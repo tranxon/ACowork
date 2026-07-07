@@ -383,7 +383,10 @@
     "contextWindowDesc": "每次请求的最大上下文 token 数。设为 0 或留空表示不限制（使用模型全窗口）。设定数值可为该 Agent 限制tokens用量。",
     "contextWindowPlaceholder": "200K（默认）",
     "resetContextWindow": "清除上下文窗口设置，使用包默认值",
-    "tokens": "tokens"
+    "tokens": "tokens",
+    "builtinTools": "内置工具",
+    "builtinToolsDesc": "选择要为此 Agent 启用的内置工具。未启用的工具将对 LLM 隐藏。",
+    "noBuiltinTools": "暂无内置工具。"
   },
   "harness": {
     "tabProviders": "模型服务商",

@@ -159,32 +159,6 @@ pub(crate) async fn phase_c_spawn_subsystems(
         }
     };
 
-    // ── Send workspace config snapshot to Gateway ─────────────────────
-    if let Some(ref mut client) = ctx.grpc_client {
-        let config_path = work_dir_path
-            .join("config")
-            .join("agent_workspaces.json");
-        let config_json = if config_path.exists() {
-            std::fs::read_to_string(&config_path)
-                .unwrap_or_else(|_| r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string())
-        } else {
-            r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
-        };
-        let msg = acowork_core::proto::ClientMessage {
-            request_id: 0,
-            payload: Some(
-                acowork_core::proto::client_message::Payload::UpdateWorkspaceConfig(
-                    acowork_core::proto::UpdateWorkspaceConfig { config_json },
-                ),
-            ),
-        };
-        if client.outbound_ctrl_sender().send(msg).await.is_err() {
-            tracing::warn!("Failed to send UpdateWorkspaceConfig snapshot to Gateway");
-        } else {
-            tracing::info!("Workspace config snapshot sent to Gateway");
-        }
-    }
-
     let (mcp_runtime_tx, mcp_runtime_rx) =
         tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
 

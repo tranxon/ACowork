@@ -2,11 +2,14 @@
 //!
 //! Two-step process:
 //! 1. `all_builtin_tools()` builds the complete tool pool
-//! 2. `activate()` applies security decorators (all builtin tools are always active)
+//! 2. `activate()` applies security decorators, filtering by per-agent
+//!    `enabled` flags from `agent_tools.json` (ADR-029).
+use crate::agent::agent_core::BuiltinToolEntry;
 use crate::tools::workspace_resolver::SharedResolver;
 use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool};
 use acowork_core::AgentManifest;
 use acowork_core::tools::traits::Tool;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -33,27 +36,45 @@ impl ToolRegistry {
         self.tools.iter().find(|t| t.name() == name).cloned()
     }
 
-    /// Get all registered tools
+    /// Get all registered tools (regardless of `enabled` flag)
     pub fn all(&self) -> &[Arc<dyn Tool>] {
         &self.tools
     }
 
-    /// Activate all registered tools with security decorators.
+    /// List all registered tool names (unconditional, regardless of enabled)
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.iter().map(|t| t.name()).collect()
+    }
+
+    /// Activate tools with security decorators, filtering by per-agent
+    /// `enabled` flags. The return value is `Vec<BuiltinToolEntry>`
+    /// — both for direct LLM dispatch (filter `enabled` again to get
+    /// `Vec<Arc<dyn Tool>>`) and for storing in
+    /// `AgentCore.builtin_tools`.
     ///
-    /// All builtin tools are always active — manifest `[[tools]]` is reserved
-    /// for future scope restriction, not activation filtering.
-    ///
-    /// Tool activation IS authorization — no separate permission check needed.
+    /// Tools NOT in the registry but listed in `enabled_entries` are
+    /// silently skipped (defensive — see ADR-029 §"Initialization").
     ///
     /// Steps:
-    /// 1. Pass the shared resolver to PathGuardedTool (no snapshot — live reads)
-    /// 2. Apply security decorators: PathGuarded → RateLimited
-    pub fn activate(
+    /// 1. Look up the `enabled` flag for every registered tool
+    /// 2. Wrap disabled ones with security decorators anyway (so the
+    ///    frontend can introspect / so future toggles are cheap) but
+    ///    mark them as `enabled = false`
+    /// 3. Caller's `AgentCore::rebuild_all_tools` will filter when
+    ///    handing the list to the LLM
+    pub(crate) fn activate(
         &self,
         _manifest: &AgentManifest,
         resolver: &SharedResolver,
         max_calls_per_minute: u32,
-    ) -> Vec<Arc<dyn Tool>> {
+        enabled_entries: &[crate::agent_config::AgentToolEntry],
+    ) -> Vec<BuiltinToolEntry> {
+        let enabled_set: HashSet<String> = enabled_entries
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.name.clone())
+            .collect();
+
         // Pass the shared resolver directly to PathGuardedTool so it reads
         // workspace directories fresh from the global source of truth on every
         // execute() call. This ensures hot-reload of workspace access changes
@@ -61,20 +82,40 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|tool| {
-                // Layer 1: Path guard (for filesystem tools)
-                let path_guarded =
-                    Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
-                        as Arc<dyn Tool>;
+                let is_enabled = enabled_set.contains(&tool.name());
 
-                // Layer 2: Rate limit
-                Arc::new(RateLimitedTool::new(path_guarded, max_calls_per_minute)) as Arc<dyn Tool>
+                if is_enabled {
+                    // Layer 1: Path guard (for filesystem tools)
+                    let path_guarded =
+                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
+                            as Arc<dyn Tool>;
+
+                    // Layer 2: Rate limit
+                    let rate_limited = Arc::new(RateLimitedTool::new(
+                        path_guarded,
+                        max_calls_per_minute,
+                    )) as Arc<dyn Tool>;
+                    BuiltinToolEntry {
+                        tool: rate_limited,
+                        enabled: true,
+                    }
+                } else {
+                    // Disabled tools still get the security decorators so
+                    // they remain introspectable for re-enable at runtime.
+                    let path_guarded =
+                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
+                            as Arc<dyn Tool>;
+                    let rate_limited = Arc::new(RateLimitedTool::new(
+                        path_guarded,
+                        max_calls_per_minute,
+                    )) as Arc<dyn Tool>;
+                    BuiltinToolEntry {
+                        tool: rate_limited,
+                        enabled: false,
+                    }
+                }
             })
             .collect()
-    }
-
-    /// List all registered tool names
-    pub fn tool_names(&self) -> Vec<String> {
-        self.tools.iter().map(|t| t.name()).collect()
     }
 }
 
@@ -196,9 +237,37 @@ mod tests {
         let manifest = manifest_with_tools(&["shell", "calculator"]);
         let resolver: SharedResolver =
             Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
-        let activated = reg.activate(&manifest, &resolver, 60);
-        // All tools are always active, regardless of manifest
+        let enabled = vec![
+            crate::agent_config::AgentToolEntry::new("shell", true),
+            crate::agent_config::AgentToolEntry::new("calculator", true),
+            crate::agent_config::AgentToolEntry::new("weather", true),
+            crate::agent_config::AgentToolEntry::new("memory_store", true),
+        ];
+        let activated = reg.activate(&manifest, &resolver, 60, &enabled);
         assert_eq!(activated.len(), 4);
+        // All enabled
+        assert!(activated.iter().all(|e| e.enabled));
+    }
+
+    #[test]
+    fn test_registry_activate_filters_by_enabled() {
+        let reg = create_registry();
+        let manifest = manifest_with_tools(&["shell", "calculator"]);
+        let resolver: SharedResolver =
+            Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
+        // Only enable two tools
+        let enabled = vec![
+            crate::agent_config::AgentToolEntry::new("shell", true),
+            crate::agent_config::AgentToolEntry::new("weather", true),
+            crate::agent_config::AgentToolEntry::new("calculator", false),
+            crate::agent_config::AgentToolEntry::new("memory_store", false),
+        ];
+        let activated = reg.activate(&manifest, &resolver, 60, &enabled);
+        assert_eq!(activated.len(), 4, "all 4 are returned (disabled ones kept for introspection)");
+        let shell = activated.iter().find(|e| e.name() == "shell").unwrap();
+        let calc  = activated.iter().find(|e| e.name() == "calculator").unwrap();
+        assert!(shell.enabled);
+        assert!(!calc.enabled);
     }
 
     #[test]
@@ -221,8 +290,10 @@ mod tests {
         let manifest = AgentManifest::from_toml(toml_str).unwrap();
         let resolver: SharedResolver =
             Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
-        let activated = reg.activate(&manifest, &resolver, 60);
-        assert_eq!(activated.len(), 4); // All tools available
+        // No enabled_entries → all default to false (opt-in semantics)
+        let activated = reg.activate(&manifest, &resolver, 60, &[]);
+        assert_eq!(activated.len(), 4);
+        assert!(activated.iter().all(|e| !e.enabled));
     }
 
     #[test]

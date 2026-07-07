@@ -13,6 +13,11 @@ interface SearchProvidersResponse {
   providers: SearchProviderListItem[];
 }
 
+interface BuiltinToolEntry {
+  name: string;
+  enabled: boolean;
+}
+
 // ── Component ───────────────────────────────────────────────────────────
 
 export function ToolsTab() {
@@ -32,6 +37,10 @@ export function ToolsTab() {
   const [activeSearch, setActiveSearch] = useState<AgentSearchProvider[]>([]);
   const [searchSaving, setSearchSaving] = useState(false);
 
+  // ADR-029: Builtin tools configuration
+  const [builtinToolsAll, setBuiltinToolsAll] = useState<BuiltinToolEntry[]>([]);
+  const [builtinSaving, setBuiltinSaving] = useState(false);
+
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
@@ -48,7 +57,7 @@ export function ToolsTab() {
       })
       .catch(() => { });
 
-    // Fetch config for MCP and search
+    // Fetch config for MCP, search, and builtin tools
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/config`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -57,6 +66,10 @@ export function ToolsTab() {
           activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
         }));
         setActiveSearch(data.search_config?.providers ?? []);
+        // ADR-029: Parse full builtin tools list
+        if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
+          setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
+        }
       })
       .catch((err) => {
         console.debug("[ToolsTab] Agent not ready:", err);
@@ -81,6 +94,9 @@ export function ToolsTab() {
               activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
             }));
             setActiveSearch(data.search_config?.providers ?? []);
+            if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
+              setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
+            }
           })
           .catch(() => { });
       }
@@ -146,6 +162,33 @@ export function ToolsTab() {
     saveSearchConfig(normalized);
   };
 
+  // ── ADR-029: Builtin tools helpers ─────────────────────────────────
+
+  /** Toggle a builtin tool enabled/disabled and PUT to Gateway */
+  const toggleBuiltinTool = async (toolName: string) => {
+    if (!selectedAgentId) return;
+    const next = builtinToolsAll.map((entry) =>
+      entry.name === toolName ? { ...entry, enabled: !entry.enabled } : entry
+    );
+    setBuiltinToolsAll(next);
+    setBuiltinSaving(true);
+    try {
+      const enabledNames = next.filter((e) => e.enabled).map((e) => e.name);
+      await fetch(
+        `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ builtin_tools: enabledNames }),
+        },
+      );
+    } catch {
+      // silently ignore network errors; optimistic update is OK
+    } finally {
+      setBuiltinSaving(false);
+    }
+  };
+
   if (!selectedAgentId || !selectedAgent) {
     return (
       <div className="flex flex-1 items-center justify-center p-6">
@@ -156,6 +199,47 @@ export function ToolsTab() {
 
   return (
     <div className="flex-1 overflow-y-auto p-3">
+      {/* ADR-029: Builtin Tools */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.builtinTools")}
+        </label>
+        {builtinToolsAll.length === 0 ? (
+          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
+              {t("agentSetup.noBuiltinTools")}
+            </span>
+          </div>
+        ) : (
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+            {builtinToolsAll.map((entry) => (
+              <label
+                key={entry.name}
+                className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={entry.enabled}
+                  onChange={() => toggleBuiltinTool(entry.name)}
+                  disabled={builtinSaving || !selectedAgentId}
+                  className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                      {entry.name}
+                    </span>
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.builtinToolsDesc")}
+        </p>
+      </div>
+
       {/* Web Search Providers */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -168,7 +252,7 @@ export function ToolsTab() {
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {searchProviders.map((sp) => {
               const active = activeSearch.find((p) => p.provider === sp.id);
               const isChecked = !!active;
@@ -249,7 +333,7 @@ export function ToolsTab() {
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white p-1.5 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
             {catalog.map((server) => {
               const isChecked = activeServers.includes(server.name);
               return (

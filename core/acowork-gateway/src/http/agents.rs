@@ -779,6 +779,7 @@ pub async fn update_avatar_config(
                         max_sessions: None,
                         context_window: None,
                         approval_timeout_secs: None,
+                        builtin_tools_enabled: None,
                     })
                     .await;
 
@@ -1048,6 +1049,7 @@ pub async fn delete_avatar_file(
                             max_sessions: None,
                             context_window: None,
                             approval_timeout_secs: None,
+                            builtin_tools_enabled: None,
                         })
                         .await;
                 }
@@ -1907,6 +1909,8 @@ pub async fn get_agent_config(
         max_sessions,
         agent_cfg_context_window,
         agent_cfg_approval_timeout,
+        builtin_tools_enabled_json,
+        builtin_tools_all_json,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1931,15 +1935,17 @@ pub async fn get_agent_config(
                         snap.max_sessions.map(|v| v as usize),
                         snap.context_window,
                         snap.approval_timeout_secs,
+                        snap.builtin_tools_enabled_json,
+                        snap.builtin_tools_all_json,
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None, None, None, None)
+                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None, None, None, None),
+            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None, None, None, None)
+        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1984,6 +1990,13 @@ pub async fn get_agent_config(
         context_window_source,
         manifest_context_window,
         approval_timeout_secs: agent_cfg_approval_timeout,
+        builtin_tools: builtin_tools_enabled_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+            .unwrap_or_default(),
+        builtin_tools_all: builtin_tools_all_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()),
     };
 
     Ok(Json(effective))
@@ -2058,6 +2071,7 @@ pub async fn update_agent_config(
                     max_sessions: req.max_sessions,
                     context_window: req.context_window,
                     approval_timeout_secs: req.approval_timeout_secs,
+                    builtin_tools_enabled: req.builtin_tools.clone(),
                 })
                 .await;
             if !push_result {
@@ -2110,6 +2124,8 @@ pub async fn update_agent_config(
         context_window_source: req.context_window.map(|_| "config".to_string()),
         manifest_context_window: None,
         approval_timeout_secs: req.approval_timeout_secs,
+        builtin_tools: req.builtin_tools.clone().unwrap_or_default(),
+        builtin_tools_all: None,
     };
 
     Ok(Json(effective))
@@ -2280,6 +2296,7 @@ pub async fn update_agent_mcp_servers(
                     max_sessions: None,
                     context_window: None,
                     approval_timeout_secs: None,
+                    builtin_tools_enabled: None,
                 })
                 .await;
             if !push_result {
@@ -2482,6 +2499,7 @@ pub async fn update_agent_search_config(
                     max_sessions: None,
                     context_window: None,
                     approval_timeout_secs: None,
+                    builtin_tools_enabled: None,
                 })
                 .await;
             if !push_result {

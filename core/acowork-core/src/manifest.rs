@@ -179,6 +179,25 @@ impl AgentManifest {
         self.tools.iter().find(|t| t.name == tool_name)
     }
 
+    /// Names of all `[[tools]]` declarations in the manifest (builtin or rag).
+    ///
+    /// Used by ADR-029 to bootstrap `agent_tools.json`: any tool name
+    /// in this list is seeded as `enabled = true` on first start.
+    /// RAG tools are intentionally excluded — RAG is opt-in via the
+    /// gateway, not via the runtime registry.
+    pub fn builtin_tool_names(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|t| t.tool_type == "builtin" || t.tool_type.is_empty())
+            .map(|t| t.name.clone())
+            .collect()
+    }
+
+    /// True if the manifest contains at least one `[[tools]]` entry.
+    pub fn has_any_tool_declaration(&self) -> bool {
+        !self.tools.is_empty()
+    }
+
     /// Get all cron triggers from the manifest
     pub fn cron_triggers(&self) -> Vec<&Trigger> {
         self.triggers

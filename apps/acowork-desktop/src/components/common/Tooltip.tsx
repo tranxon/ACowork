@@ -1,5 +1,5 @@
 import { type ReactElement, useRef, useState, useCallback, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { cn } from "../../lib/utils";
 
 /**
@@ -80,20 +80,45 @@ function InlineTooltip({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleEnter = useCallback(() => {
-    timerRef.current = setTimeout(() => setVisible(true), delayMs);
-  }, [delayMs]);
-
-  const handleLeave = useCallback(() => {
-    if (timerRef.current) {
+    // Defense 1: clear any pending timer from a previous enter that hasn't
+    // fired yet. Without this, rapid hover-out-and-in races leave a stale
+    // timer scheduled to fire and call setVisible(true) after we already
+    // cleared state via handleLeave.
+    if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    setVisible(false);
+    timerRef.current = setTimeout(() => {
+      // Defense 2: clear ref after fire so handleLeave doesn't no-op
+      // clearTimeout on a stale (already-fired) id.
+      timerRef.current = null;
+      setVisible(true);
+    }, delayMs);
+  }, [delayMs]);
+
+  const handleLeave = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    // Force synchronous commit. React 18 auto-batches state updates from
+    // event handlers — if a parent re-render (e.g. a zustand store update)
+    // queues a state change between our setVisible(false) and React's next
+    // commit, the deferred hide can be overwritten by a quick re-enter's
+    // setVisible(true) (or merged with another store update), leaving the
+    // tooltip "stuck visible" until the user does another full hover cycle.
+    // flushSync forces this update to commit before any other queued update.
+    flushSync(() => {
+      setVisible(false);
+    });
   }, []);
 
   useEffect(() => {
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
     };
   }, []);
 
@@ -183,23 +208,46 @@ function PortalTooltip({
   }, [position]);
 
   const handleEnter = useCallback(() => {
+    // Defense 1: clear any pending timer from a previous enter that hasn't
+    // fired yet. Without this, rapid hover-out-and-in races leave a stale
+    // timer scheduled to fire and call setVisible(true) after we already
+    // cleared state via handleLeave.
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
     timerRef.current = setTimeout(() => {
+      // Defense 2: clear ref after fire so handleLeave doesn't no-op
+      // clearTimeout on a stale (already-fired) id.
+      timerRef.current = null;
       calcPosition();
       setVisible(true);
     }, delayMs);
   }, [calcPosition, delayMs]);
 
   const handleLeave = useCallback(() => {
-    if (timerRef.current) {
+    if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    setVisible(false);
+    // Force synchronous commit. React 18 auto-batches state updates from
+    // event handlers — if a parent re-render (e.g. a zustand store update)
+    // queues a state change between our setVisible(false) and React's next
+    // commit, the deferred hide can be overwritten by a quick re-enter's
+    // setVisible(true) (or merged with another store update), leaving the
+    // tooltip "stuck visible" until the user does another full hover cycle.
+    // flushSync forces this update to commit before any other queued update.
+    flushSync(() => {
+      setVisible(false);
+    });
   }, []);
 
   useEffect(() => {
     return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
     };
   }, []);
 
@@ -214,7 +262,13 @@ function PortalTooltip({
       {visible &&
         createPortal(
           <div
-            className="pointer-events-none fixed z-[9999]"
+            // w-max: width follows the inner content's natural width (fit-content),
+            // independent of the trigger's width. Without this, a position:fixed
+            // child without an explicit width can collapse to ~0 in some
+            // renderers for CJK / pre-wrap content, squeezing text into a
+            // single-character-per-line column. See InlineTooltip above for
+            // the analogous rationale with position:absolute.
+            className="pointer-events-none fixed z-[9999] w-max"
             style={{
               top: coords.top,
               left: coords.left,

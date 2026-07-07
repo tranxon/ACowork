@@ -73,6 +73,13 @@ pub enum SessionMessage {
     UpdateMcpTools {
         mcp_tools: Option<Vec<Arc<dyn Tool>>>,
     },
+    /// ADR-029: Update builtin tools enabled flags on AgentCore (hot-push
+    /// when Gateway pushes RuntimeConfigUpdate.builtin_tools_enabled).
+    /// Refreshes `AgentCore.all_tools` so LLM injection picks up
+    /// toggled tools.
+    UpdateBuiltinTools {
+        entries: Vec<crate::agent_config::AgentToolEntry>,
+    },
     /// Update the title of the session's conversation
     UpdateSessionTitle { title: String },
     /// Persist the per-session workspace_id to the JSONL conversation file
@@ -180,6 +187,14 @@ impl std::fmt::Debug for SessionMessage {
                 .field(
                     "mcp_tool_count",
                     &mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0),
+                )
+                .finish(),
+            SessionMessage::UpdateBuiltinTools { entries } => f
+                .debug_struct("UpdateBuiltinTools")
+                .field("entry_count", &entries.len())
+                .field(
+                    "enabled_count",
+                    &entries.iter().filter(|e| e.enabled).count(),
                 )
                 .finish(),
             SessionMessage::UpdateSessionTitle { title } => f
@@ -1178,6 +1193,25 @@ impl SessionTask {
                         "SessionTask: updating MCP tools on AgentCore"
                     );
                     agent_loop.core.mcp_tools = mcp_tools;
+                    agent_loop.core.rebuild_all_tools();
+                }
+                Some(SessionMessage::UpdateBuiltinTools { entries }) => {
+                    let update_count = entries.len();
+                    let enabled_count = entries.iter().filter(|e| e.enabled).count();
+                    tracing::info!(
+                        session_id = %session_id,
+                        update_count,
+                        enabled_count,
+                        "SessionTask: updating builtin tools on AgentCore"
+                    );
+                    let patch_map: std::collections::HashMap<&str, bool> =
+                        entries.iter().map(|e| (e.name.as_str(), e.enabled)).collect();
+                    for entry in agent_loop.core.builtin_tools.iter_mut() {
+                        let name = entry.name();
+                        if let Some(&new_enabled) = patch_map.get(name.as_str()) {
+                            entry.enabled = new_enabled;
+                        }
+                    }
                     agent_loop.core.rebuild_all_tools();
                 }
                 Some(SessionMessage::UpdateSessionTitle { title }) => {

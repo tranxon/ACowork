@@ -1236,6 +1236,23 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
+    /// ADR-029: Apply builtin tools enabled flags from a Gateway
+    /// `RuntimeConfigUpdate`. Persists to `agent_tools.json` and
+    /// broadcasts to all existing sessions.
+    pub fn apply_builtin_tools_enabled(
+        &mut self,
+        entries: &[crate::agent_config::AgentToolEntry],
+    ) {
+        tracing::info!(
+            entry_count = entries.len(),
+            enabled_count = entries.iter().filter(|e| e.enabled).count(),
+            "SessionManager: applying builtin tools enabled list"
+        );
+        self.broadcast(SessionMessage::UpdateBuiltinTools {
+            entries: entries.to_vec(),
+        });
+    }
+
     /// Rebuild `full_tool_specs` by merging the original built-in specs with
     /// any currently connected MCP tool specs.
     fn rebuild_full_tool_specs_with_mcp(&mut self) {

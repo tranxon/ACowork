@@ -34,6 +34,35 @@ use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
 use acowork_core::ShellApprovalThreshold;
 
+/// A builtin tool entry — wraps the raw `Arc<dyn Tool>` together with
+/// its per-agent `enabled` flag (ADR-029).
+///
+/// `enabled == false` tools are still present in
+/// [`AgentCore::builtin_tools`] (so the frontend can render the full
+/// list with checkboxes), but they are filtered out of
+/// [`AgentCore::all_tools`] (the LLM dispatch list).
+///
+/// Clone is cheap because `Arc<dyn Tool>` is internally reference-counted.
+#[derive(Clone)]
+pub(crate) struct BuiltinToolEntry {
+    /// The tool implementation (cloned from the registry).
+    pub(crate) tool: Arc<dyn Tool>,
+    /// Whether this tool is enabled for the current agent.
+    pub(crate) enabled: bool,
+}
+
+impl BuiltinToolEntry {
+    /// Tool name (delegated to the underlying `Tool`).
+    pub(crate) fn name(&self) -> String {
+        self.tool.name()
+    }
+
+    /// Tool specification (delegated to the underlying `Tool`).
+    pub(crate) fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+        self.tool.spec()
+    }
+}
+
 /// Cross-session shared state for the agent loop.
 ///
 /// Fields here are immutable or rarely mutated at runtime (e.g. provider swap
@@ -47,14 +76,17 @@ pub struct AgentCore {
     /// LLM Provider
     pub(crate) provider: Arc<dyn Provider>,
     /// Built-in tool registry — the static base set used as the seed for
-    /// rebuilding `all_tools` whenever `mcp_tools` changes. These are the
-    /// tools shipped with the runtime binary and registered in
-    /// `crate::tools::builtin`; MCP tools are kept separate in [`Self::mcp_tools`].
-    pub(crate) builtin_tools: Vec<Arc<dyn Tool>>,
+    /// rebuilding `all_tools` whenever `mcp_tools` or `builtin_tools`
+    /// enabled flags change. These are the tools shipped with the
+    /// runtime binary and registered in `crate::tools::builtin`. Each
+    /// entry carries its own `enabled` flag (ADR-029); only `enabled`
+    /// entries are merged into [`Self::all_tools`] by `rebuild_all_tools`.
+    /// MCP tools are kept separate in [`Self::mcp_tools`].
+    pub(crate) builtin_tools: Vec<BuiltinToolEntry>,
     /// MCP (Model Context Protocol) tool wrappers, populated when MCP servers
     /// have been connected. These are merged into [`all_tools`] at rebuild time.
     pub(crate) mcp_tools: Option<Vec<Arc<dyn Tool>>>,
-    /// Merged tool list for dispatch — always contains built-in + MCP tools.
+    /// Merged tool list for dispatch — contains enabled built-in tools + MCP tools.
     pub(crate) all_tools: Vec<Arc<dyn Tool>>,
     /// Global provider list — full metadata including models, capabilities,
     /// base_url, protocol_type, compact_model for all configured providers.
@@ -114,11 +146,11 @@ pub struct AgentCore {
 
 impl AgentCore {
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_observer(
+    pub(crate) fn new_with_observer(
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        builtin_tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<BuiltinToolEntry>,
         observer: DebugObserverSlot,
     ) -> Self {
         let shell_approval_threshold =
@@ -131,13 +163,24 @@ impl AgentCore {
             ?manifest_context_window,
             "AgentCore: seeding manifest_temperature and manifest_context_window from manifest [llm]"
         );
+
+        // Compute initial `all_tools` now (enabled builtin + MCP later).
+        // We can't fully rebuild yet because MCP hasn't been connected,
+        // but seeding with the enabled builtin subset keeps dispatch
+        // working from the very first LLM call.
+        let initial_all_tools: Vec<Arc<dyn Tool>> = builtin_tools
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.tool.clone())
+            .collect();
+
         Self {
             config,
             manifest,
             provider,
-            builtin_tools: builtin_tools.clone(),
+            builtin_tools,
             mcp_tools: None,
-            all_tools: builtin_tools,
+            all_tools: initial_all_tools,
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: 0,
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
@@ -166,11 +209,11 @@ impl AgentCore {
         }
     }
 
-    pub fn new(
+    pub(crate) fn new(
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        builtin_tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<BuiltinToolEntry>,
     ) -> Self {
         Self::new_with_observer(
             config,
@@ -181,8 +224,18 @@ impl AgentCore {
         )
     }
 
+    /// Rebuild `all_tools` from the current `builtin_tools` (filtered by
+    /// `enabled`) plus `mcp_tools`. Called whenever either set changes:
+    /// - Agent startup (after `builtin_tools` is initialized with flags)
+    /// - MCP connect/disconnect
+    /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
     pub(crate) fn rebuild_all_tools(&mut self) {
-        let mut merged = self.builtin_tools.clone();
+        let mut merged: Vec<Arc<dyn Tool>> = self
+            .builtin_tools
+            .iter()
+            .filter(|e| e.enabled)
+            .map(|e| e.tool.clone())
+            .collect();
         if let Some(ref mcp) = self.mcp_tools {
             merged.extend(mcp.clone());
         }
@@ -192,7 +245,6 @@ impl AgentCore {
     pub fn config(&self) -> &RuntimeConfig { &self.config }
     pub fn manifest(&self) -> &acowork_core::AgentManifest { &self.manifest }
     pub fn provider(&self) -> &Arc<dyn Provider> { &self.provider }
-    pub fn builtin_tools(&self) -> &[Arc<dyn Tool>] { &self.builtin_tools }
 
     // ── ADR-028: Agent-scoped cumulative token usage ───────────────────
     //

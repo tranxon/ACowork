@@ -1127,6 +1127,15 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 // ADR-026: per-agent context window cap
                 context_window: rcu.context_window,
                 approval_timeout_secs: rcu.approval_timeout_secs,
+                // ADR-029: builtin tools enabled
+                builtin_tools_enabled: if rcu.builtin_tools_enabled_set {
+                    let json_str = rcu.builtin_tools_enabled_json.as_deref().unwrap_or("");
+                    let parsed: Vec<String> =
+                        serde_json::from_str(json_str).unwrap_or_default();
+                    Some(parsed)
+                } else {
+                    None
+                },
             }
         }
         // Response messages (request_id > 0) — included for robustness

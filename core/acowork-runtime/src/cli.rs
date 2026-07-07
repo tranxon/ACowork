@@ -681,8 +681,25 @@ pub(crate) async fn run_gateway_loop(
                                         builtin_avatar: agent_cfg.builtin_avatar.clone(),
                                         max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
                                         context_window: agent_cfg.context_window,
-                                        approval_timeout_secs: agent_cfg.approval_timeout_secs,
-                                    },
+                                    approval_timeout_secs: agent_cfg.approval_timeout_secs,
+                                    builtin_tools_enabled_json: crate::agent_config::load_agent_tools_config(
+                                        std::path::Path::new(&work_dir),
+                                    )
+                                    .unwrap_or_default()
+                                    .map(|cfg| {
+                                        let enabled: Vec<String> = cfg.tools.iter()
+                                            .filter(|e| e.enabled)
+                                            .map(|e| e.name.clone())
+                                            .collect();
+                                        serde_json::to_string(&enabled).unwrap_or_default()
+                                    }),
+                                    builtin_tools_all_json:
+                                        crate::agent_config::load_agent_tools_config(
+                                            std::path::Path::new(&work_dir),
+                                        )
+                                        .unwrap_or_default()
+                                        .map(|cfg| serde_json::to_string(&cfg.tools).unwrap_or_default()),
+                                },
                                 );
                                 let response = proto::ClientMessage {
                                     request_id,
@@ -1822,6 +1839,7 @@ async fn process_gateway_recv(
                     max_sessions,
                     context_window,
                     approval_timeout_secs,
+                    builtin_tools_enabled,
                 } => {
                     tracing::info!(
 
@@ -1854,6 +1872,44 @@ async fn process_gateway_recv(
                             approval_timeout_secs,
                         },
                     );
+
+                    // ── ADR-029: Apply builtin tools enabled list ──────
+                    // When the Gateway pushes a new enabled-tools list,
+                    // patch agent_tools.json and broadcast to sessions.
+                    if let Some(ref enabled_names) = builtin_tools_enabled {
+                        let work_path = std::path::Path::new(&work_dir);
+                        let current = crate::agent_config::load_agent_tools_config(work_path)
+                            .unwrap_or_default()
+                            .map(|cfg| cfg.tools)
+                            .unwrap_or_default();
+                        // Build a patch: every tool in `enabled_names` gets enabled=true;
+                        // everything currently in agent_tools.json but not in the list
+                        // gets enabled=false.
+                        let patch: Vec<crate::agent_config::AgentToolEntry> = current
+                            .iter()
+                            .map(|entry| {
+                                let enabled = enabled_names.iter().any(|n| n == &entry.name);
+                                crate::agent_config::AgentToolEntry::new(&entry.name, enabled)
+                            })
+                            .collect();
+                        let updated = crate::agent_config::apply_builtin_tools_patch(&current, &patch);
+                        // Persist
+                        if let Err(e) = crate::agent_config::save_agent_tools_config(
+                            work_path,
+                            &crate::agent_config::AgentToolsConfig {
+                                tools: updated.clone(),
+                            },
+                        ) {
+                            tracing::warn!(error = %e, "Failed to persist agent_tools.json after RuntimeConfigUpdate");
+                        }
+                        // Broadcast to all sessions
+                        session_manager.apply_builtin_tools_enabled(&updated);
+                        tracing::info!(
+                            enabled_count = updated.iter().filter(|e| e.enabled).count(),
+                            total = updated.len(),
+                            "Applied builtin_tools_enabled from Gateway"
+                        );
+                    }
 
                     // Handle MCP server config changes: connect, disconnect, or reconnect.
                     // Gateway pushes catalog MCPs. We must merge catalog + local

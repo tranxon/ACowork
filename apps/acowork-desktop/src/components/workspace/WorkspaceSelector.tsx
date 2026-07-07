@@ -21,6 +21,13 @@ function workspaceDisplayName(dir: WorkspaceDir) {
 export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDirection?: "up" | "down"; textHidden?: boolean }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
+  // Subscribe to ready flag so we re-fetch workspaces when the agent finishes
+  // startup (ready transitions false→true). Without this, a fetch that races
+  // with Gateway workspace-cache population yields an empty list that sticks.
+  const agentReady = useAgentStore((s) => {
+    if (!selectedAgentId) return false;
+    return s.agents[selectedAgentId]?.meta?.ready ?? false;
+  });
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
   const { workspaces, sessionWorkspaceMap, loading, fetchWorkspaces, setSessionWorkspace } =
@@ -41,14 +48,16 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
     ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
     : "__agent_home__";
 
-  // Load workspaces when agent changes
+  // Load workspaces when agent changes or becomes ready.
+  // agentReady guards against a race: the initial fetch may hit Gateway
+  // before the Runtime's Phase-A UpdateWorkspaceConfig reaches the cache.
   useEffect(() => {
     if (!selectedAgentId) {
       useWorkspaceStore.getState().reset();
       return;
     }
     void fetchWorkspaces(selectedAgentId);
-  }, [selectedAgentId, fetchWorkspaces]);
+  }, [selectedAgentId, agentReady, fetchWorkspaces]);
 
   // Close on outside click
   useEffect(() => {

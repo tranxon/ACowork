@@ -40,8 +40,15 @@ pub(crate) struct AgentBootContext {
     pub emb_provider: Arc<dyn crate::embedding::EmbeddingProvider>,
 
     // Tools
-    pub active_tools: Vec<Arc<dyn acowork_core::tools::traits::Tool>>,
+    /// ADR-029: builtin tools as `BuiltinToolEntry` (each carries its
+    /// `enabled` flag). Phase B reads this directly to seed
+    /// [`crate::agent::AgentCore::builtin_tools`] via
+    /// [`crate::agent::AgentCore::new`].
+    pub active_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
+    /// Flattened tool spec JSON objects for the LLM (enabled builtin only).
     pub tool_definitions: Vec<serde_json::Value>,
+    /// Full builtin specs including disabled ones (keyed by name),
+    /// used by `/api/agents/{id}/builtin-tools` GET responses.
     pub full_tool_specs: Vec<(String, serde_json::Value)>,
 
     // Skills

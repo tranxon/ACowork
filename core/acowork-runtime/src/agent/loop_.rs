@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
+#[allow(unused_imports)]
 use acowork_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -251,11 +252,11 @@ impl AgentLoop {
     /// If `chunk_tx` is provided, control events are forwarded to it
     /// so the caller can relay them to the Gateway.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_observer(
+    pub(crate) fn new_with_observer(
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        builtin_tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
@@ -319,11 +320,11 @@ impl AgentLoop {
     /// If `chunk_tx` is provided, control events are forwarded to it
     /// so the caller can relay them to the Gateway.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        builtin_tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
@@ -394,7 +395,9 @@ impl AgentLoop {
             .builtin_tools
             .iter()
             .find(|t| t.spec().name == name)
-            .ok_or_else(|| format!("Tool not found: {}", name))?;
+            .ok_or_else(|| format!("Tool not found: {}", name))?
+            .tool
+            .clone();
 
         let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
         match tool.execute(params, work_dir.as_deref()).await
@@ -1221,6 +1224,7 @@ impl AgentLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::agent_core::BuiltinToolEntry;
     use crate::agent::loop_llm::make_incomplete_marker;
     use crate::agent::loop_tools::execute_single_tool;
     use acowork_core::providers::mock::MockProvider;
@@ -1290,6 +1294,22 @@ mod tests {
         }
     }
 
+    /// Wrap a `Vec<Arc<dyn Tool>>` (test fixture style) into the
+    /// `Vec<BuiltinToolEntry>` shape that `AgentLoop::new` now requires.
+    /// Used widely in this module's tests to keep fixtures terse.
+    fn entries(tools: Vec<Arc<dyn Tool>>) -> Vec<BuiltinToolEntry> {
+        tools
+            .into_iter()
+            .map(|tool| BuiltinToolEntry { tool, enabled: true })
+            .collect()
+    }
+
+    /// Inverse of `entries` — used by tests that hand the tool set to
+    /// pure `Arc<dyn Tool>` APIs like `execute_single_tool`.
+    fn raw_tools(entries: &[BuiltinToolEntry]) -> Vec<Arc<dyn Tool>> {
+        entries.iter().map(|e| e.tool.clone()).collect()
+    }
+
     #[test]
     fn test_agent_loop_with_gateway_client() {
         // NOTE: We use ipc_client: None because GatewayGrpcClient::connect is
@@ -1299,7 +1319,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let budget = test_budget();
         let (_agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
@@ -1316,7 +1336,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let budget = test_budget();
         let (_agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
@@ -1333,7 +1353,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("Hello from standalone!"));
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let budget = test_budget();
         let (mut agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
@@ -1352,7 +1372,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("Accumulated content here"));
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let budget = test_budget();
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
@@ -1369,7 +1389,7 @@ mod tests {
             r#"{"message": "hello"}"#,
             "Done",
         ));
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+        let tools = entries(vec![Arc::new(EchoTool)]);
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
@@ -1387,7 +1407,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1408,7 +1428,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1432,7 +1452,7 @@ mod tests {
             r#"{"message": "test"}"#,
             "All done",
         ));
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+        let tools = entries(vec![Arc::new(EchoTool)]);
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
@@ -1450,7 +1470,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1466,7 +1486,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1487,7 +1507,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1505,7 +1525,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1535,7 +1555,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1566,7 +1586,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1598,7 +1618,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1630,7 +1650,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (agent_loop, inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
 
@@ -1655,7 +1675,7 @@ mod tests {
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let budget = test_budget();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
         let (mut agent_loop, _inbound_tx) =
             AgentLoop::new(config, manifest, provider, tools, budget, None, None);
         let mut context_builder = ContextBuilder::new("System".to_string());
@@ -1740,6 +1760,7 @@ mod tests {
                 delay_ms: 100,
             }),
         ];
+        let tools = entries(tools);
 
         let provider = Arc::new(MockProvider::new(vec![
             acowork_core::providers::mock::MockResponse::ToolCalls {
@@ -1866,7 +1887,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FailTool), Arc::new(SuccessTool)];
+        let tools = entries(vec![Arc::new(FailTool), Arc::new(SuccessTool)]);
 
         // LLM returns both tool calls, then text
         let provider = Arc::new(MockProvider::new(vec![
@@ -1958,7 +1979,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StuckTool)];
+        let tools = entries(vec![Arc::new(StuckTool)]);
 
         let provider = Arc::new(MockProvider::tool_call_then_text(
             "stuck_tool",
@@ -2030,7 +2051,7 @@ mod tests {
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
         // shell requires Shell permission, but manifest doesn't declare it
-        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let tools = entries(vec![]);
 
         let provider = Arc::new(MockProvider::tool_call_then_text(
             "shell",
@@ -2123,6 +2144,7 @@ mod tests {
                 output: "Result C".to_string(),
             }),
         ];
+        let tools = entries(tools);
 
         let provider = Arc::new(MockProvider::new(vec![
             acowork_core::providers::mock::MockResponse::ToolCalls {
@@ -2275,7 +2297,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FastTool), Arc::new(SlowTool)];
+        let tools = entries(vec![Arc::new(FastTool), Arc::new(SlowTool)]);
 
         // LLM requests both tools; fast_tool completes quickly, slow_tool times out
         let provider = Arc::new(MockProvider::new(vec![
@@ -2407,7 +2429,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(MediumTool)];
+        let tools = entries(vec![Arc::new(MediumTool)]);
 
         let provider = Arc::new(MockProvider::tool_call_then_text(
             "medium_tool",
@@ -2526,7 +2548,7 @@ mod tests {
         "#;
         let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
 
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoPermTool)];
+        let tools = entries(vec![Arc::new(EchoPermTool)]);
 
         // LLM requests both echo and shell
         let provider = Arc::new(MockProvider::new(vec![
@@ -2599,7 +2621,7 @@ mod tests {
     /// is skipped, returning the embedded message to the LLM.
     #[tokio::test]
     async fn test_incomplete_tool_call_skipped() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+        let tools = entries(vec![Arc::new(EchoTool)]);
 
         // Simulate the marker that the streaming assembler injects
         let incomplete_args = make_incomplete_marker("echo", 42);
@@ -2612,7 +2634,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc, None).await;
+        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(
@@ -2637,7 +2659,7 @@ mod tests {
     /// does not silently degrade to {} — it returns a clear error.
     #[tokio::test]
     async fn test_invalid_json_tool_call_error() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+        let tools = entries(vec![Arc::new(EchoTool)]);
 
         // Simulate LLM producing broken JSON (not from streaming truncation)
         let tc = ToolCall {
@@ -2649,7 +2671,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc, None).await;
+        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
 
         // Must NOT execute the tool
         assert!(
@@ -2674,7 +2696,7 @@ mod tests {
     /// for the INCOMPLETE/invalid-JSON guard).
     #[tokio::test]
     async fn test_valid_json_tool_call_executes_normally() {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool)];
+        let tools = entries(vec![Arc::new(EchoTool)]);
 
         let tc = ToolCall {
             id: "call_ok".to_string(),
@@ -2685,7 +2707,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&tools, &tc, None).await;
+        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
         assert_eq!(
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",

@@ -1624,15 +1624,32 @@ export function ChatPanel() {
             className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-zinc-400 dark:placeholder:text-zinc-500 dark:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[4.5rem]"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                // On macOS, compositionEnd fires before keydown(Enter) when the user
-                // presses Enter to confirm an IME selection. isComposing is already
-                // false by then, so we check a time window instead.
-                const elapsed = Date.now() - lastCompositionEndRef.current;
-                if (elapsed < 300) return; // IME confirmation — do not send
-                e.preventDefault();
-                // Match the button logic: during sending (streaming), queue the message
-                (sending ? handleStop : handleSend)();
+              if (e.key !== "Enter" || e.shiftKey) return;
+              // On macOS, compositionEnd fires before keydown(Enter) when the user
+              // presses Enter to confirm an IME selection. isComposing is already
+              // false by then, so we check a time window instead.
+              const elapsed = Date.now() - lastCompositionEndRef.current;
+              if (elapsed < 300) return; // IME confirmation — do not send
+              e.preventDefault();
+              // Enter is ALWAYS a send action — never a stop.
+              // To stop, the user MUST click the Stop button (handleStop).
+              // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
+              // focus/keyboard quirks during window resize, accidental keypresses)
+              // previously triggered urgent_stop and silently killed the stream.
+              if (!sending) {
+                handleSend();
+                return;
+              }
+              // Sending: queue the input so it waits for the next loop iteration.
+              // Empty input → no-op (do not enqueue an empty string).
+              const content = session.inputValue.trim();
+              if (content && selectedAgentId && currentSessionId) {
+                useChatStore.getState().addQueuedMessage(
+                  selectedAgentId,
+                  currentSessionId,
+                  content,
+                );
+                session.setInputValue("");
               }
             }}
             onCompositionEnd={() => {

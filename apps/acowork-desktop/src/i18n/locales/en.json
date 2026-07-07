@@ -485,7 +485,10 @@
     "contextWindowDesc": "Max context tokens per request. 0 or empty = no limit (use model's full window). Set a value to cap token usage for this agent.",
     "contextWindowPlaceholder": "200K (default)",
     "resetContextWindow": "Clear context window override, revert to package default",
-    "tokens": "tokens"
+    "tokens": "tokens",
+    "builtinTools": "Builtin Tools",
+    "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
+    "noBuiltinTools": "No builtin tools available."
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

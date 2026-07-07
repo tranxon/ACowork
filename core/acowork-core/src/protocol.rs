@@ -725,6 +725,12 @@ pub enum GatewayRequest {
         /// Per-agent approval timeout in seconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approval_timeout_secs: Option<u64>,
+        /// ADR-029: Builtin tools enabled list (JSON-serialized Vec<String>).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_tools_enabled_json: Option<String>,
+        /// ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<AgentToolEntry>).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_tools_all_json: Option<String>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1090,6 +1096,11 @@ pub enum GatewayResponse {
         /// Per-agent approval timeout in seconds.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approval_timeout_secs: Option<u64>,
+        /// ADR-029: Builtin tools enabled set.
+        /// Some(vec![]) means all builtin tools disabled.
+        /// None means don't change.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builtin_tools_enabled: Option<Vec<String>>,
     },
     /// Query config request (Gateway → Runtime)
     ///

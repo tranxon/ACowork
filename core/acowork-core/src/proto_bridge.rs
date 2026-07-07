@@ -388,6 +388,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                 max_sessions,
                 context_window,
                 approval_timeout_secs,
+                builtin_tools_enabled_json,
+                builtin_tools_all_json,
             } => {
                 let mcp_json: Vec<String> = mcp_servers
                     .iter()
@@ -410,6 +412,8 @@ impl GatewayRequestToProto for protocol::GatewayRequest {
                         max_sessions: max_sessions.map(|v| v as u64),
                         context_window: *context_window,
                         approval_timeout_secs: *approval_timeout_secs,
+                        builtin_tools_enabled_json: builtin_tools_enabled_json.clone(),
+                        builtin_tools_all_json: builtin_tools_all_json.clone(),
                     },
                 ))
             }
@@ -682,6 +686,7 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             max_sessions,
             context_window,
             approval_timeout_secs,
+            builtin_tools_enabled,
         } => {
                 let mcp_servers_set = mcp_servers.is_some();
                 let system_prompt_set = system_prompt_override.is_some();
@@ -720,6 +725,10 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     max_sessions_set: max_sessions.is_some(),
                     context_window: *context_window,
                     approval_timeout_secs: *approval_timeout_secs,
+                    builtin_tools_enabled_json: builtin_tools_enabled
+                        .as_ref()
+                        .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                    builtin_tools_enabled_set: builtin_tools_enabled.is_some(),
                 },
                 ))
             }

@@ -229,6 +229,218 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
     Ok(())
 }
 
+// ── Per-agent builtin-tools config (ADR-029) ───────────────────────────
+
+/// Per-agent builtin tools enable/disable configuration.
+///
+/// Persisted to `{work_dir}/config/agent_tools.json`.
+/// Contains ALL builtin tools — each with an `enabled` flag. The file
+/// is the single source of truth once it exists; on first start it is
+/// generated from `manifest.toml` `[[tools]]` declarations (or, if no
+/// `[[tools]]` is present, every builtin tool is enabled by default).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentToolsConfig {
+    /// All builtin tools with their enable status.
+    /// Must include every registered builtin tool — call sites
+    /// reconcile this list against `all_builtin_tools()` at load time.
+    #[serde(default)]
+    pub tools: Vec<AgentToolEntry>,
+}
+
+/// A single builtin tool entry in `agent_tools.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentToolEntry {
+    /// Tool name (matches `Tool::name()`).
+    pub name: String,
+    /// Whether this tool is enabled for the agent.
+    /// Defaults to `true` when missing in JSON for backward-compatible
+    /// additions of new fields.
+    #[serde(default = "default_tool_entry_enabled")]
+    pub enabled: bool,
+}
+
+fn default_tool_entry_enabled() -> bool {
+    true
+}
+
+impl AgentToolEntry {
+    /// Construct a new entry with the given enabled flag.
+    pub fn new(name: impl Into<String>, enabled: bool) -> Self {
+        Self {
+            name: name.into(),
+            enabled,
+        }
+    }
+}
+
+/// Filename for per-agent builtin-tools config in the workspace config dir.
+const AGENT_TOOLS_CONFIG_FILE: &str = "agent_tools.json";
+
+/// Build the path to the agent builtin-tools config file.
+fn tools_config_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("config").join(AGENT_TOOLS_CONFIG_FILE)
+}
+
+/// Load per-agent builtin-tools config from
+/// `workspace/config/agent_tools.json`.
+///
+/// Returns `Ok(None)` if the file does not exist (first start — caller
+/// must then initialize from `manifest.toml` or default-enable every
+/// tool).
+pub fn load_agent_tools_config(work_dir: &Path) -> Result<Option<AgentToolsConfig>, String> {
+    let path = tools_config_path(work_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let cfg: AgentToolsConfig = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        tool_count = cfg.tools.len(),
+        "Loaded agent builtin-tools config from workspace"
+    );
+
+    Ok(Some(cfg))
+}
+
+/// Save per-agent builtin-tools config to
+/// `workspace/config/agent_tools.json`. Atomic write-tmp-rename.
+pub fn save_agent_tools_config(
+    work_dir: &Path,
+    cfg: &AgentToolsConfig,
+) -> Result<(), String> {
+    let config_dir = work_dir.join("config");
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!(
+            "Failed to create config dir {}: {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+
+    let path = tools_config_path(work_dir);
+    let tmp_path = path.with_extension("tmp");
+
+    let json = serde_json::to_string_pretty(cfg)
+        .map_err(|e| format!("Failed to serialize agent tools config: {}", e))?;
+
+    std::fs::write(&tmp_path, &json)
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        tool_count = cfg.tools.len(),
+        "Saved agent builtin-tools config to workspace"
+    );
+
+    Ok(())
+}
+
+/// Merge a persisted config with the current set of code-registered
+/// builtin tools, producing a fresh list of entries keyed off the
+/// *code* registry (not the persisted file) so unknown tools are
+/// silently dropped on next save.
+///
+/// Rules (per ADR-029):
+/// - Tools present in both → use persisted `enabled`
+/// - Tools only in code (newly added by Runtime upgrade) → appended
+///   with `enabled = false` (opt-in)
+/// - Tools only in persisted file (removed by Runtime upgrade) →
+///   silently dropped
+pub fn merge_tools_config(
+    code_tool_names: &[String],          // from `all_builtin_tools()` registry
+    persisted: &[AgentToolEntry],        // from agent_tools.json
+) -> Vec<AgentToolEntry> {
+    let persisted_map: std::collections::HashMap<&str, bool> = persisted
+        .iter()
+        .map(|e| (e.name.as_str(), e.enabled))
+        .collect();
+
+    code_tool_names
+        .iter()
+        .map(|name| {
+            let enabled = persisted_map
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(false); // new tool → disabled (opt-in)
+            AgentToolEntry::new(name, enabled)
+        })
+        .collect()
+}
+
+/// Apply a partial `RuntimeConfigUpdate.builtin_tools_enabled` payload
+/// (only listed tool names are touched) onto an existing
+/// `AgentToolsConfig` in place. Returns the new full list — a copy of
+/// the caller may then persist via `save_agent_tools_config`.
+///
+/// Tool names in `patch` that are not present in `current` are
+/// silently ignored (defensive: future tools should arrive via
+/// `merge_tools_config` at startup, not via this incremental path).
+pub fn apply_builtin_tools_patch(
+    current: &[AgentToolEntry],
+    patch: &[AgentToolEntry],
+) -> Vec<AgentToolEntry> {
+    let patch_map: std::collections::HashMap<&str, bool> = patch
+        .iter()
+        .map(|e| (e.name.as_str(), e.enabled))
+        .collect();
+
+    current
+        .iter()
+        .map(|e| {
+            let enabled = patch_map
+                .get(e.name.as_str())
+                .copied()
+                .unwrap_or(e.enabled);
+            AgentToolEntry::new(&e.name, enabled)
+        })
+        .collect()
+}
+
+/// Initialize an `AgentToolsConfig` from a `manifest.toml`
+/// `[[tools]]` tool-names list. Any builtin tool whose name appears
+/// in the manifest gets `enabled = true`; everything else gets
+/// `enabled = false`. Used when `agent_tools.json` is absent.
+pub fn init_tools_config_from_manifest(
+    code_tool_names: &[String],
+    manifest_tool_names: &[String],
+) -> Vec<AgentToolEntry> {
+    let manifest_set: std::collections::HashSet<&str> =
+        manifest_tool_names.iter().map(|s| s.as_str()).collect();
+
+    code_tool_names
+        .iter()
+        .map(|name| {
+            let enabled = manifest_set.contains(name.as_str());
+            AgentToolEntry::new(name, enabled)
+        })
+        .collect()
+}
+
+/// Build the canonical list of builtin tools when no manifest
+/// declaration is present: every tool enabled by default
+/// (backward-compatible default behavior).
+pub fn all_enabled_tools_config(code_tool_names: &[String]) -> Vec<AgentToolEntry> {
+    code_tool_names
+        .iter()
+        .map(|name| AgentToolEntry::new(name, true))
+        .collect()
+}
+
 // ── Per-agent MCP config (dual-list: catalog + local) ──────────────────
 
 /// Filename for per-agent MCP config in the workspace config directory.
@@ -763,5 +975,189 @@ mod tests {
         let loaded = load_agent_config(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.context_window, Some(200_000));
         assert_eq!(loaded.temperature, Some(0.5));
+    }
+
+    // ── AgentToolsConfig (ADR-029) ────────────────────────────────────
+
+    fn sample_tools() -> Vec<String> {
+        vec![
+            "memory_recall".to_string(),
+            "memory_store".to_string(),
+            "http_request".to_string(),
+            "web_fetch".to_string(),
+            "shell".to_string(),
+        ]
+    }
+
+    #[test]
+    fn agent_tools_config_default_empty() {
+        let cfg = AgentToolsConfig::default();
+        assert!(cfg.tools.is_empty());
+    }
+
+    #[test]
+    fn agent_tools_config_serialize_round_trip() {
+        let cfg = AgentToolsConfig {
+            tools: vec![
+                AgentToolEntry::new("memory_recall", true),
+                AgentToolEntry::new("http_request", false),
+            ],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: AgentToolsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tools.len(), 2);
+        assert_eq!(restored.tools[0].name, "memory_recall");
+        assert!(restored.tools[0].enabled);
+        assert!(!restored.tools[1].enabled);
+    }
+
+    #[test]
+    fn agent_tool_entry_missing_enabled_defaults_to_true() {
+        // Backward-compatible: a stripped entry (`{"name":"x"}`) must
+        // deserialize to enabled=true, not the Rust default false.
+        let json = r#"[{"name": "memory_recall"}]"#;
+        let restored: Vec<AgentToolEntry> = serde_json::from_str(json).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].enabled, "missing enabled should default to true");
+    }
+
+    #[test]
+    fn merge_tools_config_preserves_persisted_state() {
+        let code = sample_tools();
+        let persisted = vec![
+            AgentToolEntry::new("memory_recall", true),
+            AgentToolEntry::new("http_request", false),
+            AgentToolEntry::new("removed_tool", true), // should be dropped
+        ];
+        let merged = merge_tools_config(&code, &persisted);
+        let map: std::collections::HashMap<String, bool> =
+            merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert_eq!(merged.len(), 5, "removed_tool must not appear in merge");
+        assert!(map["memory_recall"]);
+        assert!(!map["http_request"], "persisted false preserved");
+        // Tools missing from persisted file are disabled (opt-in), NOT enabled
+        assert!(!map["memory_store"], "missing in persisted → disabled (opt-in)");
+        assert!(!map["web_fetch"], "missing in persisted → disabled (opt-in)");
+        assert!(!map["shell"], "missing in persisted → disabled (opt-in)");
+        assert!(!map.contains_key("removed_tool"));
+    }
+
+    #[test]
+    fn merge_tools_config_new_tool_defaults_disabled() {
+        // Simulate a Runtime upgrade that introduced a new tool
+        // `brand_new_tool` to the code registry. The persisted file
+        // has no knowledge of it.
+        let mut code = sample_tools();
+        code.push("brand_new_tool".to_string());
+
+        let persisted = vec![
+            AgentToolEntry::new("memory_recall", true),
+            AgentToolEntry::new("memory_store", true),
+            AgentToolEntry::new("http_request", true),
+            AgentToolEntry::new("web_fetch", true),
+            AgentToolEntry::new("shell", true),
+        ];
+        // Per ADR-029, the `default_enabled` parameter is purely
+        // semantic documentation — actual semantics require "missing
+        // from persisted → disabled". So the merge must always set
+        // unmentioned tools to `enabled = false`.
+        let merged = merge_tools_config(&code, &persisted);
+        let entry = merged.iter().find(|e| e.name == "brand_new_tool").unwrap();
+        assert!(
+            !entry.enabled,
+            "new tool default must be disabled (opt-in): got enabled={}",
+            entry.enabled
+        );
+        // Existing tools should preserve their persisted state.
+        let memory_recall = merged.iter().find(|e| e.name == "memory_recall").unwrap();
+        assert!(memory_recall.enabled);
+    }
+
+    #[test]
+    fn init_tools_config_from_manifest_enables_listed_only() {
+        let code = sample_tools();
+        let manifest_tools = vec!["memory_recall".to_string(), "shell".to_string()];
+        let cfg = init_tools_config_from_manifest(&code, &manifest_tools);
+        let map: std::collections::HashMap<String, bool> =
+            cfg.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert!(map["memory_recall"]);
+        assert!(map["shell"]);
+        assert!(!map["memory_store"], "not in manifest → disabled");
+        assert!(!map["http_request"]);
+        assert!(!map["web_fetch"]);
+    }
+
+    #[test]
+    fn init_tools_config_empty_manifest_disables_all() {
+        let code = sample_tools();
+        let cfg = init_tools_config_from_manifest(&code, &[]);
+        assert!(cfg.iter().all(|e| !e.enabled));
+    }
+
+    #[test]
+    fn all_enabled_tools_config_enables_everything() {
+        let code = sample_tools();
+        let cfg = all_enabled_tools_config(&code);
+        assert_eq!(cfg.len(), code.len());
+        assert!(cfg.iter().all(|e| e.enabled));
+    }
+
+    #[test]
+    fn apply_builtin_tools_patch_only_touches_listed_tools() {
+        let current = vec![
+            AgentToolEntry::new("memory_recall", true),
+            AgentToolEntry::new("http_request", true),
+            AgentToolEntry::new("shell", false),
+        ];
+        let patch = vec![AgentToolEntry::new("http_request", false)];
+        let next = apply_builtin_tools_patch(&current, &patch);
+
+        let map: std::collections::HashMap<String, bool> =
+            next.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert!(map["memory_recall"], "unchanged when not in patch");
+        assert!(!map["http_request"], "patched to false");
+        assert!(!map["shell"], "unchanged when not in patch");
+    }
+
+    #[test]
+    fn apply_builtin_tools_patch_unknown_tool_silently_ignored() {
+        let current = vec![AgentToolEntry::new("memory_recall", true)];
+        let patch = vec![
+            AgentToolEntry::new("memory_recall", false),
+            AgentToolEntry::new("ghost_tool", true), // not in current
+        ];
+        let next = apply_builtin_tools_patch(&current, &patch);
+        assert_eq!(next.len(), 1, "patch must not add new tools");
+        assert!(!next[0].enabled);
+    }
+
+    #[test]
+    fn load_agent_tools_config_returns_none_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load_agent_tools_config(dir.path()).unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn save_and_load_agent_tools_config_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AgentToolsConfig {
+            tools: vec![
+                AgentToolEntry::new("memory_recall", true),
+                AgentToolEntry::new("http_request", false),
+                AgentToolEntry::new("shell", true),
+            ],
+        };
+        save_agent_tools_config(dir.path(), &cfg).unwrap();
+
+        let loaded = load_agent_tools_config(dir.path())
+            .unwrap()
+            .expect("file should exist after save");
+        assert_eq!(loaded.tools.len(), 3);
+        let map: std::collections::HashMap<String, bool> =
+            loaded.tools.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert!(map["memory_recall"]);
+        assert!(!map["http_request"]);
+        assert!(map["shell"]);
     }
 }

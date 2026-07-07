@@ -81,6 +81,36 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     }
     if grpc_client.is_some() {
         tracing::info!("Gateway gRPC client initialized");
+
+        // ── Send workspace config snapshot immediately after AgentHello ──
+        // Sending here (Phase A) instead of Phase C ensures the Gateway's
+        // in-memory cache is populated before any frontend workspace-list
+        // queries. Previously the window between AgentHello (Phase A) and
+        // UpdateWorkspaceConfig (Phase C) caused a race: the frontend could
+        // query GET /workspaces and receive an empty list.
+        if let Some(ref mut client) = grpc_client {
+            let work_dir_path = std::path::Path::new(&config.work_dir);
+            let ws_config_path = work_dir_path.join("config").join("agent_workspaces.json");
+            let ws_config_json = if ws_config_path.exists() {
+                std::fs::read_to_string(&ws_config_path)
+                    .unwrap_or_else(|_| r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string())
+            } else {
+                r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
+            };
+            let msg = acowork_core::proto::ClientMessage {
+                request_id: 0,
+                payload: Some(
+                    acowork_core::proto::client_message::Payload::UpdateWorkspaceConfig(
+                        acowork_core::proto::UpdateWorkspaceConfig { config_json: ws_config_json },
+                    ),
+                ),
+            };
+            if client.outbound_ctrl_sender().send(msg).await.is_err() {
+                tracing::warn!("Failed to send UpdateWorkspaceConfig snapshot to Gateway (Phase A)");
+            } else {
+                tracing::info!("Workspace config snapshot sent to Gateway (Phase A)");
+            }
+        }
     } else {
         tracing::info!("Running in standalone mode (no Gateway)");
     }
@@ -334,20 +364,101 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         registry.register(tool);
     }
 
-    let active_tools = registry.activate(&loaded.manifest, &workspace_resolver, 60);
+    let active_tools = registry.activate(&loaded.manifest, &workspace_resolver, 60, &[]);
     tracing::info!(
         total = registry.all().len(),
         active = active_tools.len(),
-        "Tools activated"
+        enabled = active_tools.iter().filter(|e| e.enabled).count(),
+        "Tools activated (initial — no agent_tools.json yet; will be re-merged below)"
+    );
+
+    // ── ADR-029 Step B: Resolve `agent_tools.json` enabled flags ────
+    //
+    // 1. If `{work_dir}/config/agent_tools.json` exists → load it
+    // 2. If absent → generate initial config from manifest `[[tools]]`
+    //    (or enable-all when manifest has no `[[tools]]`)
+    // 3. Merge code-registered tools with persisted entries to handle
+    //    upgrades (new tools default to enabled=false; removed tools
+    //    silently dropped)
+    let work_path = std::path::Path::new(&config.work_dir);
+    let code_tool_list: Vec<String> = registry
+        .all()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    let manifest_tool_names = loaded.manifest.builtin_tool_names();
+
+    let resolved_entries: Vec<crate::agent_config::AgentToolEntry> =
+        match crate::agent_config::load_agent_tools_config(work_path) {
+            Ok(Some(persisted_cfg)) => {
+                tracing::info!(
+                    count = persisted_cfg.tools.len(),
+                    "Loaded existing agent_tools.json — merging with code registry"
+                );
+                crate::agent_config::merge_tools_config(&code_tool_list, &persisted_cfg.tools)
+            }
+            Ok(None) => {
+                let initial = if loaded.manifest.has_any_tool_declaration() {
+                    tracing::info!(
+                        manifest_tools = manifest_tool_names.len(),
+                        "agent_tools.json absent — seeding from manifest.toml [[tools]]"
+                    );
+                    crate::agent_config::init_tools_config_from_manifest(
+                        &code_tool_list,
+                        &manifest_tool_names,
+                    )
+                } else {
+                    tracing::info!(
+                        "agent_tools.json absent and manifest has no [[tools]] — all builtin tools enabled by default"
+                    );
+                    crate::agent_config::all_enabled_tools_config(&code_tool_list)
+                };
+                // Persist the freshly generated config so future startups see it
+                if let Err(e) = crate::agent_config::save_agent_tools_config(
+                    work_path,
+                    &crate::agent_config::AgentToolsConfig {
+                        tools: initial.clone(),
+                    },
+                ) {
+                    tracing::warn!(error = %e, "Failed to persist initial agent_tools.json");
+                }
+                initial
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to parse agent_tools.json — falling back to manifest-derived config"
+                );
+                crate::agent_config::init_tools_config_from_manifest(
+                    &code_tool_list,
+                    &manifest_tool_names,
+                )
+            }
+        };
+
+    // Now re-activate with the merged enabled list. We use a fresh
+    // registry walk so each tool gets the post-merge `enabled` flag.
+    let active_tools = registry.activate(
+        &loaded.manifest,
+        &workspace_resolver,
+        60,
+        &resolved_entries,
+    );
+    tracing::info!(
+        total_enabled = active_tools.iter().filter(|e| e.enabled).count(),
+        total_disabled = active_tools.iter().filter(|e| !e.enabled).count(),
+        "agent_tools.json resolved"
     );
 
     // ── Step 5: Build tool definitions ──────────────────────────────
     #[allow(unused_imports)]
     use acowork_core::tools::traits::Tool;
+    // LLM-visible tool specs: enabled subset only.
     let tool_specs: Vec<(String, serde_json::Value)> = active_tools
         .iter()
-        .map(|t| {
-            let spec = t.spec();
+        .filter(|e| e.enabled)
+        .map(|e| {
+            let spec = e.spec();
             let serialized = serde_json::to_value(&spec).unwrap_or_default();
             tracing::warn!(
                 tool = %spec.name,
@@ -361,11 +472,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let tool_definitions: Vec<serde_json::Value> =
         tool_specs.iter().map(|(_, v)| v.clone()).collect();
 
-    let full_tool_specs: Vec<(String, serde_json::Value)> = registry
-        .all()
+    // Full builtin specs: every builtin regardless of enabled (used by
+    // the frontend ToolsTab — `GET /api/agents/{id}/builtin-tools`).
+    let full_tool_specs: Vec<(String, serde_json::Value)> = active_tools
         .iter()
-        .map(|t| {
-            let spec = t.spec();
+        .map(|e| {
+            let spec = e.spec();
             let serialized = serde_json::to_value(&spec).unwrap_or_default();
             (spec.name.clone(), serialized)
         })
@@ -373,7 +485,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     tracing::info!(
         active_specs = tool_specs.len(),
         full_specs = full_tool_specs.len(),
-        "Tool specs: active vs full registry"
+        "Tool specs: enabled vs full builtin registry"
     );
 
     // ── Step 6: Build context builder ───────────────────────────────

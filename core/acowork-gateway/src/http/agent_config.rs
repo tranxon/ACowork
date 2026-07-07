@@ -77,6 +77,12 @@ pub struct AgentConfigResponse {
     /// ADR-023: Approval timeout in seconds. None = use system default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_secs: Option<u64>,
+    /// ADR-029: Enabled builtin tool names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builtin_tools: Vec<String>,
+    /// ADR-029: Full builtin tools list with enabled flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_tools_all: Option<serde_json::Value>,
 }
 
 /// PUT request body for updating agent config.
@@ -103,6 +109,10 @@ pub struct UpdateAgentConfigRequest {
     /// ADR-023: Approval timeout in seconds. None = use system default.
     #[serde(default)]
     pub approval_timeout_secs: Option<u64>,
+    /// ADR-029: Enabled builtin tool names to set.
+    /// Some(vec![]) disables all builtin tools. None leaves unchanged.
+    #[serde(default)]
+    pub builtin_tools: Option<Vec<String>>,
 }
 
 /// Default global values used as fallback when no override exists.
