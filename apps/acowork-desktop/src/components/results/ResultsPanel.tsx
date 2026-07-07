@@ -241,7 +241,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
         <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
       </div>
       {/* Tab title header */}
-      <div className="border-b border-zinc-200 px-3 pt-[11px] pb-1.5 text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+      <div className="border-b border-zinc-200 px-3 pt-[11px] pb-[7px] text-xs font-medium text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
         {t(`resultsPanel.${activeTab}`)}
       </div>
 
