@@ -14,6 +14,7 @@ use acowork_core::providers::traits::Provider;
 
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
 impl AgentLoop {
     /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
@@ -38,38 +39,21 @@ impl AgentLoop {
     }
 
     /// Apply runtime config overrides from Gateway.
-    pub fn apply_runtime_config(
-        &mut self,
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
-    ) {
-        self.core.apply_runtime_config(
-            max_output_tokens,
-            max_iterations,
-            temperature,
-            context_window,
-            system_prompt_override,
-            shell_approval_threshold,
-            approval_timeout_secs,
-        );
+    pub fn apply_runtime_config(&mut self, overrides: &RuntimeConfigOverrides) {
+        self.core.apply_runtime_config(overrides);
         // Sync the session's cached temperature so emit_session_state()
         // reflects the new override immediately.  Without this,
         // session.temperature() returns the old resolved value (always
         // Some), blocking the fallback chain from reaching the new
         // temperature_override.
-        if temperature.is_some() {
-            self.session.set_temperature(temperature);
+        if overrides.temperature.is_some() {
+            self.session.set_temperature(overrides.temperature);
         }
 
         // If context_window changed, push updated context_usage immediately
         // so the frontend status panel and context-usage popup reflect the
         // new cap without waiting for the next LLM response.
-        if context_window.is_some() {
+        if overrides.context_window.is_some() {
             let model_name = self.resolve_current_model(None);
             if let Some(caps) = self.core.get_model_capabilities(&model_name) {
                 let max_output = self.core.max_output_tokens_limit_for_model(&model_name);

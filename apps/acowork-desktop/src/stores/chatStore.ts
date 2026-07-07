@@ -1241,7 +1241,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return;
       }
 
-      console.log(`[ChatStore] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}`);
+      console.log(`[ChatStore:DEBUG] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}, has_more=${data.has_more}, streaming=${!!data.streaming}${data.streaming ? ` (line=${data.streaming.line}, role=${data.streaming.role}, contentLen=${data.streaming.content?.length ?? 0})` : ""}`);
+      if (data.messages && data.messages.length > 0) {
+        const lastMsg = data.messages[data.messages.length - 1];
+        console.log(`[ChatStore:DEBUG] Last incremental message: id=${lastMsg.id}, role=${lastMsg.role}, contentPreview=${typeof lastMsg.content === 'string' ? lastMsg.content.slice(0, 80) : String(lastMsg.content).slice(0, 80)}`);
+      }
 
       const converted = mergeDocumentUploads(data.messages ?? [], agentId);
 
@@ -1715,6 +1719,10 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
     // user content; backend then appends "\n\nThe following workspace
     // files were attached..." enrichment.  Reconstruct the `documents`
     // array from the file references and keep only the actual user input.
+    // `selection` is emitted by the backend when an editor line-range was
+    // attached (chatStore `attachedContext.type === "selection"`); treat
+    // it the same as `file` for chip/document reconstruction — the line
+    // range in the line itself is informational only.
     if (msg.type === "user" && msg.content) {
       let cleanedContent = msg.content;
       let attachedFiles: ChatMessage["documents"] = [];
@@ -1726,7 +1734,7 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
       if (attachedCtxMatch) {
         const block = attachedCtxMatch[1];
         for (const line of block.split('\n')) {
-          const fileMatch = line.match(/^- (?:file|folder): `(.+?)`/);
+          const fileMatch = line.match(/^- (?:file|folder|selection): `(.+?)`/);
           if (fileMatch) {
             const absPath = fileMatch[1];
             const filename =
@@ -1826,8 +1834,16 @@ function handleMessageEvent(
     case "new_data_available": {
       if (!sid) break;
       const intervalMs = (data.interval_ms as number) ?? undefined;
+      // DEBUG: log session state when new_data_available arrives
+      const state = get();
+      const ss = getSessionState(state, agentId, sid!);
       console.log(
-        `[ChatStore] new_data_available for ${agentId}/${sid}: interval_ms=${intervalMs}`,
+        `[ChatStore:DEBUG] new_data_available for ${agentId}/${sid}: ` +
+        `interval_ms=${intervalMs}, ` +
+        `status=${ss.sessionStatus?.status}, ` +
+        `messageCount=${ss.messages.length}, ` +
+        `isLoadingSession=${ss.isLoadingSession}, ` +
+        `loadSequence=${ss.loadSequence}`,
       );
       // ADR-025: Pure signal — no totalLines. Backend maintains delivery cursor.
       // Import PollingManager dynamically to avoid circular dependency
@@ -1847,6 +1863,11 @@ function handleMessageEvent(
     case "done": {
       if (!sid) break;
       const usage = data.usage as TokenUsage | undefined;
+      // DEBUG: trace final poll on done
+      console.log(
+        `[ChatStore:DEBUG] done event for ${agentId}/${sid} — starting final incremental poll`,
+      );
+      const pollStart = Date.now();
       // ADR-025: Final poll to drain remaining data. No coordinates —
       // the backend delivery cursor knows what's left. This is NOT
       // "compensation" — it's the natural "fetch remaining data" step.
@@ -1857,7 +1878,24 @@ function handleMessageEvent(
         50,
         "backward",
         true, // incremental = true (ADR-025)
-      ).finally(() => {
+      ).then((result) => {
+        const elapsed = Date.now() - pollStart;
+        const state = get();
+        const ss = getSessionState(state, agentId, sid!);
+        console.log(
+          `[ChatStore:DEBUG] done final poll result: elapsed=${elapsed}ms, ` +
+          `hasMore=${result?.hasMore}, noNewData=${result?.noNewData}, ` +
+          `messageCount=${ss.messages.length}, ` +
+          `status=${ss.sessionStatus?.status}`,
+        );
+        // Log last 3 message IDs for traceability
+        const lastMsgs = ss.messages.slice(-3).map(m => ({
+          id: m.id, type: m.type,
+          contentLen: typeof m.content === 'string' ? m.content.length : String(m.content).length,
+          contentPreview: typeof m.content === 'string' ? m.content.slice(0, 60) : String(m.content).slice(0, 60),
+        }));
+        console.log(`[ChatStore:DEBUG] last 3 messages after done poll:`, lastMsgs);
+      }).finally(() => {
         import("../lib/polling").then(({ stopPolling }) => {
           stopPolling(agentId, sid!);
         }).catch(() => {});
@@ -2063,6 +2101,13 @@ function handleMessageEvent(
       if (sid) {
         const status = data.status as SessionStatus | undefined;
         if (status) {
+          // DEBUG: log status transitions
+          const prev = getSessionState(get(), agentId, sid!);
+          console.log(
+            `[ChatStore:DEBUG] session_state_changed for ${agentId}/${sid}: ` +
+            `prev=${prev.sessionStatus?.status} → next=${status.status}, ` +
+            `messageCount=${prev.messages.length}`,
+          );
           set((state) => {
             const sessionPatch: Partial<SessionChatState> = { sessionStatus: status };
 

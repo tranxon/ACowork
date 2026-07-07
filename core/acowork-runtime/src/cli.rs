@@ -1,6 +1,7 @@
 //! CLI definitions for Agent Runtime
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session::{SessionManager, SessionMessage};
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent_config::AgentMcpConfig;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
@@ -1843,13 +1844,15 @@ async fn process_gateway_recv(
                     // silently revert values like `max_iterations` back to
                     // the default (50) for every brand-new session.
                     session_manager.apply_runtime_config_override(
-                        max_output_tokens,
-                        max_iterations,
-                        temperature,
-                        context_window,
-                        system_prompt_override,
-                        shell_approval_threshold,
-                        approval_timeout_secs,
+                        &RuntimeConfigOverrides {
+                            max_output_tokens,
+                            max_iterations,
+                            temperature,
+                            context_window,
+                            system_prompt_override,
+                            shell_approval_threshold,
+                            approval_timeout_secs,
+                        },
                     );
 
                     // Handle MCP server config changes: connect, disconnect, or reconnect.

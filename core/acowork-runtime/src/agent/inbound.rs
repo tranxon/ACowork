@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
+
 /// Maximum payload size in bytes for inbound message text content.
 /// Messages exceeding this limit will be truncated.
 const MAX_INBOUND_PAYLOAD_SIZE: usize = 4096;
@@ -58,15 +60,7 @@ pub enum UserOp {
     /// These are also persisted via the SessionTask channel
     /// (`SessionMessage::UpdateRuntimeConfig`) for tool definitions
     /// and other session-level updates.
-    UpdateRuntimeConfig {
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
-    },
+    UpdateRuntimeConfig(RuntimeConfigOverrides),
 }
 
 /// Messages that can be injected into the agent loop from external sources.

@@ -28,6 +28,7 @@ use chrono::Utc;
 use crate::config::RuntimeConfig;
 use crate::debug::DebugObserverSlot;
 use crate::embedding::EmbeddingProvider;
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::memory::ConsolidationBgTask;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
@@ -45,8 +46,11 @@ pub struct AgentCore {
     pub(crate) manifest: acowork_core::AgentManifest,
     /// LLM Provider
     pub(crate) provider: Arc<dyn Provider>,
-    /// Tool registry — built-in tools only (used as base for rebuilding).
-    pub(crate) tools: Vec<Arc<dyn Tool>>,
+    /// Built-in tool registry — the static base set used as the seed for
+    /// rebuilding `all_tools` whenever `mcp_tools` changes. These are the
+    /// tools shipped with the runtime binary and registered in
+    /// `crate::tools::builtin`; MCP tools are kept separate in [`Self::mcp_tools`].
+    pub(crate) builtin_tools: Vec<Arc<dyn Tool>>,
     /// MCP (Model Context Protocol) tool wrappers, populated when MCP servers
     /// have been connected. These are merged into [`all_tools`] at rebuild time.
     pub(crate) mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -114,7 +118,7 @@ impl AgentCore {
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<Arc<dyn Tool>>,
         observer: DebugObserverSlot,
     ) -> Self {
         let shell_approval_threshold =
@@ -131,9 +135,9 @@ impl AgentCore {
             config,
             manifest,
             provider,
-            tools: tools.clone(),
+            builtin_tools: builtin_tools.clone(),
             mcp_tools: None,
-            all_tools: tools,
+            all_tools: builtin_tools,
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: 0,
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
@@ -166,13 +170,19 @@ impl AgentCore {
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<Arc<dyn Tool>>,
     ) -> Self {
-        Self::new_with_observer(config, manifest, provider, tools, DebugObserverSlot::production())
+        Self::new_with_observer(
+            config,
+            manifest,
+            provider,
+            builtin_tools,
+            DebugObserverSlot::production(),
+        )
     }
 
     pub(crate) fn rebuild_all_tools(&mut self) {
-        let mut merged = self.tools.clone();
+        let mut merged = self.builtin_tools.clone();
         if let Some(ref mcp) = self.mcp_tools {
             merged.extend(mcp.clone());
         }
@@ -182,7 +192,7 @@ impl AgentCore {
     pub fn config(&self) -> &RuntimeConfig { &self.config }
     pub fn manifest(&self) -> &acowork_core::AgentManifest { &self.manifest }
     pub fn provider(&self) -> &Arc<dyn Provider> { &self.provider }
-    pub fn tools(&self) -> &[Arc<dyn Tool>] { &self.tools }
+    pub fn builtin_tools(&self) -> &[Arc<dyn Tool>] { &self.builtin_tools }
 
     // ── ADR-028: Agent-scoped cumulative token usage ───────────────────
     //
@@ -353,43 +363,61 @@ impl AgentCore {
         }
     }
 
-    pub fn apply_runtime_config(
-        &mut self,
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
-    ) {
-        if let Some(limit) = max_output_tokens {
+    pub fn apply_runtime_config(&mut self, overrides: &RuntimeConfigOverrides) {
+        if let Some(limit) = overrides.max_output_tokens {
             tracing::info!(new = limit, "runtime config: max_output_tokens updated (all models)");
             self.update_max_output_tokens_limit(limit);
         }
-        if let Some(n) = max_iterations {
-            tracing::info!(old = self.config.max_iterations, new = n, "runtime config: max_iterations updated");
+        if let Some(n) = overrides.max_iterations {
+            tracing::info!(
+                old = self.config.max_iterations,
+                new = n,
+                "runtime config: max_iterations updated"
+            );
             self.config.max_iterations = n;
         }
-        if let Some(temp) = temperature {
-            tracing::info!(old = ?self.temperature_override, new = temp, "runtime config: temperature updated");
+        if let Some(temp) = overrides.temperature {
+            tracing::info!(
+                old = ?self.temperature_override,
+                new = temp,
+                "runtime config: temperature updated"
+            );
             self.temperature_override = Some(temp);
         }
-        if let Some(cw) = context_window {
-            tracing::info!(old = ?self.context_window_override, new = cw, "runtime config: context_window updated");
+        if let Some(cw) = overrides.context_window {
+            tracing::info!(
+                old = ?self.context_window_override,
+                new = cw,
+                "runtime config: context_window updated"
+            );
             self.context_window_override = Some(cw);
         }
-        if system_prompt_override.is_some() {
-            tracing::info!(has_override = system_prompt_override.as_ref().map(|s| !s.is_empty()).unwrap_or(false), "runtime config: system_prompt_override updated");
-            self.system_prompt_override = system_prompt_override;
+        if overrides.system_prompt_override.is_some() {
+            tracing::info!(
+                has_override = overrides
+                    .system_prompt_override
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
+                "runtime config: system_prompt_override updated"
+            );
+            self.system_prompt_override = overrides.system_prompt_override.clone();
         }
-        if let Some(ref threshold) = shell_approval_threshold {
+        if let Some(ref threshold) = overrides.shell_approval_threshold {
             let new_threshold = ShellApprovalThreshold::from_str_loose(threshold).unwrap_or_default();
-            tracing::info!(old = ?self.shell_approval_threshold, new = ?new_threshold, "runtime config: shell_approval_threshold updated");
+            tracing::info!(
+                old = ?self.shell_approval_threshold,
+                new = ?new_threshold,
+                "runtime config: shell_approval_threshold updated"
+            );
             self.shell_approval_threshold = new_threshold;
         }
-        if let Some(timeout) = approval_timeout_secs {
-            tracing::info!(old = ?self.approval_timeout_secs, new = timeout, "runtime config: approval_timeout_secs updated");
+        if let Some(timeout) = overrides.approval_timeout_secs {
+            tracing::info!(
+                old = ?self.approval_timeout_secs,
+                new = timeout,
+                "runtime config: approval_timeout_secs updated"
+            );
             self.approval_timeout_secs = Some(timeout);
         }
     }
@@ -629,7 +657,7 @@ impl Clone for AgentCore {
             config: self.config.clone(),
             manifest: self.manifest.clone(),
             provider: self.provider.clone(),
-            tools: self.tools.clone(),
+            builtin_tools: self.builtin_tools.clone(),
             mcp_tools: self.mcp_tools.clone(),
             all_tools: self.all_tools.clone(),
             global_provider_list: self.global_provider_list.clone(),

@@ -255,7 +255,7 @@ impl AgentLoop {
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<Arc<dyn Tool>>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
@@ -267,7 +267,11 @@ impl AgentLoop {
         let max_tokens = config.history_max_tokens;
         let approval_handle = ApprovalHandle::new(approval_tx);
         let core = AgentCore::new_with_observer(
-            config.clone(), manifest, provider, tools, observer,
+            config.clone(),
+            manifest,
+            provider,
+            builtin_tools,
+            observer,
         );
         let streaming_lines: crate::conversation::StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
@@ -319,7 +323,7 @@ impl AgentLoop {
         config: RuntimeConfig,
         manifest: acowork_core::AgentManifest,
         provider: Arc<dyn Provider>,
-        tools: Vec<Arc<dyn Tool>>,
+        builtin_tools: Vec<Arc<dyn Tool>>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         conversation: Option<ConversationSession>,
@@ -328,7 +332,7 @@ impl AgentLoop {
             config,
             manifest,
             provider,
-            tools,
+            builtin_tools,
             budget,
             chunk_tx,
             conversation,
@@ -387,7 +391,7 @@ impl AgentLoop {
     ) -> std::result::Result<String, String> {
         let tool = self
             .core
-            .tools
+            .builtin_tools
             .iter()
             .find(|t| t.spec().name == name)
             .ok_or_else(|| format!("Tool not found: {}", name))?;

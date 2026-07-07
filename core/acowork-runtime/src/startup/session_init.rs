@@ -14,10 +14,16 @@ use std::sync::Arc;
 
 use acowork_core::timeout_config::constants;
 use crate::agent::agent_core::AgentCore;
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session::{SessionManager, SessionManagerConfig};
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext, build_session_manager_config};
+
+/// Cached result of the background scan that finds the most recently active
+/// session — `(session_id, title)`. Held in an `Arc<RwLock<…>>` so the
+/// SessionManager can read it on the main thread after construction.
+type LatestSessionScan = Arc<std::sync::RwLock<Option<(String, Option<String>)>>>;
 
 /// Phase B: assemble per-session state on the main thread (Gateway mode).
 ///
@@ -124,8 +130,7 @@ pub(crate) async fn phase_b_init_session(
     // The result (latest session by last_active_at) is stored in a shared
     // Arc so SessionManager can read it after construction, avoiding a
     // duplicate full scan when the frontend calls fetchLatestSession.
-    let latest_session_scan: Arc<std::sync::RwLock<Option<(String, Option<String>)>>> =
-        Arc::new(std::sync::RwLock::new(None));
+    let latest_session_scan: LatestSessionScan = Arc::new(std::sync::RwLock::new(None));
     let latest_session_scan_clone = latest_session_scan.clone();
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
@@ -369,15 +374,8 @@ pub(crate) async fn phase_b_init_session(
                 temperature = ?agent_cfg.temperature,
                 "Applying runtime config overrides from workspace agent_config.json"
             );
-            session_manager.apply_runtime_config_override(
-                agent_cfg.max_output_tokens,
-                agent_cfg.max_iterations,
-                agent_cfg.temperature,
-                agent_cfg.context_window,
-                agent_cfg.system_prompt_override.clone(),
-                agent_cfg.shell_approval_threshold.clone(),
-                agent_cfg.approval_timeout_secs,
-            );
+            session_manager
+                .apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
         }
     }
 

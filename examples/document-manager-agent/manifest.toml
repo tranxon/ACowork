@@ -34,15 +34,9 @@ type = "MemoryWrite"
 # Network permission supports collecting references and source documents when allowed.
 
 [llm]
-temperature = 0.35
-
-[llm.providers.openai]
-model = "gpt-4o"
-api_key_ref = "vault:openai_key"
-
-[llm.providers.claude]
-model = "claude-sonnet-4"
-api_key_ref = "vault:anthropic_key"
+temperature = 0.3
+max_tokens = 65536
+context_window = 250000
 
 [llm.routing]
 strategy = "quality_priority"

@@ -184,6 +184,11 @@ export class PollingManager {
         status !== "waiting_approval" &&
         status !== "paused"
       ) {
+        // DEBUG: log why poll was skipped
+        console.log(
+          `[PollingManager:DEBUG] doPoll SKIPPED for ${this.agentId}/${this.sessionId}: ` +
+          `status=${status}, messageCount=${session.messages.length}`,
+        );
         this.stop();
         return;
       }

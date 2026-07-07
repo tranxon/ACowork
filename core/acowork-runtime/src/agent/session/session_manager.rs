@@ -28,6 +28,7 @@ use crate::config::DEFAULT_TEMPERATURE;
 use crate::conversation::ConversationSession;
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
+use crate::agent_config::AgentConfig;
 use crate::tools::mcp_manager::McpConnectionFailure;
 use crate::tools::mcp_manager::McpManager;
 use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
@@ -89,7 +90,7 @@ impl Default for SessionManagerConfig {
 /// each time a new session is spawned, so config changes remain effective
 /// for sessions created *after* the push (not only for sessions that were
 /// already alive when the push arrived).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeConfigOverrides {
     pub max_output_tokens: Option<u64>,
     pub max_iterations: Option<u32>,
@@ -114,36 +115,44 @@ impl RuntimeConfigOverrides {
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
     /// previously cached override.
-    pub fn merge(
-        &mut self,
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
-    ) {
-        if max_output_tokens.is_some() {
-            self.max_output_tokens = max_output_tokens;
+    pub fn merge(&mut self, other: &Self) {
+        if other.max_output_tokens.is_some() {
+            self.max_output_tokens = other.max_output_tokens;
         }
-        if max_iterations.is_some() {
-            self.max_iterations = max_iterations;
+        if other.max_iterations.is_some() {
+            self.max_iterations = other.max_iterations;
         }
-        if temperature.is_some() {
-            self.temperature = temperature;
+        if other.temperature.is_some() {
+            self.temperature = other.temperature;
         }
-        if context_window.is_some() {
-            self.context_window = context_window;
+        if other.context_window.is_some() {
+            self.context_window = other.context_window;
         }
-        if system_prompt_override.is_some() {
-            self.system_prompt_override = system_prompt_override;
+        if other.system_prompt_override.is_some() {
+            self.system_prompt_override = other.system_prompt_override.clone();
         }
-        if shell_approval_threshold.is_some() {
-            self.shell_approval_threshold = shell_approval_threshold;
+        if other.shell_approval_threshold.is_some() {
+            self.shell_approval_threshold = other.shell_approval_threshold.clone();
         }
-        if approval_timeout_secs.is_some() {
-            self.approval_timeout_secs = approval_timeout_secs;
+        if other.approval_timeout_secs.is_some() {
+            self.approval_timeout_secs = other.approval_timeout_secs;
+        }
+    }
+}
+
+impl From<&AgentConfig> for RuntimeConfigOverrides {
+    /// Project the subset of `AgentConfig` fields that participate in the
+    /// runtime override chain. Other `AgentConfig` fields (max_sessions,
+    /// avatar, etc.) are applied separately via their own code paths.
+    fn from(cfg: &AgentConfig) -> Self {
+        Self {
+            max_output_tokens: cfg.max_output_tokens,
+            max_iterations: cfg.max_iterations,
+            temperature: cfg.temperature,
+            context_window: cfg.context_window,
+            system_prompt_override: cfg.system_prompt_override.clone(),
+            shell_approval_threshold: cfg.shell_approval_threshold.clone(),
+            approval_timeout_secs: cfg.approval_timeout_secs,
         }
     }
 }
@@ -863,14 +872,14 @@ impl SessionManager {
         let meta_path = conversations_dir
             .join("meta")
             .join(format!("{}.json", session_id));
-        if let Err(e) = std::fs::remove_file(&meta_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "Failed to delete session meta file"
-                );
-            }
+        if let Err(e) = std::fs::remove_file(&meta_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to delete session meta file"
+            );
         }
 
         // 3. Delete the JSONL file.
@@ -1034,47 +1043,17 @@ impl SessionManager {
     ///   2. Broadcast the override to all currently active sessions.
     pub fn apply_runtime_config_override(
         &mut self,
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
+        overrides: &RuntimeConfigOverrides,
     ) -> Vec<String> {
-        self.runtime_overrides.merge(
-            max_output_tokens,
-            max_iterations,
-            temperature,
-            context_window,
-            system_prompt_override.clone(),
-            shell_approval_threshold.clone(),
-            approval_timeout_secs,
-        );
+        self.runtime_overrides.merge(overrides);
         // ── 1. Broadcast to SessionTask channels (for tool definitions etc.) ──
-        let sessions = self.broadcast(SessionMessage::UpdateRuntimeConfig {
-            max_output_tokens,
-            max_iterations,
-            temperature,
-            context_window,
-            system_prompt_override: system_prompt_override.clone(),
-            shell_approval_threshold: shell_approval_threshold.clone(),
-            approval_timeout_secs,
-        });
+        let sessions = self.broadcast(SessionMessage::UpdateRuntimeConfig(overrides.clone()));
 
         // ── 2. Also deliver via send_inbound() fast channel ──
         // This ensures the AgentLoop immediately picks up runtime config
         // changes even while mid-execution (streaming / running tools),
         // when the SessionTask's message loop is blocked on agent_loop.run().
-        let user_op = UserOp::UpdateRuntimeConfig {
-            max_output_tokens,
-            max_iterations,
-            temperature,
-            context_window,
-            system_prompt_override,
-            shell_approval_threshold,
-            approval_timeout_secs,
-        };
+        let user_op = UserOp::UpdateRuntimeConfig(overrides.clone());
         let inbound_msg = InboundMessage::UserOperation(user_op);
         for (session_id, handle) in &self.sessions {
             if let Err(e) = handle.send_inbound(inbound_msg.clone()) {
@@ -1090,7 +1069,7 @@ impl SessionManager {
         //    the new temperature immediately, even when the AgentLoop is
         //    mid-streaming (the fast-path UserOp won't be consumed until
         //    the next drain_inbound_queue checkpoint).
-        if let Some(temp) = temperature {
+        if let Some(temp) = overrides.temperature {
             for (session_id, handle) in &self.sessions {
                 if let Ok(mut guard) = handle.snapshot.write() {
                     tracing::debug!(
@@ -2207,16 +2186,22 @@ mod tests {
     #[test]
     fn test_overrides_merge() {
         let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(Some(100), None, None, None, None, None, None);
+        ov.merge(&RuntimeConfigOverrides {
+            max_output_tokens: Some(100),
+            ..Default::default()
+        });
         assert!(!ov.is_empty());
         assert_eq!(ov.max_output_tokens, Some(100));
 
         // Re-merge with Some replaces
-        ov.merge(Some(200), None, None, None, None, None, None);
+        ov.merge(&RuntimeConfigOverrides {
+            max_output_tokens: Some(200),
+            ..Default::default()
+        });
         assert_eq!(ov.max_output_tokens, Some(200));
 
         // None preserves
-        ov.merge(None, None, None, None, None, None, None);
+        ov.merge(&RuntimeConfigOverrides::default());
         assert_eq!(ov.max_output_tokens, Some(200));
     }
 

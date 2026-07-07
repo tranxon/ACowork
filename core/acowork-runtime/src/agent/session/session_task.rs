@@ -64,15 +64,7 @@ pub enum SessionMessage {
         effort: String,
     },
     /// Apply runtime config overrides from Gateway
-    UpdateRuntimeConfig {
-        max_output_tokens: Option<u64>,
-        max_iterations: Option<u32>,
-        temperature: Option<f32>,
-        context_window: Option<u64>,
-        system_prompt_override: Option<String>,
-        shell_approval_threshold: Option<String>,
-        approval_timeout_secs: Option<u64>,
-    },
+    UpdateRuntimeConfig(RuntimeConfigOverrides),
     /// Update workspace context text
     UpdateWorkspaceContext { context_text: String },
     /// Update MCP tools on AgentCore (hot-push when MCP servers connect/disconnect).
@@ -160,23 +152,24 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("ReasoningEffort")
                 .field("effort", effort)
                 .finish(),
-            SessionMessage::UpdateRuntimeConfig {
-                max_output_tokens,
-                max_iterations,
-                temperature,
-                context_window,
-                system_prompt_override,
-                shell_approval_threshold,
-                approval_timeout_secs,
-            } => f
+            SessionMessage::UpdateRuntimeConfig(overrides) => f
                 .debug_struct("UpdateRuntimeConfig")
-                .field("max_output_tokens", max_output_tokens)
-                .field("max_iterations", max_iterations)
-                .field("temperature", temperature)
-                .field("context_window", context_window)
-                .field("has_system_prompt", &system_prompt_override.is_some())
-                .field("shell_approval_threshold", shell_approval_threshold)
-                .field("approval_timeout_secs", approval_timeout_secs)
+                .field("max_output_tokens", &overrides.max_output_tokens)
+                .field("max_iterations", &overrides.max_iterations)
+                .field("temperature", &overrides.temperature)
+                .field("context_window", &overrides.context_window)
+                .field(
+                    "has_system_prompt",
+                    &overrides.system_prompt_override.is_some(),
+                )
+                .field(
+                    "shell_approval_threshold",
+                    &overrides.shell_approval_threshold,
+                )
+                .field(
+                    "approval_timeout_secs",
+                    &overrides.approval_timeout_secs,
+                )
                 .finish(),
             SessionMessage::UpdateWorkspaceContext { context_text } => f
                 .debug_struct("UpdateWorkspaceContext")
@@ -476,15 +469,7 @@ impl SessionTask {
         }
 
         // Apply accumulated runtime config overrides
-        core_mut.apply_runtime_config(
-            runtime_overrides.max_output_tokens,
-            runtime_overrides.max_iterations,
-            runtime_overrides.temperature,
-            runtime_overrides.context_window,
-            runtime_overrides.system_prompt_override,
-            runtime_overrides.shell_approval_threshold,
-            runtime_overrides.approval_timeout_secs,
-        );
+        core_mut.apply_runtime_config(&runtime_overrides);
 
         // Sync temperature override
         let mut session = session;
@@ -896,10 +881,9 @@ impl SessionTask {
                                             (Some(s), _) => format!(" (L{})", s),
                                             _ => String::new(),
                                         };
-                                        let type_label = if ctx.context_type == "selection" {
-                                            "file"
-                                        } else {
-                                            "file"
+                                        let type_label = match ctx.context_type.as_str() {
+                                            "selection" => "selection",
+                                            _ => "file",
                                         };
                                         format!("- {}: `{}`{}", type_label, ctx.abs_path, line_info)
                                     })
@@ -1165,32 +1149,16 @@ impl SessionTask {
                         conv.update_reasoning_effort(Some(effort));
                     }
                 }
-                Some(SessionMessage::UpdateRuntimeConfig {
-                    max_output_tokens,
-                    max_iterations,
-                    temperature,
-                    context_window,
-                    system_prompt_override,
-                    shell_approval_threshold,
-                    approval_timeout_secs,
-                }) => {
+                Some(SessionMessage::UpdateRuntimeConfig(overrides)) => {
                     tracing::info!(
                         session_id = %session_id,
-                        max_output_tokens = ?max_output_tokens,
-                        max_iterations = ?max_iterations,
-                        temperature = ?temperature,
-                        context_window = ?context_window,
+                        max_output_tokens = ?overrides.max_output_tokens,
+                        max_iterations = ?overrides.max_iterations,
+                        temperature = ?overrides.temperature,
+                        context_window = ?overrides.context_window,
                         "SessionTask: applying runtime config overrides"
                     );
-                    agent_loop.apply_runtime_config(
-                        max_output_tokens,
-                        max_iterations,
-                        temperature,
-                        context_window,
-                        system_prompt_override,
-                        shell_approval_threshold,
-                        approval_timeout_secs,
-                    );
+                    agent_loop.apply_runtime_config(&overrides);
                     // Push updated state to frontend immediately so the
                     // ResultsPanel temperature display reflects the new value
                     // without waiting for the next LLM iteration.

@@ -207,10 +207,10 @@ impl super::loop_::AgentLoop {
     /// Idempotent: `ConversationSession::update_title_force` is a no-op if
     /// the title hasn't changed.
     pub(crate) fn flush_pending_title(&mut self) {
-        if let Some(title) = self.session_core.title.read().unwrap().clone() {
-            if let Some(ref conversation) = self.session.conversation {
-                conversation.update_title_force(&title);
-            }
+        if let Some(title) = self.session_core.title.read().unwrap().clone()
+            && let Some(ref conversation) = self.session.conversation
+        {
+            conversation.update_title_force(&title);
         }
     }
 

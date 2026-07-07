@@ -111,33 +111,17 @@ impl AgentLoop {
                 );
                 false
             }
-            crate::agent::inbound::UserOp::UpdateRuntimeConfig {
-                max_output_tokens,
-                max_iterations,
-                temperature,
-                context_window,
-                system_prompt_override,
-                shell_approval_threshold,
-                approval_timeout_secs,
-            } => {
+            crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides) => {
                 tracing::info!(
-                    max_output_tokens,
-                    max_iterations,
-                    temperature,
-                    context_window,
-                    system_prompt_override = system_prompt_override.as_deref(),
-                    shell_approval_threshold = shell_approval_threshold.as_deref(),
+                    max_output_tokens = overrides.max_output_tokens,
+                    max_iterations = overrides.max_iterations,
+                    temperature = overrides.temperature,
+                    context_window = overrides.context_window,
+                    system_prompt_override = overrides.system_prompt_override.as_deref(),
+                    shell_approval_threshold = overrides.shell_approval_threshold.as_deref(),
                     "UserOp: applying runtime config immediately in AgentLoop"
                 );
-                self.apply_runtime_config(
-                    *max_output_tokens,
-                    *max_iterations,
-                    *temperature,
-                    *context_window,
-                    system_prompt_override.clone(),
-                    shell_approval_threshold.clone(),
-                    *approval_timeout_secs,
-                );
+                self.apply_runtime_config(overrides);
                 // Push updated state to frontend immediately so the
                 // ResultsPanel temperature display reflects the new value
                 // without waiting for the next LLM iteration.

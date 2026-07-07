@@ -35,14 +35,8 @@ type = "MemoryWrite"
 
 [llm]
 temperature = 0.5
-
-[llm.providers.openai]
-model = "gpt-4o"
-api_key_ref = "vault:openai_key"
-
-[llm.providers.claude]
-model = "claude-sonnet-4"
-api_key_ref = "vault:anthropic_key"
+max_tokens = 32768
+context_window = 200000
 
 [llm.routing]
 strategy = "quality_priority"

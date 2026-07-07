@@ -34,15 +34,9 @@ type = "MemoryWrite"
 # Network permission allows reading product references, analytics exports, and Figma design links when tools support it.
 
 [llm]
-temperature = 0.45
-
-[llm.providers.openai]
-model = "gpt-4o"
-api_key_ref = "vault:openai_key"
-
-[llm.providers.claude]
-model = "claude-sonnet-4"
-api_key_ref = "vault:anthropic_key"
+temperature = 0.7
+max_tokens = 32768
+context_window = 200000
 
 [llm.routing]
 strategy = "quality_priority"

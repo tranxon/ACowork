@@ -1038,14 +1038,14 @@ pub(crate) fn prune_excess_sessions(
         }
 
         // Delete the per-session meta file.
-        if let Err(e) = std::fs::remove_file(&meta_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "Failed to delete meta file during session pruning"
-                );
-            }
+        if let Err(e) = std::fs::remove_file(&meta_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to delete meta file during session pruning"
+            );
         }
     }
 
