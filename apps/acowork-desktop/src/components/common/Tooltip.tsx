@@ -104,10 +104,18 @@ function InlineTooltip({
       onMouseLeave={handleLeave}
     >
       {children}
+      {/*
+        width: max-content lets the tooltip size to its natural content
+        width (capped at maxWidth by the inner div), independent of the
+        trigger's width. Without this, a position:absolute child with
+        width:auto fills the containing block, so an icon-only trigger
+        (~28px) would squeeze the tooltip to a 28px column and wrap
+        the text one character per line.
+      */}
       <div
         className={cn(
           inlinePositionClasses[position],
-          "pointer-events-none absolute z-50",
+          "pointer-events-none absolute z-50 w-max",
           tipClass,
           visible ? "block" : "hidden",
         )}
