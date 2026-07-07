@@ -135,6 +135,10 @@ pub enum ChunkEvent {
         /// Current temperature setting for LLM inference.
         /// `None` means use agent config or global default (0.7).
         temperature: Option<f32>,
+        /// ADR-028: JSON-serialized ContextUsageInfo snapshot from persisted
+        /// session tokens. Set on session activation/resume so the frontend
+        /// can show token counts without waiting for the first LLM call.
+        context_usage: Option<String>,
     },
     /// Todo list updated — emitted after a `todo_write` tool call mutates
     /// SessionState.todos, so the frontend can render the current task list.

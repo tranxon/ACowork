@@ -50,13 +50,13 @@ pub struct SessionHandle {
     /// pick them up at the start of each iteration without going through
     /// the SessionTask message channel (which is blocked on .run()).
     pub(crate) pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
-    /// Shared snapshot slot for the Gateway session state pull API.
+    /// Shared snapshot of per-session state for the Gateway pull API.
     ///
-    /// Written by `AgentLoop::emit_session_state` on every status transition.
-    /// Read by `SessionManager::snapshot_session_state` to serve the HTTP
-    /// `GET /api/agents/{id}/sessions/{session_id}/state` handler.
-    pub(crate) snapshot_slot:
-        Arc<std::sync::RwLock<Option<SessionStateSnapshot>>>,
+    /// Owned by [`SessionState`]; shared with SessionHandle so
+    /// [`SessionManager::snapshot_session_state`] can read it directly.
+    /// Written by [`AgentLoop::emit_session_state`] on every status transition.
+    pub(crate) snapshot:
+        Arc<std::sync::RwLock<SessionStateSnapshot>>,
     /// Per-session workspace ID. Single source of truth, shared with [`SessionCore`].
     /// Written synchronously by [`SessionManager::set_session_workspace`],
     /// read by `list_sessions` and `session_workspace_id`.
@@ -129,13 +129,29 @@ impl SessionHandle {
 
     /// Read the current session state snapshot (for the Gateway pull API).
     ///
-    /// Returns a clone of the snapshot written by the last `emit_session_state`
-    /// call. Returns `None` if no state has been emitted yet (session just
-    /// created and the AgentLoop has not run its first status transition).
-    pub fn snapshot(&self) -> Option<SessionStateSnapshot> {
-        self.snapshot_slot
+    /// Returns a clone of the snapshot shared with [`SessionState`].
+    /// Always returns a value — the snapshot is initialized with defaults
+    /// in [`SessionState::new`] and populated with persistent data during
+    /// [`build_initial_session_state`].
+    pub fn snapshot(&self) -> SessionStateSnapshot {
+        self.snapshot
             .read()
             .ok()
-            .and_then(|guard| guard.clone())
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|| {
+                // Fallback: return a minimal snapshot if the lock is poisoned.
+                SessionStateSnapshot {
+                    session_id: self.session_id.clone(),
+                    status_json: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    workspace_id: None,
+                    ratio: None,
+                    reasoning_effort: None,
+                    temperature: None,
+                    todos_json: None,
+                    context_usage_json: None,
+                }
+            })
     }
 }

@@ -700,9 +700,44 @@ pub(crate) async fn run_gateway_loop(
                                 let store_opt = session_manager.memory_store().cloned();
                                 let outbound = grpc_client.outbound_ctrl_sender();
 
+                                // Handle GetLatestSessionQuery inline — reads the cached
+                                // latest session from SessionManager (populated by the
+                                // startup scan). No disk I/O.
+                                if let ServerPayload::GetLatestSessionQuery(ref q) = payload {
+                                    let result = if let Some((session_id, title)) =
+                                        session_manager.latest_session()
+                                    {
+                                        proto::LatestSessionResult {
+                                            request_id: q.request_id.clone(),
+                                            found: true,
+                                            session_id,
+                                            title: title.unwrap_or_default(),
+                                            created_at: String::new(),
+                                        }
+                                    } else {
+                                        proto::LatestSessionResult {
+                                            request_id: q.request_id.clone(),
+                                            found: false,
+                                            ..Default::default()
+                                        }
+                                    };
+                                    let response = proto::ClientMessage {
+                                        request_id,
+                                        payload: Some(
+                                            proto::client_message::Payload::LatestSessionResult(
+                                                result,
+                                            ),
+                                        ),
+                                    };
+                                    if let Err(e) = outbound.send(response).await {
+                                        tracing::error!(
+                                            "Failed to send LatestSessionResult: {}",
+                                            e
+                                        );
+                                    }
                                 // Handle GetSessionStateQuery inline — the snapshot is
                                 // a cheap RwLock read that never blocks.
-                                if let ServerPayload::GetSessionStateQuery(ref q) = payload {
+                                } else if let ServerPayload::GetSessionStateQuery(ref q) = payload {
                                     let snapshot = session_manager.snapshot_session_state(&q.session_id);
                                     let result = if let Some(snap) = snapshot {
                                         proto::SessionStateResult {
@@ -718,6 +753,7 @@ pub(crate) async fn run_gateway_loop(
                                             temperature: snap.temperature.unwrap_or(0.0),
                                             has_temperature: snap.temperature.is_some(),
                                             todos_json: snap.todos_json.unwrap_or_default(),
+                                            context_usage_json: snap.context_usage_json.unwrap_or_default(),
                                         }
                                     } else {
                                         proto::SessionStateResult {

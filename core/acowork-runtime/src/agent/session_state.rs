@@ -8,6 +8,8 @@
 //! Phase 1: direct ownership inside AgentLoop.
 //! Phase 2: extracted into Session Actor for multi-session concurrency.
 
+use std::sync::{Arc, RwLock};
+
 use crate::agent::budget_guard::BudgetGuard;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
@@ -46,6 +48,11 @@ pub struct SessionStateSnapshot {
     /// Serialized as JSON so the Gateway and frontend can consume it
     /// without additional protobuf message definitions.
     pub todos_json: Option<String>,
+    /// Current context usage info (token counts, window, percentage).
+    /// `None` if no LLM call has been made yet in this session.
+    /// Serialized as JSON so the Gateway and frontend can consume it
+    /// without additional protobuf message definitions.
+    pub context_usage_json: Option<String>,
 }
 
 /// A single item in the session-level todo list.
@@ -194,6 +201,14 @@ pub struct SessionState {
     ///
     /// `None` means "no profile yet" — default English summary is fine.
     pub(crate) identity_context: Option<String>,
+    /// Shared snapshot of per-session state for the Gateway pull API.
+    ///
+    /// Initialized with persistent data (model, provider, tokens, etc.) during
+    /// [`build_initial_session_state`]. Updated at runtime by
+    /// [`AgentLoop::emit_session_state`] on every status transition.
+    /// Read by [`SessionManager::snapshot_session_state`] to serve
+    /// `GET /api/agents/{id}/sessions/{sid}/state` without a gRPC round-trip.
+    pub(crate) snapshot: Arc<RwLock<SessionStateSnapshot>>,
 }
 
 impl SessionState {
@@ -203,6 +218,8 @@ impl SessionState {
         budget: acowork_core::Budget,
         conversation: Option<ConversationSession>,
     ) -> Self {
+        let status_json = serde_json::to_string(&SessionStatus::Idle)
+            .unwrap_or_else(|_| r#""idle""#.to_string());
         Self {
             history: HistoryManager::new(max_tokens),
             conversation,
@@ -219,6 +236,18 @@ impl SessionState {
             reasoning_effort: None,
             temperature: None,
             identity_context: None,
+            snapshot: Arc::new(RwLock::new(SessionStateSnapshot {
+                session_id: String::new(),
+                status_json,
+                model: None,
+                provider: None,
+                workspace_id: None,
+                ratio: None,
+                reasoning_effort: None,
+                temperature: None,
+                todos_json: None,
+                context_usage_json: None,
+            })),
         }
     }
 
@@ -395,5 +424,10 @@ impl SessionState {
     /// every `UpdateIdentityContext` broadcast from the SessionManager.
     pub fn set_identity_context(&mut self, ctx: Option<String>) {
         self.identity_context = ctx;
+    }
+
+    /// Access the shared snapshot Arc for external reads (SessionHandle).
+    pub fn snapshot_arc(&self) -> &Arc<RwLock<SessionStateSnapshot>> {
+        &self.snapshot
     }
 }

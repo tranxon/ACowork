@@ -228,6 +228,9 @@ interface AgentStoreState {
   // ── Session actions (write to agents[agentId].*) ──
 
   fetchSessions: (agentId: string, page?: number) => Promise<void>;
+  /** Fetch just the latest session ID and title (no full disk scan).
+   *  The Runtime caches this during startup. */
+  fetchLatestSession: (agentId: string) => Promise<{ session_id: string; title: string | null } | null>;
   /** Fetch just the latest session title for the AgentList sidebar (lightweight). */
   fetchLatestSessionTitle: (agentId: string) => Promise<string | null>;
   /** Activate a session on the backend and update frontend state. */
@@ -549,6 +552,26 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const title = session.title ?? "";
       set((state) => patchAgent(state, agentId, { sessionTitle: title }));
       return title;
+    } catch {
+      return null;
+    }
+  },
+
+  /** Fetch the latest session (by last_active_at desc) without a full disk scan.
+   *  The Runtime caches this during startup. Returns null if no sessions exist
+   *  or the agent is not connected. */
+  fetchLatestSession: async (agentId: string) => {
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/latest-session`,
+      );
+      if (!resp.ok) return null;
+      const data = (await resp.json()) as {
+        session_id: string;
+        title: string | null;
+        created_at: string | null;
+      };
+      return { session_id: data.session_id, title: data.title ?? null };
     } catch {
       return null;
     }

@@ -518,19 +518,6 @@ impl SessionTask {
         self.agent_loop.session_core.status_tx = Some(tx);
     }
 
-    /// Set the shared snapshot slot for the Gateway pull API.
-    ///
-    /// Called by SessionManager after creating the SessionTask, before spawning.
-    /// The slot is a shared `Arc<RwLock<Option<SessionStateSnapshot>>>` that
-    /// `AgentLoop::emit_session_state` writes to on every status transition,
-    /// and `SessionManager::snapshot_session_state` reads from.
-    pub(crate) fn set_snapshot_slot(
-        &mut self,
-        slot: Arc<std::sync::RwLock<Option<crate::agent::session_state::SessionStateSnapshot>>>,
-    ) {
-        self.agent_loop.session_core.snapshot_slot = Some(slot);
-    }
-
     /// Return the per-session urgent_stop Notify so SessionManager can
     /// route fire_urgent_stop() to only the target session.
     /// Returns None in standalone mode (where urgent_stop is not initialized).
@@ -576,11 +563,11 @@ impl SessionTask {
             .history_mut()
             .set_protocol_type(protocol_type.clone());
 
-        // Emit initial session state so the snapshot_slot is populated
+        // Emit initial session state so the snapshot is populated
         // before the frontend's first fetchSessionState pull request.
-        // Without this, the slot stays None until the first status transition
-        // or ProviderListUpdated message, causing the frontend to see null
-        // for reasoning_effort and hide the thinking level control.
+        // Without this, the snapshot stays with default values until the first
+        // status transition, causing the frontend to see null for
+        // reasoning_effort and hide the thinking level control.
         agent_loop.emit_session_state();
 
         // Emit initial context-usage indicator for resumed sessions so the

@@ -97,6 +97,10 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{session_id}/state",
             get(get_session_state),
         )
+        .route(
+            "/api/agents/{id}/latest-session",
+            get(get_latest_session),
+        )
         // ADR-017: Avatar runtime config endpoints (work when agent is stopped)
         .route(
             "/api/agents/{id}/avatar-config",
@@ -2510,6 +2514,8 @@ pub struct SessionStateResponse {
     pub temperature: Option<f32>,
     /// Current todo list (parsed from JSON, None if empty or unset)
     pub todos: Option<serde_json::Value>,
+    /// Current context usage info (parsed from JSON, None if empty or unset)
+    pub context_usage: Option<serde_json::Value>,
 }
 
 /// `GET /api/agents/{id}/sessions/{session_id}/state`
@@ -2636,6 +2642,38 @@ pub async fn get_session_state(
         }
     };
 
+    // Parse context_usage_json into a serde_json::Value for the response.
+    let context_usage_value: Option<serde_json::Value> = if result.context_usage_json.is_empty() {
+        tracing::info!(
+            agent_id = %agent_id,
+            session_id = %session_id,
+            "Gateway get_session_state: context_usage_json is empty string"
+        );
+        None
+    } else {
+        match serde_json::from_str(&result.context_usage_json) {
+            Ok(v) => {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    raw_len = result.context_usage_json.len(),
+                    "Gateway get_session_state: parsed context_usage_json successfully"
+                );
+                Some(v)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    error = %e,
+                    raw_len = result.context_usage_json.len(),
+                    "Failed to parse context_usage_json from runtime; returning None"
+                );
+                None
+            }
+        }
+    };
+
     Ok(Json(SessionStateResponse {
         session_id: result.session_id,
         status: status_value,
@@ -2646,6 +2684,106 @@ pub async fn get_session_state(
         reasoning_effort: if result.reasoning_effort.is_empty() { None } else { Some(result.reasoning_effort) },
         temperature: if result.has_temperature { Some(result.temperature) } else { None },
         todos: todos_value,
+        context_usage: context_usage_value,
+    }))
+}
+
+/// Response body for `GET /api/agents/{id}/latest-session`.
+#[derive(Serialize)]
+pub struct LatestSessionResponse {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// `GET /api/agents/{id}/latest-session`
+///
+/// Returns the latest session (by `last_active_at` descending) without a
+/// full `list_sessions` disk scan. The Runtime caches this during startup.
+/// Returns 404 if no sessions exist or the agent is not connected.
+pub async fn get_latest_session(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<LatestSessionResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!(
+        agent_id = %agent_id,
+        "Latest session pull: GET /api/agents/{}/latest-session",
+        agent_id
+    );
+
+    // Verify agent is installed
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
+        }
+    }
+
+    let grpc_mgr = match state.grpc_session_mgr.as_ref() {
+        Some(mgr) => mgr,
+        None => {
+            return Err(ApiError::not_found(&format!(
+                "Agent {} is not connected",
+                agent_id
+            )));
+        }
+    };
+
+    let (request_id, rx) = {
+        let mut mgr = grpc_mgr.lock().await;
+        match mgr.send_latest_session_request(&agent_id) {
+            Some(h) => h,
+            None => {
+                return Err(ApiError::not_found(&format!(
+                    "Agent {} is not connected via gRPC",
+                    agent_id
+                )));
+            }
+        }
+    };
+
+    let client_msg =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+            Ok(Ok(msg)) => msg,
+            Ok(Err(_)) => {
+                return Err(ApiError::not_found("Runtime dropped latest session response sender"));
+            }
+            Err(_) => {
+                grpc_mgr.lock().await.cleanup_pending(request_id);
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    Json(ApiError {
+                        error: format!("Timed out waiting for latest session from agent {}", agent_id),
+                        code: 504,
+                    }),
+                ));
+            }
+        };
+
+    let result = match client_msg.payload {
+        Some(acowork_core::proto::client_message::Payload::LatestSessionResult(r)) => r,
+        _ => {
+            return Err(ApiError::internal(&format!(
+                "Unexpected response payload for latest session query (agent {})",
+                agent_id
+            )));
+        }
+    };
+
+    if !result.found {
+        return Err(ApiError::not_found(&format!(
+            "No sessions found for agent {}",
+            agent_id
+        )));
+    }
+
+    Ok(Json(LatestSessionResponse {
+        session_id: result.session_id,
+        title: if result.title.is_empty() { None } else { Some(result.title) },
+        created_at: if result.created_at.is_empty() { None } else { Some(result.created_at) },
     }))
 }
 

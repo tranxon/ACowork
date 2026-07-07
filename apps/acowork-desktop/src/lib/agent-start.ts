@@ -1,10 +1,13 @@
-//! Agent start UI orchestration utility.
+//! Agent start orchestration utility.
 //!
-//! Encapsulates the common sequence of post-start UI state sync:
-//! waitForAgentReady → connectStream → fetchWorkspaces → emitAgentConfigRefresh.
+//! Provides `startAgentAndSyncUI` — an atomic function that:
+//! 1. Starts the agent process
+//! 2. Waits for the Runtime to become ready
+//! 3. Initializes the session (fetch list, determine active, pull state)
+//! 4. Synchronizes UI (connect WebSocket, fetch workspaces, refresh config)
 //!
-//! Both AgentList (right-click Start) and ChatPanel ("Agent is stopped" button)
-//! invoke this after calling startAgent(), avoiding duplicate code.
+//! All callers (AgentList right-click, ChatPanel "Start Agent" button) use
+//! this single entry point so session data is always ready before rendering.
 
 import { useAgentStore } from "../stores/agentStore";
 import { useChatStore } from "../stores/chatStore";
@@ -13,25 +16,73 @@ import { getGatewayUrl } from "./config";
 import { emitAgentConfigRefresh } from "./refresh";
 
 /**
- * Wait for the agent Runtime to become ready, then synchronize all UI state.
+ * Initialize the session for an agent using the lightweight
+ * `fetchLatestSession` endpoint (no full disk scan).
  *
- * - Connects the chat WebSocket stream
- * - Refreshes the workspace directory list
- * - Refreshes the agent config (model, provider, tools)
+ * The Runtime caches the latest session (by last_active_at desc) during
+ * startup, so this is a cheap in-memory read. Falls back to the
+ * remembered session if it matches the latest; otherwise uses the latest.
  *
- * Should be called *after* `startAgent()` has been invoked.
- * The caller is responsible for toast messages and any local loading state.
+ * Extracted from ChatPanel's useEffect so it can run atomically
+ * inside `startAgentAndSyncUI` before any UI rendering.
  */
-export async function syncAgentUI(agentId: string) {
-    await useAgentStore.getState().waitForAgentReady(agentId);
-    useChatStore.getState().connectStream(agentId, getGatewayUrl());
+async function initSessionForAgent(agentId: string): Promise<void> {
+    // Retry until the startup scan completes (max 10 attempts, 1s interval).
+    // The scan runs in a background task and may not have finished yet.
+    const maxRetries = 10;
+    let latestSession: { session_id: string; title: string | null } | null = null;
 
-    // ADR-015 Phase 5: Pull initial session state for the active session
-    const activeSid = useChatStore.getState().getActiveSessionId(agentId);
-    if (activeSid) {
-        await useChatStore.getState().fetchSessionState(agentId, activeSid);
+    for (let i = 0; i < maxRetries; i++) {
+        latestSession = await useAgentStore.getState().fetchLatestSession(agentId);
+        if (latestSession) break;
+        if (i < maxRetries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
     }
 
+    if (!latestSession) return;
+
+    // Prefer the remembered session if it matches the latest;
+    // otherwise just use the latest session from the backend.
+    const rememberedSessionId =
+        useAgentStore.getState().agents[agentId]?.rememberedSessionId;
+    const targetSessionId =
+        rememberedSessionId === latestSession.session_id
+            ? rememberedSessionId
+            : latestSession.session_id;
+
+    await useAgentStore
+        .getState()
+        .switchSession(targetSessionId, agentId);
+    await useChatStore
+        .getState()
+        .fetchSessionState(agentId, targetSessionId);
+}
+
+/**
+ * Atomic agent start + session init + UI sync.
+ *
+ * Replaces the previous two-step pattern:
+ *   `await startAgentAndSyncUI(id);`
+ *
+ * @param agentId  The agent package ID to start.
+ * @param devMode  If true, start in debug mode (DevTools WebSocket enabled).
+ */
+export async function startAgentAndSyncUI(
+    agentId: string,
+    devMode = false,
+): Promise<void> {
+    // 1. Start the agent process
+    await useAgentStore.getState().startAgent(agentId, devMode);
+
+    // 2. Wait for the Runtime to become ready
+    await useAgentStore.getState().waitForAgentReady(agentId);
+
+    // 3. Initialize session — fetch list, determine active, pull state
+    await initSessionForAgent(agentId);
+
+    // 4. Sync UI — connect stream, workspaces, config refresh (pure render)
+    useChatStore.getState().connectStream(agentId, getGatewayUrl());
     useWorkspaceStore.getState().fetchWorkspaces(agentId);
     emitAgentConfigRefresh(agentId);
 }

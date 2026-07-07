@@ -375,6 +375,66 @@ impl GrpcSessionManager {
 
         Some((request_id, rx))
     }
+
+    /// Send a `GetLatestSessionQuery` to the Runtime and return a oneshot
+    /// receiver for the `LatestSessionResult` response.
+    ///
+    /// Returns `None` if the agent is not connected or the push fails.
+    pub fn send_latest_session_request(
+        &mut self,
+        agent_id: &str,
+    ) -> Option<(u64, oneshot::Receiver<proto::ClientMessage>)> {
+        let request_id = self.next_request_id();
+        let rx = self.register_pending_request(request_id);
+
+        let query_request_id = format!("gw-ls-{}", request_id);
+        let server_msg = proto::ServerMessage {
+            request_id,
+            payload: Some(proto::server_message::Payload::GetLatestSessionQuery(
+                proto::GetLatestSessionQuery {
+                    request_id: query_request_id,
+                },
+            )),
+        };
+
+        let push_result: Result<String, ()> = {
+            match self.find_by_agent_id(agent_id) {
+                Some((conn_id, session)) => {
+                    if !session.try_push_request(server_msg) {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            "Failed to push GetLatestSessionQuery to Runtime (channel closed)"
+                        );
+                        Err(())
+                    } else {
+                        Ok(conn_id.clone())
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        "Agent not connected, cannot send GetLatestSessionQuery"
+                    );
+                    Err(())
+                }
+            }
+        };
+
+        match push_result {
+            Ok(conn_id) => {
+                self.session_requests
+                    .entry(conn_id)
+                    .or_default()
+                    .push(request_id);
+            }
+            Err(()) => {
+                self.pending_requests.remove(&request_id);
+                return None;
+            }
+        }
+
+        Some((request_id, rx))
+    }
 }
 
 impl Default for GrpcSessionManager {

@@ -310,6 +310,7 @@ async fn relay_chunk_event(
             ratio,
             reasoning_effort,
             temperature,
+            context_usage,
         } => {
             let mut params = serde_json::json!({ "status": status, "session_id": sid });
             if let Some(ref m) = model {
@@ -329,6 +330,11 @@ async fn relay_chunk_event(
             }
             if let Some(t) = temperature {
                 params["temperature"] = serde_json::json!(t);
+            }
+            if let Some(ref cu) = context_usage {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(cu) {
+                    params["context_usage"] = v;
+                }
             }
             relay_intent(outbound_ctrl_tx, "session_state_changed", &params).await;
         }

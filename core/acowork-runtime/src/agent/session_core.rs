@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 
 use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_approval::ApprovalHandle;
-use crate::agent::session_state::{SessionStateSnapshot, SessionStatus};
+use crate::agent::session_state::SessionStatus;
 use crate::conversation::StreamingStateMap;
 use crate::providers::reliable::RetryWaitHandle;
 
@@ -70,11 +70,6 @@ pub(crate) struct SessionCore {
     /// None for CLI-only sessions.
     pub(crate) status_tx:
         Option<tokio::sync::watch::Sender<SessionStatus>>,
-
-    /// Shared session state snapshot for the Gateway pull API.
-    /// None for CLI-only sessions.
-    pub(crate) snapshot_slot:
-        Option<Arc<std::sync::RwLock<Option<SessionStateSnapshot>>>>,
 
     /// Shared session status for 429 retry UX.
     ///
@@ -140,7 +135,6 @@ impl SessionCore {
             streaming_lines,
             urgent_stop: Some(Arc::new(Notify::new())),
             status_tx: None,
-            snapshot_slot: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
                 SessionStatus::Streaming { message_id: None },
             ))),

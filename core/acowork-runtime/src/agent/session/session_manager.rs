@@ -231,6 +231,10 @@ pub struct SessionManager {
     /// Pending embedding config from Gateway EmbeddingConfigUpdate.
     /// Stored for persistence and used on next Agent restart.
     pub pending_embed_config: Option<PendingEmbedConfig>,
+    /// Latest session ID and title, determined during the startup session scan
+    /// (by `last_active_at` descending). Set once after the background scan
+    /// completes; `None` until the scan finishes or if no sessions exist.
+    latest_session: std::sync::RwLock<Option<(String, Option<String>)>>,
 }
 
 impl SessionManager {
@@ -253,6 +257,7 @@ impl SessionManager {
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
             pending_embed_config: None,
+            latest_session: std::sync::RwLock::new(None),
         }
     }
 
@@ -381,6 +386,22 @@ impl SessionManager {
         let session_committed_lines = committed_lines
             .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicUsize::new(0)));
 
+        // Extract the snapshot Arc before session_state is moved into SessionTask.
+        // The snapshot is already populated with persistent data by
+        // build_initial_session_state; we just need to set session_id and workspace_id.
+        let snapshot_arc = session_state.snapshot.clone();
+        {
+            let ws_id_str = if initial_workspace == "__agent_home__" {
+                None
+            } else {
+                Some(initial_workspace.clone())
+            };
+            if let Ok(mut snap) = snapshot_arc.write() {
+                snap.session_id = session_id.clone();
+                snap.workspace_id = ws_id_str;
+            }
+        }
+
         let (mut task, agent_inbound_tx) = SessionTask::new(
             self.core.clone(),
             session_state,
@@ -404,13 +425,6 @@ impl SessionManager {
         // ADR-014: Create watch channel for session status
         let (status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
         task.set_status_tx(status_tx);
-
-        // Create shared snapshot slot for the Gateway session state pull API.
-        // The slot is written by AgentLoop::emit_session_state and read by
-        // snapshot_session_state() without any message passing.
-        let snapshot_slot: Arc<std::sync::RwLock<Option<crate::agent::session_state::SessionStateSnapshot>>> =
-            Arc::new(std::sync::RwLock::new(None));
-        task.set_snapshot_slot(snapshot_slot.clone());
 
         // Register per-session urgent_stop Notify so fire_urgent_stop()
         // only wakes this session's tokio::select! branches.
@@ -450,7 +464,7 @@ impl SessionManager {
             status_rx,
             last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
             pending_debug_handles: pending_debug_handles.clone(),
-            snapshot_slot,
+            snapshot: snapshot_arc,
             workspace_id,
             current_work_dir,
         };
@@ -715,6 +729,43 @@ impl SessionManager {
             }
         }
 
+        // Populate the shared snapshot with persistent data so the frontend
+        // can read it via fetchSessionState() immediately, without waiting
+        // for emit_session_state() to run.
+        {
+            let model_name = session_state.model().map(|s| s.to_string());
+            let provider_name = session_state.provider().map(|s| s.to_string());
+            let effort_str = session_state.reasoning_effort().map(|e| e.to_string());
+            let temp = session_state.temperature();
+
+            // Build context_usage from persisted session tokens (if available).
+            let context_usage_json = session_state.conversation().and_then(|conv| {
+                let persisted = conv.tokens()?;
+                let m = model_name.as_deref().unwrap_or("unknown");
+                let caps = self.core.get_model_capabilities(m)?;
+                let max_output = self.core.max_output_tokens_limit_for_model(m);
+                let ctx = crate::agent::context::build_context_usage_from_persisted(
+                    &caps,
+                    persisted.last_input,
+                    persisted.last_output,
+                    max_output,
+                    self.core.context_window_override,
+                    Some(&persisted),
+                );
+                serde_json::to_string(&ctx).ok()
+            });
+
+            if let Ok(mut snap) = session_state.snapshot.write() {
+                snap.model = model_name;
+                snap.provider = provider_name;
+                snap.reasoning_effort = effort_str;
+                snap.temperature = temp;
+                snap.context_usage_json = context_usage_json;
+                // session_id and workspace_id are set by the caller after
+                // build_initial_session_state returns.
+            }
+        }
+
         session_state
     }
 
@@ -935,6 +986,13 @@ impl SessionManager {
                 ))
             })?;
 
+        // ADR-028: merge the resumed session's persisted token totals into
+        // the AgentCore counters so the live context_usage WebSocket push
+        // doesn't report agent_total < session_total after a process restart.
+        if let Some(t) = conv.tokens() {
+            self.core.merge_token_totals((Some(t.total_input), Some(t.total_output)));
+        }
+
         self.create_session_with_id_and_conversation(session_id.to_string(), Some(conv), Some(committed_lines))
             .await?;
 
@@ -1028,22 +1086,20 @@ impl SessionManager {
             }
         }
 
-        // ── 3. Directly patch snapshot_slot so the HTTP pull API returns
+        // ── 3. Directly patch snapshot so the HTTP pull API returns
         //    the new temperature immediately, even when the AgentLoop is
         //    mid-streaming (the fast-path UserOp won't be consumed until
         //    the next drain_inbound_queue checkpoint).
         if let Some(temp) = temperature {
             for (session_id, handle) in &self.sessions {
-                if let Ok(mut guard) = handle.snapshot_slot.write() {
-                    if let Some(ref mut snapshot) = *guard {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            old = ?snapshot.temperature,
-                            new = temp,
-                            "apply_runtime_config_override: patching snapshot_slot temperature"
-                        );
-                        snapshot.temperature = Some(temp);
-                    }
+                if let Ok(mut guard) = handle.snapshot.write() {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        old = ?guard.temperature,
+                        new = temp,
+                        "apply_runtime_config_override: patching snapshot temperature"
+                    );
+                    guard.temperature = Some(temp);
                 }
             }
         }
@@ -1412,6 +1468,22 @@ After installation, ask the user to re-enable the MCP server.",
         self.sessions.keys().cloned().collect()
     }
 
+    /// Store the latest session info determined during the startup scan.
+    ///
+    /// Called from `session_init` after the background session scan completes.
+    /// `title` may be `None` if the session has no title yet.
+    pub fn set_latest_session(&self, session_id: String, title: Option<String>) {
+        *self.latest_session.write().unwrap() = Some((session_id, title));
+    }
+
+    /// Get the latest session ID and title (by `last_active_at` descending).
+    ///
+    /// Returns `None` if the startup scan has not completed yet or if no
+    /// sessions exist on disk.
+    pub fn latest_session(&self) -> Option<(String, Option<String>)> {
+        self.latest_session.read().unwrap().clone()
+    }
+
     /// Look up a session handle by ID.
     pub fn get_session(&self, session_id: &str) -> Option<&SessionHandle> {
         self.sessions.get(session_id)
@@ -1424,16 +1496,17 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Get the session state snapshot for a specific session.
     ///
-    /// Returns the most recent `SessionStateSnapshot` written by the session's
-    /// AgentLoop, or `None` if the session is not found or no state has been
-    /// emitted yet (session just created before the first `emit_session_state`).
+    /// Returns the current `SessionStateSnapshot` shared with [`SessionState`].
+    /// The snapshot is initialized with persistent data during session creation
+    /// and updated at runtime by [`AgentLoop::emit_session_state`].
+    /// Returns `None` only if the session is not found.
     pub fn snapshot_session_state(
         &self,
         session_id: &str,
     ) -> Option<crate::agent::session_state::SessionStateSnapshot> {
         self.sessions
             .get(session_id)
-            .and_then(|handle| handle.snapshot())
+            .map(|handle| handle.snapshot())
     }
 
     /// Get the current status of all active sessions (ADR-014).
@@ -1563,8 +1636,8 @@ After installation, ask the user to re-enable the MCP server.",
             .sessions
             .values()
             .filter_map(|handle| {
-                let snap = handle.snapshot_slot.read().ok()?;
-                let model = snap.as_ref()?.model.clone()?;
+                let snap = handle.snapshot.read().ok()?;
+                let model = snap.model.clone()?;
                 let ts = *handle.last_active_at.lock().ok()?;
                 Some((ts, model))
             })
@@ -1598,9 +1671,9 @@ After installation, ask the user to re-enable the MCP server.",
             .sessions
             .values()
             .filter_map(|handle| {
-                let snap = handle.snapshot_slot.read().ok()?;
-                let model = snap.as_ref()?.model.clone()?;
-                let provider = snap.as_ref()?.provider.clone()?;
+                let snap = handle.snapshot.read().ok()?;
+                let model = snap.model.clone()?;
+                let provider = snap.provider.clone()?;
                 let ts = *handle.last_active_at.lock().ok()?;
                 Some((ts, model, provider))
             })

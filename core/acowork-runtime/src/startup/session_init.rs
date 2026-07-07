@@ -120,12 +120,22 @@ pub(crate) async fn phase_b_init_session(
         }
     }
 
-    // Spawn background session scan (fire-and-forget).
+    // Spawn background session scan.
+    // The result (latest session by last_active_at) is stored in a shared
+    // Arc so SessionManager can read it after construction, avoiding a
+    // duplicate full scan when the frontend calls fetchLatestSession.
+    let latest_session_scan: Arc<std::sync::RwLock<Option<(String, Option<String>)>>> =
+        Arc::new(std::sync::RwLock::new(None));
+    let latest_session_scan_clone = latest_session_scan.clone();
     let conversations_dir_clone = conversations_dir.clone();
     let _session_scan_handle = tokio::spawn(async move {
         let handle = crate::conversation::scan_sessions_async(conversations_dir_clone, None, None);
         let (sessions, _, _agent_totals) =
             handle.await.unwrap_or((Vec::new(), 0, (0, 0)));
+        if let Some(s) = sessions.first() {
+            *latest_session_scan_clone.write().unwrap() =
+                Some((s.session_id.clone(), s.title.clone()));
+        }
         tracing::info!(count = sessions.len(), "Background session scan complete");
     });
 
@@ -308,8 +318,23 @@ pub(crate) async fn phase_b_init_session(
         );
     }
 
+    // Seed the latest session from the background scan (if it has completed).
+    // If the scan hasn't finished yet, latest_session() returns None and the
+    // frontend will retry — the scan result is written atomically so a
+    // subsequent call will see it.
+    if let Some((session_id, title)) = latest_session_scan.read().unwrap().clone() {
+        session_manager.set_latest_session(session_id, title);
+        tracing::info!("SessionManager: seeded latest session from startup scan");
+    }
+
     // ── Step 9 (cont.): Create initial session ───────────────────────
     let initial_session_id = if let Some(conv) = conversation_session {
+        // ADR-028: merge the resumed session's persisted token totals into
+        // the AgentCore counters so the live context_usage WebSocket push
+        // doesn't report agent_total < session_total after a process restart.
+        if let Some(t) = conv.tokens() {
+            session_manager.core().merge_token_totals((Some(t.total_input), Some(t.total_output)));
+        }
         let sid = conv.session_id().to_string();
         session_manager
             .create_session_with_id_and_conversation(sid.clone(), Some(conv), Some(committed_lines.clone()))

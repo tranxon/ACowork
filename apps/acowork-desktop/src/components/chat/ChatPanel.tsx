@@ -10,7 +10,7 @@ import type { ToolApprovalNeededEvent } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
 import { fetchProviderModels } from "../../lib/gateway-api";
-import { syncAgentUI } from "../../lib/agent-start";
+import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
@@ -87,7 +87,7 @@ function getDistanceFromBottom(container: HTMLElement): number {
 
 export function ChatPanel() {
   const { t } = useTranslation();
-  const { selectedAgentId, startAgent } = useAgentStore();
+  const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
 
   // ── Toolbar responsive collapse ──────────────────────────────────
@@ -601,13 +601,24 @@ export function ChatPanel() {
     // This prevents redundant clearMessages + reload when selectedAgent.running
     // is re-evaluated without actually changing (e.g. agent list refresh).
     if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running && selectedAgent?.ready) {
-      // Still ensure WebSocket is connected — the early return used to skip
-      // connectStream, causing ~18s of "streaming unavailable" until
-      // waitForAgentReady's poll loop finally caught up.
-      if (!wsMap[selectedAgentId]) {
-        connectStream(selectedAgentId, getGatewayUrl());
+      // Check if session state is fully initialized. If contextUsage is still
+      // null, fetchSessionState may not have completed before the last remount
+      // — fall through to the isSameAgentRemount refresh path below.
+      const agent = useChatStore.getState().agentStates[selectedAgentId];
+      const activeSessId = agent?.activeSessionId;
+      const hasSessionState = activeSessId
+        ? agent?.sessionStates[activeSessId]?.contextUsage != null
+        : false;
+      if (hasSessionState) {
+        // Still ensure WebSocket is connected — the early return used to skip
+        // connectStream, causing ~18s of "streaming unavailable" until
+        // waitForAgentReady's poll loop finally caught up.
+        if (!wsMap[selectedAgentId]) {
+          connectStream(selectedAgentId, getGatewayUrl());
+        }
+        return;
       }
-      return;
+      // Session state not fully initialized — fall through to refresh below.
     }
 
     // DEFENSIVE: If we reached here for the SAME agent (e.g. remount after
@@ -711,6 +722,17 @@ export function ChatPanel() {
             }
           };
           void restoreSessionSelection();
+        }
+      } else {
+        // isSameAgentRemount: the effect re-ran for the same agent (e.g. ready
+        // transitioned false→true after startAgent). The session was previously
+        // initialized but fetchSessionState may not have completed before the
+        // remount. Pull session state (context_usage, todos, model, provider)
+        // without reloading messages or switching sessions.
+        const agent = useChatStore.getState().agentStates[selectedAgentId];
+        const activeSessId = agent?.activeSessionId;
+        if (activeSessId) {
+          useChatStore.getState().fetchSessionState(selectedAgentId, activeSessId);
         }
       }
     } else if (!isSameAgentRemount) {
@@ -1222,8 +1244,7 @@ export function ChatPanel() {
           <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
               onClick={async () => {
-                await startAgent(selectedAgent.agent_id);
-                await syncAgentUI(selectedAgent.agent_id);
+                await startAgentAndSyncUI(selectedAgent.agent_id);
               }}
               className="mx-auto flex h-20 w-20 items-center justify-center rounded-full btn-solid"
             >

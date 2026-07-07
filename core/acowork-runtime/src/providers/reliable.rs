@@ -220,6 +220,7 @@ impl ReliableProvider {
                     ratio: None,
                     reasoning_effort: None,
                     temperature: None,
+                    context_usage: None,
                 },
             });
         }
@@ -251,6 +252,7 @@ impl ReliableProvider {
                     ratio: None,
                     reasoning_effort: None,
                     temperature: None,
+                    context_usage: None,
                 },
             });
         }

@@ -15,7 +15,7 @@ import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug 
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { CloneResponse } from "../../lib/types";
-import { syncAgentUI } from "../../lib/agent-start";
+import { startAgentAndSyncUI } from "../../lib/agent-start";
 
 interface AgentListProps {
   width?: number;
@@ -24,7 +24,7 @@ interface AgentListProps {
 export function AgentList({ width }: AgentListProps) {
   const { t } = useTranslation();
   const isCollapsed = width !== undefined && width <= 80;
-  const { selectedAgentId, loading, fetchAgents, selectAgent, startAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
+  const { selectedAgentId, loading, fetchAgents, selectAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
@@ -40,24 +40,6 @@ export function AgentList({ width }: AgentListProps) {
   // Track agents currently waiting for the Runtime to become ready.
   // Reading this Set is the dedup gate for `handleStart` — see guard there.
   const [startingAgentIds, setStartingAgentIds] = useState<Set<string>>(new Set());
-
-  /// Poll fetchAgents until the agent's `ready` flag becomes true, then connect WebSocket.
-  /// Called after startAgent() succeeds. Max wait 15 seconds (30 × 500ms).
-  const waitForAgentReady = async (agentId: string, devMode: boolean) => {
-    setStartingAgentIds((prev) => new Set(prev).add(agentId));
-    try {
-      await syncAgentUI(agentId);
-      addToast({ type: "success", message: devMode ? t("agentList.agentStartedDebug") : t("agentList.agentStarted") });
-    } catch (e: any) {
-      addToast({ type: "error", message: e?.message ?? String(e) });
-    } finally {
-      setStartingAgentIds((prev) => {
-        const next = new Set(prev);
-        next.delete(agentId);
-        return next;
-      });
-    }
-  };
 
   // Confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -146,19 +128,26 @@ export function AgentList({ width }: AgentListProps) {
   const handleStart = async (agentId: string) => {
     // Dedup gate: prevent rapid double-fires (e.g. user double-clicks the list
     // item, or double-clicks and then triggers Start from the context menu).
-    // The set is held until `waitForAgentReady` finishes, see below.
     if (startingAgentIds.has(agentId)) return;
+    setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
-      await startAgent(agentId);
-      // Poll until ready, then connect WebSocket
-      waitForAgentReady(agentId, false);
-    } catch (e) {
-      addToast({ type: "error", message: t("agentList.errorFailedToStartAgent", { error: String(e) }) });
+      await startAgentAndSyncUI(agentId);
+      addToast({ type: "success", message: t("agentList.agentStarted") });
+    } catch (e: any) {
+      addToast({ type: "error", message: e?.message ?? String(e) });
+    } finally {
+      setStartingAgentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(agentId);
+        return next;
+      });
     }
     setContextMenu(null);
   };
 
   const handleDebugStart = async (agentId: string) => {
+    if (startingAgentIds.has(agentId)) return;
+    setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
       // Clean up any stale chat store state before starting debug mode.
       // Without this, a stopped agent may leave behind a stale wsMap entry
@@ -167,11 +156,16 @@ export function AgentList({ width }: AgentListProps) {
       if (chatStore.wsMap[agentId]) {
         chatStore.disconnectStream(agentId);
       }
-      await startAgent(agentId, true);
-      // Poll until ready, then connect WebSocket
-      waitForAgentReady(agentId, true);
-    } catch (e) {
-      addToast({ type: "error", message: t("agentList.errorFailedToStartDebugAgent", { error: String(e) }) });
+      await startAgentAndSyncUI(agentId, true);
+      addToast({ type: "success", message: t("agentList.agentStartedDebug") });
+    } catch (e: any) {
+      addToast({ type: "error", message: e?.message ?? String(e) });
+    } finally {
+      setStartingAgentIds((prev) => {
+        const next = new Set(prev);
+        next.delete(agentId);
+        return next;
+      });
     }
     setContextMenu(null);
   };

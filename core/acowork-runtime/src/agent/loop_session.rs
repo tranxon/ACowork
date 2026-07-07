@@ -11,7 +11,8 @@
 use acowork_core::providers::traits::{ChatMessage, ChatResponse, MessageRole};
 use std::sync::atomic::Ordering;
 
-use crate::agent::session_state::{SessionStateSnapshot, SessionStatus};
+use crate::agent::context::build_context_usage_from_persisted;
+use crate::agent::session_state::SessionStatus;
 use crate::config::DEFAULT_TEMPERATURE;
 use crate::error::Result;
 
@@ -48,6 +49,50 @@ impl super::loop_::AgentLoop {
             .or(self.core.temperature_override)
             .or(self.core.manifest_temperature)
             .unwrap_or(DEFAULT_TEMPERATURE);
+        // Build context_usage from persisted session tokens (if available)
+        // so the frontend can show token counts immediately on session state push,
+        // without waiting for the first LLM call or a WebSocket context_usage event.
+        let context_usage_json = self.session.conversation.as_ref().and_then(|conv| {
+            let persisted = conv.tokens()?;
+            let model_name = self.session.model().unwrap_or("unknown");
+            let caps = self.core.get_model_capabilities(model_name)?;
+            let max_output = self.core.max_output_tokens_limit_for_model(model_name);
+            let ctx = build_context_usage_from_persisted(
+                &caps,
+                persisted.last_input,
+                persisted.last_output,
+                max_output,
+                self.core.context_window_override,
+                Some(&persisted),
+            );
+            let json = serde_json::to_string(&ctx).ok();
+            tracing::info!(
+                session_id = %self.session_core.session_id.as_deref().unwrap_or("?"),
+                model = %model_name,
+                last_input = persisted.last_input,
+                last_output = persisted.last_output,
+                has_json = json.is_some(),
+                "emit_session_state: built context_usage_json"
+            );
+            json
+        });
+        if context_usage_json.is_none() {
+            let has_conv = self.session.conversation.is_some();
+            let has_tokens = self.session.conversation.as_ref()
+                .and_then(|c| c.tokens())
+                .is_some();
+            let model_for_caps = self.session.model().unwrap_or("unknown");
+            let has_caps = self.core.get_model_capabilities(model_for_caps).is_some();
+            tracing::warn!(
+                session_id = %self.session_core.session_id.as_deref().unwrap_or("?"),
+                has_conv,
+                has_tokens,
+                model = %model_for_caps,
+                has_caps,
+                "emit_session_state: context_usage_json is None"
+            );
+        }
+
         // Emit chunk event to Gateway → frontend
         let workspace_id_str = {
             let ws_id = self.session_core.workspace_id.read().unwrap().clone();
@@ -63,6 +108,7 @@ impl super::loop_::AgentLoop {
                 ratio: self.session.model_ratio(),
                 reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
                 temperature: Some(effective_temperature),
+                context_usage: context_usage_json.clone(),
             })
         {
             tracing::debug!(
@@ -74,8 +120,10 @@ impl super::loop_::AgentLoop {
         if let Some(ref tx) = self.session_core.status_tx {
             let _ = tx.send(status.clone());
         }
-        // Update shared snapshot slot for Gateway pull API
-        if let Some(ref slot) = self.session_core.snapshot_slot {
+        // Update shared snapshot for Gateway pull API.
+        // The snapshot Arc is shared between SessionState and SessionHandle;
+        // writes here are immediately visible to snapshot_session_state().
+        {
             let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
             // Serialize the todo list to JSON for the snapshot. Skip the allocation
             // entirely when the list is empty (common case — most iterations have
@@ -97,19 +145,24 @@ impl super::loop_::AgentLoop {
                     }
                 }
             };
-            let snapshot = SessionStateSnapshot {
-                session_id: self.session_core.session_id.clone().unwrap_or_default(),
-                status_json,
-                model: self.session.model().map(|s| s.to_string()),
-                provider: self.session.provider().map(|s| s.to_string()),
-                workspace_id: workspace_id_str,
-                ratio: self.session.model_ratio(),
-                reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
-                temperature: Some(effective_temperature),
-                todos_json,
-            };
-            if let Ok(mut guard) = slot.write() {
-                *guard = Some(snapshot);
+            if let Ok(mut guard) = self.session.snapshot.write() {
+                guard.status_json = status_json;
+                guard.model = self.session.model().map(|s| s.to_string());
+                guard.provider = self.session.provider().map(|s| s.to_string());
+                guard.workspace_id = workspace_id_str;
+                guard.ratio = self.session.model_ratio();
+                guard.reasoning_effort = self.session.reasoning_effort().map(|e| e.to_string());
+                guard.temperature = Some(effective_temperature);
+                guard.todos_json = todos_json;
+                // Only overwrite context_usage_json if we successfully computed a
+                // new value.  Otherwise preserve the existing value set by
+                // build_initial_session_state — emit_session_state may fail to
+                // compute context_usage (e.g. model capabilities not yet available
+                // for the session's model name), and unconditionally writing None
+                // would wipe the initial snapshot populated at session creation.
+                if context_usage_json.is_some() || guard.context_usage_json.is_none() {
+                    guard.context_usage_json = context_usage_json;
+                }
             }
         }
     }

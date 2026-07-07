@@ -1555,6 +1555,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         reasoning_effort?: string | null;
         temperature?: number | null;
         todos?: TodoItem[] | null;
+        context_usage?: ContextUsageInfo | null;
       };
       const sessionPatch: Partial<SessionChatState> = {};
       if (typeof data.model === "string" && data.model) sessionPatch.model = data.model;
@@ -1564,6 +1565,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature;
       if (data.todos && Array.isArray(data.todos)) {
         sessionPatch.todos = data.todos as TodoItem[];
+      }
+      if (data.context_usage && typeof data.context_usage === "object") {
+        sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
       }
       if (Object.keys(sessionPatch).length > 0) {
         set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
@@ -2071,6 +2075,13 @@ function handleMessageEvent(
             if (typeof data.reasoning_effort === "string") sessionPatch.reasoningEffort = data.reasoning_effort as string;
             // Temperature override from Runtime session state.
             if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature as number;
+            // ADR-028: Context usage snapshot from persisted session tokens.
+            // The backend includes this on session activation/resume so the
+            // frontend can show token counts before the first LLM call
+            // triggers a dedicated context_usage event.
+            if (data.context_usage && typeof data.context_usage === "object") {
+              sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
+            }
 
             // ADR-021: Start/stop polling based on status transitions.
             // When entering streaming/waiting_approval/paused → start polling.
