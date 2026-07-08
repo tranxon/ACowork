@@ -233,6 +233,48 @@ impl GrafeoStore {
         crate::index_config::validate_embedding_dim(embedding, self.hnsw_config.dim)
     }
 
+    /// Count nodes that have a non-NULL `embedding` property, summed across all
+    /// four memory labels (Episodic / Knowledge / Procedural / Autobiographical).
+    ///
+    /// Used by the runtime's `MemoryStatsQuery` handler so that the desktop UI
+    /// can compare this against `total_nodes` to detect nodes that exist but
+    /// were never embedded (e.g., because the embedding provider was offline at
+    /// write time, or because a dimension migration was never run).
+    ///
+    /// Returns 0 (and logs a warning) on individual label errors so that one
+    /// corrupt label cannot break the entire stats response.
+    pub fn count_nodes_with_embedding(&self) -> u64 {
+        let mut total: u64 = 0;
+        for label in [
+            labels::EPISODIC,
+            labels::KNOWLEDGE,
+            labels::PROCEDURAL,
+            labels::AUTOBIOGRAPHICAL,
+        ] {
+            // `IS NOT NULL` matches both populated vectors and the empty-list
+            // sentinel written by some provisioners; in practice an embedding
+            // that participates in vector search is only ever non-NULL and
+            // non-empty, so this is a tight-enough approximation for stats.
+            let query = format!(
+                "MATCH (n:`{label}`) WHERE n.embedding IS NOT NULL RETURN count(n) AS cnt"
+            );
+            match self.db.query_scalar::<i64>(&query) {
+                Ok(n) if n >= 0 => total += n as u64,
+                Ok(_) => {
+                    tracing::warn!(label, "Negative count returned for memory label");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        label,
+                        error = %e,
+                        "Failed to count nodes with embedding for label; continuing with 0"
+                    );
+                }
+            }
+        }
+        total
+    }
+
     /// Migrate all embeddings and vector indexes to a new dimension.
     ///
     /// This is the core migration primitive used when the user switches to an
@@ -362,10 +404,13 @@ impl GrafeoStore {
 
     /// Rebuild all embeddings with progress reporting.
     ///
+    /// Scans every node across all memory labels. Any node with a non-empty
+    /// `content` property is (re-)embedded — this covers both dimension
+    /// migration (existing embedding with wrong dim) and backfill (nodes that
+    /// were created while the embedding provider was offline).
+    ///
     /// `progress_cb` is called with `(processed, total)` after each node is
-    /// re-embedded. `None` disables progress reporting. `total` is the count of
-    /// nodes that have an existing embedding (skipped nodes are counted as
-    /// processed with no callback).
+    /// embedded. `None` disables progress reporting.
     pub fn rebuild_embeddings_with_progress(
         &self,
         embed_fn: impl Fn(&str) -> Option<Vec<f32>>,
@@ -376,7 +421,7 @@ impl GrafeoStore {
 
         let mut stats = RebuildStats::default();
 
-        // Count total embeddable nodes for progress reporting.
+        // Count total nodes that have content (embeddable) for progress reporting.
         let total_embeddable: u64 = if progress_cb.is_some() {
             let mut count = 0u64;
             for label in [
@@ -392,18 +437,12 @@ impl GrafeoStore {
                         Some(n) => n,
                         None => continue,
                     };
-                    let has_embedding = node
+                    let has_content = node
                         .properties_as_btree()
                         .into_iter()
-                        .any(|(k, v)| k.as_str() == "embedding" && v.as_vector().is_some());
-                    if has_embedding {
-                        let has_content = node
-                            .properties_as_btree()
-                            .into_iter()
-                            .any(|(k, v)| k.as_str() == "content" && v.as_str().is_some_and(|s| !s.is_empty()));
-                        if has_content {
-                            count += 1;
-                        }
+                        .any(|(k, v)| k.as_str() == "content" && v.as_str().is_some_and(|s| !s.is_empty()));
+                    if has_content {
+                        count += 1;
                     }
                 }
             }
@@ -443,18 +482,8 @@ impl GrafeoStore {
                 let prop_map: std::collections::HashMap<&str, &Value> =
                     props.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
-                // Skip nodes without an existing embedding (they may have been
-                // created without an embedding provider).
-                let has_embedding = prop_map
-                    .get("embedding")
-                    .and_then(|v| v.as_vector())
-                    .is_some();
-                if !has_embedding {
-                    stats.skipped_no_embedding += 1;
-                    continue;
-                }
-
-                // Get the content text for re-embedding.
+                // Get the content text for embedding / re-embedding.
+                // Nodes without content cannot be embedded — skip.
                 let content = match prop_map.get("content").and_then(|v| v.as_str()) {
                     Some(c) if !c.is_empty() => c.to_string(),
                     _ => {

@@ -802,10 +802,18 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => Some(
                 proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
             ),
-            // MigrationStart — no proto message defined (same pattern as EmbeddingConfigUpdate).
-            // This variant is only used in direct IPC scenarios.
-            protocol::GatewayResponse::MigrationStart { .. } => Some(
-                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
+            protocol::GatewayResponse::MigrationStart {
+                request_id,
+                embed_endpoint,
+                embed_model_id,
+                embed_dimension,
+            } => Some(
+                proto::server_message::Payload::MigrationStart(proto::MigrationStart {
+                    request_id: request_id.clone(),
+                    embed_endpoint: embed_endpoint.clone(),
+                    embed_model_id: embed_model_id.clone(),
+                    embed_dimension: *embed_dimension as u64,
+                }),
             ),
         };
 

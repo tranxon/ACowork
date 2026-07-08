@@ -194,7 +194,7 @@ pub(crate) async fn phase_b_init_session(
         }
 
         c.memory_session = Some(ctx.memory_session.clone());
-        c.embedding_provider = Some(ctx.emb_provider.clone());
+        c.embedding_provider = ctx.emb_provider.clone();
         c.init_memory_store(work_dir_path);
 
         // ── Resolve & persist agent_config.json defaults ─────────────

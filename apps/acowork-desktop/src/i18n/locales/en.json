@@ -809,7 +809,13 @@
     "typeKnowledge": "Knowledge",
     "typeEpisodic": "Episodic",
     "typeProcedural": "Procedural",
-    "typeAutobiographical": "Autobiographical"
+    "typeAutobiographical": "Autobiographical",
+    "dimMismatchTitle": "Vector index dimension mismatch",
+    "dimMismatchDetail": "Stored dim: {{stored}} · Model dim: {{model}}",
+    "missingEmbeddingsTitle": "Some memory nodes are missing vector embeddings",
+    "missingEmbeddingsDetail": "Indexed nodes: {{indexed}} / {{total}}",
+    "rebuildIndex": "Rebuild Index",
+    "rebuildIndexInProgress": "Rebuilding…"
   },
   "statusBar": {
     "agent": "agent",

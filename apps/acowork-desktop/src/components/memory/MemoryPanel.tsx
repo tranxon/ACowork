@@ -2,9 +2,10 @@ import { useEffect, useRef } from "react";
 import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
+import { useGatewayStore } from "../../stores/gatewayStore";
 import { MemoryNodeList } from "./MemoryNodeList";
 import { MemoryNodeDetail } from "./MemoryNodeDetail";
-import { Info } from "lucide-react";
+import { AlertTriangle, Info } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
@@ -23,14 +24,22 @@ export function MemoryPanel() {
     loading,
     error,
     consolidateMessage,
+    migrationInProgress,
     fetchNodes,
     fetchStats,
     consolidate,
+    rebuildIndex,
     setFilters,
     setPage,
     setSelectedNodeId,
     clearMemory,
   } = useMemoryStore();
+
+  // Live migration progress for the currently selected agent, used to drive
+  // the "重建中…" button label and a tiny progress fraction in the banner.
+  const agentMigration = useGatewayStore((s) =>
+    selectedAgentId ? s.migrationProgress[selectedAgentId] : undefined,
+  );
 
   const selectedNode = nodes.find((n) => n.node_id === selectedNodeId) ?? null;
 
@@ -81,6 +90,43 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
   };
+
+  const handleRebuildIndex = () => {
+    if (!selectedAgentId) return;
+    void rebuildIndex(selectedAgentId);
+  };
+
+  // True when the persisted HNSW index dimension disagrees with the active
+  // embedding model's output dimension. `stored_dim == 0` means the index
+  // hasn't been built yet (fresh store) — not a mismatch, just an empty state.
+  // `model_dim == 0` means no provider is configured — also not actionable.
+  const dimMismatch =
+    !!stats &&
+    stats.stored_dim > 0 &&
+    stats.model_dim > 0 &&
+    stats.stored_dim !== stats.model_dim;
+
+  // True when some memory nodes are missing vector embeddings (NULL or failed
+  // write). This is common after an embedding model change where existing nodes
+  // were stored with a different dimension and their embeddings were rejected
+  // by the HNSW index — they exist as metadata-only nodes.
+  const missingEmbeddings =
+    !!stats &&
+    stats.model_dim > 0 &&
+    stats.total_nodes > 0 &&
+    stats.nodes_with_embedding < stats.total_nodes;
+
+  // While migration is in flight, show the rebuilt/total fraction so the
+  // user can see progress. Falls back to plain "重建中…" if the Gateway has
+  // not yet produced a progress payload.
+  const migrationProgressLabel = (() => {
+    if (!migrationInProgress) return t("memoryPanel.rebuildIndex");
+    const p = agentMigration?.progress;
+    if (p && p.total_scanned > 0) {
+      return `${t("memoryPanel.rebuildIndexInProgress")} ${p.rebuilt}/${p.total_scanned}`;
+    }
+    return t("memoryPanel.rebuildIndexInProgress");
+  })();
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -165,6 +211,56 @@ export function MemoryPanel() {
             label={t("memoryPanel.health")}
             value={stats.index_health}
           />
+        </div>
+      )}
+
+      {/* Index-health banner — shown when:
+          1. Dim-mismatch: persisted HNSW index dim differs from active model dim.
+          2. Missing embeddings: some nodes lack vector embeddings (nodes_with_embedding < total_nodes).
+          Clicking the button triggers the same /api/embedding-models/{id}/start-migration
+          flow that the Harness tab already uses. */}
+      {(dimMismatch || missingEmbeddings) && stats && (
+        <div
+          className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-2 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
+          role="alert"
+          data-testid="index-health-banner"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[11px] font-semibold">
+              {dimMismatch
+                ? t("memoryPanel.dimMismatchTitle")
+                : t("memoryPanel.missingEmbeddingsTitle")}
+            </p>
+            <p className="truncate text-[10px] opacity-80">
+              {dimMismatch
+                ? t("memoryPanel.dimMismatchDetail", {
+                    stored: stats.stored_dim,
+                    model: stats.model_dim,
+                  })
+                : t("memoryPanel.missingEmbeddingsDetail", {
+                    indexed: stats.nodes_with_embedding,
+                    total: stats.total_nodes,
+                  })}
+              {dimMismatch && stats.total_nodes > 0 && (
+                <>
+                  {" · "}
+                  {t("memoryPanel.dimMismatchIndexedDetail", {
+                    indexed: stats.nodes_with_embedding,
+                    total: stats.total_nodes,
+                  })}
+                </>
+              )}
+            </p>
+          </div>
+          <button
+            onClick={handleRebuildIndex}
+            disabled={migrationInProgress}
+            data-testid="rebuild-index-button"
+            className="shrink-0 rounded btn-solid px-2.5 py-1 text-[11px] font-medium disabled:opacity-50"
+          >
+            {migrationProgressLabel}
+          </button>
         </div>
       )}
 

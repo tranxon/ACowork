@@ -83,6 +83,7 @@ message ServerMessage {
     UserProfileUpdate       user_profile_update  = 38;
     EnableDebugMode         enable_debug_mode     = 39;
     LogFileCountUpdate      log_file_count_update = 40;
+    MigrationStart          migration_start       = 44;
   }
 }
 
@@ -255,6 +256,12 @@ message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}
 message LogFileCountUpdate      { uint64 log_file_count = 1; }
+message MigrationStart {
+    string request_id      = 1;
+    string embed_endpoint  = 2;
+    string embed_model_id  = 3;
+    uint64 embed_dimension = 4;
+}
 message RuntimeConfigUpdate      {
     optional uint64 max_output_tokens = 1;
     optional uint32 max_iterations = 2;
@@ -339,6 +346,19 @@ message MemoryStatsResult {
   map<string, uint64> by_status = 4;
   double avg_decay_score = 5;
   string index_health = 6;
+  // Embedding dimension of the Grafeo HNSW vector index actually persisted on disk.
+  // 0 if the store has not yet built a vector index.
+  uint64 stored_dim = 7;
+  // Number of nodes across all memory labels that currently have a non-NULL
+  // `embedding` field and are therefore participating in vector search.
+  // Compare against `total_nodes` to detect missing embeddings.
+  uint64 nodes_with_embedding = 8;
+  // Embedding dimension of the active embedding provider (model output).
+  // 0 if no embedding provider is currently configured.
+  // The desktop uses (stored_dim vs model_dim) to detect a dimension mismatch
+  // and offer a one-click "Rebuild Index" action via the existing
+  // start-migration endpoint.
+  uint64 model_dim = 9;
 }
 
 message MemoryConsolidateQuery {
