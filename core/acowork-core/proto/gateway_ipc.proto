@@ -83,6 +83,17 @@ message ServerMessage {
     UserProfileUpdate       user_profile_update  = 38;
     EnableDebugMode         enable_debug_mode     = 39;
     LogFileCountUpdate      log_file_count_update = 40;
+    // Sidecar endpoint update (Gateway → Runtime, push).
+    //
+    // Pushed when a Gateway-managed sidecar (LSP Relay, local ONNX Embed,
+    // future sidecars) becomes ready, changes its endpoint, or becomes
+    // unavailable. The Runtime registers/disables the corresponding tool
+    // (e.g. `codebase` for `lsp_relay`) or rebuilds its FallbackEmbeddingProvider
+    // chain (for `embed`).
+    //
+    // This message replaces ad-hoc JSON fields in RuntimeConfigUpdate
+    // (embed_config_json) and is the canonical channel for sidecar state.
+    SidecarEndpointUpdate   sidecar_endpoint_update = 44;
   }
 }
 
@@ -255,6 +266,41 @@ message IterationLimitPaused    { uint32 iteration = 1; uint32 max_iterations = 
 message LogLevelUpdate           { string log_level = 1; }
 message LogRotate               {}
 message LogFileCountUpdate      { uint64 log_file_count = 1; }
+
+// ── Sidecar Endpoint Update (Gateway → Runtime, push) ─────────────────────
+
+/// Sidecar kinds known to the Runtime. Adding a new sidecar requires:
+/// 1. Extending this enum.
+/// 2. Adding a match arm in Runtime's `cli.rs` SidecarEndpointUpdate handler.
+/// 3. Registering the sidecar in the Gateway's `GatewayState` and supervisor
+///    so `push_sidecar_endpoint` can locate it.
+enum SidecarKind {
+  SIDECAR_KIND_UNSPECIFIED = 0;
+  /// `acowork-lsp-relay` — provides JSON-RPC LSP relay used by the
+  /// Runtime's `codebase` builtin tool.
+  SIDECAR_KIND_LSP_RELAY = 1;
+  /// `acowork-embed` — local ONNX embedding HTTP service. The Runtime
+  /// builds a `FallbackEmbeddingProvider` chain from the active model id
+  /// and dimension provided in `spec_json`.
+  SIDECAR_KIND_EMBED = 2;
+}
+
+/// Pushed by the Gateway whenever a sidecar transitions to ready, changes
+/// its endpoint, or becomes unavailable. Empty `endpoint` means "sidecar is
+/// down — disable dependent runtime features".
+///
+/// `spec_json` carries sidecar-specific metadata as a JSON object string:
+///   - `lsp_relay`: `""` (no extra fields today)
+///   - `embed`:     `{"model_id":"bge-small-zh-v1.5","dimension":512}`
+message SidecarEndpointUpdate {
+  SidecarKind sidecar = 1;
+  /// HTTP URL the Runtime should connect to. Empty string = unavailable.
+  /// Examples: "http://127.0.0.1:19878", "http://127.0.0.1:18080/v1".
+  string endpoint = 2;
+  /// Sidecar-specific JSON metadata. Schema depends on `sidecar`:
+  /// see comment above. Empty string if no metadata applies.
+  string spec_json = 3;
+}
 message RuntimeConfigUpdate      {
     optional uint64 max_output_tokens = 1;
     optional uint32 max_iterations = 2;

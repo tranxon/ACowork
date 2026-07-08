@@ -438,6 +438,18 @@ pub trait GatewayRequestToProto {
     fn to_proto(&self, request_id: u64) -> proto::ClientMessage;
 }
 
+// ── SidecarKind ↔ proto::SidecarKind ──────────────────────────────────────
+
+/// Map the domain `SidecarKind` enum onto the proto integer value. Mirrors
+/// the order defined in `gateway_ipc.proto::SidecarKind`.
+fn sidecar_to_proto(kind: protocol::SidecarKind) -> proto::SidecarKind {
+    match kind {
+        protocol::SidecarKind::Unspecified => proto::SidecarKind::Unspecified,
+        protocol::SidecarKind::LspRelay => proto::SidecarKind::LspRelay,
+        protocol::SidecarKind::Embed => proto::SidecarKind::Embed,
+    }
+}
+
 // ── GatewayResponse → ServerMessage helpers ─────────────────────────────
 
 /// Convert a domain GatewayResponse into a proto ServerMessage.
@@ -807,6 +819,21 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             protocol::GatewayResponse::MigrationStart { .. } => Some(
                 proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
             ),
+            // SidecarEndpointUpdate — Gateway → Runtime push for sidecar state.
+            // The Runtime reacts by registering/disabling sidecar-dependent
+            // builtin tools (e.g. `codebase` for lsp_relay) or rebuilding
+            // the embedding provider chain (for embed).
+            protocol::GatewayResponse::SidecarEndpointUpdate {
+                sidecar,
+                endpoint,
+                spec_json,
+            } => Some(proto::server_message::Payload::SidecarEndpointUpdate(
+                proto::SidecarEndpointUpdate {
+                    sidecar: sidecar_to_proto(*sidecar) as i32,
+                    endpoint: endpoint.clone(),
+                    spec_json: spec_json.clone(),
+                },
+            )),
         };
 
         proto::ServerMessage {

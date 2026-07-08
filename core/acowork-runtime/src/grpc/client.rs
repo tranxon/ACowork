@@ -1307,6 +1307,29 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             debug_port: edm.debug_port,
         },
 
+        // SidecarEndpointUpdate — Gateway notifies the Runtime that a
+        // sidecar (lsp_relay, embed, ...) became ready, changed its
+        // endpoint, or became unavailable. The Runtime's main loop
+        // dispatches by `sidecar` to the right subsystem.
+        Some(ServerPayload::SidecarEndpointUpdate(seu)) => {
+            let sidecar = match seu.sidecar {
+                x if x == proto::SidecarKind::LspRelay as i32 => acowork_core::protocol::SidecarKind::LspRelay,
+                x if x == proto::SidecarKind::Embed as i32 => acowork_core::protocol::SidecarKind::Embed,
+                _ => acowork_core::protocol::SidecarKind::Unspecified,
+            };
+            tracing::info!(
+                sidecar = %sidecar.as_str(),
+                endpoint = %seu.endpoint,
+                has_spec = !seu.spec_json.is_empty(),
+                "Received SidecarEndpointUpdate from Gateway"
+            );
+            GatewayResponse::SidecarEndpointUpdate {
+                sidecar,
+                endpoint: seu.endpoint,
+                spec_json: seu.spec_json,
+            }
+        }
+
         None => {
             tracing::warn!("Received ServerMessage with empty payload");
             GatewayResponse::Unknown {}
