@@ -717,7 +717,13 @@
     "typeKnowledge": "ナレッジ",
     "typeEpisodic": "エピソード",
     "typeProcedural": "手続き",
-    "typeAutobiographical": "自伝"
+    "typeAutobiographical": "自伝",
+    "dimMismatchTitle": "ベクトルインデックスの次元が一致しません",
+    "dimMismatchDetail": "保存済み次元: {{stored}} · モデル次元: {{model}}",
+    "missingEmbeddingsTitle": "一部のメモリノードにベクトル埋め込みがありません",
+    "missingEmbeddingsDetail": "インデックス済みノード: {{indexed}} / {{total}}",
+    "rebuildIndex": "インデックスを再構築",
+    "rebuildIndexInProgress": "再構築中…"
   },
   "skillsPanel": {
     "selectSkill": "スキルを選択",

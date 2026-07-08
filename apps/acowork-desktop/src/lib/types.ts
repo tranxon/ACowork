@@ -477,6 +477,23 @@ export interface MemoryStatsResponse {
   by_status: Record<string, number>;
   avg_decay_score: number;
   index_health: string;
+  /**
+   * Embedding dimension of the Grafeo HNSW vector index actually persisted
+   * on disk. 0 if the store has not yet built a vector index.
+   */
+  stored_dim: number;
+  /**
+   * Number of memory nodes (across all labels) that currently have a non-NULL
+   * `embedding` field and therefore participate in vector search. Compare
+   * against `total_nodes` to detect missing embeddings.
+   */
+  nodes_with_embedding: number;
+  /**
+   * Embedding dimension of the active embedding provider (model output).
+   * 0 if no embedding provider is currently configured. Used together with
+   * `stored_dim` to detect a dimension mismatch.
+   */
+  model_dim: number;
 }
 
 /** Response for deleting a memory node */

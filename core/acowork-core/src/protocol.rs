@@ -1182,6 +1182,7 @@ pub enum GatewayResponse {
         /// Sidecar-specific metadata. Schema depends on `sidecar`:
         ///   - `LspRelay`: `""` (no extra fields today)
         ///   - `Embed`:    `{"model_id":"bge-small-zh-v1.5","dimension":512}`
+        ///
         /// Empty string if no metadata applies.
         spec_json: String,
     },

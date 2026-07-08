@@ -251,10 +251,7 @@ impl SessionCore {
         &self,
         conversation: Option<&crate::conversation::ConversationSession>,
     ) -> Option<String> {
-        let sid = match &self.session_id {
-            Some(s) => s.clone(),
-            None => return None,
-        };
+        let sid = self.session_id.as_ref()?.clone();
         let removed = {
             let mut map = self.streaming_lines.write().unwrap();
             map.remove(&sid)

@@ -715,7 +715,13 @@
     "typeKnowledge": "지식",
     "typeEpisodic": "에피소드",
     "typeProcedural": "절차",
-    "typeAutobiographical": "자서전"
+    "typeAutobiographical": "자서전",
+    "dimMismatchTitle": "벡터 인덱스 차원 불일치",
+    "dimMismatchDetail": "저장된 차원: {{stored}} · 모델 차원: {{model}}",
+    "missingEmbeddingsTitle": "일부 메모리 노드에 벡터 임베딩이 없습니다",
+    "missingEmbeddingsDetail": "인덱싱된 노드: {{indexed}} / {{total}}",
+    "rebuildIndex": "인덱스 재구축",
+    "rebuildIndexInProgress": "재구축 중…"
   },
   "skillsPanel": {
     "selectSkill": "기술 선택",

@@ -485,7 +485,17 @@ impl AgentCore {
             return;
         }
         let db_path = memory_dir.join("private.grafeo");
-        let embedding_dim = self.embedding_provider.as_ref().map(|p| p.dimension()).unwrap_or(acowork_grafeo::types::DEFAULT_EMBEDDING_DIM);
+        let embedding_dim = self.embedding_provider.as_ref().map(|p| p.dimension()).unwrap_or_else(|| {
+            tracing::warn!(
+                default_dim = acowork_grafeo::types::DEFAULT_EMBEDDING_DIM,
+                "⚠️ Embedding provider unavailable — opening GrafeoStore with default dim {}. \
+                 If the on-disk store was created with a different dim, vector search will fail \
+                 (HNSW index creation will warn) and memory will fall back to text-only search. \
+                 Restart runtime after the embedding service is back online to use vector search.",
+                acowork_grafeo::types::DEFAULT_EMBEDDING_DIM
+            );
+            acowork_grafeo::types::DEFAULT_EMBEDDING_DIM
+        });
         let config = GrafeoConfig { db_path: db_path.clone(), embedding_dim };
         match GrafeoStore::open(&config) {
             Ok(store) => {
@@ -569,7 +579,7 @@ impl AgentCore {
             return;
         };
         let Some(ref embedding) = self.embedding_provider else {
-            tracing::debug!("Cannot start consolidation: embedding provider not available");
+            tracing::warn!("⚠️ Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back.");
             return;
         };
         if self.consolidation_scheduler.is_some() {

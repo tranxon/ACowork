@@ -715,7 +715,13 @@
     "typeKnowledge": "知識",
     "typeEpisodic": "情景",
     "typeProcedural": "程序",
-    "typeAutobiographical": "自傳"
+    "typeAutobiographical": "自傳",
+    "dimMismatchTitle": "向量索引維度不一致",
+    "dimMismatchDetail": "當前索引維度: {{stored}} · 當前模型維度: {{model}}",
+    "missingEmbeddingsTitle": "部分節點缺少向量嵌入",
+    "missingEmbeddingsDetail": "已索引節點: {{indexed}} / {{total}}",
+    "rebuildIndex": "重建索引",
+    "rebuildIndexInProgress": "重建中…"
   },
   "skillsPanel": {
     "selectSkill": "選擇技能",

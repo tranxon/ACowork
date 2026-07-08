@@ -367,7 +367,7 @@ async fn async_main(
             None, // no conversation session in standalone cold-start
         );
 
-        agent_loop.core.embedding_provider = Some(agent_ctx.emb_provider.clone());
+        agent_loop.core.embedding_provider = agent_ctx.emb_provider.clone();
         agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
@@ -716,6 +716,7 @@ pub(crate) async fn run_gateway_loop(
 
                                 // refresh, etc.). The task holds cloned Arc/Sender handles.
                                 let store_opt = session_manager.memory_store().cloned();
+                                let embed_dim = session_manager.embedding_provider_dim();
                                 let outbound = grpc_client.outbound_ctrl_sender();
 
                                 // Handle GetLatestSessionQuery inline — reads the cached
@@ -792,6 +793,7 @@ pub(crate) async fn run_gateway_loop(
                                     tokio::spawn(spawn_memory_query_handler(
 
                                     store_opt,
+                                    embed_dim,
                                     outbound,
                                     request_id,
                                     payload,
@@ -2240,6 +2242,23 @@ async fn process_gateway_recv(
                                         "Embedding dimension migration complete"
                                     );
 
+                                    // Force a WAL checkpoint + full section flush to the .grafeo
+                                    // container file so that embeddings survive a process restart
+                                    // even when the periodic checkpoint timer (300s) hasn't fired yet.
+                                    if let Err(e) = store.db().wal_checkpoint() {
+                                        tracing::error!(
+                                            request_id = %req_id,
+                                            error = %e,
+                                            "Failed to checkpoint Grafeo after migration — embeddings \
+                                             may be lost on restart (they will only exist in WAL)"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            request_id = %req_id,
+                                            "Grafeo checkpoint flushed after migration"
+                                        );
+                                    }
+
                                     // Notify Gateway of completion via IntentSend.
                                     let params = serde_json::json!({
                                         "request_id": req_id,
@@ -2359,6 +2378,7 @@ async fn process_gateway_recv(
 /// select! loop. Takes owned data (Arc, Sender) so it can run independently.
 async fn spawn_memory_query_handler(
     memory_store: Option<Arc<acowork_grafeo::grafeo::GrafeoStore>>,
+    embed_provider_dim: u64,
     outbound: tokio::sync::mpsc::Sender<acowork_core::proto::ClientMessage>,
     request_id: u64,
     payload: acowork_core::proto::server_message::Payload,
@@ -2369,11 +2389,14 @@ async fn spawn_memory_query_handler(
         request_id,
         payload_type = ?std::mem::discriminant(&payload),
         memory_store = memory_store.is_some(),
+        embed_provider_dim,
         "Memory query handler spawned"
     );
     let response_payload = match payload {
         ServerPayload::MemoryNodesQuery(q) => handle_memory_nodes_query(memory_store.as_ref(), q),
-        ServerPayload::MemoryStatsQuery(_) => handle_memory_stats_query(memory_store.as_ref()),
+        ServerPayload::MemoryStatsQuery(_) => {
+            handle_memory_stats_query(memory_store.as_ref(), embed_provider_dim)
+        }
         ServerPayload::MemoryDeleteQuery(q) => handle_memory_delete_query(memory_store.as_ref(), q),
         ServerPayload::MemoryConsolidateQuery(q) => {
             handle_memory_consolidate_query(memory_store.as_ref(), q)
@@ -2638,6 +2661,7 @@ fn extract_node_content(label: &str, n: &grafeo_core::graph::lpg::Node) -> Strin
 /// Handle MemoryStatsQuery — get memory statistics.
 fn handle_memory_stats_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
+    embed_provider_dim: u64,
 ) -> acowork_core::proto::client_message::Payload {
     use acowork_core::proto;
     use acowork_core::proto::client_message::Payload as ClientPayload;
@@ -2653,6 +2677,9 @@ fn handle_memory_stats_query(
                 by_status: HashMap::new(),
                 avg_decay_score: 0.0,
                 index_health: "no_store".to_string(),
+                stored_dim: 0,
+                nodes_with_embedding: 0,
+                model_dim: embed_provider_dim,
             });
         }
     };
@@ -2670,6 +2697,12 @@ fn handle_memory_stats_query(
             let avg_decay_score = 0.0; // TODO P3: track in StatsCollector (acowork-grafeo stats)
             let index_health = "healthy".to_string();
 
+            // Vector-index diagnostics used by the desktop "Rebuild Index" banner.
+            // These are best-effort: a single failed Cypher query must not break
+            // the whole stats response.
+            let stored_dim = store.embedding_dim() as u64;
+            let nodes_with_embedding = store.count_nodes_with_embedding();
+
             ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
                 total_nodes,
                 storage_bytes: 0, // TODO P3: track file size in StatsCollector
@@ -2677,6 +2710,9 @@ fn handle_memory_stats_query(
                 by_status,
                 avg_decay_score,
                 index_health,
+                stored_dim,
+                nodes_with_embedding,
+                model_dim: embed_provider_dim,
             })
         }
 
@@ -2690,6 +2726,9 @@ fn handle_memory_stats_query(
                 by_status: HashMap::new(),
                 avg_decay_score: 0.0,
                 index_health: format!("error: {}", e),
+                stored_dim: 0,
+                nodes_with_embedding: 0,
+                model_dim: embed_provider_dim,
             })
         }
     }

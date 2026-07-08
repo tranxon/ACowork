@@ -1217,6 +1217,12 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
             remaining_cost_usd: r.remaining_cost_usd,
         },
         Some(ServerPayload::UsageReportAck(_)) => GatewayResponse::UsageReportAck {},
+        Some(ServerPayload::MigrationStart(ms)) => GatewayResponse::MigrationStart {
+            request_id: ms.request_id,
+            embed_endpoint: ms.embed_endpoint,
+            embed_model_id: ms.embed_model_id,
+            embed_dimension: ms.embed_dimension as usize,
+        },
         Some(ServerPayload::ContextUsageAck(_)) => GatewayResponse::ContextUsageAck {},
         Some(ServerPayload::RateToken(r)) => GatewayResponse::RateToken {
             granted: r.granted,

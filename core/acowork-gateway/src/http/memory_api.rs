@@ -95,6 +95,18 @@ pub struct MemoryStatsResponse {
     pub by_status: std::collections::HashMap<String, u64>,
     pub avg_decay_score: f64,
     pub index_health: String,
+    /// Embedding dimension of the Grafeo HNSW vector index actually persisted on disk.
+    /// 0 if the store has not yet built a vector index.
+    pub stored_dim: u64,
+    /// Number of memory nodes (across all labels) that currently have a
+    /// non-NULL `embedding` field and therefore participate in vector search.
+    /// Compare against `total_nodes` to detect missing embeddings.
+    pub nodes_with_embedding: u64,
+    /// Embedding dimension of the active embedding provider (model output).
+    /// 0 if no embedding provider is currently configured.
+    /// The desktop uses (stored_dim vs model_dim) to detect a dimension
+    /// mismatch and offer a one-click "Rebuild Index" action.
+    pub model_dim: u64,
 }
 
 /// Response for deleting a memory node
@@ -293,6 +305,9 @@ pub async fn get_memory_stats(
                     by_status: result.by_status,
                     avg_decay_score: result.avg_decay_score,
                     index_health: result.index_health,
+                    stored_dim: result.stored_dim,
+                    nodes_with_embedding: result.nodes_with_embedding,
+                    model_dim: result.model_dim,
                 }));
             }
     }
@@ -305,6 +320,9 @@ pub async fn get_memory_stats(
         by_status: std::collections::HashMap::new(),
         avg_decay_score: 0.0,
         index_health: "not_connected".to_string(),
+        stored_dim: 0,
+        nodes_with_embedding: 0,
+        model_dim: 0,
     }))
 }
 
@@ -462,9 +480,17 @@ mod tests {
             by_status: std::collections::HashMap::new(),
             avg_decay_score: 0.75,
             index_health: "healthy".to_string(),
+            stored_dim: 512,
+            nodes_with_embedding: 100,
+            model_dim: 512,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"total_nodes\":100"));
         assert!(json.contains("\"healthy\""));
+        // Index-health fields are serialized as snake_case to match the
+        // TypeScript types in apps/acowork-desktop/src/lib/types.ts.
+        assert!(json.contains("\"stored_dim\":512"));
+        assert!(json.contains("\"nodes_with_embedding\":100"));
+        assert!(json.contains("\"model_dim\":512"));
     }
 }

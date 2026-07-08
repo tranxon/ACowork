@@ -36,8 +36,9 @@ pub(crate) struct AgentBootContext {
     /// Provider ID resolved at startup (used to detect session mismatch).
     pub gateway_current_provider_id: Option<String>,
 
-    // Embedding provider
-    pub emb_provider: Arc<dyn crate::embedding::EmbeddingProvider>,
+    // Embedding provider (None when Tier-1 ONNX provider construction failed —
+    // memory then degrades to text-only search via memory::manager fallback)
+    pub emb_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>>,
 
     // Tools
     /// ADR-029: builtin tools as `BuiltinToolEntry` (each carries its

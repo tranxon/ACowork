@@ -1695,6 +1695,18 @@ After installation, ask the user to re-enable the MCP server.",
         self.core.memory_store()
     }
 
+    /// Return the embedding dimension of the currently configured
+    /// [`EmbeddingProvider`](crate::embedding::EmbeddingProvider), or 0 if no
+    /// provider is configured. Used by the runtime's `MemoryStatsQuery` handler
+    /// so the desktop can detect a stored vs. model dimension mismatch.
+    pub(crate) fn embedding_provider_dim(&self) -> u64 {
+        self.core
+            .embedding_provider
+            .as_ref()
+            .map(|p| p.dimension() as u64)
+            .unwrap_or(0)
+    }
+
     /// Reap completed sessions (remove handles for tasks that have finished).
     ///
     /// Call this periodically to avoid memory leaks from accumulated
