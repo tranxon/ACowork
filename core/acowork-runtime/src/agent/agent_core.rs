@@ -43,22 +43,34 @@ use acowork_core::ShellApprovalThreshold;
 /// [`AgentCore::all_tools`] (the LLM dispatch list).
 ///
 /// Clone is cheap because `Arc<dyn Tool>` is internally reference-counted.
+///
+/// **ADR-030 C3**: visibility was raised from `pub(crate)` to `pub` so that
+/// `SessionMessage::AddDynamicBuiltinTool` (a `pub` enum) can carry this
+/// type as a field. The runtime is a single crate (`acowork-runtime`) and
+/// does not re-export `BuiltinToolEntry`, so this is effectively an
+/// internal-only widening.
 #[derive(Clone)]
-pub(crate) struct BuiltinToolEntry {
+pub struct BuiltinToolEntry {
     /// The tool implementation (cloned from the registry).
-    pub(crate) tool: Arc<dyn Tool>,
+    pub tool: Arc<dyn Tool>,
     /// Whether this tool is enabled for the current agent.
-    pub(crate) enabled: bool,
+    pub enabled: bool,
 }
 
 impl BuiltinToolEntry {
     /// Tool name (delegated to the underlying `Tool`).
-    pub(crate) fn name(&self) -> String {
+    ///
+    /// Returns a `String` rather than `&str` for backward compatibility
+    /// with the many call sites that store the result in a local
+    /// variable and compare against it. The `Tool` trait's `name()` API
+    /// returns `String` so this is a thin allocation each call; given
+    /// that builtin_tools is small (tens of entries), this is fine.
+    pub fn name(&self) -> String {
         self.tool.name()
     }
 
     /// Tool specification (delegated to the underlying `Tool`).
-    pub(crate) fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+    pub fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
         self.tool.spec()
     }
 }

@@ -18,6 +18,12 @@ pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registr
 /// Retry interval when Gateway recv encounters a transient error
 const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
 
+/// Per-tool rate limit used by `RateLimitedTool` when wrapping tools at
+/// startup (`ToolRegistry::activate`) and for runtime-registered dynamic
+/// tools (`SessionManager::register_dynamic_tool`, ADR-030 C3).
+/// Hard-coded to match the value used in `startup::agent_init::phase_a_init_agent`.
+const MAX_TOOL_CALLS_PER_MINUTE: u32 = 60;
+
 /// Global reference to the SizeRollingFileAppender for runtime log rotation.
 /// Set by init_tracing() and read by the LogRotate IPC handler.
 static FILE_APPENDER: std::sync::OnceLock<Arc<acowork_core::logging::SizeRollingFileAppender>> =
@@ -2124,6 +2130,104 @@ async fn process_gateway_recv(
                         embed_dimension,
                     );
 
+                    LoopAction::Continue
+                }
+
+                // ── ADR-030 C3: Generic sidecar endpoint update ────────
+                //
+                // Gateway pushes `SidecarEndpointUpdate` whenever a
+                // managed sidecar's reachable endpoint changes. We
+                // route by `sidecar`:
+                //
+                // * `LspRelay` — register or unregister the `codebase`
+                //   builtin tool so the LLM dispatch list reflects the
+                //   current LSP relay availability in real time.
+                // * `Embed`    — delegate to `handle_embedding_config_update`
+                //   (the existing EmbeddingConfigUpdate path; payload is
+                //   identical, just delivered via the new channel).
+                // * `Unspecified` — unknown / reserved; log and ignore.
+                GatewayResponse::SidecarEndpointUpdate {
+                    sidecar,
+                    endpoint,
+                    spec_json,
+                } => {
+                    use acowork_core::protocol::SidecarKind;
+                    tracing::info!(
+                        sidecar = %sidecar.as_str(),
+                        endpoint = %endpoint,
+                        spec_len = spec_json.len(),
+                        "Received SidecarEndpointUpdate from Gateway"
+                    );
+                    match sidecar {
+                        SidecarKind::LspRelay => {
+                            if endpoint.is_empty() {
+                                session_manager.unregister_dynamic_tool("codebase");
+                            } else {
+                                let tool: Arc<dyn acowork_core::tools::traits::Tool> =
+                                    Arc::new(crate::tools::builtin::codebase::CodebaseTool::new(
+                                        endpoint.clone(),
+                                    ));
+                                // enabled=true on register; if the user has
+                                // codebase disabled in agent_tools.json the
+                                // entry will still be added (with enabled=true)
+                                // and the per-session `enabled` flag is the
+                                // gateway-driven source of truth. The
+                                // codebase tool being added here is the
+                                // *availability* signal; the user's enable
+                                // preference is reflected via the builtin
+                                // tools enabled list and filtered by
+                                // `rebuild_all_tools` accordingly.
+                                session_manager.register_dynamic_tool(
+                                    tool,
+                                    resolver.clone(),
+                                    MAX_TOOL_CALLS_PER_MINUTE,
+                                    true,
+                                );
+                            }
+                        }
+                        SidecarKind::Embed => {
+                            // Endpoint empty ⇒ embed sidecar unavailable.
+                            // Delegate to the existing handler so sessions
+                            // see a coherent state (empty endpoint is a
+                            // no-op for the existing handler, but log it).
+                            if endpoint.is_empty() {
+                                tracing::warn!(
+                                    "SidecarEndpointUpdate(Embed) with empty endpoint; \
+                                     leaving current embed provider in place (callers may \
+                                     rely on a None-detection path elsewhere)."
+                                );
+                            } else {
+                                // spec_json shape (from C2 build_embed_sidecar_payload):
+                                //   {"model_id":"...","dimension":N}
+                                #[derive(serde::Deserialize)]
+                                struct EmbedSpec {
+                                    model_id: String,
+                                    dimension: usize,
+                                }
+                                match serde_json::from_str::<EmbedSpec>(&spec_json) {
+                                    Ok(spec) => {
+                                        session_manager.handle_embedding_config_update(
+                                            endpoint.clone(),
+                                            spec.model_id,
+                                            spec.dimension,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            spec_json = %spec_json,
+                                            "Failed to parse Embed spec_json in SidecarEndpointUpdate"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        SidecarKind::Unspecified => {
+                            tracing::warn!(
+                                "Received SidecarEndpointUpdate with Unspecified kind; ignoring"
+                            );
+                        }
+                    }
                     LoopAction::Continue
                 }
 

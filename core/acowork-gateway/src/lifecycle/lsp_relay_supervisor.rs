@@ -16,12 +16,14 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use acowork_core::health::supervisor_defaults;
+use acowork_core::protocol::SidecarKind;
 use acowork_core::supervisor::{
     HeartbeatStatus, HeartbeatWatchdog, RestartHistory, SseFrame, backoff_with_jitter,
     parse_sse_frame,
 };
 
 use crate::gateway::state::GatewayState;
+use crate::ipc::global_push::GlobalResourcePusher;
 
 use super::lsp_relay::{
     check_lsp_relay_health, kill_lsp_relay, spawn_lsp_relay,
@@ -39,21 +41,67 @@ pub struct LspRelaySupervisorConfig {
     pub data_dir: std::path::PathBuf,
     pub port: u16,
     pub gateway_health_url: String,
+    /// ADR-030 C3: optional pusher for `SidecarEndpointUpdate(LspRelay, ...)`
+    /// notifications when the relay endpoint changes (ready, restart,
+    /// shutdown). Mirrors `EmbedSupervisorConfig::pusher`.
+    pub pusher: Option<Arc<GlobalResourcePusher>>,
 }
 
 /// Spawn the supervisor task. Must be called from an async context,
 /// AFTER the LSP Relay child has been spawned.
-pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState) {
+pub fn start_lsp_relay_supervisor(
+    cfg: LspRelaySupervisorConfig,
+    state: SharedState,
+    pusher: Option<Arc<GlobalResourcePusher>>,
+) {
     let port = cfg.port;
     tokio::spawn(async move {
-        run_supervisor(cfg, state, port).await;
+        run_supervisor(cfg, state, pusher, port).await;
     });
+}
+
+/// Build the (endpoint, spec_json) payload for a LspRelay push, reflecting
+/// the **current** state of `state.lsp_relay_process`.
+///
+/// Returns an empty endpoint when the relay is unavailable (process
+/// absent, or `ready=false`); the runtime reacts by unregistering the
+/// `codebase` tool. When the relay is up and `ready=true`, returns the
+/// canonical `http://127.0.0.1:{port}` URL with an empty `spec_json`
+/// (LspRelay has no model/dimension metadata — that's embed-only).
+fn build_lsp_relay_sidecar_payload(state: &GatewayState) -> (String, String) {
+    match state.lsp_relay_process.as_ref() {
+        Some(p) if p.ready => (format!("http://127.0.0.1:{}", p.port), String::new()),
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// Push the current LSP relay endpoint to all running agents, no-op if
+/// no pusher is configured. Called from the 5 state-transition points
+/// listed in ADR-030 §C3.4 (startup ready, restart success/failure,
+/// reaper exit, etc.).
+async fn push_lsp_relay_sidecar(
+    pusher: &Option<Arc<GlobalResourcePusher>>,
+    state: &SharedState,
+) {
+    if let Some(p) = pusher {
+        let (endpoint, spec_json) = {
+            let gw = state.read().await;
+            build_lsp_relay_sidecar_payload(&gw)
+        };
+        p.push_sidecar_endpoint(SidecarKind::LspRelay, endpoint, spec_json)
+            .await;
+    }
 }
 
 /// Long-running supervisor. Monitors the LSP Relay child via SSE; on
 /// heartbeat timeout or connection failure, restarts the relay with
 /// exponential backoff. Gives up after MAX_RESTART_ATTEMPTS recent failures.
-async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port: u16) {
+async fn run_supervisor(
+    cfg: LspRelaySupervisorConfig,
+    state: SharedState,
+    pusher: Option<Arc<GlobalResourcePusher>>,
+    port: u16,
+) {
     let mut history = RestartHistory::new();
     let mut in_startup_grace = true;
 
@@ -85,7 +133,7 @@ async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port:
     }
 
     loop {
-        let exit_reason = match run_monitor_session(&state, port, &mut in_startup_grace).await {
+        let exit_reason = match run_monitor_session(&state, port, &pusher, &mut in_startup_grace).await {
             MonitorExit::Clean => {
                 tracing::info!("LSP Relay monitor session ended cleanly");
                 return;
@@ -137,6 +185,9 @@ async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port:
             let mut gw = state.write().await;
             gw.lsp_relay_process = None;
         }
+        // ADR-030 C3: notify runtimes that the relay is going away
+        // (will come back at the same port after the restart succeeds).
+        push_lsp_relay_sidecar(&pusher, &state).await;
 
         let attempts = history.record(supervisor_defaults::RESTART_WINDOW);
         if attempts as u32 > supervisor_defaults::MAX_RESTART_ATTEMPTS {
@@ -145,6 +196,9 @@ async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port:
                 let mut gw = state.write().await;
                 gw.lsp_relay_process = None;
             }
+            // Final push: endpoint="" so runtimes unregister the codebase
+            // tool permanently (no more retries will succeed).
+            push_lsp_relay_sidecar(&pusher, &state).await;
             return;
         }
 
@@ -163,8 +217,16 @@ async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port:
                     let mut gw = state.write().await;
                     gw.lsp_relay_process = Some(new_state.clone());
                 }
+                // ADR-030 C3: announce the new relay endpoint. The
+                // process exists but `ready` is still false at this
+                // point — the SSE listener below will mark it ready and
+                // push again with the same endpoint. We push here
+                // optimistically; if the relay never becomes ready, the
+                // final reaper push below clears it.
+                push_lsp_relay_sidecar(&pusher, &state).await;
                 let new_child_pid = new_state.pid;
                 let state_for_reaper = state.clone();
+                let pusher_for_reaper = pusher.clone();
                 tokio::spawn(async move {
                     let mut child = child;
                     let _ = child.wait().await;
@@ -174,6 +236,9 @@ async fn run_supervisor(cfg: LspRelaySupervisorConfig, state: SharedState, port:
                     if still_ours {
                         gw.lsp_relay_process = None;
                     }
+                    drop(gw);
+                    // ADR-030 C3: notify runtimes the relay just died.
+                    push_lsp_relay_sidecar(&pusher_for_reaper, &state_for_reaper).await;
                 });
             }
             Err(e) => {
@@ -226,6 +291,7 @@ enum MonitorExit {
 async fn run_monitor_session(
     state: &SharedState,
     port: u16,
+    pusher: &Option<Arc<GlobalResourcePusher>>,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
     let url = format!("http://127.0.0.1:{port}/events");
@@ -276,6 +342,11 @@ async fn run_monitor_session(
             tracing::info!("LSP Relay marked as ready (port: {})", eps.port);
         }
     }
+    // ADR-030 C3: notify runtimes that the relay just became ready.
+    // First-time startup is the most common trigger; restarts hit this
+    // path after a successful respawn too (the earlier restart-success
+    // push is then a redundant but harmless double push).
+    push_lsp_relay_sidecar(pusher, state).await;
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
@@ -376,9 +447,11 @@ mod tests {
             data_dir: std::path::PathBuf::from("/tmp/acowork"),
             port: 19878,
             gateway_health_url: "http://127.0.0.1:19876/health".to_string(),
+            pusher: None,
         };
         assert_eq!(cfg.port, 19878);
         assert_eq!(cfg.gateway_health_url, "http://127.0.0.1:19876/health");
+        assert!(cfg.pusher.is_none());
     }
 
     #[test]
@@ -387,8 +460,48 @@ mod tests {
             data_dir: std::path::PathBuf::from("/tmp"),
             port: 0,
             gateway_health_url: "http://127.0.0.1:19876/health".to_string(),
+            pusher: None,
         };
         assert_eq!(cfg.port, 0);
+        assert!(cfg.pusher.is_none());
+    }
+
+    // ── ADR-030 C3: build_lsp_relay_sidecar_payload unit tests ────
+
+    use crate::gateway::state::GatewayState;
+    use crate::lifecycle::lsp_relay::LspRelayProcessState;
+
+    fn gateway_state_with_relay(port: u16, ready: bool) -> GatewayState {
+        let mut s = GatewayState::default();
+        s.lsp_relay_process = Some(LspRelayProcessState {
+            pid: 12345,
+            port,
+            ready,
+        });
+        s
+    }
+
+    #[test]
+    fn sidecar_payload_ready() {
+        let s = gateway_state_with_relay(19878, true);
+        let (endpoint, spec) = build_lsp_relay_sidecar_payload(&s);
+        assert_eq!(endpoint, "http://127.0.0.1:19878");
+        assert!(spec.is_empty(), "lsp_relay carries no model/dimension metadata");
+    }
+
+    #[test]
+    fn sidecar_payload_not_ready() {
+        let s = gateway_state_with_relay(19878, false);
+        let (endpoint, _) = build_lsp_relay_sidecar_payload(&s);
+        assert!(endpoint.is_empty(), "not-ready relay → empty endpoint");
+    }
+
+    #[test]
+    fn sidecar_payload_no_process() {
+        let s = GatewayState::default();
+        let (endpoint, spec) = build_lsp_relay_sidecar_payload(&s);
+        assert!(endpoint.is_empty());
+        assert!(spec.is_empty());
     }
 
     #[test]

@@ -1253,6 +1253,70 @@ After installation, ask the user to re-enable the MCP server.",
         });
     }
 
+    // ── ADR-030 C3: dynamic builtin tool registration (SidecarEndpointUpdate) ──
+    //
+    // When a sidecar's state changes (LSP relay became ready, sidecar
+    // went away, ...), `cli.rs` calls these methods. They wrap the raw
+    // tool with the same security decorators used at startup (path guard
+    // + rate limiter) and broadcast a `SessionMessage` so every active
+    // session rebuilds its dispatch list.
+
+    /// Register a dynamic builtin tool. The raw `Arc<dyn Tool>` is
+    /// wrapped with `PathGuardedTool` and `RateLimitedTool` (matching
+    /// the startup path in `ToolRegistry::activate`) and then broadcast
+    /// to all sessions. Sessions replace any existing entry with the
+    /// same `name()` so a sidecar endpoint re-push is idempotent.
+    ///
+    /// Caller passes the per-session rate limit (`max_calls_per_minute`)
+    /// and the shared `SharedResolver`; both are already available at
+    /// the runtime call site (`cli.rs`).
+    pub fn register_dynamic_tool(
+        &self,
+        tool: Arc<dyn Tool>,
+        resolver: crate::tools::workspace_resolver::SharedResolver,
+        max_calls_per_minute: u32,
+        enabled: bool,
+    ) {
+        let name = tool.name().to_string();
+        // Layer 1: path guard. This mirrors ToolRegistry::activate.
+        let path_guarded = Arc::new(crate::tools::wrappers::PathGuardedTool::new(
+            tool,
+            resolver,
+        )) as Arc<dyn Tool>;
+        // Layer 2: rate limit.
+        let rate_limited = Arc::new(crate::tools::wrappers::RateLimitedTool::new(
+            path_guarded,
+            max_calls_per_minute,
+        )) as Arc<dyn Tool>;
+
+        let entry = crate::agent::agent_core::BuiltinToolEntry {
+            tool: rate_limited,
+            enabled,
+        };
+
+        let failed = self.broadcast(SessionMessage::AddDynamicBuiltinTool { entry });
+        tracing::info!(
+            tool = %name,
+            enabled,
+            failed_count = failed.len(),
+            "SessionManager: dynamic builtin tool registered"
+        );
+    }
+
+    /// Unregister a dynamic builtin tool by name. Idempotent: removing a
+    /// tool that no session has is still a no-op broadcast (sessions
+    /// silently skip unknown names).
+    pub fn unregister_dynamic_tool(&self, name: &str) {
+        let failed = self.broadcast(SessionMessage::RemoveDynamicBuiltinTool {
+            name: name.to_string(),
+        });
+        tracing::info!(
+            tool = %name,
+            failed_count = failed.len(),
+            "SessionManager: dynamic builtin tool unregistered"
+        );
+    }
+
     /// Rebuild `full_tool_specs` by merging the original built-in specs with
     /// any currently connected MCP tool specs.
     fn rebuild_full_tool_specs_with_mcp(&mut self) {

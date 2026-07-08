@@ -80,6 +80,22 @@ pub enum SessionMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
+    /// switched, ...) and we want to surface a new builtin tool to this
+    /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
+    /// gets its own security-wrapped clone (path guard + rate limiter).
+    ///
+    /// Replaces any existing entry with the same `name()` so hot-reload
+    /// of the LSP relay endpoint is idempotent.
+    AddDynamicBuiltinTool {
+        entry: crate::agent::agent_core::BuiltinToolEntry,
+    },
+    /// ADR-030 C3: Sidecar went away (LSP relay died, embed sidecar
+    /// restart, ...). Removing the named builtin tool from this session's
+    /// dispatch list. `name` should match `BuiltinToolEntry::name()`.
+    RemoveDynamicBuiltinTool {
+        name: String,
+    },
     /// Update the title of the session's conversation
     UpdateSessionTitle { title: String },
     /// Persist the per-session workspace_id to the JSONL conversation file
@@ -196,6 +212,15 @@ impl std::fmt::Debug for SessionMessage {
                     "enabled_count",
                     &entries.iter().filter(|e| e.enabled).count(),
                 )
+                .finish(),
+            SessionMessage::AddDynamicBuiltinTool { entry } => f
+                .debug_struct("AddDynamicBuiltinTool")
+                .field("name", &entry.name())
+                .field("enabled", &entry.enabled)
+                .finish(),
+            SessionMessage::RemoveDynamicBuiltinTool { name } => f
+                .debug_struct("RemoveDynamicBuiltinTool")
+                .field("name", name)
                 .finish(),
             SessionMessage::UpdateSessionTitle { title } => f
                 .debug_struct("UpdateSessionTitle")
@@ -1213,6 +1238,50 @@ impl SessionTask {
                         }
                     }
                     agent_loop.core.rebuild_all_tools();
+                }
+                // ── ADR-030 C3: dynamic builtin tool add/remove ──────
+                //
+                // A SidecarEndpointUpdate just told us a sidecar came
+                // online (LSP relay ready, embed model restart, ...).
+                // `entry` is already wrapped with security decorators by
+                // the SessionManager, so the session just appends /
+                // replaces it in its own `builtin_tools` and rebuilds
+                // the dispatch list.
+                Some(SessionMessage::AddDynamicBuiltinTool { entry }) => {
+                    let tool_name = entry.name().to_string();
+                    let replaced = if let Some(existing) = agent_loop
+                        .core
+                        .builtin_tools
+                        .iter_mut()
+                        .find(|e| e.name() == tool_name)
+                    {
+                        *existing = entry;
+                        true
+                    } else {
+                        agent_loop.core.builtin_tools.push(entry);
+                        false
+                    };
+                    agent_loop.core.rebuild_all_tools();
+                    tracing::info!(
+                        session_id = %session_id,
+                        tool = %tool_name,
+                        replaced,
+                        "SessionTask: dynamic builtin tool added/updated"
+                    );
+                }
+                Some(SessionMessage::RemoveDynamicBuiltinTool { name }) => {
+                    let before = agent_loop.core.builtin_tools.len();
+                    agent_loop.core.builtin_tools.retain(|e| e.name() != name);
+                    let removed = agent_loop.core.builtin_tools.len() < before;
+                    if removed {
+                        agent_loop.core.rebuild_all_tools();
+                    }
+                    tracing::info!(
+                        session_id = %session_id,
+                        tool = %name,
+                        removed,
+                        "SessionTask: dynamic builtin tool removed"
+                    );
                 }
                 Some(SessionMessage::UpdateSessionTitle { title }) => {
                     tracing::info!(
