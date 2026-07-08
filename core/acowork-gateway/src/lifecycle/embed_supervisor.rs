@@ -41,7 +41,8 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::ipc::global_push::GlobalResourcePusher;
+use crate::ipc::global_push::{build_embed_sidecar_payload, GlobalResourcePusher};
+use acowork_core::protocol::SidecarKind;
 
 use super::embed::spawn_embed_process;
 
@@ -318,7 +319,7 @@ async fn run_supervisor(
                 // Push the (now-empty or new-model) embed config to
                 // agents so they can refresh local embedding caches.
                 if let Some(p) = &pusher {
-                    p.push_embedding_config().await;
+                    push_embed_sidecar_to_agents(p, &state).await;
                 }
             }
             Err(e) => {
@@ -334,7 +335,7 @@ async fn run_supervisor(
                         gw.embed_process = Some(attached);
                     }
                     if let Some(p) = &pusher {
-                        p.push_embedding_config().await;
+                        push_embed_sidecar_to_agents(p, &state).await;
                     }
                 } else {
                     tracing::error!(error = %e, "Failed to restart embed process");
@@ -597,7 +598,7 @@ async fn bootstrap_state_from_health(
             "Embed state bootstrapped from /health"
         );
         if let Some(p) = pusher {
-            p.push_embedding_config().await;
+            push_embed_sidecar_to_agents(p, state).await;
         }
     }
     Ok(())
@@ -706,7 +707,36 @@ async fn apply_state_event(
             "Embed state updated from SSE"
         );
         if let Some(p) = pusher {
-            p.push_embedding_config().await;
+            push_embed_sidecar_to_agents(p, state).await;
         }
     }
+}
+
+/// Build the embed sidecar payload from `state` and push it via `pusher`.
+///
+/// This is a local helper for the four supervisor call sites that
+/// previously invoked the deprecated `push_embedding_config()`. The push
+/// channel is now the generic `SidecarEndpointUpdate` introduced in
+/// ADR-030 Phase C2 — see `push_sidecar_endpoint` in
+/// `ipc::global_push` for the full semantics.
+///
+/// No-op if the embed process has not yet resolved its active model
+/// (`build_embed_sidecar_payload` returns `None`).
+async fn push_embed_sidecar_to_agents(
+    pusher: &GlobalResourcePusher,
+    state: &SharedEmbedState,
+) {
+    let (endpoint, spec_json) = {
+        let gw = state.read().await;
+        match build_embed_sidecar_payload(&gw) {
+            Some(payload) => payload,
+            None => {
+                tracing::warn!("Embed state not ready, skipping sidecar push");
+                return;
+            }
+        }
+    };
+    pusher
+        .push_sidecar_endpoint(SidecarKind::Embed, endpoint, spec_json)
+        .await;
 }
