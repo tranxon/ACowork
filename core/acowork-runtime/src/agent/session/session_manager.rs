@@ -183,6 +183,11 @@ pub struct SessionManager {
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
+    /// ADR-030 C3: Dynamic builtin tools registered via SidecarEndpointUpdate
+    /// (e.g. `codebase` when LSP relay becomes ready). Stored here so that
+    /// **new** sessions created after a sidecar push also inherit them -
+    /// mirrors the `mcp_tools` pattern (ADR-030 review ISSUE-1 fix).
+    dynamic_builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
     /// MCP connection manager.
     mcp_manager: McpManager,
     /// Per-session pending workspace reference.
@@ -241,6 +246,7 @@ impl SessionManager {
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
             mcp_tools: None,
+            dynamic_builtin_tools: Vec::new(),
             mcp_manager: McpManager::new(),
             pending_workspaces: HashMap::new(),
             default_workspace_id: "__agent_home__".to_string(),
@@ -407,6 +413,7 @@ impl SessionManager {
             self.config.identity_context.clone(),
             self.config.protocol_type.clone(),
             self.mcp_tools.clone(),
+            self.dynamic_builtin_tools.clone(),
             per_session_debug,
             pending_debug_handles.clone(),
             self.runtime_overrides.clone(),
@@ -1256,28 +1263,34 @@ After installation, ask the user to re-enable the MCP server.",
     /// and the shared `SharedResolver`; both are already available at
     /// the runtime call site (`cli.rs`).
     pub fn register_dynamic_tool(
-        &self,
+        &mut self,
         tool: Arc<dyn Tool>,
         resolver: crate::tools::workspace_resolver::SharedResolver,
         max_calls_per_minute: u32,
         enabled: bool,
     ) {
         let name = tool.name().to_string();
-        // Layer 1: path guard. This mirrors ToolRegistry::activate.
-        let path_guarded = Arc::new(crate::tools::wrappers::PathGuardedTool::new(
+        let wrapped = crate::tools::wrappers::wrap_with_security_decorators(
             tool,
             resolver,
-        )) as Arc<dyn Tool>;
-        // Layer 2: rate limit.
-        let rate_limited = Arc::new(crate::tools::wrappers::RateLimitedTool::new(
-            path_guarded,
             max_calls_per_minute,
-        )) as Arc<dyn Tool>;
-
+        );
         let entry = crate::agent::agent_core::BuiltinToolEntry {
-            tool: rate_limited,
+            tool: wrapped,
             enabled,
         };
+
+        // Store on the manager so new sessions created after this push
+        // also inherit the tool (ADR-030 review ISSUE-1 fix).
+        if let Some(existing) = self
+            .dynamic_builtin_tools
+            .iter()
+            .position(|e| e.name() == name)
+        {
+            self.dynamic_builtin_tools[existing] = entry.clone();
+        } else {
+            self.dynamic_builtin_tools.push(entry.clone());
+        }
 
         let failed = self.broadcast(SessionMessage::AddDynamicBuiltinTool { entry });
         tracing::info!(
@@ -1291,7 +1304,11 @@ After installation, ask the user to re-enable the MCP server.",
     /// Unregister a dynamic builtin tool by name. Idempotent: removing a
     /// tool that no session has is still a no-op broadcast (sessions
     /// silently skip unknown names).
-    pub fn unregister_dynamic_tool(&self, name: &str) {
+    pub fn unregister_dynamic_tool(&mut self, name: &str) {
+        // Remove from the manager's stored list so new sessions don't
+        // inherit a stale tool (ADR-030 review ISSUE-1 fix).
+        self.dynamic_builtin_tools.retain(|e| e.name() != name);
+
         let failed = self.broadcast(SessionMessage::RemoveDynamicBuiltinTool {
             name: name.to_string(),
         });
@@ -1498,6 +1515,24 @@ After installation, ask the user to re-enable the MCP server.",
                     "Failed to send UpdateEmbedConfig to session (channel closed)"
                 );
             }
+        }
+    }
+
+    /// Clear the embedding provider on all sessions (embed sidecar went down).
+    ///
+    /// Broadcasts `DisableEmbedConfig` so each session clears its ONNX
+    /// embedding provider. New sessions created after this call will
+    /// inherit the cleared state from the shared template (ADR-030 ISSUE-2).
+    pub fn clear_embedding_config(&self) {
+        tracing::info!(
+            "SessionManager: clearing embedding provider on all sessions (embed sidecar unavailable)"
+        );
+        let failed = self.broadcast(SessionMessage::DisableEmbedConfig);
+        if !failed.is_empty() {
+            tracing::warn!(
+                failed_count = failed.len(),
+                "Some sessions failed to receive DisableEmbedConfig"
+            );
         }
     }
 

@@ -2127,16 +2127,16 @@ async fn process_gateway_recv(
                             }
                         }
                         SidecarKind::Embed => {
-                            // Endpoint empty ⇒ embed sidecar unavailable.
-                            // Delegate to the existing handler so sessions
-                            // see a coherent state (empty endpoint is a
-                            // no-op for the existing handler, but log it).
                             if endpoint.is_empty() {
-                                tracing::warn!(
+                                // Embed sidecar unavailable: clear the ONNX
+                                // embedding provider on all sessions so
+                                // embedding operations degrade gracefully
+                                // (ADR-030 review ISSUE-2 fix).
+                                tracing::info!(
                                     "SidecarEndpointUpdate(Embed) with empty endpoint; \
-                                     leaving current embed provider in place (callers may \
-                                     rely on a None-detection path elsewhere)."
+                                     clearing embedding provider on all sessions"
                                 );
+                                session_manager.clear_embedding_config();
                             } else {
                                 // spec_json shape (from C2 build_embed_sidecar_payload):
                                 //   {"model_id":"...","dimension":N}

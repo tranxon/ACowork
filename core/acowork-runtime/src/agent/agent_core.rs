@@ -390,6 +390,26 @@ impl AgentCore {
         );
     }
 
+    /// Clear the embedding provider (set to `None`).
+    ///
+    /// Called when the embed sidecar goes down (SidecarEndpointUpdate with
+    /// empty endpoint). The memory store should gracefully degrade -
+    /// embedding-dependent operations will fail until a new provider is
+    /// pushed (ADR-030 review ISSUE-2 fix).
+    pub fn clear_embedding_provider(&mut self) {
+        let old_name = self
+            .embedding_provider
+            .as_ref()
+            .map(|p| p.name())
+            .unwrap_or("none")
+            .to_string();
+        self.embedding_provider = None;
+        tracing::info!(
+            old_provider = %old_name,
+            "Embedding provider cleared (embed sidecar unavailable)"
+        );
+    }
+
     pub fn update_gateway_model_capabilities(
         &mut self,
         model_id: &str,

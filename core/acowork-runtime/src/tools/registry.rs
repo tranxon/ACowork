@@ -6,7 +6,6 @@
 //!    `enabled` flags from `agent_tools.json` (ADR-029).
 use crate::agent::agent_core::BuiltinToolEntry;
 use crate::tools::workspace_resolver::SharedResolver;
-use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool};
 use acowork_core::AgentManifest;
 use acowork_core::tools::traits::Tool;
 use std::collections::HashSet;
@@ -31,38 +30,6 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
-    /// Register a tool from an external source (e.g. a SidecarEndpointUpdate
-    /// that just told us the LSP relay is now available). If a tool with the
-    /// same `name()` is already registered, it is **replaced** in place —
-    /// this is the canonical semantics for hot-push updates: the most recent
-    /// endpoint wins, no duplicates.
-    ///
-    /// Returns `true` if a pre-existing tool was replaced, `false` if a new
-    /// entry was appended.
-    pub fn register_external(&mut self, tool: Arc<dyn Tool>) -> bool {
-        let name = tool.name().to_string();
-        if let Some(existing) = self.tools.iter().position(|t| t.name() == name) {
-            self.tools[existing] = tool;
-            tracing::info!(tool = %name, "ToolRegistry: replaced existing tool");
-            true
-        } else {
-            self.tools.push(tool);
-            tracing::info!(tool = %name, "ToolRegistry: added new tool");
-            false
-        }
-    }
-
-    /// Remove a tool by name. Returns `true` if a tool was actually removed.
-    /// No-op if no tool with that name is present.
-    pub fn unregister(&mut self, name: &str) -> bool {
-        let before = self.tools.len();
-        self.tools.retain(|t| t.name() != name);
-        let removed = self.tools.len() < before;
-        if removed {
-            tracing::info!(tool = %name, "ToolRegistry: removed tool");
-        }
-        removed
-    }
 
     /// Get tool by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -112,40 +79,23 @@ impl ToolRegistry {
         // workspace directories fresh from the global source of truth on every
         // execute() call. This ensures hot-reload of workspace access changes
         // takes effect immediately without agent restart.
+        //
+        // Both enabled and disabled tools get the full security decorator
+        // stack (path guard + rate limiter) via `wrap_with_security_decorators`
+        // so disabled tools remain introspectable for re-enable at runtime.
         self.tools
             .iter()
             .map(|tool| {
                 let is_enabled = enabled_set.contains(&tool.name());
-
-                if is_enabled {
-                    // Layer 1: Path guard (for filesystem tools)
-                    let path_guarded =
-                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
-                            as Arc<dyn Tool>;
-
-                    // Layer 2: Rate limit
-                    let rate_limited = Arc::new(RateLimitedTool::new(
-                        path_guarded,
+                let wrapped =
+                    crate::tools::wrappers::wrap_with_security_decorators(
+                        tool.clone(),
+                        resolver.clone(),
                         max_calls_per_minute,
-                    )) as Arc<dyn Tool>;
-                    BuiltinToolEntry {
-                        tool: rate_limited,
-                        enabled: true,
-                    }
-                } else {
-                    // Disabled tools still get the security decorators so
-                    // they remain introspectable for re-enable at runtime.
-                    let path_guarded =
-                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
-                            as Arc<dyn Tool>;
-                    let rate_limited = Arc::new(RateLimitedTool::new(
-                        path_guarded,
-                        max_calls_per_minute,
-                    )) as Arc<dyn Tool>;
-                    BuiltinToolEntry {
-                        tool: rate_limited,
-                        enabled: false,
-                    }
+                    );
+                BuiltinToolEntry {
+                    tool: wrapped,
+                    enabled: is_enabled,
                 }
             })
             .collect()
@@ -335,52 +285,4 @@ mod tests {
         assert!(reg.all().is_empty());
     }
 
-    // ── ADR-030 C3: register_external / unregister (hot-push API) ──────
-
-    #[test]
-    fn test_registry_register_external_appends_new() {
-        let mut reg = ToolRegistry::new();
-        let replaced = reg.register_external(Arc::new(MockTool {
-            name: "codebase".to_string(),
-        }));
-        assert!(!replaced, "no pre-existing tool → returns false");
-        assert_eq!(reg.all().len(), 1);
-        assert!(reg.get("codebase").is_some());
-    }
-
-    #[test]
-    fn test_registry_register_external_replaces_same_name() {
-        let mut reg = ToolRegistry::new();
-        reg.register_external(Arc::new(MockTool {
-            name: "codebase".to_string(),
-        }));
-        let replaced = reg.register_external(Arc::new(MockTool {
-            name: "codebase".to_string(),
-        }));
-        assert!(replaced, "same-name registration → returns true");
-        // No duplicates — still exactly one entry.
-        assert_eq!(reg.all().len(), 1);
-        let names: Vec<String> = reg.tool_names();
-        let count = names.iter().filter(|n| n.as_str() == "codebase").count();
-        assert_eq!(count, 1, "codebase must appear exactly once after replace");
-    }
-
-    #[test]
-    fn test_registry_unregister_removes_and_returns_flag() {
-        let mut reg = ToolRegistry::new();
-        reg.register_external(Arc::new(MockTool {
-            name: "codebase".to_string(),
-        }));
-        reg.register_external(Arc::new(MockTool {
-            name: "shell".to_string(),
-        }));
-
-        assert!(reg.unregister("codebase"));
-        assert!(reg.get("codebase").is_none());
-        assert!(reg.get("shell").is_some());
-
-        // Idempotent: removing a non-existent tool is a no-op that returns false.
-        assert!(!reg.unregister("codebase"));
-        assert!(!reg.unregister("never_registered"));
-    }
 }
