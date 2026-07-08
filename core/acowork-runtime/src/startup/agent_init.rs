@@ -322,22 +322,16 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         registry.register(tool);
     }
 
-    let active_tools = registry.activate(&loaded.manifest, &workspace_resolver, 60, &[]);
-    tracing::info!(
-        total = registry.all().len(),
-        active = active_tools.len(),
-        enabled = active_tools.iter().filter(|e| e.enabled).count(),
-        "Tools activated (initial — no agent_tools.json yet; will be re-merged below)"
-    );
-
-    // ── ADR-029 Step B: Resolve `agent_tools.json` enabled flags ────
+    // ── ADR-029: Resolve `agent_tools.json` enabled flags ──────────
     //
-    // 1. If `{work_dir}/config/agent_tools.json` exists → load it
-    // 2. If absent → generate initial config from manifest `[[tools]]`
-    //    (or enable-all when manifest has no `[[tools]]`)
-    // 3. Merge code-registered tools with persisted entries to handle
-    //    upgrades (new tools default to enabled=false; removed tools
-    //    silently dropped)
+    // 1. If `{work_dir}/config/agent_tools.json` exists -> load it,
+    //    merge with code registry, and **persist the merged result**
+    //    so new tools from code upgrades are saved to disk.
+    //    Persisted `enabled` flags are always preserved (the user's
+    //    choices are the single source of truth; never overwrite).
+    // 2. If absent -> generate initial config from manifest `[[tools]]`
+    //    (only declared tools are enabled; if no `[[tools]]` section
+    //    exists, all tools default to disabled — opt-in model).
     let work_path = std::path::Path::new(&config.work_dir);
     let code_tool_list: Vec<String> = registry
         .all()
@@ -353,24 +347,42 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     count = persisted_cfg.tools.len(),
                     "Loaded existing agent_tools.json — merging with code registry"
                 );
-                crate::agent_config::merge_tools_config(&code_tool_list, &persisted_cfg.tools)
+                let merged = crate::agent_config::merge_tools_config(
+                    &code_tool_list,
+                    &persisted_cfg.tools,
+                );
+                // Persist the merged result so new tools from code
+                // upgrades are written to agent_tools.json immediately.
+                // This ensures the file is always a complete,
+                // up-to-date reflection of the code registry.
+                if let Err(e) = crate::agent_config::save_agent_tools_config(
+                    work_path,
+                    &crate::agent_config::AgentToolsConfig {
+                        tools: merged.clone(),
+                    },
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to persist merged agent_tools.json after startup merge"
+                    );
+                }
+                merged
             }
             Ok(None) => {
-                let initial = if loaded.manifest.has_any_tool_declaration() {
-                    tracing::info!(
-                        manifest_tools = manifest_tool_names.len(),
-                        "agent_tools.json absent — seeding from manifest.toml [[tools]]"
-                    );
-                    crate::agent_config::init_tools_config_from_manifest(
-                        &code_tool_list,
-                        &manifest_tool_names,
-                    )
-                } else {
-                    tracing::info!(
-                        "agent_tools.json absent and manifest has no [[tools]] — all builtin tools enabled by default"
-                    );
-                    crate::agent_config::all_enabled_tools_config(&code_tool_list)
-                };
+                // First start: seed from manifest [[tools]] declarations.
+                // Only tools listed in the manifest are enabled; everything
+                // else is disabled (opt-in model).  If the manifest has no
+                // [[tools]] section, all tools are disabled by default.
+                let initial = crate::agent_config::init_tools_config_from_manifest(
+                    &code_tool_list,
+                    &manifest_tool_names,
+                );
+                tracing::info!(
+                    manifest_tools = manifest_tool_names.len(),
+                    enabled = initial.iter().filter(|e| e.enabled).count(),
+                    disabled = initial.iter().filter(|e| !e.enabled).count(),
+                    "agent_tools.json absent — seeded from manifest [[tools]]"
+                );
                 // Persist the freshly generated config so future startups see it
                 if let Err(e) = crate::agent_config::save_agent_tools_config(
                     work_path,
@@ -394,8 +406,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             }
         };
 
-    // Now re-activate with the merged enabled list. We use a fresh
-    // registry walk so each tool gets the post-merge `enabled` flag.
+    // Activate with the merged enabled list, applying security
+    // decorators (path guard + rate limiter) to each tool.
     let active_tools = registry.activate(
         &loaded.manifest,
         &workspace_resolver,

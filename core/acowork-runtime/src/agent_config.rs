@@ -350,16 +350,116 @@ pub fn save_agent_tools_config(
     Ok(())
 }
 
+/// Ensure a tool entry exists in `agent_tools.json`.
+///
+/// If the tool is already present, its `enabled` flag is preserved
+/// (respecting the user's preference). If absent, a new entry is
+/// appended with `default_enabled`.
+///
+/// Used by the `SidecarEndpointUpdate` handler to persist dynamically
+/// registered tools (e.g. `codebase` when LSP Relay becomes ready)
+/// so that the frontend tool panel and `ConfigSnapshot` queries
+/// reflect tools that were not available at startup.
+///
+/// No-op if `agent_tools.json` does not exist yet (it will be created
+/// at next startup via the normal `agent_init.rs` flow).
+pub fn ensure_tool_in_config(work_dir: &Path, tool_name: &str, default_enabled: bool) {
+    match load_agent_tools_config(work_dir) {
+        Ok(Some(mut cfg)) => {
+            if let Some(existing) = cfg.tools.iter().find(|e| e.name == tool_name) {
+                // Already present - respect user's enabled/disabled preference.
+                tracing::info!(
+                    tool = tool_name,
+                    existing_enabled = existing.enabled,
+                    default_enabled,
+                    "ensure_tool_in_config: tool already present, preserving existing enabled flag"
+                );
+                return;
+            }
+            cfg.tools
+                .push(AgentToolEntry::new(tool_name, default_enabled));
+            tracing::info!(
+                tool = tool_name,
+                default_enabled,
+                "Adding dynamically registered tool to agent_tools.json"
+            );
+            if let Err(e) = save_agent_tools_config(work_dir, &cfg) {
+                tracing::warn!(
+                    error = %e,
+                    tool = tool_name,
+                    "Failed to persist dynamic tool addition to agent_tools.json"
+                );
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(
+                tool = tool_name,
+                work_dir = %work_dir.display(),
+                "agent_tools.json not found; skipping dynamic tool persistence \
+                 (will be created at next startup)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                tool = tool_name,
+                "Failed to load agent_tools.json for dynamic tool persistence"
+            );
+        }
+    }
+}
+
+/// Remove a tool entry from `agent_tools.json`.
+///
+/// Used by the `SidecarEndpointUpdate` handler when a sidecar goes
+/// away (e.g. LSP Relay stopped) so the frontend tool panel no longer
+/// shows the now-unavailable tool.
+///
+/// No-op if the file or the tool entry does not exist.
+pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
+    match load_agent_tools_config(work_dir) {
+        Ok(Some(mut cfg)) => {
+            let before = cfg.tools.len();
+            cfg.tools.retain(|e| e.name != tool_name);
+            if cfg.tools.len() < before {
+                tracing::info!(
+                    tool = tool_name,
+                    "Removing dynamically unregistered tool from agent_tools.json"
+                );
+                if let Err(e) = save_agent_tools_config(work_dir, &cfg) {
+                    tracing::warn!(
+                        error = %e,
+                        tool = tool_name,
+                        "Failed to persist dynamic tool removal to agent_tools.json"
+                    );
+                }
+            }
+        }
+        Ok(None) => {
+            // File doesn't exist - nothing to remove.
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                tool = tool_name,
+                "Failed to load agent_tools.json for dynamic tool removal"
+            );
+        }
+    }
+}
+
 /// Merge a persisted config with the current set of code-registered
 /// builtin tools, producing a fresh list of entries keyed off the
 /// *code* registry (not the persisted file) so unknown tools are
 /// silently dropped on next save.
 ///
-/// Rules (per ADR-029):
-/// - Tools present in both → use persisted `enabled`
-/// - Tools only in code (newly added by Runtime upgrade) → appended
-///   with `enabled = false` (opt-in)
-/// - Tools only in persisted file (removed by Runtime upgrade) →
+/// Rules:
+/// - Tools present in both -> use persisted `enabled` (user's choice
+///   is the single source of truth; never overwrite)
+/// - Tools only in code (newly added by Runtime upgrade) -> appended
+///   with `enabled = false` (opt-in: new tools require explicit
+///   enablement via manifest or frontend)
+/// - Tools only in persisted file (removed by Runtime upgrade) ->
 ///   silently dropped
 pub fn merge_tools_config(
     code_tool_names: &[String],          // from `all_builtin_tools()` registry
@@ -369,6 +469,29 @@ pub fn merge_tools_config(
         .iter()
         .map(|e| (e.name.as_str(), e.enabled))
         .collect();
+
+    let code_set: std::collections::HashSet<&str> =
+        code_tool_names.iter().map(|s| s.as_str()).collect();
+
+    // Log tools that are in persisted but NOT in code registry (will be dropped)
+    for entry in persisted {
+        if !code_set.contains(entry.name.as_str()) {
+            tracing::warn!(
+                tool = %entry.name,
+                enabled = entry.enabled,
+                "merge_tools_config: DROPPING persisted tool not in code registry"
+            );
+        }
+    }
+    // Log tools that are in code but NOT in persisted (new tools, default enabled=false)
+    for name in code_tool_names {
+        if !persisted_map.contains_key(name.as_str()) {
+            tracing::info!(
+                tool = %name,
+                "merge_tools_config: new code-registered tool, defaulting to enabled=false"
+            );
+        }
+    }
 
     code_tool_names
         .iter()
@@ -1035,7 +1158,7 @@ mod tests {
         assert_eq!(merged.len(), 5, "removed_tool must not appear in merge");
         assert!(map["memory_recall"]);
         assert!(!map["http_request"], "persisted false preserved");
-        // Tools missing from persisted file are disabled (opt-in), NOT enabled
+        // Tools missing from persisted file are disabled (opt-in)
         assert!(!map["memory_store"], "missing in persisted → disabled (opt-in)");
         assert!(!map["web_fetch"], "missing in persisted → disabled (opt-in)");
         assert!(!map["shell"], "missing in persisted → disabled (opt-in)");
@@ -1057,10 +1180,8 @@ mod tests {
             AgentToolEntry::new("web_fetch", true),
             AgentToolEntry::new("shell", true),
         ];
-        // Per ADR-029, the `default_enabled` parameter is purely
-        // semantic documentation — actual semantics require "missing
-        // from persisted → disabled". So the merge must always set
-        // unmentioned tools to `enabled = false`.
+        // New tools default to disabled (opt-in: need explicit
+        // enablement via manifest or frontend).
         let merged = merge_tools_config(&code, &persisted);
         let entry = merged.iter().find(|e| e.name == "brand_new_tool").unwrap();
         assert!(

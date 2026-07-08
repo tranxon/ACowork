@@ -45,61 +45,61 @@ export function ToolsTab() {
     if (!selectedAgentId) return;
     let cancelled = false;
 
-    // Load MCP catalog
+    // MCP catalog (gateway global, independent of agent state)
     loadCatalog();
 
-    // Fetch search providers catalog
-    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/search-providers`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: SearchProvidersResponse | null) => {
-        if (cancelled || !data) return;
-        setSearchProviders(data.providers);
-      })
-      .catch(() => { });
+    // Search providers + agent config — fetch once on mount.
+    (async () => {
+      const base = `${getGatewayUrl()}/api/agents/${selectedAgentId}`;
+      try {
+        const spRes = await fetch(`${base}/search-providers`);
+        if (spRes.ok && !cancelled) {
+          const spData: SearchProvidersResponse = await spRes.json();
+          setSearchProviders(spData.providers);
+        }
+      } catch { /* ignore */ }
 
-    // Fetch config for MCP, search, and builtin tools
-    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/config`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (cancelled || !data) return;
+      try {
+        const cfgRes = await fetch(`${base}/config`);
+        if (cfgRes.ok && !cancelled) {
+          const data = await cfgRes.json();
+          useMcpStore.setState((s) => ({
+            activeServers: {
+              ...s.activeServers,
+              [selectedAgentId!]: data.active_mcp_servers ?? [],
+            },
+          }));
+          setActiveSearch(data.search_config?.providers ?? []);
+          if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
+            setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
+          }
+        }
+      } catch { /* agent not ready — user can re-open tab later */ }
+    })();
+
+    return () => { cancelled = true; };
+  }, [selectedAgentId]);
+
+  // Refresh on global events (e.g. after MCP toggle)
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    const handler = async (e: Event) => {
+      const ce = e as CustomEvent<{ agentId: string }>;
+      if (ce.detail?.agentId !== selectedAgentId) return;
+      try {
+        const cfgRes = await fetch(
+          `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+        );
+        if (!cfgRes.ok) return;
+        const data = await cfgRes.json();
         useMcpStore.setState((s) => ({
           activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
         }));
         setActiveSearch(data.search_config?.providers ?? []);
-        // ADR-029: Parse full builtin tools list
         if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
           setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
         }
-      })
-      .catch((err) => {
-        console.debug("[ToolsTab] Agent not ready:", err);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedAgentId]);
-
-  // Listen for global resource refresh events
-  useEffect(() => {
-    if (!selectedAgentId) return;
-    const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ agentId: string }>;
-      if (ce.detail?.agentId === selectedAgentId) {
-        fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/config`)
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data) => {
-            if (!data) return;
-            useMcpStore.setState((s) => ({
-              activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
-            }));
-            setActiveSearch(data.search_config?.providers ?? []);
-            if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
-              setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
-            }
-          })
-          .catch(() => { });
-      }
+      } catch { /* ignore */ }
     };
     window.addEventListener('acowork:refresh-agent-config', handler);
     return () => window.removeEventListener('acowork:refresh-agent-config', handler);

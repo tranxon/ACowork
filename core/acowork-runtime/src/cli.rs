@@ -667,6 +667,38 @@ pub(crate) async fn run_gateway_loop(
                                 )
                                 .unwrap_or_default()
                                 .unwrap_or_default();
+
+                                // Build merged builtin tools list: load from disk,
+                                // then merge dynamically registered tools (from
+                                // SidecarEndpointUpdate) so ConfigSnapshot reflects
+                                // tools that were not available at startup (e.g.
+                                // codebase when LSP Relay became ready after
+                                // AgentHello).
+                                let mut merged_tools: Vec<crate::agent_config::AgentToolEntry> =
+                                    crate::agent_config::load_agent_tools_config(
+                                        std::path::Path::new(&work_dir),
+                                    )
+                                    .unwrap_or_default()
+                                    .map(|cfg| cfg.tools)
+                                    .unwrap_or_default();
+                                for (name, enabled) in session_manager.dynamic_builtin_tool_names() {
+                                    if !merged_tools.iter().any(|e| e.name == name) {
+                                        merged_tools.push(
+                                            crate::agent_config::AgentToolEntry::new(name, enabled),
+                                        );
+                                    }
+                                }
+                                let builtin_tools_all_json =
+                                    serde_json::to_string(&merged_tools).unwrap_or_default();
+                                let builtin_tools_enabled_json = {
+                                    let enabled: Vec<String> = merged_tools
+                                        .iter()
+                                        .filter(|e| e.enabled)
+                                        .map(|e| e.name.clone())
+                                        .collect();
+                                    serde_json::to_string(&enabled).unwrap_or_default()
+                                };
+
                                 let snapshot = proto::client_message::Payload::ConfigSnapshot(
                                     proto::ConfigSnapshot {
                                         request_id: String::new(),
@@ -688,23 +720,8 @@ pub(crate) async fn run_gateway_loop(
                                         max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
                                         context_window: agent_cfg.context_window,
                                     approval_timeout_secs: agent_cfg.approval_timeout_secs,
-                                    builtin_tools_enabled_json: crate::agent_config::load_agent_tools_config(
-                                        std::path::Path::new(&work_dir),
-                                    )
-                                    .unwrap_or_default()
-                                    .map(|cfg| {
-                                        let enabled: Vec<String> = cfg.tools.iter()
-                                            .filter(|e| e.enabled)
-                                            .map(|e| e.name.clone())
-                                            .collect();
-                                        serde_json::to_string(&enabled).unwrap_or_default()
-                                    }),
-                                    builtin_tools_all_json:
-                                        crate::agent_config::load_agent_tools_config(
-                                            std::path::Path::new(&work_dir),
-                                        )
-                                        .unwrap_or_default()
-                                        .map(|cfg| serde_json::to_string(&cfg.tools).unwrap_or_default()),
+                                    builtin_tools_enabled_json: Some(builtin_tools_enabled_json),
+                                    builtin_tools_all_json: Some(builtin_tools_all_json),
                                 },
                                 );
                                 let response = proto::ClientMessage {
@@ -1883,11 +1900,19 @@ async fn process_gateway_recv(
                     // When the Gateway pushes a new enabled-tools list,
                     // patch agent_tools.json and broadcast to sessions.
                     if let Some(ref enabled_names) = builtin_tools_enabled {
+                        tracing::info!(
+                            enabled_names = ?enabled_names,
+                            "RuntimeConfigUpdate: received builtin_tools_enabled list"
+                        );
                         let work_path = std::path::Path::new(&work_dir);
                         let current = crate::agent_config::load_agent_tools_config(work_path)
                             .unwrap_or_default()
                             .map(|cfg| cfg.tools)
                             .unwrap_or_default();
+                        tracing::info!(
+                            current_tool_count = current.len(),
+                            "RuntimeConfigUpdate: loaded current agent_tools.json for patching"
+                        );
                         // Build a patch: every tool in `enabled_names` gets enabled=true;
                         // everything currently in agent_tools.json but not in the list
                         // gets enabled=false.
@@ -1899,6 +1924,14 @@ async fn process_gateway_recv(
                             })
                             .collect();
                         let updated = crate::agent_config::apply_builtin_tools_patch(&current, &patch);
+                        // Log each entry after patching
+                        for entry in &updated {
+                            tracing::info!(
+                                tool = %entry.name,
+                                enabled = entry.enabled,
+                                "RuntimeConfigUpdate: patched tool entry"
+                            );
+                        }
                         // Persist
                         if let Err(e) = crate::agent_config::save_agent_tools_config(
                             work_path,
@@ -2102,8 +2135,21 @@ async fn process_gateway_recv(
                     match sidecar {
                         SidecarKind::LspRelay => {
                             if endpoint.is_empty() {
+                                tracing::info!(
+                                    "SidecarEndpointUpdate(LspRelay): endpoint empty, unregistering codebase"
+                                );
                                 session_manager.unregister_dynamic_tool("codebase");
+                                // Persist removal to agent_tools.json so the
+                                // frontend tool panel stops showing codebase.
+                                crate::agent_config::remove_tool_from_config(
+                                    std::path::Path::new(&work_dir),
+                                    "codebase",
+                                );
                             } else {
+                                tracing::info!(
+                                    endpoint = %endpoint,
+                                    "SidecarEndpointUpdate(LspRelay): endpoint ready, registering codebase"
+                                );
                                 let tool: Arc<dyn acowork_core::tools::traits::Tool> =
                                     Arc::new(crate::tools::builtin::codebase::CodebaseTool::new(
                                         endpoint.clone(),
@@ -2122,6 +2168,15 @@ async fn process_gateway_recv(
                                     tool,
                                     resolver.clone(),
                                     MAX_TOOL_CALLS_PER_MINUTE,
+                                    true,
+                                );
+                                // Persist addition to agent_tools.json so the
+                                // frontend tool panel shows codebase. If the
+                                // entry already exists, the user's enabled/
+                                // disabled preference is preserved.
+                                crate::agent_config::ensure_tool_in_config(
+                                    std::path::Path::new(&work_dir),
+                                    "codebase",
                                     true,
                                 );
                             }

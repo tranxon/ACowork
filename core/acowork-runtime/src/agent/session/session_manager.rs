@@ -1319,6 +1319,20 @@ After installation, ask the user to re-enable the MCP server.",
         );
     }
 
+    /// Returns `(name, enabled)` pairs for all dynamically registered
+    /// builtin tools (via `SidecarEndpointUpdate`).
+    ///
+    /// Used by the `ConfigSnapshot` builder to merge with the persisted
+    /// `agent_tools.json` so the frontend tool panel reflects tools that
+    /// were registered after startup (e.g. `codebase` when LSP Relay
+    /// becomes ready).
+    pub fn dynamic_builtin_tool_names(&self) -> Vec<(String, bool)> {
+        self.dynamic_builtin_tools
+            .iter()
+            .map(|e| (e.name(), e.enabled))
+            .collect()
+    }
+
     /// Rebuild `full_tool_specs` by merging the original built-in specs with
     /// any currently connected MCP tool specs.
     fn rebuild_full_tool_specs_with_mcp(&mut self) {

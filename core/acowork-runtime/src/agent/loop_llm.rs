@@ -198,6 +198,13 @@ impl AgentLoop {
                         "ToolCallStart received"
                     );
                     tool_calls.get_or_insert_with(Vec::new).push(tc);
+                    // ADR-021: Notify frontend that a tool call has started.
+                    // Without this, the frontend has no way to know that the LLM
+                    // emitted tool calls until the entire agent loop iteration
+                    // completes — leaving the UI blank while tools execute.
+                    // (Text/reasoning chunks already notify during streaming;
+                    //  this fills the gap for tool-call-only responses.)
+                    self.session_core.notify_new_data_available();
                 }
                 StreamEvent::ToolCallChunk { index, arguments } => {
                     tracing::debug!(index, chunk_len = arguments.len(), "ToolCallChunk received");

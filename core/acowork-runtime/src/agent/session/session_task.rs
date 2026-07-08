@@ -1087,6 +1087,16 @@ impl SessionTask {
                                     );
                                 }
                             }
+                            // ADR-021: Notify frontend that new conversation data
+                            // is available for polling.  This is the canonical
+                            // notification point — by the time run() returns, ALL
+                            // response data (text, tool_calls, assistant messages,
+                            // reasoning) has been persisted to JSONL regardless of
+                            // whether the LLM produced text-only, tool calls, or
+                            // mixed output.  The per-chunk notifications during
+                            // streaming (loop_llm.rs) serve real-time streaming UX;
+                            // this one guarantees a signal after full persistence.
+                            agent_loop.session_core.notify_new_data_available();
                         }
                         Err(e) => {
                             tracing::error!(
