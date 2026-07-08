@@ -1,6 +1,6 @@
 # ADR-030：Sidecar 端点动态推送 — Gateway → Runtime
 
-**状态**：草案（C1 已完成；C2/C3/C4 待实施）
+**状态**：已完成（C1 ✅ C2 ✅ C3 ✅ C4 ✅）
 **日期**：2026-07-08
 **决策者**：大鱼
 **前置**：
@@ -704,11 +704,11 @@ fn build_lsp_relay_sidecar_payload(state: &GatewayState, default_port: u16) -> (
 
 #### C4 验收
 
-- `cargo build --workspace` 通过（无 deprecation warning）
-- `cargo test --workspace` 通过
-- 搜索 `embed_config_json` 在 codebase 命中数为 0
-- 搜索 `EmbeddingConfigUpdate` 在 codebase 命中数为 0
-- 端到端：embed 模型切换 → `push_sidecar_endpoint(Embed, ...)` 推送 → runtime 收到后重建 provider 链
+- ✅ `cargo build --workspace` 通过（无 deprecation warning）
+- ✅ `cargo test --workspace` 通过
+- ✅ 搜索 `embed_config_json` 在 codebase 命中数为 0（ADR 文档中历史叙述除外）
+- ✅ 搜索 `EmbeddingConfigUpdate` 在 codebase 命中数为 0（ADR 文档中历史叙述除外）
+- ✅ 端到端：embed 模型切换 → `push_sidecar_endpoint(Embed, ...)` 推送 → runtime 收到后重建 provider 链
 
 #### C4 兼容性影响
 

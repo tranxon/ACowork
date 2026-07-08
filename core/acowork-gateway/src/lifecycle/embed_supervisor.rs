@@ -71,7 +71,7 @@ pub struct EmbedSupervisorConfig {
 ///
 /// We only care about the active model ID and dimension. The gateway
 /// stores these in `EmbedProcessState` and pushes them to running
-/// agents via `RuntimeConfigUpdate.embed_config_json`.
+/// agents via `SidecarEndpointUpdate` (ADR-030).
 #[derive(Debug, Deserialize)]
 struct StateEvent {
     #[serde(default)]
@@ -714,10 +714,9 @@ async fn apply_state_event(
 
 /// Build the embed sidecar payload from `state` and push it via `pusher`.
 ///
-/// This is a local helper for the four supervisor call sites that
-/// previously invoked the deprecated `push_embedding_config()`. The push
-/// channel is now the generic `SidecarEndpointUpdate` introduced in
-/// ADR-030 Phase C2 — see `push_sidecar_endpoint` in
+/// This is a local helper for the supervisor's state-transition call
+/// sites. The push channel is the generic `SidecarEndpointUpdate`
+/// introduced in ADR-030 Phase C2 — see `push_sidecar_endpoint` in
 /// `ipc::global_push` for the full semantics.
 ///
 /// No-op if the embed process has not yet resolved its active model

@@ -1841,7 +1841,6 @@ async fn process_gateway_recv(
                     model: _,    // ADR-012: model_switch is a separate action
                     provider: _, // ADR-012: model_switch is a separate action
                     search_config_json,
-                    embed_config_json,
                     avatar,
                     builtin_avatar,
                     max_sessions,
@@ -1858,7 +1857,6 @@ async fn process_gateway_recv(
                         context_window = ?context_window,
 
                         mcp_server_count = mcp_servers.as_ref().map(|s| s.len()),
-                        has_embed_config = embed_config_json.is_some(),
                         "Received RuntimeConfigUpdate from Gateway — applying to current and future sessions"
 
                     );
@@ -2009,39 +2007,6 @@ async fn process_gateway_recv(
                         }
                     }
 
-                    // Handle embedding config update: rebuild FallbackEmbeddingProvider chain.
-                    // When `embed_config_json` is Some, parse the JSON and forward to SessionManager.
-                    // Format: {"embed_endpoint":"http://...","embed_model_id":"...","embed_dimension":N}
-                    if let Some(ref ecfg_json) = embed_config_json {
-                        #[derive(serde::Deserialize)]
-                        struct EmbedConfigFields {
-                            embed_endpoint: String,
-                            embed_model_id: String,
-                            embed_dimension: usize,
-                        }
-                        match serde_json::from_str::<EmbedConfigFields>(ecfg_json) {
-                            Ok(cfg) => {
-                                tracing::info!(
-                                    endpoint = %cfg.embed_endpoint,
-                                    model_id = %cfg.embed_model_id,
-                                    dimension = cfg.embed_dimension,
-                                    "Applying embedding config update from RuntimeConfigUpdate"
-                                );
-                                session_manager.handle_embedding_config_update(
-                                    cfg.embed_endpoint,
-                                    cfg.embed_model_id,
-                                    cfg.embed_dimension,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to parse embed_config_json in RuntimeConfigUpdate"
-                                );
-                            }
-                        }
-                    }
-
                     // Persist per-agent config to workspace/config/agent_config.json.
                     // This consolidates all overrides into a single file owned by Runtime,
                     // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
@@ -2109,30 +2074,6 @@ async fn process_gateway_recv(
                     LoopAction::Continue
                 }
 
-                GatewayResponse::EmbeddingConfigUpdate {
-                    embed_endpoint,
-                    embed_model_id,
-                    embed_dimension,
-                } => {
-                    tracing::info!(
-                        endpoint = %embed_endpoint,
-                        model_id = %embed_model_id,
-                        dimension = embed_dimension,
-                        "Received EmbeddingConfigUpdate — forwarding to SessionManager"
-                    );
-
-                    // Delegate to SessionManager: it has access to the embedding
-                    // provider types and can rebuild the FallbackEmbeddingProvider
-                    // chain with the new ONNX provider as the first entry.
-                    session_manager.handle_embedding_config_update(
-                        embed_endpoint,
-                        embed_model_id,
-                        embed_dimension,
-                    );
-
-                    LoopAction::Continue
-                }
-
                 // ── ADR-030 C3: Generic sidecar endpoint update ────────
                 //
                 // Gateway pushes `SidecarEndpointUpdate` whenever a
@@ -2143,8 +2084,8 @@ async fn process_gateway_recv(
                 //   builtin tool so the LLM dispatch list reflects the
                 //   current LSP relay availability in real time.
                 // * `Embed`    — delegate to `handle_embedding_config_update`
-                //   (the existing EmbeddingConfigUpdate path; payload is
-                //   identical, just delivered via the new channel).
+                //   (payload is identical to the removed `EmbeddingConfigUpdate`
+                //   variant, now delivered via the canonical channel).
                 // * `Unspecified` — unknown / reserved; log and ignore.
                 GatewayResponse::SidecarEndpointUpdate {
                     sidecar,

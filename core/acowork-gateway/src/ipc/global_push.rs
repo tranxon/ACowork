@@ -37,9 +37,7 @@ pub struct GlobalResourcePusher {
 ///
 /// This helper is `pub(crate)` so the embed supervisor and embedding HTTP
 /// API can share the same payload construction logic without duplicating
-/// it. Introduced in ADR-030 Phase C2; will be folded into the sidecar
-/// push method in C4 when the legacy `push_embedding_config()` wrapper
-/// is removed.
+/// it. Introduced in ADR-030 Phase C2.
 pub(crate) fn build_embed_sidecar_payload(state: &GatewayState) -> Option<(String, String)> {
     let eps = state.embed_process.as_ref()?;
     let model_id = eps.active_model_id.as_ref()?;
@@ -272,19 +270,6 @@ impl GlobalResourcePusher {
                         model: None,
                         provider: None,
                         search_config_json: None,
-                        embed_config_json: {
-                            let gw = self.gateway_state.read().await;
-                            match &gw.embed_process {
-                                Some(eps) if eps.active_model_id.is_some() => {
-                                    Some(serde_json::json!({
-                                        "embed_endpoint": format!("http://127.0.0.1:{}/v1", eps.port),
-                                        "embed_model_id": eps.active_model_id.clone().unwrap_or_default(),
-                                        "embed_dimension": eps.active_dimension.unwrap_or(0),
-                                    }).to_string())
-                                }
-                                _ => None,
-                            }
-                        },
                         avatar: None,
                         builtin_avatar: None,
                         max_sessions: None,
@@ -375,9 +360,8 @@ impl GlobalResourcePusher {
     /// should disable dependent features rather than try to connect. This
     /// matches the protocol convention defined in ADR-030 C1.2.
     ///
-    /// Introduced in ADR-030 Phase C2. Replaces the legacy
-    /// `push_embedding_config()` ad-hoc channel for the embed sidecar; the
-    /// lsp_relay sidecar will be wired through this method in C3.
+    /// Introduced in ADR-030 Phase C2. As of C4, this is the only channel
+    /// for sidecar state pushes; both `embed` and `lsp_relay` use it.
     #[tracing::instrument(skip(self), name = "push_sidecar_endpoint")]
     pub async fn push_sidecar_endpoint(
         &self,
@@ -446,41 +430,6 @@ impl GlobalResourcePusher {
                 "Sidecar push complete"
             );
         }
-    }
-
-    /// Push embedding configuration update to all running agents after a
-    /// model switch. The Runtime rebuilds its `FallbackEmbeddingProvider`
-    /// chain with the new ONNX provider as the first entry.
-    ///
-    /// **DEPRECATED**: Use
-    /// [`push_sidecar_endpoint`](Self::push_sidecar_endpoint) with
-    /// `SidecarKind::Embed` instead. This thin wrapper is retained only for
-    /// the transition window (ADR-030 Phase C2) and will be removed in C4.
-    ///
-    /// Note: as of C2, this wrapper pushes exclusively via the new
-    /// `SidecarEndpointUpdate` channel. Legacy Runtimes (pre-C1) that still
-    /// read `RuntimeConfigUpdate.embed_config_json` will not receive the
-    /// update — that loss is accepted by design (project is in active
-    /// development, no compatibility requirement).
-    #[deprecated(
-        note = "use push_sidecar_endpoint(SidecarKind::Embed, ...) instead (ADR-030 C2)"
-    )]
-    #[tracing::instrument(skip(self), name = "push_embedding_config")]
-    #[allow(deprecated)]
-    pub async fn push_embedding_config(&self) {
-        let (endpoint, spec_json) = {
-            let gw = self.gateway_state.read().await;
-            match build_embed_sidecar_payload(&gw) {
-                Some(payload) => payload,
-                None => {
-                    tracing::warn!("Embedding service not running, skipping push");
-                    return;
-                }
-            }
-        };
-
-        self.push_sidecar_endpoint(SidecarKind::Embed, endpoint, spec_json)
-            .await;
     }
 
     /// Push a `MigrationStart` command to a single agent by ID.

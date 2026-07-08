@@ -332,8 +332,6 @@ message RuntimeConfigUpdate      {
     // just omitted the field entirely.
     bool mcp_servers_set = 11;
     bool system_prompt_set = 13;
-    // Embedding config override (JSON: {"embed_endpoint":"...","embed_model_id":"...","embed_dimension":N})
-    optional string embed_config_json = 14;
     // ADR-017: Avatar config fields (pushed from Gateway to Runtime).
     // Use avatar_set / builtin_avatar_set to distinguish "not set" (don't change)
     // from "set to empty" (clear the field).

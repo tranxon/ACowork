@@ -31,26 +31,6 @@ use acowork_core::AgentManifest;
 use acowork_core::protocol::GatewayResponse;
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
-/// Build embed_config_json from GatewayState's embed_process info.
-/// Returns None if the embedding service is not running or has no active model.
-async fn build_embed_config_json(state: &AppState) -> Option<String> {
-    let gw = state.gateway_state.read().await;
-    match &gw.embed_process {
-        Some(eps) if eps.active_model_id.is_some() => {
-            let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
-            Some(
-                serde_json::json!({
-                    "embed_endpoint": endpoint,
-                    "embed_model_id": eps.active_model_id.clone().unwrap_or_default(),
-                    "embed_dimension": eps.active_dimension.unwrap_or(0),
-                })
-                .to_string(),
-            )
-        }
-        _ => None,
-    }
-}
-
 /// Build the agent management router
 pub fn agent_routes() -> Router<AppState> {
     Router::new()
@@ -170,10 +150,6 @@ pub struct AgentDetailResponse {
     pub started_at: Option<String>,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
-    /// Embedding service config (endpoint, active model id, dimension).
-    /// None when the embed service is not running or no model is loaded.
-    /// Updated reactively by the embed supervisor's SSE monitor.
-    pub embed_config_json: Option<String>,
 }
 
 /// Generic message response
@@ -324,7 +300,6 @@ pub async fn get_agent_detail(
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
         debug_port: running_info.and_then(|r| r.debug_port),
-        embed_config_json: build_embed_config_json(&state).await,
     };
     Ok(Json(resp))
 }
@@ -773,7 +748,6 @@ pub async fn update_avatar_config(
                         model: None,
                         provider: None,
                         search_config_json: None,
-                        embed_config_json: None,
                         avatar: avatar_val,
                         builtin_avatar: builtin_val,
                         max_sessions: None,
@@ -1043,7 +1017,6 @@ pub async fn delete_avatar_file(
                             model: None,
                             provider: None,
                             search_config_json: None,
-                            embed_config_json: None,
                             avatar: Some(String::new()), // empty = clear
                             builtin_avatar: None,
                             max_sessions: None,
@@ -2065,7 +2038,6 @@ pub async fn update_agent_config(
                     model: None,
                     provider: None,
                     search_config_json: None,
-                    embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: req.max_sessions,
@@ -2290,7 +2262,6 @@ pub async fn update_agent_mcp_servers(
                     model: None,
                     provider: None,
                     search_config_json: None,
-                    embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: None,
@@ -2493,7 +2464,6 @@ pub async fn update_agent_search_config(
                     model: None,
                     provider: None,
                     search_config_json: Some(providers_json),
-                    embed_config_json: build_embed_config_json(&state).await,
                     avatar: None,
                     builtin_avatar: None,
                     max_sessions: None,

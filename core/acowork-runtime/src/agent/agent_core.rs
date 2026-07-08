@@ -386,7 +386,7 @@ impl AgentCore {
         tracing::info!(
             old_provider = %old_name,
             new_provider = %new_name,
-            "Embedding provider updated at runtime via EmbeddingConfigUpdate"
+            "Embedding provider updated at runtime via SidecarEndpointUpdate"
         );
     }
 

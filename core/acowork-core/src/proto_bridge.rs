@@ -692,7 +692,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             model,
             provider,
             search_config_json,
-            embed_config_json,
             avatar,
             builtin_avatar,
             max_sessions,
@@ -728,7 +727,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         search_config_json: search_config_json.clone(),
                         mcp_servers_set,
                         system_prompt_set,
-                        embed_config_json: embed_config_json.clone(),
                         avatar: avatar.clone(),
                         builtin_avatar: builtin_avatar.clone(),
                         avatar_set,
@@ -804,15 +802,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                 proto::server_message::Payload::EnableDebugMode(proto::EnableDebugMode {
                     debug_port: *debug_port,
                 }),
-            ),
-            // EmbeddingConfigUpdate — no proto message defined.
-            // This variant is only used in direct IPC (non-gRPC) scenarios.
-            // For gRPC delivery, the Gateway uses RuntimeConfigUpdate.embed_config_json
-            // instead, which has proper proto representation.
-            // Mapping to UsageReportAck here is safe because the gRPC path
-            // never generates this variant.
-            protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => Some(
-                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
             ),
             protocol::GatewayResponse::MigrationStart {
                 request_id,

@@ -157,18 +157,6 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
     }
 }
 
-/// Pending embedding config from Gateway EmbeddingConfigUpdate.
-///
-/// Stored so that the config can be persisted to `agent_config.json`
-/// and used on next Agent restart to rebuild the FallbackEmbeddingProvider.
-/// True hot-swap (in-place rebuild without restart) is planned future work.
-#[derive(Debug, Clone)]
-pub struct PendingEmbedConfig {
-    pub embed_endpoint: String,
-    pub embed_model_id: String,
-    pub embed_dimension: usize,
-}
-
 /// Debug mode handles injected at runtime when Gateway pushes
 /// EnableDebugMode. Stored on SessionManager so that sessions
 /// created *after* debug mode is enabled inherit the debug
@@ -237,9 +225,7 @@ pub struct SessionManager {
     /// Shared streaming lines map (keyed by session_id), cloned into each
     /// SessionCore and used by the HTTP handler for `read_messages_since`.
     streaming_lines: crate::conversation::StreamingStateMap,
-    /// Pending embedding config from Gateway EmbeddingConfigUpdate.
-    /// Stored for persistence and used on next Agent restart.
-    pub pending_embed_config: Option<PendingEmbedConfig>,
+
     /// Latest session ID and title, determined during the startup session scan
     /// (by `last_active_at` descending). Set once after the background scan
     /// completes; `None` until the scan finishes or if no sessions exist.
@@ -265,7 +251,6 @@ impl SessionManager {
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            pending_embed_config: None,
             latest_session: std::sync::RwLock::new(None),
         }
     }
@@ -1477,7 +1462,7 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
-    /// Handle EmbeddingConfigUpdate from Gateway.
+    /// Handle embedding config update from Gateway (via SidecarEndpointUpdate(Embed)).
     ///
     /// When the user switches the active embedding model, the Gateway pushes
     /// this update to all running Runtimes. The Runtime rebuilds its
@@ -1494,15 +1479,8 @@ After installation, ask the user to re-enable the MCP server.",
             endpoint = %embed_endpoint,
             model_id = %embed_model_id,
             dimension = embed_dimension,
-            "SessionManager: received EmbeddingConfigUpdate"
+            "SessionManager: received embedding config update via SidecarEndpointUpdate"
         );
-
-        // Cache the config for persistence and new session construction.
-        self.pending_embed_config = Some(PendingEmbedConfig {
-            embed_endpoint: embed_endpoint.clone(),
-            embed_model_id: embed_model_id.clone(),
-            embed_dimension,
-        });
 
         // Broadcast to all existing sessions so they rebuild their
         // embedding provider in-place (same pattern as UpdateProvider).

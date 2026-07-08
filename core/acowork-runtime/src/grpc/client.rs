@@ -1106,7 +1106,6 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 model: rcu.model,
                 provider: rcu.provider,
                 search_config_json: rcu.search_config_json,
-                embed_config_json: rcu.embed_config_json,
                 // ADR-017: Avatar fields (use _set flags to distinguish "clear" from "don't change")
                 avatar: if rcu.avatar_set {
                     Some(rcu.avatar.unwrap_or_default())

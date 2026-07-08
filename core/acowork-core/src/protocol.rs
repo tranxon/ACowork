@@ -1073,11 +1073,6 @@ pub enum GatewayResponse {
         /// Some("") means no search providers active.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search_config_json: Option<String>,
-        /// Embedding config override (JSON-serialized EmbeddingConfigUpdate fields).
-        /// When Some, the Runtime rebuilds its FallbackEmbeddingProvider chain.
-        /// Format: {"embed_endpoint":"http://127.0.0.1:18080/v1","embed_model_id":"bge-small-zh-v1.5","embed_dimension":512}
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        embed_config_json: Option<String>,
         /// ADR-017: Custom avatar path override.
         /// Some("path") = set, Some("") = clear, None = don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1131,19 +1126,6 @@ pub enum GatewayResponse {
         /// Debug WebSocket port (allocated by Gateway)
         debug_port: u32,
     },
-    /// Embedding configuration update (Gateway → Runtime, push).
-    ///
-    /// Pushed when the user switches the active embedding model via
-    /// Gateway HTTP API. The Runtime rebuilds its FallbackEmbeddingProvider
-    /// chain with the new ONNX provider as the first entry.
-    EmbeddingConfigUpdate {
-        /// Embedding service endpoint URL (e.g. "http://127.0.0.1:18080/v1")
-        embed_endpoint: String,
-        /// Active embedding model ID (e.g. "bge-small-zh-v1.5")
-        embed_model_id: String,
-        /// Embedding dimension of the active model (e.g. 512)
-        embed_dimension: usize,
-    },
     /// Start embedding dimension migration (Gateway → Runtime).
     ///
     /// Sent by Gateway when the user confirms migration for a specific agent.
@@ -1170,10 +1152,9 @@ pub enum GatewayResponse {
     /// Empty `endpoint` signals "sidecar is down" — the Runtime should
     /// disable dependent features rather than try to connect.
     ///
-    /// This message is the canonical channel for sidecar state and
-    /// supersedes the ad-hoc `RuntimeConfigUpdate.embed_config_json` JSON
-    /// field. Both channels currently coexist for migration safety; the
-    /// legacy path will be removed once the new path has stabilized.
+    /// This message is the canonical (and only) channel for sidecar state
+    /// updates. As of ADR-030 C4, the legacy `RuntimeConfigUpdate.embed_config_json`
+    /// JSON field and the `EmbeddingConfigUpdate` variant have been removed.
     SidecarEndpointUpdate {
         /// Which sidecar this update is for.
         sidecar: SidecarKind,
