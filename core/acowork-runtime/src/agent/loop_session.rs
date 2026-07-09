@@ -437,6 +437,33 @@ impl super::loop_::AgentLoop {
             self.session_core.remove_streaming_line();
         }
 
+        // Persist the final assistant turn to in-memory history.
+        //
+        // IMPORTANT: We DELIBERATELY do not store `reasoning_content` here,
+        // even though it is available on `response`. This is by design and
+        // aligns with DeepSeek's thinking mode contract:
+        //
+        //   - If the user turn triggered NO tool calls, DeepSeek says the
+        //     intermediate `reasoning_content` "无需参与上下文拼接,在后续
+        //     轮次中将其传入 API 会被忽略" — passing it is harmless but
+        //     bloats context for nothing, so we drop it.
+        //   - Tool-call rounds are handled in `loop_tools.rs::prepare_tool_calls`
+        //     where we DO persist `reasoning_content` because DeepSeek REQUIRES
+        //     round-tripping it on tool-call turns.
+        //
+        // Reference: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+        //
+        // Notes:
+        //  - This drops reasoning ONLY for the text-final path. If the assistant
+        //    happens to have called tools earlier in the same user turn, the
+        //    earlier tool-turn `reasoning_content` is already in history via
+        //    `prepare_tool_calls` — that is the DeepSeek-required signal.
+        //  - Anthropic currently parses thinking into `reasoning_content` but
+        //    never reads it back from history (Anthropic echoes thinking blocks,
+        //    not a single string field); the field is effectively inert for
+        //    Anthropic and harmless.
+        //  - For OpenAI's Chat Completions (o-series), `response.reasoning_content`
+        //    is always None, so dropping it is a no-op.
         self.session.history.append(ChatMessage {
             ..ChatMessage::assistant(content.clone())
         });

@@ -40,7 +40,7 @@ export interface SessionScope {
   prevScrollHeight: number;
   /** True while the load-more HTTP request is in flight. */
   isLoadingMore: boolean;
-  /** Tracks which session ID is being initial-loaded (or "__init__" for agent init). */
+  /** Tracks which session ID is being initial-loaded. `null` when no load is in flight. */
   isInitialLoad: string | null;
   /** True for the render immediately after the user sends a message. */
   userJustSent: boolean;

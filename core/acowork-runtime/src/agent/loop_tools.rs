@@ -676,7 +676,27 @@ impl AgentLoop {
             })
             .collect();
 
-        // Add assistant message with tool_calls to history
+        // Persist assistant turn to in-memory history.
+        //
+        // IMPORTANT: We intentionally store `reasoning_content` here, despite it
+        // looking like internal reasoning detail, **because the DeepSeek thinking
+        // mode API requires it on the wire**: when an assistant turn contains
+        // tool_calls, the `reasoning_content` for that turn MUST be echoed back
+        // to the DeepSeek API in all subsequent user turns — otherwise the API
+        // returns HTTP 400. Reference: https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+        // section "工具调用 → 必须完整回传 reasoning_content".
+        //
+        // For the OpenAI-compatible code path, `reasoning_content` is naturally
+        // None on non-DeepSeek endpoints (o1/o3 Chat Completions do not surface
+        // reasoning in the response), so serializing the field back is a no-op
+        // for non-DeepSeek providers.
+        //
+        // Why this is NOT a bug: looking at it in isolation, storing
+        // reasoning_content into history seems risky (it grows context); it is
+        // NOT optional for DeepSeek, and removing it will silently break
+        // DeepSeek tool-call iterations with 400 errors. See the companion
+        // comment in loop_session.rs::handle_text_response for the matching
+        // text-only-path behavior.
         self.session.history.append(ChatMessage {
             reasoning_content: response.reasoning_content.clone(),
             tool_calls: Some(deduped_calls.clone()),

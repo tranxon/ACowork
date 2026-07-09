@@ -351,7 +351,6 @@ export function ChatPanel() {
   }, [todos, session.setTodosCollapsed]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const initAbortedRef = useRef(false);
   /** Tracks previous running state to detect genuine agent stop vs transient remount. */
   const wasRunningRef = useRef(false);
   /** Timestamp of the last compositionEnd event. On macOS WKWebView, compositionEnd
@@ -654,81 +653,17 @@ export function ChatPanel() {
       // Load available model list; per-session model comes from model_confirmed events.
       loadModels();
 
-      if (!isSameAgentRemount) {
-        // Only load session messages on first switch to this agent if no messages yet.
-        // Per-session state preserves messages across remounts, so skip reload if already loaded.
-        const agent = useChatStore.getState().agentStates[selectedAgentId];
-        const activeSessId = agent?.activeSessionId;
-        const agentMessages = activeSessId ? agent?.sessionStates[activeSessId]?.messages : undefined;
-        if (!agentMessages || agentMessages.length === 0) {
-          // 3. Fetch sessions and 4. restore previously selected session (or latest)
-          const initSession = async () => {
-            session.scope.current.isInitialLoad = "__init__";
-            initAbortedRef.current = false;
-
-            // Retry fetching sessions until Agent is ready (max 10 attempts, 1s interval)
-            const maxRetries = 10;
-            let sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
-
-            for (let i = 0; i < maxRetries; i++) {
-              if (initAbortedRef.current) return;
-              await useAgentStore.getState().fetchSessions(selectedAgentId);
-              sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
-              if (sessions.length > 0) break;
-              if (i < maxRetries - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000));
-              }
-            }
-
-            if (initAbortedRef.current) return;
-
-            if (sessions.length === 0) {
-              session.scope.current.isInitialLoad = null;
-              return;
-            }
-
-            // Restore previously selected session for this agent, fallback to latest
-            const rememberedSessionId = useAgentStore.getState().agents[selectedAgentId]?.rememberedSessionId;
-            const targetSession = rememberedSessionId
-              ? sessions.find((s) => s.session_id === rememberedSessionId) ?? sessions[0]
-              : sessions[0];
-            if (targetSession) {
-              // switchSession first (clears old messages), then loadSessionMessages
-              // so that messages are not cleared after loading.
-              await useAgentStore.getState().switchSession(targetSession.session_id, selectedAgentId);
-              await useChatStore
-                .getState()
-                .loadSessionMessages(selectedAgentId, targetSession.session_id);
-              // Pull session state (todos, model, provider, etc.) from backend
-              await useChatStore
-                .getState()
-                .fetchSessionState(selectedAgentId, targetSession.session_id);
-            }
-            session.scope.current.isInitialLoad = null;
-          };
-          void initSession();
-        } else {
-          // Messages already cached — restore session list and selection without reloading
-          const restoreSessionSelection = async () => {
-            await useAgentStore.getState().fetchSessions(selectedAgentId);
-            const rememberedId = useAgentStore.getState().agents[selectedAgentId]?.rememberedSessionId;
-            const sessions = useAgentStore.getState().agents[selectedAgentId]?.sessions ?? [];
-            if (rememberedId && sessions.some(s => s.session_id === rememberedId)) {
-              useAgentStore.getState().switchSession(rememberedId, selectedAgentId);
-              // Pull session state (todos, model, provider, etc.) from backend
-              useChatStore
-                .getState()
-                .fetchSessionState(selectedAgentId, rememberedId);
-            }
-          };
-          void restoreSessionSelection();
-        }
-      } else {
-        // isSameAgentRemount: the effect re-ran for the same agent (e.g. ready
-        // transitioned false→true after startAgent). The session was previously
-        // initialized but fetchSessionState may not have completed before the
-        // remount. Pull session state (context_usage, todos, model, provider)
-        // without reloading messages or switching sessions.
+      // For a brand-new agent: session state is already initialized by
+      // `startAgentAndSyncUI` (which awaits before ChatPanel mounts). Nothing
+      // more to do here — the second useEffect below handles `loadSessionMessages`
+      // when `currentSessionId` is set.
+      //
+      // For an isSameAgentRemount (e.g. ready flag flipped false→true, or
+      // nav-back into Chat): the session was already initialized previously
+      // but `fetchSessionState` may not have completed before the remount.
+      // Pull session state (context_usage, todos, model, provider) without
+      // reloading messages or switching sessions.
+      if (isSameAgentRemount) {
         const agent = useChatStore.getState().agentStates[selectedAgentId];
         const activeSessId = agent?.activeSessionId;
         if (activeSessId) {
@@ -746,7 +681,6 @@ export function ChatPanel() {
     wasRunningRef.current = selectedAgent?.running ?? false;
     justMountedRef.current = false;
     return () => {
-      initAbortedRef.current = true;
       // Do NOT disconnect the old agent's ws — keep it alive for reuse.
       // Only clear reconnect timers for the old agent to avoid stale reconnects.
       // The ws connections are per-agent and managed in wsMap.
@@ -757,9 +691,8 @@ export function ChatPanel() {
   useEffect(() => {
     if (!currentSessionId || !selectedAgentId) return;
 
-    // Skip if agent initialization is in progress — initSession already calls loadSessionMessages.
-    // Also skip if this specific session is already being loaded (prevents duplicate requests).
-    if (session.scope.current.isInitialLoad === "__init__" || session.scope.current.isInitialLoad === currentSessionId) return;
+    // Skip if this specific session is already being loaded (prevents duplicate requests).
+    if (session.scope.current.isInitialLoad === currentSessionId) return;
 
     // Guard: only proceed if this session belongs to the current agent's session list.
     const agentSession = useAgentStore

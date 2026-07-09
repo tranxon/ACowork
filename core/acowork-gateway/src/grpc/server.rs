@@ -738,8 +738,17 @@ pub fn default_grpc_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], DEFAULT_GRPC_PORT))
 }
 
-/// Check if a ClientMessage is a memory API response from Runtime.
-/// These are routed to the pending request map, not through dispatch.
+/// Check if a ClientMessage is a Gateway-side request-response result from Runtime.
+///
+/// These are routed to the pending request map (fulfilling the oneshot returned
+/// by `send_memory_request` / `send_session_state_request` /
+/// `send_latest_session_request`), not through `dispatch_grpc_request`.
+///
+/// **Invariant (mirrored with Runtime's `is_gateway_query_payload`):**
+/// every `XxxQuery` payload on the Server-side must have a corresponding
+/// `XxxResult` payload on the Client-side included here — otherwise the
+/// matching HTTP handler times out with 504 because the oneshot is never
+/// fulfilled.
 fn is_memory_result(msg: &proto::ClientMessage) -> bool {
     matches!(
         msg.payload,
@@ -748,6 +757,8 @@ fn is_memory_result(msg: &proto::ClientMessage) -> bool {
             | Some(proto::client_message::Payload::MemoryConsolidateResult(_))
             | Some(proto::client_message::Payload::MemoryDeleteResult(_))
             | Some(proto::client_message::Payload::ConfigSnapshot(_))
+            | Some(proto::client_message::Payload::SessionStateResult(_))
+            | Some(proto::client_message::Payload::LatestSessionResult(_))
     )
 }
 
@@ -831,5 +842,78 @@ mod tests {
         assert!(msg.is_ok());
         let server_msg = msg.unwrap();
         assert_eq!(server_msg.request_id, 0); // push messages use request_id = 0
+    }
+
+    /// Regression test for the bug where `LatestSessionResult` and
+    /// `SessionStateResult` were missing from `is_memory_result`.
+    ///
+    /// Without these match arms the Gateway would route the Runtime's response
+    /// through `dispatch_grpc_request`, which does not understand them and
+    /// returns an empty ServerMessage. The oneshot returned by
+    /// `send_latest_session_request` / `send_session_state_request` is then
+    /// never fulfilled and the HTTP handler times out with 504.
+    ///
+    /// **Invariant:** every `XxxResult` payload handled by
+    /// `is_memory_result` MUST mirror a `XxxQuery` payload handled by
+    /// Runtime's `is_gateway_query_payload` (core/acowork-runtime/src/grpc/client.rs).
+    /// If you add a new query/result pair, update BOTH sides in the same commit.
+    #[test]
+    fn test_is_memory_result_covers_all_query_response_types() {
+        use proto::client_message::Payload;
+
+        // All request-response result types must be classified so the
+        // oneshot returned by send_*_request() is fulfilled.
+        let result_cases: &[(&str, Payload)] = &[
+            (
+                "MemoryNodesResult",
+                Payload::MemoryNodesResult(proto::MemoryNodesResult::default()),
+            ),
+            (
+                "MemoryStatsResult",
+                Payload::MemoryStatsResult(proto::MemoryStatsResult::default()),
+            ),
+            (
+                "MemoryConsolidateResult",
+                Payload::MemoryConsolidateResult(proto::MemoryConsolidateResult::default()),
+            ),
+            (
+                "MemoryDeleteResult",
+                Payload::MemoryDeleteResult(proto::MemoryDeleteResult::default()),
+            ),
+            (
+                "ConfigSnapshot",
+                Payload::ConfigSnapshot(proto::ConfigSnapshot::default()),
+            ),
+            (
+                "SessionStateResult",
+                Payload::SessionStateResult(proto::SessionStateResult::default()),
+            ),
+            (
+                "LatestSessionResult",
+                Payload::LatestSessionResult(proto::LatestSessionResult::default()),
+            ),
+        ];
+        for (name, payload) in result_cases {
+            let msg = proto::ClientMessage {
+                request_id: 1,
+                payload: Some(payload.clone()),
+            };
+            assert!(
+                is_memory_result(&msg),
+                "{name} must be classified as a request-response result, \
+                 otherwise the matching HTTP handler will time out with 504 \
+                 (oneshot returned by send_*_request() is never fulfilled)",
+            );
+        }
+
+        // Sanity check: an unrelated push-style payload must NOT be classified
+        // as a result, so it stays on the dispatch path (or its dedicated
+        // handler). UsageReport, AgentHello, ContextUsageReport etc. all fall
+        // through to dispatch_grpc_request.
+        let push_msg = proto::ClientMessage {
+            request_id: 0,
+            payload: Some(Payload::UsageReport(proto::UsageReportRequest::default())),
+        };
+        assert!(!is_memory_result(&push_msg));
     }
 }

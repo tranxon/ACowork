@@ -51,6 +51,14 @@ async function initSessionForAgent(agentId: string): Promise<void> {
             ? rememberedSessionId
             : latestSession.session_id;
 
+    // Load the full session list before switching.  ChatPanel's
+    // message-loading useEffect checks that the session exists in
+    // agentStore.sessions (agent-start.ts → agentStore.switchSession →
+    // fire-and-forget fetchSessions → ChatPanel.tsx useEffect guard).
+    // Without this await the effect fires while the list is still
+    // empty and permanently skips loadSessionMessages.
+    await useAgentStore.getState().fetchSessions(agentId);
+
     await useAgentStore
         .getState()
         .switchSession(targetSessionId, agentId);

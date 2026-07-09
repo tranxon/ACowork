@@ -1364,6 +1364,7 @@ fn is_gateway_query_payload(msg: &proto::ServerMessage) -> bool {
             | Some(ServerPayload::MemoryDeleteQuery(_))
             | Some(ServerPayload::QueryConfig(_))
             | Some(ServerPayload::GetSessionStateQuery(_))
+            | Some(ServerPayload::GetLatestSessionQuery(_))
     )
 }
 
@@ -1454,5 +1455,68 @@ mod tests {
             resp,
             GatewayResponse::SessionCreated { session_id } if session_id == "session-123"
         ));
+    }
+
+    /// Regression test for the bug where `GetLatestSessionQuery` was missing
+    /// from `is_gateway_query_payload`. Without this match arm the Runtime
+    /// would route the query into the Server-push channel (which has no
+    /// consumer), causing Gateway's `/api/agents/{id}/latest-session` HTTP
+    /// handler to time out with 504.
+    #[test]
+    fn test_is_gateway_query_payload_covers_all_query_types() {
+        // Every payload type the Runtime's main loop handles via `mq_rx`
+        // MUST be recognized — otherwise it gets lost in `push_rx`.
+        let query_cases: &[(&str, ServerPayload)] = &[
+            (
+                "MemoryNodesQuery",
+                ServerPayload::MemoryNodesQuery(proto::MemoryNodesQuery::default()),
+            ),
+            (
+                "MemoryStatsQuery",
+                ServerPayload::MemoryStatsQuery(proto::MemoryStatsQuery::default()),
+            ),
+            (
+                "MemoryConsolidateQuery",
+                ServerPayload::MemoryConsolidateQuery(proto::MemoryConsolidateQuery::default()),
+            ),
+            (
+                "MemoryDeleteQuery",
+                ServerPayload::MemoryDeleteQuery(proto::MemoryDeleteQuery::default()),
+            ),
+            (
+                "QueryConfig",
+                ServerPayload::QueryConfig(proto::QueryConfig::default()),
+            ),
+            (
+                "GetSessionStateQuery",
+                ServerPayload::GetSessionStateQuery(proto::GetSessionStateQuery::default()),
+            ),
+            (
+                "GetLatestSessionQuery",
+                ServerPayload::GetLatestSessionQuery(proto::GetLatestSessionQuery::default()),
+            ),
+        ];
+        for (name, payload) in query_cases {
+            let msg = proto::ServerMessage {
+                request_id: 1,
+                payload: Some(payload.clone()),
+            };
+            assert!(
+                is_gateway_query_payload(&msg),
+                "{name} must be classified as a Gateway query payload (request-response), \
+                 otherwise the Runtime will drop it and the Gateway HTTP handler will time out",
+            );
+        }
+
+        // Sanity check: an unrelated push-style payload must NOT be classified
+        // as a query, so it stays on the push channel.
+        let push_msg = proto::ServerMessage {
+            request_id: 0,
+            payload: Some(ServerPayload::BudgetInfo(proto::BudgetInfo {
+                remaining_tokens: 0,
+                remaining_cost_usd: 0.0,
+            })),
+        };
+        assert!(!is_gateway_query_payload(&push_msg));
     }
 }
