@@ -211,28 +211,26 @@ export function ToolsTab() {
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
-            {builtinToolsAll.map((entry) => (
-              <label
-                key={entry.name}
-                className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  checked={entry.enabled}
-                  onChange={() => toggleBuiltinTool(entry.name)}
-                  disabled={builtinSaving || !selectedAgentId}
-                  className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                      {entry.name}
-                    </span>
-                  </div>
-                </div>
-              </label>
-            ))}
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
+              {builtinToolsAll.map((entry) => (
+                <label
+                  key={entry.name}
+                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={entry.enabled}
+                    onChange={() => toggleBuiltinTool(entry.name)}
+                    disabled={builtinSaving || !selectedAgentId}
+                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                  />
+                  <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                    {entry.name}
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
         )}
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
@@ -252,68 +250,70 @@ export function ToolsTab() {
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
-            {searchProviders.map((sp) => {
-              const active = activeSearch.find((p) => p.provider === sp.id);
-              const isChecked = !!active;
-              const priority = active?.priority;
-              const hasKey = !!sp.id; // Providers listed here already have vault keys
-              const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
-              return (
-                <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
-                  <div
-                    className={`flex items-center gap-2 py-1 px-1.5 rounded ${hasKey
-                      ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                      : "opacity-50"
-                      }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => toggleSearchProvider(sp.id)}
-                      disabled={searchSaving || !hasKey}
-                      className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-[11px] font-medium ${hasKey
-                          ? "text-zinc-700 dark:text-zinc-300"
-                          : "text-zinc-400 dark:text-zinc-500"
-                          }`}>
-                          {sp.name || sp.id}
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
+              {searchProviders.map((sp) => {
+                const active = activeSearch.find((p) => p.provider === sp.id);
+                const isChecked = !!active;
+                const priority = active?.priority;
+                const hasKey = !!sp.id; // Providers listed here already have vault keys
+                const activeIdx = activeSearch.findIndex((p) => p.provider === sp.id);
+                return (
+                  <Tooltip key={sp.id} content={hasKey ? "" : t("agentSetup.noApiKey")} variant="plain">
+                    <div
+                      className={`flex items-center gap-2 px-3 py-2 transition-colors ${hasKey
+                        ? "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                        : "opacity-50"
+                        }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSearchProvider(sp.id)}
+                        disabled={searchSaving || !hasKey}
+                        className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[11px] font-medium ${hasKey
+                            ? "text-zinc-700 dark:text-zinc-300"
+                            : "text-zinc-400 dark:text-zinc-500"
+                            }`}>
+                            {sp.name || sp.id}
+                          </span>
+                          {isChecked && priority !== undefined && (
+                            <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
+                              {t("agentSetup.priority", { value: priority })}
+                            </span>
+                          )}
+                          {!hasKey && (
+                            <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
+                              {t("agentSetup.noKey")}
+                            </span>
+                          )}
+                        </div>
+                        <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                          {sp.description || sp.base_url || ""}
                         </span>
-                        {isChecked && priority !== undefined && (
-                          <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
-                            {t("agentSetup.priority", { value: priority })}
-                          </span>
-                        )}
-                        {!hasKey && (
-                          <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] text-amber-600 dark:bg-amber-900/30 dark:text-amber-400">
-                            {t("agentSetup.noKey")}
-                          </span>
-                        )}
                       </div>
-                      <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
-                        {sp.description || sp.base_url || ""}
-                      </span>
+                      {isChecked && activeIdx > 0 && (
+                        <Tooltip content={t("agentSetup.moveUp")} variant="plain">
+                          <button
+                            onClick={() => moveSearchProviderUp(sp.id)}
+                            disabled={searchSaving}
+                            className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="m18 15-6-6-6 6" />
+                            </svg>
+                          </button>
+                        </Tooltip>
+                      )}
                     </div>
-                    {isChecked && activeIdx > 0 && (
-                      <Tooltip content={t("agentSetup.moveUp")} variant="plain">
-                        <button
-                          onClick={() => moveSearchProviderUp(sp.id)}
-                          disabled={searchSaving}
-                          className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="m18 15-6-6-6 6" />
-                          </svg>
-                        </button>
-                      </Tooltip>
-                    )}
-                  </div>
-                </Tooltip>
-              );
-            })}
+                  </Tooltip>
+                );
+              })}
+            </div>
           </div>
         )}
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
@@ -333,37 +333,39 @@ export function ToolsTab() {
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto space-y-1 rounded-md border border-zinc-200 bg-white py-3 px-1.5 dark:border-zinc-700 dark:bg-zinc-800">
-            {catalog.map((server) => {
-              const isChecked = activeServers.includes(server.name);
-              return (
-                <label
-                  key={server.name}
-                  className="flex items-center gap-2 py-1 px-1.5 rounded hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
-                    disabled={activationLoading || !selectedAgentId}
-                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                        {server.name}
-                      </span>
-                      <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
-                        {server.transport}
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
+              {catalog.map((server) => {
+                const isChecked = activeServers.includes(server.name);
+                return (
+                  <label
+                    key={server.name}
+                    className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
+                      disabled={activationLoading || !selectedAgentId}
+                      className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                          {server.name}
+                        </span>
+                        <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] text-zinc-400 dark:bg-zinc-700">
+                          {server.transport}
+                        </span>
+                      </div>
+                      <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
+                        {server.command || server.url || ""}
                       </span>
                     </div>
-                    <span className="block text-[9px] text-zinc-400 dark:text-zinc-500 leading-tight">
-                      {server.command || server.url || ""}
-                    </span>
-                  </div>
-                </label>
-              );
-            })}
+                  </label>
+                );
+              })}
+            </div>
           </div>
         )}
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
