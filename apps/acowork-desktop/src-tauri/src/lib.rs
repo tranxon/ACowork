@@ -26,7 +26,8 @@ mod commands;
 mod gateway_client;
 mod state;
 mod tray;
-
+#[cfg(target_os = "windows")]
+mod win_wndproc;
 use state::AppState;
 use tauri::Manager;
 
@@ -415,15 +416,88 @@ pub fn run() {
                 let _ = main_window.set_effects(effects);
             }
 
-            // ── Disable native decorations on non-macOS ─────────────────
-            // On Windows/Linux, titleBarStyle:"Overlay" is ignored but
-            // decorations:true from tauri.conf.json still renders a native
-            // OS title bar with wrong colors.  We disable it here so the
-            // frontend's custom TitleBar component is the only one visible.
+            // ── Disable native decorations ──────────────────────────────
+            // set_decorations(false) removes the title bar on Linux and Windows.
+            // macOS uses native traffic lights with titleBarStyle: Overlay
+            // (configured in tauri.conf.json), so decorations stay On.
             #[cfg(not(target_os = "macos"))]
             {
                 let main_window = app.get_webview_window("main").expect("no main window");
                 let _ = main_window.set_decorations(false);
+            }
+
+            // ── Windows: restore WS_SYSMENU | WS_MINIMIZEBOX ─────────
+            // set_decorations(false) strips WS_SYSMENU and WS_MINIMIZEBOX,
+            // which breaks taskbar button behavior:
+            //   • Explorer needs WS_SYSMENU → system menu for right-click
+            //   • Explorer needs WS_MINIMIZEBOX → minimize/restore on left-click
+            // Without these, Explorer falls back to showing the system menu
+            // on both left-click and right-click.  We put them back into the
+            // window style and force a fresh system menu so the taskbar
+            // button behaves correctly.  The title bar stays hidden because
+            // decorations are already disabled.
+            //
+            // A WndProc subclass (win_wndproc.rs) catches any remaining
+            // SC_MOUSEMENU/SC_KEYMENU that Explorer might send as fallback.
+            #[cfg(target_os = "windows")]
+            {
+                use std::ffi::c_void;
+
+                unsafe extern "system" {
+                    fn GetWindowLongPtrW(h: *mut c_void, n: i32) -> isize;
+                    fn SetWindowLongPtrW(h: *mut c_void, n: i32, v: isize) -> isize;
+                    fn SetWindowPos(
+                        h: *mut c_void,
+                        insert_after: *mut c_void,
+                        x: i32, y: i32, cx: i32, cy: i32,
+                        flags: u32,
+                    ) -> i32;
+                    fn GetSystemMenu(h: *mut c_void, b: i32) -> *mut c_void;
+                }
+
+                const GWL_STYLE: i32 = -16;
+                const WS_SYSMENU: isize = 0x0008_0000;
+                const WS_MINIMIZEBOX: isize = 0x0002_0000;
+                const SWP_FRAMECHANGED: u32 = 0x0020;
+                const SWP_NOMOVE: u32 = 0x0002;
+                const SWP_NOSIZE: u32 = 0x0001;
+                const SWP_NOZORDER: u32 = 0x0004;
+                const SWP_NOACTIVATE: u32 = 0x0010;
+
+                let main_window = app.get_webview_window("main").expect("no main window");
+                if let Ok(hwnd) = main_window.hwnd() {
+                    let raw = hwnd.0 as *mut c_void;
+                    unsafe {
+                        let style = GetWindowLongPtrW(raw, GWL_STYLE);
+                        let needed = WS_SYSMENU | WS_MINIMIZEBOX;
+                        if style & needed != needed {
+                            SetWindowLongPtrW(raw, GWL_STYLE, style | needed);
+                            // SWP_FRAMECHANGED triggers WM_NCCALCSIZE to recalc the
+                            // non-client area, which DWM uses to render the frame.
+                            // SWP_NOACTIVATE prevents focus change.
+                            SetWindowPos(
+                                raw, std::ptr::null_mut(),
+                                0, 0, 0, 0,
+                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                            // TRUE → force fresh copy of default system menu
+                            GetSystemMenu(raw, 1);
+                            tracing::info!(
+                                "Restored WS_SYSMENU|WS_MINIMIZEBOX + rebuilt system menu"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ── Windows: WndProc subclass for taskbar left-click ────
+            #[cfg(target_os = "windows")]
+            {
+                let main_window = app.get_webview_window("main").expect("no main window");
+                if let Ok(hwnd) = main_window.hwnd() {
+                    let raw = hwnd.0 as *mut std::ffi::c_void;
+                    let _ = unsafe { crate::win_wndproc::install(raw) };
+                }
             }
 
             // Spawn async task for automatic sleep detection.

@@ -2,6 +2,7 @@
 
 use crate::state::AppState;
 use tauri::{AppHandle, Manager, menu::MenuEvent, tray::TrayIconEvent};
+use tauri::tray::MouseButton;
 
 /// Handle tray menu events
 pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
@@ -53,12 +54,26 @@ pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
 }
 
 /// Handle tray icon click events
+///
+/// Left-click: show & focus the main window (like WeChat/QQ).
+/// Right-click: system shows the attached menu automatically — do nothing.
 pub fn on_tray_icon_event(tray: &tauri::tray::TrayIcon, event: TrayIconEvent) {
-    if let TrayIconEvent::Click { .. } = event {
-        let app = tray.app_handle();
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
+    match event {
+        TrayIconEvent::Click { button, .. } if button == MouseButton::Left => {
+            let app = tray.app_handle();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
         }
+        TrayIconEvent::DoubleClick { .. } => {
+            // Double-click (Windows only): also show & focus
+            let app = tray.app_handle();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+        _ => {} // Right-click → menu auto-shown by .menu()
     }
 }
