@@ -29,9 +29,22 @@ triggers = []
 # System Agent does NOT declare identity_deps — it IS the identity provider
 identity_deps = []
 
-# System Agent tools
-# Builtin tools are always active — no need to declare them here.
-# The [[tools]] section is reserved for future scope-limiting (optional).
+# Tool opt-in declarations (ADR-029).
+# System Agent is the identity & preferences provider — the always-on system
+# component. Tool set is kept intentionally minimal (no FS / Network / Shell
+# permissions declared → no related tools): only what's required to serve
+# other agents and persist identity data.
+
+# --- Memory (user identity & preferences) ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Cross-agent messaging ---
+[[tools]]
+name = "intent_send"
 
 [llm]
 temperature = 0.5

@@ -30,8 +30,64 @@ type = "MemoryRead"
 [[permissions]]
 type = "MemoryWrite"
 
-# Builtin tools are always active — no need to declare them here.
-# The [[tools]] section is reserved for future scope-limiting (optional).
+# Tool opt-in declarations (ADR-029).
+# QA Manager focuses on quality strategy, test planning, test case design,
+# defect management, release acceptance, and regression management. This is a
+# planning/management role, not a test-execution role — tools cover authoring
+# and review, not running test commands:
+#   - file_*/doc_reader/glob_search/content_search → test plans, cases, defect reports
+#   - http_request/web_fetch/web_search            → research test tools & practices
+#   - memory_*                                     → quality history & known issues
+#   - intent_send                                  → coordinate with dev/PM agents
+#   - ask_user_question, todo_write                → clarify acceptance & track plans
+# No shell tools — this QA role is management-focused, not test execution.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "file_write"
+
+[[tools]]
+name = "file_edit"
+
+[[tools]]
+name = "doc_reader"
+
+[[tools]]
+name = "glob_search"
+
+[[tools]]
+name = "content_search"
+
+# --- Network ---
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "web_search"  # conditional: needs search provider
+
+# --- Inter-agent ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
 
 [llm]
 temperature = 0.1

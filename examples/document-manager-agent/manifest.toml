@@ -30,8 +30,63 @@ type = "MemoryRead"
 [[permissions]]
 type = "MemoryWrite"
 
-# Builtin tools are always active — no need to declare them here.
-# Network permission supports collecting references and source documents when allowed.
+# Tool opt-in declarations (ADR-029).
+# Document Manager focuses on collecting, organizing, archiving, writing,
+# reviewing, and converting documentation. Tools cover the full doc lifecycle:
+#   - doc_reader              → PRIMARY tool: read PDF/Word/Excel/PowerPoint
+#   - file_*/glob_search/content_search → organize, write, search knowledge base
+#   - http_request/web_fetch/web_search → gather external references
+#   - memory_*                → knowledge-base persistence across sessions
+#   - intent_send             → coordinate with content-owner agents
+#   - ask_user_question, todo_write → clarify scope & track doc tasks
+# No shell tools — Doc Manager does not hold a Shell permission.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "file_write"
+
+[[tools]]
+name = "file_edit"
+
+[[tools]]
+name = "doc_reader"
+
+[[tools]]
+name = "glob_search"
+
+[[tools]]
+name = "content_search"
+
+# --- Network ---
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "web_search"  # conditional: needs search provider
+
+# --- Inter-agent ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
 
 [llm]
 temperature = 0.3

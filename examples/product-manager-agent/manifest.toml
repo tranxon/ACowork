@@ -30,8 +30,62 @@ type = "MemoryRead"
 [[permissions]]
 type = "MemoryWrite"
 
-# Builtin tools are always active — no need to declare them here.
-# Network permission allows reading product references, analytics exports, and Figma design links when tools support it.
+# Tool opt-in declarations (ADR-029).
+# Product Manager focuses on strategy, PRD writing, roadmap prioritization,
+# Figma/feature review, and launch planning. Tools cover those workflows:
+#   - file_*/doc_reader/glob_search/content_search → PRDs, specs, references
+#   - http_request/web_fetch/web_search            → market & competitor research
+#   - memory_*                                     → long-term project context
+#   - intent_send                                  → coordinate with engineering agents
+#   - ask_user_question, todo_write                → gather requirements & track plans
+# No shell tools — PM does not hold a Shell permission.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "file_write"
+
+[[tools]]
+name = "file_edit"
+
+[[tools]]
+name = "doc_reader"
+
+[[tools]]
+name = "glob_search"
+
+[[tools]]
+name = "content_search"
+
+# --- Network ---
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "web_search"  # conditional: needs search provider
+
+# --- Inter-agent ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
 
 [llm]
 temperature = 0.7

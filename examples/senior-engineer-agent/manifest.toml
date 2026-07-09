@@ -33,8 +33,85 @@ type = "MemoryRead"
 [[permissions]]
 type = "MemoryWrite"
 
-# Builtin tools are always active — no need to declare them here.
-# The [[tools]] section is reserved for future scope-limiting (optional).
+# Built-in tool opt-in declarations (ADR-029)
+# Each [[tools]] entry seeds `agent_tools.json` with `enabled = true` on first start.
+# Tools NOT listed here are registered in code but kept disabled (opt-in model).
+#
+# Conditionally-registered tools (no-ops when runtime lacks the required capability):
+#   - `web_search`: requires a configured search provider (brave/tavily/serper/...)
+#   - `codebase`  : requires an LSP Relay endpoint
+#   - shell tools : names are platform-detected. We declare all three (`bash`,
+#                   `powershell`, `shell`) so a senior engineer always has shell
+#                   access on every platform — `init_tools_config_from_manifest`
+#                   silently drops names that the runtime hasn't registered.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "file_write"
+
+[[tools]]
+name = "file_edit"
+
+[[tools]]
+name = "doc_reader"
+
+[[tools]]
+name = "glob_search"
+
+[[tools]]
+name = "content_search"
+
+# --- Network ---
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "web_search"  # conditional: needs search provider
+
+# --- Code intelligence ---
+[[tools]]
+name = "codebase"  # conditional: needs LSP Relay
+
+# --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
+[[tools]]
+name = "bash"        # Windows (Git Bash installed)
+
+[[tools]]
+name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+
+[[tools]]
+name = "shell"       # Linux / macOS
+
+# --- Inter-agent messaging ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow primitives ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
+
+# --- MCP lifecycle (per-agent) ---
+[[tools]]
+name = "mcp_install"
+
+[[tools]]
+name = "mcp_uninstall"
 
 [llm]
 temperature = 0.1

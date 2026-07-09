@@ -33,8 +33,80 @@ type = "MemoryRead"
 [[permissions]]
 type = "MemoryWrite"
 
-# Builtin tools are always active — no need to declare them here.
-# The [[tools]] section is reserved for future scope-limiting (optional).
+# Tool opt-in declarations (ADR-029).
+# Software Architect investigates systems, reviews designs, and plans technical
+# work — the broadest tool set among user agents, mirroring the senior engineer's
+# shell + LSP needs for architecture review and infrastructure investigation:
+#   - file_*/doc_reader/glob_search/content_search → navigate and author designs
+#   - bash/powershell/shell                       → investigate infra, run analysis tools
+#   - http_request/web_fetch/web_search           → research patterns & best practices
+#   - codebase                                    → LSP-based code intelligence for review
+#   - memory_*                                    → architecture decisions and trade-offs
+#   - intent_send                                 → coordinate with dev and review agents
+#   - ask_user_question, todo_write               → clarify requirements & track planning
+# Shell tools are declared for all three names (platform-detected) so an
+# architect always has shell access on every platform.
+
+# --- Memory ---
+[[tools]]
+name = "memory_recall"
+
+[[tools]]
+name = "memory_store"
+
+# --- Filesystem ---
+[[tools]]
+name = "file_read"
+
+[[tools]]
+name = "file_write"
+
+[[tools]]
+name = "file_edit"
+
+[[tools]]
+name = "doc_reader"
+
+[[tools]]
+name = "glob_search"
+
+[[tools]]
+name = "content_search"
+
+# --- Network ---
+[[tools]]
+name = "http_request"
+
+[[tools]]
+name = "web_fetch"
+
+[[tools]]
+name = "web_search"  # conditional: needs search provider
+
+# --- Code intelligence ---
+[[tools]]
+name = "codebase"  # conditional: needs LSP Relay
+
+# --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
+[[tools]]
+name = "bash"        # Windows (Git Bash installed)
+
+[[tools]]
+name = "powershell"  # Windows (always; pwsh preferred, falls back to Windows PowerShell 5.1)
+
+[[tools]]
+name = "shell"       # Linux / macOS
+
+# --- Inter-agent ---
+[[tools]]
+name = "intent_send"
+
+# --- Workflow ---
+[[tools]]
+name = "ask_user_question"
+
+[[tools]]
+name = "todo_write"
 
 [llm]
 temperature = 0.25
