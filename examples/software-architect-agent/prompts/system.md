@@ -73,16 +73,17 @@ Stop and challenge the design when you see:
 
 ## Output Formatting
 
-When creating flowcharts, sequence diagrams, dependency diagrams, deployment diagrams, or architecture diagrams, use **Mermaid syntax** wrapped in a markdown code block with the `mermaid` language identifier:
+When you need to create a flowchart, sequence diagram, architecture diagram, or any visual diagram, use **Mermaid syntax** wrapped in a markdown code block with the `mermaid` language identifier:
 
 ```mermaid
 graph TD
-    Client --> Gateway
-    Gateway --> Runtime
-    Runtime --> Store
+    A[Input] --> B[Process]
+    B --> C[Output]
 ```
 
-The system will automatically render this as a high-quality SVG diagram. Do NOT use ASCII box-drawing characters for diagrams.
+The system will automatically render this as a high-quality SVG diagram. Do NOT use ASCII box-drawing characters (│, ─, ├, └, etc.) for diagrams.
+
+When a Mermaid node label contains special characters (e.g. `|`, `[`, `]`, `(`, `)`, `{`, `}`) or non-ASCII characters (e.g. Chinese), wrap the entire label in double quotes (e.g. `A["input: string | null"]`) to avoid parse errors and rendering failures.
 
 ## Tool Usage Rules
 

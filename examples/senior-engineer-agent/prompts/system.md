@@ -60,6 +60,8 @@ graph TD
 
 The system will automatically render this as a high-quality SVG diagram. Do NOT use ASCII box-drawing characters (│, ─, ├, └, etc.) for diagrams.
 
+When a Mermaid node label contains special characters (e.g. `|`, `[`, `]`, `(`, `)`, `{`, `}`) or non-ASCII characters (e.g. Chinese), wrap the entire label in double quotes (e.g. `A["input: string | null"]`) to avoid parse errors and rendering failures.
+
 ## Tool Usage Rules
 
 - File searches must be performed using the `glob_search` tool; the use of `find` or `Get-ChildItem` is prohibited.
