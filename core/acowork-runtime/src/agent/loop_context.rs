@@ -16,6 +16,35 @@ use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
+// ── Context compression thresholds ─────────────────────────────────────
+// All percentages are relative to the **effective usable input budget**
+// (`ModelCapabilitiesInfo::effective_input_budget`, i.e. context_window
+// minus the reserved output space).
+//
+// They drive a multi-tier strategy (ADR-011):
+//   WARN      → soft log / preemptive history trim before appending tool
+//               results that would push the total over this threshold.
+//   COMPACT   → trigger LLM-based compaction (`compact_via_llm` +
+//               `replace_middle_with_summary`).
+//   HARD      → force `emergency_trim` before the next LLM call (the
+//               chat request is rebuilt after trimming).
+//   CRITICAL  → `emergency_trim` safety net, applied directly when usage
+//               jumps to ≥ this, or post-compaction if compaction alone
+//               didn't bring usage back under it.
+pub(crate) const CONTEXT_WARN_PERCENT: f64 = 70.0;
+pub(crate) const CONTEXT_COMPACT_PERCENT: f64 = 80.0;
+pub(crate) const CONTEXT_HARD_PERCENT: f64 = 90.0;
+pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
+
+/// Number of conversational rounds kept at the tail after LLM compaction.
+/// A round begins with a User message, so this preserves the last N User
+/// messages and everything after them. Consumed by both
+/// [`HistoryManager::replace_middle_with_summary`] and the
+/// `CompactionEventMeta` record persisted in the JSONL session log (the
+/// session restorer reads the most recent such event to anchor the replay
+/// window on cold-start resume).
+pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
+
 impl AgentLoop {
     /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
     /// message rebuilds the Provider from the global cache).
@@ -55,15 +84,10 @@ impl AgentLoop {
         // new cap without waiting for the next LLM response.
         if overrides.context_window.is_some() {
             let model_name = self.resolve_current_model(None);
-            if let Some(caps) = self.core.get_model_capabilities(&model_name) {
-                let max_output = self.core.max_output_tokens_limit_for_model(&model_name);
+            if let Some((caps, effective_window, effective_usable)) =
+                self.effective_context_budget(&model_name)
+            {
                 let total_tokens = self.session.history.token_count();
-                let effective_window = match self.core.context_window_override {
-                    Some(0) | None => caps.context_window,
-                    Some(cap) => cap.min(caps.context_window),
-                };
-                let usable = caps.effective_input_budget(max_output);
-                let effective_usable = usable.min(effective_window);
                 let percent = if effective_usable > 0 {
                     ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
                 } else {
@@ -118,6 +142,32 @@ impl AgentLoop {
     /// are unavailable.
     pub(crate) fn context_trim_budget(&self, model_name: &str) -> u64 {
         self.core.context_trim_budget(model_name)
+    }
+
+    /// Resolve the effective (clamped) context budget for **display** and
+    /// threshold checks in this file.
+    ///
+    /// Returns `(caps, effective_window, effective_usable)` if model
+    /// capabilities are available, otherwise `None`.
+    ///
+    /// This is the **display-layer** budget: it considers only the runtime
+    /// `context_window_override`, not `manifest_context_window` or the
+    /// `DEFAULT_CONTEXT_WINDOW` fallback. The latter two feed
+    /// [`Self::context_trim_budget`] (the actual trim threshold), and the
+    /// divergence is intentional — the UI shows the model's full capacity
+    /// by default while trimming honours user-imposed caps.
+    pub(crate) fn effective_context_budget(
+        &self,
+        model_name: &str,
+    ) -> Option<(acowork_core::protocol::ModelCapabilitiesInfo, u64, u64)> {
+        let caps = self.core.get_model_capabilities(model_name)?;
+        let max_output_limit = self.core.max_output_tokens_limit_for_model(model_name);
+        let usable = caps.effective_input_budget(max_output_limit);
+        let effective_window = match self.core.context_window_override {
+            Some(0) | None => caps.context_window,
+            Some(cap) => cap.min(caps.context_window),
+        };
+        Some((caps, effective_window, usable.min(effective_window)))
     }
 
     /// Trim history to fit within the context window budget.
@@ -208,7 +258,7 @@ impl AgentLoop {
     ///
     /// Per [ADR-011], this implements the three-stage compaction strategy:
     /// - 80% usage → LLM-based compaction (`compact_via_llm` + `replace_middle_with_summary`)
-    /// - 95% usage → emergency trim (safety net)
+    /// - `CONTEXT_CRITICAL_PERCENT` usage → emergency trim (safety net)
     ///
     /// When `force` is true (manual trigger from user), the 80% threshold is
     /// bypassed and compaction proceeds regardless of current usage percentage.
@@ -216,10 +266,6 @@ impl AgentLoop {
     /// Called after each LLM response (force=false) and on manual user trigger
     /// (force=true via `SessionMessage::CompactContext`).
     pub(crate) async fn compact_history_if_needed(&mut self, model_name: &str, force: bool) {
-        /// Number of conversational rounds to keep at the tail after compaction.
-        /// Each round starts with a User message, so this keeps the last N user
-        /// messages and everything after them.
-        const KEEP_LAST_ROUNDS: usize = 3;
         let budget = self.context_trim_budget(model_name);
         let current_tokens = self.session.history.token_count();
 
@@ -229,8 +275,9 @@ impl AgentLoop {
 
         let usage_percent = (current_tokens as f64 / budget as f64) * 100.0;
 
-        // Stage 2: 80% → LLM-based compaction (or force=true bypasses threshold)
-        if force || usage_percent >= 80.0 {
+        // Stage 2: CONTEXT_COMPACT_PERCENT → LLM-based compaction
+        // (or force=true bypasses threshold).
+        if force || usage_percent >= CONTEXT_COMPACT_PERCENT {
             tracing::info!(
                 usage_percent = ?usage_percent,
                 current_tokens,
@@ -357,12 +404,12 @@ impl AgentLoop {
                     );
 
                     // Stage 3: 95% → emergency trim (safety net, even after compaction)
-                    if new_usage >= 95.0 {
+                    if new_usage >= CONTEXT_CRITICAL_PERCENT {
                         let em_removed = self.session.history.emergency_trim();
                         tracing::warn!(
                             em_removed,
                             after_usage = ?new_usage,
-                            "Emergency trim performed after compaction (still >= 95%)"
+                            "Emergency trim performed after compaction (still >= CONTEXT_CRITICAL_PERCENT)"
                         );
                     }
                 }
@@ -375,6 +422,12 @@ impl AgentLoop {
                     if self.session.history.token_count() > budget {
                         self.session.history.emergency_trim();
                     }
+                    // Same per-message cap as the successful `trim_history_to_budget`
+                    // path — without this, a single oversized tool result could
+                    // survive the fallback and still block the next LLM call.
+                    self.session
+                        .history
+                        .truncate_large_messages(budget / 4);
                 }
             }
 
@@ -385,15 +438,9 @@ impl AgentLoop {
             let _ = self.session_core.try_send_chunk(ChunkEvent::CompactingEnded);
 
             // Compute and send updated context usage after compaction.
-            let caps = self.core.get_model_capabilities(model_name);
-            if let Some(caps) = caps {
-                let max_output_limit = self.core.max_output_tokens_limit_for_model(model_name);
-                let usable = caps.effective_input_budget(max_output_limit);
-                let effective_window = match self.core.context_window_override {
-                    Some(0) | None => caps.context_window,
-                    Some(cap) => cap.min(caps.context_window),
-                };
-                let effective_usable = usable.min(effective_window);
+            if let Some((caps, effective_window, effective_usable)) =
+                self.effective_context_budget(model_name)
+            {
                 let total_tokens = self.session.history.token_count();
                 let usage_percent = if effective_usable > 0 {
                     ((total_tokens as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
@@ -431,16 +478,16 @@ impl AgentLoop {
                 ctx_info.agent_total_output_tokens = Some(agent_out);
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
-        } else if usage_percent >= 95.0 {
+        } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
             // Stage 3: emergency trim without attempting compaction
-            // (when usage jumps directly to >= 95%)
+            // (when usage jumps directly to >= CONTEXT_CRITICAL_PERCENT)
             let removed = self.session.history.emergency_trim();
             tracing::warn!(
                 removed,
                 usage_percent = ?usage_percent,
                 current_tokens,
                 budget,
-                "Emergency trim performed (usage >= 95%)"
+                "Emergency trim performed (usage >= CONTEXT_CRITICAL_PERCENT)"
             );
         }
     }
@@ -589,8 +636,8 @@ impl AgentLoop {
     /// Returns `true` if the chat_request needs to be rebuilt after trimming.
     pub(crate) fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
         let usable = self.context_trim_budget(current_model);
-        let warn_threshold = (usable as f64 * 0.70) as u64;
-        let hard_threshold = (usable as f64 * 0.90) as u64;
+        let warn_threshold = (usable as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
+        let hard_threshold = (usable as f64 * (CONTEXT_HARD_PERCENT / 100.0)) as u64;
         let current_tokens = self.session.history.token_count();
 
         if current_tokens > hard_threshold {
@@ -684,12 +731,11 @@ impl AgentLoop {
                         self.core.context_window_override,
                     )
                 } else {
-                    let usable = caps.effective_input_budget(max_output_limit);
-                    let effective_window = match self.core.context_window_override {
-                        Some(0) | None => caps.context_window,
-                        Some(cap) => cap.min(caps.context_window),
-                    };
-                    let effective_usable = usable.min(effective_window);
+                    // Re-resolve via the helper: model_caps in scope and the
+                    // helper agree (same source), so this is infallible here.
+                    let (caps, effective_window, effective_usable) = self
+                        .effective_context_budget(current_model)
+                        .expect("model_caps already verified Some above");
                     let percent = if effective_usable > 0 {
                         ((local_estimate as f64 / effective_usable as f64) * 100.0).min(100.0) as u8
                     } else {
@@ -804,7 +850,7 @@ impl AgentLoop {
             .map(|r| crate::token::count_text(r, current_model) as u64)
             .sum();
         let usable_budget = self.context_trim_budget(current_model);
-        let trim_threshold = (usable_budget as f64 * 0.70) as u64;
+        let trim_threshold = (usable_budget as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
         let current_tokens = self.session.history.token_count();
         if current_tokens.saturating_add(result_tokens_estimate) > trim_threshold {
             tracing::info!(
