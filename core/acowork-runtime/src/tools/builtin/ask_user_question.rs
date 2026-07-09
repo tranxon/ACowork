@@ -56,7 +56,7 @@ pub struct AskQuestionParams {
     pub timeout_seconds: Option<u32>,
 }
 
-/// Result returned from the user's response (received via IPC from Gateway)
+/// Result returned from the user's response (received via gRPC from Gateway)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskQuestionAnswer {
     /// The request_id this answer corresponds to

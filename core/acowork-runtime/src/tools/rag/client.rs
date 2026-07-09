@@ -26,7 +26,8 @@ impl RagAuthCredential {
     /// Parse auth_ref and auth_type from manifest into a credential.
     ///
     /// `auth_ref` format: "vault:<provider_name>" (e.g., "vault:rag_enterprise_key")
-    /// The actual key value is obtained from Vault via IPC handshake.
+    /// The actual key value is obtained from Vault via the gRPC handshake
+/// (AgentHello carries the API key distribution).
     ///
     /// # Arguments
     /// * `auth_ref` - Vault reference string from manifest

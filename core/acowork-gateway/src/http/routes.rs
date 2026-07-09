@@ -18,14 +18,10 @@ use tokio::sync::RwLock;
 use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
 use crate::http::auth::HttpAuth;
-use crate::ipc::global_push::GlobalResourcePusher;
-use crate::ipc::session::SessionManager;
+use crate::grpc::resource_pusher::GlobalResourcePusher;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
-
-/// Shared session manager type (same as IPC server)
-pub type SharedSessionMgr = Arc<tokio::sync::Mutex<SessionManager>>;
 
 /// Bridge event type — known event types for Agent → HTTP client forwarding
 ///
@@ -79,7 +75,7 @@ pub enum BridgeEventType {
 }
 
 impl BridgeEventType {
-    /// Map an IPC action string to a BridgeEventType.
+    /// Map a gRPC action string to a BridgeEventType.
     /// Returns None for unrecognized actions.
     pub fn from_action(action: &str) -> Option<Self> {
         match action {
@@ -163,9 +159,9 @@ pub struct BridgeEvent {
 /// Pending session request map (S1.14)
 ///
 /// When the Gateway HTTP API forwards a session query to the Runtime
-/// via IPC (IntentReceived push), it stores a oneshot sender here
+/// via gRPC (IntentReceived push), it stores a oneshot sender here
 /// keyed by request_id. When the Runtime sends the result back via
-/// IntentSend with action "session_response", the IPC dispatch handler
+/// IntentSend with action "session_response", the gRPC dispatch handler
 /// finds the pending sender and fulfills it, which unblocks the
 /// HTTP handler awaiting the oneshot receiver.
 pub type SessionPendingRequests = Arc<
@@ -181,20 +177,17 @@ pub struct AppState {
     pub gateway_state: SharedHttpState,
     /// HTTP authentication
     pub auth: Arc<HttpAuth>,
-    /// Shared session manager for pushing messages to agents
-    /// Set by Gateway::run() when the IPC server is initialized
-    pub session_mgr: Option<SharedSessionMgr>,
+    /// gRPC session manager for Gateway→Runtime push + request-response
+    pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     /// P2 (ADR-020): Bridge control channel for all events (tools,
-    /// control, metadata). The IPC/gRPC dispatch publishes here; WebSocket
+    /// control, metadata). The gRPC dispatch publishes here; WebSocket
     /// subscribes. ADR-021 Phase 2: data channel removed — all events
     /// now flow through this single control channel.
     pub bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    /// Pending session requests for IPC response correlation (S1.14)
+    /// Pending session requests for gRPC response correlation (S1.14)
     pub session_pending: SessionPendingRequests,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
-    /// gRPC session manager for Gateway→Runtime request-response
-    pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     /// Unified global resource pusher (provider/model, MCP catalog, …)
     pub pusher: Option<Arc<GlobalResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
@@ -206,20 +199,19 @@ impl AppState {
     pub fn new(
         gateway_state: SharedHttpState,
         auth: Arc<HttpAuth>,
-        session_mgr: Option<SharedSessionMgr>,
+        grpc_session_mgr: Option<SharedGrpcSessionMgr>,
         bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
         session_pending: Option<SessionPendingRequests>,
     ) -> Self {
         Self {
             gateway_state,
             auth,
-            session_mgr,
+            grpc_session_mgr,
             bridge_ctrl_tx,
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
             log_reload_handle: None,
-            grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
         }
@@ -229,7 +221,7 @@ impl AppState {
     pub(crate) fn with_config(
         gateway_state: SharedHttpState,
         auth: Arc<HttpAuth>,
-        session_mgr: Option<SharedSessionMgr>,
+        grpc_session_mgr: Option<SharedGrpcSessionMgr>,
         bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
         session_pending: Option<SessionPendingRequests>,
         log_reload_handle: Option<crate::LogReloadHandle>,
@@ -237,13 +229,12 @@ impl AppState {
         Self {
             gateway_state,
             auth,
-            session_mgr,
+            grpc_session_mgr,
             bridge_ctrl_tx,
             session_pending: session_pending.unwrap_or_else(|| {
                 Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
             }),
             log_reload_handle,
-            grpc_session_mgr: None,
             pusher: None,
             cors_enabled: false,
         }
@@ -387,13 +378,13 @@ const MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
 ///
 /// Checks critical dependencies and returns an aggregated status:
 /// - `"ok"` — all checks passed
-/// - `"degraded"` — some checks failed (IPC unavailable, disk low)
+/// - `"degraded"` — some checks failed (gRPC unavailable, disk low)
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     let mut checks = std::collections::HashMap::new();
     let mut has_degraded = false;
 
-    // 1. IPC Session Manager check
-    match &state.session_mgr {
+    // 1. gRPC Session Manager check
+    match &state.grpc_session_mgr {
         Some(_) => {
             checks.insert(
                 "ipc".to_string(),
@@ -825,3 +816,4 @@ mod tests {
         assert!(json.contains("\"chunk\""));
     }
 }
+

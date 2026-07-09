@@ -1827,7 +1827,7 @@ fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
 
 /// `GET /api/agents/{id}/config` — get agent runtime config
 ///
-/// Queries the connected Runtime via QueryConfig IPC for per-agent config
+/// Queries the connected Runtime via QueryConfig gRPC for per-agent config
 /// (Phase 5 refactor: per-agent config is now owned by Runtime workspace).
 /// Merges with Gateway global defaults for the response.
 pub async fn get_agent_config(
@@ -1868,7 +1868,7 @@ pub async fn get_agent_config(
         (global_limit, manifest_cw)
     };
 
-    // Query Runtime workspace config via IPC (QueryConfig → ConfigSnapshot roundtrip).
+    // Query Runtime workspace config via gRPC (QueryConfig → ConfigSnapshot roundtrip).
     let (
         model,
         provider,
@@ -2018,7 +2018,7 @@ pub async fn update_agent_config(
     let req_mcp_servers = req.mcp_servers.clone();
 
     // Push RuntimeConfigUpdate to connected agent
-    if let Some(ref session_mgr) = state.session_mgr {
+    if let Some(ref session_mgr) = state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
             tracing::info!(
@@ -2063,13 +2063,13 @@ pub async fn update_agent_config(
                 agent_id = %agent_id,
                 session_count = mgr.session_count(),
                 authenticated_count = mgr.authenticated_count(),
-                "Cannot push RuntimeConfigUpdate: agent not found in IPC session manager"
+                "Cannot push RuntimeConfigUpdate: agent not found in gRPC session manager"
             );
         }
     } else {
         tracing::warn!(
             agent_id = %agent_id,
-            "Cannot push RuntimeConfigUpdate: session_mgr is None (IPC session manager not initialized)"
+            "Cannot push RuntimeConfigUpdate: session_mgr is None (gRPC session manager not initialized)"
         );
     }
 
@@ -2192,7 +2192,7 @@ pub async fn get_agent_mcp_servers(
 /// 1. Looks up each name in the global MCP catalog to get full config
 /// 2. Merges catalog definitions with any per-agent overrides
 /// 3. Saves the full configs to per-agent config
-/// 4. Pushes RuntimeConfigUpdate to the running agent via IPC
+/// 4. Pushes RuntimeConfigUpdate to the running agent via gRPC
 pub async fn update_agent_mcp_servers(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -2238,7 +2238,7 @@ pub async fn update_agent_mcp_servers(
     }
 
     // Push RuntimeConfigUpdate to connected agent (Runtime persists per-agent config)
-    if let Some(ref session_mgr) = state.session_mgr {
+    if let Some(ref session_mgr) = state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
             tracing::info!(
@@ -2287,13 +2287,13 @@ pub async fn update_agent_mcp_servers(
                 agent_id = %agent_id,
                 session_count = mgr.session_count(),
                 authenticated_count = mgr.authenticated_count(),
-                "Cannot push MCP config: agent not found in IPC session manager. "
+                "Cannot push MCP config: agent not found in gRPC session manager. "
             );
         }
     } else {
         tracing::warn!(
             agent_id = %agent_id,
-            "Cannot push MCP config: session_mgr is None (IPC session manager not initialized)"
+            "Cannot push MCP config: session_mgr is None (gRPC session manager not initialized)"
         );
     }
 
@@ -2450,7 +2450,7 @@ pub async fn update_agent_search_config(
     .map_err(|e| ApiError::internal(&format!("Failed to serialize search config: {}", e)))?;
 
     // Push RuntimeConfigUpdate to connected agent (Runtime persists agent_search.json)
-    if let Some(ref session_mgr) = state.session_mgr {
+    if let Some(ref session_mgr) = state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
             let push_result = session

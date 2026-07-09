@@ -11,7 +11,7 @@ pub mod proto_bridge;
 pub mod proto {
     #![allow(clippy::large_enum_variant)]
     #![allow(clippy::result_large_err)]
-    tonic::include_proto!("acowork.ipc.v1");
+    tonic::include_proto!("acowork.gateway.v1");
 }
 
 pub mod budget;

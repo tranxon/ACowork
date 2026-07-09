@@ -6,7 +6,7 @@
 //! No persistence to disk. Workspace config is maintained by Agent Runtime
 //! (in `agent_workspaces.json`). Gateway caches the config in `RunningAgentInfo`
 //! (in-memory only, cleared on disconnect) to serve HTTP API requests.
-//! CRUD operations serialize the full config → push `WorkspaceConfigUpdate` via IPC.
+//! CRUD operations serialize the full config → push `WorkspaceConfigUpdate` via gRPC.
 //! Agent must be running (HTTP API returns 409 if not).
 
 use axum::{
@@ -112,7 +112,7 @@ async fn get_cached_config(state: &AppState, agent_id: &str) -> Option<Workspace
 
 /// Helper: push WorkspaceConfigUpdate to Runtime and update the cache.
 ///
-/// ADR-009: IPC push is synchronous — we await the result before updating
+/// ADR-009: gRPC push is synchronous — we await the result before updating
 /// the in-memory cache. This avoids TOCTOU where the cache shows a config
 /// that Runtime never received (e.g. channel closed mid-push).
 async fn push_and_cache(
@@ -123,32 +123,20 @@ async fn push_and_cache(
     let config_json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-    // Push to Runtime via IPC first — only update cache on success
-    if let Some(ref session_mgr) = state.session_mgr {
-        let push_tx = {
-            let mgr = session_mgr.lock().await;
-            mgr.find_by_agent_id(agent_id)
-                .and_then(|(_, session)| session.push_sender().cloned())
+    // Push to Runtime via gRPC session — only update cache on success
+    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
+        let push_msg = acowork_core::protocol::GatewayResponse::WorkspaceConfigUpdate {
+            config_json: config_json.clone(),
         };
-        if let Some(push_tx) = push_tx {
-            let push_msg = acowork_core::protocol::GatewayResponse::WorkspaceConfigUpdate {
-                config_json: config_json.clone(),
-            };
-            if push_tx.send(push_msg).await.is_err() {
-                tracing::warn!(
-                    "Failed to push WorkspaceConfigUpdate to agent={} (channel closed)",
-                    agent_id
-                );
-                return Err(format!(
-                    "Agent {} is not reachable (IPC channel closed), cannot update workspace",
-                    agent_id
-                ));
-            }
+        let pushed = {
+            let mgr = grpc_mgr.lock().await;
+            mgr.push_to_agent(agent_id, push_msg).await
+        };
+        if pushed {
             tracing::info!("Pushed WorkspaceConfigUpdate to agent={}", agent_id);
         } else {
-            // Agent has no active IPC session — cannot update workspace
             return Err(format!(
-                "Agent {} has no active IPC session, cannot update workspace",
+                "Agent {} is not reachable (gRPC channel closed), cannot update workspace",
                 agent_id
             ));
         }
@@ -156,7 +144,7 @@ async fn push_and_cache(
         return Err("No session manager available".to_string());
     }
 
-    // IPC push succeeded — now update in-memory cache
+    // gRPC push succeeded — now update in-memory cache
     {
         let mut gw = state.gateway_state.write().await;
         if let Some(info) = gw.running_agents.get_mut(agent_id) {
@@ -316,7 +304,7 @@ pub async fn set_prompt_file(
 /// `PUT /api/agents/{agent_id}/workspaces/current` — set the current (active) workspace
 ///
 /// Optional query param `session_id` enables per-session workspace selection.
-/// When provided, Gateway also sends `SetSessionWorkspace` IPC to the Runtime
+/// When provided, Gateway also sends `SetSessionWorkspace` gRPC to the Runtime
 /// in addition to the `WorkspaceConfigUpdate` (which updates list stats).
 pub async fn set_current_workspace(
     State(state): State<AppState>,
@@ -344,31 +332,28 @@ pub async fn set_current_workspace(
 
     // When session_id is provided, push SetSessionWorkspace to Runtime
     if let Some(ref session_id) = query.session_id
-        && let Some(ref session_mgr) = state.session_mgr {
-            let push_tx = {
-                let mgr = session_mgr.lock().await;
-                mgr.find_by_agent_id(&agent_id)
-                    .and_then(|(_, session)| session.push_sender().cloned())
+        && let Some(ref grpc_mgr) = state.grpc_session_mgr {
+            let push_msg = acowork_core::protocol::GatewayResponse::SetSessionWorkspace {
+                session_id: session_id.clone(),
+                workspace_id: req.workspace_id.clone(),
             };
-            if let Some(push_tx) = push_tx {
-                let push_msg = acowork_core::protocol::GatewayResponse::SetSessionWorkspace {
-                    session_id: session_id.clone(),
-                    workspace_id: req.workspace_id.clone(),
-                };
-                if push_tx.send(push_msg).await.is_err() {
-                    tracing::warn!(
-                        agent_id = %agent_id,
-                        session_id = %session_id,
-                        "Failed to push SetSessionWorkspace (channel closed)"
-                    );
-                } else {
-                    tracing::info!(
-                        agent_id = %agent_id,
-                        session_id = %session_id,
-                        workspace_id = %req.workspace_id,
-                        "Pushed SetSessionWorkspace to Runtime"
-                    );
-                }
+            let pushed = {
+                let mgr = grpc_mgr.lock().await;
+                mgr.push_to_agent(&agent_id, push_msg).await
+            };
+            if pushed {
+                tracing::info!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    workspace_id = %req.workspace_id,
+                    "Pushed SetSessionWorkspace to Runtime"
+                );
+            } else {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    "Failed to push SetSessionWorkspace (channel closed)"
+                );
             }
         }
 

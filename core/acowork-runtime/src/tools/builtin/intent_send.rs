@@ -3,7 +3,7 @@
 //! Per design doc (12-tool-system.md):
 //! - Routed to target Agent via Gateway
 //! - Requires intent:send:<target> permission
-//! - Phase 1 uses IPC client; Phase 2+ supports async Intent
+//! - Phase 1 uses synchronous Intent routing; Phase 2+ supports async Intent
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;

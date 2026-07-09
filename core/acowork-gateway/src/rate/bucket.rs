@@ -186,7 +186,7 @@ impl RateLimiter {
     /// threshold of total capacity, the request is deprioritized.
     pub fn try_acquire(&mut self, provider: &str) -> RateResult {
         // Without a known agent_id, we can't do fair scheduling.
-        // This method is for the simple IPC handler case.
+        // Fall back to the legacy single-bucket path.
         self.try_acquire_for(provider, "default")
     }
 

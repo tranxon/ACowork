@@ -1,7 +1,7 @@
 //! Agent main loop (9 steps)
 //!
 //! The core execution loop for Agent Runtime.
-//! References ZeroClaw agent/loop_.rs but simplified for IPC architecture.
+//! References ZeroClaw agent/loop_.rs but simplified for gRPC transport.
 //!
 //! S1.5: Streaming LLM responses via chat_stream()
 //! S1.6: InboundQueue for external message injection
@@ -48,7 +48,7 @@ pub struct SessionChunkEvent {
 
 /// Streaming chunk event emitted during LLM response generation.
 ///
-/// Adapted from ZeroClaw's DraftEvent, simplified for ACowork's IPC architecture.
+/// Adapted from ZeroClaw's DraftEvent, simplified for ACowork's gRPC transport.
 /// Each delta is forwarded to the Gateway via `StreamChunk` gRPC message,
 /// which maps to a BridgeEventType for the Desktop App WebSocket.
 /// SPDX-License-Identifier: MIT OR Apache-2.0
@@ -1312,10 +1312,9 @@ mod tests {
 
     #[test]
     fn test_agent_loop_with_gateway_client() {
-        // NOTE: We use ipc_client: None because GatewayGrpcClient::connect is
-        // lazy (does not immediately connect), and connecting to a non-existent
-        // server would fail. This test verifies that AgentLoop construction works
-        // correctly, not the gRPC connection.
+        // NOTE: Both chunk_tx and conversation are None because this test is
+        // only verifying that AgentLoop construction works correctly, not the
+        // gRPC streaming connection.
         let config = RuntimeConfig::default();
         let manifest = test_manifest();
         let provider = Arc::new(MockProvider::single_text("ok"));

@@ -501,10 +501,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ── Capture reconnect params for Gateway mode ───────────────────
     let agent_id = config.agent_id.clone();
     let version = loaded.manifest.version.clone();
-    let socket_path = config
-        .get_gateway_address()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
 
     Ok(AgentBootContext {
         loaded,
@@ -532,6 +528,5 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         resource_cache,
         agent_id,
         version,
-        socket_path,
     })
 }

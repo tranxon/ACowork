@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::ipc::session::SessionManager;
+use crate::grpc::SharedGrpcSessionMgr;
 pub use store::{CronStore, CronStoreError, StoredCronEntry};
 
 /// A registered cron entry (S5.8 enhanced)
@@ -363,14 +363,14 @@ fn parse_field(field: &str, min: u8, max: u8, name: &str) -> Result<Vec<u8>, Str
 /// Run the cron scheduler loop as a background task.
 ///
 /// Checks every minute for entries that should fire, and pushes
-/// IntentReceived messages to the target Agent's IPC session.
+/// IntentReceived messages to the target Agent's gRPC session.
 ///
 /// If the target Agent is not running, attempts to start it first
 /// (via LifecycleManager), then pushes the Intent.
 pub async fn run_cron_scheduler(
     scheduler: Arc<Mutex<CronScheduler>>,
-    session_mgr: Arc<Mutex<SessionManager>>,
-    gateway_state: crate::ipc::server::SharedState,
+    session_mgr: SharedGrpcSessionMgr,
+    gateway_state: crate::handlers::server::SharedState,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     // Skip the first immediate tick

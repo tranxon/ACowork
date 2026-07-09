@@ -79,7 +79,6 @@ pub(crate) struct AgentBootContext {
     // Reconnect params (Gateway mode)
     pub agent_id: String,
     pub version: String,
-    pub socket_path: String,
 }
 
 /// Context produced by Phase B (per-session initialization).

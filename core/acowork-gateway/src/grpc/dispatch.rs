@@ -1,24 +1,22 @@
 //! gRPC request dispatch — routes ClientMessage.payload to existing handler functions.
 //!
 //! This module converts proto request types into domain GatewayRequest variants,
-//! delegates to the same handler functions used by the IPC server, and then
+//! delegates to the same handler functions used by the gRPC server, and then
 //! converts the domain GatewayResponse back into proto ServerMessage payloads.
 
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use acowork_core::proto;
 use acowork_core::proto_bridge::GatewayResponseToProto;
 use acowork_core::protocol::GatewayResponse;
 
 use crate::http::routes::{BridgeEvent, SessionPendingRequests};
-use crate::ipc::server::{
+use crate::handlers::server::{
     SharedState, handle_agent_hello, handle_agent_ready, handle_budget_query,
     handle_capability_query, handle_context_usage_report, handle_cron_list, handle_cron_register,
     handle_cron_unregister, handle_intent_send, handle_key_release, handle_rate_acquire,
     handle_usage_report,
 };
-use crate::ipc::session::SessionManager;
+use crate::grpc::SharedGrpcSessionMgr;
 
 /// Dispatch a proto ClientMessage to the appropriate handler and return a proto ServerMessage.
 ///
@@ -32,7 +30,7 @@ pub async fn dispatch_grpc_request(
     client_msg: proto::ClientMessage,
     conn_id: &str,
     state: &SharedState,
-    session_mgr: &Arc<Mutex<SessionManager>>,
+    grpc_session_mgr: &SharedGrpcSessionMgr,
     bridge_ctrl_tx: &Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: &Option<SessionPendingRequests>,
 ) -> proto::ServerMessage {
@@ -40,7 +38,9 @@ pub async fn dispatch_grpc_request(
 
     let response = match client_msg.payload {
         Some(proto::client_message::Payload::KeyRelease(req)) => {
-            handle_key_release(&req.provider, conn_id, state, session_mgr).await
+            // Resolve agent_id from connection: look up via gRPC session manager
+            let agent_id = resolve_agent_id(conn_id, grpc_session_mgr).await;
+            handle_key_release(&req.provider, &agent_id, state).await
         }
 
         Some(proto::client_message::Payload::IntentSend(req)) => {
@@ -48,24 +48,20 @@ pub async fn dispatch_grpc_request(
                 serde_json::from_str(&req.params_json).unwrap_or(serde_json::Value::Null);
 
             // C2: Intercept tool_approval_needed from Runtime.
-            // Create oneshot, send BridgeEvent to Desktop App, await user decision.
             if req.action == "tool_approval_needed" && req.target == "http-api" {
                 return handle_tool_approval_needed_grpc(&params, bridge_ctrl_tx).await;
             }
 
-            // C3: Intercept ask_question from Runtime (ask_user_question tool).
-            // Forward to Desktop App via BridgeEvent::AskQuestion — the user's
-            // answer flows back via the HTTP question endpoint + gRPC push
-            // (same unified push architecture as tool_approval_needed).
+            // C3: Intercept ask_question from Runtime.
             if req.action == "ask_question" && req.target == "http-api" {
                 return handle_ask_question_grpc(&params, bridge_ctrl_tx).await;
             }
 
-            // Migration complete: update RunningAgentInfo.migration state
+            // Migration complete
             if req.target == "gateway" && req.action == "migration_complete" {
-                handle_migration_complete(&params, conn_id, state, session_mgr).await
+                let agent_id = resolve_agent_id(conn_id, grpc_session_mgr).await;
+                handle_migration_complete(&params, &agent_id, state).await
             } else if req.action == "session_response" {
-                // S1.14: Check if this is a session response from Runtime
                 if let Some(pending) = session_pending {
                     handle_session_response_grpc(&params, pending).await;
                 }
@@ -76,14 +72,15 @@ pub async fn dispatch_grpc_request(
                     ),
                 }
             } else {
+                let from = resolve_agent_id(conn_id, grpc_session_mgr).await;
                 handle_intent_send(
                     &req.target,
                     &req.action,
                     &params,
                     req.r#async,
-                    conn_id,
+                    &from,
                     state,
-                    session_mgr,
+                    grpc_session_mgr,
                     bridge_ctrl_tx,
                 )
                 .await
@@ -123,7 +120,8 @@ pub async fn dispatch_grpc_request(
         }
 
         Some(proto::client_message::Payload::CronList(_req)) => {
-            handle_cron_list(conn_id, session_mgr, state).await
+            let agent_id = resolve_agent_id(conn_id, grpc_session_mgr).await;
+            handle_cron_list(&agent_id, state).await
         }
 
         Some(proto::client_message::Payload::ContextUsageReport(req)) => {
@@ -137,19 +135,15 @@ pub async fn dispatch_grpc_request(
                     max_input_tokens: None,
                     usable_context: 0,
                     usage_percent: 0,
-                    // Cumulative session totals are absent when the runtime
-                    // sends a malformed payload; leave them as None.
                     total_input_tokens: None,
                     total_output_tokens: None,
-                    // ADR-028: agent-scoped totals also absent in this
-                    // defensive default.
                     agent_total_input_tokens: None,
                     agent_total_output_tokens: None,
                 },
             };
             let agent_id = req.agent_id;
             let session_id = req.session_id;
-            handle_context_usage_report(&agent_id, &session_id, &context, conn_id, session_mgr, bridge_ctrl_tx).await
+            handle_context_usage_report(&agent_id, &session_id, &context, bridge_ctrl_tx).await
         }
 
         Some(proto::client_message::Payload::AgentHello(req)) => {
@@ -163,9 +157,7 @@ pub async fn dispatch_grpc_request(
                 req.user_profile_version,
                 req.avatar.clone(),
                 req.builtin_avatar.clone(),
-                conn_id,
                 state,
-                session_mgr,
             )
             .await
         }
@@ -205,19 +197,14 @@ pub async fn dispatch_grpc_request(
 
         Some(proto::client_message::Payload::UpdateWorkspaceConfig(update)) => {
             // Runtime pushes its workspace config snapshot for Gateway's in-memory cache.
-            let agent_id = {
-                let mgr = session_mgr.lock().await;
-                mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
-            };
-            if let Some(ref aid) = agent_id {
-                let mut gw = state.write().await;
-                if let Some(info) = gw.running_agents.get_mut(aid) {
-                    info.workspace_config_json = Some(update.config_json);
-                    tracing::info!(
-                        agent_id = %aid,
-                        "Updated RunningAgentInfo workspace config cache"
-                    );
-                }
+            let agent_id = resolve_agent_id(conn_id, grpc_session_mgr).await;
+            let mut gw = state.write().await;
+            if let Some(info) = gw.running_agents.get_mut(&agent_id) {
+                info.workspace_config_json = Some(update.config_json);
+                tracing::info!(
+                    agent_id = %agent_id,
+                    "Updated RunningAgentInfo workspace config cache"
+                );
             }
             return proto::ServerMessage {
                 request_id,
@@ -245,12 +232,7 @@ pub async fn dispatch_grpc_request(
         Some(proto::client_message::Payload::StreamChunk(req)) => {
             // Stream chunks target the HTTP/WebSocket client — forward via bridge
             if req.target == "http-ws" || req.target == "http-api" {
-                let agent_id = {
-                    let mgr = session_mgr.lock().await;
-                    mgr.get_session(conn_id)
-                        .and_then(|s| s.agent_id.clone())
-                        .unwrap_or_else(|| "unknown".to_string())
-                };
+                let agent_id = resolve_agent_id(conn_id, grpc_session_mgr).await;
 
                 let params: serde_json::Value =
                     serde_json::from_str(&req.params_json).unwrap_or(serde_json::Value::Null);
@@ -371,9 +353,8 @@ pub fn is_stream_chunk(msg: &proto::ClientMessage) -> bool {
 /// Updates RunningAgentInfo.migration state to reflect completion or failure.
 async fn handle_migration_complete(
     params: &serde_json::Value,
-    conn_id: &str,
+    agent_id: &str,
     state: &SharedState,
-    session_mgr: &Arc<Mutex<SessionManager>>,
 ) -> GatewayResponse {
     let success = params
         .get("success")
@@ -384,16 +365,8 @@ async fn handle_migration_complete(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // Resolve agent_id from connection
-    let agent_id = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id)
-            .and_then(|s| s.agent_id.clone())
-            .unwrap_or_else(|| "unknown".to_string())
-    };
-
     let mut gw = state.write().await;
-    if let Some(info) = gw.running_agents.get_mut(&agent_id)
+    if let Some(info) = gw.running_agents.get_mut(agent_id)
         && let Some(ref mut m) = info.migration
     {
         m.done = true;
@@ -465,9 +438,20 @@ async fn handle_tool_approval_needed_grpc(
     }
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Resolve agent_id from a connection ID via the gRPC session manager.
+/// Returns "unknown" if the session is not found or not authenticated.
+async fn resolve_agent_id(conn_id: &str, grpc_session_mgr: &SharedGrpcSessionMgr) -> String {
+    let mgr = grpc_session_mgr.lock().await;
+    mgr.get_session(conn_id)
+        .and_then(|s| s.agent_id.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Handle session response from Runtime via gRPC (S1.14).
 ///
-/// Mirrors the IPC server's handle_session_response but accepts proto-compatible params.
+/// Mirrors handle_session_response but accepts proto-compatible params.
 async fn handle_session_response_grpc(
     params: &serde_json::Value,
     pending: &SessionPendingRequests,

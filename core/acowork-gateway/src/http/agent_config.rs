@@ -2,7 +2,7 @@
 //!
 //! NOTE: Per-agent config persistence has been moved to Runtime
 //! ({work_dir}/config/agent_config.json). Gateway only defines the
-//! request/response DTOs and forwards queries to Runtime via IPC.
+//! request/response DTOs and forwards queries to Runtime via gRPC.
 //!
 //! ADR-017: Avatar config is managed by the Runtime (agent_config.json).
 //! The Gateway maintains a lightweight avatar cache file

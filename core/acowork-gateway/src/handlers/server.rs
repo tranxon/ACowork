@@ -5,10 +5,9 @@
 //! and can be used by any transport layer.
 
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
-use crate::ipc::session::SessionManager;
 use acowork_core::protocol::GatewayResponse;
 
 /// Shared state type: Arc<RwLock<GatewayState>> for concurrent read/write access.
@@ -16,55 +15,33 @@ use acowork_core::protocol::GatewayResponse;
 /// budget query) with occasional writes (install/uninstall).
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
-/// Shared session manager type
-pub type SharedSessionMgr = Arc<Mutex<SessionManager>>;
-
 // ── Handler implementations ─────────────────────────────────────────────────
 
 pub async fn handle_key_release(
     provider: &str,
-    conn_id: &str,
+    agent_id: &str,
     state: &SharedState,
-    session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
-    // Check if session is authenticated (read-only on session_mgr)
-    let agent_id = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
-    };
-    // Session lock released before acquiring state lock — avoids deadlocks
-
-    match agent_id {
-        Some(id) => {
-            // Read-only access to GatewayState
-            let state_guard = state.read().await;
-            match state_guard.vault.get_key(provider) {
-                Ok(api_key) => {
-                    tracing::info!("KeyRelease for agent={}, provider={}", id, provider);
-                    GatewayResponse::KeyReleaseResult {
-                        api_key: Some(api_key),
-                        error: None,
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "KeyRelease failed for agent={}, provider={}: {}",
-                        id,
-                        provider,
-                        e
-                    );
-                    GatewayResponse::KeyReleaseResult {
-                        api_key: None,
-                        error: Some(e.to_string()),
-                    }
-                }
+    // Read-only access to GatewayState
+    let state_guard = state.read().await;
+    match state_guard.vault.get_key(provider) {
+        Ok(api_key) => {
+            tracing::info!("KeyRelease for agent={}, provider={}", agent_id, provider);
+            GatewayResponse::KeyReleaseResult {
+                api_key: Some(api_key),
+                error: None,
             }
         }
-        None => {
-            tracing::warn!("KeyRelease from unauthenticated session {}", conn_id);
+        Err(e) => {
+            tracing::warn!(
+                "KeyRelease failed for agent={}, provider={}: {}",
+                agent_id,
+                provider,
+                e
+            );
             GatewayResponse::KeyReleaseResult {
                 api_key: None,
-                error: Some("unauthenticated session".into()),
+                error: Some(e.to_string()),
             }
         }
     }
@@ -79,18 +56,11 @@ pub async fn handle_intent_send(
     action: &str,
     params: &serde_json::Value,
     async_: bool,
-    conn_id: &str,
+    from: &str,
     state: &SharedState,
-    session_mgr: &SharedSessionMgr,
+    grpc_session_mgr: &crate::grpc::SharedGrpcSessionMgr,
     bridge_ctrl_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
-    let from = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id)
-            .and_then(|s| s.agent_id.clone())
-            .unwrap_or_else(|| "unknown".to_string())
-    };
-
     tracing::info!(
         "IntentSend from={} to={} action={} async={}",
         from,
@@ -145,7 +115,7 @@ pub async fn handle_intent_send(
             }
 
             let event = crate::http::routes::BridgeEvent {
-                agent_id: from.clone(),
+                agent_id: from.to_string(),
                 message_id: message_id.clone(),
                 event_type,
                 payload,
@@ -221,47 +191,28 @@ pub async fn handle_intent_send(
         );
     } else {
         // S4.1.3: Target is running — push IntentReceived to target Agent
-        let target_conn_id = {
-            let mgr = session_mgr.lock().await;
-            mgr.find_by_agent_id(target)
-                .map(|(conn_id, _)| conn_id.clone())
+        let intent_msg = GatewayResponse::IntentReceived {
+            from: from.to_string(),
+            action: action.to_string(),
+            params: params.clone(),
+            command: None,
+        };
+        let pushed = {
+            let mgr = grpc_session_mgr.lock().await;
+            mgr.push_to_agent(target, intent_msg).await
         };
 
-        if let Some(target_conn) = target_conn_id {
-            let pushed = {
-                let mgr = session_mgr.lock().await;
-                if let Some(session) = mgr.get_session(&target_conn) {
-                    let intent_msg = GatewayResponse::IntentReceived {
-                        from: from.clone(),
-                        action: action.to_string(),
-                        params: params.clone(),
-                        command: None,
-                    };
-                    session.push_message(intent_msg).await
-                } else {
-                    false
-                }
-            };
-
-            if pushed {
-                tracing::info!(
-                    "Intent forwarded: from={} to={} action={} via conn={}",
-                    from,
-                    target,
-                    action,
-                    target_conn
-                );
-            } else {
-                tracing::warn!(
-                    "Intent push failed: target {} conn {} channel closed",
-                    target,
-                    target_conn
-                );
-            }
+        if pushed {
+            tracing::info!(
+                "Intent forwarded: from={} to={} action={}",
+                from,
+                target,
+                action,
+            );
         } else {
             tracing::warn!(
-                "Intent target '{}' is running but has no IPC session",
-                target
+                "Intent push failed: target {} channel closed",
+                target,
             );
         }
     }
@@ -443,7 +394,7 @@ pub async fn handle_cron_register(
     }
 
     tracing::info!(
-        "Cron registered via IPC: agent={} cron_id={} schedule={} action={}",
+        "Cron registered via gRPC: agent={} cron_id={} schedule={} action={}",
         agent_id,
         cron_id,
         schedule,
@@ -483,27 +434,13 @@ pub async fn handle_cron_unregister(cron_id: &str, state: &SharedState) -> Gatew
 }
 
 pub async fn handle_cron_list(
-    conn_id: &str,
-    session_mgr: &SharedSessionMgr,
+    agent_id: &str,
     state: &SharedState,
 ) -> GatewayResponse {
-    // Get agent_id from session
-    let agent_id = {
-        let mgr = session_mgr.lock().await;
-        mgr.get_session(conn_id).and_then(|s| s.agent_id.clone())
-    };
-
-    let agent_id = match agent_id {
-        Some(id) => id,
-        None => {
-            return GatewayResponse::CronListResult { entries: vec![] };
-        }
-    };
-
     let guard = state.read().await;
     let entries = guard
         .cron_scheduler
-        .entries_for_agent(&agent_id)
+        .entries_for_agent(agent_id)
         .into_iter()
         .map(|e| acowork_core::protocol::CronEntryInfo {
             id: e.id.clone(),
@@ -528,8 +465,6 @@ pub async fn handle_context_usage_report(
     agent_id: &str,
     session_id: &str,
     context: &acowork_core::protocol::ContextUsageInfo,
-    _conn_id: &str,
-    _session_mgr: &SharedSessionMgr,
     bridge_ctrl_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
     tracing::info!(
@@ -576,7 +511,7 @@ pub async fn handle_context_usage_report(
 /// response.  Resource lists use version-driven diff sync:
 /// - provider_list / mcp_list / search_list are only sent when Runtime's cached version < Gateway's.
 /// - provider_key_vault / mcp_key_vault / search_key_vault are always sent in full (keys not versioned).
-///   This satisfies PRD GTW-05 and SEC-07: API keys are distributed via IPC,
+///   This satisfies PRD GTW-05 and SEC-07: API keys are distributed via gRPC,
 ///   not environment variables.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_agent_hello(
@@ -589,15 +524,12 @@ pub async fn handle_agent_hello(
     user_profile_version: u64,
     avatar: Option<String>,
     builtin_avatar: Option<String>,
-    conn_id: &str,
     state: &SharedState,
-    session_mgr: &SharedSessionMgr,
 ) -> GatewayResponse {
     tracing::info!(
-        "AgentHello received: agent_id={} version={} conn={} role={} prov_ver={} mcp_ver={} user_ver={} avatar={:?} builtin={:?}",
+        "AgentHello received: agent_id={} version={} role={} prov_ver={} mcp_ver={} user_ver={} avatar={:?} builtin={:?}",
         agent_id,
         version,
-        conn_id,
         connection_role,
         provider_list_version,
         mcp_list_version,
@@ -606,180 +538,147 @@ pub async fn handle_agent_hello(
         builtin_avatar
     );
 
-    let mut mgr = session_mgr.lock().await;
-    if let Some(session) = mgr.get_session_mut(conn_id) {
-        session.authenticate(agent_id);
-        session.connection_role = connection_role.to_string();
-        tracing::info!(
-            "Session {} authenticated as agent {} (role={})",
-            conn_id,
-            agent_id,
-            connection_role
-        );
+    // Mark the agent as connected in GatewayState
+    {
+        let mut gw = state.write().await;
+        gw.set_agent_connected(agent_id, true);
 
-        // Mark the agent as connected in GatewayState
-        {
-            let mut gw = state.write().await;
-            gw.set_agent_connected(agent_id, true);
-
-            // ADR-017: Sync avatar from Runtime's agent_config.json to the
-            // Gateway's avatar cache + in-memory manifest. This handles
-            // recovery of avatar changes made while the old Gateway was running.
-            if avatar.is_some() || builtin_avatar.is_some() {
-                if let Some(info) = gw.installed_agents.get_mut(agent_id) {
-                    info.manifest.avatar = avatar.clone();
-                    info.manifest.builtin_avatar = builtin_avatar.clone();
-                }
-                // Also persist to the avatar cache file.
-                if let Some(ref config) = gw.config {
-                    let data_dir = std::path::PathBuf::from(&config.data_dir);
-                    crate::http::agent_config::update_avatar_in_cache(
-                        &data_dir,
-                        agent_id,
-                        avatar.clone(),
-                        builtin_avatar.clone(),
-                    );
-                }
+        // ADR-017: Sync avatar from Runtime's agent_config.json to the
+        // Gateway's avatar cache + in-memory manifest. This handles
+        // recovery of avatar changes made while the old Gateway was running.
+        if avatar.is_some() || builtin_avatar.is_some() {
+            if let Some(info) = gw.installed_agents.get_mut(agent_id) {
+                info.manifest.avatar = avatar.clone();
+                info.manifest.builtin_avatar = builtin_avatar.clone();
+            }
+            // Also persist to the avatar cache file.
+            if let Some(ref config) = gw.config {
+                let data_dir = std::path::PathBuf::from(&config.data_dir);
+                crate::http::agent_config::update_avatar_in_cache(
+                    &data_dir,
+                    agent_id,
+                    avatar.clone(),
+                    builtin_avatar.clone(),
+                );
             }
         }
+    }
 
-        // ── Build resource lists from in-memory cache ─────────────────
-        let gw = state.read().await;
+    // ── Build resource lists from in-memory cache ─────────────────
+    let gw = state.read().await;
 
-        let (provider_list, gw_provider_version) =
-            if provider_list_version < gw.resource_cache.provider_list.version {
-                (
-                    Some(gw.resource_cache.provider_list.providers.clone()),
-                    gw.resource_cache.provider_list.version,
-                )
-            } else {
-                (None, gw.resource_cache.provider_list.version)
-            };
-
-        let (mcp_list, gw_mcp_version) = if mcp_list_version < gw.resource_cache.mcp_list.version {
+    let (provider_list, gw_provider_version) =
+        if provider_list_version < gw.resource_cache.provider_list.version {
             (
-                Some(gw.resource_cache.mcp_list.servers.clone()),
-                gw.resource_cache.mcp_list.version,
+                Some(gw.resource_cache.provider_list.providers.clone()),
+                gw.resource_cache.provider_list.version,
             )
         } else {
-            (None, gw.resource_cache.mcp_list.version)
+            (None, gw.resource_cache.provider_list.version)
         };
 
-        let (search_list, gw_search_version) =
-            if search_list_version < gw.resource_cache.search_list.version {
-                (
-                    Some(gw.resource_cache.search_list.providers.clone()),
-                    gw.resource_cache.search_list.version,
-                )
-            } else {
-                (None, gw.resource_cache.search_list.version)
-            };
-
-        // ── Key vaults (always full, from Vault + MCP catalog) ─────
-        let provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry> = gw
-            .vault
-            .list_providers()
-            .iter()
-            .filter_map(|name| {
-                gw.vault.get_provider(name).ok().map(|entry| {
-                    acowork_core::protocol::ProviderKeyEntry {
-                        provider_id: name.clone(),
-                        api_key: entry.api_key,
-                    }
-                })
-            })
-            .collect();
-
-        // Load MCP catalog for key extraction
-        let data_dir = gw
-            .config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.data_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-        let mcp_key_vault = match crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir) {
-            Ok(catalog) => crate::resource_cache::build_mcp_key_vault(&catalog),
-            Err(_) => Vec::new(),
-        };
-
-        // Build search key vault (always full delivery)
-        let search_key_vault = crate::resource_cache::build_search_key_vault(&gw);
-
-        // ── Embedding service info (from embed_process state) ──
-        let embed_endpoint = gw
-            .embed_process
-            .as_ref()
-            .map(|eps| format!("http://127.0.0.1:{}/v1", eps.port));
-        let embed_model_id = gw
-            .embed_process
-            .as_ref()
-            .and_then(|eps| eps.active_model_id.clone());
-        let embed_dimension = gw
-            .embed_process
-            .as_ref()
-            .and_then(|eps| eps.active_dimension);
-
-        // ── LSP Relay endpoint (from lsp_relay_process state) ──
-        let lsp_relay_endpoint = gw
-            .lsp_relay_process
-            .as_ref()
-            .filter(|eps| eps.ready)
-            .map(|eps| format!("http://127.0.0.1:{}", eps.port));
-
-        drop(gw);
-
-        // ── User identity (version-driven diff sync) ──
-        let (user_identity, gw_user_version) = {
-            let gw = state.read().await;
-            let active_user = gw
-                .resource_cache
-                .user_profile_list
-                .users
-                .iter()
-                .find(|u| u.is_active)
-                .cloned();
-            (active_user, gw.resource_cache.user_profile_list.version)
-        };
-
-        GatewayResponse::AgentHelloResult {
-            success: true,
-            error: None,
-            provider_list,
-            provider_list_version: gw_provider_version,
-            mcp_list,
-            mcp_list_version: gw_mcp_version,
-            provider_key_vault,
-            mcp_key_vault,
-            search_list,
-            search_list_version: gw_search_version,
-            search_key_vault,
-            user_identity,
-            user_profile_version: gw_user_version,
-            embed_endpoint,
-            embed_model_id,
-            embed_dimension,
-            lsp_relay_endpoint,
-        }
+    let (mcp_list, gw_mcp_version) = if mcp_list_version < gw.resource_cache.mcp_list.version {
+        (
+            Some(gw.resource_cache.mcp_list.servers.clone()),
+            gw.resource_cache.mcp_list.version,
+        )
     } else {
-        tracing::warn!("AgentHello from unknown connection {}", conn_id);
-        GatewayResponse::AgentHelloResult {
-            success: false,
-            error: Some(format!("Unknown connection: {}", conn_id)),
-            provider_list: None,
-            provider_list_version: 0,
-            mcp_list: None,
-            mcp_list_version: 0,
-            provider_key_vault: vec![],
-            mcp_key_vault: vec![],
-            search_list: None,
-            search_list_version: 0,
-            search_key_vault: vec![],
-            user_identity: None,
-            user_profile_version: 0,
-            embed_endpoint: None,
-            embed_model_id: None,
-            embed_dimension: None,
-            lsp_relay_endpoint: None,
-        }
+        (None, gw.resource_cache.mcp_list.version)
+    };
+
+    let (search_list, gw_search_version) =
+        if search_list_version < gw.resource_cache.search_list.version {
+            (
+                Some(gw.resource_cache.search_list.providers.clone()),
+                gw.resource_cache.search_list.version,
+            )
+        } else {
+            (None, gw.resource_cache.search_list.version)
+        };
+
+    // ── Key vaults (always full, from Vault + MCP catalog) ─────
+    let provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry> = gw
+        .vault
+        .list_providers()
+        .iter()
+        .filter_map(|name| {
+            gw.vault.get_provider(name).ok().map(|entry| {
+                acowork_core::protocol::ProviderKeyEntry {
+                    provider_id: name.clone(),
+                    api_key: entry.api_key,
+                }
+            })
+        })
+        .collect();
+
+    // Load MCP catalog for key extraction
+    let data_dir = gw
+        .config
+        .as_ref()
+        .map(|c| std::path::PathBuf::from(&c.data_dir))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    let mcp_key_vault = match crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir) {
+        Ok(catalog) => crate::resource_cache::build_mcp_key_vault(&catalog),
+        Err(_) => Vec::new(),
+    };
+
+    // Build search key vault (always full delivery)
+    let search_key_vault = crate::resource_cache::build_search_key_vault(&gw);
+
+    // ── Embedding service info (from embed_process state) ──
+    let embed_endpoint = gw
+        .embed_process
+        .as_ref()
+        .map(|eps| format!("http://127.0.0.1:{}/v1", eps.port));
+    let embed_model_id = gw
+        .embed_process
+        .as_ref()
+        .and_then(|eps| eps.active_model_id.clone());
+    let embed_dimension = gw
+        .embed_process
+        .as_ref()
+        .and_then(|eps| eps.active_dimension);
+
+    // ── LSP Relay endpoint (from lsp_relay_process state) ──
+    let lsp_relay_endpoint = gw
+        .lsp_relay_process
+        .as_ref()
+        .filter(|eps| eps.ready)
+        .map(|eps| format!("http://127.0.0.1:{}", eps.port));
+
+    drop(gw);
+
+    // ── User identity (version-driven diff sync) ──
+    let (user_identity, gw_user_version) = {
+        let gw = state.read().await;
+        let active_user = gw
+            .resource_cache
+            .user_profile_list
+            .users
+            .iter()
+            .find(|u| u.is_active)
+            .cloned();
+        (active_user, gw.resource_cache.user_profile_list.version)
+    };
+
+    GatewayResponse::AgentHelloResult {
+        success: true,
+        error: None,
+        provider_list,
+        provider_list_version: gw_provider_version,
+        mcp_list,
+        mcp_list_version: gw_mcp_version,
+        provider_key_vault,
+        mcp_key_vault,
+        search_list,
+        search_list_version: gw_search_version,
+        search_key_vault,
+        user_identity,
+        user_profile_version: gw_user_version,
+        embed_endpoint,
+        embed_model_id,
+        embed_dimension,
+        lsp_relay_endpoint,
     }
 }
 
@@ -1052,134 +951,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// S4.1.3: Test that IntentSend pushes IntentReceived to the target's session
-    #[tokio::test]
-    async fn test_intent_push_to_target_session() {
-        let dir = temp_vault_dir("intent_push");
-        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
-        let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
-
-        // Register target's capability
-        {
-            let mut guard = state.write().await;
-            guard.capability_registry.register(
-                "com.example.target",
-                "weather_query",
-                acowork_core::CapabilityDef {
-                    description: "Query weather".to_string(),
-                    input_schema: None,
-                    output_schema: None,
-                },
-            );
-        }
-
-        // Simulate target agent's session with a push channel
-        let (push_tx, mut push_rx) = tokio::sync::mpsc::channel::<GatewayResponse>(8);
-        {
-            let mut mgr = session_mgr.lock().await;
-            mgr.create_session_with_push("conn-target", push_tx);
-            mgr.get_session_mut("conn-target")
-                .unwrap()
-                .authenticate("com.example.target");
-        }
-
-        // Mark target as installed and running
-        {
-            let mut guard = state.write().await;
-            let toml_str = r#"
-                agent_id = "com.example.target"
-                version = "1.0.0"
-                name = "Target"
-                description = "target agent"
-                author = "test"
-                runtime_version = "0.1.0"
-                [llm]
-                provider = "openai"
-                model = "gpt-4"
-            "#;
-            let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
-            guard.add_installed(crate::gateway::state::AgentInfo {
-                agent_id: "com.example.target".to_string(),
-                version: "1.0.0".to_string(),
-                name: "Target".to_string(),
-                install_path: "/tmp/test".to_string(),
-                manifest,
-            });
-            guard.add_running(crate::gateway::state::RunningAgentInfo {
-                agent_id: "com.example.target".to_string(),
-                pid: 1234,
-                started_at: chrono::Utc::now(),
-                workspace: "/tmp/test".to_string(),
-                connected: false,
-                ready: false,
-                dev_mode: false,
-                debug_port: None,
-                workspace_config_json: None,
-                current_embed_dim: None,
-                migration: None,
-            });
-        }
-
-        // Simulate sender's session
-        {
-            let mut mgr = session_mgr.lock().await;
-            mgr.create_session("conn-sender");
-            mgr.get_session_mut("conn-sender")
-                .unwrap()
-                .authenticate("com.example.sender");
-        }
-
-        // Call handle_intent_send (no perm_store parameter after refactor)
-        let response = handle_intent_send(
-            "com.example.target",
-            "weather_query",
-            &serde_json::json!({"city": "Shanghai"}),
-            false,
-            "conn-sender",
-            &state,
-            &session_mgr,
-            &None,
-        )
-        .await;
-
-        // Verify the immediate response is IntentDelivered
-        match &response {
-            GatewayResponse::IntentDelivered { message_id } => {
-                assert!(!message_id.starts_with("error:"));
-            }
-            _ => panic!("Expected IntentDelivered, got {:?}", response),
-        }
-
-        // Verify the target received IntentReceived via push channel
-        let pushed_msg =
-            tokio::time::timeout(std::time::Duration::from_millis(500), push_rx.recv())
-                .await
-                .expect("Timeout waiting for push message")
-                .expect("Push channel closed");
-
-        match &pushed_msg {
-            GatewayResponse::IntentReceived {
-                from,
-                action,
-                params,
-                command: _,
-            } => {
-                assert_eq!(from, "com.example.sender");
-                assert_eq!(action, "weather_query");
-                assert_eq!(params["city"], "Shanghai");
-            }
-            _ => panic!("Expected IntentReceived, got {:?}", pushed_msg),
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     /// S2.4: Test IntentSend rejected when target lacks the requested capability
     #[tokio::test]
     async fn test_intent_send_capability_mismatch() {
         let dir = temp_vault_dir("intent_no_cap");
         let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
-        let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
+        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        );
 
         // Install target (but don't register any capability)
         {
@@ -1205,23 +985,14 @@ mod tests {
             });
         }
 
-        // Simulate sender's session
-        {
-            let mut mgr = session_mgr.lock().await;
-            mgr.create_session("conn-sender");
-            mgr.get_session_mut("conn-sender")
-                .unwrap()
-                .authenticate("com.example.sender");
-        }
-
         let response = handle_intent_send(
             "com.example.target",
             "nonexistent_action",
             &serde_json::json!({}),
             false,
-            "conn-sender",
+            "com.example.sender",
             &state,
-            &session_mgr,
+            &grpc_session_mgr,
             &None,
         )
         .await;
@@ -1244,7 +1015,9 @@ mod tests {
     async fn test_intent_send_params_too_large() {
         let dir = temp_vault_dir("intent_large_params");
         let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
-        let session_mgr: SharedSessionMgr = Arc::new(Mutex::new(SessionManager::new()));
+        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        );
 
         // Install target with capability
         {
@@ -1279,15 +1052,6 @@ mod tests {
             );
         }
 
-        // Simulate sender's session
-        {
-            let mut mgr = session_mgr.lock().await;
-            mgr.create_session("conn-sender");
-            mgr.get_session_mut("conn-sender")
-                .unwrap()
-                .authenticate("com.example.sender");
-        }
-
         // Create params > 64KB
         let large_data = "x".repeat(65 * 1024);
         let large_params = serde_json::json!({"data": large_data});
@@ -1297,9 +1061,9 @@ mod tests {
             "weather_query",
             &large_params,
             false,
-            "conn-sender",
+            "com.example.sender",
             &state,
-            &session_mgr,
+            &grpc_session_mgr,
             &None,
         )
         .await;

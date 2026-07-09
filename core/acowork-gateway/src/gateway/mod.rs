@@ -1,7 +1,7 @@
 //! Gateway main module
 //!
 //! The Gateway struct is the top-level orchestrator that ties together
-//! IPC server, lifecycle manager, package manager, and vault.
+//! gRPC server, lifecycle manager, package manager, and vault.
 
 pub mod state;
 
@@ -13,8 +13,8 @@ use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
-use crate::ipc::global_push::GlobalResourcePusher;
-use crate::ipc::server::SharedState;
+use crate::grpc::resource_pusher::GlobalResourcePusher;
+use crate::handlers::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
 use crate::package_manager::uninstall;
@@ -305,14 +305,17 @@ impl Gateway {
 
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
     ///
-    /// When Gateway restarts, previously spawned runtime processes lose their IPC
+    /// When Gateway restarts, previously spawned runtime processes lose their gRPC
     /// connection and become useless orphans. This method finds them by scanning
-    /// /proc for acowork-runtime processes whose `--gateway-socket` argument
-    /// matches this Gateway's socket path, and kills them.
+    /// /proc for acowork-runtime processes whose `--gateway-endpoint` argument
+    /// matches this Gateway's gRPC endpoint.
     ///
-    /// Scoping by socket path ensures we only kill orphans belonging to THIS
-    /// Gateway instance, not runtimes managed by other concurrent Gateway instances.
+    /// Since Gateway is single-instance per host (enforced by HTTP port probing),
+    /// scoping by endpoint is a safety measure against false positives.
     fn cleanup_orphaned_runtimes(&self) -> usize {
+        let grpc_endpoint = crate::grpc::server::default_grpc_addr().to_string();
+        let grpc_endpoint_url = format!("http://{}", grpc_endpoint);
+
         // Find all acowork-runtime processes
         let output = match std::process::Command::new("pgrep")
             .args(["-af", "acowork-runtime"])
@@ -325,7 +328,7 @@ impl Gateway {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let my_pid = std::process::id();
 
-        // Filter PIDs whose command line includes our socket path
+        // Filter PIDs whose command line includes our gRPC endpoint
         let pids_to_kill: Vec<(u32, String)> = stdout
             .lines()
             .filter_map(|line| {
@@ -335,8 +338,8 @@ impl Gateway {
                     return None; // don't kill self
                 }
                 let cmdline = parts.get(1).map(|s| s.trim()).unwrap_or("");
-                // Only kill runtimes that were connected to OUR socket path
-                if cmdline.contains(&self.config.socket_path) {
+                // Only kill runtimes connected to OUR gRPC endpoint
+                if cmdline.contains(&grpc_endpoint_url) {
                     Some((pid, cmdline.to_string()))
                 } else {
                     None
@@ -370,16 +373,15 @@ impl Gateway {
 
     /// Run the Gateway daemon (async, multi-connection)
     ///
-    /// This starts the IPC server and enters the main event loop.
+    /// This starts the gRPC server and enters the main event loop.
     /// Blocks until shutdown signal is received.
     /// The GatewayState is wrapped in Arc<RwLock> for concurrent access
-    /// by multiple IPC connection handlers.
+    /// by multiple gRPC connection handlers.
     pub async fn run(
         &mut self,
         log_reload_handle: Option<crate::LogReloadHandle>,
     ) -> Result<(), GatewayError> {
         tracing::info!("Gateway starting");
-        tracing::info!("  Socket path: {}", self.config.socket_path);
         tracing::info!("  Vault dir: {}", self.config.vault_dir);
         tracing::info!("  Packages dir: {}", self.config.packages_dir);
 
@@ -402,7 +404,7 @@ impl Gateway {
 
         // Clean up orphaned runtime processes from a previous Gateway run.
         // When Gateway restarts, previously running agents become orphaned
-        // (no IPC connection). We kill them so the fresh Gateway can manage
+        // (no gRPC connection). We kill them so the fresh Gateway can manage
         // agents from a clean state.
         let orphan_count = self.cleanup_orphaned_runtimes();
         if orphan_count > 0 {
@@ -573,8 +575,6 @@ impl Gateway {
             gw.config = Some(self.config.clone());
         }
 
-        let socket_path = self.config.socket_path.clone();
-
         // Spawn the idle timeout checker in a background task
         let idle_timeout = self.config.timeouts.idle_timeout_secs;
         let _idle_handle = tokio::spawn(async move {
@@ -589,23 +589,11 @@ impl Gateway {
             }
         });
 
-        tracing::info!("Gateway entering IPC event loop (async multi-connection)");
+        tracing::info!("Gateway entering gRPC event loop (async multi-connection)");
 
         // Clone HTTP config before moving into the task
         let http_config = self.config.http.clone();
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
-
-        // Create shared session manager for both IPC and HTTP
-        let session_mgr: crate::http::routes::SharedSessionMgr = Arc::new(tokio::sync::Mutex::new(
-            crate::ipc::session::SessionManager::new(),
-        ));
-        let http_session_mgr = Some(session_mgr.clone());
-
-        // Store session manager in shared state so HTTP API can access it
-        {
-            let mut gw = shared_state.write().await;
-            gw.ipc_sessions = Some(session_mgr.clone());
-        }
 
         // Rebuild resource cache from MCP catalog at startup.
         // provider_list.json is loaded by load_resource_cache() above;
@@ -636,11 +624,7 @@ impl Gateway {
                 sched.clone()
             };
         }
-        let cron_session_mgr = session_mgr.clone();
-        let cron_gw_state = shared_state.clone();
-        let _cron_handle = tokio::spawn(async move {
-            crate::cron::run_cron_scheduler(cron_scheduler, cron_session_mgr, cron_gw_state).await;
-        });
+        // Cron spawned below after grpc_session_mgr creation.
 
         // ADR-021 Phase 2: Single Bridge control channel for all events.
         // Data channel (L1 chunks) removed — frontend now polls via HTTP.
@@ -664,9 +648,15 @@ impl Gateway {
         );
         let http_grpc_session_mgr = Some(grpc_session_mgr.clone());
 
-        // Start HTTP server in a separate tokio task (parallel with IPC)
+        // Spawn cron scheduler (requires grpc_session_mgr for pushing IntentReceived)
+        let cron_session_mgr = grpc_session_mgr.clone();
+        let cron_gw_state = shared_state.clone();
+        let _cron_handle = tokio::spawn(async move {
+            crate::cron::run_cron_scheduler(cron_scheduler, cron_session_mgr, cron_gw_state).await;
+        });
+
+        // Start HTTP server in a separate tokio task (parallel with gRPC)
         let http_state = shared_state.clone();
-        let http_socket_path = socket_path.clone();
 
         // Create unified global resource pusher for hot-push of provider_list,
         // search_config, MCP catalog, and user profile changes to running agents.
@@ -681,7 +671,7 @@ impl Gateway {
         // active_dimension, ready}` from the embed's state events, and
         // restarts the embed process on heartbeat timeout or connection
         // loss (with exponential backoff and a 5-attempts/5-min cap).
-        // The HTTP API and IPC pushers read the same `shared_state` via
+        // The HTTP API and gRPC pushers read the same `shared_state` via
         // a separate Arc clone, so updates are visible immediately.
         if let (Some(sup_cfg), Some(shared_arc)) =
             (embed_supervisor_cfg.take(), Some(shared_state.clone()))
@@ -811,9 +801,7 @@ impl Gateway {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
                 http_state,
-                &http_socket_path,
                 &data_dir_path,
-                http_session_mgr,
                 http_grpc_session_mgr,
                 http_bridge_ctrl_tx,
                 http_session_pending,
@@ -827,7 +815,7 @@ impl Gateway {
         });
 
         // Task #12: Start gRPC server so HTTP API can reach Runtime via gRPC.
-        // The gRPC server registers each connection in ipc_session_mgr,
+        // The gRPC server registers each connection in grpc_session_mgr,
         // so HTTP handlers find gRPC-connected agents via the same path.
         let grpc_state = shared_state.clone();
         let grpc_bridge_ctrl_tx = Some(bridge_ctrl_tx);
@@ -841,7 +829,6 @@ impl Gateway {
                 grpc_addr,
                 grpc_state,
                 grpc_session_mgr,
-                session_mgr,
                 capability_tx,
                 grpc_bridge_ctrl_tx,
                 grpc_session_pending,
@@ -1071,7 +1058,6 @@ mod tests {
     fn test_config() -> GatewayConfig {
         GatewayConfig {
             config_source_path: None,
-            socket_path: "/tmp/test-gateway.sock".to_string(),
             vault_dir: std::env::temp_dir()
                 .join("acowork-test-vault")
                 .to_string_lossy()

@@ -13,7 +13,7 @@ pub mod grpc;
 pub mod http;
 pub mod intent;
 pub mod interaction_store;
-pub mod ipc;
+pub mod handlers;
 pub mod lifecycle;
 pub mod package_manager;
 pub mod rate;

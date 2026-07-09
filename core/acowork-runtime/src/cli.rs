@@ -25,7 +25,7 @@ const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
 const MAX_TOOL_CALLS_PER_MINUTE: u32 = 60;
 
 /// Global reference to the SizeRollingFileAppender for runtime log rotation.
-/// Set by init_tracing() and read by the LogRotate IPC handler.
+/// Set by init_tracing() and read by the LogRotate gRPC handler.
 static FILE_APPENDER: std::sync::OnceLock<Arc<acowork_core::logging::SizeRollingFileAppender>> =
     std::sync::OnceLock::new();
 
@@ -47,13 +47,12 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_WORK_DIR")]
     pub work_dir: String,
 
-    /// Gateway endpoint (e.g., unix:///tmp/agent-gateway.sock)
+    /// Gateway gRPC endpoint URL (e.g., http://127.0.0.1:19877)
     #[arg(long, env = "ACOWORK_GATEWAY_ENDPOINT")]
     pub gateway_endpoint: Option<String>,
 
-    /// Gateway Unix socket path for IPC connection.
-    /// When omitted, the runtime runs in standalone mode without Gateway.
-    #[arg(long, env = "ACOWORK_GATEWAY_SOCKET")]
+    /// Gateway endpoint URL (deprecated, use --gateway-endpoint).
+    #[arg(long, env = "ACOWORK_GATEWAY_SOCKET", hide = true)]
     pub gateway_socket: Option<String>,
 
     /// Enable developer mode (debug protocol)
@@ -175,7 +174,7 @@ impl Cli {
             max_file_count,
         ));
 
-        // Store for LogRotate IPC handler
+        // Store for LogRotate gRPC handler
         let _ = FILE_APPENDER.set(file_appender.clone());
         let (filter, reload_handle) = reload::Layer::new(env_filter);
         let stderr_layer = tracing_subscriber::fmt::layer()
@@ -529,7 +528,6 @@ pub(crate) async fn run_gateway_loop(
         tokio::sync::mpsc::UnboundedReceiver<(u64, acowork_core::proto::server_message::Payload)>,
     >,
     work_dir: String,
-    _socket_path: String,
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,

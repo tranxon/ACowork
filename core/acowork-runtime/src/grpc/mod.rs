@@ -1,4 +1,4 @@
-//! gRPC module — bidirectional streaming IPC via protocol buffers.
+//! gRPC module — bidirectional streaming via protocol buffers.
 pub mod client;
 
 pub use client::GatewayGrpcClient;

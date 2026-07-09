@@ -3,7 +3,7 @@
 //! Provides secure storage for LLM API keys with:
 //! - Password-derived master key (Argon2id)
 //! - ChaCha20-Poly1305 AEAD encryption
-//! - One-time key distribution via IPC
+//! - One-time key distribution via the gRPC AgentHello handshake
 
 pub mod encryption;
 pub mod error;

@@ -47,9 +47,10 @@ pub struct RuntimeConfig {
     pub package_path: String,
     /// Working directory for the agent
     pub work_dir: String,
-    /// Gateway Unix socket path for IPC connection
+    /// Gateway gRPC endpoint URL (e.g., http://127.0.0.1:19877).
+    /// When omitted, the runtime runs in standalone mode without Gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_socket: Option<String>,
+    pub gateway_endpoint: Option<String>,
     /// Path to manifest.toml override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
@@ -206,7 +207,7 @@ impl Default for RuntimeConfig {
             agent_id: String::new(),
             package_path: String::new(),
             work_dir: String::new(),
-            gateway_socket: None,
+            gateway_endpoint: None,
             manifest_path: None,
             config_dir: None,
             dev_mode: false,
@@ -233,10 +234,10 @@ impl RuntimeConfig {
             agent_id: cli.agent_id.clone(),
             package_path: cli.package_path.clone(),
             work_dir: cli.work_dir.clone(),
-            gateway_socket: cli
-                .gateway_socket
+            gateway_endpoint: cli
+                .gateway_endpoint
                 .clone()
-                .or_else(|| cli.gateway_endpoint.clone()),
+                .or_else(|| cli.gateway_socket.clone()),
             manifest_path: cli.manifest_path.clone(),
             config_dir: cli.config_dir.clone(),
             dev_mode: cli.dev_mode,
@@ -248,10 +249,10 @@ impl RuntimeConfig {
         }
     }
 
-    /// Get gateway address from `gateway_socket`.
+    /// Get gateway address from `gateway_endpoint`.
     /// Returns None if not set (standalone mode).
     pub fn get_gateway_address(&self) -> Option<&str> {
-        self.gateway_socket.as_deref()
+        self.gateway_endpoint.as_deref()
     }
 
     /// Validate startup-sensitive configuration values.

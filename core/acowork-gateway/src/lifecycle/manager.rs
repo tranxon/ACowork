@@ -15,7 +15,7 @@ pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
 pub struct LifecycleManager {
     /// Idle timeout in seconds (0 = no timeout)
     idle_timeout_secs: u64,
-    /// Gateway gRPC endpoint URL passed to Runtime via --gateway-socket
+    /// Gateway gRPC endpoint URL passed to Runtime via --gateway-endpoint
     /// (e.g. "http://127.0.0.1:19877")
     gateway_grpc_endpoint: String,
     /// Log file max size in MB before auto-split

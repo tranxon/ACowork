@@ -143,7 +143,7 @@ impl SizeRollingFileAppender {
     }
 
     /// Force immediate rotation: close current log file and open a new one.
-    /// Called by the Runtime when Gateway requests log cleanup via IPC.
+    /// Called by the Runtime when Gateway requests log cleanup via gRPC.
     /// The caller should delete old *.log files before calling this.
     pub fn force_rotate(&self) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());

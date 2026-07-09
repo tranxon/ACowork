@@ -1,11 +1,12 @@
-//! gRPC server module for Gateway IPC.
+//! gRPC server module.
 //!
-//! Provides a tonic-based bidirectional streaming server as an alternative
-//! to the custom-framing IPC transport. This module reuses the same
-//! business logic (handler functions) as the IPC server, but converts
-//! between proto types and domain types instead of JSON framing.
+//! Provides a tonic-based bidirectional streaming server as the sole
+//! transport for Runtime ↔ Gateway communication. This module reuses the same
+//! business logic (handler functions) as the gRPC dispatcher, converting
+//! between proto types and domain types.
 
 pub mod dispatch;
+pub mod resource_pusher;
 pub mod server;
 
 // Re-export the main entry point and types

@@ -21,8 +21,8 @@ use acowork_core::proto::gateway_service_server::{GatewayService, GatewayService
 use acowork_core::proto_bridge::GatewayResponseToProto;
 use acowork_core::protocol::GatewayResponse;
 
-use crate::http::routes::{BridgeEvent, SessionPendingRequests, SharedSessionMgr};
-use crate::ipc::server::SharedState;
+use crate::http::routes::{BridgeEvent, SessionPendingRequests};
+use crate::handlers::server::SharedState;
 
 use super::dispatch::{dispatch_grpc_request, is_stream_chunk};
 
@@ -33,8 +33,8 @@ const DEFAULT_GRPC_PORT: u16 = 19877;
 
 /// Session state for a gRPC-connected Agent Runtime.
 ///
-/// Unlike the IPC `Session`, this stores the gRPC-specific push channel
-/// which sends `Result<proto::ServerMessage, Status>` items.
+/// Stores the gRPC-specific push channel which sends
+/// `Result<proto::ServerMessage, Status>` items.
 pub struct GrpcSession {
     /// Agent ID (set after AgentHello handshake)
     pub agent_id: Option<String>,
@@ -183,6 +183,16 @@ impl GrpcSessionManager {
                 None
             }
         })
+    }
+
+    /// Get count of active sessions
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Get count of authenticated sessions
+    pub fn authenticated_count(&self) -> usize {
+        self.sessions.values().filter(|s| s.authenticated).count()
     }
 
     /// Allocate a new request_id for Gateway→Runtime requests.
@@ -454,9 +464,6 @@ pub type SharedGrpcSessionMgr = Arc<Mutex<GrpcSessionManager>>;
 pub struct GatewayGrpcService {
     state: SharedState,
     grpc_session_mgr: SharedGrpcSessionMgr,
-    /// Legacy IPC session manager — shared with IPC server for intent routing.
-    /// gRPC sessions register here too so that IntentReceived push works.
-    ipc_session_mgr: SharedSessionMgr,
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
@@ -490,20 +497,9 @@ impl GatewayService for GatewayGrpcService {
             mgr.create_session(&conn_id, outbound_tx.clone());
         }
 
-        // Also register in IPC session manager so intent routing can find us.
-        // We create an IPC push channel that bridges to gRPC outbound.
-        let (ipc_push_tx, mut ipc_push_rx) = mpsc::channel::<GatewayResponse>(
-            self.data_flow_config.ipc_push_capacity,
-        );
-        {
-            let mut mgr = self.ipc_session_mgr.lock().await;
-            mgr.create_session_with_push(&conn_id, ipc_push_tx);
-        }
-
         // Clone all shared state for the spawned task
         let state = Arc::clone(&self.state);
         let grpc_session_mgr = Arc::clone(&self.grpc_session_mgr);
-        let ipc_session_mgr = Arc::clone(&self.ipc_session_mgr);
         let mut cap_rx = self.capability_tx.subscribe();
         let bridge_ctrl_tx = self.bridge_ctrl_tx.clone();
         let session_pending = self.session_pending.clone();
@@ -513,7 +509,7 @@ impl GatewayService for GatewayGrpcService {
         tokio::spawn(async move {
             loop {
                 // Biased select: branches are polled in declaration order.
-                // Control messages (CapabilityUpdate, IPC push) take priority
+                // Control messages (CapabilityUpdate) take priority
                 // over data messages (inbound LLM streaming chunks) to ensure
                 // Stop/Done/Error and capability changes are never starved by
                 // high-frequency token streaming.
@@ -548,36 +544,7 @@ impl GatewayService for GatewayGrpcService {
                         }
                     }
 
-                    // Branch 2 (HIGH priority): Server-push message via IPC session channel
-                    // (IntentReceived, ProviderListUpdate, WorkspaceConfigUpdate, etc.)
-                    push_msg = ipc_push_rx.recv() => {
-                        match push_msg {
-                            Some(msg) => {
-                                tracing::debug!(
-                                    "Server-push to gRPC {}: {:?}",
-                                    conn_id_clone,
-                                    std::mem::discriminant(&msg)
-                                );
-                                let server_msg = msg.to_proto(0); // request_id = 0 = push
-                                if outbound_tx.send(Ok(server_msg)).await.is_err() {
-                                    tracing::warn!(
-                                        "gRPC outbound channel closed for {}",
-                                        conn_id_clone
-                                    );
-                                    break;
-                                }
-                            }
-                            None => {
-                                tracing::warn!(
-                                    "IPC push channel closed for {}",
-                                    conn_id_clone
-                                );
-                                break;
-                            }
-                        }
-                    }
-
-                    // Branch 3 (LOWEST priority): Incoming request from Runtime
+                    // Branch 2 (LOWEST priority): Incoming request from Runtime
                     // (includes high-frequency LLM streaming chunks)
                     msg = inbound.message() => {
                         match msg {
@@ -600,17 +567,16 @@ impl GatewayService for GatewayGrpcService {
                                         client_msg,
                                         &conn_id_clone,
                                         &state,
-                                        &ipc_session_mgr,
+                                        &grpc_session_mgr,
                                         &bridge_ctrl_tx,
                                         &session_pending,
                                     ).await;
                                     continue;
                                 }
 
-                                // Intercept AgentHello to also authenticate the GrpcSession.
-                                // The dispatch handler authenticates the IPC session, but the
-                                // GrpcSession (used by send_memory_request → find_by_agent_id)
-                                // needs its own agent_id set for memory API routing.
+                                // Intercept AgentHello to authenticate the GrpcSession.
+                                // This sets agent_id on the session for memory API routing
+                                // and other gRPC-specific lookups.
                                 if let Some(proto::client_message::Payload::AgentHello(ref req)) = client_msg.payload {
                                     let mut grpc_mgr = grpc_session_mgr.lock().await;
                                     if let Some(session) = grpc_mgr.get_session_mut(&conn_id_clone) {
@@ -629,15 +595,10 @@ impl GatewayService for GatewayGrpcService {
                                     client_msg,
                                     &conn_id_clone,
                                     &state,
-                                    &ipc_session_mgr,
+                                    &grpc_session_mgr,
                                     &bridge_ctrl_tx,
                                     &session_pending,
                                 ).await;
-
-                                // For AgentHello, the handler also pushes resource
-                                // updates (e.g. ProviderListUpdate) via the IPC session's
-                                // push channel. We need to deliver those to the gRPC
-                                // outbound too. This is handled by Branch 2 (ipc_push_rx).
 
                                 if server_msg.payload.is_some() {
                                     let _ = outbound_tx.send(Ok(server_msg)).await;
@@ -668,10 +629,6 @@ impl GatewayService for GatewayGrpcService {
                 let mut mgr = grpc_session_mgr.lock().await;
                 mgr.remove_session(&conn_id_clone)
             };
-            {
-                let mut mgr = ipc_session_mgr.lock().await;
-                mgr.remove_session(&conn_id_clone);
-            }
             if let Some(session) = removed_session
                 && let Some(agent_id) = session.agent_id
             {
@@ -706,7 +663,6 @@ pub async fn start_grpc_server(
     addr: SocketAddr,
     state: SharedState,
     grpc_session_mgr: SharedGrpcSessionMgr,
-    ipc_session_mgr: SharedSessionMgr,
     capability_tx: tokio::sync::broadcast::Sender<GatewayResponse>,
     bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
@@ -715,7 +671,6 @@ pub async fn start_grpc_server(
     let service = GatewayGrpcService {
         state,
         grpc_session_mgr,
-        ipc_session_mgr,
         capability_tx,
         bridge_ctrl_tx,
         session_pending,

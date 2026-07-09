@@ -127,7 +127,7 @@ impl CliApprovalGate {
     /// Interactive approval using dialoguer::Confirm.
     ///
     /// This is a blocking call (reads from stdin). It is designed to be
-    /// called from `tokio::task::spawn_blocking()` in the Gateway's IPC
+    /// called from `tokio::task::spawn_blocking()` in the Gateway's gRPC
     /// handler to avoid blocking the async runtime.
     fn interactive_approval(&self, request: &ApprovalRequest) -> ApprovalResponse {
         use dialoguer::Confirm;

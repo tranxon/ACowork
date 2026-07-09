@@ -17,7 +17,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 // ── Permission binary encoding helpers (S5.5) ────────────────────────────
 
 /// Permission type tags for compact binary encoding.
-/// Each variant gets a unique 1-byte tag for efficient IPC transport.
+/// Each variant gets a unique 1-byte tag for efficient binary encoding
+/// in the gateway transport.
 #[repr(u8)]
 enum PermissionTag {
     Network = 0,

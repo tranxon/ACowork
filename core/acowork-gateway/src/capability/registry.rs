@@ -151,7 +151,7 @@ impl CapabilityRegistry {
     /// Get capability overview for handshake step ⑤
     ///
     /// S4.2.5: Returns a summary of all capabilities for the
-    /// capability_overview push during IPC handshake.
+    /// capability_overview push during AgentHello handshake.
     pub fn overview(&self) -> CapabilityOverview {
         let mut by_agent: HashMap<String, Vec<String>> = HashMap::new();
         for cap in self.capabilities.values() {

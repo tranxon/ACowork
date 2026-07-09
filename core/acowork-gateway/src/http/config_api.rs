@@ -27,7 +27,6 @@ pub fn config_routes() -> Router<AppState> {
 /// Gateway configuration response
 #[derive(Serialize)]
 pub struct ConfigResponse {
-    pub socket_path: String,
     pub packages_dir: String,
     pub data_dir: String,
     pub log_level: String,
@@ -111,7 +110,6 @@ pub async fn get_config(
         .ok_or_else(|| ApiError::internal("Gateway config not initialized"))?;
 
     Ok(Json(ConfigResponse {
-        socket_path: config.socket_path.clone(),
         packages_dir: config.packages_dir.clone(),
         data_dir: config.data_dir.clone(),
         log_level: config.log_level.clone(),
@@ -239,7 +237,7 @@ pub async fn update_config(
         crate::cli::update_log_file_count(count);
 
         // 2. Push to all connected Runtime agents
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             let agent_ids: Vec<String> = {
                 let gw = state.gateway_state.read().await;
@@ -277,7 +275,7 @@ pub async fn update_config(
         }
 
         // 2. Push to all connected Runtimes
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             let agent_ids: Vec<String> = {
                 let gw = state.gateway_state.read().await;
@@ -310,7 +308,7 @@ pub async fn update_config(
 /// `DELETE /api/logs` — delete all log files
 ///
 /// Three-phase cleanup:
-/// 1. Push LogRotate to **running** agents via IPC — each Runtime
+/// 1. Push LogRotate to **running** agents via gRPC — each Runtime
 ///    force-rotates to a new log file and deletes old `*.log` files.
 /// 2. Delete **Gateway**'s own log files in the project config directory.
 /// 3. For **stopped** agents (installed but not running), delete
@@ -320,8 +318,8 @@ pub async fn delete_logs(
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let mut total_deleted = 0u64;
 
-    // ── Phase 1: Push LogRotate to running agents via IPC ──────────────
-    if let Some(session_mgr) = &state.session_mgr {
+    // ── Phase 1: Push LogRotate to running agents via gRPC ──────────────
+    if let Some(session_mgr) = &state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         let agent_ids: Vec<String> = {
             let gw = state.gateway_state.read().await;
@@ -412,7 +410,6 @@ mod tests {
     #[test]
     fn test_config_response_serialization() {
         let resp = ConfigResponse {
-            socket_path: "/tmp/gateway.sock".to_string(),
             packages_dir: "/tmp/packages".to_string(),
             data_dir: "/tmp/data".to_string(),
             log_level: "info".to_string(),

@@ -1,6 +1,6 @@
 //! HTTP server lifecycle management
 //!
-//! Starts the Axum HTTP server alongside the IPC server in Gateway::run().
+//! Starts the Axum HTTP server alongside the gRPC server in Gateway::run().
 //! Handles port conflict auto-increment and pidfile writing.
 
 use std::net::TcpListener as StdTcpListener;
@@ -14,15 +14,15 @@ use crate::config::HttpConfig;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::http::routes::{self, AppState, BridgeEvent, SessionPendingRequests, SharedSessionMgr};
-use crate::ipc::global_push::GlobalResourcePusher;
+use crate::http::routes::{self, AppState, BridgeEvent, SessionPendingRequests};
+use crate::grpc::SharedGrpcSessionMgr;
+use crate::grpc::resource_pusher::GlobalResourcePusher;
 
 /// PID file content for Desktop App discovery
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct PidFile {
     pub pid: u32,
     pub http_port: u16,
-    pub socket_path: String,
 }
 
 /// RAII guard for the pidfile — deletes the file on Drop.
@@ -107,10 +107,8 @@ pub fn cleanup_stale_pidfile(data_dir: &Path) {
 pub(crate) async fn start_http_server(
     http_config: &HttpConfig,
     gateway_state: Arc<RwLock<GatewayState>>,
-    socket_path: &str,
     data_dir: &Path,
-    session_mgr: Option<SharedSessionMgr>,
-    grpc_session_mgr: Option<crate::grpc::SharedGrpcSessionMgr>,
+    grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
     session_pending: Option<SessionPendingRequests>,
     log_reload_handle: Option<crate::LogReloadHandle>,
@@ -129,12 +127,11 @@ pub(crate) async fn start_http_server(
     let mut app_state = AppState::with_config(
         gateway_state,
         auth,
-        session_mgr,
+        grpc_session_mgr,
         bridge_ctrl_tx,
         session_pending,
         log_reload_handle,
     );
-    app_state.grpc_session_mgr = grpc_session_mgr;
     app_state.pusher = pusher;
     app_state.cors_enabled = http_config.cors_enabled;
 
@@ -152,7 +149,7 @@ pub(crate) async fn start_http_server(
     .await?;
 
     // Write pidfile for Desktop App discovery
-    let _pidfile_guard = write_pidfile(data_dir, actual_port, socket_path)?;
+    let _pidfile_guard = write_pidfile(data_dir, actual_port)?;
 
     // Build router
     let app = routes::build_router(app_state);
@@ -222,12 +219,10 @@ async fn find_available_port(
 fn write_pidfile(
     data_dir: &Path,
     http_port: u16,
-    socket_path: &str,
 ) -> Result<PidFileGuard, GatewayError> {
     let pid_file = PidFile {
         pid: std::process::id(),
         http_port,
-        socket_path: socket_path.to_string(),
     };
     let content = serde_json::to_string_pretty(&pid_file)
         .map_err(|e| GatewayError::Config(format!("Failed to serialize pidfile: {}", e)))?;
@@ -272,7 +267,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let _guard = write_pidfile(&dir, 19876, r"\\.\\pipe\\acowork-gateway").unwrap();
+        let _guard = write_pidfile(&dir, 19876).unwrap();
 
         let pid_path = dir.join("gateway.pid");
         assert!(pid_path.exists());
@@ -302,7 +297,7 @@ mod tests {
         // Write pidfile via write_pidfile, which returns a PidFileGuard
         let pid_path = dir.join("gateway.pid");
         {
-            let _guard = write_pidfile(&dir, 19876, "/tmp/test.sock").unwrap();
+            let _guard = write_pidfile(&dir, 19876).unwrap();
             // pidfile should exist while guard is alive
             assert!(
                 pid_path.exists(),
@@ -328,7 +323,6 @@ mod tests {
         let pid_file = PidFile {
             pid: 9999999,
             http_port: 19876,
-            socket_path: "/tmp/test.sock".to_string(),
         };
         let pid_path = dir.join("gateway.pid");
         let content = serde_json::to_string_pretty(&pid_file).unwrap();

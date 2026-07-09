@@ -1,7 +1,7 @@
 //! HTTP API module
 //!
 //! Provides REST + WebSocket API for Desktop App and CLI access.
-//! Shares `Arc<RwLock<GatewayState>>` with the IPC server.
+//! Shares `Arc<RwLock<GatewayState>>` with the gRPC server.
 
 pub mod agent_config;
 pub mod agents;

@@ -43,16 +43,12 @@ fn print_logo() {
 /// Gateway CLI
 #[derive(Parser)]
 #[command(name = "acowork-gateway")]
-#[command(about = "ACowork Gateway - Agent lifecycle manager and IPC coordinator")]
+#[command(about = "ACowork Gateway - Agent lifecycle manager and gRPC coordinator")]
 #[command(version)]
 pub struct Cli {
     /// Run as daemon (background service)
     #[arg(long, env = "ACOWORK_GATEWAY_DAEMON")]
     pub daemon: bool,
-
-    /// Gateway socket path (overrides config)
-    #[arg(long, env = "ACOWORK_GATEWAY_SOCKET_PATH")]
-    pub socket_path: Option<String>,
 
     /// Vault directory (overrides config)
     #[arg(long, env = "ACOWORK_GATEWAY_VAULT_DIR")]

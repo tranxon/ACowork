@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::routes::AppState;
 use crate::gateway::state::AgentMigrationState;
-use crate::ipc::global_push::build_embed_sidecar_payload;
+use crate::grpc::resource_pusher::build_embed_sidecar_payload;
 use crate::lifecycle::embed;
 use acowork_core::protocol::SidecarKind;
 

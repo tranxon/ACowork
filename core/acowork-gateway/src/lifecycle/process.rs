@@ -67,7 +67,7 @@ pub async fn spawn_agent_process(
         .arg(&manifest_path)
         .arg("--work-dir")
         .arg(workspace)
-        .arg("--gateway-socket")
+        .arg("--gateway-endpoint")
         .arg(gateway_grpc_endpoint);
 
     // Developer mode: lower log level to DEBUG for detailed diagnostics

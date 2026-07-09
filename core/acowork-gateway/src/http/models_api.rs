@@ -1006,7 +1006,7 @@ fn enrich_model_from_offline(model: &mut ModelInfo) {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
-// ── Model capabilities lookup (used by IPC and vault hot-push) ──────────
+// ── Model capabilities lookup (used by gRPC and vault hot-push) ──────────
 
 /// Look up model capabilities for a specific provider + model_id.
 /// Uses built-in offline provider data (always available, no network required).
@@ -1065,7 +1065,7 @@ fn cross_provider_lookup(
     None
 }
 
-// ── Protocol type lookup (used by IPC to derive protocol from npm field) ──────
+// ── Protocol type lookup (used by gRPC to derive protocol from npm field) ──────
 
 /// Derive protocol type from models.dev npm field.
 ///

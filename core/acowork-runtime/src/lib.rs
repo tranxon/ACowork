@@ -12,7 +12,6 @@ pub mod embedding;
 pub mod episode_distill;
 pub mod error;
 pub mod grpc;
-pub mod ipc;
 pub mod mcp_notify;
 pub mod memory;
 pub mod package;

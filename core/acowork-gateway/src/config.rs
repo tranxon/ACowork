@@ -57,8 +57,6 @@ pub struct GatewayConfig {
     /// Skipped in serialization — not stored in the TOML file itself.
     #[serde(skip)]
     pub config_source_path: Option<String>,
-    /// Socket path for IPC (Unix Socket on Linux, Named Pipe on Windows)
-    pub socket_path: String,
     /// Vault directory for encrypted key storage
     pub vault_dir: String,
     /// Packages directory for installed .agent packages
@@ -87,12 +85,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub http: HttpConfig,
     /// Default LLM provider for agents
-    /// When set, Gateway delivers this provider's config to agents via IPC.
+    /// When set, Gateway delivers this provider's config to agents via gRPC.
     /// If not set, falls back to the first key stored in Vault.
     #[serde(default)]
     pub default_provider: Option<String>,
     /// Default LLM model for agents
-    /// When set, Gateway delivers this model to agents via IPC.
+    /// When set, Gateway delivers this model to agents via gRPC.
     /// If not set, falls back to the Vault entry's default_model.
     #[serde(default)]
     pub default_model: Option<String>,
@@ -137,10 +135,6 @@ pub struct DataFlowConfig {
     /// Default: 32.
     #[serde(default = "default_grpc_outbound_capacity")]
     pub grpc_outbound_capacity: usize,
-    /// Capacity of the IPC push mpsc channel (per-connection).
-    /// Default: 32.
-    #[serde(default = "default_ipc_push_capacity")]
-    pub ipc_push_capacity: usize,
     /// Capacity of the capability broadcast channel.
     /// Default: 64.
     #[serde(default = "default_capability_broadcast_capacity")]
@@ -156,9 +150,6 @@ fn default_bridge_ctrl_capacity() -> usize {
 fn default_grpc_outbound_capacity() -> usize {
     256
 }
-fn default_ipc_push_capacity() -> usize {
-    256
-}
 fn default_capability_broadcast_capacity() -> usize {
     64
 }
@@ -169,7 +160,6 @@ impl Default for DataFlowConfig {
             worker_threads: default_worker_threads(),
             bridge_ctrl_capacity: default_bridge_ctrl_capacity(),
             grpc_outbound_capacity: default_grpc_outbound_capacity(),
-            ipc_push_capacity: default_ipc_push_capacity(),
             capability_broadcast_capacity: default_capability_broadcast_capacity(),
         }
     }
@@ -344,11 +334,6 @@ impl GatewayConfig {
 
         // Defaults
         let base_dir = Self::project_config_dir();
-        let default_socket = if cfg!(windows) {
-            r"\\.\pipe\acowork-gateway".to_string()
-        } else {
-            base_dir.join("gateway.sock").to_string_lossy().to_string()
-        };
         let default_vault = base_dir.join("vault").to_string_lossy().to_string();
         let default_packages = base_dir.join("packages").to_string_lossy().to_string();
 
@@ -367,11 +352,6 @@ impl GatewayConfig {
         // Merge: CLI > env > file > defaults
         let config = Self {
             config_source_path: config_path,
-            socket_path: cli
-                .socket_path
-                .clone()
-                .or(file_config.as_ref().map(|c| c.socket_path.clone()))
-                .unwrap_or(default_socket),
             vault_dir: cli
                 .vault_dir
                 .clone()
@@ -519,15 +499,8 @@ impl Default for GatewayConfig {
         let base_dir = Self::project_config_dir();
         let data_dir = Self::project_data_dir();
 
-        let default_socket = if cfg!(windows) {
-            r"\\.\pipe\acowork-gateway".to_string()
-        } else {
-            base_dir.join("gateway.sock").to_string_lossy().to_string()
-        };
-
         Self {
             config_source_path: None,
-            socket_path: default_socket,
             vault_dir: base_dir.join("vault").to_string_lossy().to_string(),
             packages_dir: base_dir.join("packages").to_string_lossy().to_string(),
             data_dir: data_dir.to_string_lossy().to_string(),
@@ -594,7 +567,6 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GatewayConfig::default();
-        assert!(!config.socket_path.is_empty());
         assert!(!config.vault_dir.is_empty());
         assert!(!config.packages_dir.is_empty());
         assert_eq!(config.log_level, "info");
@@ -617,7 +589,6 @@ mod tests {
 
         let cli = Cli::parse_from(["acowork-gateway"]);
         let config = GatewayConfig::from_cli(&cli).unwrap();
-        assert!(!config.socket_path.is_empty());
         assert_eq!(config.log_level, "info");
     }
 
@@ -625,13 +596,10 @@ mod tests {
     fn test_config_from_cli_overrides() {
         let cli = Cli::parse_from([
             "acowork-gateway",
-            "--socket-path",
-            "/tmp/custom.sock",
             "--log-level",
             "debug",
         ]);
         let config = GatewayConfig::from_cli(&cli).unwrap();
-        assert_eq!(config.socket_path, "/tmp/custom.sock");
         assert_eq!(config.log_level, "debug");
     }
 
@@ -639,7 +607,6 @@ mod tests {
     fn test_ensure_dirs() {
         let config = GatewayConfig {
             config_source_path: None,
-            socket_path: "/tmp/test-gw/gateway.sock".to_string(),
             vault_dir: format!("/tmp/test-gw-{}", std::process::id()),
             packages_dir: format!("/tmp/test-gw-pkg-{}", std::process::id()),
             data_dir: format!("/tmp/test-gw-data-{}", std::process::id()),

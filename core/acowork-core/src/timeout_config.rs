@@ -231,7 +231,7 @@ pub mod constants {
     /// Tool approval / user question wait (was `APPROVAL_TIMEOUT_SECS = 300`).
     pub const APPROVAL: Duration = Duration::from_secs(300);
 
-    /// HTTP → Runtime IPC response wait (was `SESSION_IPC_TIMEOUT_SECS = 10`).
+    /// HTTP → Runtime gRPC response wait (was `SESSION_IPC_TIMEOUT_SECS = 10`).
     pub const SESSION_IPC: Duration = Duration::from_secs(10);
 
     /// Default synchronous Intent routing wait

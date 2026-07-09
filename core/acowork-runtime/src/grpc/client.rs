@@ -3,10 +3,10 @@
 //! Replaces the legacy socket-based `GatewayClient` with a protocol-buffer
 //! transport that natively supports multiplexing: request-response and
 //! server-push messages share a single gRPC stream and are demuxed by
-//! `request_id`. This eliminates the IPC frame interleaving bug that
-//! required `pending_push` buffering in the old client.
+//! `request_id`. This eliminates the frame interleaving bug that
+//! required `pending_push` buffering in the legacy client.
 //!
-//! Key improvements over the legacy IPC client:
+//! Key improvements over the legacy GatewayClient:
 //! - **No frame interleaving**: gRPC stream multiplexes inherently
 //! - **Concurrent requests**: each gets a unique `request_id`; `&self` sends
 //! - **Exponential backoff reconnect**: [`connect`] wraps [`connect_once`] with configurable bounds

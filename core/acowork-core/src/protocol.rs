@@ -609,14 +609,14 @@ pub enum GatewayRequest {
         context: ContextUsageInfo,
         session_id: String,
     },
-    /// Agent registration — first message sent after IPC connection
+    /// Agent registration — first message sent after gRPC connection
     /// Runtime sends this to identify itself to the Gateway
     AgentHello {
         /// The agent's reverse-domain identifier
         agent_id: String,
         /// The agent's version
         version: String,
-        /// Connection role — "main" for the primary IPC connection,
+        /// Connection role — "main" for the primary gRPC connection,
         /// "chunk-relay" for the streaming chunk relay connection.
         /// The Gateway uses this to route IntentReceived only to "main" connections.
         /// Defaults to "main" when absent (backward compatible).
@@ -1246,7 +1246,7 @@ pub enum McpTransportDef {
     Sse,
 }
 
-/// Session info DTO for IPC responses (S1.14)
+/// Session info DTO for gRPC responses (S1.14)
 ///
 /// Carries session metadata from Runtime to Gateway
 /// so the HTTP API can return session lists without
@@ -1317,7 +1317,7 @@ pub struct RetryPauseInfoDto {
     pub provider: String,
 }
 
-/// Conversation entry DTO for IPC responses (S1.14)
+/// Conversation entry DTO for gRPC responses (S1.14)
 ///
 /// Carries a single message from Runtime to Gateway
 /// for paginated message queries.
@@ -1344,7 +1344,7 @@ pub struct ConversationEntryDto {
     pub kind: Option<String>,
 }
 
-/// Cron entry info (for IPC responses, S5.8 enhanced)
+/// Cron entry info (for gRPC responses, S5.8 enhanced)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronEntryInfo {
     /// Unique ID for this cron entry

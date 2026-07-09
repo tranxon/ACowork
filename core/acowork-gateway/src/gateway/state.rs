@@ -39,7 +39,7 @@ pub struct RunningAgentInfo {
     /// Debug WebSocket port (set when dev_mode is true)
     pub debug_port: Option<u16>,
     /// In-memory cache of the agent's workspace config JSON (ADR-009: pass-through).
-    /// Populated by Runtime via UpdateWorkspaceConfig IPC after AgentHello.
+    /// Populated by Runtime via UpdateWorkspaceConfig gRPC after AgentHello.
     /// Cleared when agent disconnects. NOT persisted to disk.
     pub workspace_config_json: Option<String>,
     /// Current embedding dimension (reported by Runtime during AgentHello).
@@ -67,7 +67,7 @@ pub struct AgentMigrationState {
     pub error: Option<String>,
 }
 
-/// Shared permission store type (same as IPC server)
+/// Shared permission store type (same as gRPC server)
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
     /// Installed agents (agent_id → AgentInfo)
@@ -88,8 +88,6 @@ pub struct GatewayState {
     pub cron_store: Option<std::sync::Arc<CronStore>>,
     /// Gateway configuration snapshot (for Config API)
     pub config: Option<crate::config::GatewayConfig>,
-    /// Shared IPC session manager (set during Gateway::run before IPC/HTTP start)
-    pub ipc_sessions: Option<crate::http::routes::SharedSessionMgr>,
     /// Resource cache — versioned provider and MCP lists for AgentHello diff sync.
     /// Loaded at startup and rebuilt by HTTP handlers when resources change.
     pub resource_cache: ResourceCache,
@@ -122,7 +120,6 @@ impl GatewayState {
             cron_scheduler: CronScheduler::new(),
             cron_store: None,
             config: None,
-            ipc_sessions: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,
             lsp_relay_process: None,

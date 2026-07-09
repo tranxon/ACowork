@@ -73,7 +73,6 @@ pub(crate) async fn phase_d_run(
         &mut client,
         gateway_query_rx,
         config.work_dir.clone(),
-        ctx.socket_path.clone(),
         ctx.agent_id.clone(),
         ctx.version.clone(),
         log_reload_handle,

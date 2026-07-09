@@ -41,14 +41,14 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::ipc::global_push::{build_embed_sidecar_payload, GlobalResourcePusher};
+use crate::grpc::resource_pusher::{build_embed_sidecar_payload, GlobalResourcePusher};
 use acowork_core::protocol::SidecarKind;
 
 use super::embed::spawn_embed_process;
 
-/// Shared gateway state handle. Same as `ipc::server::SharedState`
+/// Shared gateway state handle. Same as `crate::handlers::server::SharedState`
 /// but re-declared here to avoid a cycle (lifecycle shouldn't import
-/// from ipc::server, and ipc::server shouldn't import lifecycle).
+/// from handlers, and handlers shouldn't import lifecycle).
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
 /// Connect / reconnect backoff bounds.
@@ -717,7 +717,7 @@ async fn apply_state_event(
 /// This is a local helper for the supervisor's state-transition call
 /// sites. The push channel is the generic `SidecarEndpointUpdate`
 /// introduced in ADR-030 Phase C2 — see `push_sidecar_endpoint` in
-/// `ipc::global_push` for the full semantics.
+/// `grpc::resource_pusher` for the full semantics.
 ///
 /// No-op if the embed process has not yet resolved its active model
 /// (`build_embed_sidecar_payload` returns `None`).

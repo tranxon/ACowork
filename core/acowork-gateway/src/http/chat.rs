@@ -193,7 +193,7 @@ struct WsClientMessage {
 /// `POST /api/agents/:id/message` — send a message to an agent
 ///
 /// Validates the agent exists and is running, then pushes the message
-/// to the agent's IPC session via the SessionManager.
+/// to the agent's gRPC session via the SessionManager.
 /// Returns a message_id for correlation.
 pub async fn send_message(
     State(state): State<AppState>,
@@ -256,7 +256,7 @@ pub async fn send_message(
 
     // Push message to agent via SessionManager (if available)
     // S1.6 will implement the full response bridge
-    if let Some(session_mgr) = &state.session_mgr {
+    if let Some(session_mgr) = &state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
             let mut params = serde_json::json!({
@@ -327,9 +327,9 @@ pub async fn send_message(
 
 /// `GET /api/agents/:id/conversations` — list conversation sessions for an agent
 ///
-/// S1.14: Forwards the query to Runtime via IPC (IntentReceived push)
+/// S1.14: Forwards the query to Runtime via gRPC (IntentReceived push)
 /// and waits for the response. Falls back to the legacy Grafeo-based
-/// implementation if the agent is not running via IPC.
+/// implementation if the agent is not running via gRPC.
 pub async fn get_conversations(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -345,8 +345,8 @@ pub async fn get_conversations(
         }
     }
 
-    // S1.14: Try IPC forwarding first (if agent is running)
-    if let Some(ref session_mgr) = state.session_mgr {
+    // S1.14: Try gRPC forwarding first (if agent is running)
+    if let Some(ref session_mgr) = state.grpc_session_mgr {
         let request_id = format!("sess-list-{}", uuid::Uuid::new_v4());
         let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
             from: "http-api".to_string(),
@@ -367,7 +367,7 @@ pub async fn get_conversations(
         }; // mgr dropped here
 
         if pushed {
-            // Wait for Runtime response via IPC
+            // Wait for Runtime response via gRPC
             match wait_for_session_response(&state, &request_id).await {
                 Ok(data) => {
                     // Convert SessionInfoDto to ConversationSummary
@@ -388,7 +388,7 @@ pub async fn get_conversations(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Session IPC query timed out or failed: {}, falling back to Grafeo",
+                        "Session gRPC query timed out or failed: {}, falling back to Grafeo",
                         e
                     );
                 }
@@ -396,7 +396,7 @@ pub async fn get_conversations(
         }
     }
 
-    // No running agent with IPC session — return empty list
+    // No running agent with gRPC session — return empty list
     let conversations = vec![];
     Ok(Json(ConversationsListResponse { conversations }))
 }
@@ -437,7 +437,7 @@ pub async fn get_latest_conversation(
         ));
     }
 
-    // Fetch messages for the target session via IPC
+    // Fetch messages for the target session via gRPC
     let params = serde_json::json!({
         "session_id": &query.session_id,
         "limit": 100,
@@ -499,7 +499,7 @@ pub async fn agent_stream_ws(
 
 /// Handle the WebSocket connection lifecycle
 ///
-/// Receives messages from the client, pushes them to the Agent's IPC session,
+/// Receives messages from the client, pushes them to the Agent's gRPC session,
 /// and subscribes to the bridge channel for streaming responses back.
 async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
     tracing::info!("WebSocket connected for agent: {}", agent_id);
@@ -595,7 +595,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
     };
 
     if client_msg.msg_type == "model_switch" {
-        // Handle model switch: push to running agent via IPC
+        // Handle model switch: push to running agent via gRPC
         // Only running agents can switch models — persistence is handled here
         // because the Agent Runtime's in-memory override is lost on restart.
         let model = match client_msg.model {
@@ -615,7 +615,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
 
         let message_id = format!("msg-{}", uuid::Uuid::new_v4());
         let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let mut params = serde_json::json!({
@@ -677,7 +677,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
     }
 
     if client_msg.msg_type == "reasoning_effort" {
-        // Handle reasoning effort override: push to running agent via IPC.
+        // Handle reasoning effort override: push to running agent via gRPC.
         // The Runtime persists and applies the override per-session.
         let effort = match client_msg.effort {
             Some(ref e) if !e.is_empty() => e.clone(),
@@ -695,7 +695,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
 
         let message_id = format!("msg-{}", uuid::Uuid::new_v4());
         let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let mut params = serde_json::json!({
@@ -745,11 +745,11 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
     }
 
     if client_msg.msg_type == "stop" {
-        // Handle stop: send interrupt signal to running agent via IPC
+        // Handle stop: send interrupt signal to running agent via gRPC
         tracing::info!(agent = %agent_id, "Forwarding stop signal to agent");
 
         let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let mut params = serde_json::json!({
@@ -796,13 +796,13 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
     }
 
     if client_msg.msg_type == "compact_context" {
-        // Handle compact context: forward to Runtime via IPC IntentReceived.
+        // Handle compact context: forward to Runtime via gRPC IntentReceived.
         // The Runtime's compact_history_if_needed will emit CompactingStarted
         // and ContextUsage events automatically.
         tracing::info!(agent = %agent_id, "Forwarding compact_context to agent");
 
         let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.session_mgr {
+        if let Some(session_mgr) = &state.grpc_session_mgr {
             let mgr = session_mgr.lock().await;
             if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
                 let mut params = serde_json::json!({});
@@ -881,7 +881,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
 
     // Push to agent via SessionManager
     let mut pushed_ok = false;
-    if let Some(session_mgr) = &state.session_mgr {
+    if let Some(session_mgr) = &state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
             let mut params = serde_json::json!({
@@ -923,7 +923,7 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
     if !pushed_ok {
         let err = serde_json::json!({
             "type": "error",
-            "message": format!("Agent {} is not connected via IPC", agent_id),
+            "message": format!("Agent {} is not connected via gRPC", agent_id),
             "message_id": message_id,
         });
         let _ = socket.send(Message::Text(err.to_string().into())).await;
@@ -1050,7 +1050,7 @@ pub struct ContinueExecutionRequest {
 
 /// Continue agent execution after iteration limit was reached.
 ///
-/// This sends a `ContinueExecution` signal to the Agent Runtime via IPC,
+/// This sends a `ContinueExecution` signal to the Agent Runtime via gRPC,
 /// which resets the iteration counter and resumes the agent loop.
 pub async fn continue_execution(
     State(state): State<AppState>,
@@ -1074,8 +1074,8 @@ pub async fn continue_execution(
         }
     }
 
-    // Forward continue_execution to agent via IPC
-    if let Some(ref session_mgr) = state.session_mgr {
+    // Forward continue_execution to agent via gRPC
+    if let Some(ref session_mgr) = state.grpc_session_mgr {
         let mgr = session_mgr.lock().await;
         if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
             let mut params = serde_json::json!({
@@ -1262,7 +1262,7 @@ pub struct SessionCreatedResponse {
 
 /// `GET /api/agents/{id}/sessions` — list conversation sessions (S1.14)
 ///
-/// Forwards the query to Runtime via IPC and returns the session list.
+/// Forwards the query to Runtime via gRPC and returns the session list.
 pub async fn list_sessions(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1347,7 +1347,7 @@ pub async fn list_sessions(
 
 /// `GET /api/agents/{id}/sessions/{session_id}/messages` — get paginated session messages (S1.14)
 ///
-/// Forwards the query to Runtime via IPC and returns the messages.
+/// Forwards the query to Runtime via gRPC and returns the messages.
 pub async fn get_session_messages(
     State(state): State<AppState>,
     Path((agent_id, session_id)): Path<(String, String)>,
@@ -1457,7 +1457,7 @@ pub async fn get_session_messages(
 
 /// `POST /api/agents/{id}/sessions` — create a new conversation session (S1.14)
 ///
-/// Forwards the request to Runtime via IPC, which creates a new
+/// Forwards the request to Runtime via gRPC, which creates a new
 /// ConversationSession and returns the session_id.
 pub async fn create_session(
     State(state): State<AppState>,
@@ -1742,13 +1742,13 @@ pub async fn delete_session(
     Ok(Json(data))
 }
 
-// ── S1.14: IPC forwarding helpers ──────────────────────────────────────────────
+// ── S1.14: gRPC forwarding helpers ──────────────────────────────────────────────
 
-/// Default timeout for waiting for session IPC response.
+/// Default timeout for waiting for session gRPC response.
 const SESSION_IPC_TIMEOUT: std::time::Duration =
     acowork_core::timeout_config::constants::SESSION_IPC;
 
-/// Forward a session query to Runtime via IPC push and wait for the response.
+/// Forward a session query to Runtime via gRPC push and wait for the response.
 ///
 /// 1. Creates a oneshot channel and stores the sender in the pending map
 /// 2. Pushes IntentReceived with the query action to Runtime
@@ -1761,7 +1761,7 @@ async fn forward_session_query(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
     let session_mgr = state
-        .session_mgr
+        .grpc_session_mgr
         .as_ref()
         .ok_or_else(|| ApiError::internal("Session manager not available"))?;
 
@@ -1828,7 +1828,7 @@ async fn forward_session_action(
     params: serde_json::Value,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let session_mgr = state
-        .session_mgr
+        .grpc_session_mgr
         .as_ref()
         .ok_or_else(|| ApiError::internal("Session manager not available"))?;
 
@@ -1949,3 +1949,4 @@ async fn resolve_document_refs(
         Some(serde_json::Value::Array(docs))
     }
 }
+

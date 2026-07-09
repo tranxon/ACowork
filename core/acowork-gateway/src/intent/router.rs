@@ -16,8 +16,8 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::intent::privacy;
-use crate::ipc::server::SharedState;
-use crate::ipc::session::SessionManager;
+use crate::handlers::server::SharedState;
+use crate::grpc::SharedGrpcSessionMgr;
 
 /// Default timeout for synchronous Intent routing.
 pub const DEFAULT_INTENT_TIMEOUT: Duration =
@@ -74,7 +74,7 @@ pub struct PendingIntent {
 /// Intent router for cross-agent messaging.
 ///
 /// Responsible for:
-/// - Routing Intent requests to target Agents via IPC
+/// - Routing Intent requests to target Agents via gRPC
 /// - Auto-spawning target Agents when not running
 /// - Applying privacy filters to responses
 /// - Managing async Intent callbacks
@@ -116,7 +116,7 @@ impl IntentRouter {
     /// Steps:
     /// 1. Look up the target agent in running agents
     /// 2. If not running, attempt to auto-spawn (S4.1.2)
-    /// 3. Forward the intent via IPC and wait for response (S4.1.3)
+    /// 3. Forward the intent via gRPC and wait for response (S4.1.3)
     /// 4. Apply privacy filtering and return
     pub async fn route_sync(
         &self,
@@ -125,7 +125,7 @@ impl IntentRouter {
         action: &str,
         _params: &Value,
         state: &SharedState,
-        session_mgr: &Arc<Mutex<SessionManager>>,
+        session_mgr: &SharedGrpcSessionMgr,
     ) -> Result<IntentResult, IntentError> {
         let message_id = format!("msg-{}", chrono::Utc::now().timestamp_millis());
 
@@ -153,14 +153,14 @@ impl IntentRouter {
                 target
             );
             // For now, return SpawnFailed since the router doesn't own
-            // the lifecycle manager. The IPC handler layer coordinates this.
+            // the lifecycle manager. The handler layer coordinates this.
             return Err(IntentError::SpawnFailed(format!(
                 "Agent '{}' not running; lifecycle manager coordination required",
                 target
             )));
         }
 
-        // Step 3: Find the target agent's IPC session and forward
+        // Step 3: Find the target agent's gRPC session and forward
         let target_conn_id = {
             let mgr = session_mgr.lock().await;
             mgr.find_by_agent_id(target)
@@ -175,7 +175,7 @@ impl IntentRouter {
                 // 2. Wait for the target agent to process and reply
                 // 3. Apply timeout if no response within default_timeout
                 //
-                // Since the current IPC model is request-response per connection
+                // Since the current gRPC model is request-response per connection
                 // (agent → gateway), cross-agent forwarding requires a server-push
                 // mechanism which is added in S4.1.4 for async intents.
                 //
@@ -195,10 +195,10 @@ impl IntentRouter {
                 })
             }
             None => {
-                // Agent is marked as running but has no IPC session
+                // Agent is marked as running but has no gRPC session
                 // This can happen briefly during startup or after a disconnect
                 Err(IntentError::SpawnFailed(format!(
-                    "Agent '{}' is running but has no active IPC session",
+                    "Agent '{}' is running but has no active gRPC session",
                     target
                 )))
             }
@@ -208,7 +208,7 @@ impl IntentRouter {
     /// Route an asynchronous Intent to the target agent.
     ///
     /// S4.1.4: The intent is stored as pending and the target agent
-    /// will receive it on the next IPC poll. The result is delivered
+    /// will receive it on the next gRPC poll. The result is delivered
     /// via a callback mechanism when the target responds.
     pub async fn route_async(
         &self,
@@ -217,7 +217,7 @@ impl IntentRouter {
         action: &str,
         _params: &Value,
         state: &SharedState,
-        _session_mgr: &Arc<Mutex<SessionManager>>,
+        _session_mgr: &SharedGrpcSessionMgr,
     ) -> Result<IntentResult, IntentError> {
         let message_id = format!("msg-{}-async", chrono::Utc::now().timestamp_millis());
 
@@ -338,10 +338,6 @@ mod tests {
         Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())))
     }
 
-    fn test_session_mgr() -> Arc<Mutex<SessionManager>> {
-        Arc::new(Mutex::new(SessionManager::new()))
-    }
-
     #[test]
     fn test_intent_router_new() {
         let router = IntentRouter::new();
@@ -381,7 +377,7 @@ mod tests {
     async fn test_route_sync_agent_not_found() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = test_session_mgr();
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
 
         let result = router
             .route_sync(
@@ -407,7 +403,7 @@ mod tests {
     async fn test_route_sync_agent_not_running() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = test_session_mgr();
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
 
         // Install an agent but don't start it
         {
@@ -458,7 +454,7 @@ mod tests {
     async fn test_route_async_queues_intent() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = test_session_mgr();
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
 
         // Install target agent
         {
@@ -624,7 +620,7 @@ mod tests {
     async fn test_route_async_agent_not_found() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = test_session_mgr();
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
 
         let result = router
             .route_async(

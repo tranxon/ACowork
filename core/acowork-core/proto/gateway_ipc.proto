@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package acowork.ipc.v1;
+package acowork.gateway.v1;
 
 service GatewayService {
   rpc Connect(stream ClientMessage) returns (stream ServerMessage);
