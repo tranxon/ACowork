@@ -438,6 +438,18 @@ pub trait GatewayRequestToProto {
     fn to_proto(&self, request_id: u64) -> proto::ClientMessage;
 }
 
+// ── SidecarKind ↔ proto::SidecarKind ──────────────────────────────────────
+
+/// Map the domain `SidecarKind` enum onto the proto integer value. Mirrors
+/// the order defined in `gateway_ipc.proto::SidecarKind`.
+fn sidecar_to_proto(kind: protocol::SidecarKind) -> proto::SidecarKind {
+    match kind {
+        protocol::SidecarKind::Unspecified => proto::SidecarKind::Unspecified,
+        protocol::SidecarKind::LspRelay => proto::SidecarKind::LspRelay,
+        protocol::SidecarKind::Embed => proto::SidecarKind::Embed,
+    }
+}
+
 // ── GatewayResponse → ServerMessage helpers ─────────────────────────────
 
 /// Convert a domain GatewayResponse into a proto ServerMessage.
@@ -680,7 +692,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
             model,
             provider,
             search_config_json,
-            embed_config_json,
             avatar,
             builtin_avatar,
             max_sessions,
@@ -716,7 +727,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                         search_config_json: search_config_json.clone(),
                         mcp_servers_set,
                         system_prompt_set,
-                        embed_config_json: embed_config_json.clone(),
                         avatar: avatar.clone(),
                         builtin_avatar: builtin_avatar.clone(),
                         avatar_set,
@@ -793,15 +803,6 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     debug_port: *debug_port,
                 }),
             ),
-            // EmbeddingConfigUpdate — no proto message defined.
-            // This variant is only used in direct IPC (non-gRPC) scenarios.
-            // For gRPC delivery, the Gateway uses RuntimeConfigUpdate.embed_config_json
-            // instead, which has proper proto representation.
-            // Mapping to UsageReportAck here is safe because the gRPC path
-            // never generates this variant.
-            protocol::GatewayResponse::EmbeddingConfigUpdate { .. } => Some(
-                proto::server_message::Payload::UsageReportAck(proto::UsageReportAck {}),
-            ),
             protocol::GatewayResponse::MigrationStart {
                 request_id,
                 embed_endpoint,
@@ -815,6 +816,21 @@ impl GatewayResponseToProto for protocol::GatewayResponse {
                     embed_dimension: *embed_dimension as u64,
                 }),
             ),
+            // SidecarEndpointUpdate — Gateway → Runtime push for sidecar state.
+            // The Runtime reacts by registering/disabling sidecar-dependent
+            // builtin tools (e.g. `codebase` for lsp_relay) or rebuilding
+            // the embedding provider chain (for embed).
+            protocol::GatewayResponse::SidecarEndpointUpdate {
+                sidecar,
+                endpoint,
+                spec_json,
+            } => Some(proto::server_message::Payload::SidecarEndpointUpdate(
+                proto::SidecarEndpointUpdate {
+                    sidecar: sidecar_to_proto(*sidecar) as i32,
+                    endpoint: endpoint.clone(),
+                    spec_json: spec_json.clone(),
+                },
+            )),
         };
 
         proto::ServerMessage {

@@ -157,18 +157,6 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
     }
 }
 
-/// Pending embedding config from Gateway EmbeddingConfigUpdate.
-///
-/// Stored so that the config can be persisted to `agent_config.json`
-/// and used on next Agent restart to rebuild the FallbackEmbeddingProvider.
-/// True hot-swap (in-place rebuild without restart) is planned future work.
-#[derive(Debug, Clone)]
-pub struct PendingEmbedConfig {
-    pub embed_endpoint: String,
-    pub embed_model_id: String,
-    pub embed_dimension: usize,
-}
-
 /// Debug mode handles injected at runtime when Gateway pushes
 /// EnableDebugMode. Stored on SessionManager so that sessions
 /// created *after* debug mode is enabled inherit the debug
@@ -195,6 +183,11 @@ pub struct SessionManager {
     /// MCP tool wrappers, built when MCP servers are connected.
     /// Merged into each new session's tools at creation time.
     mcp_tools: Option<Vec<Arc<dyn Tool>>>,
+    /// ADR-030 C3: Dynamic builtin tools registered via SidecarEndpointUpdate
+    /// (e.g. `codebase` when LSP relay becomes ready). Stored here so that
+    /// **new** sessions created after a sidecar push also inherit them -
+    /// mirrors the `mcp_tools` pattern (ADR-030 review ISSUE-1 fix).
+    dynamic_builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
     /// MCP connection manager.
     mcp_manager: McpManager,
     /// Per-session pending workspace reference.
@@ -237,9 +230,7 @@ pub struct SessionManager {
     /// Shared streaming lines map (keyed by session_id), cloned into each
     /// SessionCore and used by the HTTP handler for `read_messages_since`.
     streaming_lines: crate::conversation::StreamingStateMap,
-    /// Pending embedding config from Gateway EmbeddingConfigUpdate.
-    /// Stored for persistence and used on next Agent restart.
-    pub pending_embed_config: Option<PendingEmbedConfig>,
+
     /// Latest session ID and title, determined during the startup session scan
     /// (by `last_active_at` descending). Set once after the background scan
     /// completes; `None` until the scan finishes or if no sessions exist.
@@ -255,6 +246,7 @@ impl SessionManager {
             config,
             runtime_overrides: RuntimeConfigOverrides::default(),
             mcp_tools: None,
+            dynamic_builtin_tools: Vec::new(),
             mcp_manager: McpManager::new(),
             pending_workspaces: HashMap::new(),
             default_workspace_id: "__agent_home__".to_string(),
@@ -265,7 +257,6 @@ impl SessionManager {
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            pending_embed_config: None,
             latest_session: std::sync::RwLock::new(None),
         }
     }
@@ -422,6 +413,7 @@ impl SessionManager {
             self.config.identity_context.clone(),
             self.config.protocol_type.clone(),
             self.mcp_tools.clone(),
+            self.dynamic_builtin_tools.clone(),
             per_session_debug,
             pending_debug_handles.clone(),
             self.runtime_overrides.clone(),
@@ -1253,6 +1245,94 @@ After installation, ask the user to re-enable the MCP server.",
         });
     }
 
+    // ── ADR-030 C3: dynamic builtin tool registration (SidecarEndpointUpdate) ──
+    //
+    // When a sidecar's state changes (LSP relay became ready, sidecar
+    // went away, ...), `cli.rs` calls these methods. They wrap the raw
+    // tool with the same security decorators used at startup (path guard
+    // + rate limiter) and broadcast a `SessionMessage` so every active
+    // session rebuilds its dispatch list.
+
+    /// Register a dynamic builtin tool. The raw `Arc<dyn Tool>` is
+    /// wrapped with `PathGuardedTool` and `RateLimitedTool` (matching
+    /// the startup path in `ToolRegistry::activate`) and then broadcast
+    /// to all sessions. Sessions replace any existing entry with the
+    /// same `name()` so a sidecar endpoint re-push is idempotent.
+    ///
+    /// Caller passes the per-session rate limit (`max_calls_per_minute`)
+    /// and the shared `SharedResolver`; both are already available at
+    /// the runtime call site (`cli.rs`).
+    pub fn register_dynamic_tool(
+        &mut self,
+        tool: Arc<dyn Tool>,
+        resolver: crate::tools::workspace_resolver::SharedResolver,
+        max_calls_per_minute: u32,
+        enabled: bool,
+    ) {
+        let name = tool.name().to_string();
+        let wrapped = crate::tools::wrappers::wrap_with_security_decorators(
+            tool,
+            resolver,
+            max_calls_per_minute,
+        );
+        let entry = crate::agent::agent_core::BuiltinToolEntry {
+            tool: wrapped,
+            enabled,
+        };
+
+        // Store on the manager so new sessions created after this push
+        // also inherit the tool (ADR-030 review ISSUE-1 fix).
+        if let Some(existing) = self
+            .dynamic_builtin_tools
+            .iter()
+            .position(|e| e.name() == name)
+        {
+            self.dynamic_builtin_tools[existing] = entry.clone();
+        } else {
+            self.dynamic_builtin_tools.push(entry.clone());
+        }
+
+        let failed = self.broadcast(SessionMessage::AddDynamicBuiltinTool { entry });
+        tracing::info!(
+            tool = %name,
+            enabled,
+            failed_count = failed.len(),
+            "SessionManager: dynamic builtin tool registered"
+        );
+    }
+
+    /// Unregister a dynamic builtin tool by name. Idempotent: removing a
+    /// tool that no session has is still a no-op broadcast (sessions
+    /// silently skip unknown names).
+    pub fn unregister_dynamic_tool(&mut self, name: &str) {
+        // Remove from the manager's stored list so new sessions don't
+        // inherit a stale tool (ADR-030 review ISSUE-1 fix).
+        self.dynamic_builtin_tools.retain(|e| e.name() != name);
+
+        let failed = self.broadcast(SessionMessage::RemoveDynamicBuiltinTool {
+            name: name.to_string(),
+        });
+        tracing::info!(
+            tool = %name,
+            failed_count = failed.len(),
+            "SessionManager: dynamic builtin tool unregistered"
+        );
+    }
+
+    /// Returns `(name, enabled)` pairs for all dynamically registered
+    /// builtin tools (via `SidecarEndpointUpdate`).
+    ///
+    /// Used by the `ConfigSnapshot` builder to merge with the persisted
+    /// `agent_tools.json` so the frontend tool panel reflects tools that
+    /// were registered after startup (e.g. `codebase` when LSP Relay
+    /// becomes ready).
+    pub fn dynamic_builtin_tool_names(&self) -> Vec<(String, bool)> {
+        self.dynamic_builtin_tools
+            .iter()
+            .map(|e| (e.name(), e.enabled))
+            .collect()
+    }
+
     /// Rebuild `full_tool_specs` by merging the original built-in specs with
     /// any currently connected MCP tool specs.
     fn rebuild_full_tool_specs_with_mcp(&mut self) {
@@ -1413,7 +1493,7 @@ After installation, ask the user to re-enable the MCP server.",
         }
     }
 
-    /// Handle EmbeddingConfigUpdate from Gateway.
+    /// Handle embedding config update from Gateway (via SidecarEndpointUpdate(Embed)).
     ///
     /// When the user switches the active embedding model, the Gateway pushes
     /// this update to all running Runtimes. The Runtime rebuilds its
@@ -1430,15 +1510,8 @@ After installation, ask the user to re-enable the MCP server.",
             endpoint = %embed_endpoint,
             model_id = %embed_model_id,
             dimension = embed_dimension,
-            "SessionManager: received EmbeddingConfigUpdate"
+            "SessionManager: received embedding config update via SidecarEndpointUpdate"
         );
-
-        // Cache the config for persistence and new session construction.
-        self.pending_embed_config = Some(PendingEmbedConfig {
-            embed_endpoint: embed_endpoint.clone(),
-            embed_model_id: embed_model_id.clone(),
-            embed_dimension,
-        });
 
         // Broadcast to all existing sessions so they rebuild their
         // embedding provider in-place (same pattern as UpdateProvider).
@@ -1456,6 +1529,24 @@ After installation, ask the user to re-enable the MCP server.",
                     "Failed to send UpdateEmbedConfig to session (channel closed)"
                 );
             }
+        }
+    }
+
+    /// Clear the embedding provider on all sessions (embed sidecar went down).
+    ///
+    /// Broadcasts `DisableEmbedConfig` so each session clears its ONNX
+    /// embedding provider. New sessions created after this call will
+    /// inherit the cleared state from the shared template (ADR-030 ISSUE-2).
+    pub fn clear_embedding_config(&self) {
+        tracing::info!(
+            "SessionManager: clearing embedding provider on all sessions (embed sidecar unavailable)"
+        );
+        let failed = self.broadcast(SessionMessage::DisableEmbedConfig);
+        if !failed.is_empty() {
+            tracing::warn!(
+                failed_count = failed.len(),
+                "Some sessions failed to receive DisableEmbedConfig"
+            );
         }
     }
 

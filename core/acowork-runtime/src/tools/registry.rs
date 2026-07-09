@@ -6,7 +6,6 @@
 //!    `enabled` flags from `agent_tools.json` (ADR-029).
 use crate::agent::agent_core::BuiltinToolEntry;
 use crate::tools::workspace_resolver::SharedResolver;
-use crate::tools::wrappers::{PathGuardedTool, RateLimitedTool};
 use acowork_core::AgentManifest;
 use acowork_core::tools::traits::Tool;
 use std::collections::HashSet;
@@ -30,6 +29,7 @@ impl ToolRegistry {
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
     }
+
 
     /// Get tool by name
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -79,40 +79,23 @@ impl ToolRegistry {
         // workspace directories fresh from the global source of truth on every
         // execute() call. This ensures hot-reload of workspace access changes
         // takes effect immediately without agent restart.
+        //
+        // Both enabled and disabled tools get the full security decorator
+        // stack (path guard + rate limiter) via `wrap_with_security_decorators`
+        // so disabled tools remain introspectable for re-enable at runtime.
         self.tools
             .iter()
             .map(|tool| {
                 let is_enabled = enabled_set.contains(&tool.name());
-
-                if is_enabled {
-                    // Layer 1: Path guard (for filesystem tools)
-                    let path_guarded =
-                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
-                            as Arc<dyn Tool>;
-
-                    // Layer 2: Rate limit
-                    let rate_limited = Arc::new(RateLimitedTool::new(
-                        path_guarded,
+                let wrapped =
+                    crate::tools::wrappers::wrap_with_security_decorators(
+                        tool.clone(),
+                        resolver.clone(),
                         max_calls_per_minute,
-                    )) as Arc<dyn Tool>;
-                    BuiltinToolEntry {
-                        tool: rate_limited,
-                        enabled: true,
-                    }
-                } else {
-                    // Disabled tools still get the security decorators so
-                    // they remain introspectable for re-enable at runtime.
-                    let path_guarded =
-                        Arc::new(PathGuardedTool::new(tool.clone(), resolver.clone()))
-                            as Arc<dyn Tool>;
-                    let rate_limited = Arc::new(RateLimitedTool::new(
-                        path_guarded,
-                        max_calls_per_minute,
-                    )) as Arc<dyn Tool>;
-                    BuiltinToolEntry {
-                        tool: rate_limited,
-                        enabled: false,
-                    }
+                    );
+                BuiltinToolEntry {
+                    tool: wrapped,
+                    enabled: is_enabled,
                 }
             })
             .collect()
@@ -301,4 +284,5 @@ mod tests {
         let reg = ToolRegistry::default();
         assert!(reg.all().is_empty());
     }
+
 }

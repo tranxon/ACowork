@@ -731,6 +731,7 @@ impl Gateway {
                         data_dir,
                         port: lsp_relay_port,
                         gateway_health_url,
+                        pusher: pusher.clone(),
                     },
                 );
             } else {
@@ -757,6 +758,7 @@ impl Gateway {
                                 data_dir,
                                 port: lsp_relay_port,
                                 gateway_health_url,
+                                pusher: pusher.clone(),
                             },
                         );
                     }
@@ -801,6 +803,7 @@ impl Gateway {
             crate::lifecycle::lsp_relay_supervisor::start_lsp_relay_supervisor(
                 sup_cfg,
                 shared_state.clone(),
+                pusher.clone(),
             );
         }
 

@@ -15,9 +15,10 @@
 
 use std::path::PathBuf;
 
+use crate::gateway::state::GatewayState;
 use crate::grpc::SharedGrpcSessionMgr;
 use crate::http::routes::SharedHttpState;
-use acowork_core::protocol::GatewayResponse;
+use acowork_core::protocol::{GatewayResponse, SidecarKind};
 
 /// Unified pusher for global resource changes (provider/model, MCP catalog, …).
 #[derive(Clone)]
@@ -25,6 +26,28 @@ pub struct GlobalResourcePusher {
     grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     gateway_state: SharedHttpState,
     data_dir: PathBuf,
+}
+
+/// Build the (endpoint, spec_json) payload for a `SidecarEndpointUpdate`
+/// targeting `SidecarKind::Embed`, derived from the current GatewayState.
+///
+/// Returns `None` when no embed process is running or when the active
+/// model has not yet been resolved — callers should treat `None` as
+/// "nothing to push" and skip the call rather than push an empty payload.
+///
+/// This helper is `pub(crate)` so the embed supervisor and embedding HTTP
+/// API can share the same payload construction logic without duplicating
+/// it. Introduced in ADR-030 Phase C2.
+pub(crate) fn build_embed_sidecar_payload(state: &GatewayState) -> Option<(String, String)> {
+    let eps = state.embed_process.as_ref()?;
+    let model_id = eps.active_model_id.as_ref()?;
+    let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
+    let spec_json = serde_json::json!({
+        "model_id": model_id,
+        "dimension": eps.active_dimension.unwrap_or(0),
+    })
+    .to_string();
+    Some((endpoint, spec_json))
 }
 
 impl GlobalResourcePusher {
@@ -247,19 +270,6 @@ impl GlobalResourcePusher {
                         model: None,
                         provider: None,
                         search_config_json: None,
-                        embed_config_json: {
-                            let gw = self.gateway_state.read().await;
-                            match &gw.embed_process {
-                                Some(eps) if eps.active_model_id.is_some() => {
-                                    Some(serde_json::json!({
-                                        "embed_endpoint": format!("http://127.0.0.1:{}/v1", eps.port),
-                                        "embed_model_id": eps.active_model_id.clone().unwrap_or_default(),
-                                        "embed_dimension": eps.active_dimension.unwrap_or(0),
-                                    }).to_string())
-                                }
-                                _ => None,
-                            }
-                        },
                         avatar: None,
                         builtin_avatar: None,
                         max_sessions: None,
@@ -336,21 +346,36 @@ impl GlobalResourcePusher {
         }
     }
 
-    // ── Embedding config ────────────────────────────────────────────────
+    // ── Sidecar endpoint (embed / lsp_relay / …) ────────────────────────
 
-    /// Push embedding configuration update to all running agents after a
-    /// model switch. The Runtime rebuilds its FallbackEmbeddingProvider
-    /// chain with the new ONNX provider as the first entry.
+    /// Push a sidecar endpoint update to all running agents.
     ///
-    /// Uses `RuntimeConfigUpdate.embed_config_json` instead of the deprecated
-    /// `EmbeddingConfigUpdate` variant, because the latter has no proto
-    /// representation and would be lost over the gRPC bridge.
-    #[tracing::instrument(skip(self), name = "push_embedding_config")]
-    pub async fn push_embedding_config(&self) {
+    /// This is the canonical channel for sidecar state changes (embed model
+    /// switched, lsp_relay ready, sidecar crash, …). Both sidecars share a
+    /// single wire message (`GatewayResponse::SidecarEndpointUpdate`); the
+    /// Runtime uses [`SidecarKind`] to route the payload to the correct
+    /// subsystem.
+    ///
+    /// An empty `endpoint` signals "sidecar is unavailable" — the Runtime
+    /// should disable dependent features rather than try to connect. This
+    /// matches the protocol convention defined in ADR-030 C1.2.
+    ///
+    /// Introduced in ADR-030 Phase C2. As of C4, this is the only channel
+    /// for sidecar state pushes; both `embed` and `lsp_relay` use it.
+    #[tracing::instrument(skip(self), name = "push_sidecar_endpoint")]
+    pub async fn push_sidecar_endpoint(
+        &self,
+        sidecar: SidecarKind,
+        endpoint: String,
+        spec_json: String,
+    ) {
         let grpc_session_mgr = match &self.grpc_session_mgr {
             Some(mgr) => mgr.clone(),
             None => {
-                tracing::warn!("No gRPC session manager, skipping embedding config push");
+                tracing::warn!(
+                    sidecar = %sidecar.as_str(),
+                    "No gRPC session manager, skipping sidecar push"
+                );
                 return;
             }
         };
@@ -364,31 +389,6 @@ impl GlobalResourcePusher {
             return;
         }
 
-        // Read current embedding config from GatewayState
-        let (embed_endpoint, embed_model_id, embed_dimension) = {
-            let gw = self.gateway_state.read().await;
-            match &gw.embed_process {
-                Some(eps) => {
-                    let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
-                    let model_id = eps.active_model_id.clone().unwrap_or_default();
-                    let dimension = eps.active_dimension.unwrap_or(0);
-                    (endpoint, model_id, dimension)
-                }
-                None => {
-                    tracing::warn!("Embedding service not running, skipping push");
-                    return;
-                }
-            }
-        };
-
-        // Serialize as JSON for the embed_config_json field
-        let embed_config_json = serde_json::json!({
-            "embed_endpoint": embed_endpoint,
-            "embed_model_id": embed_model_id,
-            "embed_dimension": embed_dimension,
-        })
-        .to_string();
-
         let mut pushed = 0u32;
         let mut failed = 0u32;
 
@@ -396,43 +396,39 @@ impl GlobalResourcePusher {
             let mgr = grpc_session_mgr.lock().await;
             if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
                 let ok = session
-                    .push_message(GatewayResponse::RuntimeConfigUpdate {
-                        max_output_tokens: None,
-                        max_iterations: None,
-                        temperature: None,
-                        system_prompt_override: None,
-                        shell_approval_threshold: None,
-                        mcp_servers: None,
-                        model: None,
-                        provider: None,
-                        search_config_json: None,
-                        embed_config_json: Some(embed_config_json.clone()),
-                        avatar: None,
-                        builtin_avatar: None,
-                        max_sessions: None,
-                        context_window: None,
-                        approval_timeout_secs: None,
-                        builtin_tools_enabled: None,
+                    .push_message(GatewayResponse::SidecarEndpointUpdate {
+                        sidecar,
+                        endpoint: endpoint.clone(),
+                        spec_json: spec_json.clone(),
                     })
                     .await;
 
                 if ok {
                     tracing::info!(
                         agent = %agent_id,
-                        model_id = %embed_model_id,
-                        dimension = embed_dimension,
-                        "Pushed embedding config to agent via RuntimeConfigUpdate"
+                        sidecar = %sidecar.as_str(),
+                        endpoint = %endpoint,
+                        "Pushed sidecar endpoint to agent"
                     );
                     pushed += 1;
                 } else {
-                    tracing::warn!(agent = %agent_id, "Embedding config push failed (channel closed)");
+                    tracing::warn!(
+                        agent = %agent_id,
+                        sidecar = %sidecar.as_str(),
+                        "Sidecar push failed (channel closed)"
+                    );
                     failed += 1;
                 }
             }
         }
 
         if pushed > 0 || failed > 0 {
-            tracing::info!(pushed, failed, "Embedding config push complete");
+            tracing::info!(
+                sidecar = %sidecar.as_str(),
+                pushed,
+                failed,
+                "Sidecar push complete"
+            );
         }
     }
 

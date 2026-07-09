@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::routes::AppState;
 use crate::gateway::state::AgentMigrationState;
+use crate::ipc::global_push::build_embed_sidecar_payload;
 use crate::lifecycle::embed;
+use acowork_core::protocol::SidecarKind;
 
 // ── Response types ─────────────────────────────────────────────────────
 
@@ -438,9 +440,16 @@ pub async fn select_model(
 
             drop(gw);
 
-            // Same dimension — push to all running agents immediately
+            // Same dimension — push to all running agents immediately via
+            // the generic sidecar push channel (ADR-030 C2).
             if let Some(ref pusher) = state.pusher {
-                pusher.push_embedding_config().await;
+                let gw = state.gateway_state.read().await;
+                if let Some((endpoint, spec_json)) = build_embed_sidecar_payload(&gw) {
+                    drop(gw);
+                    pusher
+                        .push_sidecar_endpoint(SidecarKind::Embed, endpoint, spec_json)
+                        .await;
+                }
             }
 
             tracing::info!(

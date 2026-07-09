@@ -16,6 +16,26 @@ use crate::tools::path_utils;
 pub use crate::tools::workspace_resolver::{SharedResolver, WorkspaceAccess, WorkspaceDir, WorkspaceResolver};
 use std::time::Instant;
 
+/// Wrap a raw tool with the standard two-layer security decorator stack:
+///   1. `PathGuardedTool` - filesystem path validation
+///   2. `RateLimitedTool` - per-tool call rate limiting
+///
+/// This is the **single source of truth** for how builtin tools are
+/// decorated, used by both:
+///   - `ToolRegistry::activate()` at agent startup
+///   - `SessionManager::register_dynamic_tool()` for ADR-030 sidecar pushes
+///
+/// Extracting this function eliminates the duplicated wrapping logic that
+/// previously existed in both call sites (ADR-030 review ISSUE-3).
+pub(crate) fn wrap_with_security_decorators(
+    tool: Arc<dyn Tool>,
+    resolver: SharedResolver,
+    max_calls_per_minute: u32,
+) -> Arc<dyn Tool> {
+    let path_guarded = Arc::new(PathGuardedTool::new(tool, resolver)) as Arc<dyn Tool>;
+    Arc::new(RateLimitedTool::new(path_guarded, max_calls_per_minute)) as Arc<dyn Tool>
+}
+
 /// Rate-limited tool wrapper
 ///
 /// Enforces a maximum number of calls per minute for a tool.

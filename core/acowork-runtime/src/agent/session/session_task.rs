@@ -80,6 +80,22 @@ pub enum SessionMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
+    /// switched, ...) and we want to surface a new builtin tool to this
+    /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
+    /// gets its own security-wrapped clone (path guard + rate limiter).
+    ///
+    /// Replaces any existing entry with the same `name()` so hot-reload
+    /// of the LSP relay endpoint is idempotent.
+    AddDynamicBuiltinTool {
+        entry: crate::agent::agent_core::BuiltinToolEntry,
+    },
+    /// ADR-030 C3: Sidecar went away (LSP relay died, embed sidecar
+    /// restart, ...). Removing the named builtin tool from this session's
+    /// dispatch list. `name` should match `BuiltinToolEntry::name()`.
+    RemoveDynamicBuiltinTool {
+        name: String,
+    },
     /// Update the title of the session's conversation
     UpdateSessionTitle { title: String },
     /// Persist the per-session workspace_id to the JSONL conversation file
@@ -108,13 +124,20 @@ pub enum SessionMessage {
     Close,
     /// Manually trigger context compaction (from user-initiated compact_context WebSocket action).
     CompactContext,
-    /// Update the embedding provider at runtime (hot-push from Gateway EmbeddingConfigUpdate).
-    /// The session rebuilds its ONNX embedding provider with the new endpoint/model/dimension.
+    /// Update the embedding provider at runtime (hot-push from Gateway
+    /// via SidecarEndpointUpdate(Embed, non-empty endpoint)).
+    /// The session rebuilds its ONNX embedding provider with the new
+    /// endpoint/model/dimension.
     UpdateEmbedConfig {
         embed_endpoint: String,
         embed_model_id: String,
         embed_dimension: usize,
     },
+    /// Disable the embedding provider (hot-push from Gateway via
+    /// SidecarEndpointUpdate(Embed, empty endpoint)). The session clears
+    /// its ONNX embedding provider so embedding-dependent operations
+    /// degrade gracefully until the sidecar comes back (ADR-030 ISSUE-2).
+    DisableEmbedConfig,
     /// Inject a system notification into the conversation history.
     /// Used to surface MCP connection failures and other async events
     /// to the LLM context so the Agent can self-heal.
@@ -197,6 +220,15 @@ impl std::fmt::Debug for SessionMessage {
                     &entries.iter().filter(|e| e.enabled).count(),
                 )
                 .finish(),
+            SessionMessage::AddDynamicBuiltinTool { entry } => f
+                .debug_struct("AddDynamicBuiltinTool")
+                .field("name", &entry.name())
+                .field("enabled", &entry.enabled)
+                .finish(),
+            SessionMessage::RemoveDynamicBuiltinTool { name } => f
+                .debug_struct("RemoveDynamicBuiltinTool")
+                .field("name", name)
+                .finish(),
             SessionMessage::UpdateSessionTitle { title } => f
                 .debug_struct("UpdateSessionTitle")
                 .field("title", title)
@@ -234,6 +266,9 @@ impl std::fmt::Debug for SessionMessage {
                 .field("embed_model_id", embed_model_id)
                 .field("embed_dimension", embed_dimension)
                 .finish(),
+            SessionMessage::DisableEmbedConfig => {
+                f.debug_tuple("DisableEmbedConfig").finish()
+            }
             SessionMessage::SystemNotification { content } => f
                 .debug_struct("SystemNotification")
                 .field("len", &content.len())
@@ -407,6 +442,10 @@ impl SessionTask {
         identity_context: Option<String>,
         protocol_type: acowork_core::protocol::ProtocolType,
         mcp_tools: Option<Vec<Arc<dyn Tool>>>,
+        // ADR-030 C3: Dynamic builtin tools registered via SidecarEndpointUpdate
+        // before this session was created. Injected into the cloned AgentCore's
+        // `builtin_tools` so the session starts with them (ISSUE-1 fix).
+        dynamic_builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
         runtime_debug: Option<DebugHandles>,
         pending_debug_handles: Arc<tokio::sync::Mutex<Option<DebugHandles>>>,
         // Accumulated runtime config overrides from Gateway pushes.
@@ -436,6 +475,21 @@ impl SessionTask {
 
         // Build per-session AgentCore clone from the shared template.
         let mut core_mut = (*core).clone();
+        // Inject dynamic builtin tools (from SidecarEndpointUpdate pushes that
+        // arrived before this session was created). Same-name tools in the
+        // template are replaced; new tools are appended.
+        for entry in dynamic_builtin_tools {
+            let name = entry.name();
+            if let Some(existing) = core_mut
+                .builtin_tools
+                .iter()
+                .position(|e| e.name() == name)
+            {
+                core_mut.builtin_tools[existing] = entry;
+            } else {
+                core_mut.builtin_tools.push(entry);
+            }
+        }
         // Set MCP tools and rebuild
         core_mut.mcp_tools = mcp_tools;
         core_mut.rebuild_all_tools();
@@ -1033,6 +1087,16 @@ impl SessionTask {
                                     );
                                 }
                             }
+                            // ADR-021: Notify frontend that new conversation data
+                            // is available for polling.  This is the canonical
+                            // notification point — by the time run() returns, ALL
+                            // response data (text, tool_calls, assistant messages,
+                            // reasoning) has been persisted to JSONL regardless of
+                            // whether the LLM produced text-only, tool calls, or
+                            // mixed output.  The per-chunk notifications during
+                            // streaming (loop_llm.rs) serve real-time streaming UX;
+                            // this one guarantees a signal after full persistence.
+                            agent_loop.session_core.notify_new_data_available();
                         }
                         Err(e) => {
                             tracing::error!(
@@ -1213,6 +1277,50 @@ impl SessionTask {
                         }
                     }
                     agent_loop.core.rebuild_all_tools();
+                }
+                // ── ADR-030 C3: dynamic builtin tool add/remove ──────
+                //
+                // A SidecarEndpointUpdate just told us a sidecar came
+                // online (LSP relay ready, embed model restart, ...).
+                // `entry` is already wrapped with security decorators by
+                // the SessionManager, so the session just appends /
+                // replaces it in its own `builtin_tools` and rebuilds
+                // the dispatch list.
+                Some(SessionMessage::AddDynamicBuiltinTool { entry }) => {
+                    let tool_name = entry.name().to_string();
+                    let replaced = if let Some(existing) = agent_loop
+                        .core
+                        .builtin_tools
+                        .iter_mut()
+                        .find(|e| e.name() == tool_name)
+                    {
+                        *existing = entry;
+                        true
+                    } else {
+                        agent_loop.core.builtin_tools.push(entry);
+                        false
+                    };
+                    agent_loop.core.rebuild_all_tools();
+                    tracing::info!(
+                        session_id = %session_id,
+                        tool = %tool_name,
+                        replaced,
+                        "SessionTask: dynamic builtin tool added/updated"
+                    );
+                }
+                Some(SessionMessage::RemoveDynamicBuiltinTool { name }) => {
+                    let before = agent_loop.core.builtin_tools.len();
+                    agent_loop.core.builtin_tools.retain(|e| e.name() != name);
+                    let removed = agent_loop.core.builtin_tools.len() < before;
+                    if removed {
+                        agent_loop.core.rebuild_all_tools();
+                    }
+                    tracing::info!(
+                        session_id = %session_id,
+                        tool = %name,
+                        removed,
+                        "SessionTask: dynamic builtin tool removed"
+                    );
                 }
                 Some(SessionMessage::UpdateSessionTitle { title }) => {
                     tracing::info!(
@@ -1431,6 +1539,13 @@ impl SessionTask {
                             .with_locked_dimension(embed_dimension))
                         };
                     agent_loop.core.update_embedding_provider(new_emb);
+                }
+                Some(SessionMessage::DisableEmbedConfig) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "SessionTask: disabling embedding provider (embed sidecar unavailable)"
+                    );
+                    agent_loop.core.clear_embedding_provider();
                 }
                 Some(SessionMessage::SystemNotification { content }) => {
                     // Only inject into sessions that have already started a conversation.

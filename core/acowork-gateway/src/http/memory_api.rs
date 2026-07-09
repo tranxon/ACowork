@@ -480,9 +480,17 @@ mod tests {
             by_status: std::collections::HashMap::new(),
             avg_decay_score: 0.75,
             index_health: "healthy".to_string(),
+            stored_dim: 512,
+            nodes_with_embedding: 100,
+            model_dim: 512,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"total_nodes\":100"));
         assert!(json.contains("\"healthy\""));
+        // Index-health fields are serialized as snake_case to match the
+        // TypeScript types in apps/acowork-desktop/src/lib/types.ts.
+        assert!(json.contains("\"stored_dim\":512"));
+        assert!(json.contains("\"nodes_with_embedding\":100"));
+        assert!(json.contains("\"model_dim\":512"));
     }
 }

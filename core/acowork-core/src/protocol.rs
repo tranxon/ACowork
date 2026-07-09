@@ -1073,11 +1073,6 @@ pub enum GatewayResponse {
         /// Some("") means no search providers active.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         search_config_json: Option<String>,
-        /// Embedding config override (JSON-serialized EmbeddingConfigUpdate fields).
-        /// When Some, the Runtime rebuilds its FallbackEmbeddingProvider chain.
-        /// Format: {"embed_endpoint":"http://127.0.0.1:18080/v1","embed_model_id":"bge-small-zh-v1.5","embed_dimension":512}
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        embed_config_json: Option<String>,
         /// ADR-017: Custom avatar path override.
         /// Some("path") = set, Some("") = clear, None = don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1131,19 +1126,6 @@ pub enum GatewayResponse {
         /// Debug WebSocket port (allocated by Gateway)
         debug_port: u32,
     },
-    /// Embedding configuration update (Gateway → Runtime, push).
-    ///
-    /// Pushed when the user switches the active embedding model via
-    /// Gateway HTTP API. The Runtime rebuilds its FallbackEmbeddingProvider
-    /// chain with the new ONNX provider as the first entry.
-    EmbeddingConfigUpdate {
-        /// Embedding service endpoint URL (e.g. "http://127.0.0.1:18080/v1")
-        embed_endpoint: String,
-        /// Active embedding model ID (e.g. "bge-small-zh-v1.5")
-        embed_model_id: String,
-        /// Embedding dimension of the active model (e.g. 512)
-        embed_dimension: usize,
-    },
     /// Start embedding dimension migration (Gateway → Runtime).
     ///
     /// Sent by Gateway when the user confirms migration for a specific agent.
@@ -1159,6 +1141,76 @@ pub enum GatewayResponse {
         /// Embedding dimension of the new model
         embed_dimension: usize,
     },
+    /// Sidecar endpoint update (Gateway → Runtime, push).
+    ///
+    /// Pushed whenever a Gateway-managed sidecar (`lsp_relay`, `embed`,
+    /// future sidecars) transitions to ready, changes its endpoint, or
+    /// becomes unavailable. The Runtime reacts by:
+    ///   - `lsp_relay`: registering or disabling the `codebase` builtin tool
+    ///   - `embed`:     rebuilding the `FallbackEmbeddingProvider` chain
+    ///
+    /// Empty `endpoint` signals "sidecar is down" — the Runtime should
+    /// disable dependent features rather than try to connect.
+    ///
+    /// This message is the canonical (and only) channel for sidecar state
+    /// updates. As of ADR-030 C4, the legacy `RuntimeConfigUpdate.embed_config_json`
+    /// JSON field and the `EmbeddingConfigUpdate` variant have been removed.
+    SidecarEndpointUpdate {
+        /// Which sidecar this update is for.
+        sidecar: SidecarKind,
+        /// HTTP URL the Runtime should use. Empty string = sidecar unavailable.
+        endpoint: String,
+        /// Sidecar-specific metadata. Schema depends on `sidecar`:
+        ///   - `LspRelay`: `""` (no extra fields today)
+        ///   - `Embed`:    `{"model_id":"bge-small-zh-v1.5","dimension":512}`
+        ///
+        /// Empty string if no metadata applies.
+        spec_json: String,
+    },
+}
+
+/// Identifies a Gateway-managed sidecar process. The Runtime uses this to
+/// route a `SidecarEndpointUpdate` to the correct subsystem.
+///
+/// Mirrors the `SidecarKind` enum in `gateway_ipc.proto`. Adding a new
+/// sidecar requires updating both this enum and the proto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarKind {
+    /// Unspecified — reserved for forward-compat. Should not appear in
+    /// production traffic; treated as "unknown" by the Runtime.
+    Unspecified,
+    /// `acowork-lsp-relay` — provides JSON-RPC LSP relay used by the
+    /// Runtime's `codebase` builtin tool.
+    LspRelay,
+    /// `acowork-embed` — local ONNX embedding HTTP service. The Runtime
+    /// builds a `FallbackEmbeddingProvider` chain from the active model
+    /// id and dimension provided in the push payload.
+    Embed,
+}
+
+impl SidecarKind {
+    /// Canonical string identifier used in the proto and over the wire
+    /// (the proto enum value). Stable across versions; do not rename.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SidecarKind::Unspecified => "unspecified",
+            SidecarKind::LspRelay => "lsp_relay",
+            SidecarKind::Embed => "embed",
+        }
+    }
+}
+
+impl std::str::FromStr for SidecarKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unspecified" => Ok(SidecarKind::Unspecified),
+            "lsp_relay" => Ok(SidecarKind::LspRelay),
+            "embed" => Ok(SidecarKind::Embed),
+            other => Err(format!("Unknown SidecarKind: {other}")),
+        }
+    }
 }
 
 /// MCP server configuration definition (transport-agnostic, shared between Gateway and Runtime).
@@ -1471,5 +1523,88 @@ mod tests {
         assert_eq!(parsed.context_type, "file");
         assert_eq!(parsed.start_line, Some(5));
         assert_eq!(parsed.end_line, Some(15));
+    }
+
+    // ── SidecarKind wire compatibility ───────────────────────────────────
+
+    /// The proto enum value is the on-the-wire identifier and must stay
+    /// stable across versions. Adding new sidecars appends a new variant
+    /// at the next free i32, never renames or reorders existing ones.
+    #[test]
+    fn test_sidecar_kind_as_str_is_stable() {
+        assert_eq!(SidecarKind::Unspecified.as_str(), "unspecified");
+        assert_eq!(SidecarKind::LspRelay.as_str(), "lsp_relay");
+        assert_eq!(SidecarKind::Embed.as_str(), "embed");
+    }
+
+    #[test]
+    fn test_sidecar_kind_from_str_roundtrip() {
+        for k in [
+            SidecarKind::Unspecified,
+            SidecarKind::LspRelay,
+            SidecarKind::Embed,
+        ] {
+            let s = k.as_str();
+            let parsed: SidecarKind = s.parse().expect("must parse");
+            assert_eq!(parsed, k);
+        }
+    }
+
+    #[test]
+    fn test_sidecar_kind_unknown_string_is_rejected() {
+        let bad: Result<SidecarKind, _> = "code_index".parse();
+        assert!(bad.is_err(), "unknown sidecar must be rejected");
+    }
+
+    /// `SidecarEndpointUpdate` payload survives JSON roundtrip. The empty
+    /// `endpoint` field is the "sidecar unavailable" signal and must be
+    /// preserved (not collapsed to None).
+    #[test]
+    fn test_sidecar_endpoint_update_roundtrip() {
+        let resp = GatewayResponse::SidecarEndpointUpdate {
+            sidecar: SidecarKind::LspRelay,
+            endpoint: "http://127.0.0.1:19878".to_string(),
+            spec_json: String::new(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            GatewayResponse::SidecarEndpointUpdate {
+                sidecar,
+                endpoint,
+                spec_json,
+            } => {
+                assert_eq!(sidecar, SidecarKind::LspRelay);
+                assert_eq!(endpoint, "http://127.0.0.1:19878");
+                assert!(spec_json.is_empty());
+            }
+            _ => panic!("Expected SidecarEndpointUpdate variant"),
+        }
+    }
+
+    /// Empty `endpoint` (sidecar unavailable) must round-trip cleanly. This
+    /// is the disable signal the Runtime uses to turn off sidecar-dependent
+    /// features.
+    #[test]
+    fn test_sidecar_endpoint_update_unavailable_signal() {
+        let resp = GatewayResponse::SidecarEndpointUpdate {
+            sidecar: SidecarKind::Embed,
+            endpoint: String::new(),
+            spec_json: r#"{"model_id":"","dimension":0}"#.to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: GatewayResponse = serde_json::from_str(&json).unwrap();
+        match parsed {
+            GatewayResponse::SidecarEndpointUpdate {
+                sidecar,
+                endpoint,
+                spec_json,
+            } => {
+                assert_eq!(sidecar, SidecarKind::Embed);
+                assert!(endpoint.is_empty(), "empty endpoint must be preserved");
+                assert!(spec_json.contains("model_id"));
+            }
+            _ => panic!("Expected SidecarEndpointUpdate variant"),
+        }
     }
 }

@@ -18,6 +18,12 @@ pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registr
 /// Retry interval when Gateway recv encounters a transient error
 const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
 
+/// Per-tool rate limit used by `RateLimitedTool` when wrapping tools at
+/// startup (`ToolRegistry::activate`) and for runtime-registered dynamic
+/// tools (`SessionManager::register_dynamic_tool`, ADR-030 C3).
+/// Hard-coded to match the value used in `startup::agent_init::phase_a_init_agent`.
+const MAX_TOOL_CALLS_PER_MINUTE: u32 = 60;
+
 /// Global reference to the SizeRollingFileAppender for runtime log rotation.
 /// Set by init_tracing() and read by the LogRotate IPC handler.
 static FILE_APPENDER: std::sync::OnceLock<Arc<acowork_core::logging::SizeRollingFileAppender>> =
@@ -661,6 +667,38 @@ pub(crate) async fn run_gateway_loop(
                                 )
                                 .unwrap_or_default()
                                 .unwrap_or_default();
+
+                                // Build merged builtin tools list: load from disk,
+                                // then merge dynamically registered tools (from
+                                // SidecarEndpointUpdate) so ConfigSnapshot reflects
+                                // tools that were not available at startup (e.g.
+                                // codebase when LSP Relay became ready after
+                                // AgentHello).
+                                let mut merged_tools: Vec<crate::agent_config::AgentToolEntry> =
+                                    crate::agent_config::load_agent_tools_config(
+                                        std::path::Path::new(&work_dir),
+                                    )
+                                    .unwrap_or_default()
+                                    .map(|cfg| cfg.tools)
+                                    .unwrap_or_default();
+                                for (name, enabled) in session_manager.dynamic_builtin_tool_names() {
+                                    if !merged_tools.iter().any(|e| e.name == name) {
+                                        merged_tools.push(
+                                            crate::agent_config::AgentToolEntry::new(name, enabled),
+                                        );
+                                    }
+                                }
+                                let builtin_tools_all_json =
+                                    serde_json::to_string(&merged_tools).unwrap_or_default();
+                                let builtin_tools_enabled_json = {
+                                    let enabled: Vec<String> = merged_tools
+                                        .iter()
+                                        .filter(|e| e.enabled)
+                                        .map(|e| e.name.clone())
+                                        .collect();
+                                    serde_json::to_string(&enabled).unwrap_or_default()
+                                };
+
                                 let snapshot = proto::client_message::Payload::ConfigSnapshot(
                                     proto::ConfigSnapshot {
                                         request_id: String::new(),
@@ -682,23 +720,8 @@ pub(crate) async fn run_gateway_loop(
                                         max_sessions: agent_cfg.max_sessions.map(|v| v as u64),
                                         context_window: agent_cfg.context_window,
                                     approval_timeout_secs: agent_cfg.approval_timeout_secs,
-                                    builtin_tools_enabled_json: crate::agent_config::load_agent_tools_config(
-                                        std::path::Path::new(&work_dir),
-                                    )
-                                    .unwrap_or_default()
-                                    .map(|cfg| {
-                                        let enabled: Vec<String> = cfg.tools.iter()
-                                            .filter(|e| e.enabled)
-                                            .map(|e| e.name.clone())
-                                            .collect();
-                                        serde_json::to_string(&enabled).unwrap_or_default()
-                                    }),
-                                    builtin_tools_all_json:
-                                        crate::agent_config::load_agent_tools_config(
-                                            std::path::Path::new(&work_dir),
-                                        )
-                                        .unwrap_or_default()
-                                        .map(|cfg| serde_json::to_string(&cfg.tools).unwrap_or_default()),
+                                    builtin_tools_enabled_json: Some(builtin_tools_enabled_json),
+                                    builtin_tools_all_json: Some(builtin_tools_all_json),
                                 },
                                 );
                                 let response = proto::ClientMessage {
@@ -1835,7 +1858,6 @@ async fn process_gateway_recv(
                     model: _,    // ADR-012: model_switch is a separate action
                     provider: _, // ADR-012: model_switch is a separate action
                     search_config_json,
-                    embed_config_json,
                     avatar,
                     builtin_avatar,
                     max_sessions,
@@ -1852,7 +1874,6 @@ async fn process_gateway_recv(
                         context_window = ?context_window,
 
                         mcp_server_count = mcp_servers.as_ref().map(|s| s.len()),
-                        has_embed_config = embed_config_json.is_some(),
                         "Received RuntimeConfigUpdate from Gateway — applying to current and future sessions"
 
                     );
@@ -1879,11 +1900,19 @@ async fn process_gateway_recv(
                     // When the Gateway pushes a new enabled-tools list,
                     // patch agent_tools.json and broadcast to sessions.
                     if let Some(ref enabled_names) = builtin_tools_enabled {
+                        tracing::info!(
+                            enabled_names = ?enabled_names,
+                            "RuntimeConfigUpdate: received builtin_tools_enabled list"
+                        );
                         let work_path = std::path::Path::new(&work_dir);
                         let current = crate::agent_config::load_agent_tools_config(work_path)
                             .unwrap_or_default()
                             .map(|cfg| cfg.tools)
                             .unwrap_or_default();
+                        tracing::info!(
+                            current_tool_count = current.len(),
+                            "RuntimeConfigUpdate: loaded current agent_tools.json for patching"
+                        );
                         // Build a patch: every tool in `enabled_names` gets enabled=true;
                         // everything currently in agent_tools.json but not in the list
                         // gets enabled=false.
@@ -1895,6 +1924,14 @@ async fn process_gateway_recv(
                             })
                             .collect();
                         let updated = crate::agent_config::apply_builtin_tools_patch(&current, &patch);
+                        // Log each entry after patching
+                        for entry in &updated {
+                            tracing::info!(
+                                tool = %entry.name,
+                                enabled = entry.enabled,
+                                "RuntimeConfigUpdate: patched tool entry"
+                            );
+                        }
                         // Persist
                         if let Err(e) = crate::agent_config::save_agent_tools_config(
                             work_path,
@@ -2003,39 +2040,6 @@ async fn process_gateway_recv(
                         }
                     }
 
-                    // Handle embedding config update: rebuild FallbackEmbeddingProvider chain.
-                    // When `embed_config_json` is Some, parse the JSON and forward to SessionManager.
-                    // Format: {"embed_endpoint":"http://...","embed_model_id":"...","embed_dimension":N}
-                    if let Some(ref ecfg_json) = embed_config_json {
-                        #[derive(serde::Deserialize)]
-                        struct EmbedConfigFields {
-                            embed_endpoint: String,
-                            embed_model_id: String,
-                            embed_dimension: usize,
-                        }
-                        match serde_json::from_str::<EmbedConfigFields>(ecfg_json) {
-                            Ok(cfg) => {
-                                tracing::info!(
-                                    endpoint = %cfg.embed_endpoint,
-                                    model_id = %cfg.embed_model_id,
-                                    dimension = cfg.embed_dimension,
-                                    "Applying embedding config update from RuntimeConfigUpdate"
-                                );
-                                session_manager.handle_embedding_config_update(
-                                    cfg.embed_endpoint,
-                                    cfg.embed_model_id,
-                                    cfg.embed_dimension,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to parse embed_config_json in RuntimeConfigUpdate"
-                                );
-                            }
-                        }
-                    }
-
                     // Persist per-agent config to workspace/config/agent_config.json.
                     // This consolidates all overrides into a single file owned by Runtime,
                     // replacing the former Gateway-side data/agent_configs/{agent_id}.json.
@@ -2103,27 +2107,123 @@ async fn process_gateway_recv(
                     LoopAction::Continue
                 }
 
-                GatewayResponse::EmbeddingConfigUpdate {
-                    embed_endpoint,
-                    embed_model_id,
-                    embed_dimension,
+                // ── ADR-030 C3: Generic sidecar endpoint update ────────
+                //
+                // Gateway pushes `SidecarEndpointUpdate` whenever a
+                // managed sidecar's reachable endpoint changes. We
+                // route by `sidecar`:
+                //
+                // * `LspRelay` — register or unregister the `codebase`
+                //   builtin tool so the LLM dispatch list reflects the
+                //   current LSP relay availability in real time.
+                // * `Embed`    — delegate to `handle_embedding_config_update`
+                //   (payload is identical to the removed `EmbeddingConfigUpdate`
+                //   variant, now delivered via the canonical channel).
+                // * `Unspecified` — unknown / reserved; log and ignore.
+                GatewayResponse::SidecarEndpointUpdate {
+                    sidecar,
+                    endpoint,
+                    spec_json,
                 } => {
+                    use acowork_core::protocol::SidecarKind;
                     tracing::info!(
-                        endpoint = %embed_endpoint,
-                        model_id = %embed_model_id,
-                        dimension = embed_dimension,
-                        "Received EmbeddingConfigUpdate — forwarding to SessionManager"
+                        sidecar = %sidecar.as_str(),
+                        endpoint = %endpoint,
+                        spec_len = spec_json.len(),
+                        "Received SidecarEndpointUpdate from Gateway"
                     );
-
-                    // Delegate to SessionManager: it has access to the embedding
-                    // provider types and can rebuild the FallbackEmbeddingProvider
-                    // chain with the new ONNX provider as the first entry.
-                    session_manager.handle_embedding_config_update(
-                        embed_endpoint,
-                        embed_model_id,
-                        embed_dimension,
-                    );
-
+                    match sidecar {
+                        SidecarKind::LspRelay => {
+                            if endpoint.is_empty() {
+                                tracing::info!(
+                                    "SidecarEndpointUpdate(LspRelay): endpoint empty, unregistering codebase"
+                                );
+                                session_manager.unregister_dynamic_tool("codebase");
+                                // Persist removal to agent_tools.json so the
+                                // frontend tool panel stops showing codebase.
+                                crate::agent_config::remove_tool_from_config(
+                                    std::path::Path::new(&work_dir),
+                                    "codebase",
+                                );
+                            } else {
+                                tracing::info!(
+                                    endpoint = %endpoint,
+                                    "SidecarEndpointUpdate(LspRelay): endpoint ready, registering codebase"
+                                );
+                                let tool: Arc<dyn acowork_core::tools::traits::Tool> =
+                                    Arc::new(crate::tools::builtin::codebase::CodebaseTool::new(
+                                        endpoint.clone(),
+                                    ));
+                                // enabled=true on register; if the user has
+                                // codebase disabled in agent_tools.json the
+                                // entry will still be added (with enabled=true)
+                                // and the per-session `enabled` flag is the
+                                // gateway-driven source of truth. The
+                                // codebase tool being added here is the
+                                // *availability* signal; the user's enable
+                                // preference is reflected via the builtin
+                                // tools enabled list and filtered by
+                                // `rebuild_all_tools` accordingly.
+                                session_manager.register_dynamic_tool(
+                                    tool,
+                                    resolver.clone(),
+                                    MAX_TOOL_CALLS_PER_MINUTE,
+                                    true,
+                                );
+                                // Persist addition to agent_tools.json so the
+                                // frontend tool panel shows codebase. If the
+                                // entry already exists, the user's enabled/
+                                // disabled preference is preserved.
+                                crate::agent_config::ensure_tool_in_config(
+                                    std::path::Path::new(&work_dir),
+                                    "codebase",
+                                    true,
+                                );
+                            }
+                        }
+                        SidecarKind::Embed => {
+                            if endpoint.is_empty() {
+                                // Embed sidecar unavailable: clear the ONNX
+                                // embedding provider on all sessions so
+                                // embedding operations degrade gracefully
+                                // (ADR-030 review ISSUE-2 fix).
+                                tracing::info!(
+                                    "SidecarEndpointUpdate(Embed) with empty endpoint; \
+                                     clearing embedding provider on all sessions"
+                                );
+                                session_manager.clear_embedding_config();
+                            } else {
+                                // spec_json shape (from C2 build_embed_sidecar_payload):
+                                //   {"model_id":"...","dimension":N}
+                                #[derive(serde::Deserialize)]
+                                struct EmbedSpec {
+                                    model_id: String,
+                                    dimension: usize,
+                                }
+                                match serde_json::from_str::<EmbedSpec>(&spec_json) {
+                                    Ok(spec) => {
+                                        session_manager.handle_embedding_config_update(
+                                            endpoint.clone(),
+                                            spec.model_id,
+                                            spec.dimension,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            spec_json = %spec_json,
+                                            "Failed to parse Embed spec_json in SidecarEndpointUpdate"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        SidecarKind::Unspecified => {
+                            tracing::warn!(
+                                "Received SidecarEndpointUpdate with Unspecified kind; ignoring"
+                            );
+                        }
+                    }
                     LoopAction::Continue
                 }
 
