@@ -7,12 +7,6 @@ use tauri::tray::MouseButton;
 /// Handle tray menu events
 pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id().as_ref() {
-        "show_dashboard" | "agent_chat" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }
         "quit" => {
             // Kill local Gateway process tree before exit.
             // On Windows, taskkill /T /F kills the Gateway AND all its child
@@ -53,26 +47,42 @@ pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
+/// Bring the main window to the foreground, restoring it from minimized if needed.
+///
+/// Tauri/Wry/Tao on Windows has a quirk that makes `show() + set_focus()`
+/// insufficient for minimized windows:
+///   - `show()` calls `ShowWindow(SW_SHOW)`, which preserves the WS_MINIMIZE
+///     flag, so a minimized window stays minimized.
+///   - `set_focus()` (tao::platform_impl::windows::Window::set_focus) bails
+///     out early when `is_minimized` is true.
+///
+/// Calling `unminimize()` first invokes `ShowWindow(SW_RESTORE)`, which
+/// clears the minimize state and brings the window back.  Then `show()` is
+/// idempotent on an already-visible window and `set_focus()` actually does
+/// its job now that the window isn't minimized.
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        // Order matters: unminimize first, then show (no-op if already visible),
+        // then set_focus (no-op if already foregrounded).
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 /// Handle tray icon click events
 ///
-/// Left-click: show & focus the main window (like WeChat/QQ).
+/// Left-click: restore (if minimized) and focus the main window
+///             (like WeChat/QQ).
 /// Right-click: system shows the attached menu automatically — do nothing.
 pub fn on_tray_icon_event(tray: &tauri::tray::TrayIcon, event: TrayIconEvent) {
     match event {
         TrayIconEvent::Click { button, .. } if button == MouseButton::Left => {
-            let app = tray.app_handle();
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_main_window(tray.app_handle());
         }
         TrayIconEvent::DoubleClick { .. } => {
-            // Double-click (Windows only): also show & focus
-            let app = tray.app_handle();
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // Double-click (Windows only): also restore & focus
+            show_main_window(tray.app_handle());
         }
         _ => {} // Right-click → menu auto-shown by .menu()
     }
