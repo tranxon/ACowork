@@ -1493,16 +1493,43 @@ export function FileEditorPanel({ width }: { width: number }) {
                 )}
             </div>
 
-            {/* Status bar — only for editable files */}
-            {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
+            {/* Status bar — shown in both edit and preview modes so the bar
+                reserves a consistent strip of vertical space at the bottom of
+                the panel. Preview-mode tabs are read-only, so we replace the
+                cursor/LSP indicators with the file MIME type and (for URL
+                previews) the remote host. */}
+            {activeFile && !activeFile.loading && (
                 <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-[#FAFAFA] px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-                    <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
-                    {lspEnabled && lspLanguage && (
-                        <div className="shrink-0">
-                            <LspIndicator status={lspStatus} statusMessage={lspStatusMessage} language={lspLanguage} />
-                        </div>
+                    {activeFile.mode === "edit" ? (
+                        <>
+                            <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
+                            {lspEnabled && lspLanguage && (
+                                <div className="shrink-0">
+                                    <LspIndicator status={lspStatus} statusMessage={lspStatusMessage} language={lspLanguage} />
+                                </div>
+                            )}
+                            <span className="truncate min-w-0 text-right">Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
+                        </>
+                    ) : (
+                        <>
+                            <span className="uppercase truncate min-w-0">
+                                {activeFile.kind === "url"
+                                    ? "URL"
+                                    : (activeFile.mimeType || activeFile.language || "")}
+                            </span>
+                            <span className="truncate min-w-0 text-right">
+                                {activeFile.kind === "url"
+                                    ? (() => {
+                                        try {
+                                            return new URL(activeFile.url || activeFile.relPath).host;
+                                        } catch {
+                                            return activeFile.url || activeFile.relPath;
+                                        }
+                                    })()
+                                    : ""}
+                            </span>
+                        </>
                     )}
-                    <span className="truncate min-w-0 text-right">Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
                 </div>
             )}
 
