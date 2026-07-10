@@ -16,13 +16,12 @@
 //! - `tool_call_id` (string, required) — the `tool_call_id` embedded in the
 //!   placeholder: `Call context_recall(id="toolu_xxx")`.
 //!
-//! ## Transient (planned)
+//! ## Transient
 //!
-//! C3a will mark this tool's result as `transient: true` so the recalled content
-//! is injected into the next LLM request without permanently appending to history.
-//! For now (C3b baseline), the result is appended to history as a regular Tool
-//! message — which is correct but wastes context if the LLM does not immediately
-//! use the content.
+//! This tool returns `transient: true` (ADR-032 C3a) so the recalled content is
+//! injected into the next LLM request without permanently appending to history.
+//! The content is already persisted in the JSONL log; permanently keeping it in
+//! memory would waste context window space.
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;

@@ -45,7 +45,7 @@ impl AgentLoop {
     pub(crate) async fn execute_tools_parallel(
         &mut self,
         tool_calls: &[ToolCall],
-    ) -> (Vec<String>, Option<ControlDecision>) {
+    ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
         if tool_calls.is_empty() {
             return (Vec::new(), None);
         }
@@ -66,7 +66,8 @@ impl AgentLoop {
         let iteration_timeout = Duration::from_millis(self.core.config.timeouts.iteration_timeout_ms);
 
         // Channel to collect results from spawned tasks
-        let (tx, mut rx) = mpsc::channel::<(usize, String)>(tool_calls.len());
+        // Each item: (original_index, (content, is_transient))
+        let (tx, mut rx) = mpsc::channel::<(usize, (String, bool))>(tool_calls.len());
 
         // Clone shared state for spawned tasks
         let approval_handle = self.approval_handle.clone();
@@ -109,7 +110,7 @@ impl AgentLoop {
                             )
                             .await
                             {
-                                let _ = tx.send((idx, rejection)).await;
+                                let _ = tx.send((idx, (rejection, false))).await;
                                 return;
                             }
                         } else if let Some(ref gate) = approval_gate {
@@ -123,7 +124,7 @@ impl AgentLoop {
                             )
                             .await
                             {
-                                let _ = tx.send((idx, rejection)).await;
+                                let _ = tx.send((idx, (rejection, false))).await;
                                 return;
                             }
                         }
@@ -135,11 +136,14 @@ impl AgentLoop {
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(_) => format!(
-                            "Error: Tool '{}' timed out after {}ms",
-                            tc.function.name,
-                            tool_timeout.as_millis()
+                        Ok((content, transient)) => (content, transient),
+                        Err(_) => (
+                            format!(
+                                "Error: Tool '{}' timed out after {}ms",
+                                tc.function.name,
+                                tool_timeout.as_millis()
+                            ),
+                            false,
                         ),
                     };
                     let _ = tx.send((idx, result)).await;
@@ -153,7 +157,7 @@ impl AgentLoop {
         // Collect results with iteration-level deadline.
         // In Gateway mode, also listen for approval requests from spawned tasks.
         let mut deadline = Instant::now() + iteration_timeout;
-        let mut collected: Vec<(usize, String)> = Vec::with_capacity(all_indices.len());
+        let mut collected: Vec<(usize, (String, bool))> = Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
         let mut interrupt: Option<ControlDecision> = None;
 
@@ -249,7 +253,7 @@ impl AgentLoop {
                 tokio::select! {
                     entry = rx.recv() => {
                         match entry {
-                            Some((idx, result)) => collected.push((idx, result)),
+                            Some(entry) => collected.push(entry),
                             None => break,
                         }
                     }
@@ -295,14 +299,17 @@ impl AgentLoop {
         }
 
         // Build final results in original order
-        let results: Vec<String> = (0..tool_calls.len())
+        let results: Vec<(String, bool)> = (0..tool_calls.len())
             .map(|idx| {
                 if let Some(pos) = collected.iter().find(|(i, _)| *i == idx) {
                     pos.1.clone()
                 } else {
-                    format!(
-                        "Error: iteration timed out, tool {} not completed",
-                        tool_calls[idx].function.name
+                    (
+                        format!(
+                            "Error: iteration timed out, tool {} not completed",
+                            tool_calls[idx].function.name
+                        ),
+                        false,
                     )
                 }
             })
@@ -311,7 +318,7 @@ impl AgentLoop {
         // If iteration timed out with incomplete tools, add a system note
         let incomplete_count = results
             .iter()
-            .filter(|r| r.contains("iteration timed out"))
+            .filter(|(r, _)| r.contains("iteration timed out"))
             .count();
         if incomplete_count > 0 {
             tracing::warn!(
@@ -326,12 +333,17 @@ impl AgentLoop {
 
 /// Execute a single tool call against the tool registry.
 ///
-/// Returns the result content string (success or error message).
+/// Returns `(content, is_transient)` where `is_transient` indicates whether
+/// the tool result should be treated as one-shot (ADR-032 C3a).
+/// Tools that retrieve pre-existing data (e.g. context_recall) return
+/// transient results that are injected once without permanently appending
+/// to history.  Error paths that don't reach the tool's `execute()` method
+/// always return `is_transient = false`.
 pub(crate) async fn execute_single_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &ToolCall,
     work_dir: Option<&str>,
-) -> String {
+) -> (String, bool) {
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
 
@@ -350,13 +362,16 @@ pub(crate) async fn execute_single_tool(
                 error = %e,
                 "Failed to parse tool call arguments as JSON — returning error to LLM"
             );
-            return format!(
-                "Error: Tool '{}' arguments are not valid JSON and could not be parsed: {}. \
-                 This call was NOT executed. \
-                 Arguments preview (first 200 bytes): {}",
-                tool_name,
-                e,
-                &params_str[..params_str.len().min(200)]
+            return (
+                format!(
+                    "Error: Tool '{}' arguments are not valid JSON and could not be parsed: {}. \
+                     This call was NOT executed. \
+                     Arguments preview (first 200 bytes): {}",
+                    tool_name,
+                    e,
+                    &params_str[..params_str.len().min(200)]
+                ),
+                false,
             );
         }
     };
@@ -365,11 +380,14 @@ pub(crate) async fn execute_single_tool(
     // special error marker when arguments are truncated. Skip actual execution
     // and return a clear error so the LLM knows to regenerate (not retry blindly).
     if let Some("TOOL_CALL_INCOMPLETE") = params.get("error").and_then(|v| v.as_str()) {
-        return params
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Tool call arguments were truncated during streaming")
-            .to_string();
+        return (
+            params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Tool call arguments were truncated during streaming")
+                .to_string(),
+            false,
+        );
     }
 
     // Find the tool
@@ -379,9 +397,12 @@ pub(crate) async fn execute_single_tool(
     });
 
     match tool {
-        Some(tool) => match tool.execute(params, work_dir).await {
-            Ok(result) => {
-                if result.ok {
+            Some(tool) => match tool.execute(params, work_dir).await {
+                Ok(result) => {
+                    // ADR-032 C3a: context_recall results are transient
+                    // (one-shot, visible to the LLM for one request only).
+                    let transient = tool_name == "context_recall";
+                    let content = if result.ok {
                     result.content
                 } else {
                     // Include both the error output (stdout/stderr) and the error code
@@ -394,11 +415,12 @@ pub(crate) async fn execute_single_tool(
                             result.error.as_deref().unwrap_or("unknown error")
                         )
                     }
-                }
+                };
+                (content, transient)
             }
-            Err(e) => format!("Tool execution error: {e}"),
+            Err(e) => (format!("Tool execution error: {e}"), false),
         },
-        None => format!("Unknown tool: {tool_name}"),
+        None => (format!("Unknown tool: {tool_name}"), false),
     }
 }
 
@@ -769,26 +791,27 @@ impl AgentLoop {
     /// results back in original order. Also merges with pre-blocked results
     /// from `pre_check_loop_detection`.
     ///
-    /// Returns `(tool_results, interrupt)`.
+    /// Returns `(tool_results, interrupt)` where each tool_result is `(content, is_transient)`.
+    /// `is_transient` propagates from `ToolResult.transient` (ADR-032 C3a).
     pub(crate) async fn dispatch_and_merge_tools(
         &mut self,
         calls_to_execute: Vec<ToolCall>,
         deduped_calls: &[ToolCall],
         blocked_info: &[(usize, LoopPattern)],
         context_builder: &mut ContextBuilder,
-    ) -> (Vec<String>, Option<ControlDecision>) {
+    ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
         // Intercept special tools
-        let mut ask_question_results: Vec<(usize, String)> = Vec::new();
-        let mut todo_write_results: Vec<(usize, String)> = Vec::new();
+        let mut ask_question_results: Vec<(usize, (String, bool))> = Vec::new();
+        let mut todo_write_results: Vec<(usize, (String, bool))> = Vec::new();
         let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
 
         for (idx, tc) in calls_to_execute.into_iter().enumerate() {
             if tc.function.name == "ask_user_question" {
                 let result = self.handle_ask_user_question(&tc).await;
-                ask_question_results.push((idx, result));
+                ask_question_results.push((idx, (result, false)));
             } else if tc.function.name == "todo_write" {
                 let result = self.handle_todo_write(&tc, context_builder);
-                todo_write_results.push((idx, result));
+                todo_write_results.push((idx, (result, false)));
             } else {
                 parallel_calls.push((idx, tc));
             }
@@ -801,12 +824,12 @@ impl AgentLoop {
             self.execute_tools_parallel(&calls_for_parallel).await;
 
         // Merge results: ask_question + todo_write + parallel, mapped back to original indices
-        let ask_result_map: std::collections::HashMap<usize, String> =
+        let ask_result_map: std::collections::HashMap<usize, (String, bool)> =
             ask_question_results.into_iter().collect();
-        let todo_result_map: std::collections::HashMap<usize, String> =
+        let todo_result_map: std::collections::HashMap<usize, (String, bool)> =
             todo_write_results.into_iter().collect();
 
-        let mut final_results: Vec<(usize, String)> = Vec::new();
+        let mut final_results: Vec<(usize, (String, bool))> = Vec::new();
         for (parallel_idx, result) in parallel_results.into_iter().enumerate() {
             if let Some((orig_idx, _)) = parallel_calls.get(parallel_idx) {
                 final_results.push((*orig_idx, result));
@@ -820,10 +843,11 @@ impl AgentLoop {
         }
         final_results.sort_by_key(|(idx, _)| *idx);
 
-        let executed_results: Vec<String> = final_results.into_iter().map(|(_, r)| r).collect();
+        let executed_results: Vec<(String, bool)> =
+            final_results.into_iter().map(|(_, r)| r).collect();
 
         // Merge executed results with pre-blocked results, preserving original order
-        let mut tool_results: Vec<String> = Vec::with_capacity(deduped_calls.len());
+        let mut tool_results: Vec<(String, bool)> = Vec::with_capacity(deduped_calls.len());
         let mut executed_iter = executed_results.into_iter();
         for idx in 0..deduped_calls.len() {
             if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
@@ -837,9 +861,10 @@ impl AgentLoop {
                         "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach."
                     }
                 };
-                tool_results.push(msg.to_string());
+                // Blocked results are never transient
+                tool_results.push((msg.to_string(), false));
             } else {
-                tool_results.push(executed_iter.next().unwrap_or_default());
+                tool_results.push(executed_iter.next().unwrap_or(("".to_string(), false)));
             }
         }
 

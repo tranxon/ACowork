@@ -241,6 +241,13 @@ pub struct AgentLoop {
     /// never lost — even when the original channel/notify event has been
     /// consumed by a sub-module's own `select!` loop.
     pub(crate) pending_interrupt: Option<ControlDecision>,
+    /// Transient tool results from the previous iteration (ADR-032 C3a).
+    ///
+    /// Tools with `transient: true` (e.g., `context_recall`) have their
+    /// results injected into the *next* `build_chat_request` without being
+    /// permanently appended to history.  This vec is cleared after each
+    /// `build_chat_request` call.
+    pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
 }
 
 impl AgentLoop {
@@ -305,6 +312,7 @@ impl AgentLoop {
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,
+            pending_transient_tool_msgs: Vec::new(),
         };
         // Initialize persistent model ratio store from agent config dir.
         let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
@@ -371,6 +379,7 @@ impl AgentLoop {
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,
+            pending_transient_tool_msgs: Vec::new(),
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -1094,7 +1103,7 @@ impl AgentLoop {
             .debug_observer
             .on_phase_enter(crate::debug::protocol::DebugPhase::ToolExecution)
             .await;
-        let (tool_results, interrupt) = self
+        let (tagged_results, interrupt) = self
             .dispatch_and_merge_tools(
                 calls_to_execute,
                 &deduped_calls,
@@ -1103,9 +1112,17 @@ impl AgentLoop {
             )
             .await;
 
+        // Split tagged results into content strings + transient flags
+        // (ADR-032 C3a: transient tool results bypass permanent history).
+        let mut tool_contents: Vec<String> = Vec::with_capacity(tagged_results.len());
+        let transient_flags: Vec<bool> = tagged_results.iter().map(|(_, t)| *t).collect();
+        for (content, _) in tagged_results {
+            tool_contents.push(content);
+        }
+
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
-        self.persist_and_emit_tool_results(&deduped_calls, &tool_results);
-        self.pre_trim_for_tool_results(&tool_results, current_model);
+        self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
+        self.pre_trim_for_tool_results(&tool_contents, current_model);
 
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
@@ -1114,15 +1131,14 @@ impl AgentLoop {
         // overflowing the window when appended, which would cause the
         // FIFO/emergency trim to delete ALL messages including the
         // results themselves, crashing the session with "context depleted".
-        let mut tool_results = tool_results;
         let truncated = self.trim_tool_results_for_context(
-            &mut tool_results,
+            &mut tool_contents,
             current_model,
         );
         if truncated > 0 {
             tracing::warn!(
                 truncated,
-                total = tool_results.len(),
+                total = tool_contents.len(),
                 "Tool results were truncated to fit context budget"
             );
         }
@@ -1130,17 +1146,27 @@ impl AgentLoop {
         // ── ⑧.5 Path B: Record tool failures as ProceduralNodes ──
         // After persisting results, scan for errors and create
         // low-confidence ProceduralNodes (execution_failure path).
-        self.record_tool_failures_to_memory(&deduped_calls, &tool_results);
+        self.record_tool_failures_to_memory(&deduped_calls, &tool_contents);
 
-        for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-            self.session.history.append(ChatMessage {
+        // ── ⑧.75 Append tool results to history ──
+        for (tc, (result_content, &is_transient)) in
+            deduped_calls.iter().zip(tool_contents.iter().zip(transient_flags.iter()))
+        {
+            let msg = ChatMessage {
                 name: Some(tc.function.name.clone()),
                 ..ChatMessage::tool(tc.id.clone(), result_content.clone())
-            });
+            };
+            if is_transient {
+                // Transient results are queued for the next LLM request
+                // but not permanently stored in history (ADR-032 C3a).
+                self.pending_transient_tool_msgs.push(msg);
+            } else {
+                self.session.history.append(msg);
+            }
         }
 
         // ── ⑨ Post-execution loop detection ──
-        self.post_check_loop_detection(&deduped_calls, &tool_results, &blocked_info)?;
+        self.post_check_loop_detection(&deduped_calls, &tool_contents, &blocked_info)?;
 
         // ── ⑩ Post-tool control check ──
         match interrupt {
@@ -2638,7 +2664,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(
@@ -2675,7 +2701,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
 
         // Must NOT execute the tool
         assert!(
@@ -2711,7 +2737,7 @@ mod tests {
             },
         };
 
-        let result = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
         assert_eq!(
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",

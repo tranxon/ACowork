@@ -667,6 +667,17 @@ impl AgentLoop {
             }
         }
 
+        // Inject transient tool results from the previous iteration
+        // (ADR-032 C3a).  These are one-shot messages (e.g., context_recall
+        // results) that are visible to the LLM for one request only.
+        if !self.pending_transient_tool_msgs.is_empty() {
+            let count = self.pending_transient_tool_msgs.len();
+            chat_request.messages.append(&mut self.pending_transient_tool_msgs);
+            // Cleared by the above `append` which takes ownership.
+            debug_assert!(self.pending_transient_tool_msgs.is_empty());
+            tracing::debug!(count, "Injected transient tool results into chat request");
+        }
+
         // Compute total input chars for next round's token ratio calibration.
         self.last_input_chars = count_chat_request_chars(&chat_request);
 

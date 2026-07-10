@@ -73,7 +73,7 @@ LLM 看到 raw 内容 → 直接推理
 |--------|------|------|
 | **C1** | `HistoryManager::compress_tool_results()` tool_result 专用函数 + placeholder 简化 + **删除 `truncate_large_messages`** + 替换全部调用点 | 中（删除的函数被多路径调用）|
 | **C2** | `persist_and_emit_tool_results()` 简化为透传 tool 输出（仅写既有 `tool_name` / `tool_call_id`，本 ADR 不新增任何 metadata 字段） | 低 |
-| **C3** | `ToolResult.transient` 字段 + 主循环支持（C3a）+ `context_recall` 工具注册（C3b，可独立回滚）| 中 |
+| **C3** | transient 通道（C3a）+ `context_recall` 工具注册（C3b，可独立回滚）| 中 |
 | **C4** | 触发点（auto / manual 两档拆分 + todos/assistant 事件触发,**无 persist 触发** + manual 入口 API/UI）+ Restorer 兼容 + 文档同步 | 中（涉及主循环事件流 + 新增 channel + UI 接线）|
 
 **关键决策**：
@@ -181,10 +181,11 @@ C2 完成 persist 简化后,`compact_via_llm` 在读取历史时可能遇到已�
 
 ### C3（transient-return 通道 + `context_recall` 工具）
 
-#### C3a（`ToolResult.transient` + 主循环支持，先发）
+#### C3a（transient 通道 + 主循环支持，先发）
+
+**设计决策**：不向 `ToolResult` 结构体新增 `transient` 字段（避免侵入 100+ 处构造调用），改为在 `execute_single_tool` 中按工具名判断（当前仅 `context_recall`）。新增 transient 工具只需在 `execute_single_tool` 的名称检查分支中添加对应名称。
 
 **新增**：
-- `acowork-core/src/tools/traits.rs`：`ToolResult` 结构体新增 `transient: bool` 字段（默认 `false`，向后兼容旧实现）。
 - `core/acowork-runtime/src/agent/loop_.rs`：
   - `AgentLoop` 字段新增 `pending_transient_tool_msgs: Vec<ChatMessage>`。
   - `execute_single_iteration` 处理 tool 结果循环处：
@@ -214,7 +215,7 @@ C2 完成 persist 简化后,`compact_via_llm` 在读取历史时可能遇到已�
   - `build_chat_request` 末尾追加：`chat_request.messages.extend(self.pending_transient_tool_msgs.drain(..));`
 
 **为什么先发 C3a**：
-- C3a 是结构性变更（`ToolResult.transient` 字段 + 主循环协同），风险集中在主循环 review。
+- C3a 是结构性变更（transient 通道 + 主循环协同），风险集中在主循环 review。
 - C3a 独立可 build / 可测，不依赖 `context_recall` 工具实现。
 - 如果 C3b（context_recall 工具）review 不过，C3a 仍可独立发布，未来再补 C3b。
 
@@ -1400,7 +1401,7 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C2a | `acowork-core/src/protocol.rs` | **删除** `RuntimeConfigOverrides.tool_result_hard_threshold_chars` 字段 | 0 / -8 |
 | C2a | `core/acowork-runtime/src/conversation.rs` | metadata 文档注释(无结构变更;本 ADR 不新增任何字段) | +5 / 0 |
 | **C2b** | `core/acowork-runtime/src/episode_distill.rs` | `format_messages` 增强:检测压缩占位符 + tool_name/compaction_summary 标记产出 | **+42 / -10** |
-| C3a | `acowork-core/src/tools/traits.rs` | `ToolResult.transient: bool` 字段 | +10 |
+| C3a | (实现变更:无 ToolResult 字段,按工具名匹配 transient) | — |
 | C3a | `core/acowork-runtime/src/agent/loop_.rs` | 主循环接入 transient 通道 + `pending_transient_tool_msgs` 字段 | +55 / -10 |
 | C3b | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测(303 LOC: tool ~200 + 测试 ~100) | +303 / 0 |
 | C3b | `core/acowork-runtime/src/tools/builtin/mod.rs` | 注册 `context_recall` + permission 注释 | +6 / 0 |
@@ -1577,7 +1578,7 @@ fn resolve_keep_recent_n(&self) -> usize {
 
 **风险**：中。`execute_single_iteration` 是核心循环，需要谨慎 review。
 
-**回滚方案**：C3 拆为 C3a（仅 `ToolResult.transient` 字段 + 主循环支持）+ C3b（`context_recall` 工具注册）。若 C3a review 不通过，先回滚 C3b 单独发布。
+**回滚方案**：C3 拆为 C3a（transient 通道 + 主循环支持）+ C3b（`context_recall` 工具注册，可独立回滚）。若 C3a review 不通过，先回滚 C3b 单独发布。
 
 ### Phase 4（C4a → C4b → C4c）：触发档位拆分 + manual 入口 + Restorer + 文档
 
@@ -1683,7 +1684,7 @@ C4 拆为三个子 commit 顺序发布：
 ### 负面
 
 1. **新增 tool surface**：每个 agent 都暴露 `context_recall` tool，LLM 在不需要时也可能误调。**缓解**：tool description 明确写"仅在 placeholder 出现且确实需要原文时调用"，并放在 LLM 训练语料中较常见的 "memory_*" 风格命名空间。
-2. **transient 通道引入主循环复杂度**：`ToolResult.transient` 字段需要在 tool 执行管线、history append、conversation append、build_chat_request 四处协同。**缓解**：C3 单测覆盖完整链路；主循环 review 重点关注。
+2. **transient 通道引入主循环复杂度**：tool 执行管线返回值类型变更（`String` → `(String, bool)`）、history append 分流、build_chat_request 追加三处协同。**缓解**：C3 单测覆盖完整链路；主循环 review 重点关注。
 3. **todos 简化方案不精确**：v1 用 "最近 N 条 tool result" 替代 per-todo 窗口，可能误压或漏压。**缓解**：N 值已配(`tool_result_keep_recent_n`)+ 后续有真实数据后再升级为精细窗口。
 4. **JSONL 流式读取性能**：`context_recall` 接收 `tool_call_id[]`，在大量 tool result 场景下需要扫 JSONL 按 `metadata.tool_call_id` 命中匹配 entry。**缓解**：用一次 BufReader 顺序扫描 + HashSet 命中即停（当前设计）；后续可在 `ConversationWriter` 维护 `tool_call_id → (entry.id, byte_offset)` 内存侧索引，把单次 O(N) 降到 O(k) + 二分定位。
 5. **MCP 工具输出控制是另一个独立 ADR 范畴**：本 ADR 不解决 MCP tool result 失控问题，但提供了 `compress_tool_results` 这一针对 tool_result 的机制，未来如果 MCP 工具输出过大，至少 in-memory 不会被撑爆（只是 JSONL 仍会偏大）。
