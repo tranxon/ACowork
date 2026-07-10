@@ -1402,8 +1402,8 @@ fn resolve_keep_recent_n(&self) -> usize {
 | **C2b** | `core/acowork-runtime/src/episode_distill.rs` | `format_messages` 增强:检测压缩占位符 + tool_name/compaction_summary 标记产出 | **+42 / -10** |
 | C3a | `acowork-core/src/tools/traits.rs` | `ToolResult.transient: bool` 字段 | +10 |
 | C3a | `core/acowork-runtime/src/agent/loop_.rs` | 主循环接入 transient 通道 + `pending_transient_tool_msgs` 字段 | +55 / -10 |
-| C3b | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测 | +250 / 0 |
-| C3b | `core/acowork-runtime/src/tools/builtin/mod.rs` | 注册 `context_recall` | +10 |
+| C3b | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测(303 LOC: tool ~200 + 测试 ~100) | +303 / 0 |
+| C3b | `core/acowork-runtime/src/tools/builtin/mod.rs` | 注册 `context_recall` + permission 注释 | +6 / 0 |
 | C4a | `acowork-core/src/protocol.rs` | 新增 `CompressionMode` 枚举 + `tool_result_compression_mode` + `tool_result_keep_recent_n` 字段 | +35 |
 | C4a | `core/acowork-runtime/src/agent_config.rs` | `agent_config.json` 新增 4 字段（mode / threshold_chars / assistant_threshold_chars / keep_recent_n）| +40 |
 | C4a | `core/acowork-runtime/src/agent/loop_context.rs` | 新增 `resolve_keep_recent_n()` 辅助方法 + 触发点读取配置 | +15 |
@@ -1427,9 +1427,9 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C4 | `core/acowork-runtime/src/tools/builtin/todo_write.rs` | 完成事件发送（**auto 模式专属**） | +25 |
 | C5 | `core/acowork-runtime/src/agent/session/session_manager.rs:728-740` | `build_initial_session_state` restore 路径: `load_restored` 后调用 `compress_tool_results` + `recalibrate_tokens`;压缩先于 `fit_to_budget_lossless` 执行(压缩优先覆盖更多头部空间) | +24 / 0 |
 | C4 | 多文档 | 见下表 | +90 / -5 |
-| **合计** | | | **~1341 / -158** |
+| **合计** | | | **~1644 / -158** |
 
-净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1160 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~250 行 C3b context_recall 工具 / 文档新增 +40）。C2b `format_messages` 增强 + 常量提取 + 测试新增约 42 行（净增 32）。
+净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1510 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~303 行 C3b context_recall 工具 + 注册 / 文档新增 +40 + 净值调整）。C2b `format_messages` 增强 + 常量提取 + 测试新增约 42 行。C5 restore 路径 +24 行。
 
 ### 设计文档同步
 
