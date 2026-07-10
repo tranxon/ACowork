@@ -374,18 +374,67 @@ pub fn model_cost_score(model: &ModelCapabilitiesInfo) -> f64 {
     }
 }
 
-/// Format a slice of `ChatMessage` into a human-readable text block.
+use crate::agent::history::COMPRESSED_TOOL_PLACEHOLDER_PREFIX;
+use crate::agent::history::COMPACTION_SUMMARY_NAME;
+
+/// Format a slice of `ChatMessage` into a human-readable text block for LLM-based
+/// compaction & distillation.
+///
+/// ## Role label convention
+///
+/// | Actual role        | Detected condition                                          | Emitted label                                   |
+/// |--------------------|-------------------------------------------------------------|-------------------------------------------------|
+/// | `System`           | —                                                           | `[System]`                                      |
+/// | `User`             | —                                                           | `[User]`                                        |
+/// | `Assistant`        | `name == Some("compaction_summary")`                        | `[CompactionSummary]`                           |
+/// | `Assistant`        | otherwise                                                   | `[Assistant]`                                   |
+/// | `Tool`             | content starts with `COMPRESSED_TOOL_PLACEHOLDER_PREFIX`    | `[Tool(name={name}, id={tool_call_id})]`        |
+/// | `Tool`             | otherwise                                                   | `[Tool]` (or `[Tool(name={name})]` when name set)|
+///
+/// Enhanced Tool labels give the compaction LLM enough visibility to write
+/// a meaningful summary even when the tool output has been compressed to a
+/// ~120-char placeholder (ADR-032). The `tool_call_id` duplicate in both
+/// the role label and placeholder body is intentional redundancy.
 pub(crate) fn format_messages(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|msg| {
-            let role = match msg.role {
-                MessageRole::System => "System",
-                MessageRole::User => "User",
-                MessageRole::Assistant => "Assistant",
-                MessageRole::Tool => "Tool",
+            let role_label = match msg.role {
+                MessageRole::System => "System".to_string(),
+                MessageRole::User => "User".to_string(),
+                MessageRole::Assistant => {
+                    // Detect compaction summary markers: show as
+                    // "CompactionSummary" instead of "Assistant" so the
+                    // LLM knows it is reading a previous compaction output.
+                    if msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME) {
+                        "CompactionSummary".to_string()
+                    } else {
+                        "Assistant".to_string()
+                    }
+                }
+                MessageRole::Tool => {
+                    // Detect compressed tool results (placeholder content)
+                    // and emit structured metadata in the role label so
+                    // the compaction LLM can write a name-aware summary.
+                    let is_compressed = msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX);
+                    match (is_compressed, msg.name.as_deref()) {
+                        (true, Some(name)) => {
+                            let tc_id = msg.tool_call_id.as_deref().unwrap_or("?");
+                            format!("Tool(name={}, id={})", name, tc_id)
+                        }
+                        (true, None) => {
+                            // Compressed but no name: attach id only when known.
+                            match msg.tool_call_id.as_deref() {
+                                Some(tc_id) => format!("Tool(id={})", tc_id),
+                                None => "Tool".to_string(),
+                            }
+                        }
+                        (false, Some(name)) => format!("Tool({})", name),
+                        (false, None) => "Tool".to_string(),
+                    }
+                }
             };
-            format!("[{}]: {}", role, msg.content)
+            format!("[{}]: {}", role_label, msg.content)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -730,14 +779,103 @@ mod tests {
     }
 
     #[test]
-    fn test_format_messages() {
+    fn test_format_messages_basic() {
+        // Basic System / User / Assistant messages — no name metadata.
         let messages = vec![
+            ChatMessage::system("System prompt"),
             ChatMessage::user("Hello"),
             ChatMessage::assistant("Hi there!"),
         ];
         let text = format_messages(&messages);
+        assert!(text.starts_with("[System]: System prompt"));
         assert!(text.contains("[User]: Hello"));
         assert!(text.contains("[Assistant]: Hi there!"));
+    }
+
+    #[test]
+    fn test_format_messages_compaction_summary() {
+        // An Assistant message with name="compaction_summary" should be
+        // labelled as "CompactionSummary" instead of "Assistant".
+        let mut msg = ChatMessage::assistant("Previous conversation summary");
+        msg.name = Some(COMPACTION_SUMMARY_NAME.to_string());
+        let messages = vec![
+            ChatMessage::user("Hello"),
+            msg,
+        ];
+        let text = format_messages(&messages);
+        assert!(
+            text.contains("[CompactionSummary]"),
+            "compaction summary should be labelled with a distinct role label, got:\n{}",
+            text
+        );
+        assert!(
+            text.contains("Previous conversation summary"),
+            "content must be preserved verbatim, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_format_messages_compressed_tool_no_name() {
+        // A Tool message with compressed placeholder but NO name/ID
+        // should still label as "Tool".
+        let msg = ChatMessage {
+            role: MessageRole::Tool,
+            content: "[Tool result compressed. Call context_recall(id=\"toolu_abc\") to retrieve the full content.]".into(),
+            name: None,
+            tool_call_id: None,
+            ..Default::default()
+        };
+        let messages = vec![msg];
+        let text = format_messages(&messages);
+        assert!(
+            text.contains("[Tool]:"),
+            "Tool without name/id should label as bare [Tool]:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_format_messages_compressed_tool_with_name() {
+        // A Tool message with compressed placeholder AND name+tool_call_id
+        // should emit [Tool(name=my_tool, id=toolu_xxx)].
+        let msg = ChatMessage {
+            role: MessageRole::Tool,
+            content: "[Tool result compressed. Call context_recall(id=\"toolu_xyz\") to retrieve the full content.]".into(),
+            name: Some("codebase_reader".to_string()),
+            tool_call_id: Some("toolu_xyz".to_string()),
+            ..Default::default()
+        };
+        let messages = vec![msg];
+        let text = format_messages(&messages);
+        assert!(
+            text.contains("[Tool(name=codebase_reader, id=toolu_xyz)]"),
+            "compressed Tool must include name and id in role label, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_format_messages_plain_tool_with_name() {
+        // A non-compressed Tool message with name set should show
+        // [Tool(name=my_tool)].
+        let msg = ChatMessage {
+            role: MessageRole::Tool,
+            content: "Normal tool output with some text".into(),
+            name: Some("shell_exec".to_string()),
+            tool_call_id: Some("call_abc".to_string()),
+            ..Default::default()
+        };
+        let messages = vec![msg];
+        let text = format_messages(&messages);
+        assert!(
+            text.contains("[Tool(shell_exec)]"),
+            "plain Tool with name should label as Tool(name=), got:\n{}",
+            text
+        );
+        assert!(
+            text.contains("Normal tool output"),
+            "content must be preserved");
     }
 
     #[test]

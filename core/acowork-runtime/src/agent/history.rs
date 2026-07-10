@@ -23,6 +23,31 @@ use acowork_core::providers::traits::ChatRequest;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
+// ── ADR-032 placeholder format constants ────────────────────────────────
+//
+// Shared between `HistoryManager::compress_tool_results` (producer) and
+// `episode_distill::format_messages` (consumer at LLM-compaction time).
+// Both producer and consumer MUST agree on the prefix string for the
+// idempotency check; centralizing it here prevents the two from drifting.
+
+/// Stable prefix for a compressed tool-result placeholder produced by
+/// [`HistoryManager::compress_tool_results`]. Content with this prefix
+/// is treated as "already compressed" by both:
+/// - `compress_tool_results` idempotency check
+/// - `format_messages` (LLM compaction prompt builder) for richer
+///   structured labelling in the summary prompt
+///
+/// Format invariant: prefix + space + the rest of the message body.
+/// Any change to the prefix requires updating both sides of the contract.
+pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "[Tool result compressed.";
+
+/// Stable identifier string used by [`HistoryManager::replace_middle_with_summary`]
+/// to mark the synthetic Assistant message that replaces the compacted middle.
+/// Detected by `format_messages` to label these as "CompactionSummary"
+/// (rather than "Assistant") in the summary prompt, so the LLM knows
+/// it is reading a previous compaction output rather than a fresh turn.
+pub(crate) const COMPACTION_SUMMARY_NAME: &str = "compaction_summary";
+
 /// History manager for conversation
 pub struct HistoryManager {
     /// Conversation messages
@@ -265,7 +290,7 @@ impl HistoryManager {
 
         fn is_compaction_marker(msg: &ChatMessage) -> bool {
             matches!(msg.role, MessageRole::Assistant)
-                && msg.name.as_deref() == Some("compaction_summary")
+                && msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
         }
 
         // Locate the first removable index: skip leading System and the
@@ -427,7 +452,7 @@ impl HistoryManager {
     /// distillation to fall back to full-history summarization.
     pub fn emergency_trim(&mut self) -> usize {
         fn is_compaction_marker(msg: &ChatMessage) -> bool {
-            msg.name.as_deref() == Some("compaction_summary")
+            msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
         }
 
         let system_count = self
@@ -493,8 +518,9 @@ impl HistoryManager {
     ///   `keep_recent_n >= tool_count` for a no-op.
     /// - **Idempotent** via two self-describing checks (no persistence flags):
     ///   1. `content.len() <= soft_threshold_chars` → skip
-    ///   2. `content.starts_with("[Tool result compressed.")` → skip (safety
-    ///      net against misconfigured threshold; placeholder prefix is unique)
+    ///   2. `content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX)` → skip
+    ///      (safety net against misconfigured threshold; placeholder prefix
+    ///      is unique)
     /// - **Does NOT modify `name` field** — preserves tool_use.name ↔
     ///   tool_result.name protocol pairing.
     /// - **Does NOT modify `tool_call_id` field** — embedded in the
@@ -550,7 +576,7 @@ impl HistoryManager {
             // (< 100 chars) and accidental double-processing.
             if self.messages[i]
                 .content
-                .starts_with("[Tool result compressed.")
+                .starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX)
             {
                 continue;
             }
@@ -900,7 +926,7 @@ impl HistoryManager {
         let summary_msg = ChatMessage {
             role: MessageRole::Assistant,
             content: summary.to_string(),
-            name: Some("compaction_summary".to_string()),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
         };
         let summary_tokens = self.counter.count_message(
@@ -924,7 +950,7 @@ impl HistoryManager {
     /// Find the index of the last compaction summary message.
     ///
     /// Scans messages from the end, looking for an Assistant message with
-    /// `name == "compaction_summary"`. Returns `Some(index)` if found,
+    /// `name == COMPACTION_SUMMARY_NAME`. Returns `Some(index)` if found,
     /// `None` if no compaction has occurred in this session.
     ///
     /// Used at session close to determine the tail distillation start point:
@@ -936,7 +962,7 @@ impl HistoryManager {
             .rev()
             .find(|(_, msg)| {
                 msg.role == MessageRole::Assistant
-                    && msg.name.as_deref() == Some("compaction_summary")
+                    && msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
             })
             .map(|(i, _)| i)
     }
@@ -1002,7 +1028,7 @@ mod tests {
         hm.append(ChatMessage {
             role: MessageRole::Assistant,
             content: "Compaction summary".to_string(),
-            name: Some("compaction_summary".to_string()),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
         });
         for i in 0..10 {
@@ -1016,7 +1042,7 @@ mod tests {
         let has_marker = hm
             .messages()
             .iter()
-            .any(|m| m.name.as_deref() == Some("compaction_summary"));
+            .any(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME));
         assert!(
             has_marker,
             "Compaction marker should survive emergency trim"
@@ -1068,7 +1094,7 @@ mod tests {
         hm.append(ChatMessage {
             role: MessageRole::Assistant,
             content: "summary of earlier conversation that we want to keep".to_string(),
-            name: Some("compaction_summary".to_string()),
+            name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
         });
         for i in 0..6 {
@@ -1686,7 +1712,7 @@ mod tests {
 
         // Verify compaction summary exists
         let has_summary = messages.iter().any(|m| {
-            m.role == MessageRole::Assistant && m.name.as_deref() == Some("compaction_summary")
+            m.role == MessageRole::Assistant && m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
         });
         assert!(has_summary, "Compaction summary should be present");
 

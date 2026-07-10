@@ -158,6 +158,27 @@ LLM 看到 raw 内容 → 直接推理
 - tool result 直接透传,无二次处理
 - **不**存在 `compressed` / `partial` / `original_size_chars` 任何字段(grep 验证 schema 收窄)
 
+#### C2b（`format_messages` 增强识别压缩占位符 + 产出工具名标签）
+
+C2 完成 persist 简化后,`compact_via_llm` 在读取历史时可能遇到已被 `compress_tool_results` 压缩的 Tool 消息(内容变为 ~120 chars placeholder)。增强 `format_messages` 使其:
+
+**具体改动**:
+- `core/acowork-runtime/src/episode_distill.rs` 的 `format_messages` 函数：
+  - 检测 Tool 消息 content 是否以 `[Tool result compressed.` 开头(共享 `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` 常量)
+  - 若是压缩消息且 name 存在,输出 `[Tool(name={tool_name}, id={tool_call_id})]: <placeholder>`——LLM 知道哪个 tool 被调用了、结果被压缩了、可用 context_recall 召回
+  - 若压缩但 name 缺失,仅输出 `[Tool]: <placeholder>`(回退行为)
+  - 若未压缩但 name 存在,输出 `[Tool({tool_name})]: <content>`(便于 LLM 区分不同工具的产出)
+  - Assistant 消息若 name == "compaction_summary"(共享 `COMPACTION_SUMMARY_NAME` 常量),输出 `[CompactionSummary]: <content>`——LLM 知道这是上一轮压缩的产物,不是新的对话轮次
+
+**影响**:
+- 仅影响 `compact_via_llm` + `compact_full_context` 两个入口的 prompt 文本格式,不影响运行时行为
+- 不改变 placeholder 内容本身,仅改变 role label 在 prompt 中的呈现
+- 5 个新增单测覆盖:基础格式/CompactionSummary/压缩无 name/压缩有 name/普通带 name Tool 消息
+
+**Naming 常量**:
+- `COMPRESSED_TOOL_PLACEHOLDER_PREFIX` — 在 `history.rs` 中定义,`episode_distill.rs` 引用,保证双端前缀一致
+- `COMPACTION_SUMMARY_NAME` — 同样在 `history.rs` 中定义,统一 `replace_middle_with_summary` 与 `format_messages` 的 marker 检查
+
 ### C3（transient-return 通道 + `context_recall` 工具）
 
 #### C3a（`ToolResult.transient` + 主循环支持，先发）
@@ -1375,9 +1396,10 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C1 | `core/acowork-runtime/src/agent/history.rs` | **删除** `truncate_large_messages` 整函数 | 0 / -45 |
 | C1 | `core/acowork-runtime/src/agent/loop_context.rs:198` | 删除 `truncate_large_messages` 调用点，替换为 `compress_tool_results` | +5 / -5 |
 | C1 | `core/acowork-runtime/src/agent/loop_context.rs:430` | 删除 compact fallback 的 truncate 调用 | 0 / -5 |
-| C2 | `core/acowork-runtime/src/agent/loop_tools.rs:849-865` | 简化为透传(本 ADR 不修改 JSONL schema) | +5 / -50 |
-| C2 | `acowork-core/src/protocol.rs` | **删除** `RuntimeConfigOverrides.tool_result_hard_threshold_chars` 字段 | 0 / -8 |
-| C2 | `core/acowork-runtime/src/conversation.rs` | metadata 文档注释(无结构变更;本 ADR 不新增任何字段) | +5 / 0 |
+| C2a | `core/acowork-runtime/src/agent/loop_tools.rs:849-865` | 简化为透传(本 ADR 不修改 JSONL schema) | +5 / -50 |
+| C2a | `acowork-core/src/protocol.rs` | **删除** `RuntimeConfigOverrides.tool_result_hard_threshold_chars` 字段 | 0 / -8 |
+| C2a | `core/acowork-runtime/src/conversation.rs` | metadata 文档注释(无结构变更;本 ADR 不新增任何字段) | +5 / 0 |
+| **C2b** | `core/acowork-runtime/src/episode_distill.rs` | `format_messages` 增强:检测压缩占位符 + tool_name/compaction_summary 标记产出 | **+42 / -10** |
 | C3a | `acowork-core/src/tools/traits.rs` | `ToolResult.transient: bool` 字段 | +10 |
 | C3a | `core/acowork-runtime/src/agent/loop_.rs` | 主循环接入 transient 通道 + `pending_transient_tool_msgs` 字段 | +55 / -10 |
 | C3b | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测 | +250 / 0 |
@@ -1405,9 +1427,9 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C4 | `core/acowork-runtime/src/tools/builtin/todo_write.rs` | 完成事件发送（**auto 模式专属**） | +25 |
 | C4 | `core/acowork-runtime/src/agent/session/restorer.rs:286-318` | restore 末尾无条件 re-apply `compress_tool_results` + `recalibrate_tokens`;不读 `metadata.compressed` / 不写 `name` 标记 | +10 / -5 |
 | C4 | 多文档 | 见下表 | +90 / -5 |
-| **合计** | | | **~1295 / -153** |
+| **合计** | | | **~1327 / -158** |
 
-净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1160 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~250 行 C3b context_recall 工具 / 文档新增 +40）。
+净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1160 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~250 行 C3b context_recall 工具 / 文档新增 +40）。C2b `format_messages` 增强 + 常量提取 + 测试新增约 42 行（净增 32）。
 
 ### 设计文档同步
 
@@ -1522,16 +1544,27 @@ fn resolve_keep_recent_n(&self) -> usize {
 
 **回滚方案**：C1 单独 revert，所有 truncate 调用点回滚。
 
-### Phase 2（C2）：persist 简化
+### Phase 2（C2a → C2b）：persist 简化 + format_messages 增强
 
-**目标**：`persist_and_emit_tool_results` 简化为透传，删除 hard threshold 配置。
+#### C2a：persist 简化（C1 已完成）
+
+**目标**：`persist_and_emit_tool_results` 简化为透传，删除 hard threshold 配置（`truncate_large_messages` 在 C1 中已随 compress API 删除，persist 端不再做任何截断）。
 
 **验证**：
 - JSONL 写入行为简化（仅 `tool_name` / `tool_call_id`,**不**写 `compressed` / `partial` / `original_size_chars`）
 - 旧 JSONL 缺字段正常读取
-- `RuntimeConfigOverrides` 解析 `tool_result_hard_threshold_chars` 不再 panic（兼容老 runtime 推送）
 
 **风险**：低。仅 schema 收紧。
+
+#### C2b：format_messages 增强
+
+**目标**：`format_messages` 检测已压缩的 Tool 消息,在 LLM compaction prompt 中为其产出结构化 role label(含 tool_name / tool_call_id),使 LLM 在 summarize 时不会丢失"哪个 tool 被调用了"的信息。
+
+**验证**：
+- 5 个单测覆盖基础格式/CompactionSummary/压缩无 name/压缩有 name/普通带 name Tool 消息
+- 现有 34 个 history 测试、14 个 episode_distill 测试全部通过
+
+**风险**：低。纯文本格式化变更,不改变运行时行为、不读 JSONL、不改变 placeholder 内容。
 
 ### Phase 3（C3a → C3b）：transient 通道 + context_recall
 
