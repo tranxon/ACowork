@@ -19,11 +19,13 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | rag_query | rag:query + network:<rag_url> (conditional) |
+//! | context_recall | context:read — retrieve original tool result content |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
 pub mod ask_user_question;
 pub mod codebase;
 pub mod content_search;
+pub mod context_recall;
 pub mod doc_reader;
 pub mod file_edit;
 pub mod file_read;
@@ -123,6 +125,10 @@ pub fn all_builtin_tools(
             mcp_notifier.clone(),
             agent_home.clone(),
         )),
+        // ADR-032: context_recall tool — retrieve original tool result
+        // content that was compressed to a placeholder. Requires the agent
+        // home directory to find the conversations/ path.
+        Arc::new(context_recall::ContextRecallTool::new(&agent_home)),
     ];
 
     // Only register web_search when at least one search provider is configured.
