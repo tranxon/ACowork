@@ -45,6 +45,24 @@ pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 /// window on cold-start resume).
 pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
 
+// ── ADR-032 placeholder compression ──────────────────────────────────
+//
+// C1: the `compress_tool_results` API is in place; this commit only
+// hard-codes the defaults. C4a wires these through the
+// `RuntimeConfigOverrides.tool_result_keep_recent_n` config field with
+// the same three-level fallback (overrides → agent_config → this default).
+//
+// `SOFT_THRESHOLD_CHARS` — characters; an in-memory tool result longer
+// than this is replaced with a placeholder. 2048 chars ≈ 512 tokens,
+/// aligned with the typical "LLM context bloat" threshold.
+pub(crate) const SOFT_THRESHOLD_CHARS: usize = 2048;
+
+/// Number of recent tool results kept raw (not compressed) at every
+/// trigger point (event / budget / restore / manual). N = 0 compresses
+/// all eligible; N = 3 is the ADR-032 default (skill-typical tool call
+/// depth). See `docs/adr/zh/ADR-032-context-recall.md` core principle #7.
+pub(crate) const DEFAULT_KEEP_RECENT_N: usize = 3;
+
 impl AgentLoop {
     /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
     /// message rebuilds the Provider from the global cache).
@@ -194,8 +212,22 @@ impl AgentLoop {
             self.session.history.emergency_trim();
         }
 
-        // Also truncate any single message that exceeds per-message limit
-        self.session.history.truncate_large_messages(budget / 4);
+        // Stage 3 (ADR-032): ADR-032 placeholder compression — replace any
+        // remaining oversized tool result with a ~120-char placeholder so a
+        // single huge tool output can't blow the budget on its own. The most
+        // recent N tool results are preserved raw to keep LLM's
+        // current-reasoning context intact (uniform N rule across all
+        // trigger points; see ADR-032 core principle #7).
+        //
+        // C1 note: N is fixed at the default constant below. C4a wires this
+        // through the `tool_result_keep_recent_n` config field.
+        let compressed = self
+            .session
+            .history
+            .compress_tool_results(SOFT_THRESHOLD_CHARS, DEFAULT_KEEP_RECENT_N);
+        if compressed > 0 {
+            self.session.history.recalibrate_tokens();
+        }
     }
 
     /// Resolve the model to use for session distillation or compaction.
@@ -425,9 +457,17 @@ impl AgentLoop {
                     // Same per-message cap as the successful `trim_history_to_budget`
                     // path — without this, a single oversized tool result could
                     // survive the fallback and still block the next LLM call.
-                    self.session
+                    //
+                    // ADR-032: replaced with `compress_tool_results` (placeholder
+                    // path — preserves recall-ability via tool_call_id; see history.rs
+                    // for the unified N-rule rationale).
+                    let compressed = self
+                        .session
                         .history
-                        .truncate_large_messages(budget / 4);
+                        .compress_tool_results(SOFT_THRESHOLD_CHARS, DEFAULT_KEEP_RECENT_N);
+                    if compressed > 0 {
+                        self.session.history.recalibrate_tokens();
+                    }
                 }
             }
 
