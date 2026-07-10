@@ -32,6 +32,15 @@ use crate::tools::builtin::ask_user_question::QuestionOption;
 
 use crate::agent::session_state::SessionStatus;
 
+/// ADR-032 C4b: Commands accepted by the manual compress channel.
+#[derive(Debug, Clone)]
+pub(crate) enum ManualCompressCommand {
+    /// Run `compress_tool_results` (L0 placeholder compression).
+    ToolResults,
+    /// Run LLM-based summary compaction.
+    Summary,
+}
+
 /// A ChunkEvent annotated with the session that produced it.
 ///
 /// Every event emitted by a SessionTask carries its `session_id` at the
@@ -248,6 +257,12 @@ pub struct AgentLoop {
     /// permanently appended to history.  This vec is cleared after each
     /// `build_chat_request` call.
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
+    /// ADR-032 C4b: Manual compression command receiver.
+    ///
+    /// Set by the creator (SessionTask / Gateway wiring) to enable manual
+    /// compress triggers via `drain_manual_compress_commands()`.  `None`
+    /// means no channel was wired (manual triggers are no-ops).
+    pub(crate) manual_compress_rx: Option<mpsc::Receiver<ManualCompressCommand>>,
 }
 
 impl AgentLoop {
@@ -313,6 +328,7 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
+            manual_compress_rx: None,
         };
         // Initialize persistent model ratio store from agent config dir.
         let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
@@ -380,6 +396,7 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
+            manual_compress_rx: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -971,6 +988,11 @@ impl AgentLoop {
             .apply_pending_patches(context_builder);
         self.core.debug_observer.take_re_execute_pending();
 
+        // ADR-032 C4b: drain manual compress commands from Gateway channel.
+        // This runs every iteration, both in auto mode (where events also
+        // trigger) and manual mode (where manual commands are the only way).
+        self.drain_manual_compress_commands();
+
         // ── ② Budget + context build ──
         self.core
             .debug_observer
@@ -1165,6 +1187,26 @@ impl AgentLoop {
             }
         }
 
+        // ADR-032 C4b: auto-compress after todo_write (todos completion trigger).
+        // If any tool call in this iteration was todo_write and mode is auto,
+        // run compress_tool_results to reclaim context for the next step.
+        if self.event_compression_enabled()
+            && deduped_calls.iter().any(|tc| tc.function.name == "todo_write")
+        {
+            let n = self.core.tool_result_keep_recent_n();
+            let compressed = self
+                .session
+                .history
+                .compress_tool_results(
+                    crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
+                    n as usize,
+                );
+            if compressed > 0 {
+                self.session.history.recalibrate_tokens();
+                tracing::info!(compressed, "Auto-compressed after todo_write");
+            }
+        }
+
         // ── ⑨ Post-execution loop detection ──
         self.post_check_loop_detection(&deduped_calls, &tool_contents, &blocked_info)?;
 
@@ -1215,6 +1257,67 @@ impl AgentLoop {
     // ── User interaction methods moved to loop_interaction.rs (ADR-014 Phase 4) ──
     //   - handle_ask_user_question
     //   - handle_todo_write
+
+    // ── ADR-032 C4b: manual compress + mode helpers ──
+
+    /// Resolve the effective compression mode for this session.
+    ///
+    /// Resolution chain (Layer 1 = highest priority):
+    /// 1. `self.core.compression_mode_override` — set from agent_config via
+    ///    `apply_runtime_config_override` and hot-patched by RuntimeConfigUpdate
+    /// 2. `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE` — hardcoded (Auto)
+    pub(crate) fn compression_mode(&self) -> crate::agent::loop_context::CompressionMode {
+        let mode_str = self.core.compression_mode_override.as_deref();
+        match mode_str {
+            Some("manual") => crate::agent::loop_context::CompressionMode::Manual,
+            _ => crate::agent::loop_context::CompressionMode::Auto,
+        }
+    }
+
+    /// Drain any pending manual compress commands from the channel.
+    ///
+    /// Called at the start of each iteration so manual commands are
+    /// honored even when event-triggered compression is disabled.
+    /// Returns `true` if any command was processed (caller may want to
+    /// rebuild the chat request after this).
+    pub(crate) fn drain_manual_compress_commands(&mut self) -> bool {
+        let Some(rx) = &mut self.manual_compress_rx else {
+            return false;
+        };
+        let mut did_work = false;
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                ManualCompressCommand::ToolResults => {
+                    let n = self.core.tool_result_keep_recent_n();
+                    let compressed = self.session.history.compress_tool_results(
+                        crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
+                        n as usize,
+                    );
+                    if compressed > 0 {
+                        self.session.history.recalibrate_tokens();
+                        tracing::info!(compressed, "Manual compress_tool_results executed");
+                    }
+                    did_work = true;
+                }
+                ManualCompressCommand::Summary => {
+                    // Summary compaction is handled by compact_history_if_needed
+                    // (LLM-based). For now, just trigger the budget-trim path.
+                    // Full LLM-based summary trigger will be wired in a later phase.
+                    tracing::info!("Manual summary compaction requested (deferred to budget path)");
+                    did_work = true;
+                }
+            }
+        }
+        did_work
+    }
+
+    /// Check whether compression is enabled for event triggers.
+    pub(crate) fn event_compression_enabled(&self) -> bool {
+        matches!(
+            self.compression_mode(),
+            crate::agent::loop_context::CompressionMode::Auto
+        )
+    }
 
     // ── LLM streaming methods extracted to loop_llm.rs ──
 

@@ -1901,6 +1901,7 @@ async fn process_gateway_recv(
                             // value, which was set from agent_config.json at
                             // session_init").
                             tool_result_keep_recent_n: None,
+                            tool_result_compression_mode: None,
                         },
                     );
 

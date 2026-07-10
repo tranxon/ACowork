@@ -157,6 +157,19 @@ pub struct AgentConfig {
     /// (config → code default) without a third layer to seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_keep_recent_n: Option<u32>,
+
+    /// ADR-032 C4b: compression trigger mode ("auto" | "manual").
+    ///
+    /// Resolution chain:
+    /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
+    /// 2. `RuntimeConfigOverrides::tool_result_compression_mode` — runtime push
+    /// 3. `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE` — hardcoded (Auto)
+    ///
+    /// `None` falls through to the next level. `Some("auto")` enables automatic
+    /// compress_tool_results on events. `Some("manual")` disables event triggers;
+    /// user invokes via Gateway API / CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_compression_mode: Option<String>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.

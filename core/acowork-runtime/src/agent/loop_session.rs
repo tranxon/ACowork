@@ -468,6 +468,30 @@ impl super::loop_::AgentLoop {
             ..ChatMessage::assistant(content.clone())
         });
 
+        // ADR-032 C4b: auto-compress after long assistant text responses.
+        // In auto mode, long assistant text (no tool calls) triggers
+        // compress_tool_results to free context for the next iteration.
+        if self.event_compression_enabled()
+            && content.len() > crate::agent::loop_context::SOFT_THRESHOLD_CHARS
+        {
+            let n = self.core.tool_result_keep_recent_n();
+            let compressed = self
+                .session
+                .history
+                .compress_tool_results(
+                    crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
+                    n as usize,
+                );
+            if compressed > 0 {
+                self.session.history.recalibrate_tokens();
+                tracing::info!(
+                    compressed,
+                    content_len = content.len(),
+                    "Auto-compressed after assistant long text"
+                );
+            }
+        }
+
         // Per ADR-011: per-turn episodic writes are removed.
         // Grafeo is now written only via compaction summaries and
         // session-close distillation.

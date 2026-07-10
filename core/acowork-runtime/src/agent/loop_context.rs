@@ -16,6 +16,32 @@ use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
+/// ADR-032 C4b: Compression trigger mode.
+///
+/// - `Auto`: events (todos completion, assistant long message, persist
+///   pre_trim) trigger compress_tool_results automatically. Budget fallback
+///   (pre_trim_for_tool_results, trim_history_to_budget) also active.
+/// - `Manual`: events are all off; user triggers via Gateway API or CLI only.
+///   Budget fallback still active (avoids deadlock if user forgets to compress).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompressionMode {
+    Auto,
+    Manual,
+}
+
+impl std::fmt::Display for CompressionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressionMode::Auto => write!(f, "auto"),
+            CompressionMode::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+/// Default compression mode.
+pub const DEFAULT_COMPRESSION_MODE: CompressionMode = CompressionMode::Auto;
+
 // ── Context compression thresholds ─────────────────────────────────────
 // All percentages are relative to the **effective usable input budget**
 // (`ModelCapabilitiesInfo::effective_input_budget`, i.e. context_window

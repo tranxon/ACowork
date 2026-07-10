@@ -131,6 +131,9 @@ pub struct AgentCore {
     /// taken from the agent-level config at session boot (and updated by
     /// later `RuntimeConfigUpdate` pushes — see `apply_runtime_config`).
     pub(crate) tool_result_keep_recent_n_override: Option<u32>,
+    /// ADR-032 C4b: compression trigger mode override ("auto" | "manual").
+    /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
+    pub(crate) compression_mode_override: Option<String>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -209,6 +212,7 @@ impl AgentCore {
             manifest_context_window,
             approval_timeout_secs: None,
             tool_result_keep_recent_n_override: None,
+            compression_mode_override: None,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -519,6 +523,14 @@ impl AgentCore {
             );
             self.tool_result_keep_recent_n_override = Some(n);
         }
+        if let Some(ref mode) = overrides.tool_result_compression_mode {
+            tracing::info!(
+                old = ?self.compression_mode_override,
+                new = %mode,
+                "runtime config: tool_result_compression_mode updated"
+            );
+            self.compression_mode_override = Some(mode.clone());
+        }
     }
 
     pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
@@ -796,6 +808,7 @@ impl Clone for AgentCore {
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             tool_result_keep_recent_n_override: self.tool_result_keep_recent_n_override,
+            compression_mode_override: self.compression_mode_override.clone(),
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),

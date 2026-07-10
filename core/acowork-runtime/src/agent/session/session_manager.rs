@@ -107,6 +107,10 @@ pub struct RuntimeConfigOverrides {
     /// last `n` tool messages raw. See `docs/adr/zh/ADR-032-context-recall.md`
     /// core principle #7.
     pub tool_result_keep_recent_n: Option<u32>,
+
+    /// ADR-032 C4b: compression trigger mode ("auto" | "manual").
+    /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
+    pub tool_result_compression_mode: Option<String>,
 }
 
 impl RuntimeConfigOverrides {
@@ -120,6 +124,7 @@ impl RuntimeConfigOverrides {
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
             && self.tool_result_keep_recent_n.is_none()
+            && self.tool_result_compression_mode.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -149,6 +154,9 @@ impl RuntimeConfigOverrides {
         if other.tool_result_keep_recent_n.is_some() {
             self.tool_result_keep_recent_n = other.tool_result_keep_recent_n;
         }
+        if other.tool_result_compression_mode.is_some() {
+            self.tool_result_compression_mode = other.tool_result_compression_mode.clone();
+        }
     }
 }
 
@@ -166,6 +174,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
             tool_result_keep_recent_n: cfg.tool_result_keep_recent_n,
+            tool_result_compression_mode: cfg.tool_result_compression_mode.clone(),
         }
     }
 }
