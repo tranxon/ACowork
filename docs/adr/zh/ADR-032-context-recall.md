@@ -1425,9 +1425,9 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C4 | `core/acowork-runtime/src/agent/loop_context.rs:417-431` | fallback 路径前置 `compress_tool_results`（**两档都生效**） | +20 / -10 |
 | C4 | `core/acowork-runtime/src/agent/loop_context.rs:843-865` | pre_trim 整合为 `pre_trim_and_compress`（**两档都生效**） | +15 / -5 |
 | C4 | `core/acowork-runtime/src/tools/builtin/todo_write.rs` | 完成事件发送（**auto 模式专属**） | +25 |
-| C4 | `core/acowork-runtime/src/agent/session/restorer.rs:286-318` | restore 末尾无条件 re-apply `compress_tool_results` + `recalibrate_tokens`;不读 `metadata.compressed` / 不写 `name` 标记 | +10 / -5 |
+| C5 | `core/acowork-runtime/src/agent/session/session_manager.rs:728-740` | `build_initial_session_state` restore 路径: `load_restored` 后调用 `compress_tool_results` + `recalibrate_tokens`;压缩先于 `fit_to_budget_lossless` 执行(压缩优先覆盖更多头部空间) | +24 / 0 |
 | C4 | 多文档 | 见下表 | +90 / -5 |
-| **合计** | | | **~1327 / -158** |
+| **合计** | | | **~1341 / -158** |
 
 净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1160 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~250 行 C3b context_recall 工具 / 文档新增 +40）。C2b `format_messages` 增强 + 常量提取 + 测试新增约 42 行（净增 32）。
 
@@ -1646,6 +1646,17 @@ C4 拆为三个子 commit 顺序发布：
 - **配置变更回归**：修改 `tool_result_soft_threshold_chars` 配置后,旧 session restore 自动按新规则派生——验证 0 migration 路径
 - ADR-010 §"明确放弃的策略" 表更新到位
 - 03-agent-runtime.md / 12-tool-system.md / 15-conversation-persistence.md / 17-gateway-api.md 四篇文档同步
+
+### Phase 5（C5）：restore 路径压缩
+
+**目标**：`build_initial_session_state` 中 restore JSONL 历史后立即 re-apply in-memory 压缩，确保 session 重启前后 LLM 看到的"近期 raw 上下文"连续（core principle #6）。
+
+**验证**：
+- `test_session_resume` 集成测试继续通过（压缩不影响 restore 的正确性——restore 只处理纯 Tool 消息，不碰 compaction_summary / Assistant / User）
+- 压缩先于 `fit_to_budget_lossless`：即先压缩 oversized tool result（无损恢复头部空间），再执行 message 级裁剪（有损）
+- token 计数：compress 后 `recalibrate_tokens` 使 token 计数反映 placeholder 大小
+
+**风险**：低。纯 in-memory 追加调用，不影响 JSONL 持久化、不影响 session 创建、不影响正常运行时。与 C5 前行为唯一差异：restored 历史中 oversized tool result 被压缩 placeholder 替代（LLM 在 restore 后第一轮看到的上下文略小，但对质量无影响——能 recall）。
 
 ---
 

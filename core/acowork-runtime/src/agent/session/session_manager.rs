@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::loop_::SessionChunkEvent;
+use crate::agent::loop_context::SOFT_THRESHOLD_CHARS;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{SessionState, SessionStatus};
@@ -726,6 +727,29 @@ impl SessionManager {
         // model" case — it never invokes an LLM.
         if let Some(outcome) = restored {
             session_state.history_mut().load_restored(outcome.messages);
+
+            // ── ADR-032 C5: re-apply in-memory compression ────────────────
+            // The JSONL always stores raw tool output — compression state is
+            // derived at runtime by rules (core principle #6), not persisted.
+            // Restore must re-drive compression so that a resumed session
+            // starts with the same look as a continuously-running session.
+            //
+            // This runs *before* `fit_to_budget_lossless` so that compression
+            // (lossless) recovers as much headroom as possible before the
+            // lossy trim (which discards entire messages).
+            let n = self.core.tool_result_keep_recent_n();
+            let compressed = session_state
+                .history_mut()
+                .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
+            if compressed > 0 {
+                session_state.history_mut().recalibrate_tokens();
+                tracing::info!(
+                    compressed,
+                    keep_recent_n = n,
+                    "ADR-032 restore: compressed oversized tool results"
+                );
+            }
+
             let dropped = session_state.history_mut().fit_to_budget_lossless();
             if dropped > 0 {
                 tracing::warn!(
