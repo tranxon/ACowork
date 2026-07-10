@@ -43,6 +43,15 @@ impl AgentLoop {
             }
         };
 
+        // Compute effective timeout from agent config (NOT from LLM-provided params).
+        // The LLM cannot know how long the user will take — this is a scheduling
+        // decision owned by the agent runtime / user preference.
+        let effective_timeout_secs: u32 = self
+            .core
+            .approval_timeout_secs
+            .map(|t| t as u32)
+            .unwrap_or(acowork_core::timeout_config::constants::APPROVAL.as_secs() as u32);
+
         // Generate unique request ID
         let request_id = format!(
             "q-{}",
@@ -54,16 +63,18 @@ impl AgentLoop {
             request_id = %request_id,
             question = %parsed.question,
             options_count = parsed.options.len(),
+            timeout_secs = %effective_timeout_secs,
             "AskUserQuestion: emitting AskQuestion event and waiting for answer"
         );
 
-        // Emit ChunkEvent::AskQuestion
+        // Emit ChunkEvent::AskQuestion (timeout_seconds is runtime-computed,
+        // not LLM-provided, so the frontend always sees the user-preferred value)
         let _ = self.session_core.try_send_chunk(ChunkEvent::AskQuestion {
             request_id: request_id.clone(),
             question: parsed.question.clone(),
             options: parsed.options,
             title: parsed.title.clone(),
-            timeout_seconds: parsed.timeout_seconds,
+            timeout_seconds: Some(effective_timeout_secs),
         });
 
         // Transition to WaitingApproval
@@ -71,10 +82,8 @@ impl AgentLoop {
             request_id: request_id.clone(),
         });
 
-        // Wait for the user's answer (with optional timeout)
-        let answer = self
-            .await_question_answer(&request_id, parsed.timeout_seconds)
-            .await;
+        // Wait for the user's answer (timeout driven by agent config)
+        let answer = self.await_question_answer(&request_id).await;
 
         // Transition back to Streaming (the loop will continue)
         self.transition_status(SessionStatus::Streaming { message_id: None });

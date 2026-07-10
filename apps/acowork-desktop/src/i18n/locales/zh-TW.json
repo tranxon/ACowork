@@ -130,6 +130,7 @@
     "title": "應用程式出現異常",
     "description": "可能是系統休眠喚醒後連線已中斷",
     "autoRecovering": "正在自動復原...",
+    "recoverMessage": "恢復中...",
     "retry": "重試",
     "refreshPage": "重新整理頁面"
   },

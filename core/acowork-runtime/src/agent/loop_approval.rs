@@ -237,16 +237,17 @@ impl AgentLoop {
     /// Non-matching messages are buffered in `session.deferred_inbound`.
     /// Also processes concurrent approval requests from `approval_rx`.
     /// Returns the user's answer string, or a cancellation/timeout message.
-    pub(crate) async fn await_question_answer(
-        &mut self,
-        request_id: &str,
-        timeout_seconds: Option<u32>,
-    ) -> String {
-        let effective_timeout = timeout_seconds
-            .map(|t| t as u64)
-            .or(self.core.approval_timeout_secs)
+    ///
+    /// The wait timeout is driven by `core.approval_timeout_secs` (the user's
+    /// preference set in agent config / Settings). This is intentionally NOT
+    /// overridable per call — the question wait is an agent scheduling concern,
+    /// not an LLM-controlled tool parameter.
+    pub(crate) async fn await_question_answer(&mut self, request_id: &str) -> String {
+        let effective_timeout_secs = self
+            .core
+            .approval_timeout_secs
             .unwrap_or(APPROVAL_TIMEOUT_SECS);
-        let timeout_duration = std::time::Duration::from_secs(effective_timeout);
+        let timeout_duration = std::time::Duration::from_secs(effective_timeout_secs);
 
         let ctrl_notify = self.core.debug_observer.control_notify().cloned();
         let timeout_future = tokio::time::timeout(timeout_duration, async {
@@ -344,7 +345,7 @@ impl AgentLoop {
             Err(_elapsed) => {
                 tracing::warn!(
                     request_id = %request_id,
-                    timeout_secs = %timeout_seconds.unwrap_or(effective_timeout as u32),
+                    timeout_secs = %effective_timeout_secs,
                     "Question answer timed out"
                 );
                 "[Timeout: user did not respond]".to_string()

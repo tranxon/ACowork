@@ -40,6 +40,7 @@
     "title": "Something went wrong",
     "description": "Connection may have dropped after system wake",
     "autoRecovering": "Auto-recovering...",
+    "recoverMessage": "Recovering...",
     "retry": "Retry",
     "refreshPage": "Refresh page"
   },

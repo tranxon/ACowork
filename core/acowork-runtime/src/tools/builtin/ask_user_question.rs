@@ -42,6 +42,12 @@ pub struct QuestionOption {
 }
 
 /// Parameters for the ask_user_question tool (parsed from LLM tool call)
+///
+/// NOTE: The question wait timeout is intentionally NOT a tool parameter.
+/// It is a scheduling decision owned by the agent runtime (driven by the
+/// user's `approval_timeout_secs` preference), not the LLM. The LLM cannot
+/// know how long the user will take to answer — making it a tool input
+/// would let the LLM silently override the user's preferred wait time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskQuestionParams {
     /// The question to present to the user
@@ -51,9 +57,6 @@ pub struct AskQuestionParams {
     /// Short title/header for the question card (optional)
     #[serde(default)]
     pub title: Option<String>,
-    /// Seconds to wait for the user's response (default: 300)
-    #[serde(default)]
-    pub timeout_seconds: Option<u32>,
 }
 
 /// Result returned from the user's response (received via gRPC from Gateway)
@@ -119,10 +122,6 @@ impl AskUserQuestionTool {
                     "title": {
                         "type": "string",
                         "description": "Optional short title/header for the question card"
-                    },
-                    "timeout_seconds": {
-                        "type": "integer",
-                        "description": "Seconds to wait for the user's response (default: 300, max: 3600)"
                     }
                 },
                 "required": ["question", "options"]
@@ -211,17 +210,10 @@ impl AskUserQuestionTool {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let timeout_seconds = params
-            .get("timeout_seconds")
-            .and_then(|v| v.as_u64())
-            .map(|t| t as u32)
-            .filter(|t| *t > 0);
-
         Ok(AskQuestionParams {
             question,
             options,
             title,
-            timeout_seconds,
         })
     }
 }
@@ -290,6 +282,35 @@ mod tests {
         assert!(schema["properties"]["question"].is_object());
         assert!(schema["properties"]["options"].is_object());
         assert!(schema["properties"]["title"].is_object());
+    }
+
+    /// `timeout_seconds` is intentionally NOT a tool input — it is a
+    /// runtime scheduling concern driven by the user's `approval_timeout_secs`.
+    /// Verify the schema does not expose it.
+    #[test]
+    fn test_spec_does_not_expose_timeout_seconds() {
+        let spec = AskUserQuestionTool::spec_value();
+        let schema = &spec.input_schema;
+        assert!(
+            schema["properties"]["timeout_seconds"].is_null(),
+            "ask_user_question schema must not expose timeout_seconds to the LLM; \
+             it is an agent scheduling concern driven by approval_timeout_secs"
+        );
+    }
+
+    /// Verify validation tolerates an LLM that still emits `timeout_seconds`
+    /// (e.g. from cached prompts or older model snapshots). The field is
+    /// silently ignored — it never affects the wait timeout.
+    #[test]
+    fn test_validate_params_ignores_legacy_timeout_seconds() {
+        let params = serde_json::json!({
+            "question": "Which?",
+            "options": [{ "label": "A" }],
+            "timeout_seconds": 30
+        });
+        let result = AskUserQuestionTool::validate_params(&params).unwrap();
+        assert_eq!(result.question, "Which?");
+        // AskQuestionParams has no timeout_seconds field — the value is dropped.
     }
 
     #[test]

@@ -598,6 +598,14 @@ export interface AskQuestionEvent {
   question: string;
   options: QuestionOption[];
   title?: string;
+  /**
+   * Effective wait timeout in seconds, computed by the runtime from the
+   * agent's `approval_timeout_secs` config (user preference, default 300s).
+   *
+   * Frontend shows a countdown based on this value. The Runtime auto-cancels
+   * (returns "[Timeout: user did not respond]") once it elapses.
+   */
+  timeout_seconds?: number;
   /** Session ID that originated this question (used for multi-session routing) */
   session_id?: string;
 }

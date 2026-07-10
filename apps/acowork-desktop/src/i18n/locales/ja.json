@@ -130,6 +130,7 @@
     "title": "問題が発生しました",
     "description": "システムスリープからの復帰後に接続が切断された可能性があります",
     "autoRecovering": "自動復旧中...",
+    "recoverMessage": "復旧中...",
     "retry": "再試行",
     "refreshPage": "ページを更新"
   },

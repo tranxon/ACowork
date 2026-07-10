@@ -130,6 +130,7 @@
     "title": "应用出现了异常",
     "description": "可能是系统休眠唤醒后连接已断开",
     "autoRecovering": "正在自动恢复...",
+    "recoverMessage": "恢复中...",
     "retry": "重试",
     "refreshPage": "刷新页面"
   },

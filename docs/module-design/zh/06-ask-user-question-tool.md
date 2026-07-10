@@ -23,6 +23,7 @@ Agent 在以下场景需要主动问用户：
 3. **复用现有 `SessionStatus` 状态机** — 与 `ApprovalGate` 共享 `WaitingApproval` 态
 4. **前端原生渲染** — Desktop App 直接内联展示 question card
 5. **超时 & 取消** — 用户可超时不答或显式取消
+6. **超时由 agent config 决定，不由 LLM 决定** — `approval_timeout_secs`（用户偏好）是等待用户回答的唯一来源；LLM 不能在 tool call 里覆盖
 
 ---
 
@@ -32,7 +33,7 @@ Agent 在以下场景需要主动问用户：
 ┌─────────────────────────────────────────────────────────────────┐
 │ Runtime (AgentLoop)                                              │
 │                                                                  │
-│  LLM → ask_user_question({question, options?, timeout?})         │
+│  LLM → ask_user_question({question, options?, title?})            │
 │    ↓                                                             │
 │  1. 生成 request_id                                              │
 │  2. session.set_status(WaitingApproval { request_id })           │
@@ -118,15 +119,15 @@ Agent 在以下场景需要主动问用户：
         "type": "string",
         "description": "问题的标题/上下文（可选）"
       },
-      "timeout_seconds": {
-        "type": "integer",
-        "description": "等待用户响应的超时秒数（默认 300）"
-      }
     },
     "required": ["question"]
   }
 }
 ```
+
+> **注意**: `timeout_seconds` **不是** tool 的入参。等待超时由 runtime 从
+> agent config 的 `approval_timeout_secs`（用户在 Settings 设置）派生，
+> LLM 不应在 tool call 中传超时。详见 §6。
 
 ### 4.2 ChunkEvent 变体（Runtime → Gateway）
 
@@ -143,7 +144,10 @@ pub enum ChunkEvent {
         question: String,
         options: Vec<AskQuestionOption>,
         title: Option<String>,
-        timeout_seconds: u32,
+        /// Effective wait timeout in seconds, computed by the runtime from
+        /// `core.approval_timeout_secs`. Forwarded to the frontend for the
+        /// count-down UI. NOT a tool input.
+        timeout_seconds: Option<u32>,
     },
 }
 
@@ -169,12 +173,15 @@ pub struct AskQuestionOption {
       { "label": "面向对象", "description": "使用类和继承" },
       { "label": "过程式", "description": "简单的步骤式实现" }
     ],
-    "timeout_seconds": 120
+    "timeout_seconds": 300
   }
 }
 ```
 
-> **注意**: options 数组没有显式的 "Other"。前端约定：**用户不选任何选项直接提交 = Other**。
+> **注意 1**: options 数组没有显式的 "Other"。前端约定：**用户不选任何选项直接提交 = Other**。
+>
+> **注意 2**: `timeout_seconds` 字段由 runtime 填入，值取自 `approval_timeout_secs`
+> （用户偏好），不是 LLM 提供的。前端用它显示倒计时。
 
 ### 4.4 WS Event（Frontend → Gateway）
 
@@ -289,16 +296,17 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// LLM 调用 ask_user_question 时的输入参数
+///
+/// NOTE: `timeout_seconds` is intentionally NOT in this struct. The wait
+/// timeout is a runtime scheduling decision derived from
+/// `approval_timeout_secs` (the user's preference in agent config), not
+/// something the LLM controls.
 #[derive(Debug, Deserialize)]
 pub struct AskUserQuestionInput {
     pub question: String,
     pub options: Option<Vec<AskQuestionOption>>,
     pub title: Option<String>,
-    #[serde(default = "default_timeout")]
-    pub timeout_seconds: u32,
 }
-
-fn default_timeout() -> u32 { 300 }
 
 #[derive(Debug, Deserialize)]
 pub struct AskQuestionOption {
@@ -714,4 +722,48 @@ case 'ask_answer':
 - `docs/06-communication.md` §IPC 消息协议
 - `docs/review/ask-user-question-patterns-comparison.md` 全量调研对比
 - Claude Code `AskUserQuestion` tool 设计（platform.claude.com）
+
+---
+
+## 12. 超时设计：为什么 `timeout_seconds` 不是 tool 入参
+
+### 12.1 历史版本
+
+初版设计将 `timeout_seconds` 暴露为 `ask_user_question` 的可选 tool 参数，
+让 LLM 在调用时自行指定等待用户响应的秒数。schema 中默认值 300，最大值 3600。
+
+### 12.2 发现的问题
+
+实测中发现 LLM 会"自作主张"地传一个远小于默认值的 `timeout_seconds`（如 30、60），
+覆盖用户在 Settings 中设置的 `approval_timeout_secs = 300`，造成：
+
+- 用户明明设置了"愿意等 5 分钟"，实际只等 30 秒就超时
+- 前端倒计时与用户预期不一致
+- 用户偏好被 LLM 静默覆盖
+
+### 12.3 设计决定
+
+**`timeout_seconds` 不再是 tool 入参**，是 agent runtime 的**调度决策**：
+
+| 字段 | 决策者 | 来源 |
+|---|---|---|
+| `approval_timeout_secs` | 用户 | Settings → agent config → `agent_core.approval_timeout_secs` |
+| `ChunkEvent::AskQuestion.timeout_seconds` | runtime | 上面那行的值，runtime 填入 WS payload 给前端显示倒计时 |
+
+LLM 在 tool call 中即使传了 `timeout_seconds`，runtime 也会**静默忽略**（验证测试见 `test_validate_params_ignores_legacy_timeout_seconds`）。
+
+### 12.4 为什么不让 LLM 控制
+
+- **LLM 不知道用户偏好** —— LLM 看不到 agent config，瞎填小值
+- **超时本质是调度策略** —— "等多久"是 agent 的事，不是问题内容的一部分
+- **违反用户主权** —— 用户的 Settings 设置应该被尊重
+- **前端倒计时含义不清** —— 之前前端拿到的 timeout 是 LLM 决定的，用户根本不知道
+
+### 12.5 实现位置
+
+| 层 | 文件 | 说明 |
+|---|---|---|
+| Tool schema | `core/acowork-runtime/src/tools/builtin/ask_user_question.rs` | 已删除 `timeout_seconds` 字段 |
+| Wait loop | `core/acowork-runtime/src/agent/loop_approval.rs::await_question_answer` | 不再接受 `timeout_seconds` 参数，只读 `core.approval_timeout_secs` |
+| Event emit | `core/acowork-runtime/src/agent/loop_interaction.rs::handle_ask_user_question` | runtime 从 `core.approval_timeout_secs` 计算后填入 `ChunkEvent::AskQuestion` |
 - Spring AI `AskUserQuestionTool` 设计（QuestionHandler 策略模式）

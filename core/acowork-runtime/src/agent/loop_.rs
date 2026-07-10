@@ -114,7 +114,12 @@ pub enum ChunkEvent {
         options: Vec<QuestionOption>,
         /// Optional title/header for the question card
         title: Option<String>,
-        /// Optional timeout in seconds (None = use default)
+        /// Effective wait timeout in seconds, computed by the runtime from the
+        /// agent's `approval_timeout_secs` config (user preference).
+        ///
+        /// The frontend uses this to render the count-down UI.
+        /// Always `Some(_)` — the runtime fills this in unconditionally;
+        /// LLM-supplied values are no longer accepted as tool input.
         timeout_seconds: Option<u32>,
     },
     /// Session lifecycle status changed (ADR-014).

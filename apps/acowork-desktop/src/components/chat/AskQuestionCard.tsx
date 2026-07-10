@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MessageCircleQuestion } from "lucide-react";
 import type { AskQuestionEvent } from "../../lib/types";
 import { StyledTextarea } from "../common/StyledInput";
@@ -20,6 +20,8 @@ interface AskQuestionCardProps {
  * - Last option is always "Other" which reveals a textarea for free-text input
  * - Submit button uses accent color, inline with the card (no modal/dialog)
  * - Disabled after submission
+ * - Shows live countdown badge sourced from `event.timeout_seconds` (server-derived
+ *   from `approval_timeout_secs`). Mirrors the approval flow in ExploreBlock.
  */
 export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
   const { t } = useTranslation();
@@ -27,8 +29,33 @@ export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
   const [otherText, setOtherText] = useState("");
   const [submitted, setSubmitted] = useState(false);
 
+  // Countdown timer for question wait timeout.
+  // Mirrors the implementation in ExploreBlock.tsx for tool approvals.
+  const [remainingSecs, setRemainingSecs] = useState<number | null>(null);
+  useEffect(() => {
+    const total = event.timeout_seconds;
+    if (!total || total <= 0) {
+      setRemainingSecs(null);
+      return;
+    }
+    setRemainingSecs(total);
+    const interval = setInterval(() => {
+      setRemainingSecs((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [event.timeout_seconds]);
+
   const isOtherSelected = selected === "__other__";
   const canSubmit = !submitted && (selected !== null) && (!isOtherSelected || otherText.trim().length > 0);
+  const countdownLabel = remainingSecs !== null && remainingSecs > 0
+    ? `${Math.floor(remainingSecs / 60)}:${String(remainingSecs % 60).padStart(2, "0")}`
+    : remainingSecs === 0 ? "expired" : null;
 
   const handleSubmit = () => {
     if (!canSubmit) return;
@@ -57,6 +84,20 @@ export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
             {event.question}
           </div>
         </div>
+        {/* Countdown badge — mirrors approval-flow timer in ExploreBlock */}
+        {countdownLabel && countdownLabel !== "expired" && (
+          <span
+            className="text-[10px] font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right mt-0.5"
+            aria-label={t("askQuestionCard.expiresIn")}
+          >
+            {countdownLabel}
+          </span>
+        )}
+        {countdownLabel === "expired" && (
+          <span className="text-[10px] font-mono text-zinc-400 dark:text-zinc-500 shrink-0 mt-0.5">
+            {t("askQuestionCard.expired")}
+          </span>
+        )}
       </div>
 
       {/* Options */}
