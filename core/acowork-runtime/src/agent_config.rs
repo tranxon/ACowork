@@ -131,6 +131,32 @@ pub struct AgentConfig {
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_secs: Option<u64>,
+
+    /// ADR-032: number of recent tool results kept raw (not compressed) at
+    /// every trigger point (event / budget / restore / manual).
+    ///
+    /// Resolution chain at runtime (Layer 1 = highest priority):
+    /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
+    /// 2. `RuntimeConfigOverrides::tool_result_keep_recent_n` — runtime push
+    ///    from Gateway (Layer 1' when no agent_config value is set, but
+    ///    normally agent_config.json shadows it during boot via
+    ///    `From<&AgentConfig> for RuntimeConfigOverrides`)
+    /// 3. `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N` — ADR-032 hardcoded
+    ///    final fallback (3; matches skill-typical tool-call depth)
+    ///
+    /// Semantics (per ADR-032 core principle #7):
+    /// - `None` → fall through to the code default (3)
+    /// - `Some(0)` → compress every eligible tool result (most aggressive)
+    /// - `Some(n)` → keep the last `n` tool messages raw
+    /// - No upper cap is enforced; very large values simply disable compression
+    ///   for the recent-N window (the user accepts the trade-off)
+    ///
+    /// NOTE: this field is **never auto-resolved** to a default in
+    /// `session_init.rs`. Unlike `context_window` / `temperature` it has
+    /// no manifest-level analogue, so the resolution chain stays 2-level
+    /// (config → code default) without a third layer to seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_keep_recent_n: Option<u32>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.

@@ -366,7 +366,11 @@ pub(crate) async fn phase_b_init_session(
             || agent_cfg.context_window.is_some()
             || agent_cfg.system_prompt_override.is_some()
             || agent_cfg.shell_approval_threshold.is_some()
-            || agent_cfg.approval_timeout_secs.is_some();
+            || agent_cfg.approval_timeout_secs.is_some()
+            // ADR-032: include the tool-result compression N in the override
+            // detection so a user-set value in agent_config.json is applied
+            // to the SessionManager override cache at boot.
+            || agent_cfg.tool_result_keep_recent_n.is_some();
         if has_overrides {
             tracing::info!(
                 max_output_tokens = ?agent_cfg.max_output_tokens,

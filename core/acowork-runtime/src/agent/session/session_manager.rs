@@ -99,6 +99,13 @@ pub struct RuntimeConfigOverrides {
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
     pub approval_timeout_secs: Option<u64>,
+    /// ADR-032: number of recent tool results kept raw (not compressed) at
+    /// every trigger point (event / budget / restore / manual). `None`
+    /// means "fall through to `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N`".
+    /// `Some(0)` compresses every eligible tool result; `Some(n)` keeps the
+    /// last `n` tool messages raw. See `docs/adr/zh/ADR-032-context-recall.md`
+    /// core principle #7.
+    pub tool_result_keep_recent_n: Option<u32>,
 }
 
 impl RuntimeConfigOverrides {
@@ -111,6 +118,7 @@ impl RuntimeConfigOverrides {
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
+            && self.tool_result_keep_recent_n.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -137,6 +145,9 @@ impl RuntimeConfigOverrides {
         if other.approval_timeout_secs.is_some() {
             self.approval_timeout_secs = other.approval_timeout_secs;
         }
+        if other.tool_result_keep_recent_n.is_some() {
+            self.tool_result_keep_recent_n = other.tool_result_keep_recent_n;
+        }
     }
 }
 
@@ -153,6 +164,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             system_prompt_override: cfg.system_prompt_override.clone(),
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
+            tool_result_keep_recent_n: cfg.tool_result_keep_recent_n,
         }
     }
 }
@@ -2323,6 +2335,62 @@ mod tests {
         // None preserves
         ov.merge(&RuntimeConfigOverrides::default());
         assert_eq!(ov.max_output_tokens, Some(200));
+    }
+
+    // ── ADR-032 tool_result_keep_recent_n config wiring ────────────────
+
+    #[test]
+    fn test_overrides_includes_tool_result_keep_recent_n() {
+        // Setting the field flips is_empty from true → false and
+        // surfaces the value through is_empty / direct field read.
+        let mut ov = RuntimeConfigOverrides::default();
+        assert!(ov.is_empty());
+        ov.tool_result_keep_recent_n = Some(5);
+        assert!(!ov.is_empty());
+        assert_eq!(ov.tool_result_keep_recent_n, Some(5));
+    }
+
+    #[test]
+    fn test_overrides_merge_tool_result_keep_recent_n() {
+        // The same merge semantics as the other fields: Some replaces,
+        // None preserves the cached value.
+        let mut ov = RuntimeConfigOverrides::default();
+        ov.merge(&RuntimeConfigOverrides {
+            tool_result_keep_recent_n: Some(3),
+            ..Default::default()
+        });
+        assert_eq!(ov.tool_result_keep_recent_n, Some(3));
+
+        // Some replaces
+        ov.merge(&RuntimeConfigOverrides {
+            tool_result_keep_recent_n: Some(0),
+            ..Default::default()
+        });
+        assert_eq!(ov.tool_result_keep_recent_n, Some(0));
+
+        // None preserves the cached Some(0) (the user explicitly opted
+        // into the "compress every eligible tool result" mode).
+        ov.merge(&RuntimeConfigOverrides::default());
+        assert_eq!(ov.tool_result_keep_recent_n, Some(0));
+    }
+
+    #[test]
+    fn test_agent_config_projects_tool_result_keep_recent_n() {
+        // `From<&AgentConfig>` must surface `tool_result_keep_recent_n`
+        // verbatim so a user value in agent_config.json flows through
+        // to `session_manager.runtime_overrides` at boot.
+        let cfg = crate::agent_config::AgentConfig {
+            tool_result_keep_recent_n: Some(7),
+            ..Default::default()
+        };
+        let ov = RuntimeConfigOverrides::from(&cfg);
+        assert_eq!(ov.tool_result_keep_recent_n, Some(7));
+
+        // None on AgentConfig → None on overrides (caller falls through
+        // to the code default `DEFAULT_KEEP_RECENT_N`).
+        let cfg_empty = crate::agent_config::AgentConfig::default();
+        let ov_empty = RuntimeConfigOverrides::from(&cfg_empty);
+        assert_eq!(ov_empty.tool_result_keep_recent_n, None);
     }
 
     // ── require_session_id ─────────────────────────────────────────────

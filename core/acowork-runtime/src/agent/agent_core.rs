@@ -125,6 +125,12 @@ pub struct AgentCore {
     pub(crate) manifest_context_window: Option<u64>,
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     pub(crate) approval_timeout_secs: Option<u64>,
+    /// ADR-032: number of recent tool results preserved raw at every trigger
+    /// point of `compress_tool_results`. `None` means "use the code default
+    /// `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N` (3)". Snapshot is
+    /// taken from the agent-level config at session boot (and updated by
+    /// later `RuntimeConfigUpdate` pushes — see `apply_runtime_config`).
+    pub(crate) tool_result_keep_recent_n_override: Option<u32>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -202,6 +208,7 @@ impl AgentCore {
             context_window_override: None,
             manifest_context_window,
             approval_timeout_secs: None,
+            tool_result_keep_recent_n_override: None,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -504,6 +511,14 @@ impl AgentCore {
             );
             self.approval_timeout_secs = Some(timeout);
         }
+        if let Some(n) = overrides.tool_result_keep_recent_n {
+            tracing::info!(
+                old = ?self.tool_result_keep_recent_n_override,
+                new = n,
+                "runtime config: tool_result_keep_recent_n updated"
+            );
+            self.tool_result_keep_recent_n_override = Some(n);
+        }
     }
 
     pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
@@ -688,6 +703,23 @@ impl AgentCore {
     pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) { self.approval_gate = Some(gate); }
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
+    /// ADR-032: resolve the effective `keep_recent_n` for `compress_tool_results`.
+    ///
+    /// Resolution chain (Layer 1 = highest priority):
+    /// 1. `self.tool_result_keep_recent_n_override` — set from
+    ///    `agent_config.json` (via `apply_runtime_config_override`) and
+    ///    hot-patched by `RuntimeConfigUpdate` pushes
+    /// 2. `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N` — hardcoded
+    ///    fallback (3; matches the ADR-032 default)
+    ///
+    /// Returns `u32` directly so call sites don't need to deal with `Option`.
+    /// Used by every `compress_tool_results` call site in `loop_context.rs`;
+    /// see ADR-032 core principle #7 for the unified N rule.
+    pub fn tool_result_keep_recent_n(&self) -> u32 {
+        self.tool_result_keep_recent_n_override
+            .unwrap_or(crate::agent::loop_context::DEFAULT_KEEP_RECENT_N as u32)
+    }
+
     /// Resolve the effective context window budget for history trimming.
     ///
     /// Resolution chain for the user-configured cap:
@@ -763,6 +795,7 @@ impl Clone for AgentCore {
             context_window_override: self.context_window_override,
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
+            tool_result_keep_recent_n_override: self.tool_result_keep_recent_n_override,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),

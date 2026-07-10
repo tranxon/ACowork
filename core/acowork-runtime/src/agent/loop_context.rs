@@ -219,12 +219,14 @@ impl AgentLoop {
         // current-reasoning context intact (uniform N rule across all
         // trigger points; see ADR-032 core principle #7).
         //
-        // C1 note: N is fixed at the default constant below. C4a wires this
-        // through the `tool_result_keep_recent_n` config field.
+        // N resolves from agent_config.json via `AgentCore::tool_result_keep_recent_n`
+        // (Layer 1), falling back to `DEFAULT_KEEP_RECENT_N` (Layer 2, ADR-032
+        // hardcoded default). Configured via the Agent Setup panel.
+        let n = self.core.tool_result_keep_recent_n();
         let compressed = self
             .session
             .history
-            .compress_tool_results(SOFT_THRESHOLD_CHARS, DEFAULT_KEEP_RECENT_N);
+            .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
         if compressed > 0 {
             self.session.history.recalibrate_tokens();
         }
@@ -461,10 +463,11 @@ impl AgentLoop {
                     // ADR-032: replaced with `compress_tool_results` (placeholder
                     // path — preserves recall-ability via tool_call_id; see history.rs
                     // for the unified N-rule rationale).
+                    let n = self.core.tool_result_keep_recent_n();
                     let compressed = self
                         .session
                         .history
-                        .compress_tool_results(SOFT_THRESHOLD_CHARS, DEFAULT_KEEP_RECENT_N);
+                        .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
                     if compressed > 0 {
                         self.session.history.recalibrate_tokens();
                     }

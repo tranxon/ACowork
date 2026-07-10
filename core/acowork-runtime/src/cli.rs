@@ -1891,6 +1891,16 @@ async fn process_gateway_recv(
                             system_prompt_override,
                             shell_approval_threshold,
                             approval_timeout_secs,
+                            // ADR-032: hot-update via `RuntimeConfigUpdate`
+                            // plumb-through is deferred to a follow-up phase.
+                            // For C4a, this field is only sourced via
+                            // `agent_config.json` at boot time via
+                            // `From<&AgentConfig> for RuntimeConfigOverrides`,
+                            // so we leave it `None` here (which means "don't
+                            // override the cached session_manager.runtime_overrides
+                            // value, which was set from agent_config.json at
+                            // session_init").
+                            tool_result_keep_recent_n: None,
                         },
                     );
 
@@ -2058,6 +2068,15 @@ async fn process_gateway_recv(
                         agent_cfg.shell_approval_threshold = overrides.shell_approval_threshold.clone();
                         agent_cfg.context_window = overrides.context_window;
                         agent_cfg.approval_timeout_secs = overrides.approval_timeout_secs;
+                        // ADR-032: keep N from the cached runtime override so
+                        // that Desktop-side edits of `tool_result_keep_recent_n`
+                        // (preserved via the read-modify-write loop above) are
+                        // not lost when an unrelated `RuntimeConfigUpdate` arrives.
+                        // C4a only sets this from agent_config.json at boot;
+                        // gateway-push plumb-through for live edits is deferred.
+                        if let Some(n) = overrides.tool_result_keep_recent_n {
+                            agent_cfg.tool_result_keep_recent_n = Some(n);
+                        }
                         // ADR-017: Apply avatar config from RuntimeConfigUpdate.
                         // Some("path") = set, Some("") = clear, None = don't change.
                         if let Some(ref av) = avatar {
