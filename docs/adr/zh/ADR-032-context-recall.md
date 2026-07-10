@@ -1,4 +1,4 @@
-# ADR-032：Tool Result ID-Based Compression（占位符 + 按需召回调取）
+# ADR-032：Context ID-Based Compression（占位符 + 按需召回调取）
 
 **状态**：提议中
 **日期**：2026-07-10
@@ -8,130 +8,254 @@
 - ADR-011（上下文摘要与蒸馏统一策略）
 - ADR-014（Loop 模块分解）— 负责 `loop_context.rs` 所在位置
 
+**核心原则（2026-07-10 与大鱼确认）**：
+1. **Tool 自己负责控制输出大小**：内置 tool 通过参数 / 描述 / 内部截断控制；MCP 工具输出控制属于另一个独立 ADR 范畴，本 ADR 不涉及。
+2. **compress 层只做 placeholder 化**：不替 tool 做截断决策，不关心 tool 是否截断过。
+3. **`context_recall` 是 session 内按 id 精确召回工具**：仅服务于本 ADR 处理的 tool_result placeholder 场景；其他上下文召回需求由 `memory_recall`（Grafeo 语义检索）覆盖。**v1 永久仅 tool_result**，不预留扩展接口。
+4. **truncate_large_messages 同理被 placeholder 替代**：与 tool result placeholder 是同一原理，删除该函数，统一用 placeholder 路径。
+5. **触发机制两档（auto / manual）**：v1 触发分两档，`auto` 缺省，`manual` 由用户在前端 setup 面板选择。**事件触发（todos 完成 / assistant 长消息结束）仅 auto 模式生效；budget 兜底（fallback / pre_trim）两档都保留**——token 真的爆时不能让用户忘了点按钮就死锁。manual 入口（前端按钮 + Gateway API）仅 manual 模式使用。**无 persist 触发**——tool result 在写入 history 时**永远保留 raw**,由后续事件 / 兜底 / 手动 / restore 决定何时压缩(详见"删除 persist 触发器的设计反思")。
+6. **运行时压缩状态由规则派生,JSONL 不持久化**（2026-07-10 与大鱼确认）：placeholder 化是**完全运行时行为**。JSONL 的 `tool_result` entry 只存 tool 给的原始输出 + 必要的协议元数据（`tool_name` / `tool_call_id`）；**不**新增任何运行时衍生字段（拒绝曾经设计的 `compressed: bool`）。`compress_tool_results` 的幂等与 in-memory 状态完全由两条规则派生:
+   - **长度判定**:`content.len() ≤ threshold` 的消息视为"已压缩或本就小",跳过(placeholder 字符串长度 ≈ 120 chars,任何合理 threshold ≥ 256 远大于此,首次压缩后所有 Tool 消息天然落入此分支)
+   - **前缀兜底**:以 `"[Tool result compressed."` 开头的消息显式跳过,防止 threshold 被配成 < 100 chars 时的二次处理
+
+   Session 重启后 restorer 无条件调一次 `compress_tool_results(SOFT_THRESHOLD)`,in-memory 状态由规则派生,**不依赖任何持久化字段**。单一真理来源 = JSONL content;变更 threshold / 配置 / 代码时 0 migration 成本。
+
+7. **N 值可配,默认 3**(2026-07-10 修订):"保留最近 N 条 tool_result 不压缩"中的 N 是**配置项,不是硬编码常量**。
+   - **配置字段**:`tool_result_keep_recent_n: usize`,同时存在于 `RuntimeConfigOverrides` 与 `agent_config.json`;**默认值 = 3**(经验值,对应典型 skill 阶段式工具调用深度)。
+   - **配置层级**:`RuntimeConfigOverrides` 优先 → 缺则 fallback 到 `agent_config.json` → 缺则 fallback 到代码默认 `3`。
+   - **统一适用**:N 是全局保护窗口策略,**所有**触发点(事件触发 / budget 兜底 / restore / manual 入口)**都**走同一 N 规则——保证 LLM 在任何时机看到的"近期 raw 上下文"是连续的、不会被 mode/触发路径影响。
+   - **取值语义**:`N = 0` 等价于"全部压缩,无保护"(与 fallback 历史行为对齐);`N` 过大时 LLM 看到更多 raw 但 window 节省变少;具体取值由 agent / 用户根据 tool 密度与任务阶段粒度调整。
+   - **设计意图**:N=3 是 ship-with-fluency 的默认值,**不**是经过充分数据调优的最优值;开放为配置项后,用户/agent 可基于真实工作流(代码 review / 大文件分析 / 多 grep 调研等)调优,无需升级 runtime。
+
 **细化**：ADR-010 §"明确放弃的策略" 中 "Tool result 日常折叠（`fold_tool_results`）" 的策略由本 ADR 重新引入并改造，从"程序化截断"升级为"占位符 + 按需召回"。LLM 摘要（80%）和 emergency_trim（95%）的兜底路径不变。
+
+### 删除 persist 触发器的设计反思(2026-07-10 与大鱼讨论确认)
+
+**原设计的问题**:
+- persist 触发器在 `persist_and_emit_tool_results` 入库后立即压缩刚写入的 tool result(N=1 slice)
+- 编程 Agent 高频 tool result(`content_search` / `file_read` / `shell`)绝大多数 > 2KB(默认 threshold),**所有**都会被立即压缩
+- 后果:LLM 在下一轮看到的是 placeholder,**必须**调 `context_recall` 才能看到真实内容
+- 等于每次 tool 调用变成"调工具 → 看到 placeholder → 调 context_recall"两步走
+- 严重影响 LLM 推理效率,主动制造 recall 需求
+
+**核心反思**:
+- ADR 自己定义的核心原则 #2 说"compress 层只做 placeholder 化,不替 tool 做截断决策"
+- persist 触发器违反了这个原则的精神——它替 LLM 做了"这条 tool result 不重要,立即藏起来"的判断
+- 但 tool result **当时**对 LLM 是**最重要**的输入(下一步推理的依据),立即压缩它就是把 LLM 最需要的上下文抢走
+- placeholder + recall 的本意是**被动逃生口**——只有当上下文真的撑爆或语义阶段切换时,才压缩,而不是每次 tool 调用都抢一遍
+
+**修正后的数据流**:
+```
+Tool 执行 → 写入 history + JSONL(raw, 永不自动压缩)
+  ↓
+LLM 看到 raw 内容 → 直接推理
+  ↓
+[持续累积,直到任一触发]:
+  - todos 完成(仅 auto)        → 压缩**较旧** tool result,**保留最近 N 条 raw**(N 来自配置,默认 3)
+  - assistant 长消息结束(仅 auto) → 同上
+  - budget 兜底(两档)         → 全量压缩超阈值 tool result,**保留最近 N 条 raw**
+  - manual 入口(仅 manual)     → 同 budget 兜底,**保留最近 N 条 raw**
+  - restore(两档,mode-agnostic)→ 同 budget 兜底,**保留最近 N 条 raw**
+  - **统一适用**:所有触发点都走同一 N 规则(核心原则 #7),保证 LLM 看到的"近期 raw 上下文"连续
+```
+
+**对设计原则的更新**:
+- "任何 agent 自动获得优化" 这条之前的论述要修正——optimization 不等于"每条 tool result 都压缩",而是"在语义边界和预算边界时合理压缩"
+- 真正"自动获得"的是 budget 兜底(两档都生效);todo / assistant 触发是"智能但不激进"的额外清理
 
 ---
 
 ## 决策摘要
 
-**核心思路**：对超出阈值的 tool result，在 in-memory `ChatMessage` 中替换为固定占位符（包含 entry id），原始内容保留在 JSONL 中不丢失。新增内置 `context_recall` tool，LLM 按 id 主动取回原文。
+**核心思路**：对 in-memory `ChatMessage` 中超出阈值的 tool result content，替换为固定占位符（含可召回 id），原始内容保留在 JSONL 中不丢失。新增内置 `context_recall` tool，LLM 按 id 主动取回原文。v1 仅处理 tool result message；其他 large message（User/Assistant 长文本）由 L2 LLM 摘要（80%）和 L3 emergency_trim（95%）兜底——placeholder + recall 不是"覆盖所有 large message"的机制，只是上下文压缩的一个环节。**触发机制分两档**：`auto`（默认）按事件 / budget 兜底自动触发；`manual` 仅在 budget 兜底自动触发，事件触发全部关闭，由前端 setup 面板选择（auto/manual 二选一）+ 输入框 usage 弹出菜单的"工具压缩"按钮手动触发。
 
 | Commit | 范围 | 风险 |
 |--------|------|------|
-| **C1** | `HistoryManager::compress_tool_results()` 纯函数 + 单测 | 低 |
-| **C2** | `persist_and_emit_tool_results()` 软/硬阈值分流 + JSONL 元数据 | 中 |
-| **C3** | `ContextRecallTool` 内置工具 + transient-return 通道 | 中（涉及 tool 执行管线） |
-| **C4** | `compact_history_if_needed` fallback 路径前置 `compress_tool_results` + pre_trim / todos 完成触发点 | 低 |
-| **C5** | Restorer 识别 `metadata.compressed=true` + 兼容读旧 JSONL | 低 |
+| **C1** | `HistoryManager::compress_tool_results()` tool_result 专用函数 + placeholder 简化 + **删除 `truncate_large_messages`** + 替换全部调用点 | 中（删除的函数被多路径调用）|
+| **C2** | `persist_and_emit_tool_results()` 简化为透传 tool 输出（仅写既有 `tool_name` / `tool_call_id`，本 ADR 不新增任何 metadata 字段） | 低 |
+| **C3** | `ToolResult.transient` 字段 + 主循环支持（C3a）+ `context_recall` 工具注册（C3b，可独立回滚）| 中 |
+| **C4** | 触发点（auto / manual 两档拆分 + todos/assistant 事件触发,**无 persist 触发** + manual 入口 API/UI）+ Restorer 兼容 + 文档同步 | 中（涉及主循环事件流 + 新增 channel + UI 接线）|
 
-**关键决策**（按对话时序）：
+**关键决策**：
 
 | 决策 | 理由 |
 |------|------|
-| 用 entry id 而非 `tool_call_id` 作为召回 key | entry id 在 JSONL 中是稳定的全局主键；`tool_call_id` 可能因 LLM 重试变化 |
-| 占位符替换作用在 in-memory，**不在** JSONL | JSONL 是审计/回放真相来源，不允许内容丢失 |
+| **职责分离**：tool 内部控制输出大小 + compress 层只做 placeholder + LLM 自主决定是否 recall | 单一职责；不混入"谁负责截断"的歧义 |
+| **对外（placeholder / context_recall 入参）用 `tool_call_id`**（v1 永久仅适用 tool_result） | LLM 协议层稳定 id（Anthropic `toolu_xxx`、OpenAI `call_xxx`），LLM 从自己发起的 tool_call 直接 back-reference；in-memory `ChatMessage.tool_call_id` 字段压缩时可读；该 id 体系仅服务 tool_result，不绑定其他 role |
+| **JSONL 内部用 `entry.id`（UUID v4）做主键** | 跨 provider 稳定；与协议层 id 解耦；restorer / 调试工具用 |
+| **`context_recall` 内部按 `tool_call_id` 索引到 `entry.id`** | LLM 不接触 entry id；扫 JSONL 时按 `metadata.tool_call_id` 命中即返 `entry.content` |
+| placeholder 替换作用在 in-memory，**不改** JSONL 内容 | JSONL 是审计/回放真相来源 |
+| **JSONL 不持久化压缩状态**（不新增 `compressed` / `partial` / `original_size_chars` 等运行时衍生字段）| 单一真理来源 = JSONL content；运行时状态（含"是否已压缩"）由 `compress_tool_results` 规则 + 当前 `threshold` 派生；restorer 无条件 re-apply 即可；阈值/规则/代码变更 0 migration 成本；与 L2 LLM 摘要 / L3 emergency_trim 持久化策略对称 |
 | `context_recall` 返回值走 transient 通道，**不进** history | 否则一次召回就吃满窗口，下一轮立刻触发压缩，恶性循环 |
-| 软阈值 2 KB / 硬阈值 64 KB（可配） | 64 字符太低，覆盖所有有意义 result；两档区分"窗口优化"和"防御性截断" |
-| 默认压缩（每次 tool result 入库）+ 显式触发（todos 完成 / pre_trim / compact fallback）双轨 | 任何 agent 自动获得优化；todos 场景额外触发以彻底清理上阶段数据 |
-| `context_recall` 支持批量 id（数组参数） | 减少 round-trip；LLM 一次召回多条平摊 overhead |
-| placeholder 模板仅英文（v1） | 主线 LLM 多英文训练；i18n 后续单独 ADR |
+| **软阈值 2 KB（可配）** | 单档；不再有"硬阈值截断"逻辑（那是 tool 层职责） |
+| **无 persist 触发**（2026-07-10 删除） + 语义边界事件触发（todos 完成 / assistant 长消息结束）+ budget 兜底 三层 | tool result **始终保留 raw 直到自然压缩时机**:raw 状态给 LLM 当前推理提供完整上下文;todos / assistant 完成时压缩**较旧** tool_result 释放窗口(N 保留窗口,N 来自配置,默认 3);budget 兜底最后一道防线两档都生效避免死锁;**所有**触发点(事件/budget/restore/manual)统一适用同一 N 规则(核心原则 #7) |
+| **`context_recall` 支持批量 id（数组参数）** | 减少 round-trip；LLM 一次召回多条平摊 overhead |
+| placeholder 模板最简英文版 | LLM 上下文宝贵；语意清晰即可，不堆冗余信息 |
+| **`truncate_large_messages` 删除** | 与 placeholder 同一原理；统一走新路径 |
+| **触发分两档**（auto / manual），缺省 auto | 保守路线：auto 让普通用户零成本；manual 给高级用户完全可控；budget 兜底两档都保留避免死锁 |
+| **assistant 长消息结束**作为 auto 模式专属事件触发（content > 2KB + 同轮 `tool_calls` 为空） | 与 todos 完成是"事件型"触发的对偶——代表"LLM 完成一次独立思考"。**不**压缩 assistant 自己的 content（v1 永久仅 tool_result）；仅清**较旧** tool_result,**保留最近 N 条 raw 不压缩**(N 来自 `tool_result_keep_recent_n` 配置,默认 3;N 保留 LLM 当前推理依赖的近期上下文) |
+| **N 值可配**(2026-07-10 修订) | `tool_result_keep_recent_n` 配置项,RuntimeConfigOverrides → agent_config → 代码默认(3) 三级 fallback;**所有**触发点(事件/budget/restore/manual)统一适用同一 N | 适应不同 agent 工作流(skill 密集调用 / 稀疏单步查询 / 多文件并行读取);N 是默认值而非硬编码;不同 session 可独立配置无需升级 runtime |
+| **manual 入口**仅 manual 模式可主动触发（前端按钮 + Gateway API）| manual 模式"不自动"哲学的核心；不能从外部同步注入主循环，必须走 channel 异步处理 |
 
 ---
 
 ## 影响范围
 
-### C1（`HistoryManager::compress_tool_results`）
+### C1（核心：`compress_tool_results` + 删 `truncate_large_messages`）
 
 **新增**：
 - `core/acowork-runtime/src/agent/history.rs`：
-  - `pub fn compress_tool_results(messages: &mut [ChatMessage], soft_threshold_chars: usize)` — 扫描 messages，对 `MessageRole::Tool` 且 `content.len() > soft_threshold_chars` 的项替换为 placeholder 字符串；返回替换条数。
-  - placeholder 字符串格式：`"[Tool result compressed. Original size: {N} chars. ID: {entry_id}. Call context_recall(id=\"{entry_id}\") to retrieve the full content if needed.]"`
+  - `pub fn compress_tool_results(messages: &mut [ChatMessage], soft_threshold_chars: usize)` — 扫描 messages，对 `MessageRole::Tool`（v1 限定）且 `content.len() > soft_threshold_chars` 的项替换为 placeholder 字符串；返回替换条数。
+  - placeholder 字符串格式：`"[Tool result compressed. Call context_recall(id=\"<tool_call_id>\") to retrieve the full content.]"`（约 90 chars / ~22 tokens）
+  - `pub fn recalibrate_tokens(&mut self)` — O(N) 重新计算 `current_tokens`，压缩后调用一次。
+
+**删除**：
+- `core/acowork-runtime/src/agent/history.rs:481-523` 的 `truncate_large_messages` 方法整体移除。
+- 以下三处调用点删除（替换为 `compress_tool_results` 或等价物）：
+  - `core/acowork-runtime/src/agent/loop_context.rs:198`（`trim_history_to_budget` 内）
+  - `core/acowork-runtime/src/agent/loop_context.rs:430`（compact fallback fallback 分支）
+  - `core/acowork-runtime/src/agent/loop_context.rs:956`（如有 / 待 review 确认精确行号）
+
+**函数命名理由**：
+- `compress_tool_results` 命名诚实表达 v1 范围：仅压缩 tool result 消息（`MessageRole::Tool`）。
+- 与被删除的 `truncate_large_messages` 形成对比：**不**截断，**只**替换为 placeholder。
+- **不**预留扩展接口：未来如需支持 User/Assistant 长文本，开**新 ADR**（暂称 ADR-033）专门设计——不是简单改个函数名，需要 protocol 层稳定 message id、跨 role placeholder 模板等结构性变更，超出本 ADR 范畴。
 
 **约束**：
-- **纯函数**：不修改 `current_tokens` 计算，由调用方在替换后调一次 `recalibrate_tokens()` 或等价的 `set_max_tokens` + 重新计数路径。
-- **不改 JSONL**：in-memory 替换后，写盘由调用方决定是否同步追加一条 `kind="compression_tool_result"` 标记（默认不写，C2 处理）。
-- **不破坏 tool_call_id 配对**：placeholder 消息的 `tool_call_id` / `name` 字段保留。
+- **纯函数**：不修改 `current_tokens` 计算，由调用方在替换后调 `recalibrate_tokens()`。
+- **不改 JSONL**：in-memory 替换仅影响 `ChatMessage`，JSONL 内容不被触达。
+- **幂等**：通过 content 长度 + prefix 双重判定,见下文"实现要点"。**不**写 `name` 字段,`name` 始终保留 tool 原始名字。
 
 **单测覆盖**：
 - 软阈值边界（< / = / > 三档）
 - 非 tool message（User / Assistant / System）跳过
-- 已被压缩过的 entry（`metadata.compressed=true`）幂等不重复
-- 占位符包含正确 entry id / 原始大小
+- 已压缩过 entry（content ≤ threshold 或 prefix 命中）幂等不重复
+- 占位符包含正确 `tool_call_id`,不含已删除的原始大小字段
+- `name` 字段保持原 tool_name,不被压缩函数改写
+- 调用 `recalibrate_tokens` 后 token 计数正确
 
-### C2（`persist_and_emit_tool_results` 阈值分流）
+### C2（`persist_and_emit_tool_results` 简化）
 
 **修改**：
 - `core/acowork-runtime/src/agent/loop_tools.rs:849-865`：
-  - 新增配置 `tool_result_soft_threshold_chars: usize`（默认 2048）+ `tool_result_hard_threshold_chars: usize`（默认 65536），从 `RuntimeConfigOverrides` / `AgentConfig` 解析。
-  - 写入 JSONL 前判断：
-    - `result.len() <= soft_threshold` → 写入完整内容 + in-memory 完整内容（现状）
-    - `soft_threshold < result.len() <= hard_threshold` → 写入完整内容 + in-memory 走 `compress_tool_results` 替换为 placeholder（**C4 触发**；C2 仅改写盘逻辑）
-    - `result.len() > hard_threshold` → **截断到 hard_threshold** + 追加 truncation marker（参照 `loop_context.rs:951` 的 `RESULT TRUNCATED` 风格），写入截断后内容 + `metadata.partial = true, metadata.original_size_chars = N`
+  - **删除**硬阈值分流(截断逻辑)。
+  - **删除**三档判断(原 soft / hard 两档 + 分流)。
+  - 简化为:**直接透传** tool 产出的 `result_content` 写入 JSONL,metadata 仅含 `tool_name` / `tool_call_id`(两个**已有**字段,本 ADR 不新增任何字段)。
+  - **不**新增 `RuntimeConfigOverrides` 字段(删掉原 `tool_result_hard_threshold_chars`,保留 `tool_result_soft_threshold_chars` 仅供 compress 层使用)。
+- 删除 `RuntimeConfigOverrides.tool_result_hard_threshold_chars` 字段(仅在 C1 配置接口中预留过,C2 不再需要)。
 
-**新增 JSONL metadata 字段**（`ConversationEntry.metadata`，向后兼容）：
-- `compressed: bool` — 此 entry 在 in-memory 是否已被 placeholder 替换
-- `original_size_chars: u64` — 截断前原始字符数（仅硬阈值触发时写入）
-- `partial: bool` — JSONL 内内容是否已被硬阈值截断
+**JSONL metadata 字段**(`ConversationEntry.metadata` 简化):
+- **本 ADR 不新增任何 metadata 字段**。运行时压缩状态完全由规则派生,持久化层只承载 tool 给的原始输出与协议必要元数据(详见核心原则 #6)。
+- **删除**:`partial: bool` — 不再由 compress 层做截断。
+- **删除**:`original_size_chars: u64` — 同上。
+- **未引入**:`compressed: bool` — 经与大鱼 2026-07-10 确认,运行时状态不应污染持久化层;restore 时由 `compress_tool_results(SOFT_THRESHOLD)` 重新派生 in-memory 状态。
+
+向后兼容:旧 JSONL 不带任何新字段,正常读取;新 JSONL 与旧 JSONL schema 完全一致,无需 migration。
 
 **单测覆盖**：
-- 三档分流正确性
-- 截断 marker UTF-8 safe（参照 `loop_context.rs:938-946` 的 cut 逻辑）
-- metadata 字段在低/中/高三档的写入与否
+- 仅 `tool_name` / `tool_call_id` 两个字段写入,无其他 metadata
+- 旧 entry(不带任何字段)正常 restore
+- tool result 直接透传,无二次处理
+- **不**存在 `compressed` / `partial` / `original_size_chars` 任何字段(grep 验证 schema 收窄)
 
-### C3（`ContextRecallTool` + transient-return 通道）
+### C3（transient-return 通道 + `context_recall` 工具）
+
+#### C3a（`ToolResult.transient` + 主循环支持，先发）
+
+**新增**：
+- `acowork-core/src/tools/traits.rs`：`ToolResult` 结构体新增 `transient: bool` 字段（默认 `false`，向后兼容旧实现）。
+- `core/acowork-runtime/src/agent/loop_.rs`：
+  - `AgentLoop` 字段新增 `pending_transient_tool_msgs: Vec<ChatMessage>`。
+  - `execute_single_iteration` 处理 tool 结果循环处：
+    ```rust
+    // 伪代码
+    for result in tool_results {
+        if result.transient {
+            // 不 append 到 history，不 append_message_to_conversation
+            // 注入到下一轮 build_chat_request 的额外 slot
+            // name 字段：当前 transient tool 的真实名字（这里是 "context_recall"），
+            // 不是已删除的 "context_compressed" 幂等标记——name 在 ChatMessage 上
+            // 始终承载"产生这条消息的 tool 名字"协议语义。
+            let msg = ChatMessage {
+                role: MessageRole::Tool,
+                content: result.content.clone(),
+                tool_call_id: pending_transient_tool_call_id(r),
+                name: Some("context_recall".to_string()),
+                ..Default::default()
+            };
+            self.pending_transient_tool_msgs.push(msg);
+        } else {
+            history.append(...);
+            conversation.append_message(...);
+        }
+    }
+    ```
+  - `build_chat_request` 末尾追加：`chat_request.messages.extend(self.pending_transient_tool_msgs.drain(..));`
+
+**为什么先发 C3a**：
+- C3a 是结构性变更（`ToolResult.transient` 字段 + 主循环协同），风险集中在主循环 review。
+- C3a 独立可 build / 可测，不依赖 `context_recall` 工具实现。
+- 如果 C3b（context_recall 工具）review 不过，C3a 仍可独立发布，未来再补 C3b。
+
+**单测覆盖（C3a）**：
+- 普通 tool result 走原路径（写 history + JSONL）。
+- Transient tool result 不写 history，不写 JSONL，注入到 `pending_transient_tool_msgs`。
+- `build_chat_request` 后 `pending_transient_tool_msgs` 清空。
+- 重启 session 后 transient messages 不复现。
+
+#### C3b（`ContextRecallTool` 注册，后发）
 
 **新增**：
 - `core/acowork-runtime/src/tools/builtin/context_recall.rs`：
-  - `pub struct ContextRecallTool { session_file_path: PathBuf, model_for_counting: String }`
-  - `ToolSpec::name = "context_recall"`，description 注明："Retrieve the full content of a tool result that was compressed during context trimming. Provide the `id` returned in the compressed marker." + JSON schema: `ids: string[]` (required, 1-20 entries)
-  - `execute(params, _work_dir)`：解析 `ids` 数组 → 逐个读取 JSONL 找 `ConversationEntry { id, role: "tool_result" }` → 返回 `content` 拼接结果（保留 `tool_name` 前缀便于 LLM 识别）。失败 id 返回错误消息但不整体 fail。
-- `core/acowork-runtime/src/tools/builtin/mod.rs`：在 `all_builtin_tools()` 注册 `context_recall`。
+  - `pub struct ContextRecallTool { session_file_path: PathBuf }`
+  - `ToolSpec::name = "context_recall"`，description 注明："Retrieve the full content of tool results that were compressed in this session. Provide the `tool_call_id` values shown in compressed markers." + JSON schema: `ids: string[]` (required, 1-20 entries)
+  - `execute()` 返回 `ToolResult { transient: true, .. }`（关键）。
+- `core/acowork-runtime/src/tools/builtin/mod.rs`：在 `all_builtin_tools()` 注册 `context_recall`（默认 enabled，权限标记 `context:read`）。
 
-**transient-return 通道设计**（关键）：
+**关键设计**：
+- **入参用 `tool_call_id`，内部按 `metadata.tool_call_id` 索引**：扫 JSONL 时**首先**过滤 `entry["role"] == "tool_result"`（跳过 JSONL 中 `role: "tool_call"` 的 entry——其 content 是参数而非输出，不参与 recall；详见 §"两层 schema 与映射"），再匹配 `metadata.tool_call_id == param`，命中即返 `entry.content`。JSONL 的 `entry.id`（UUID）作为内部主键，从不暴露给 LLM。
+- **找不到不整体失败**：单 id 缺失只在该 id 上报错，整体 `ok: true`，LLM 可继续处理其他结果。
+- **不做截断判断**：不再关心内容是否是"部分"的。Tool 自己负责输出大小，recall 返回 tool 给的原始内容。
 
-| 通道 | 描述 | 实现位置 |
-|------|------|----------|
-| 普通 tool result | 走 `persist_and_emit_tool_results`，写 in-memory + JSONL | `loop_tools.rs:849` |
-| Transient tool result | 仅注入**下一轮** LLM 请求的 `chat_request.messages`，**不写** in-memory history，**不写** JSONL | `loop_.rs` 或 `build_chat_request` 处 |
+**单测覆盖（C3b）**：
+- 命中 / 未命中 / 部分命中 / 超过 20 ids 上限
+- JSONL 不出现 `context_recall` 的 tool_call / tool_result 行（因 transient）
+- partial=true 处理代码**不存在**（验证删干净）
 
-具体落地：
-- `ToolResult` 结构体新增 `transient: bool` 字段（`acowork-core/src/tools/traits.rs`）。
-- `execute_single_iteration` 处理 tool 结果循环时：
-  ```rust
-  // 伪代码
-  for result in tool_results {
-      if result.transient {
-          // 不 append 到 history，不 append_message_to_conversation
-          // 但要把 result.content 注入到下一轮 build_chat_request 的额外 slot
-          pending_transient_results.push(result);
-      } else {
-          history.append(...);
-          conversation.append_message(...);
-      }
-  }
-  // build_chat_request 时
-  let chat_req = context_builder.build(...);
-  chat_req.messages.extend(transient_results.into_chat_tool_messages());
-  ```
-- `context_recall` 的 `execute()` 在 `ToolResult` 上设 `transient: true`。
+### C4（触发点按档位拆分 + 新增 manual 入口 + Restorer + 文档）
 
-**为什么需要 transient 而不是普通返回**：
-- 普通返回会让一次 `context_recall` 调用把 64 KB 的内容塞进 history，触发下一轮 `pre_trim_for_tool_results` 再次压缩甚至 `compact_via_llm`，零收益。
-- Transient 让 LLM 在"本轮看到原文"的同时，下一轮 history 自动恢复到 compressed 状态。
+C4 是本 ADR 触发机制的主战场。**核心变化**：触发点按 auto / manual 两档分组；新增 assistant 长消息事件触发；新增 manual 入口（前端按钮 + Gateway API）。
 
-**单测覆盖**：
-- `context_recall` 命中 / 未命中 / 部分命中 / 超过 20 id 上限
-- Transient 通道：执行后 history 不增长、`build_chat_request` 包含 transient content、`chat_request.messages` 长度正确
-- JSONL 不出现 `context_recall` 的 tool_call / tool_result 行
+#### 触发点矩阵（按档位）
 
-### C4（触发点整合）
+| 触发点 | auto 模式 | manual 模式 | 行为 |
+|---|---|---|---|
+| ~~`persist_and_emit_tool_results` 入库后立即压缩~~ **【已删除】** | ❌ | ❌ | ~~每次 tool_result 入库后调 `compress_tool_results`~~ —— **删除原因见核心原则反思**:工具结果立即压缩等于抢走 LLM 当前推理依赖的 input |
+| todos 完成事件（pending/in_progress → completed） | ✅ | ❌ | 调 `compress_tool_results` 压缩**较旧** tool_result,**保留最近 N 条不压缩**(N 来自配置,默认 3) |
+| **assistant 长消息结束**（新） | ✅ | ❌ | assistant.content > 2KB + 同轮 `tool_calls.is_empty()` → 压缩**较旧** tool_result,**保留最近 N 条不压缩**(N 来自配置,默认 3) |
+| `compact_history_if_needed` fallback 前置 | ✅ | ✅ | L2 摘要前的零成本优化（L3 兜底前的最后一次机会）;**保留最近 N 条 raw** |
+| `pre_trim_for_tool_results` 前置 | ✅ | ✅ | FIFO/emergency 前的零成本优化（`loop_context.rs:843-865` 整合为 `pre_trim_and_compress`）;**保留最近 N 条 raw** |
+| 前端"工具压缩"按钮 + Gateway API + CLI | n/a | ✅ | 主动调 `compress_tool_results`（压缩所有超阈值 tool_result,**保留最近 N 条 raw**）|
+| 前端"摘要压缩"按钮 + Gateway API + CLI | n/a | ✅ | 主动调 `compact_via_llm`（**L2 范围，本 ADR 仅接线**）|
+| **CLI 子命令** `acowork compress tool_result --session <id>` / `acowork compress summary --session <id>` | n/a | ✅ | 同上 Gateway API；CLI 通过 IPC（Unix Socket / Named Pipe）走与 API 相同的 channel 注入路径 |
+| **restore**（session 重启/冷启动后） | ✅ | ✅ | `compress_tool_results(SOFT_THRESHOLD)` 全量压缩,**mode-agnostic**(详见修改 8 rationale);**保留最近 N 条 raw** |
 
-**修改 1**：`compact_history_if_needed` fallback 路径前置
+**关键边界**：
+- manual 模式**不**关闭 budget 兜底——保守路线：用户忘了点按钮 token 仍可能爆
+- L2 摘要（80%）独立于本 ADR，**不受** manual 模式影响
+- 事件触发**只**清**较旧**的 tool_result,**保留最近 N 条 raw 不压缩**（N 来自 `tool_result_keep_recent_n` 配置,默认 3）——N 保护 LLM 当前推理依赖的近期上下文;被压缩的是已经过期的早期阶段产物
+- **N 是全局保护窗口策略,所有触发点(事件/budget/restore/manual)都走同一 N 规则**(详见核心原则 #7)——保证 LLM 在任何时机看到的"近期 raw 上下文"是连续的、不会被 mode/触发路径影响
+- 事件触发**不**复用 L1/L2 全量扫描,O(N) 但常数时间(length 判断)
+- **无 persist 触发**:tool result 写入 history 时永远 raw;只有事件触发 / budget 兜底 / manual 入口 / restore 会压缩
+- restore mode-agnostic(详见修改 8 rationale):不论 auto / manual,session 重启后都会按当前 threshold 全量派生 in-memory 状态
+
+#### 修改 1：budget 兜底（两档都生效）—— `compact_history_if_needed` fallback 前置
 - `core/acowork-runtime/src/agent/loop_context.rs:417-431`：
   ```rust
   Err(e) => {
       // 1) 先尝试压缩所有 tool results（零成本，可能就够了）
       let compressed = self.session.history.compress_tool_results(SOFT_THRESHOLD);
+      self.session.history.recalibrate_tokens();
       let new_tokens = self.session.history.token_count();
 
       // 2) 压缩后仍超 budget 才走 FIFO + emergency
@@ -141,45 +265,270 @@
               self.session.history.emergency_trim();
           }
       }
-      // 3) 同步 truncate_large_messages 保留（防御性兜底）
-      self.session.history.truncate_large_messages(budget / 4);
+      // 3) 不再调用 truncate_large_messages（已被 compress_tool_results 替代）
   }
   ```
+- **不**需要 mode 判断——pressure-based 触发两档都生效
 
-**修改 2**：`pre_trim_for_tool_results` 前置
+#### 修改 2：budget 兜底（两档都生效）—— `pre_trim_for_tool_results` 前置
 - `core/acowork-runtime/src/agent/loop_context.rs:843-865`：
-  - 调用 `trim_history_to_budget` **之前**，先 `compress_tool_results`。两步合在一个新方法 `pre_trim_and_compress` 里，调用点替换。
+  - 调用 `trim_history_to_budget` **之前**，先 `compress_tool_results` + `recalibrate_tokens`。
+  - 两步合并到一个新方法 `pre_trim_and_compress`，替换原 `pre_trim_for_tool_results` 调用点。
 
-**修改 3**：todos 完成触发点
+#### 修改 3：`trim_history_to_budget` 移除 truncate 调用
+- `core/acowork-runtime/src/agent/loop_context.rs:195-198` 删除：
+  ```rust
+  // 删除：
+  self.session.history.truncate_large_messages(budget / 4);
+  ```
+- 替换为（在 FIFO 之后、`emergency_trim` 之前）：
+  ```rust
+  self.session.history.compress_tool_results(SOFT_THRESHOLD);
+  self.session.history.recalibrate_tokens();
+  ```
+
+#### 修改 4：事件触发（**仅 auto 模式**）—— todos 完成触发点
 - `core/acowork-runtime/src/tools/builtin/todo_write.rs`：
-  - `TodoWriteTool::execute` 在检测到某个 todo 状态从 `in_progress` / `pending` 变为 `completed` 时，emit 一个内部事件（参考 `SessionMessage` 设计）。
-  - Runtime 接收事件后调用 `compress_tool_results` 压缩**该 todo 开始之前**的所有 tool result。
-- 简化方案（v1 推荐）：todos 触发只压缩**最近一次 todo 切换前**的所有 tool result，不做精细的"每个 todo 独立窗口"——后者要做 per-todo 元数据追踪，复杂度高收益小。
+  - `TodoWriteTool::execute` 检测 todo 状态从 `in_progress` / `pending` 变为 `completed` 时，emit 内部事件。
+  - Runtime 接收事件**后** mode 判断：`if mode == "auto" { compress_tool_results(...) }`——**manual 模式跳过**
+  - **关键语义**(2026-07-10 与大鱼确认):N 表示"保留最近 N 条 tool_result **不压缩**",触发压缩的是**较旧**的 tool_result。即"N 保留窗口"(默认 3),不是"N 压缩窗口"。
+- 关键 mode 检查位置（伪代码）：
+  ```rust
+  // loop_.rs 接收 todos 完成事件
+  match event {
+      TodoCompletedEvent { .. } => {
+          if self.compression_mode == CompressionMode::Auto {
+              // ADR-032: N 来自 tool_result_keep_recent_n 配置(默认 3,见核心原则 #7)
+              // 语义:保留最近 N 条 tool_result 不压缩;压缩它们之前的较旧 tool_result
+              // (取所有 tool_result,排除最近 N 条,得到的是"较旧"的待压缩列表)
+              let keep_n = self.config.tool_result_keep_recent_n();
+              let mut older = self.session.history.tool_results_excluding_recent(keep_n);
+              let n = self.session.history.compress_tool_results(&mut older, SOFT_THRESHOLD);
+              apply_compressed_back(&mut self.session.history, older);
+              self.session.history.recalibrate_tokens();
+              tracing::info!(compressed = n, keep_recent_n = keep_n,
+                  "Todos completed → compressed older tool results (preserving recent N)");
+          } else {
+              tracing::debug!("Todos completed but compression mode is manual, skipping");
+          }
+      }
+  }
+  ```
+- **为什么保留最近 N 条不压缩**:
+  - LLM 当前推理依赖的 input 是**最近**调用的 tool result(下一步要 refer 的)
+  - **较早**的 tool_result 是"上个阶段的产物",压缩掉它们才能释放上下文
+  - 不压缩最近 N 条 = 保住 LLM 当前阶段的推理上下文
+  - **N 是配置项**(默认 3):不同 agent / 不同任务阶段(skill 阶段式调用 vs 单步工具查询 vs 多文件并行读取)对"近期上下文保护范围"的需求不同,开放为配置避免硬编码限制灵活性(详见核心原则 #7)
+- **边界情况**:如果 tool_result 总数 ≤ N,则 `tool_results_excluding_recent` 返回空 slice,`compress_tool_results` 0 次操作,no-op;若 `keep_n == 0` 则全部超阈值 tool_result 都被压缩(等价于历史 fallback 行为)
 
-**单测覆盖**：
-- 压缩 + FIFO 顺序：先压缩仍超预算才走 FIFO
-- todos 触发压缩的范围正确（仅压缩切 todo 之前的）
-- pre_trim_and_compress 后 token 计数与 in-memory 一致
+#### 修改 5：事件触发（**仅 auto 模式**）—— assistant 长消息结束触发（**新**）
+- `core/acowork-runtime/src/agent/loop_inbound.rs`：在 assistant 响应已 append 到 history 之后、`build_chat_request` 之前
+- 检测逻辑（伪代码）：
+  ```rust
+  // loop_inbound.rs: assistant 响应处理
+  fn maybe_compress_after_assistant(&mut self) {
+      if self.compression_mode != CompressionMode::Auto { return; }
+      let last = match self.session.history.messages.last() {
+          Some(m) if m.role == MessageRole::Assistant => m,
+          _ => return,
+      };
+      // 条件 1: content > 2KB（ASSISTANT_TRIGGER_THRESHOLD_CHARS，2KB 缺省）
+      if last.content.len() < ASSISTANT_TRIGGER_THRESHOLD_CHARS { return; }
+      // 条件 2: 同轮 tool_calls 为空（"无后续 tool_call" 代表 LLM 完成独立思考）
+      if !last.tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) { return; }
+      // 触发: 压缩较旧的 tool_result,保留最近 N 条 raw(N 来自配置,默认 3,与 todos 完成复用同一函数)
+      let keep_n = self.config.tool_result_keep_recent_n();
+      let mut older = self.session.history.tool_results_excluding_recent(keep_n);
+      let n = self.session.history.compress_tool_results(&mut older, SOFT_THRESHOLD);
+      apply_compressed_back(&mut self.session.history, older);
+      self.session.history.recalibrate_tokens();
+      tracing::info!(compressed = n, keep_recent_n = keep_n,
+          "Assistant long message → compressed older tool results (preserving recent N)");
+  }
+  ```
+- **关键不变式**：assistant 自己的 content **不**被压缩（v1 永久仅 tool_result 范围）；这次触发**只**压缩**较旧** tool_result,**保留最近 N 条 raw**(N 来自配置,默认 3)
+- **判定细节**：
+  - `tool_calls` 为 `None` 也算"空"（`map_or(true, ...)` 处理 None 情况）
+  - 2KB 阈值是**单次响应**长度，不是"assistant 累计长度"
+  - 阈值可通过 `RuntimeConfigOverrides.assistant_long_message_threshold_chars` 调（缺省 2048）
 
-### C5（Restorer 兼容 + 文档）
+#### ~~修改 6：事件触发（**仅 auto 模式**）—— `persist_and_emit_tool_results` 入库后立即压缩~~ **【已删除】**
 
-**修改**：
+**删除原因(2026-07-10 与大鱼确认)**:
+- persist 触发器在每个 tool result 入库时立即压缩,等于把 LLM 当前推理最依赖的 raw 输入立刻抢走
+- 后果:每次 tool 调用变成"调工具 → 看到 placeholder → 调 context_recall"两步走,LLM 推理成本翻倍
+- 编程 Agent 高频 tool result(`content_search` / `file_read` / `shell`)绝大多数 > 2KB,**所有**都会被立即压缩
+- 违反"compress 是被动逃生口,不是主动清理"的设计意图
+- 替代机制:**无 persist 触发**;tool result 始终以 raw 状态留在 history,直到自然压缩时机(todos 完成 / assistant 长消息 / budget 兜底 / manual 入口 / restore)
+- 详细论证见"核心原则 #5"和"删除 persist 触发器的设计反思"小节
+
+**对代码的影响**:
+- `core/acowork-runtime/src/agent/loop_tools.rs:849-865` **不**再追加任何 mode 判断或自动压缩调用
+- C4 代码改动汇总表删除"+15 LOC for persist_and_emit_tool_results mode 判断"一行
+- 单测覆盖表删除"persist 入库后立即压缩"行
+
+#### 修改 7：manual 入口（**仅 manual 模式**）—— 前端按钮 + Gateway API
+
+**问题**：Gateway API 收到 "compress now" 请求时，主循环可能正在跑（持有 history mutex）。从外部同步触发会破坏 transient 通道、in-progress 状态等。
+
+**解法**：通过 `mpsc::channel` 注入事件，让主循环在合适的"tick"处理。
+
+**AgentLoop 新增**：
+```rust
+pub struct AgentLoop {
+    // ... 现有字段
+    /// Manual compression requests from external (Gateway API / CLI).
+    /// Drained at the start of every iteration.
+    manual_compress_rx: mpsc::Receiver<ManualCompressRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ManualCompressRequest {
+    /// 对应前端"工具压缩"按钮：调 compress_tool_results 压缩所有超阈值 tool_result
+    ToolResult,
+    /// 对应前端"摘要压缩"按钮：调 compact_via_llm 触发 L2 摘要（本 ADR 仅接线）
+    Summary,
+}
+```
+
+**主循环每轮处理前 drain**（`loop_.rs` 的 `execute_single_iteration` 入口）：
+```rust
+async fn execute_single_iteration(&mut self) -> Result<()> {
+    // 1) Drain manual compression requests (manual 模式用户主动触发)
+    while let Ok(req) = self.manual_compress_rx.try_recv() {
+        match req {
+            ManualCompressRequest::ToolResult => {
+                // ADR-032: manual 入口也走同一 N 规则——保护 LLM 当前推理依赖的近期 N 条 raw
+                // (统一适用原则,见核心原则 #7)
+                let keep_n = self.config.tool_result_keep_recent_n();
+                let mut older = self.session.history.tool_results_excluding_recent(keep_n);
+                let n = self.session.history.compress_tool_results(&mut older, SOFT_THRESHOLD);
+                apply_compressed_back(&mut self.session.history, older);
+                self.session.history.recalibrate_tokens();
+                tracing::info!(compressed = n, keep_recent_n = keep_n,
+                    "Manual tool_result compression");
+            }
+            ManualCompressRequest::Summary => {
+                // L2 路径；不属本 ADR 范围，仅接线
+                self.session.history.compact_via_llm(...).await?;
+            }
+        }
+    }
+
+    // 2) Auto 模式专属：assistant 长消息触发
+    self.maybe_compress_after_assistant();
+
+    // 3) 正常主循环逻辑
+    // ...
+}
+```
+
+**Gateway HTTP API**（`core/acowork-gateway/src/http/`）：
+```
+POST /api/v1/sessions/{session_id}/compress/tool_result
+POST /api/v1/sessions/{session_id}/compress/summary
+→ 查找 session 对应的 AgentLoop → manual_compress_tx.send(...)
+→ 200 OK（异步执行，不等结果）
+```
+
+**Deskop App UI**（`apps/desktop/`）：
+- **Setup 面板**（右侧）：新增 "Tool result compression" 选项（auto / manual radio），读 / 写 `agent_config.tool_result_compression_mode`
+- **输入框 usage 弹出菜单**：新增**两个独立按钮**——"Tool results" / "Summary"（Open Question #6 已确定方案 B：简单直接，符合 input area 简约风格）
+- 按钮点击 → Gateway HTTP API → 异步执行 → 完成后前端 polling `GET /api/v1/sessions/{id}/status` 反馈压缩条数
+
+**CLI 子命令**（`apps/cli/`，新增）：
+- `acowork compress tool_result --session <session_id>`：触发 compress_tool_results
+- `acowork compress summary --session <session_id>`：触发 compact_via_llm
+- 通过 Gateway IPC（Unix Socket / Named Pipe，与现有 AgentLoop IPC 同套）注入 `manual_compress_tx`，与 Gateway API 走**完全相同**的 channel 路径
+- 输出：异步执行立即返回 `OK` + 后台执行；前端 / CLI 不阻塞
+- 状态查询：`acowork status --session <id>` → 返回压缩条数等
+
+**不在 v1 范围**：
+- manual 入口支持"压缩指定 range / id 列表"—— 留 future
+
+#### 修改 8：Restorer 兼容（基于规则派生，无 persisted 标记）
 - `core/acowork-runtime/src/agent/session/restorer.rs:286-318`：
-  - 解析 `tool_result` entry 时读取 `metadata.compressed` 字段；若为 `true`，在 `ChatMessage` 上设 `name = Some("context_compressed".to_string())` 作为标记（运行时 `compress_tool_results` 幂等检查用）。
-  - **不**修改 content（保留 placeholder 字符串，因为 placeholder 内容已经自描述）。
+  - **删除**原"读取 `metadata.compressed` 字段"逻辑——本 ADR 不持久化该字段（详见核心原则 #6）。
+  - **删除**原"`name = Some("context_compressed")` 作为运行时的 `compress_tool_results` 幂等检查用标记"——`compress_tool_results` 的幂等改为 content 长度 + prefix 双重判定（见模块 A），不再依赖 `name` 字段。
+  - **新增**：restore 流程末尾无条件调一次 `compress_tool_results(SOFT_THRESHOLD)` + `recalibrate_tokens()`，由规则派生 in-memory 压缩状态。`history` 在 restore 后调一次即可，O(N) 扫描但内容长度判断常数时间。
+- 旧 JSONL entry（无 metadata 字段 / 任何 schema）正常 restore：当前规则对所有 entry 一视同仁,无需 schema 兼容分支。
+- 触发档位（auto / manual）**不**写入 JSONL——mode 是 session 配置，不属于持久化数据。
+
+**新增的 restore 伪代码**：
+
+```rust
+// core/acowork-runtime/src/agent/session/restorer.rs 末尾
+async fn finalize_restore(&mut self) -> Result<()> {
+    // ... 现有的 restore 流程 ...
+    
+    // ADR-032: re-apply 运行时压缩规则,派生 in-memory placeholder 状态
+    // (自描述 self-describing: content.length 判断天然幂等)
+    // 与事件触发/budget 兜底/manual 入口统一适用同一 N 规则(核心原则 #7):
+    // restore 时也保留最近 N 条 raw,不压缩最近 N 条
+    let keep_n = self.config.tool_result_keep_recent_n();
+    let mut older = self.history.tool_results_excluding_recent(keep_n);
+    let n = self.history.compress_tool_results(&mut older, SOFT_THRESHOLD);
+    apply_compressed_back(&mut self.history, older);
+    self.history.recalibrate_tokens();
+    if n > 0 {
+        tracing::debug!(compressed = n, keep_recent_n = keep_n,
+            "Restore: re-applied tool result compression (preserving recent N)");
+    }
+    Ok(())
+}
+```
+
+**设计收益**：
+- restore 路径**零**条件分支:不读 `metadata.compressed` / 不写 `name` / 不写 content,只调一个无副作用的纯函数。
+- threshold 配置变更、代码规则升级、JSONL 旧格式兼容——全部 0 migration 成本,规则自动适配。
+- 与 L2 LLM 摘要 / L3 emergency_trim 在持久化层策略完全对称(都"不存运行时衍生状态")。
+
+**为什么 restore 不受 `CompressionMode` 影响(与事件触发点的 mode 判断区分)**:
+
+| 操作类型 | 是否受 mode 影响 | 原因 |
+|---|---|---|
+| **事件触发**(todos 完成 / assistant 长消息结束 / persist 入库后立即压缩) | ✅ 仅 auto | "何时主动触发"是触发策略,mode 管这一层 |
+| **手动入口**(前端按钮 / Gateway API / CLI 子命令) | ✅ 仅 manual | 用户主动操作,manual 模式下才有入口 |
+| **budget 兜底**(`compact_history_if_needed` fallback / `pre_trim_and_compress`) | ❌ 两档都生效 | 结构性兜底,不能让用户忘了点按钮就死锁 |
+| **restore**(`finalize_restore` 末尾 re-apply) | ❌ mode-agnostic | 结构性初始化(详见下文) |
+
+**关键架构原则**:`compress_tool_results` 函数本身是 mode-agnostic 纯函数——mode 管的是"何时调用这个函数 / 传入多大 slice",不是"函数是否被允许执行"。
+
+**restore 作为结构性初始化的具体理由**:
+1. **与 budget 兜底同构**:两者都是"在某种边界条件下让 history 回到可控状态",都是全量 history 入参,都两档生效——restore 与 fallback 应当归为同一类(mode-agnostic + 全量)。
+2. **manual 模式不能禁用压缩**:如果 restore 在 manual 模式下跳过压缩,history 一启动就被一堆 raw tool result 撑爆,用户**必须**手动点按钮才能恢复——这违背 manual 模式"控制触发时机,不是禁用压缩"的设计意图。
+3. **JSONL 永远是 raw 状态**:无论之前运行时是否压缩过,JSONL content 都是 tool 给的原始输出。restore 必须按当前 threshold 重新派生,**不**应该因为 mode 不同而有不同派生结果——否则 mode 切换会改变"什么样的 in-memory 状态是合法的"。
+4. **N 规则同样适用于 restore**(2026-07-10 修订):核心原则 #7 要求所有触发点统一适用同一 N 规则——restore 也不是例外;restore 时按当前 `tool_result_keep_recent_n` 配置值保留最近 N 条 raw,**不**做"全量压缩"。原"restore 是重建完整状态"的理解是对的——重建的是 history 完整结构,但"压缩/不压缩"的策略与事件触发/budget 兜底/manual 入口**完全一致**,保证 LLM 看到的近期 raw 上下文在 session 重启前后是连续的。
+
+**简言之**:mode 管的是"何时主动做这件事",restore 是"必须做这件事"。前者是策略,后者是初始化。两者性质不同,不能用同一把锁。
+
+#### 修改 9：文档同步
 - `docs/design/zh/15-conversation-persistence.md`：
-  - 新增一节 "Tool Result 压缩标记"，描述 `compressed` / `partial` / `original_size_chars` 三个 metadata 字段。
+  - **删除**原计划的新增 "Context Compression Marker" 节（描述 `compressed` 字段）。改为新增 **"运行时压缩状态派生"** 小节，说明 JSONL 不存压缩状态、restore 时由 `compress_tool_results` 规则重建的核心原则。
 - `docs/design/zh/03-agent-runtime.md`：
-  - §②.5 三阶段压缩描述追加"tool result 占位符压缩（ADR-032）"作为 80% 之前的优化层。
+  - §②.5 三阶段压缩描述追加"context 占位符压缩（ADR-032）"作为 80% 之前的优化层；
+  - §②.5.1 描述触发档位（auto / manual）矩阵；
+  - §②.5.2 描述 assistant 长消息触发检测。
 - `docs/design/zh/12-tool-system.md`：
   - 工具清单追加 `context_recall`，permission 标记 `context:read`。
+- `docs/design/zh/17-gateway-api.md`（如不存在则新建）：
+  - 列出 `POST /compress/tool_result` / `POST /compress/summary` API
+- `apps/desktop/src/components/SettingsPanel.*` / `ChatInput.*`：
+  - 同步实现 setup 面板 + 输入框按钮
 - `docs/adr/zh/ADR-010-context-compression-simplification.md`：
-  - "明确放弃的策略"表中 "Tool result 日常折叠" 一行更新为：**"Tool result 占位符压缩（ADR-032 引入）—— 不同于原截断方案，原始内容保留在 JSONL，LLM 可主动召回"**。
+  - "明确放弃的策略"表中 "Tool result 日常折叠" 一行更新为：**"Tool result 占位符压缩（ADR-032 引入）—— 不同于原截断方案，原始内容保留在 JSONL，LLM 可主动召回；`truncate_large_messages` 因同原理删除；运行时状态由规则派生，不污染持久化层"**。
 
 **单测覆盖**：
-- 旧 JSONL（无 metadata 字段）正常 restore，缺省 `compressed = false`
-- 新 JSONL（带 compressed=true）restore 后 message 带正确 `name` 标记
-- partial=true 的 entry restore 时 content 已含 truncation marker，不二次截断
+- 旧 JSONL（任何 schema）正常 restore，restore 后 re-apply `compress_tool_results` 自动覆盖
+- restore 后 in-memory Tool 消息的 content 符合当前 threshold 规则
+- restore 后 `name` 字段保持原 tool_name（不被压缩函数改写）
+- restore 后 token 计数与 in-memory content 一致
+- **不存在** `compressed` / `partial` / `original_size_chars` 任何 metadata 字段（grep 验证 schema 收窄）
+- mode 字段不写入 JSONL（验证 mode 持久化策略）
+- auto 模式：所有事件触发点都生效（persist / todos / assistant）
+- manual 模式：所有事件触发点都跳过；budget 兜底仍生效；manual 入口生效
+- assistant 长消息检测：content > 2KB + tool_calls 为空 → 触发；content < 2KB 跳过；tool_calls 非空跳过
+- manual 入口 channel：drain 在 iteration 入口；多次 send 累加处理；channel 满 / 断 / send 失败 单测
 
 ---
 
@@ -247,10 +596,10 @@ ADR-010 的方案是"等 LLM 摘要"，意味着一次 `content_search` 输出 2
 ## 目标
 
 1. **零成本清理大 tool result**：在 LLM 摘要触发前，用 O(N) 字符串替换把超大 tool result 替换为 ~50 chars 占位符，把 in-memory token 占用降到接近常数。
-2. **信息零丢失**：JSONL 保留原始内容，所有 placeholder 都带 entry id 可精确召回。
+2. **信息零丢失**：JSONL 保留原始内容，所有 placeholder 都带 `tool_call_id` 可精确召回。
 3. **LLM 主动 recall**：新增 `context_recall` 内置工具，LLM 在需要时按 id 召回原文。
 4. **todos 串行场景最优**：每个 todo 完成触发压缩上阶段数据，LLM 不显式 recall 就持续保持压缩状态。
-5. **触发点最小侵入**：仅在 `persist_and_emit_tool_results`、`compact_history_if_needed` fallback、`pre_trim_for_tool_results`、todos 完成事件四个点接入，不改 LLM 主循环结构。
+5. **触发分档最小侵入**(2026-07-10 修订):事件触发(todos 完成 / assistant 长消息结束,**无 persist 触发**)仅 auto 模式生效;budget 兜底（`compact_history_if_needed` fallback / `pre_trim_for_tool_results`）两档都生效；manual 入口（前端按钮 / Gateway API）仅 manual 模式可主动触发。**事件触发语义**:N 表示"保留最近 N 条 tool_result 不压缩,压缩较旧的"——保住 LLM 当前推理依赖的近期上下文;N 来自 `tool_result_keep_recent_n` 配置(默认 3,见核心原则 #7)。整体只新增 1 个 `mpsc::channel`（manual_compress_tx/rx），不破坏 LLM 主循环结构。
 6. **协议层无感**：Anthropic / OpenAI tool_result 协议兼容（placeholder 仍是 string content）。
 7. **向后兼容旧 JSONL**：未带 metadata 字段的旧 entry 正常 restore，不报错。
 
@@ -258,67 +607,212 @@ ADR-010 的方案是"等 LLM 摘要"，意味着一次 `content_search` 输出 2
 
 ## 详细设计
 
+### 职责分离原则（本 ADR 的架构核心）
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        Tool 层（file_read / shell / ...）          │
+│  • 自己负责控制输出大小（参数 / 描述 / 内部截断）                  │
+│  • 超过自身限制时自描述 marker（告知 LLM）                        │
+│  • MCP 工具输出控制是独立 ADR 范畴，本 ADR 不涉及                  │
+└────────────────────────────────────────────────────────────────────┘
+                              │ 产出的 result_content
+                              ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                   Persist 层（persist_and_emit_tool_results）     │
+│  • 直接透传 tool 输出到 JSONL（不截断 / 不二次干预）              │
+│  • **不**写任何运行时衍生字段（无 `compressed` / 无 `partial`）；   │
+│    JSONL content 永远是 tool 原始输出，metadata 仅含既有          │
+│    `tool_name` / `tool_call_id`                                     │
+└────────────────────────────────────────────────────────────────────┘
+                              │ 写入 history + JSONL
+                              ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                Compress 层（compress_tool_results）             │
+│  • 扫描 history，超阈值则替换为 placeholder                       │
+│  • 不改 JSONL；不改 message 的 role / tool_call_id / name          │
+│  • 触发点：默认（每次入库）/ pre_trim / compact fallback / todos   │
+│  • 幂等：content 长度 + prefix 双重判定（self-describing）         │
+└────────────────────────────────────────────────────────────────────┘
+                              │ placeholder 化 history
+                              ▼
+┌────────────────────────────────────────────────────────────────────┐
+│            Recall 层（context_recall 内置 tool）                   │
+│  • 接收 tool_call_id[]，扫 JSONL 按 metadata.tool_call_id 命中    │
+│  • 返回 transient tool result（不进 history，不进 JSONL）         │
+│  • 不判断 partial / 完整，recall tool 给的原始内容                 │
+└────────────────────────────────────────────────────────────────────┘
+                              │ LLM 看到内容
+                              ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                          LLM                                      │
+│  • 看到 placeholder → 决定是否 recall                             │
+│  • 看到 tool 自描述 marker → 决定是否重新调 tool                  │
+│  • 不依赖压缩层 / recall 层做语义判断                              │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**关键不变量**：
+- 压缩层**不**替 tool 做截断决策
+- 压缩层**不**替 LLM 做"是否要召回"的决策
+- 压缩层**只**做一件事：把超阈值的 content 换成 placeholder
+- "tool 截断了要不要重跑"是 LLM 的事；"压缩状态怎么管"是 in-memory 规则的事，restore 时由规则派生，**两件事不混淆**
+
+### 两层 schema 与映射
+
+本 ADR 涉及**两个 schema 层**，任何讨论必须先明确在哪一层：
+
+| 层 | 类型 / 来源 | 作用 | tool 相关字段 |
+|---|---|---|---|
+| **ChatMessage 层**（in-memory） | `pub enum MessageRole { System, User, Assistant, Tool }`（`acowork-core/src/providers/traits.rs:346-352`） | provider 协议层；`build_chat_request` 时序列化给 LLM | Tool 消息用 `tool_call_id: Option<String>` 字段 back-reference 到 Assistant 的 `tool_calls[i].id` |
+| **ConversationEntry 层**（JSONL） | `role: String ∈ {user, assistant, thought, tool_call, tool_result, system, ...}`（`core/acowork-runtime/src/conversation.rs:60-79`） | 持久化层；每条 entry 一行 JSONL | **tool_call 与 tool_result 是两条独立 entry**，靠 `metadata.tool_call_id` 关联 |
+
+#### ChatMessage 层：assistant 与 tool 结果是**相邻两条消息**
+
+```rust
+// chat_request.messages 数组中典型的一段（in-memory）：
+ChatMessage {
+    role: MessageRole::Assistant,
+    content: "I'll search for ...",
+    tool_calls: Some(vec![ToolCall {
+        id: "toolu_xyz",
+        function: { name: "content_search", arguments: "..." },
+        ...
+    }]),
+    ..Default::default()
+},
+ChatMessage {
+    role: MessageRole::Tool,
+    tool_call_id: Some("toolu_xyz"), // ← back-reference to Assistant 上面那条 tool_calls[i].id
+    content: "<200KB grep output>",
+    ..Default::default()
+},
+```
+
+**关键事实**：`MessageRole::Tool` 仅用于工具返回结果；assistant 发出的 tool_call 请求是 `Assistant` role 消息的 `tool_calls: Vec<ToolCall>` 字段（**非**独立消息）。
+
+#### ConversationEntry 层：tool_call 与 tool_result 是**两条独立 entry**
+
+```json
+// JSONL 中典型的一段（`loop_tools.rs:700-715` 写 tool_call，
+//                    `loop_tools.rs:849-865` 写 tool_result）：
+{"id":"a","role":"assistant",  "content":"<assistant 文本>","metadata":null,"kind":null}
+{"id":"b","role":"tool_call",  "content":"<参数 JSON 字符串>","metadata":{"tool_name":"content_search","tool_call_id":"toolu_xyz"}}
+{"id":"c","role":"tool_result","content":"<tool 实际输出>","metadata":{"tool_name":"content_search","tool_call_id":"toolu_xyz"}}
+```
+
+**关键事实**：
+
+- 一轮 LLM 发出的 N 个 tool_call → JSONL 里**2N 条 entry**（N 条 `tool_call` + N 条 `tool_result`）
+- 两条 entry 通过 `metadata.tool_call_id` 关联；`tool_call` entry 的 `content` 是**参数**（通常很短），`tool_result` entry 的 `content` 是**tool 实际输出**（可能很大）
+- restorer 重建 ChatMessage 数组时：把 `tool_call` entry 还原成 Assistant `tool_calls[i]`（`restorer.rs:270-285`），把 `tool_result` entry 还原成 Tool 消息（`restorer.rs:286-318`）
+
+#### 本 ADR 作用范围（哪一层哪个 entry 参与）
+
+| 动作 | ChatMessage 层对象 | JSONL 层对象 |
+|---|---|---|
+| `compress_tool_results` 替换 content 为 placeholder | `role: MessageRole::Tool` 的 ChatMessage（**非** Assistant 携带的 `tool_calls` 字段）;不改 `name` 字段 | （仅在内存中替换，**不改** JSONL） |
+| **restorer 重建后 re-apply `compress_tool_results`** | 同上（由规则派生 in-memory placeholder 状态） | **不读**任何 `compressed` 字段;**不写**任何运行时衍生字段 |
+| `context_recall` 扫 JSONL | （不直接还原 ChatMessage） | **仅**匹配 `role == "tool_result"` 的 entry；按 `metadata.tool_call_id` 命中读 `content` |
+
+#### **不在**本 ADR 范围（明确划清边界）
+
+- `role: "tool_call"` JSONL entry **不参与** compress：其 `content` 是参数（通常 < 1 KB）；如果超长那是 LLM 行为问题，不应被压缩掩盖
+- `role: "tool_call"` JSONL entry **不参与** recall：LLM 已经有自己发起的 tool_call 请求原文（在自己的 tool_calls 数组里），无需从 JSONL 反查
+- `MessageRole::Assistant` 携带 `tool_calls` 字段的 ChatMessage **不参与** v1 压缩（原因同 `tool_call` entry：content 是文本，参数在子字段）
+
+**易混点警告**：
+
+| 误读 | 正确读法 |
+|---|---|
+| "压缩 tool_result entry" → 压缩 `tool_call_id == "toolu_xyz"` 那条 | 压缩的是 `tool_result` entry（content 是 tool 输出），不是 `tool_call` entry（content 是参数） |
+| "compress_tool_results 走 Assistant" | v1 **不**走 Assistant（content 是文本，不可短替；参数在 `tool_calls` 子字段，更不该碰） |
+| "`context_recall` 用 `entry.id` 命中" | 实际用 `metadata.tool_call_id` 命中；`entry.id` 是 JSONL 内部 UUID 主键，不暴露给 LLM |
+| "JSONL 需要 `compressed: true` 标记让 restorer 恢复 placeholder" | **不需要**——JSONL **不**存任何运行时衍生字段；restorer 末尾无条件 re-apply `compress_tool_results` 由规则派生 in-memory 状态（核心原则 #6） |
+| "auto 模式 persist 时立即压缩 tool result" | **错误**——2026-07-10 删除 persist 触发器;tool result 写入 history 时**永远 raw**,只有事件触发 / budget 兜底 / manual 入口 / restore 会压缩 |
+| "事件触发 N=3 = 压缩最近 3 条" | **错误**——N 表示"**保留**最近 N 条 raw **不压缩**",触发压缩的是**较旧**的 tool_result。即"N 保留窗口",不是"N 压缩窗口" |
+| "N=3 是硬编码常量" | **错误**——N 是配置项 `tool_result_keep_recent_n`,默认 3;RuntimeConfigOverrides → agent_config → 代码默认 三级 fallback(核心原则 #7)|
+| "manual 入口压缩所有 tool_result,不受 N 限制" | **错误**——所有触发点(事件/budget/restore/manual)统一适用同一 N 规则,manual 入口也保留最近 N 条 raw(核心原则 #7)|
+| "不同触发点可以有不同的 N" | **错误**——N 是全局保护窗口策略,所有触发点共享同一 N 值;保证 LLM 在任何时机看到的"近期 raw 上下文"是连续的、不会被 mode/触发路径影响(核心原则 #7)|
+
 ### 数据流总览
 
 ```mermaid
 graph TD
-    A[Tool 执行完成] --> B{result_content.len}
-    B -- 小于等于 soft_threshold --> C[写入完整内容到 JSONL + in-memory]
-    B -- soft 与 hard 之间 --> D[写入完整内容到 JSONL<br/>in-memory 走 compress_tool_results]
-    B -- 大于 hard_threshold --> E[截断到 hard_threshold 写入 JSONL<br/>metadata.partial=true<br/>in-memory 走 compress_tool_results]
+    A[Tool 执行完成] --> B[persist_and_emit_tool_results<br/>透传 result_content 到 JSONL + history<br/>不截断 / 不二次干预<br/>不写 compressed 字段<br/>**tool result 永远保留 raw**]
+    B --> Z[LLM 下一轮直接看到 raw 内容]
 
-    F[Todo 完成事件] --> G[compress_tool_results in-memory<br/>不重写 JSONL]
-    H[pre_trim_for_tool_results] --> I[先 compress_tool_results<br/>再走原 trim 逻辑]
-    J[compact_history_if_needed fallback] --> K[先 compress_tool_results<br/>判断是否仍超预算<br/>否则走 trim_fifo + emergency_trim]
+    F[Todo 完成事件 auto 模式] --> G[compress_tool_results<br/>**保留最近 N 条 raw**<br/>**压缩较旧的 tool result**<br/>N 来自 tool_result_keep_recent_n 配置]
+    FF[Assistant 长消息结束 auto 模式] --> G
+    H[pre_trim_for_tool_results] --> I[先 compress_tool_results<br/>**保留最近 N 条 raw**<br/>再走原 trim 逻辑<br/>两档生效]
+    J[compact_history_if_needed fallback] --> K[先 compress_tool_results<br/>**保留最近 N 条 raw**<br/>判断是否仍超预算<br/>否则走 trim_fifo + emergency_trim<br/>两档生效]
+    MM[manual 入口 仅 manual 模式] --> I
 
-    L[LLM 调用 context_recall ids=X] --> M[读取 JSONL by tool_call_id 索引]
-    M -- 命中 --> N[返回原始 content<br/>transient=true<br/>仅进本轮 LLM 输入]
+    L[LLM 调用 context_recall ids=X] --> M[读取 JSONL<br/>先过滤 role=='tool_result'<br/>跳过 tool_call entry<br/>再按 metadata.tool_call_id 命中]
+    M -- 命中 --> N[返回 entry.content<br/>transient=true<br/>仅进本轮 LLM 输入]
     M -- 未命中 --> O[返回 error 描述<br/>transient=true]
-    N --> P[下一轮 history 自动恢复 compressed 状态]
+    N --> P[下一轮 history 保持 placeholder 状态<br/>name / JSONL 不变]
     O --> P
 
-    Q[Session 重启 / 冷启动] --> R[Restorer 读取 JSONL<br/>compressed=true 的 entry<br/>name=context_compressed]
+    Q[Session 重启 / 冷启动] --> R[Restorer 读取 JSONL<br/>JSONL content 始终是 tool 原始输出<br/>restore 末尾无条件 re-apply compress_tool_results<br/>由规则派生 in-memory placeholder 状态<br/>name 保持原 tool_name<br/>**两档生效,mode-agnostic**]
 ```
 
 ### 关键数据结构
 
 #### 1. placeholder 字符串模板
 
-**英文版本（主线）**：
+**最终版本（最简英文）**：
 ```
-[Tool result compressed. Original size: {N} chars. ID: {entry_id}. Call context_recall(id="{entry_id}") to retrieve the full content if needed.]
+[Tool result compressed. Call context_recall(id="<tool_call_id>") to retrieve the full content.]
 ```
 
-**字符数估算**：~150 chars（含 entry id），按 4 chars/token 折算约 38 tokens。比当前 `min_per_result: 256` token（`loop_context.rs:912`）节省 **85%**。
+**字符数估算**：~90 chars（典型 `tool_call_id` 长 20-30 chars 时总长 110-120），按 4 chars/token 折算约 **22-30 tokens**。
+
+**为什么不带原始大小**：
+- tool 可能已经截断过，size 反映 tool 截后体积，毫无意义
+- tool 没截断的情况下，size 是统计噪声，对 LLM 决策"要不要 recall"无帮助
+- LLM 决策依据应该是 placeholder 文案本身："Tool result compressed" → 不严重；"Tool result compressed" + 上下文分析判断 → 才决定 recall
+
+**为什么不带"if needed"等修饰**：
+- 描述是否需要 recall 是 LLM 的事
+- 多余措辞消耗 token 不创造价值
 
 **为什么这个长度合理**：
-- 必须含 entry id（id 不带不可召回）
-- 必须含原始大小（LLM 决策是否要 recall 的关键信号）
+- 必须含 `tool_call_id`（LLM 唯一能 back-reference 到自己刚发起的 tool_call 的标识符）
 - 必须含召回指引（LLM 训练数据中未必见过这个工具，需要明确教调用方法）
+- **不**含原始大小（tool 可能已截断过；该信息对 LLM 决策无帮助）
 
-#### 2. JSONL metadata 扩展
+#### 2. JSONL metadata 简化（**本 ADR 不新增任何字段**）
 
 ```rust
 // core/acowork-runtime/src/conversation.rs
-// 在 ConversationEntry.metadata 中（serde_json::Value），tool_result 类型的 entry 新增可选字段：
+// 在 ConversationEntry.metadata 中（serde_json::Value），tool_result 类型的 entry：
 {
-    "tool_name": "content_search",      // 已存在
-    "tool_call_id": "toolu_01abc",      // 已存在
-    "compressed": true,                 // 新增：in-memory 是否已 placeholder 化
-    "original_size_chars": 47823,       // 新增：仅硬阈值截断时写入
-    "partial": true                     // 新增：JSONL 内内容是否已被硬阈值截断
+    "tool_name": "content_search",      // 已存在（保留）
+    "tool_call_id": "toolu_01abc"       // 已存在（保留）
+}
+// 压缩后 entry（in-memory 是 placeholder，但 JSONL 内容仍是 tool 给的原始输出，metadata 不变）：
+// 注意：与"压缩前"完全相同的 metadata —— 运行时压缩状态不在持久化层承载
+{
+    "tool_name": "content_search",
+    "tool_call_id": "toolu_01abc"
 }
 ```
 
-**字段语义**：
+**字段语义（精简化）**：
 
 | 字段 | 值 | 含义 |
 |------|---|------|
-| `compressed` | `false` / 缺省 | in-memory 仍为完整内容（JSONL 是真相来源） |
-| `compressed` | `true` | in-memory 已是 placeholder 字符串；JSONL 内仍是完整内容（除非 partial=true） |
-| `partial` | `false` / 缺省 | JSONL 内是完整 tool result |
-| `partial` | `true` | JSONL 内已被硬阈值截断（即便压缩后也不能完整召回，recall 必须告知 LLM） |
-| `original_size_chars` | 数字 | 仅 `partial=true` 时有意义；LLM recall 时若看到 partial 能预知信息缺失 |
+| `tool_name` | string | 工具名字（已存在，保留）|
+| `tool_call_id` | string | LLM 协议层 id（已存在，保留）|
+| ~~`compressed`~~ | ~~bool~~ | **不存在**。运行时压缩状态由规则派生，不持久化（详见核心原则 #6）|
+
+**设计原则重申**：JSONL 的 `content` 字段永远是 tool 给的原始输出，metadata 仅承载协议必要的两个字段；运行时压缩状态完全在 in-memory 由 `compress_tool_results` 规则派生，restore 时无条件 re-apply 即可。
+
+**删除字段**：
+- `partial: bool` — 不再由 compress 层做截断。如果 tool 自己截断了，那是 tool 的事，metadata 不参与。
+- `original_size_chars: u64` — 同上理由。
+- **未引入** `compressed: bool` — 经与大鱼 2026-07-10 确认，运行时状态不应污染持久化层。
 
 #### 3. transient-return 通道
 
@@ -358,16 +852,35 @@ pub struct ToolResult {
 
 ```rust
 impl HistoryManager {
-    /// ADR-032: Replace tool result content with a compact placeholder for
-    /// any tool result whose serialized length exceeds `soft_threshold_chars`.
+    /// ADR-032: Replace large tool result content with a compact placeholder.
+    ///
+    /// Scope is intentional and permanent within this ADR: v1 only processes
+    /// `MessageRole::Tool`. Other large messages (User/Assistant) are handled
+    /// by L2 LLM summarization (history > 80%) and L3 emergency_trim (> 95%)
+    /// in `loop_context.rs` — placeholder + recall is one compression tier,
+    /// not a "cover all large messages" mechanism.
+    ///
+    /// Do NOT extend this function to other roles without opening a new ADR
+    /// (planned as ADR-033) with proper id strategy for non-tool messages.
     ///
     /// Pure function on the message slice. Does NOT recompute `current_tokens`
     /// (caller must call `recalibrate_tokens()` after the substitution).
     /// Does NOT modify the JSONL (the placeholder is in-memory only; JSONL
-    /// always retains the full content).
+    /// always retains the original tool output).
     ///
-    /// Idempotent: entries with `name == Some("context_compressed")` are
-    /// skipped (they were already compressed in a previous round).
+    /// **Idempotent** via self-describing content checks (核心原则 #6):
+    ///   - `content.len() <= soft_threshold_chars` → skip (placeholder string
+    ///     is ~120 chars, well below any reasonable threshold; after the first
+    ///     compress pass, all Tool messages naturally fall into this branch)
+    ///   - `content.starts_with("[Tool result compressed.")` → skip (safety net
+    ///     for misconfigured threshold < 100 chars; also defends against
+    ///     double-processing on rapid successive calls)
+    ///
+    /// **Does NOT write** any field on `ChatMessage` other than `content`:
+    ///   - `name` field is left untouched (still the original tool name) so
+    ///     that the LLM provider sees consistent tool_use.name ↔ tool_result.name.
+    ///   - `tool_call_id` is left untouched (placeholder string contains it,
+    ///     but the field is not modified).
     ///
     /// Returns the number of messages that were compressed.
     pub fn compress_tool_results(
@@ -383,25 +896,30 @@ impl HistoryManager {
 ```
 
 **实现要点**：
-- 入口消息必须满足：
-  - `role == MessageRole::Tool`
-  - `name != Some("context_compressed")`（幂等保护）
-  - `content.len() > soft_threshold_chars`
-  - `tool_call_id.is_some()`（必须能反查 entry id；缺 `tool_call_id` 的 tool result 应已在 `sanitize_messages` 中被清理）
+- 入口消息必须满足（**全部**条件才执行压缩）：
+  - `role == MessageRole::Tool`（v1 限定；其他 role 直接跳过）
+  - `content.len() > soft_threshold_chars`（**主幂等判定**：placeholder 字符串 ≈ 120 chars，threshold ≥ 256 远大于此，一次压缩后所有 Tool 消息天然落入 `<= threshold` 分支）
+  - **不**以 `"[Tool result compressed."` 开头（**安全网幂等判定**：防止 threshold 被错误配成 < 100 chars 时的二次处理；防御极小概率的 tool 输出意外以该 prefix 开头的场景）
+  - `tool_call_id.is_some()`（placeholder 模板需要这个 id；缺 `tool_call_id` 的 tool result 应已在 `sanitize_messages` 中被清理，跳过即可不强制压缩）
 - placeholder 字符串构造：
   ```rust
-  let original_size = msg.content.len();
-  let entry_id = msg.tool_call_id.as_ref().unwrap(); // placeholder uses tool_call_id as id proxy
+  let tool_call_id = msg.tool_call_id.as_deref().unwrap(); // safe: filtered above
   msg.content = format!(
-      "[Tool result compressed. Original size: {} chars. ID: {}. \
-       Call context_recall(id=\"{}\") to retrieve the full content if needed.]",
-      original_size, entry_id, entry_id
+      "[Tool result compressed. Call context_recall(id=\"{}\") to retrieve the full content.]",
+      tool_call_id
   );
-  msg.name = Some("context_compressed".to_string());
+  // 注意：不修改 msg.name —— 保留原 tool_name（LLM 协议层 tool_use.name ↔ tool_result.name 一致性）
+  // 注意：不修改 msg.tool_call_id —— placeholder 字符串中已嵌入该 id
   ```
-- **重要**：这里用 `tool_call_id` 作为 placeholder 里的 "ID"，因为 `tool_call_id` 是 LLM 协议层的稳定标识符，LLM 已经认识这个 id；entry id（JSONL 的 UUID）LLM 不应直接接触，统一通过 `tool_call_id` 索引。`context_recall` 接收 `tool_call_id` 后内部映射到 JSONL entry id（通过 metadata.tool_call_id 索引）。
+- **id 字段语义**：placeholder 字符串里嵌入的是 `tool_call_id`（LLM 协议层 id），LLM 直接 back-reference 到自己刚发起的 tool_call 即可。JSONL 内部的 `entry.id`（UUID v4）是另一个独立维度，仅供 `context_recall` 内部索引 / restorer / 调试使用，从不暴露给 LLM。
+- **为什么不带原始大小**：见 placeholder 模板说明（line 388-396）。
+- **为什么幂等不写 `name` 字段**：
+  - `name` 字段在 ChatMessage 上的语义是"产生这条消息的 tool 名字"（LLM 协议层 tool_use.name ↔ tool_result.name 对应关系）。
+  - 把它复用为"已压缩标记"会污染协议语义，且必须依赖持久化字段才能跨 restore 保持（详见核心原则 #6）。
+  - content 长度 + prefix 双重判定是 self-describing 的——消息自身描述"是否已压缩"，无需额外字段。
+- **范围说明（永久）**：v1 仅处理 `MessageRole::Tool` 是**永久范围**，不是临时限制——其他 large message 由 L2 LLM 摘要 + L3 emergency_trim 兜底，不属于 placeholder 层职责。如要扩展，开 ADR-033 重新设计。
 
-#### 模块 B：`persist_and_emit_tool_results` 阈值分流
+#### 模块 B：`persist_and_emit_tool_results` 简化
 
 **位置**：`core/acowork-runtime/src/agent/loop_tools.rs:849-865`
 
@@ -411,53 +929,32 @@ pub(crate) fn persist_and_emit_tool_results(
     deduped_calls: &[ToolCall],
     tool_results: &[String],
 ) {
-    let soft = self.core.tool_result_soft_threshold_chars;       // 默认 2048
-    let hard = self.core.tool_result_hard_threshold_chars;       // 默认 65536
-
+    // C2 简化后：透传 tool 产出的内容到 JSONL，不做任何截断 / 二次干预。
+    // 是否压缩由 compress 层（compress_tool_results）单独决定。
     if let Some(ref conversation) = self.session.conversation {
         for (tc, result_content) in deduped_calls.iter().zip(tool_results.iter()) {
-            // 1) 硬阈值：截断到 hard_chars + marker
-            let (jsonl_content, metadata) = if result_content.len() > hard {
-                let mut cut = hard;
-                while cut > 0 && !result_content.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                let marker = format!(
-                    "\n\n[RESULT TRUNCATED to fit persistence cap: original {} chars, \
-                     persisted {} chars]",
-                    result_content.len(), cut
-                );
-                let persisted = format!("{}{}", &result_content[..cut], marker);
-                let mut m = serde_json::json!({
-                    "tool_name": tc.function.name,
-                    "tool_call_id": tc.id,
-                    "partial": true,
-                    "original_size_chars": result_content.len(),
-                });
-                // ... m 也可加 "compressed": true 如果 in-memory 走 placeholder
-                (persisted, m)
-            } else {
-                let m = serde_json::json!({
-                    "tool_name": tc.function.name,
-                    "tool_call_id": tc.id,
-                });
-                (result_content.clone(), m)
-            };
-
-            // 2) JSONL 写入（软/硬都不改 JSONL 内容策略，JSONL 总存 "full or hard-truncated"）
-            conversation.append_message("tool_result", &jsonl_content, Some(metadata));
-
-            // 3) in-memory：根据 soft_threshold 决定是否立即 placeholder 化
-            // C2 仅做 JSONL 侧的元数据，C4 引入触发点后才在 in-memory 侧 placeholder 化
-            // 此处先留 hook：C4 接入 compress_tool_results 时改 messages
+            let metadata = serde_json::json!({
+                "tool_name": tc.function.name,
+                "tool_call_id": tc.id,
+                // 本 ADR 不新增任何 metadata 字段：
+                //   - 无 compressed（运行时状态由规则派生）
+                //   - 无 partial / original_size_chars（compress 层不做截断）
+            });
+            conversation.append_message("tool_result", result_content, Some(metadata));
         }
     }
 }
 ```
 
-**为什么 C2 不立即在 in-memory 压缩**：
-- C2 的目标是 JSONL schema 扩展，单测可独立验证。
-- C4 引入的"todos 完成触发点"和"pre_trim 前置"才是压缩时机。C2 提前做会导致"每次 tool result 都压缩"，对短 result 不必要的 metadata 写入。
+**C2 简化前后对比**：
+
+| 维度 | 简化前 | 简化后 |
+|---|---|---|
+| 硬阈值分流 | 三档判断（soft / hard / 超 hard 截断）| 单档透传 |
+| JSONL 内容 | 可能被截断 | 始终是 tool 给的原始输出 |
+| metadata 字段 | `partial` / `original_size_chars` 动态写入 | **仅** `tool_name` / `tool_call_id`(本 ADR 不新增任何字段) |
+| 配置项 | `tool_result_hard_threshold_chars` | **删除** |
+| 运行时压缩状态 | (计划写 `compressed: bool`) | **不写**——由 `compress_tool_results` 规则 + 当前 threshold 派生 |
 
 #### 模块 C：`ContextRecallTool`
 
@@ -480,12 +977,12 @@ impl Tool for ContextRecallTool {
             description: "Retrieve the full content of one or more tool results \
                           that were compressed during context trimming. The `ids` \
                           parameter accepts tool_call_id values shown in \
-                          '[Tool result compressed. ... ID: <id>. ...]' markers. \
-                          Returned content is injected into the current LLM turn \
-                          only and is NOT added to history; subsequent turns will \
-                          show the compressed marker again unless the underlying \
-                          data is preserved through other means (e.g., re-running \
-                          the original tool)."
+                          '[Tool result compressed. Call context_recall(id=\"<id>\") ...]' \
+                          markers (the `id=\"...\"` argument to recall). Returned content \
+                          is injected into the current LLM turn only and is NOT added \
+                          to history; subsequent turns will show the compressed \
+                          marker again unless the underlying data is preserved \
+                          through other means (e.g., re-running the original tool)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -542,12 +1039,10 @@ impl Tool for ContextRecallTool {
                 if ids.contains(&tc_id.to_string()) && !found.contains_key(tc_id) {
                     let content = entry["content"].as_str().unwrap_or("").to_string();
                     let tool_name = entry["metadata"]["tool_name"].as_str().map(String::from);
-                    let partial = entry["metadata"]["partial"].as_bool().unwrap_or(false);
-                    let prefix = if partial { "[PARTIAL - original was truncated] " } else { "" };
-                    found.insert(tc_id.to_string(), (
-                        format!("{}{}", prefix, content),
-                        tool_name,
-                    ));
+                    found.insert(tc_id.to_string(), (content, tool_name));
+                    // 注意：不判断 partial / original_size_chars。
+                    // Tool 自己负责输出大小控制；context_recall 透传 tool 给的内容。
+                    // 如果 tool 截断过，tool 自己在输出里加了 marker，recall 同样返回带 marker 的内容。
                 }
             }
         }
@@ -580,8 +1075,8 @@ impl Tool for ContextRecallTool {
 ```
 
 **关键设计**：
-- **按 `tool_call_id` 索引而非 entry id**：LLM 看到 placeholder 时只有 `tool_call_id`（更易识别，与 LLM 协议层对齐）。`context_recall` 内部用 `metadata.tool_call_id` 反查 JSONL。
-- **partial=true 显式标记**：告知 LLM "召回的内容本身已经被截断，不是原文"，避免 LLM 误以为信息完整。
+- **入参用 `tool_call_id`，内部按 `metadata.tool_call_id` 索引到 JSONL**：LLM 看到 placeholder 时只有 `tool_call_id`（已在自己发起的 tool_call 中见过），`context_recall` 接收 `tool_call_id` 后扫描 JSONL——**先过滤 `role == "tool_result"`（跳过 `tool_call` entry）**，再按 `metadata.tool_call_id == param` 命中，读取 `entry.content`。JSONL 的 `entry.id`（UUID v4）用作内部主键，从不暴露给 LLM。
+- **不做 partial 判断**：tool 自己负责输出大小控制。`context_recall` 透传 tool 给的内容（含 tool 自带的截断 marker）。如果 LLM 看到 marker，判断是否重跑由 LLM 自己决定。
 - **找不到不整体失败**：单 id 缺失只在该 id 上报错，整体 `ok: true`，LLM 可继续处理其他结果。
 
 #### 模块 D：transient-return 通道在主循环的接入
@@ -666,21 +1161,22 @@ impl TodoWriteTool {
 // 已有 channel，添加新事件分支
 match event {
     TodoCompletedEvent { completed_ids } => {
-        // 简化方案：压缩最近 N=5 条 tool result（粗略对应"刚完成的 todo 期间"）
-        // 不做 per-todo 精细窗口追踪，避免过度工程
-        let to_compress = find_last_n_tool_results_before_last_user_msg(&self.session.history, 5);
-        let mut slice: Vec<ChatMessage> = to_compress.into_iter().cloned().collect();
-        let n = self.session.history.compress_tool_results(&mut slice, SOFT_THRESHOLD);
+        // ADR-032: 简化方案不追踪 per-todo 窗口;直接按 N 保留窗口策略压缩
+        // N 来自 tool_result_keep_recent_n 配置(默认 3,见核心原则 #7)
+        let keep_n = self.config.tool_result_keep_recent_n();
+        let mut older = self.session.history.tool_results_excluding_recent(keep_n);
+        let n = self.session.history.compress_tool_results(&mut older, SOFT_THRESHOLD);
         // 写回 history（in-place）
-        apply_compressed_back(&mut self.session.history, slice);
+        apply_compressed_back(&mut self.session.history, older);
         self.session.history.recalibrate_tokens();
-        tracing::info!(compressed = n, "Compressed tool results after todo completion");
+        tracing::info!(compressed = n, keep_recent_n = keep_n,
+            "Compressed older tool results after todo completion (preserving recent N)");
     }
     _ => { /* 现有事件 */ }
 }
 ```
 
-**简化方案的局限**：v1 不做 per-todo 窗口，N=5 是经验值。可在未来需要时升级为 "每个 todo 维护 tool_call_id 集合 → 完成后按集合压缩"。
+**简化方案的局限**：v1 不做 per-todo 窗口，用 N 全局保留窗口替代。可在未来需要时升级为 "每个 todo 维护 tool_call_id 集合 → 完成后按集合压缩";N 值已在配置层开放,可基于真实工作流调优。
 
 ### 与现有压缩层次的协作
 
@@ -688,46 +1184,95 @@ ADR-010 确立的三阶段策略 + 本 ADR 的占位符压缩，构成四层防�
 
 | 层 | 触发条件 | 行为 | 成本 |
 |----|---------|------|------|
-| **L0: Tool result 占位符压缩**（本 ADR 新增） | tool result > 2 KB（默认） | 字符串替换 ~50 chars placeholder | O(N)，零 LLM |
+| **L0: Tool result 占位符压缩**（本 ADR 新增） | tool result > 2 KB（默认） | 字符串替换 ~90 chars placeholder | O(N)，零 LLM |
 | **L1: 监控 / 警告** | history > 70% | 日志 + L0 兜底 | 零成本 |
 | **L2: LLM 摘要** | history > 80% | `compact_via_llm` + `replace_middle_with_summary` | 1 次远端 LLM |
 | **L3: Emergency trim** | history > 95% / API ContextOverflow | `emergency_trim` 保留最后 4 条非 system | 零 LLM |
 
 **预期收益**：大多数情况下 L0 就把 history 压在 80% 以下，**L2 几乎不会被触发**。原本每 session 平均 1-2 次 LLM 摘要调用可能降到 0-1 次。
 
-**与 L2 的协作**：如果 L0 + L1 仍触发 L2，L2 的输入仍是完整 history（含 placeholder），LLM 看到的 tool result 是 placeholder 字符串本身（~150 chars），比完整内容（数十 KB）更省 prompt tokens。
+**与 L2 的协作**：如果 L0 + L1 仍触发 L2，L2 的输入仍是完整 history（含 placeholder），LLM 看到的 tool result 是 placeholder 字符串本身（~90 chars），比完整内容（数十 KB）更省 prompt tokens。
 
-**与 L3 的协作**：L3 是 FIFO 兜底，**不再** truncate_large_messages 调用任何 tool result——因为 tool result 在 L0 已经是 placeholder 或完整小内容，不会再有 "单条 msg 占 budget/4" 的情况。
+**与 L3 的协作**：L3 是 FIFO 兜底。**本 ADR 之后 `truncate_large_messages` 已被删除**（L0 placeholder 路径完全覆盖它的功能，且效果更好——保留 tool_call_id 配对、不丢 LLM 召回机会）。`emergency_trim` 不再需要截断单条 msg 的 fallback 分支。
+
+**`truncate_large_messages` 删除的影响**：
+- 旧 L3 fallback 路径中"单条 msg 超过 budget/4 时 prefix-truncate"——这条逻辑在 L0 之后基本失效（tool result 要么是 placeholder 要么是 tool 已经控制过的小 content）。
+- 用户/Assistant message 历史上极少超过 budget/4（如有，是用户输入超长，应该在用户侧或 prompt 模板层处理，不在 compress 层）。
+- 删除它简化了 compress 层次，**所有**"超阈值"统一走 placeholder 路径。
 
 ### JSONL 演化样例
 
-**v1（旧格式）**：
+**核心事实（再次强调，核心原则 #6）**：JSONL 的 `content` 字段**永远是** tool 给的原始输出；JSONL **不存任何运行时衍生字段**（无 `compressed` / 无 `partial` / 无 `original_size_chars`）。placeholder 化完全是运行时行为，由 `compress_tool_results` 规则 + threshold 派生。JSONL 与 in-memory **唯一允许的差异**就是 content 本身（in-memory 可能是 placeholder，JSONL 永远是 ground truth）。
+
+**v1（旧格式，未压缩 —— in-memory 与 JSONL 一致）**：
+
+JSONL：
 ```json
 {"id":"a1b2","ts":"...","role":"tool_result","content":"<200KB grep 输出>","metadata":{"tool_name":"content_search","tool_call_id":"toolu_xyz"}}
 ```
 
-**v2（本 ADR 后）**：
-```json
-{"id":"a1b2","ts":"...","role":"tool_result","content":"<200KB grep 输出>","metadata":{"tool_name":"content_search","tool_call_id":"toolu_xyz","compressed":true,"partial":true,"original_size_chars":204853}}
+in-memory `ChatMessage`：
+```rust
+ChatMessage {
+    role: MessageRole::Tool,
+    tool_call_id: Some("toolu_xyz"),
+    content: "<200KB grep 输出>",  // ← 与 JSONL 一致
+    name: None,                    // ← name 字段保持协议语义（None 或 tool_name）
+    ..Default::default()
+}
 ```
 
-JSONL 侧的 `content` 仍是完整（或 hard-truncated）原文，**仅 metadata 多 3 个字段**。磁盘占用增加 < 100 bytes / 条。
+**v2（本 ADR 后，in-memory 被压缩 —— JSONL 完全不变）**：
 
-### 协议兼容性验证
+JSONL（**逐字段都没变**，仍是原始内容）：
+```json
+{"id":"a1b2","ts":"...","role":"tool_result","content":"<200KB grep 输出>","metadata":{"tool_name":"content_search","tool_call_id":"toolu_xyz"}}
+```
+↑ 注意：与 v1 JSONL **完全字节级一致**——本 ADR 不修改 JSONL 的任何字段。
 
-**Anthropic**（`providers/anthropic.rs:442-476`）：
-- tool_result content 是 user message 内嵌的 tool_result content block，string content 兼容。
-- placeholder 是合法 string，LLM 看到无报错。
-- **风险**：极小，placeholder 是纯 ASCII。
+in-memory `ChatMessage`（**content 变了，name 字段保留协议语义**）：
+```rust
+ChatMessage {
+    role: MessageRole::Tool,
+    tool_call_id: Some("toolu_xyz"),
+    content: "[Tool result compressed. Call context_recall(id=\"toolu_xyz\") to retrieve the full content.]", // ← placeholder
+    name: None,                    // ← 不再被改写为 "context_compressed"，保持原 tool_name（或 None）
+    ..Default::default()
+}
+```
 
-**OpenAI**（`providers/openai.rs:328`）：
-- tool_result 是独立 `role: "tool"` 消息，content 是 string。
-- placeholder 兼容。
-- **风险**：极小。
+**对 LLM 的影响**：
+- 下一轮 `build_chat_request` 时，**只看 in-memory `ChatMessage`**——LLM 看到的是 placeholder 字符串
+- LLM 想看原文时调 `context_recall(id="toolu_xyz")`——工具读 JSONL 的 `content` 原文返回
+- 如果 session 重启，restorer 重建 ChatMessage 后无条件调一次 `compress_tool_results(SOFT_THRESHOLD)`——由规则派生 in-memory placeholder 状态，**不**依赖任何持久化标记
 
-**需验证点**：
-- 部分 provider 对 tool_result content 有最大长度限制（Anthropic 是 100KB 一条）。如果 placeholder 字符串超过限制会报错（不会，原 placeholder 仅 150 chars）。
-- 如果 JSONL 内 hard-truncated content 超过 100KB（默认 hard 64KB 不会），需要更低的 hard 阈值。建议 hard 64KB + provider 100KB 余量，验证通过。
+**JSONL 侧的不变式**：
+- **所有** tool_result entry 的 metadata 都是 `{tool_name, tool_call_id}` 两个字段——无论是否被压缩
+- **所有** tool_result entry 的 content 都是 tool 给的原始输出——无论是否被压缩
+- 没有 `partial` / `original_size_chars` / `compressed` 任何字段——compress 层不写持久化
+
+**向后兼容**：
+- 旧 JSONL（任何 schema）：当前规则对所有 entry 一视同仁,无需特殊分支
+- 新 JSONL 与旧 JSONL schema 完全一致——0 migration 成本
+- threshold / 规则 / 代码版本变更——restore 时 re-apply 自动适配
+
+**易混点警告**：
+
+| 误读 | 正确读法 |
+|------|----------|
+| "JSONL 里没标记,restorer 怎么知道哪些已压缩?" | restorer **不需要知道**——调一次 `compress_tool_results` 由规则统一处理,O(N) 但常数时间 |
+| "如果 JSONL content 是 placeholder 字符串,能反推已压缩吗?" | **不能也不需要反推**——placeholder 只存在于 in-memory,JSONL content 永远是 ground truth |
+| "threshold 改了,旧 session 怎么办?" | restore 时按当前 threshold 重新派生——历史 in-memory 状态不可"穿越"规则变更 |
+
+### id 字段分层说明
+
+| JSONL 字段 | 用途 | 谁能看到 |
+|---|---|---|
+| `id`（顶层） | JSONL 主键 / `context_recall` 内部索引 / restorer 锚点 | 系统内部 |
+| `metadata.tool_call_id` | LLM 协议层 id，placeholder 嵌入 / `context_recall` 入参 / 反查 JSONL 的索引键 | LLM + 系统 |
+| `content` | tool 给的原始输出（可能完整 / 可能被 tool 自己截断） | 系统 |
+
+LLM 通过 placeholder 看到 `tool_call_id`，调用 `context_recall(id="<tool_call_id>")`；工具内部用 `tool_call_id` 扫 JSONL 找 `metadata.tool_call_id` 匹配的 entry 后读 `content`。LLM 从不接触 JSONL 的 `id` 字段。
 
 ### 配置接口
 
@@ -739,15 +1284,84 @@ pub struct RuntimeConfigOverrides {
     /// Results above this are replaced with a placeholder; JSONL keeps full.
     /// None = use default (2048).
     pub tool_result_soft_threshold_chars: Option<usize>,
-    /// ADR-032: Hard threshold (chars) for JSONL-side truncation.
-    /// Results above this are truncated before write; metadata.partial=true.
-    /// None = use default (65536).
-    pub tool_result_hard_threshold_chars: Option<usize>,
+
+    /// ADR-032: Compression trigger mode.
+    ///   - Auto: events (todos completion / assistant long message / persist)
+    ///           trigger compress_tool_results automatically; budget fallback
+    ///           (compact_history_if_needed / pre_trim) also active.
+    ///   - Manual: events are all OFF; budget fallback still active (avoid
+    ///           deadlock if user forgets to click button); user triggers via
+    ///           front-end button / Gateway API only.
+    /// None = use default (Auto).
+    pub tool_result_compression_mode: Option<CompressionMode>,
+
+    /// ADR-032: Number of recent tool results to keep raw (uncompressed) when
+    /// any compression trigger fires (event triggers / budget fallback / restore /
+    /// manual entry — all uniform per core principle #7).
+    ///   - N = 0 → compress all eligible (no protection, matches historical fallback)
+    ///   - N = 3 (default) → keep last 3 raw, compress older
+    ///   - N = large → LLM sees more raw context but less window savings
+    /// Applies globally so LLM's "recent raw context" is continuous across all
+    /// trigger paths (no mode/trigger surprises).
+    /// None = use default (3).
+    pub tool_result_keep_recent_n: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompressionMode {
+    Auto,
+    Manual,
+}
+impl Default for CompressionMode {
+    fn default() -> Self { CompressionMode::Auto }
 }
 ```
 
+**删除字段**：`tool_result_hard_threshold_chars`（C2 简化后，compress 层不再做截断，无需硬阈值配置）。
+
+**新增字段**：
+- `tool_result_compression_mode: Option<CompressionMode>`（缺省 Auto）
+- `assistant_long_message_threshold_chars: Option<usize>`（缺省 2048）—— assistant 长消息触发的阈值
+- `tool_result_keep_recent_n: Option<usize>`（缺省 3）—— **全局保护窗口大小**;适用于所有触发点(事件 / budget / restore / manual),保证 LLM 看到的"近期 raw 上下文"连续(详见核心原则 #7)
+
 **AgentConfig 扩展**（`core/acowork-runtime/src/agent_config.rs`）：
-- `agent_config.json` 新增两个可选字段（缺省值与 `RuntimeConfigOverrides` 默认一致：`soft_threshold_chars=2048`, `hard_threshold_chars=65536`）。
+- `agent_config.json` 新增可选字段：
+  - `tool_result_soft_threshold_chars: usize`（缺省 2048）
+  - `tool_result_compression_mode: "auto" | "manual"`（缺省 "auto"）
+  - `assistant_long_message_threshold_chars: usize`（缺省 2048）
+  - `tool_result_keep_recent_n: usize`（缺省 3）—— 全局保护窗口;RuntimeConfigOverrides 优先,缺则 fallback 到此值,缺则 fallback 到代码默认 3
+
+**示例**（典型编程 agent,skill 阶段式工具调用密集 → 保留窗口稍大）:
+```json
+{
+  "tool_result_soft_threshold_chars": 2048,
+  "tool_result_compression_mode": "auto",
+  "assistant_long_message_threshold_chars": 2048,
+  "tool_result_keep_recent_n": 3
+}
+```
+
+**示例**（轻量工具查询 agent,tool 调用稀疏 → 保留窗口小,压缩更激进）:
+```json
+{
+  "tool_result_soft_threshold_chars": 2048,
+  "tool_result_compression_mode": "auto",
+  "assistant_long_message_threshold_chars": 2048,
+  "tool_result_keep_recent_n": 0
+}
+```
+
+**运行时配置读取伪代码**:
+```rust
+// AgentLoop 启动时一次性确定 N 值,后续所有触发点复用
+fn resolve_keep_recent_n(&self) -> usize {
+    self.runtime_config_overrides
+        .tool_result_keep_recent_n
+        .or(self.agent_config.tool_result_keep_recent_n)
+        .unwrap_or(DEFAULT_KEEP_RECENT_N) // const = 3
+}
+```
 
 ---
 
@@ -758,56 +1372,78 @@ pub struct RuntimeConfigOverrides {
 | Commit | 文件 | 类型 | LOC 估算 |
 |--------|------|------|----------|
 | C1 | `core/acowork-runtime/src/agent/history.rs` | 新增 `compress_tool_results` / `recalibrate_tokens` + 单测 | +180 / -10 |
-| C1 | `core/acowork-runtime/src/agent/history.rs` | `is_compaction_marker` 旁加 `is_compressed_marker` | +5 |
-| C2 | `core/acowork-runtime/src/agent/loop_tools.rs:849-865` | 阈值分流 + JSONL metadata | +60 / -10 |
-| C2 | `core/acowork-runtime/src/conversation.rs` | metadata 字段文档（无结构变更） | +20 / 0 |
-| C3 | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测 | +350 / 0 |
-| C3 | `core/acowork-runtime/src/tools/builtin/mod.rs` | 注册 `context_recall` | +10 |
-| C3 | `acowork-core/src/tools/traits.rs` | `ToolResult.transient: bool` 字段 | +10 |
-| C3 | `core/acowork-runtime/src/agent/loop_.rs` | 主循环接入 transient 通道 | +50 / -10 |
-| C3 | `core/acowork-runtime/src/agent/loop_.rs` | `AgentLoop` 字段新增 `pending_transient_tool_msgs` | +5 |
-| C4 | `core/acowork-runtime/src/agent/loop_context.rs:417-431` | fallback 路径前置 compress | +20 / -10 |
-| C4 | `core/acowork-runtime/src/agent/loop_context.rs:843-865` | pre_trim 整合 | +15 / -5 |
-| C4 | `core/acowork-runtime/src/tools/builtin/todo_write.rs` | 完成事件发送 | +25 |
-| C4 | `core/acowork-runtime/src/agent/loop_.rs` | 完成事件接收 + 简化压缩 | +40 |
-| C5 | `core/acowork-runtime/src/agent/session/restorer.rs:286-318` | 识别 `compressed=true` | +15 / -5 |
-| C5 | 多文档 | 见下表 | +50 / -5 |
-| **合计** | | | **~855 / -55** |
+| C1 | `core/acowork-runtime/src/agent/history.rs` | **删除** `truncate_large_messages` 整函数 | 0 / -45 |
+| C1 | `core/acowork-runtime/src/agent/loop_context.rs:198` | 删除 `truncate_large_messages` 调用点，替换为 `compress_tool_results` | +5 / -5 |
+| C1 | `core/acowork-runtime/src/agent/loop_context.rs:430` | 删除 compact fallback 的 truncate 调用 | 0 / -5 |
+| C2 | `core/acowork-runtime/src/agent/loop_tools.rs:849-865` | 简化为透传(本 ADR 不修改 JSONL schema) | +5 / -50 |
+| C2 | `acowork-core/src/protocol.rs` | **删除** `RuntimeConfigOverrides.tool_result_hard_threshold_chars` 字段 | 0 / -8 |
+| C2 | `core/acowork-runtime/src/conversation.rs` | metadata 文档注释(无结构变更;本 ADR 不新增任何字段) | +5 / 0 |
+| C3a | `acowork-core/src/tools/traits.rs` | `ToolResult.transient: bool` 字段 | +10 |
+| C3a | `core/acowork-runtime/src/agent/loop_.rs` | 主循环接入 transient 通道 + `pending_transient_tool_msgs` 字段 | +55 / -10 |
+| C3b | `core/acowork-runtime/src/tools/builtin/context_recall.rs` | 新文件 + 单测 | +250 / 0 |
+| C3b | `core/acowork-runtime/src/tools/builtin/mod.rs` | 注册 `context_recall` | +10 |
+| C4a | `acowork-core/src/protocol.rs` | 新增 `CompressionMode` 枚举 + `tool_result_compression_mode` + `tool_result_keep_recent_n` 字段 | +35 |
+| C4a | `core/acowork-runtime/src/agent_config.rs` | `agent_config.json` 新增 4 字段（mode / threshold_chars / assistant_threshold_chars / keep_recent_n）| +40 |
+| C4a | `core/acowork-runtime/src/agent/loop_context.rs` | 新增 `resolve_keep_recent_n()` 辅助方法 + 触发点读取配置 | +15 |
+| C4a | `core/acowork-runtime/src/agent/history.rs` | 新增 `tool_results_excluding_recent(n: usize) -> Vec<ChatMessage>` 辅助函数 | +20 |
+| C4b | `core/acowork-runtime/src/agent/loop_.rs` | 主循环 `manual_compress_rx` channel + 入口 drain 逻辑 | +50 / -5 |
+| C4b | `core/acowork-runtime/src/agent/loop_.rs` | todos 完成事件 mode 判断（auto 才触发） | +15 / 0 |
+| C4b | `core/acowork-runtime/src/agent/loop_inbound.rs` | 新增 `maybe_compress_after_assistant()`（auto 模式专属） | +45 |
+| ~~C4b~~（已删除） | ~~`core/acowork-runtime/src/agent/loop_tools.rs`~~ | ~~`persist_and_emit_tool_results` 后置 mode 判断（auto 才触发）~~ | ~~+15 / 0~~（删除后不增不减）|
+| C4b | `core/acowork-gateway/src/http/` | 新增 `POST /compress/tool_result` / `/compress/summary` 路由 + handler | +80 / 0 |
+| C4b | `core/acowork-gateway/src/session_manager.rs` | `manual_compress_tx` 端：API → AgentLoop channel 注入 | +30 |
+| C4c | `apps/desktop/src/components/SettingsPanel.*` | setup 面板新增 "Tool result compression" radio (auto/manual) | +40 / 0 |
+| C4c | `apps/desktop/src/components/ChatInput.*` | usage 弹出菜单新增**两个独立按钮**（Tool results / Summary） | +60 / 0 |
+| C4c | `apps/desktop/src/api/client.ts` | 新增 `compressToolResult()` / `compressSummary()` API 调用 | +25 |
+| C4d | `apps/cli/src/commands/compress.rs` | 新增 `acowork compress tool_result` / `compress summary` 子命令 | +90 / 0 |
+| C4d | `apps/cli/src/ipc/client.rs` | CLI → Gateway IPC（Unix Socket / Named Pipe）连接 + channel 注入 | +50 / 0 |
+| C4d | `apps/cli/src/commands/status.rs` | 新增 `acowork status --session <id>` 查询压缩状态 | +35 / 0 |
+| C4d | `core/acowork-gateway/src/ipc/` | Gateway IPC 端：CLI → session_manager channel（与 C4b 共享路径） | +40 / 0 |
+| C4d | `apps/cli/` | 新增 `clap` 依赖 + 子命令注册 + `tests/cli_compress.rs` | +30 / 0 |
+| C4 | `core/acowork-runtime/src/agent/loop_context.rs:417-431` | fallback 路径前置 `compress_tool_results`（**两档都生效**） | +20 / -10 |
+| C4 | `core/acowork-runtime/src/agent/loop_context.rs:843-865` | pre_trim 整合为 `pre_trim_and_compress`（**两档都生效**） | +15 / -5 |
+| C4 | `core/acowork-runtime/src/tools/builtin/todo_write.rs` | 完成事件发送（**auto 模式专属**） | +25 |
+| C4 | `core/acowork-runtime/src/agent/session/restorer.rs:286-318` | restore 末尾无条件 re-apply `compress_tool_results` + `recalibrate_tokens`;不读 `metadata.compressed` / 不写 `name` 标记 | +10 / -5 |
+| C4 | 多文档 | 见下表 | +90 / -5 |
+| **合计** | | | **~1295 / -153** |
+
+净 LOC 减少 ~ 158 行（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 简化 ~15 + 杂项 10）；净增 ~1160 行（包含 ~180 行 C4b 触发逻辑 / ~125 行 C4c UI / ~245 行 C4d CLI / ~120 行 C4a config（含 N 字段配置 + resolve 辅助 + 历史辅助）/ ~80 行 Gateway API（HTTP） / ~40 行 Gateway API（IPC） / ~250 行 C3b context_recall 工具 / 文档新增 +40）。
 
 ### 设计文档同步
 
 | 文档 | 变更 |
 |------|------|
-| `docs/design/zh/03-agent-runtime.md` | §②.5 压缩策略加 L0 层；说明 transient 通道 |
+| `docs/design/zh/03-agent-runtime.md` | §②.5 压缩策略加 L0 层 + 触发档位矩阵（auto / manual）+ assistant 长消息触发；说明 transient 通道；提及 `truncate_large_messages` 删除 |
 | `docs/design/zh/12-tool-system.md` | 工具清单追加 `context_recall`；permission 标记 `context:read` |
-| `docs/design/zh/15-conversation-persistence.md` | 新增 "Tool Result 压缩标记" 节，描述 metadata 扩展 |
-| `docs/adr/zh/ADR-010-context-compression-simplification.md` | "明确放弃的策略" 表中 "Tool result 日常折叠" 一行更新（标注由 ADR-032 重新引入并升级为占位符+召回方案） |
-| `docs/adr/zh/ADR-014-loop-module-decomposition.md` | §transient 通道在 `loop_.rs` 的归属说明（如果适用） |
-| `examples/*/config/agent_config.json` | 可选：暴露 `tool_result_*_threshold_chars` 配置示例 |
+| `docs/design/zh/15-conversation-persistence.md` | 新增 "运行时压缩状态派生" 节，说明 JSONL 不存压缩状态、restore 时由 `compress_tool_results` 规则重建；新增 "Compression Mode" 节，说明 mode 不持久化 |
+| `docs/design/zh/17-gateway-api.md`（如不存在则新建） | 列出 `POST /compress/tool_result` / `POST /compress/summary` API |
+| `docs/adr/zh/ADR-010-context-compression-simplification.md` | "明确放弃的策略" 表中 "Tool result 日常折叠" 一行更新：**"由 ADR-032 重新引入并升级为占位符+召回方案；同时 `truncate_large_messages` 因同原理删除"** |
+| `docs/adr/zh/ADR-014-loop-module-decomposition.md` | §transient 通道在 `loop_.rs` 的归属说明 + `manual_compress_rx` channel 归属 |
+| `examples/*/config/agent_config.json` | 暴露 4 个配置项：`tool_result_soft_threshold_chars` / `tool_result_compression_mode` / `assistant_long_message_threshold_chars` / `tool_result_keep_recent_n`(默认 3) |
+| `apps/desktop/docs/` | 描述 setup 面板 + ChatInput 弹出菜单新增的"压缩上下文"按钮组 |
 
 ### 与现有压缩层次的交互
 
 | 现有模块 | 交互 | 改动方向 |
 |----------|------|----------|
-| `loop_context.rs::compact_history_if_needed` | L2 LLM 摘要前可调用 `compress_tool_results` 预清（可选优化） | 增强：可选在 L2 之前先调一次 |
-| `loop_context.rs::pre_trim_for_tool_results` | L1 触发时先压缩再 trim | **必须改**：避免 trim 掉已 placeholder 的 tool result（顺序敏感） |
-| `loop_context.rs::trim_tool_results_for_context` | 现状按比例切到 remaining/n | **可保留**：作为 L3 emergency 路径兜底，但 L0 已压缩后通常用不到 |
+| `loop_context.rs::compact_history_if_needed` | L2 LLM 摘要前可调用 `compress_tool_results` 预清（可选优化） | 增强：fallback 路径前调一次 |
+| `loop_context.rs::pre_trim_for_tool_results` | L1 触发时先压缩再 trim | **必须改**：合并为 `pre_trim_and_compress` |
+| `loop_context.rs::trim_tool_results_for_context` | 现状按比例切到 remaining/n | **保留**：作为 L3 emergency 路径兜底，但 L0 已压缩后通常用不到 |
 | `loop_context.rs::check_context_overflow_and_trim` | 90% hard 阈值 | 不改：行为不变 |
-| `history.rs::truncate_large_messages` | budget/4 单条截断 | **建议弱化**：L0 已压缩后此函数命中率显著下降；保留但不再作为主路径 |
-| `loop_tools.rs::persist_and_emit_tool_results` | 工具结果入库 | **必须改**：新增阈值分流 |
-| `restorer.rs::restore_history_from_jsonl` | JSONL → in-memory | **必须改**：识别 `compressed` 标记 |
+| `history.rs::truncate_large_messages` | budget/4 单条截断 | **删除**：与 placeholder 同原理，统一走新路径 |
+| `loop_tools.rs::persist_and_emit_tool_results` | 工具结果入库 | **必须改**：简化为透传（删除阈值分流） |
+| `restorer.rs::restore_history_from_jsonl` | JSONL → in-memory | **必须改**：restore 末尾无条件 re-apply `compress_tool_results` + `recalibrate_tokens`(不读任何 `compressed` 标记) |
 | `session/restorer.rs::drop_orphan_tool_results` | orphan tool_result 清理 | 不改：placeholder 仍带 `tool_call_id`，配对不受影响 |
 
 ### 协议层兼容性
 
-| Provider | 兼容性 | 验证方式 |
-|----------|--------|----------|
-| Anthropic Claude | ✅ 兼容 | tool_result content 是 user message 内嵌 block，string content 无 protocol 限制 |
+| Provider | 兼容性 | 备注 |
+|----------|--------|------|
+| Anthropic Claude | ✅ 兼容 | placeholder 是 string content，协议层无拒收风险 |
 | OpenAI / 兼容 | ✅ 兼容 | tool role 独立消息，content 是 string |
 | Ollama / 本地模型 | ✅ 兼容 | 同 OpenAI 协议 |
-| Custom HTTP provider | 待验证 | 需要在 `acowork-core/src/providers/` 目录下做集成测试 |
 
-**验证要求**：C3 完成后，必须跑一遍 `core/tests/` 下的端到端测试，覆盖 Anthropic / OpenAI / Ollama 三种 provider，确保 placeholder content 不被 provider 拒绝。
+**说明**：本 ADR 不在 compress 层做截断，因此**没有** protocol 层截断 marker / 字节限制相关验证需求（之前 C2 涉及 hard threshold 时才有这层验证）。验证范围仅收缩到 placeholder 字符串本身（~90 chars ASCII）被 provider 接受——纯字符串，零风险。
 
 ---
 
@@ -817,23 +1453,48 @@ pub struct RuntimeConfigOverrides {
 
 | 模块 | 测试覆盖 |
 |------|----------|
-| `compress_tool_results` | 阈值边界、幂等性、role 过滤、name 字段正确 |
+| `compress_tool_results` | 阈值边界(< /= / > 三档)、幂等性(content 长度 + prefix 双重判定)、role 过滤、**name 字段保持原 tool_name 不被改写** |
 | `recalibrate_tokens` | 压缩前后 token 计数正确性 |
-| `persist_and_emit_tool_results` 三档分流 | 软/硬阈值各档 metadata 字段正确；UTF-8 safe 截断 |
+| `truncate_large_messages` 删除 | 编译通过；所有调用点替换为新函数 |
+| `persist_and_emit_tool_results` 简化 | 仅写 `tool_name` / `tool_call_id`(本 ADR 不新增任何字段);不再有 partial / hard threshold 字段;**不存在 `compressed` 字段**(grep 验证) |
 | `ContextRecallTool::execute` | 命中 / 未命中 / 部分命中 / > 20 ids / 文件不存在 / 损坏行跳过 |
-| Transient 通道 | execute 后 history 不增长；build_chat_request 包含 transient content；重启后不复现 |
-| todos 完成事件 | 完成事件触发压缩范围正确；非完成事件不触发 |
-| Restorer | 旧 JSONL 正常；新 JSONL `compressed=true` name 正确；`partial=true` 不二次截断 |
+| Transient 通道 | execute 后 history 不增长;build_chat_request 包含 transient content;重启后不复现 |
+| **触发档位解析** | `"auto"` / `"manual"` / 缺省值;非法值报错 |
+| **RuntimeConfigOverrides 新字段** | `tool_result_compression_mode` / `assistant_long_message_threshold_chars` 序列化反序列化 |
+| **todos 完成事件 mode 判断** | auto 模式触发压缩;manual 模式跳过;非完成事件不触发;**保留最近 N 条 raw 不压缩,只压缩较旧**(N 来自配置,默认 3)|
+| **assistant 长消息触发** | content > 2KB + tool_calls 为空 → 触发;content < 2KB 跳过;tool_calls 非空跳过;manual 模式跳过;**保留最近 N 条 raw 不压缩,只压缩较旧**(N 来自配置,默认 3)|
+| **N 参数化测试** | `tool_result_keep_recent_n` 取值 `0` / `1` / `3` / `10` 四档;验证每档下保留条数 = min(N, history.len());`N=0` 全部压缩;`N` 大于 tool_result 总数时 no-op;RuntimeConfigOverrides 优先于 AgentConfig |
+| ~~**persist 入库后立即压缩**~~ **【已删除】** | ~~auto 模式触发;manual 模式跳过;幂等不重复~~ —— **已删除**,tool result 永远保留 raw 直到其他触发 |
+| **manual 入口 channel** | drain 在 iteration 入口;多次 send 累加处理;channel 满 / 断 / send 失败 |
+| Restorer | restore 末尾无条件 re-apply `compress_tool_results` 正确;in-memory Tool 消息符合当前 threshold 规则;`name` 保持原 tool_name;**不存在 `compressed` / `partial` / `original_size_chars` 字段**(grep 验证);**mode 字段不写入 JSONL** |
 
-### 集成测试（C5 必跑）
+### 集成测试（C4 必跑）
 
 1. **端到端压缩-召回循环**：
    - 触发一个 `content_search` 输出 200KB → L0 压缩为 placeholder → LLM 调用 `context_recall` → transient 返回原文 → LLM 基于原文继续回答。
-2. **todos 触发压缩**：
-   - 设置 todos [调研, 设计, 实现] → 执行调研阶段多个 tool → 标记调研完成 → 检查 in-memory 是 placeholder → 进入设计阶段。
-3. **跨 session 持久化**：
+2. **todos 触发压缩（auto 模式）**：
+   - 设置 todos [调研, 设计, 实现] → 执行调研阶段多个 tool → 标记调研完成 → 检查**较旧** tool_result 是 placeholder,**最近 N 条仍是 raw**(N 来自配置,默认 3) → 进入设计阶段。
+3. **assistant 长消息触发（auto 模式）**：
+   - 模拟一个 3KB 的 assistant 文本（无 tool_call）→ 检测到 → 调 compress_tool_results → 验证**较旧** tool_result 被压缩,**最近 N 条仍是 raw**(N 来自配置,默认 3)。
+4. **manual 入口端到端**：
+   - 配置 mode=manual → 不触发任何事件型压缩 → Gateway API `POST /compress/tool_result` → history 中 tool_result 被压缩 → LLM 后续可 recall。
+5. **manual 模式 budget 兜底**：
+   - 配置 mode=manual → 故意构造超 budget history（不动事件触发）→ `compact_history_if_needed` fallback 路径仍触发 L0 压缩（验证 budget 兜底不受 mode 影响）。
+6. **跨 session 持久化**：
    - session 中所有 tool result 都被压缩 → 关闭 session → 重启 session → 确认 history 是 placeholder 状态 → LLM 调用 `context_recall` 仍能召回原文。
-4. **provider 兼容性**：
+   - **关键不变式**：JSONL 在压缩前后**逐字段都不变**(content 永远是 tool 原始输出,metadata 只有 `tool_name` / `tool_call_id` 两个字段);重启后 in-memory placeholder 状态由 `compress_tool_results` 规则派生,**不依赖任何持久化字段**。
+   - **验证**:在 session 关闭前 grep JSONL,确认**没有任何 `compressed` / `partial` / `original_size_chars` 字段**;重启后 grep 同样。
+7. **UI 接线（Deskop App 端到端）**：
+   - Setup 面板切换 auto → manual → agent_config.json 同步更新 → AgentLoop 行为相应变化。
+   - 输入框 usage 弹出菜单点击"Tool results" / "Summary" 两个独立按钮 → 触发对应 compress API → history 状态变化。
+8. **CLI 端到端（C4d 必跑）**：
+   - `acowork compress tool_result --session abc-123` → Gateway IPC → AgentLoop channel → history 中 tool_result 被压缩
+   - `acowork compress summary --session abc-123` → 触发 L2 摘要
+   - `acowork status --session abc-123` → 返回压缩条数
+   - session 不存在 → CLI 返回非零退出码 + 错误信息
+   - Gateway 未运行 → CLI 返回连接错误信息
+   - 多次连续调用 → channel buffer 累加（不丢请求）
+9. **provider 兼容性**：
    - 分别用 Anthropic / OpenAI / Ollama 三种 provider 跑测试 1，确认无 protocol 错误。
 
 ### 回归测试
@@ -847,18 +1508,32 @@ pub struct RuntimeConfigOverrides {
 
 ## 迁移路径
 
-### Phase 1（C1-C2）：基础设施
+### Phase 1（C1）：核心压缩函数 + 删除 truncate
 
-**目标**：在不动主流程的前提下，建立 `compress_tool_results` 函数和 JSONL metadata schema。
+**目标**：在不动主流程的前提下，建立 `compress_tool_results` 函数 + 删除 `truncate_large_messages` + 替换全部调用点。
 
 **验证**：
 - `cargo test --workspace` 通过
-- 新增单测全部通过
-- 现有 JSONL 写入路径行为不变（metadata 新字段缺省 false，序列化输出兼容）
+- `compress_tool_results` 单测覆盖阈值边界 / 幂等性 / role 过滤
+- 删除 `truncate_large_messages` 后所有调用点替换编译通过
+- 现有 history 单测（`emergency_trim` / `compact_via_llm` 等）继续通过
 
-**风险**：低。仅新增函数和 schema 字段。
+**风险**：中。`truncate_large_messages` 是 L1/L2/L3 多路径调用，删除后调用点替换必须 review 完整。
 
-### Phase 2（C3）：transient 通道 + context_recall
+**回滚方案**：C1 单独 revert，所有 truncate 调用点回滚。
+
+### Phase 2（C2）：persist 简化
+
+**目标**：`persist_and_emit_tool_results` 简化为透传，删除 hard threshold 配置。
+
+**验证**：
+- JSONL 写入行为简化（仅 `tool_name` / `tool_call_id`,**不**写 `compressed` / `partial` / `original_size_chars`）
+- 旧 JSONL 缺字段正常读取
+- `RuntimeConfigOverrides` 解析 `tool_result_hard_threshold_chars` 不再 panic（兼容老 runtime 推送）
+
+**风险**：低。仅 schema 收紧。
+
+### Phase 3（C3a → C3b）：transient 通道 + context_recall
 
 **目标**：tool 执行管线支持 transient-return，新增 `context_recall` 内置工具。
 
@@ -871,27 +1546,73 @@ pub struct RuntimeConfigOverrides {
 
 **回滚方案**：C3 拆为 C3a（仅 `ToolResult.transient` 字段 + 主循环支持）+ C3b（`context_recall` 工具注册）。若 C3a review 不通过，先回滚 C3b 单独发布。
 
-### Phase 3（C4）：触发点接入
+### Phase 4（C4a → C4b → C4c）：触发档位拆分 + manual 入口 + Restorer + 文档
 
-**目标**：四个触发点接入 L0 压缩。
+C4 拆为三个子 commit 顺序发布：
+
+#### C4a：配置层 + 触发逻辑前置（最小可测）
+
+**目标**：新增 `CompressionMode` 枚举 + 配置字段 + `tool_results_excluding_recent` 辅助函数 + `tool_result_keep_recent_n` 配置项。
 
 **验证**：
+- `CompressionMode` 序列化 / 反序列化（`"auto"` / `"manual"` / 缺省）
+- `agent_config.json` 四个新字段解析（包括 `tool_result_keep_recent_n`，默认 3）
+- `tool_results_excluding_recent(n)` 返回除最近 n 条外的所有 tool_result（按 history 逆序扫描）
+- `tool_result_keep_recent_n` 三级 fallback 正确：RuntimeConfigOverrides → agent_config → 代码默认 3
+
+**风险**：低。仅配置层。
+
+#### C4b：事件触发改造 + manual 入口
+
+**目标**：主循环接入 `manual_compress_rx` channel；todos / assistant / persist 三个事件触发点加 mode 判断；Gateway API 暴露 `POST /compress/tool_result` / `/compress/summary`。
+
+**验证**：
+- auto 模式：todos / assistant / persist 三个事件都触发 L0 压缩
+- manual 模式：三个事件全部跳过；channel drain 生效
+- budget 兜底（fallback / pre_trim）：两档都生效
+- Gateway API 异步注入 channel；session 找不到返回 404
+- `manual_compress_rx` 满 / 断 / send 失败 单测
+
+**风险**：中。涉及主循环事件流 + 新增 channel。
+
+**回滚方案**：C4b 单独 revert；C4a / C4c 不受影响（独立可 build）。
+
+#### C4c：Deskop App UI 接线
+
+**目标**：setup 面板新增 "Tool result compression" radio；输入框 usage 弹出菜单新增 "Tool results" / "Summary" 两个按钮。
+
+**验证**：
+- setup 面板切换 auto / manual → agent_config.json 同步更新 → AgentLoop 行为相应变化
+- 按钮点击 → Gateway API → 完成后前端 polling 状态反馈压缩条数
+- 两种 mode 下按钮行为一致（auto 模式按钮也可点）
+
+**风险**：低。纯 UI 接线；不影响后端行为。
+
+#### C4d：CLI 手动压缩入口
+
+**目标**：新增 `acowork compress tool_result --session <id>` / `acowork compress summary --session <id>` 两个子命令；通过 Gateway IPC 注入 `manual_compress_tx`，与 Gateway API 共享 channel 路径。
+
+**验证**：
+- `acowork compress tool_result --session abc-123` → Gateway IPC → AgentLoop `manual_compress_rx` → drain 时执行 `compress_tool_results` → 状态可在 `acowork status --session abc-123` 查询
+- 同理 `acowork compress summary` → 触发 `compact_via_llm`
+- session 不存在 → CLI 返回非零退出码 + 错误信息
+- Gateway 未运行 → CLI 返回连接错误信息
+- 多次连续调用 → channel buffer 累加（不丢请求）
+
+**风险**：低。CLI 是 thin wrapper；后端逻辑已由 C4b 覆盖。
+
+**回滚方案**：C4d 单独 revert；不影响 C4a/C4b/C4c。
+
+#### 整体 Phase 4 验证
+
 - todos 完成事件单元测试 + 集成测试
 - pre_trim 整合后 token 计数正确性
 - compact fallback 路径压测（模拟 200KB tool result × 5 条）
-
-**风险**：低。每个触发点改动局部。
-
-### Phase 4（C5）：Restorer + 文档
-
-**目标**：冷启动路径兼容新旧 JSONL，文档完整。
-
-**验证**：
-- Restorer 单测 + 集成测试
+- Restorer 单测 + 集成测试（含 mode 字段不写入 JSONL + restore 后 in-memory 由规则正确派生 + `name` 保持原 tool_name）
+- **grep 验证 JSONL schema 收窄**：session 任意时刻 grep JSONL,**不存在 `compressed` / `partial` / `original_size_chars` 任何字段**
+- **配置变更回归**：修改 `tool_result_soft_threshold_chars` 配置后,旧 session restore 自动按新规则派生——验证 0 migration 路径
 - ADR-010 §"明确放弃的策略" 表更新到位
-- 03-agent-runtime.md / 12-tool-system.md / 15-conversation-persistence.md 三篇文档同步
-
-**风险**：低。
+- 03-agent-runtime.md / 12-tool-system.md / 15-conversation-persistence.md / 17-gateway-api.md 四篇文档同步
 
 ---
 
@@ -899,72 +1620,94 @@ pub struct RuntimeConfigOverrides {
 
 ### 正面
 
-1. **window 利用率显著提升**：单条 200KB 的 `content_search` 在 in-memory 从 ~50K tokens 降到 ~38 tokens（99.9% 节省）。典型多 grep 场景下，LLM 摘要触发频率从每 session 1-2 次降到 0-1 次。
+1. **window 利用率温和提升,不牺牲 LLM 上下文质量**(2026-07-10 修订):语义边界(todos 完成 / assistant 长消息结束)清理**较旧** tool_result,**保留最近 N 条 raw**(N 来自 `tool_result_keep_recent_n` 配置,默认 3)——LLM 当前推理依赖的近期上下文完整保留;单条 200KB 的旧 `content_search` 会被 placeholder 化(从 ~50K tokens 降到 ~22 tokens,99.95% 节省),但**最近 N 条 tool_result 仍以 raw 状态供 LLM 直接推理**。典型多 grep 场景下,LLM 摘要触发频率从每 session 1-2 次降到 0-1 次;LLM **不需要**为查看刚调用的 tool result 多一次 `context_recall` round-trip。
+1a. **N 可调,适配不同工作流**(2026-07-10 新增):`tool_result_keep_recent_n` 配置项让 agent / 用户根据 tool 密度调整保留窗口:
+   - **skill 阶段式密集调用**(编程 agent 多 grep / 多 file_read):`N=3` 默认即可,保护每个阶段的近期上下文
+   - **稀疏单步查询**(轻量工具查询 agent):`N=0` 更激进,全部压缩以最大化 window 利用率
+   - **多文件并行读取**(深度调研):`N=5-10` 更大窗口,避免 LLM 在文件间来回 recall
+   - 配置层级 RuntimeConfigOverrides → agent_config → 代码默认 3,无需重启 runtime 即可调整;不同 skill / 不同 session 可独立配置
 2. **JSONL 不丢失信息**：所有 tool result 原文永久保留，回放 / 审计 / `context_recall` 都可取回。**这是 ADR-010 否决 `fold_tool_results` 的根本原因，本 ADR 通过"占位符 + 召回"绕开这个否决**。
-3. **LLM 摘要成本下降**：L2 触发频率降低，对应远端 LLM 调用次数下降，按每 session 1 次摘要节省 ~$0.02 估算，大规模部署有可观成本节省。
-4. **todos 串行场景最优**：每个 todo 完成时主动清理上阶段数据，不需要等 FIFO 或 L2 触发。这是 LLM 主动行为驱动的（todo 完成），不是被动等窗口满。
-5. **协议层无感**：Anthropic / OpenAI / Ollama 三大 provider 全部兼容，无需 provider 侧改动。
-6. **向后兼容**：旧 JSONL 不带 metadata 字段正常 restore；旧 runtime 不升级也不影响 JSONL schema（仅多写 metadata，老 reader 忽略）。
-7. **可观测性提升**：JSONL metadata 新增 `compressed` / `partial` / `original_size_chars` 三个字段，便于后续做 session 统计、压缩率分析、cost dashboard。
+3. **职责清晰，单一不变量**：tool 自己控大小 + compress 层只 placeholder + LLM 自主决定是否 recall。三层职责互不污染，新增 tool / 调整阈值时不需要跨层修改。
+4. **LLM 摘要成本下降**：L2 触发频率降低，对应远端 LLM 调用次数下降，按每 session 1 次摘要节省 ~$0.02 估算，大规模部署有可观成本节省。
+5. **todos 串行场景最优**：每个 todo 完成时主动清理上阶段数据，不需要等 FIFO 或 L2 触发。这是 LLM 主动行为驱动的（todo 完成），不是被动等窗口满。
+6. **`truncate_large_messages` 删除了**（净减 45 行 LOC）：旧 L3 fallback 中的"单条 msg 超过 budget/4 时 prefix-truncate"逻辑在 L0 placeholder 之后基本失效，统一走 placeholder 路径是更通用的方案。
+7. **JSONL schema 收窄**：删除 `partial` / `original_size_chars` 字段，schema 更简单、向后兼容性更好（缺省 false 时老 reader 无影响）。
+8. **向后兼容**：旧 JSONL 不带 metadata 字段正常 restore；新 JSONL 与旧 JSONL schema 完全一致，0 migration 成本。
+9. **持久化层职责清晰**（核心原则 #6 落地收益）：JSONL 只存 ground truth + 必要的协议元数据（`tool_name` / `tool_call_id`），**不**承载运行时衍生状态（`compressed` / `partial` / `original_size_chars` 全部不写入）。Session 重启、threshold 变更、规则升级——全部 0 migration；与 L2 LLM 摘要 / L3 emergency_trim 在持久化策略上完全对称；`name` 字段保持 tool 原始名字不被压缩函数污染，LLM 协议层 tool_use.name ↔ tool_result.name 一致性自然成立。
+10. **协议层零特殊处理**：不再有 hard threshold 截断 → 不需要处理 provider 100KB 限制余量，零额外协议验证成本。
 
 ### 负面
 
 1. **新增 tool surface**：每个 agent 都暴露 `context_recall` tool，LLM 在不需要时也可能误调。**缓解**：tool description 明确写"仅在 placeholder 出现且确实需要原文时调用"，并放在 LLM 训练语料中较常见的 "memory_*" 风格命名空间。
 2. **transient 通道引入主循环复杂度**：`ToolResult.transient` 字段需要在 tool 执行管线、history append、conversation append、build_chat_request 四处协同。**缓解**：C3 单测覆盖完整链路；主循环 review 重点关注。
-3. **JSONL 体积微增**：metadata 新增 3 个字段，每条 ~50-100 bytes，单 session 累积可忽略。
-4. **todos 简化方案不精确**：v1 用 "最近 N=5 条 tool result" 替代 per-todo 窗口，可能误压或漏压。**缓解**：N 值可配 + 后续有真实数据后再升级为精细窗口。
-5. **JSONL 流式读取性能**：`context_recall` 在大量 tool result 场景下需要扫整段 JSONL 找指定 id。**缓解**：先全文件扫一遍建立 `tool_call_id → (offset, line)` 索引（在 `ConversationWriter` 维护 memory-side 索引）；或者用一次 BufReader 顺序扫描 + HashSet 命中即停（当前设计）。
+3. **todos 简化方案不精确**：v1 用 "最近 N 条 tool result" 替代 per-todo 窗口，可能误压或漏压。**缓解**：N 值已配(`tool_result_keep_recent_n`)+ 后续有真实数据后再升级为精细窗口。
+4. **JSONL 流式读取性能**：`context_recall` 接收 `tool_call_id[]`，在大量 tool result 场景下需要扫 JSONL 按 `metadata.tool_call_id` 命中匹配 entry。**缓解**：用一次 BufReader 顺序扫描 + HashSet 命中即停（当前设计）；后续可在 `ConversationWriter` 维护 `tool_call_id → (entry.id, byte_offset)` 内存侧索引，把单次 O(N) 降到 O(k) + 二分定位。
+5. **MCP 工具输出控制是另一个独立 ADR 范畴**：本 ADR 不解决 MCP tool result 失控问题，但提供了 `compress_tool_results` 这一针对 tool_result 的机制，未来如果 MCP 工具输出过大，至少 in-memory 不会被撑爆（只是 JSONL 仍会偏大）。
+6. **`compress_tool_results` 仅支持 tool_result（永久范围）**：其他 large message（User/Assistant 长文本）由 L2 LLM 摘要 + L3 emergency_trim 兜底。placeholder + recall 不是"覆盖所有 large message"的机制，只是上下文压缩的一个环节。
 
 ### 与 ADR-010/011 的关系
 
 | 关系 | 说明 |
 |------|------|
 | **扩展而非替代** | L1/L2/L3 三阶段策略完全保留；本 ADR 新增 L0 作为 70% 之前的预清理 |
-| **保留 ADR-010 §"明确放弃的策略"** | 纯截断的 `fold_tool_results` 仍应放弃，本 ADR 用占位符 + 召回代替 |
+| **重新引入 ADR-010 §"明确放弃的策略"中折叠策略** | 纯截断的 `fold_tool_results` 仍应放弃；但占位符 + 召回的"程序化压缩"是升级版，绕开"截断位置不可控"的根本缺陷 |
+| **删除 `truncate_large_messages`（旧 L3 fallback）** | 与 placeholder 同原理，统一走新路径；删除 45 行 LOC + 调用点替换 |
 | **保留 ADR-011 §"摘要即蒸馏"** | L2 LLM 摘要的输入仍是完整 history（含 placeholder），摘要文本仍写入 Grafeo；占位符字符串对摘要 LLM 是合法的语义输入 |
 | **保留 ADR-011 §"Memory Recall 保持不变"** | `memory_recall` 仍只查 Grafeo，不做 JSONL 检索；本 ADR 的 `context_recall` 是 JSONL 侧的精确按 id 召回，与 memory_recall 职责正交 |
 | **JSONL 与 Grafeo 职责** | JSONL：session 内短期数据 + 精确按 id 召回；Grafeo：跨 session 长期记忆 + 语义检索。两者通过 L2 摘要串联（摘要文本写入 Grafeo），互不干扰 |
+
+### 净代码影响
+
+- **新增**：~1315 LOC（含 `compress_tool_results` 180 + `context_recall` 250 + transient 通道 65 + 触发点（C4a/C4b/C4c）400 + Restorer 10 + Gateway API（HTTP+IPC）150 + Deskop App UI 125 + **CLI（C4d）245** + 文档 90 + 杂项 30 + 历史辅助 + N 配置 20 + CLI 测试 30）
+- **删除**：~158 LOC（`truncate_large_messages` 45 + persist 阈值分支 50 + partial 处理 ~30 + hard threshold 字段 8 + Restorer 中读 `metadata.compressed` / 写 `name` 标记的旧逻辑 ~15 + 杂项 10）
+- **净增**：~1137 LOC（比原估算少 ~10 行——Restorer 简化,不再写 `name` 标记;JSONL 不新增字段;整体略减）。其中 ~300 行是 `context_recall` 工具实现 + 单测，~290 行是 C4a/C4b/C4c 触发点 / 模式判断 / manual 入口 / UI 接线，~150 行是 Gateway API（HTTP+IPC），~125 行是 Deskop App UI，~245 行是 C4d CLI 接入。
 
 ---
 
 ## Open Questions（需要讨论决定）
 
-1. **C2 的 JSONL metadata 是否对所有 tool result 写入 `compressed: false`，还是仅当被压缩时写入 `true`？**
-   - 方案 A：所有 tool_result 都写 `compressed: false` 显式字段（schema 更一致，restorer 总是读这个字段）
-   - 方案 B：仅当压缩时才写 `compressed: true`（更紧凑，未压缩 entry 的 metadata 不变）
-   - **倾向 B**：保持向后兼容性最大（现有 JSONL entry 已经是这种"缺省 = false"语义）。
-   - **需要大鱼确认**。
+1. **todos / assistant 事件触发的压缩范围 N 是否合理？**
+   - **已确定**：N = 3 是**默认值**,N 值可配(`tool_result_keep_recent_n`,同时存在于 `RuntimeConfigOverrides` 与 `agent_config.json`)。
+   - **理由**：N=3 是 ship-with-fluency 的经验值(典型 skill 阶段式工具调用深度),**不**是经过数据调优的最优值;开放为配置项让 agent / 用户根据真实工作流调优,无需升级 runtime。所有触发点(事件 / budget / restore / manual)统一适用同一 N 规则,详见核心原则 #7。未来根据真实数据可调默认值为 5 / 2 等。
 
-2. **`context_recall` 是否需要在 partial=true 时拒绝返回？**
-   - 方案 A：返回截断版本 + 标记 `partial=true`，让 LLM 决定是否需要重跑原 tool
-   - 方案 B：直接报错，让 LLM 改用 `shell` / `content_search` 等原 tool 重跑
-   - **倾向 A**：保留信息给 LLM，符合"信息零丢失"原则。
-   - **需要大鱼确认**。
+2. **`compress_tool_results` 是否扩展到 User/Assistant role？**
+   - **已确定**：v1 永久仅 `MessageRole::Tool`。
+   - **不预留扩展接口**：未来如需扩展开 **ADR-033（暂定）** 专门设计通用 message id + 跨 role placeholder 协议。
+   - **理由**：compress_tool_results 只是上下文压缩的一个环节；其他 large message 由 L2 LLM 摘要（80%）+ L3 emergency_trim（95%）兜底；不需要"覆盖所有 large message"。
 
-3. **todos 完成触发的压缩范围 N=5 是否合理？**
-   - 太小（<3）：可能漏压，触发频率高
-   - 太大（>20）：可能误压掉下一阶段仍需���的数据
-   - **倾向 N=5**：经验值，后续看真实数据调整；可配。
-   - **需要大鱼确认**。
+3. **`context_recall` 是否在 LLM 调用时记录到 Grafeo 经历层？**
+   - **已确定**：方案 B（**不**记录）。
+   - **理由**：transient 设计的初衷就是"不污染 history"，Grafeo 写入也应保持一致；recall 频率统计可走 telemetry / 遥测层（不在 Grafeo）。
 
-4. **placeholder 字符串的语言是否需要 i18n？**
-   - v1 仅英文模板（决策摘要已定）
-   - i18n 后续单独 ADR（不在本 ADR 范围）
-   - **已确定**，无需决策。
+4. **未来 MCP 工具输出控制 ADR 何时启动？**
+   - 本 ADR 不涉及；用户已确认独立处理
+   - 建议在 `compress_tool_results` 落地（让 in-memory 至少不爆）之后再启动 MCP ADR
+   - **已确定，无需决策**。
 
-5. **`context_recall` 是否限制为仅本 agent 可调用？**
-   - 当前设计：所有 agent 共享同一 JSONL 命名空间（按 session_id 隔离）
-   - 跨 agent recall 不应该发生（每个 agent 有自己的 session）
-   - **无需处理**：tool 自动绑定当前 agent 的 session_file_path，跨 agent 不可能。
-   - **仅确认，无需决策**。
+5. **manual 入口是否做 CLI 版本？**
+   - **已确定**：v1 **做** CLI 版本（C4d 子 commit）。
+   - **理由**：CLI 是高级用���的常用入口（脚本化 / 自动化场景）；与 Gateway API 共享 channel 路径，零新增后端复杂度。
+   - **设计**：`acowork compress tool_result --session <id>` / `acowork compress summary --session <id>` 两个子命令；通过 Gateway IPC（Unix Socket / Named Pipe）注入 `manual_compress_tx`。
+
+6. **前端"压缩上下文"按钮的 UX 形式？**
+   - **已确定**：方案 B（**两个独立按钮**："Tool results" / "Summary"）。
+   - **理由**：简单直接，符合 input area 简约风格；展开子菜单层级多、误触风险高。
+
+7. **assistant 长消息阈值 2KB 是否合适？**
+   - **已确定**：2KB（与 placeholder 软阈值一致）。
+   - **未来根据数据调整**：观察 90% assistant 响应长度分布后可能调到 1KB 或 3KB。
+
+---
+
+**Open Questions 全部收敛**（#1/#2/#3/#4/#5/#6/#7 均"已确定"），本 ADR 进入可执行状态。
 
 ---
 
 ## 参考
 
 - `core/acowork-runtime/src/agent/loop_context.rs` — 现有压缩策略总入口
-- `core/acowork-runtime/src/agent/history.rs:481-523` — `truncate_large_messages`（参考截断 marker 风格）
-- `core/acowork-runtime/src/agent/loop_context.rs:877-977` — `trim_tool_results_for_context`（参考 UTF-8 safe cut）
+- `core/acowork-runtime/src/agent/history.rs:481-523` — `truncate_large_messages`（**C1 删除**，迁移到 `compress_tool_results`）
+- `core/acowork-runtime/src/agent/loop_context.rs:877-977` — `trim_tool_results_for_context`（保留作 L3 兜底）
 - `core/acowork-runtime/src/agent/loop_tools.rs:849-865` — `persist_and_emit_tool_results`（C2 改造点）
 - `core/acowork-runtime/src/agent/session/restorer.rs:286-318` — tool_result restore（C5 改造点）
 - `core/acowork-runtime/src/tools/builtin/memory_recall.rs` — 现有 builtin tool 的样板（C3 仿写）
