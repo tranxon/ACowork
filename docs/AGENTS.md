@@ -15,7 +15,12 @@ docs/
 │   ├── prd.md               # 平台需求定义
 │   ├── prd-ui-ux.md         # Desktop App UI/UX 需求
 │   ├── RAG-protocol-guide.md# 标准查询协议指南
-│   └── session-diagnostic.md# Session 管理诊断报告
+│   ├── session-diagnostic.md# Session 管理诊断报告
+│   └── protocols/           # API 协议参考文档（面向集成方）
+│       ├── README.md        # 协议总览 / 纲要
+│       ├── http.md          # Gateway HTTP REST API
+│       ├── grpc.md          # Gateway ↔ Runtime gRPC
+│       └── websocket.md     # 聊天流式事件 WebSocket
 ├── en/                      # English docs
 │   └── mcp-server-research.md
 ├── design/
@@ -75,6 +80,7 @@ docs/
 | Gateway components     | `module-design/zh/03-gateway.md`  |
 | Memory (Grafeo)        | `module-design/zh/04-grafeo.md`   |
 | Implementation roadmap | `plan/zh/plan-overview.md`        |
+| API 协议参考（HTTP / gRPC / WebSocket） | `zh/protocols/README.md` |
 
 ## CONVENTIONS (THIS DIR)
 
