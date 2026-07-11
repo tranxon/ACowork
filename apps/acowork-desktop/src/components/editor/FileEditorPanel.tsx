@@ -22,6 +22,7 @@ import { HtmlPreviewView } from "./HtmlPreviewView";
 import type { IDisposable } from "monaco-editor";
 import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
+import { SymbolSearchPanel } from "./SymbolSearchPanel";
 import { Tooltip } from "../common/Tooltip";
 
 // ── LSP Install Hints ─────────────────────────────────────────────────
@@ -388,6 +389,7 @@ export function FileEditorPanel({ width }: { width: number }) {
     >(null);
     const [showGoToFile, setShowGoToFile] = useState(false);
     const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+    const [showSymbolSearch, setShowSymbolSearch] = useState(false);
     const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
     const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
     const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -740,6 +742,25 @@ export function FileEditorPanel({ width }: { width: number }) {
             run: () => {
                 console.log("[GlobalSearch] addAction fired — opening panel");
                 setShowGlobalSearch(true);
+            },
+        });
+
+        // Ctrl+T / Cmd+T — Go to Symbol in Workspace (LSP workspace/symbol).
+        // Mirrors VS Code's Ctrl+T exactly: opens a `#`-prefixed input box
+        // backed by LSP semantic search (functions, classes, variables, …).
+        // KeyCode.KeyT = 44 in monaco-editor 0.55.x.
+        // Note: also intercept Ctrl+Shift+T via the same action to avoid
+        // browser re-opening of recently-closed tabs.
+        editor.addAction({
+            id: "acowork.symbolSearch",
+            label: "Go to Symbol in Workspace",
+            keybindings: [
+                // eslint-disable-next-line no-bitwise
+                monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT,
+            ],
+            run: () => {
+                console.log("[SymbolSearch] addAction fired — opening panel");
+                setShowSymbolSearch(true);
             },
         });
 
@@ -1591,11 +1612,22 @@ export function FileEditorPanel({ width }: { width: number }) {
                 <GlobalSearchPanel
                     agentId={activeFile.agentId}
                     workspaceId={activeFile.workspaceId}
-                    lspClient={lspClient}
-                    lspStatus={lspStatus}
-                    workspaceRoot={workspaceRoot}
                     onClose={() => {
                         setShowGlobalSearch(false);
+                        editorRef.current?.focus();
+                    }}
+                />
+            )}
+
+            {/* Symbol Search panel (Ctrl+T) — Go to Symbol in Workspace (LSP) */}
+            {showSymbolSearch && activeFile && (
+                <SymbolSearchPanel
+                    agentId={activeFile.agentId}
+                    workspaceId={activeFile.workspaceId}
+                    lspClient={lspClient}
+                    workspaceRoot={workspaceRoot}
+                    onClose={() => {
+                        setShowSymbolSearch(false);
                         editorRef.current?.focus();
                     }}
                 />
