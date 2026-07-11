@@ -738,6 +738,8 @@
     "locateDisabled": { "no-file": "No file is open", "loading": "File is still loading", "url-preview": "URL previews are not part of the workspace", "wrong-agent": "This file belongs to a different agent", "wrong-workspace": "This file belongs to a different workspace" },
     "copy": "Copy",
     "previewBadge": "Preview",
+    "openPreview": "Preview",
+    "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",
     "previewDoubleClickHint": "Double-click to open in editor",
     "loadingUrl": "Loading page...",

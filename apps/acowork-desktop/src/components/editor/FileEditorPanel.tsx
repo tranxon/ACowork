@@ -368,6 +368,7 @@ export function FileEditorPanel({ width }: { width: number }) {
     const closeOthers = useFileEditorStore((s) => s.closeOthers);
     const closeAllFiles = useFileEditorStore((s) => s.closeAllFiles);
     const refreshFile = useFileEditorStore((s) => s.refreshFile);
+    const openPreview = useFileEditorStore((s) => s.openPreview);
     const addAttachedContext = useChatStore((s) => s.addAttachedContext);
     const getActiveSessionId = useChatStore((s) => s.getActiveSessionId);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
@@ -1295,6 +1296,14 @@ export function FileEditorPanel({ width }: { width: number }) {
         closeAllFiles();
     }, [openFiles, cleanupClosedFiles, closeAllFiles]);
 
+    const handleTabPreview = useCallback((file: OpenFile) => {
+        setTabContextMenu(null);
+        if (file.kind !== "file") return;
+        // openPreview is idempotent: if the file is already open it activates it
+        // and switches the mode in place, otherwise it opens it as a preview tab.
+        openPreview(file.agentId, file.workspaceId, file.relPath);
+    }, [openPreview]);
+
     const confirmBatchClose = useCallback(() => {
         if (!batchCloseRequest) return;
         // Re-resolve the actual OpenFile objects from the latest store state
@@ -1652,6 +1661,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                         const showFileActions = target.kind === "file";
                         const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
                         const canRefresh = showFileActions && !target.loading;
+                        // Preview is only useful for files that have a preview view
+                        // (Markdown / HTML), and only when the tab is currently in
+                        // source mode — switching preview → preview would be a no-op.
+                        const canPreview = showFileActions
+                            && target.mode === "edit"
+                            && /\.(md|html?)$/i.test(target.fileName);
                         return (
                             <>
                                 {showFileActions && (
@@ -1673,6 +1688,16 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         >
                                             <RefreshCw className="context-menu-item__icon" />
                                             {t("fileEditor.refresh")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => canPreview && handleTabPreview(target)}
+                                            disabled={!canPreview}
+                                            className="context-menu-item"
+                                            title={canPreview ? undefined : t("fileEditor.previewDisabled")}
+                                        >
+                                            <Eye className="context-menu-item__icon" />
+                                            {t("fileEditor.openPreview")}
                                         </button>
                                         <div className="context-menu-divider" />
                                     </>
