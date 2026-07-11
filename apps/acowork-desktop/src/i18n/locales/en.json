@@ -109,7 +109,7 @@
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
     "compressContext": "compact context",
-    "compressTools": "Compress Tools",
+    "compressTools": "Compress tools only",
     "compressSummary": "Compress Summary"
   },
   "onboarding": {
@@ -844,6 +844,7 @@
   },
   "tools": {
     "memory_recall": { "running": "Recalling", "done": "Recalled" },
+    "context_recall": { "running": "Recalling context", "done": "Context recalled" },
     "memory_store": { "running": "Storing", "done": "Stored" },
     "http_request": { "running": "Requesting", "done": "Requested" },
     "web_fetch": { "running": "Fetching", "done": "Fetched" },

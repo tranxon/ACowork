@@ -196,7 +196,9 @@
     "ariaLabel": "上下文用量",
     "compressing": "壓縮中...",
     "agentRunning": "Agent 執行中",
-    "compressContext": "壓縮上下文"
+    "compressContext": "壓縮上下文",
+    "compressTools": "只壓縮工具結果",
+    "compressSummary": "壓縮整個上下文"
   },
   "agentList": {
     "searchPlaceholder": "搜尋 Agent...",
@@ -768,6 +770,7 @@
   },
   "tools": {
     "memory_recall": { "running": "回憶中", "done": "已回憶" },
+    "context_recall": { "running": "回溯上下文中", "done": "已回溯上下文" },
     "memory_store": { "running": "記憶中", "done": "已記憶" },
     "http_request": { "running": "請求中", "done": "已請求" },
     "web_fetch": { "running": "取得網頁", "done": "已取得網頁" },

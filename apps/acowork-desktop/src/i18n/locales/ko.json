@@ -196,7 +196,9 @@
     "ariaLabel": "컨텍스트 사용량",
     "compressing": "압축 중...",
     "agentRunning": "Agent 실행 중",
-    "compressContext": "컨텍스트 압축"
+    "compressContext": "컨텍스트 압축",
+    "compressTools": "도구 결과만 압축",
+    "compressSummary": "전체 컨텍스트 압축"
   },
   "agentList": {
     "searchPlaceholder": "Agent 검색...",
@@ -768,6 +770,7 @@
   },
   "tools": {
     "memory_recall": { "running": "기억 회상 중", "done": "기억 회상 완료" },
+    "context_recall": { "running": "컨텍스트 회상 중", "done": "컨텍스트 회상 완료" },
     "memory_store": { "running": "저장 중", "done": "저장됨" },
     "http_request": { "running": "요청 중", "done": "요청됨" },
     "web_fetch": { "running": "웹 페이지 가져오는 중", "done": "웹 페이지 가져옴" },
@@ -909,3 +912,4 @@
     "refreshing": "새로고침 중..."
   }
 }
+

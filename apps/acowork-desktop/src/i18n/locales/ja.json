@@ -198,7 +198,9 @@
     "ariaLabel": "コンテキスト使用量",
     "compressing": "圧縮中...",
     "agentRunning": "Agent実行中",
-    "compressContext": "コンテキストを圧縮"
+    "compressContext": "コンテキストを圧縮",
+    "compressTools": "ツール結果のみ圧縮",
+    "compressSummary": "コンテキスト全体を圧縮"
   },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",
@@ -770,6 +772,7 @@
   },
   "tools": {
     "memory_recall": { "running": "記憶を思い出し中", "done": "記憶を思い出した" },
+    "context_recall": { "running": "コンテキストを思い出し中", "done": "コンテキストを思い出した" },
     "memory_store": { "running": "保存中", "done": "保存済み" },
     "http_request": { "running": "リクエスト中", "done": "リクエスト済み" },
     "web_fetch": { "running": "ウェブページ取得中", "done": "ウェブページ取得済み" },

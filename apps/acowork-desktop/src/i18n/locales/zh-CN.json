@@ -199,8 +199,8 @@
     "compressing": "压缩中...",
     "agentRunning": "Agent 运行中",
     "compressContext": "压缩上下文",
-    "compressTools": "压缩工具结果",
-    "compressSummary": "压缩上下文"
+    "compressTools": "只压缩工具结果",
+    "compressSummary": "压缩整个上下文"
   },
   "agentList": {
     "doubleClickToStart": "双击启动",
@@ -792,6 +792,7 @@
   },
   "tools": {
     "memory_recall": { "running": "回忆中", "done": "已回忆" },
+    "context_recall": { "running": "回溯上下文中", "done": "已回溯上下文" },
     "memory_store": { "running": "记忆中", "done": "已记忆" },
     "http_request": { "running": "正在请求", "done": "已请求" },
     "web_fetch": { "running": "获取网页", "done": "已获取网页" },
