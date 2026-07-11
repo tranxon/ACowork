@@ -395,8 +395,24 @@ export function ChatPanel() {
     scrollSnapshot.scrollOffset > 0
     ? scrollSnapshot.scrollOffset
     : undefined;
-  // DIAGNOSTIC
-  console.log("[CP:snapshot-read]", { currentScrollKey, scrollSnapshot, sending, initialScrollOffset });
+  // DIAGNOSTIC — log only when the (key, sending, snapshot) signature actually
+  // changes, not on every render. ChatPanel re-renders frequently for many
+  // unrelated reasons (other state updates in parent stores), and a
+  // per-render log here flooded the console with hundreds of identical lines
+  // during the reload-resume investigation.  Snapshot is an object reference
+  // that may be recreated without changing values, so we compare via a
+  // JSON-encoded signature of the few fields that actually matter.
+  const snapshotSig = `${currentScrollKey}|${sending}|${scrollSnapshot?.pinnedToBottom ? 1 : 0}|${scrollSnapshot?.scrollOffset ?? ""}|${initialScrollOffset ?? ""}`;
+  const lastSnapshotSigRef = useRef("");
+  if (snapshotSig !== lastSnapshotSigRef.current) {
+    lastSnapshotSigRef.current = snapshotSig;
+    console.log("[CP:snapshot-read]", {
+      currentScrollKey,
+      scrollSnapshot,
+      sending,
+      initialScrollOffset,
+    });
+  }
 
   // Group consecutive messages for display
   // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
@@ -689,19 +705,34 @@ export function ChatPanel() {
 
   // Load messages when active session changes (from SessionPanel or createSession)
   useEffect(() => {
-    if (!currentSessionId || !selectedAgentId) return;
+    console.log("[ChatPanel] loadSessionMessages useEffect FIRE", {
+      currentSessionId,
+      selectedAgentId,
+      isInitialLoad: session.scope.current.isInitialLoad,
+      lastLoadedSessionId,
+    });
+
+    if (!currentSessionId || !selectedAgentId) {
+      console.log("[ChatPanel] early-return #1 (no currentSessionId/selectedAgentId)");
+      return;
+    }
 
     // Skip if this specific session is already being loaded (prevents duplicate requests).
-    if (session.scope.current.isInitialLoad === currentSessionId) return;
-
-    // Guard: only proceed if this session belongs to the current agent's session list.
-    const agentSession = useAgentStore
-      .getState()
-      .agents[selectedAgentId]?.sessions.find((s) => s.session_id === currentSessionId);
-    if (!agentSession) return;
+    if (session.scope.current.isInitialLoad === currentSessionId) {
+      console.log("[ChatPanel] early-return #2 (isInitialLoad === currentSessionId)");
+      return;
+    }
 
     // If this session was already loaded, skip reload
-    if (currentSessionId === lastLoadedSessionId) return;
+    if (currentSessionId === lastLoadedSessionId) {
+      console.log("[ChatPanel] early-return #4 (already loaded this session in this webview lifetime)");
+      return;
+    }
+
+    console.log("[ChatPanel] → will call loadSessionMessages", {
+      currentSessionId,
+      lastLoadedSessionId,
+    });
 
     // ADR-021 Phase 4: Use incremental load (pass pollLineNumber) so the
     // messages array is APPENDED to, never REPLACED.  This prevents a race

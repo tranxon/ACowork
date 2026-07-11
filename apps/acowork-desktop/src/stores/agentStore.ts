@@ -9,7 +9,7 @@ import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
 /** System Agent ID — always auto-started by Gateway */
-const SYSTEM_AGENT_ID = "com.acowork.system";
+export const SYSTEM_AGENT_ID = "com.acowork.system";
 
 // ══════════════════════════════════════════════════════════════════════════
 // AgentProfile types (moved from agentProfileStore.ts)
@@ -167,8 +167,6 @@ export interface AgentStorage {
   };
   /** Currently loading sessions for this agent */
   isLoading: boolean;
-  /** Remembers the last active session per agent (survives remount) */
-  rememberedSessionId: string | null;
   /** ADR-028: agent-scoped cumulative token totals — fallback data source
    *  for the Results Panel when the live `context_usage` WebSocket push
    *  hasn't fired yet (e.g. fresh Runtime with no LLM calls, or session
@@ -187,7 +185,6 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     sessionTitle: undefined,
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
-    rememberedSessionId: null,
     agentTokenTotals: null,
   };
 }
@@ -226,8 +223,6 @@ interface AgentStoreState {
   agents: Record<string, AgentStorage>;
   /** Currently selected agent ID — the "pointer" that UI uses to read agents[selectedAgentId]. */
   selectedAgentId: string | null;
-  /** True once the user has explicitly chosen an agent (suppresses auto-select). */
-  _userHasSelected: boolean;
   /** Loading flag for the master agent list */
   loading: boolean;
   /** Master list fetch error */
@@ -290,7 +285,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   agents: {},
   selectedAgentId: null,
-  _userHasSelected: false,
   loading: false,
   error: null,
   isSessionPanelOpen: false,
@@ -333,22 +327,58 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           }
         }
 
-        // Auto-select System Agent on initial load
+        // Auto-select: always pick the agent with the largest
+        // last_interaction_at.  All agents (including system) are equal —
+        // the backend owns the truth, the frontend just displays it.
+        // Fallback to list[0] (system per sort order) when nothing
+        // has ever been interacted with.
         let selId = state.selectedAgentId;
-        if (!selId && !state._userHasSelected && list.length > 0) {
-          const sys = list.find((a) => a.agent_id === SYSTEM_AGENT_ID);
-          selId = sys ? SYSTEM_AGENT_ID : list[0].agent_id;
+        if (!selId && list.length > 0) {
+          let bestId: string | null = null;
+          let bestTs = -1;
+          for (const a of list) {
+            const ts = a.last_interaction_at ? Date.parse(a.last_interaction_at) : -1;
+            if (!Number.isNaN(ts) && ts > bestTs) {
+              bestTs = ts;
+              bestId = a.agent_id;
+            }
+          }
+          selId = bestId ?? list[0].agent_id;
         }
 
         return { agents: next, selectedAgentId: selId, loading: false };
       });
+
+      // Trigger atomic session activation for the selected agent.
+      // Backend guarantees /latest-session always returns a session_id
+      // for every running agent.
+      const current = get();
+      if (current.selectedAgentId) {
+        current.selectAgent(current.selectedAgentId);
+      }
     } catch (e) {
       set({ error: String(e), loading: false });
     }
   },
 
   selectAgent: (id) => {
-    set({ selectedAgentId: id, _userHasSelected: true });
+    if (!id) return;
+    set({ selectedAgentId: id });
+
+    // 原子化：选 agent 时加载 latest session 并激活。
+    // switchSession 内部会调后端 /activate（拿到 model/provider/workspace）、
+    // 写入 session 元数据、拉取 session 列表。fetchSessionState 补上 context
+    // usage / todos。connectStream 和 loadModels 由 ChatPanel 的 useEffect
+    // 在 selectedAgentId 变化 + running && ready 时自动触发。
+    const chat = useChatStore.getState();
+    if (!chat.agentStates[id]?.activeSessionId) {
+      get().fetchLatestSession(id).then((latest) => {
+        if (!latest?.session_id) return;
+        get().switchSession(latest.session_id, id).then(() => {
+          useChatStore.getState().fetchSessionState(id, latest.session_id);
+        });
+      });
+    }
   },
 
   installAgent: async (packagePath) => {
@@ -644,8 +674,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     get().fetchSessions(agentId);
   },
 
-  saveSessionForAgent: (agentId: string, sessionId: string) => {
-    set((state) => patchAgent(state, agentId, { rememberedSessionId: sessionId }));
+  saveSessionForAgent: (_agentId: string, _sessionId: string) => {
+    // No-op: rememberedSessionId is no longer tracked client-side.
+    // The backend /latest-session endpoint is the source of truth
+    // for which session is "current", and selectAgent always fetches
+    // it fresh on mount / agent switch.
   },
 
   createSession: async (agentId: string) => {

@@ -561,6 +561,11 @@ impl SessionManager {
         self.sessions.insert(session_id.clone(), handle);
         tracing::info!(session_id = %session_id, "SessionManager: created new session");
 
+        // Every newly created session is the "latest" by definition.
+        // This powers /latest-session (used by selectAgent in the frontend),
+        // which must always return a valid session_id for running agents.
+        self.set_latest_session(session_id.clone(), None);
+
         // Initialize per-session workspace.
         // For resumed sessions, restore the persisted workspace_id from JSONL metadata.
         // New sessions default to last_active workspace (or agent home fallback).

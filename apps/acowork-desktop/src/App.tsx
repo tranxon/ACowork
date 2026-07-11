@@ -16,6 +16,7 @@ function App() {
   // (Rust backend survives reload) and Zustand persisted stores restore from
   // localStorage, so we can jump straight to AppLayout.
   const isRecoveryReload = sessionStorage.getItem("acowork_recovery_reload") === "1";
+  console.log("[App] boot branch selection", { isRecoveryReload });
 
   const [onboardingDone, setOnboardingDone] = useState(() => {
     return localStorage.getItem("acowork_onboarding") === "completed";

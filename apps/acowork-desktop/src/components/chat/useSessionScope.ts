@@ -127,6 +127,10 @@ export function useSessionScope(
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
+    console.log("[useSessionScope] reset-effect fire", {
+      currentSessionId,
+      prevSessionRef: prevSessionRef.current,
+    });
     if (currentSessionId === prevSessionRef.current) return;
 
     // Capture the previous value BEFORE overwriting so we can distinguish a
@@ -136,6 +140,9 @@ export function useSessionScope(
     prevSessionRef.current = currentSessionId;
 
     if (isFreshMount) {
+      console.log("[useSessionScope] fresh mount — no reset performed", {
+        currentSessionId,
+      });
       // Fresh mount: scope is already in default state (useRef(default)) and
       // useState values already hold their initial defaults.  No reset needed.
       // (Per-user-intent scroll state such as pinnedToBottom is owned OUTSIDE

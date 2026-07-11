@@ -42,14 +42,9 @@ async function initSessionForAgent(agentId: string): Promise<void> {
 
     if (!latestSession) return;
 
-    // Prefer the remembered session if it matches the latest;
-    // otherwise just use the latest session from the backend.
-    const rememberedSessionId =
-        useAgentStore.getState().agents[agentId]?.rememberedSessionId;
-    const targetSessionId =
-        rememberedSessionId === latestSession.session_id
-            ? rememberedSessionId
-            : latestSession.session_id;
+    // Backend /latest-session is the source of truth — no client-side
+    // rememberedSessionId needed.
+    const targetSessionId = latestSession.session_id;
 
     // Load the full session list before switching.  ChatPanel's
     // message-loading useEffect checks that the session exists in

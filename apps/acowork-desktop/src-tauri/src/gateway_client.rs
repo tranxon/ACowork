@@ -685,6 +685,9 @@ pub struct AgentListEntry {
     pub ready: bool,
     pub dev_mode: bool,
     pub debug_port: Option<u16>,
+    /// Last user interaction time (RFC 3339).  Drives the frontend auto-select
+    /// logic: on webview reload the agent with the largest value is selected.
+    pub last_interaction_at: Option<String>,
 }
 
 /// Agent detail response

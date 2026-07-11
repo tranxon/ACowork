@@ -346,7 +346,15 @@ pub(crate) async fn phase_b_init_session(
             .await?;
         sid
     } else {
-        session_manager.create_session().await?
+        let sid = session_manager.create_session().await?;
+        // Register the new session as "latest" so that /latest-session
+        // (used by the frontend's selectAgent → loadLatestSession flow)
+        // returns it immediately on the next query, even before any
+        // message is sent.  Without this, a freshly started agent with
+        // zero sessions on disk returns found:false / 404 and the
+        // frontend ChatPanel stays blank.
+        session_manager.set_latest_session(sid.clone(), None);
+        sid
     };
     tracing::info!(initial_session_id = %initial_session_id, "Initial session created");
 

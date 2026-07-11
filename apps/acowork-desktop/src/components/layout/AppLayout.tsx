@@ -70,6 +70,43 @@ export function AppLayout() {
   const hasOpenFiles = useFileEditorStore((s) => s.openFiles.length > 0);
   const fileWidthInitialized = useRef(false);
 
+  // [DEBUG] Mount diagnostic — print state immediately after webview reload
+  const mountLoggedRef = useRef(false);
+  useEffect(() => {
+    if (mountLoggedRef.current) return;
+    mountLoggedRef.current = true;
+    const a = useAgentStore.getState();
+    const c = useChatStore.getState();
+    const sid = a.selectedAgentId ?? "";
+    console.log("[AppLayout] MOUNT", {
+      recoveryReloadFlag: sessionStorage.getItem("acowork_recovery_reload"),
+      selectedAgentId: a.selectedAgentId,
+      activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
+      openSessionIds: c.agentStates[sid]?.openSessionIds ?? [],
+      knownAgents: Object.keys(a.agents),
+      sessionsForSelected: a.selectedAgentId ? (a.agents[a.selectedAgentId]?.sessions ?? []).map((s) => s.session_id) : null,
+    });
+  }, []);
+
+  // Ensure agents are fetched on mount (AgentList already does this via its
+  // own useEffect, but AppLayout may mount before AgentList, so we also
+  // trigger it here as a guard.  fetchAgents internally does auto-select +
+  // loadLatestSession, so no extra recovery logic is needed.)
+  const fetchedRef = useRef(false);
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    const store = useAgentStore.getState();
+    if (Object.keys(store.agents).length === 0) {
+      void store.fetchAgents().then(() => {
+        console.log("[AppLayout] initial fetchAgents complete", {
+          selectedAgentId: store.selectedAgentId,
+          knownAgents: Object.keys(store.agents),
+        });
+      });
+    }
+  }, []);
+
   // Refs to track latest panel widths for proportional window-resize scaling
   const fileWidthValueRef = useRef(fileWidth);
   fileWidthValueRef.current = fileWidth;
@@ -189,14 +226,27 @@ export function AppLayout() {
   // We retry up to 3 times with exponential backoff in case the
   // NSView hierarchy isn't ready yet when React first mounts.
   // Non-macOS: no-op.
+  //
+  // lastAppliedIsDarkRef guards against double-invocation: React StrictMode
+  // (dev only) and React 18 concurrent rendering can both run this effect
+  // twice for the same `isDark`.  The native `set_window_effect` is idempotent
+  // so this is not a correctness issue, but a duplicate call shows up in the
+  // console as `[vibrancy] set_window_effect(...) succeeded` twice and
+  // obscures the real boot-time signal.  We only skip when the previous run
+  // for this exact `isDark` value actually succeeded; failures do NOT update
+  // the ref so the retry path still works on the next attempt.
+  const lastAppliedIsDarkRef = useRef<boolean | null>(null);
   useEffect(() => {
     if (typeof navigator === "undefined" || !/Mac/i.test(navigator.userAgent)) return;
+    if (lastAppliedIsDarkRef.current === isDark) return;
 
     let cancelled = false;
     const tryApply = async (attempt: number) => {
       try {
         await invoke("set_window_effect", { isDark });
+        if (cancelled) return;
         console.log(`[vibrancy] set_window_effect(isDark=${isDark}) succeeded (attempt ${attempt})`);
+        lastAppliedIsDarkRef.current = isDark;
       } catch (e: unknown) {
         console.warn(`[vibrancy] set_window_effect attempt ${attempt} failed:`, e);
         if (!cancelled && attempt < 3) {
@@ -304,7 +354,17 @@ export function AppLayout() {
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState !== "visible") return;
-      console.log("[AppLayout] Page visible after sleep/lock, checking connections");
+      const a = useAgentStore.getState();
+      const c = useChatStore.getState();
+      const sid = a.selectedAgentId ?? "";
+      console.log("[AppLayout] Page visible after sleep/lock", {
+        selectedAgentId: a.selectedAgentId,
+        activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
+        openSessionIds: c.agentStates[sid]?.openSessionIds ?? [],
+        wsKeys: Object.keys(c.wsMap),
+        knownAgents: Object.keys(a.agents),
+        sessionsForSelected: a.selectedAgentId ? (a.agents[a.selectedAgentId]?.sessions ?? []).map((s) => s.session_id) : null,
+      });
       checkHealth();
       // Reconnect all agent WebSocket connections
       const store = useChatStore.getState();
