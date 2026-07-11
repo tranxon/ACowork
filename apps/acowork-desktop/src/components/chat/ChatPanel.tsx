@@ -53,13 +53,6 @@ import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 
-// Module-level: persists across ChatPanel mount/unmount cycles
-// so nav-back (Settings→Chat) doesn't trigger full reinit
-let lastInitAgentId: string | null = null;
-/** Tracks the last session ID for which messages were loaded.
- *  Prevents redundant reload when remounting after navigation. */
-let lastLoadedSessionId: string | null = null;
-
 // Generous threshold used ONLY for scroll snapshot on unmount (nav-back).
 // Real-time pinned-to-bottom detection in handleScroll uses a strict 5px
 // to let the user escape auto-scroll with a tiny upward flick.
@@ -351,18 +344,12 @@ export function ChatPanel() {
   }, [todos, session.setTodosCollapsed]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
-  /** Tracks previous running state to detect genuine agent stop vs transient remount. */
-  const wasRunningRef = useRef(false);
   /** Timestamp of the last compositionEnd event. On macOS WKWebView, compositionEnd
    *  fires BEFORE the keydown(Enter) that confirmed the IME selection, so
    *  isComposing is already false when keydown runs. We use a time-window
    *  check instead: if compositionEnd happened within the last 300ms, the
    *  Enter was almost certainly an IME confirmation, not a send intent. */
   const lastCompositionEndRef = useRef(0);
-  /** True only during the first useEffect run of this mount. */
-  const justMountedRef = useRef(true);
-  /** Session key captured on unmount so chat navigation can restore the scroll position. */
-  const scrollSnapshotKeyRef = useRef<string | null>(null);
   /**
    * "Pinned to bottom" UI preference — owned HERE (not in session.scope)
    * because it is per-USER-INTENT, not per-session.  Owned by ChatPanel so
@@ -374,7 +361,6 @@ export function ChatPanel() {
   const pinnedToBottomRef = useRef(false);
 
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
-  scrollSnapshotKeyRef.current = currentScrollKey;
 
   // Read saved scroll snapshot for nav-back restoration.
   // VirtualMessageList uses this as initialOffset so the Virtualizer renders
@@ -584,9 +570,14 @@ export function ChatPanel() {
   // Persist scroll state across top-level navigation.  AppLayout unmounts the
   // whole chat subtree for Settings/Harness/Docs/Projects, so component-local
   // refs and the virtualizer's internal offset are lost otherwise.
+  //
+  // deps=[currentScrollKey]: only save snapshot when session changes or when the
+  // component unmounts.  Without deps the cleanup would fire on *every* re-render
+  // (e.g. loadSessionMessages → isLoadingSession → re-render), overwriting the
+  // unmount snapshot with a transient scrollOffset=0.
   useLayoutEffect(() => {
     return () => {
-      const key = scrollSnapshotKeyRef.current;
+      const key = currentScrollKey;
       const container = messagesContainerRef.current;
       if (!key || !container) return;
 
@@ -608,214 +599,132 @@ export function ChatPanel() {
         pinnedToBottom: sending || pinnedToBottomRef.current || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
       });
     };
-  });
+  }, [currentScrollKey]);
 
-  // Connect WebSocket when agent changes + restore per-agent model + init session
+  // ── Atomized mount effect ──────────────────────────────────────────
+  // Every ChatPanel mount restores session state from the backend.
+  // Reconnect stream (idempotent), load messages if needed, refresh session state.
+  const prevAgentIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    // Skip re-init if this agent was already initialized and is still running.
-    // This prevents redundant clearMessages + reload when selectedAgent.running
-    // is re-evaluated without actually changing (e.g. agent list refresh).
-    if (selectedAgentId && selectedAgentId === lastInitAgentId && selectedAgent?.running && selectedAgent?.ready) {
-      // Check if session state is fully initialized. If contextUsage is still
-      // null, fetchSessionState may not have completed before the last remount
-      // — fall through to the isSameAgentRemount refresh path below.
-      const agent = useChatStore.getState().agentStates[selectedAgentId];
-      const activeSessId = agent?.activeSessionId;
-      const hasSessionState = activeSessId
-        ? agent?.sessionStates[activeSessId]?.contextUsage != null
-        : false;
-      if (hasSessionState) {
-        // Still ensure WebSocket is connected — the early return used to skip
-        // connectStream, causing ~18s of "streaming unavailable" until
-        // waitForAgentReady's poll loop finally caught up.
-        if (!wsMap[selectedAgentId]) {
-          connectStream(selectedAgentId, getGatewayUrl());
-        }
-        return;
-      }
-      // Session state not fully initialized — fall through to refresh below.
+    if (!selectedAgentId) return;
+    const agentMeta = useAgentStore.getState().agents[selectedAgentId]?.meta;
+    if (!agentMeta?.running || !agentMeta?.ready) return;
+
+    const currentSessId = useChatStore.getState().agentStates[selectedAgentId]?.activeSessionId;
+    if (!currentSessId) {
+      console.log("[ChatPanel:mount] no active session, deferring...");
+      return;
     }
 
-    // DEFENSIVE: If we reached here for the SAME agent (e.g. remount after
-    // Settings→Chat navigation where selectedAgent?.running was temporarily
-    // falsy), skip all destructive init to preserve WebSocket-streamed messages.
-    const isSameAgentRemount = !!(selectedAgentId && selectedAgentId === lastInitAgentId);
-
-    // Remember the current session for the agent we're leaving (saved in store for remount survival)
-    const leavingAgentId = lastInitAgentId;
-    const leavingSessionId = leavingAgentId ? useChatStore.getState().getActiveSessionId(leavingAgentId) : null;
-    if (leavingAgentId && leavingSessionId) {
-      useAgentStore.getState().saveSessionForAgent(leavingAgentId, leavingSessionId);
-    }
-
-    if (!isSameAgentRemount) {
-      // Allow reload for new agent/session
-      lastLoadedSessionId = null;
-      // Reset session list state for the new agent
+    // Close session panel on agent switch (UX nicety)
+    if (prevAgentIdRef.current !== null && prevAgentIdRef.current !== selectedAgentId) {
       useAgentStore.getState().reset();
     }
+    prevAgentIdRef.current = selectedAgentId;
 
-    if (selectedAgentId && selectedAgent?.running && selectedAgent?.ready) {
-      if (!isSameAgentRemount) {
-        lastInitAgentId = selectedAgentId;
-        // Guard against double-connect: waitForAgentReady in AgentList already
-        // calls connectStream when the agent becomes ready. If the WebSocket
-        // is already open (e.g. ready flag arrived before this effect fired),
-        // skip the redundant connectStream call.
-        if (!wsMap[selectedAgentId]) {
-          connectStream(selectedAgentId, getGatewayUrl());
-        }
-      }
-      // Load available model list; per-session model comes from model_confirmed events.
-      loadModels();
-
-      // For a brand-new agent: session state is already initialized by
-      // `startAgentAndSyncUI` (which awaits before ChatPanel mounts). Nothing
-      // more to do here — the second useEffect below handles `loadSessionMessages`
-      // when `currentSessionId` is set.
-      //
-      // For an isSameAgentRemount (e.g. ready flag flipped false→true, or
-      // nav-back into Chat): the session was already initialized previously
-      // but `fetchSessionState` may not have completed before the remount.
-      // Pull session state (context_usage, todos, model, provider) without
-      // reloading messages or switching sessions.
-      if (isSameAgentRemount) {
-        const agent = useChatStore.getState().agentStates[selectedAgentId];
-        const activeSessId = agent?.activeSessionId;
-        if (activeSessId) {
-          useChatStore.getState().fetchSessionState(selectedAgentId, activeSessId);
-        }
-      }
-    } else if (!isSameAgentRemount) {
-      lastInitAgentId = null;
-    }
-    // Only reset lastInitAgentId on genuine agent stop (running true→false
-    // within the same component lifecycle), not during a remount transient.
-    if (!selectedAgent?.running && wasRunningRef.current && !justMountedRef.current) {
-      lastInitAgentId = null;
-    }
-    wasRunningRef.current = selectedAgent?.running ?? false;
-    justMountedRef.current = false;
-    return () => {
-      // Do NOT disconnect the old agent's ws — keep it alive for reuse.
-      // Only clear reconnect timers for the old agent to avoid stale reconnects.
-      // The ws connections are per-agent and managed in wsMap.
-    };
-  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready, connectStream, loadModels]);
-
-  // Load messages when active session changes (from SessionPanel or createSession)
-  useEffect(() => {
-    console.log("[ChatPanel] loadSessionMessages useEffect FIRE", {
-      currentSessionId,
-      selectedAgentId,
-      isInitialLoad: session.scope.current.isInitialLoad,
-      lastLoadedSessionId,
-    });
-
-    if (!currentSessionId || !selectedAgentId) {
-      console.log("[ChatPanel] early-return #1 (no currentSessionId/selectedAgentId)");
-      return;
-    }
-
-    // Skip if this specific session is already being loaded (prevents duplicate requests).
-    if (session.scope.current.isInitialLoad === currentSessionId) {
-      console.log("[ChatPanel] early-return #2 (isInitialLoad === currentSessionId)");
-      return;
-    }
-
-    // If this session was already loaded, skip reload
-    if (currentSessionId === lastLoadedSessionId) {
-      console.log("[ChatPanel] early-return #4 (already loaded this session in this webview lifetime)");
-      return;
-    }
-
-    console.log("[ChatPanel] → will call loadSessionMessages", {
-      currentSessionId,
-      lastLoadedSessionId,
-    });
-
-    // ADR-021 Phase 4: Use incremental load (pass pollLineNumber) so the
-    // messages array is APPENDED to, never REPLACED.  This prevents a race
-    // where the user has already sent an optimistically-rendered message
-    // before the HTTP response returns — a full replacement would wipe it.
     const chatStore = useChatStore.getState();
-    lastLoadedSessionId = currentSessionId;
+    const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages;
+    const hasMessages = !!(existingMessages && existingMessages.length > 0);
 
-    /* ── DIAG: memory snapshot before session load ── [disabled per C2 review]
-    const diagDomBefore = document.querySelectorAll("*").length;
-    const diagStoreBefore = JSON.stringify(chatStore).length;
-    const diagHeapBefore = (performance as any).memory?.usedJSHeapSize;
-    const diagSessionCount = Object.keys(chatStore.agentStates[selectedAgentId]?.sessionStates ?? {}).length;
-    // Measure SVG bloat: count + total serialized size of all SVGs in document
-    const diagSvgs = document.querySelectorAll("svg");
-    let diagSvgChars = 0;
-    diagSvgs.forEach((s) => { diagSvgChars += s.outerHTML.length; });
-    // Total innerHTML size of body (catches large hidden subtrees)
-    const diagBodyHtml = document.body.innerHTML.length;
-    console.log(
-      `%c[MEM] >>> switch to %c${currentSessionId.slice(0, 8)}%c | ` +
-      `sessions_cached=${diagSessionCount} | ` +
-      `DOM=${diagDomBefore} | ` +
-      `Store=${(diagStoreBefore / 1024).toFixed(0)}KB | ` +
-      `SVGs=${diagSvgs.length}(${(diagSvgChars / 1024).toFixed(0)}KB) | ` +
-      `bodyHTML=${(diagBodyHtml / 1024).toFixed(0)}KB` +
-      (diagHeapBefore != null ? ` | JSHeap=${(diagHeapBefore / 1024 / 1024).toFixed(1)}MB` : ""),
-      "color:#888", "color:#f90;font-weight:bold", "color:#888",
-    );
-    */
+    console.log("[ChatPanel:mount] atomized restore start", {
+      agentId: selectedAgentId,
+      sessionId: currentSessId,
+      hasMessages,
+    });
 
-    // Mark as initial load to trigger scroll-to-bottom after messages are loaded.
-    // Track the specific session ID so concurrent loads for different sessions
-    // are not blocked (unlike the old boolean which blocked all loads).
+    // 1. Connect stream (idempotent — no-op if already connected)
+    connectStream(selectedAgentId, getGatewayUrl());
+
+    if (!hasMessages) {
+      // 2a. No messages in store — load from backend (first mount or new session).
+      session.scope.current.isInitialLoad = currentSessId;
+      chatStore.loadSessionMessages(selectedAgentId, currentSessId)
+        .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessId))
+        .finally(() => {
+          session.scope.current.isInitialLoad = null;
+          console.log("[ChatPanel:mount] atomized restore done (full)", {
+            agentId: selectedAgentId,
+            sessionId: currentSessId,
+            messageCount: useChatStore.getState().agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages?.length ?? 0,
+          });
+        });
+    } else {
+      // 2b. Messages already in store (nav-back: same agent, same session).
+      //     No reload needed — messages survive in zustand across unmount.
+      chatStore.fetchSessionState(selectedAgentId, currentSessId);
+      console.log("[ChatPanel:mount] atomized restore done (incremental)", {
+        agentId: selectedAgentId,
+        sessionId: currentSessId,
+        messageCount: existingMessages.length,
+      });
+    }
+  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
+
+  // ── Session switch effect ─────────────────────────────────────────
+  // When the user picks a different session from the session panel,
+  // ChatPanel stays mounted — only activeSessionId changes in chatStore.
+  // Load messages for the newly-active session.
+  useEffect(() => {
+    if (!selectedAgentId || !currentSessionId) return;
+
+    // Guard: mount effect (above) already handles the initial session load.
+    // If it set isInitialLoad, it means a load is in progress for this session.
+    if (session.scope.current.isInitialLoad === currentSessionId) {
+      console.log("[ChatPanel:session-switch] skipped (mount effect loading this session)");
+      return;
+    }
+
+    const chatStore = useChatStore.getState();
+    const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messages;
+    if (existingMessages && existingMessages.length > 0) {
+      // Messages already cached — just refresh session state.
+      chatStore.fetchSessionState(selectedAgentId, currentSessionId);
+      return;
+    }
+
+    console.log("[ChatPanel:session-switch] loading messages", {
+      agentId: selectedAgentId,
+      sessionId: currentSessionId,
+    });
+
     session.scope.current.isInitialLoad = currentSessionId;
-    void chatStore
-      .loadSessionMessages(selectedAgentId, currentSessionId)
+    chatStore.loadSessionMessages(selectedAgentId, currentSessionId)
+      .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessionId))
       .finally(() => {
         session.scope.current.isInitialLoad = null;
-
-        /* ── DIAG: memory snapshot after session load ── [disabled per C2 review]
-        setTimeout(() => {
-          const storeAfter = useChatStore.getState();
-          const diagDomAfter = document.querySelectorAll("*").length;
-          const diagStoreAfter = JSON.stringify(storeAfter).length;
-          const diagHeapAfter = (performance as any).memory?.usedJSHeapSize;
-          const diagSvgsAfter = document.querySelectorAll("svg");
-          let diagSvgCharsAfter = 0;
-          diagSvgsAfter.forEach((s) => { diagSvgCharsAfter += s.outerHTML.length; });
-          const diagBodyHtmlAfter = document.body.innerHTML.length;
-          console.log(
-            `%c[MEM] <<< switch done %c${currentSessionId.slice(0, 8)}%c | ` +
-            `DOM=${diagDomAfter} (${diagDomAfter > diagDomBefore ? "+" : ""}${diagDomAfter - diagDomBefore}) | ` +
-            `Store=${(diagStoreAfter / 1024).toFixed(0)}KB (${diagStoreAfter > diagStoreBefore ? "+" : ""}${((diagStoreAfter - diagStoreBefore) / 1024).toFixed(0)}KB) | ` +
-            `SVGs=${diagSvgsAfter.length}(${(diagSvgCharsAfter / 1024).toFixed(0)}KB) | ` +
-            `bodyHTML=${(diagBodyHtmlAfter / 1024).toFixed(0)}KB` +
-            (diagHeapAfter != null ? ` | JSHeap=${(diagHeapAfter / 1024 / 1024).toFixed(1)}MB` : ""),
-            "color:#888", "color:#0f0;font-weight:bold", "color:#888",
-          );
-
-          // Per-session breakdown
-          const agent = storeAfter.agentStates[selectedAgentId!];
-          if (agent) {
-            const entries = Object.entries(agent.sessionStates);
-            console.log(
-              `[MEM] Per-session (${entries.length} cached):`,
-              entries.map(([sid, ss]) => ({
-                id: sid.slice(0, 8),
-                msgs: ss.messages.length,
-                chars: ss.messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0),
-                active: sid === currentSessionId ? "★" : "",
-              })),
-            );
-          }
-        }, 300);
-        */
       });
   }, [currentSessionId, selectedAgentId]);
 
+  // ── Scroll restoration ───────────────────────────────────────────
+  // ChatPanel is conditionally rendered — navigating to Settings/Harness
+  // unmounts the entire chat subtree.  On remount the VirtualMessageList
+  // is brand-new; its internal scroll-to-bottom (useLayoutEffect + [])
+  // fires before the virtualizer has measured all items.
+  //
+  // We handle restoration explicitly here in a useLayoutEffect so scroll
+  // is set before the first paint.  This eliminates the "flash of top
+  // position" that would occur with a useEffect-based approach.
+  const restorePinnedToBottom = scrollSnapshot?.pinnedToBottom ?? false;
+  useLayoutEffect(() => {
+    if (!currentScrollKey || virtualCount === 0) return;
+    const snapshot = chatScrollSnapshots.get(currentScrollKey);
+    if (!snapshot) return;
+
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    if (snapshot.pinnedToBottom) {
+      pinnedToBottomRef.current = true;
+      container.scrollTop = container.scrollHeight;
+    } else if (snapshot.scrollOffset > 0) {
+      pinnedToBottomRef.current = false;
+      container.scrollTop = snapshot.scrollOffset;
+    }
+  }, [currentScrollKey, virtualCount, restorePinnedToBottom]);
+
   // ── Retry session load ──────────────────────────────────────────
   // Called from VirtualMessageList when user clicks retry on load error.
-  // Directly calls the store method — does NOT use the useEffect-based
-  // session loader (which has module-level guards that skip repeat loads).
   const handleRetryLoadSession = useCallback(() => {
     if (!selectedAgentId || !currentSessionId) return;
     useChatStore.getState().loadSessionMessages(selectedAgentId, currentSessionId);

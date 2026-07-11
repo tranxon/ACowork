@@ -303,10 +303,21 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       saveSessionForAgent(agentId, newActiveId);
     }
 
-    // If no tabs remain, create a new session
+    // If no tabs remain, reuse an existing session from the session list
+    // instead of unconditionally creating a new one.  Creating always would
+    // trigger an infinite loop: close last tab → auto-create 1-tab session →
+    // close it → auto-create again.  Switching to a real session breaks the
+    // cycle while still guaranteeing the chat area is never blank.
     const remaining = useChatStore.getState().getOpenSessionIds(agentId);
     if (remaining.length === 0) {
-      createSession(agentId);
+      const sessions = useAgentStore.getState().agents[agentId]?.sessions;
+      const otherSession = sessions?.find((s: { session_id: string }) => s.session_id !== sessionId);
+      if (otherSession) {
+        switchSession(otherSession.session_id, agentId);
+        saveSessionForAgent(agentId, otherSession.session_id);
+      } else {
+        createSession(agentId);
+      }
     }
   };
 

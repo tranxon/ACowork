@@ -742,15 +742,26 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (!storage) return;
       const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = storage.sessions.filter((s) => s.session_id !== sessionId);
-      const newCurrentId = isCurrent
-        ? remaining.length > 0
-          ? remaining[0].session_id
-          : null
-        : useChatStore.getState().getActiveSessionId(agentId);
+      const openIds = useChatStore.getState().getOpenSessionIds(agentId);
+      let newCurrentId: string | null;
+      if (isCurrent) {
+        // Prefer an already-open tab (e.g. the default session) so the user
+        // doesn't see a random old session auto-open.  If no open tabs remain,
+        // fall back to the first remaining session; if none, clear messages.
+        const openRemaining = remaining.filter((s) => openIds.includes(s.session_id));
+        if (openRemaining.length > 0) {
+          newCurrentId = openRemaining[0].session_id;
+        } else if (remaining.length > 0) {
+          newCurrentId = remaining[0].session_id;
+        } else {
+          newCurrentId = null;
+        }
+      } else {
+        newCurrentId = useChatStore.getState().getActiveSessionId(agentId);
+      }
 
       set((state) => patchAgent(state, agentId, { sessions: remaining }));
 
-      const openIds = useChatStore.getState().getOpenSessionIds(agentId);
       if (openIds.includes(sessionId)) {
         useChatStore.getState().closeTab(agentId, sessionId);
       }
