@@ -1,6 +1,7 @@
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
+import { useNodeTypeLabel } from "./nodeTypeI18n";
 
 interface MemoryNodeListProps {
   nodes: MemoryNodeResponse[];
@@ -45,6 +46,7 @@ export function MemoryNodeList({
 }: MemoryNodeListProps) {
   const start = (page - 1) * pageSize + 1;
   const end = Math.min(page * pageSize, total);
+  const labelOf = useNodeTypeLabel();
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -97,8 +99,9 @@ export function MemoryNodeList({
                       colors.bg,
                       colors.text,
                     )}
+                    data-node-type={node.node_type}
                   >
-                    {node.node_type}
+                    {labelOf(node.node_type)}
                   </span>
                   <span
                     className={cn(

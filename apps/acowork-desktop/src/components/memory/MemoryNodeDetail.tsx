@@ -2,6 +2,7 @@ import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
+import { useNodeTypeLabel } from "./nodeTypeI18n";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -34,6 +35,7 @@ function formatDate(ts: number): string {
 
 export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailProps) {
   const { t } = useTranslation();
+  const labelOf = useNodeTypeLabel();
   const colors = getTypeColor(node.node_type);
   const decayLabel = (() => {
     const tier = getDecayTier(node.decay_score);
@@ -68,8 +70,9 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
               colors.bg,
               colors.text,
             )}
+            data-node-type={node.node_type}
           >
-            {node.node_type}
+            {labelOf(node.node_type)}
           </span>
           <span className="text-[11px] text-zinc-400 dark:text-zinc-500">#{node.node_id}</span>
         </div>
