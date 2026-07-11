@@ -87,6 +87,13 @@ pub struct AgentConfigResponse {
     /// None or empty = not set / use default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_compression_mode: Option<String>,
+
+    /// ADR-032 C4a: Tool-result **soft compression** threshold in characters.
+    /// Tool results whose `content.len()` exceeds this value get replaced
+    /// with a fixed-length placeholder by `compress_tool_results`.
+    /// None = not set / use default (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_soft_threshold_chars: Option<usize>,
 }
 
 /// PUT request body for updating agent config.
@@ -118,9 +125,24 @@ pub struct UpdateAgentConfigRequest {
     #[serde(default)]
     pub builtin_tools: Option<Vec<String>>,
     /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
-    /// None = don't change, Some("") = use default (auto), Some("auto"/"manual") = explicit.
+    /// JSON `null` / field absent → "don't change" (partial-PUT semantics:
+    /// unrelated edits leave this field alone).
+    /// JSON `"auto"` or `"manual"` → explicit value, persisted verbatim.
     #[serde(default)]
     pub tool_result_compression_mode: Option<String>,
+
+    /// ADR-032 C4a: Tool-result **soft compression** threshold in characters.
+    /// None = don't change, Some(n) = explicit threshold applied to the
+    /// current session.
+    ///
+    /// Note: this field is currently treated as **boot-only** in the Runtime
+    /// (matches `tool_result_keep_recent_n` semantics — see `cli.rs`'s
+    /// `RuntimeConfigUpdate` taxonomy). The PUT path here still forwards
+    /// it through `RuntimeConfigUpdate` for symmetry with the GET response
+    /// shape, but a live change only takes effect for the next session
+    /// restore / process restart.
+    #[serde(default)]
+    pub tool_result_soft_threshold_chars: Option<usize>,
 }
 
 /// Default global values used as fallback when no override exists.

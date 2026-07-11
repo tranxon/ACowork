@@ -755,6 +755,7 @@ pub async fn update_avatar_config(
                         approval_timeout_secs: None,
                         builtin_tools_enabled: None,
                         tool_result_compression_mode: None,
+                        tool_result_soft_threshold_chars: None,
                     })
                     .await;
 
@@ -1025,6 +1026,7 @@ pub async fn delete_avatar_file(
                             approval_timeout_secs: None,
                             builtin_tools_enabled: None,
                             tool_result_compression_mode: None,
+                            tool_result_soft_threshold_chars: None,
                         })
                         .await;
                 }
@@ -1887,6 +1889,7 @@ pub async fn get_agent_config(
         builtin_tools_enabled_json,
         builtin_tools_all_json,
         tool_result_compression_mode,
+        tool_result_soft_threshold_chars,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1914,15 +1917,16 @@ pub async fn get_agent_config(
                         snap.builtin_tools_enabled_json,
                         snap.builtin_tools_all_json,
                         snap.tool_result_compression_mode,
+                        snap.tool_result_soft_threshold_chars,
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None)
+                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1975,6 +1979,7 @@ pub async fn get_agent_config(
             .as_deref()
             .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()),
         tool_result_compression_mode,
+        tool_result_soft_threshold_chars: tool_result_soft_threshold_chars.map(|v| v as usize),
     };
 
     Ok(Json(effective))
@@ -2050,6 +2055,7 @@ pub async fn update_agent_config(
                     approval_timeout_secs: req.approval_timeout_secs,
                     builtin_tools_enabled: req.builtin_tools.clone(),
                     tool_result_compression_mode: req.tool_result_compression_mode.clone(),
+                    tool_result_soft_threshold_chars: req.tool_result_soft_threshold_chars.map(|v| v as u64),
                 })
                 .await;
             if !push_result {
@@ -2105,6 +2111,7 @@ pub async fn update_agent_config(
         builtin_tools: req.builtin_tools.clone().unwrap_or_default(),
         builtin_tools_all: None,
         tool_result_compression_mode: req.tool_result_compression_mode.clone(),
+        tool_result_soft_threshold_chars: req.tool_result_soft_threshold_chars,
     };
 
     Ok(Json(effective))
@@ -2276,6 +2283,7 @@ pub async fn update_agent_mcp_servers(
                     approval_timeout_secs: None,
                     builtin_tools_enabled: None,
                     tool_result_compression_mode: None,
+                    tool_result_soft_threshold_chars: None,
                 })
                 .await;
             if !push_result {
@@ -2479,6 +2487,7 @@ pub async fn update_agent_search_config(
                     approval_timeout_secs: None,
                     builtin_tools_enabled: None,
                     tool_result_compression_mode: None,
+                    tool_result_soft_threshold_chars: None,
                 })
                 .await;
             if !push_result {

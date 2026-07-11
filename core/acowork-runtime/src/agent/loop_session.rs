@@ -471,15 +471,22 @@ impl super::loop_::AgentLoop {
         // ADR-032 C4b: auto-compress after long assistant text responses.
         // In auto mode, long assistant text (no tool calls) triggers
         // compress_tool_results to free context for the next iteration.
+        //
+        // Both the trigger threshold and the compression threshold use the
+        // same configurable value `tool_result_soft_threshold_chars()`, so
+        // assistant messages are compressed only when the message is long
+        // enough to warrant it, and tool results are sized against the same
+        // bar.
         if self.event_compression_enabled()
-            && content.len() > crate::agent::loop_context::SOFT_THRESHOLD_CHARS
+            && content.len() > self.core.tool_result_soft_threshold_chars()
         {
             let n = self.core.tool_result_keep_recent_n();
+            let soft_threshold = self.core.tool_result_soft_threshold_chars();
             let compressed = self
                 .session
                 .history
                 .compress_tool_results(
-                    crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
+                    soft_threshold,
                     n as usize,
                 );
             if compressed > 0 {

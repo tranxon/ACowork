@@ -277,6 +277,7 @@ impl GlobalResourcePusher {
                         approval_timeout_secs: None,
                         builtin_tools_enabled: None,
                         tool_result_compression_mode: None,
+                        tool_result_soft_threshold_chars: None,
                     })
                     .await;
                 if ok {

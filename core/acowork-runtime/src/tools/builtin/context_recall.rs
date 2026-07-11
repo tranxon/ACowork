@@ -27,6 +27,7 @@ use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
+use tracing;
 
 /// ADR-032 context_recall tool for retrieving compressed tool results.
 pub struct ContextRecallTool {
@@ -47,8 +48,11 @@ impl ContextRecallTool {
             description:
                 "Retrieve the original full content of a compressed tool result by its tool_call_id. \
                  Call this when an earlier tool result was compressed to a placeholder and you need \
-                 the complete output. The tool_call_id is included in every compressed placeholder: \
-                 `[Tool result compressed. Call context_recall(id=\"toolu_xxx\")...]{.open}"
+                 the complete output. \
+                 \
+                 The tool_call_id is embedded verbatim in every compressed placeholder: \
+                 `[Tool result compressed. Call context_recall(id=\"toolu_xxx\") to retrieve the full content.]` \
+                 Copy the id from the placeholder and pass it directly — no parsing needed."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -80,6 +84,7 @@ impl Tool for ContextRecallTool {
         let tool_call_id = match params.get("tool_call_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id.to_string(),
             Some(_) => {
+                tracing::warn!("context_recall called with empty tool_call_id");
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
@@ -90,6 +95,7 @@ impl Tool for ContextRecallTool {
                 })
             }
             None => {
+                tracing::warn!("context_recall called without tool_call_id parameter");
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
@@ -110,7 +116,17 @@ impl Tool for ContextRecallTool {
         //   - the search stops at the first match per session, not scanning
         //     the entire file beyond the target entry
         let conversations_dir = Path::new(&self.agent_home).join("conversations");
+
+        tracing::info!(
+            conversations_dir = %conversations_dir.display(),
+            tool_call_id = %tool_call_id,
+            "context_recall invoked"
+        );
         if !conversations_dir.exists() {
+            tracing::warn!(
+                conversations_dir = %conversations_dir.display(),
+                "context_recall: conversations dir not found"
+            );
             return Ok(ToolResult {
                 ok: true,
                 content: format!(
@@ -126,6 +142,11 @@ impl Tool for ContextRecallTool {
         let mut entries = match std::fs::read_dir(&conversations_dir) {
             Ok(e) => e,
             Err(e) => {
+                tracing::error!(
+                    dir = %conversations_dir.display(),
+                    error = %e,
+                    "context_recall: failed to read conversations dir"
+                );
                 return Ok(ToolResult {
                     ok: true,
                     content: format!(
@@ -159,11 +180,26 @@ impl Tool for ContextRecallTool {
                 )
         });
 
+        tracing::info!(
+            files_count = files_found.len(),
+            files = ?files_found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "context_recall: searching conversation logs"
+        );
+
         for file_path in &files_found {
+            tracing::debug!(
+                file = %file_path.display(),
+                "context_recall: checking file"
+            );
             if let Some(result) = find_in_jsonl(file_path, &tool_call_id) {
                 return Ok(result);
             }
         }
+
+        tracing::warn!(
+            tool_call_id = %tool_call_id,
+            "context_recall: not found in any session file"
+        );
 
         Ok(ToolResult {
             ok: false,
@@ -183,6 +219,11 @@ impl Tool for ContextRecallTool {
 /// Returns `None` if no match is found.
 fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
     let content = std::fs::read_to_string(path).ok()?;
+
+    // Track whether we found a non-tool_result entry (for better diagnostics)
+    // if we exhaust the file without finding a tool_result.
+    let mut found_non_tool_result: Option<String> = None;
+
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -202,25 +243,29 @@ fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if role != "tool_result" {
-                    // Entry exists but is not a tool_result — return
-                    // a friendly message instead of "not found".
-                    return Some(ToolResult {
-                        ok: true,
-                        content: format!(
-                            "Found entry with tool_call_id '{}' but its role is '{}', not 'tool_result'. \
-                             Only tool_result entries have content that can be recalled.",
-                            target_id,
-                            role
-                        ),
-                        error: None,
-                        token_usage: None,
-                    });
+                    // Entry exists but role is wrong — record it and keep scanning.
+                    // The actual tool_result entry might be further down in the file.
+                    tracing::debug!(
+                        file = %path.display(),
+                        target_id = %target_id,
+                        role = %role,
+                        "context_recall: found matching tool_call_id but wrong role"
+                    );
+                    found_non_tool_result = Some(role.to_string());
+                    continue;
                 }
+                // Found the actual tool_result — return its content.
                 let result_content = entry
                     .get("content")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                tracing::info!(
+                    file = %path.display(),
+                    target_id = %target_id,
+                    content_len = result_content.len(),
+                    "context_recall: match found"
+                );
                 return Some(ToolResult {
                     ok: true,
                     content: result_content,
@@ -231,6 +276,33 @@ fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
             _ => continue,
         }
     }
+
+    // Exhausted the file. Give a diagnostic if we found a non-tool_result entry.
+    if let Some(role) = found_non_tool_result {
+        tracing::debug!(
+            file = %path.display(),
+            target_id = %target_id,
+            non_tool_role = %role,
+            "context_recall: exhausted file, found match with wrong role only"
+        );
+        return Some(ToolResult {
+            ok: true,
+            content: format!(
+                "Found entry with tool_call_id '{}' but its role is '{}', not 'tool_result'. \
+                 Only tool_result entries have content that can be recalled.",
+                target_id, role
+            ),
+            error: None,
+            token_usage: None,
+        });
+    }
+
+    tracing::debug!(
+        file = %path.display(),
+        target_id = %target_id,
+        "context_recall: not found in this file"
+    );
+
     None
 }
 
@@ -280,6 +352,30 @@ mod tests {
         let result = find_in_jsonl(tmp.path(), "toolu_assistant_id").unwrap();
         assert!(result.ok);
         assert!(result.content.contains("role is 'assistant'"));
+    }
+
+    #[test]
+    fn test_find_in_jsonl_skips_tool_call_finds_tool_result() {
+        // Regression test: when both a tool_call (role="tool_call") and a
+        // tool_result share the same tool_call_id, and the tool_call appears
+        // first in the file, find_in_jsonl must skip the tool_call entry and
+        // continue scanning to find the tool_result.
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Simulate a tool_call entry (e.g. role="tool_call") with the target id,
+        // written before the tool_result in the log file.
+        write_entry(&mut tmp, "tool_call", "", "toolu_shared_id");
+        // Simulate a user message in between (no matching tool_call_id)
+        write_entry(&mut tmp, "user", "What was the result?", "");
+        // The actual tool_result with the same id
+        write_entry(&mut tmp, "tool_result", "The actual tool result content", "toolu_shared_id");
+
+        let result = find_in_jsonl(tmp.path(), "toolu_shared_id").unwrap();
+        assert!(result.ok, "Should succeed in finding the tool_result");
+        assert_eq!(
+            result.content, "The actual tool result content",
+            "Should return the tool_result content, not a role error"
+        );
+        assert!(result.error.is_none());
     }
 
     #[test]

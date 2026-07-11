@@ -1139,6 +1139,15 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 // `optional string` in proto → Option<String> in Rust;
                 // None = don't change, Some(v) = set to v.
                 tool_result_compression_mode: rcu.tool_result_compression_mode,
+                // ADR-032 C4a: tool-result soft compression threshold.
+                // `optional uint64` in proto → Option<u64> in Rust.
+                // None = don't change, Some(n) = set to n chars.
+                // Runtime-side it is **boot-only** (see
+                // `cli.rs::RuntimeConfigUpdate::is_*_boot_only` taxonomy);
+                // the value here is captured for parity with
+                // `tool_result_compression_mode` and consumed on the next
+                // session restore / process restart.
+                tool_result_soft_threshold_chars: rcu.tool_result_soft_threshold_chars,
             }
         }
         // Response messages (request_id > 0) — included for robustness

@@ -37,8 +37,30 @@ use crate::token::counter::TokenCounter;
 /// - `format_messages` (LLM compaction prompt builder) for richer
 ///   structured labelling in the summary prompt
 ///
-/// Format invariant: prefix + space + the rest of the message body.
-/// Any change to the prefix requires updating both sides of the contract.
+/// Compression placeholder prefix used by [`HistoryManager::compress_tool_results`].
+///
+/// When a tool result exceeds the soft threshold, its content is replaced with:
+///   `[Tool result compressed. Call context_recall(id="{tool_call_id}") to retrieve the full content.]`
+///
+/// ## Format contract
+///
+/// The exact format string is a contract shared by **three** consumers:
+///
+/// 1. **`context_recall` built-in tool** — parses `tool_call_id` from the placeholder
+///    to fetch the original content from the in-memory inverted index.
+/// 2. **`format_messages` in episode_distill** — checks `starts_with` this prefix
+///    to label compressed tool results correctly in compaction prompts.
+/// 3. **LLM system prompt** — instructs the model to copy the `tool_call_id` from
+///    the placeholder verbatim when calling `context_recall`.
+///
+/// **Any change** to this prefix or the placeholder format **must** update all three
+/// consumers in lockstep.
+///
+/// ## Format invariant
+///
+/// The placeholder always includes the raw `tool_call_id` embedded inline
+/// (e.g. `toolu_abc123`), so the LLM can copy-paste it without parsing.
+/// Format: prefix + " Call context_recall(id=\"" + tool_call_id + "\") ..."
 pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "[Tool result compressed.";
 
 /// Stable identifier string used by [`HistoryManager::replace_middle_with_summary`]

@@ -399,9 +399,10 @@ pub(crate) async fn execute_single_tool(
     match tool {
             Some(tool) => match tool.execute(params, work_dir).await {
                 Ok(result) => {
-                    // ADR-032 C3a: context_recall results are transient
-                    // (one-shot, visible to the LLM for one request only).
-                    let transient = tool_name == "context_recall";
+        // ADR-032: context_recall results are no longer transient — instead,
+        // they're split: history gets a placeholder, the full content goes
+        // into placeholder_replacements for target placeholder substitution.
+        let transient = false;
                     let content = if result.ok {
                     result.content
                 } else {

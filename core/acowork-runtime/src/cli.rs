@@ -686,10 +686,16 @@ pub(crate) async fn run_gateway_loop(
                                         );
                                     }
                                 }
+                                // context_recall is a platform-protected tool and
+                                // must not be exposed to the frontend tool panel.
+                                let exposed_tools: Vec<_> = merged_tools
+                                    .into_iter()
+                                    .filter(|e| e.name != "context_recall")
+                                    .collect();
                                 let builtin_tools_all_json =
-                                    serde_json::to_string(&merged_tools).unwrap_or_default();
+                                    serde_json::to_string(&exposed_tools).unwrap_or_default();
                                 let builtin_tools_enabled_json = {
-                                    let enabled: Vec<String> = merged_tools
+                                    let enabled: Vec<String> = exposed_tools
                                         .iter()
                                         .filter(|e| e.enabled)
                                         .map(|e| e.name.clone())
@@ -722,6 +728,10 @@ pub(crate) async fn run_gateway_loop(
                                     builtin_tools_all_json: Some(builtin_tools_all_json),
                                     // ADR-032 C4b: compression trigger mode from runtime overrides
                                     tool_result_compression_mode: overrides.tool_result_compression_mode.clone(),
+                                    // ADR-032 C4a: tool-result soft compression threshold
+                                    // from runtime overrides (boot-only semantics on
+                                    // the runtime side; see proto comments).
+                                    tool_result_soft_threshold_chars: overrides.tool_result_soft_threshold_chars.map(|v| v as u64),
                                 },
                                 );
                                 let response = proto::ClientMessage {
@@ -1911,6 +1921,19 @@ async fn process_gateway_recv(
                     approval_timeout_secs,
                     builtin_tools_enabled,
                     tool_result_compression_mode, // ADR-032 C4b: plumbed through proto; forwarded below.
+                    // ADR-032 C4a: pass the live-edited threshold through to
+                    // `RuntimeConfigOverrides` so it (a) updates the in-memory
+                    // cache via `merge` and (b) lands in `agent_config.json` via
+                    // the persistence block below (lines around 2120). On next
+                    // boot, `From<&AgentConfig> for RuntimeConfigOverrides` will
+                    // re-derive it into `soft_threshold_chars_override`, which
+                    // is what `compress_tool_results` reads.
+                    //
+                    // **Do not** revert this to `tool_result_soft_threshold_chars: _`
+                    // — that pattern was the original bug in commit 75e0349 (for
+                    // `tool_result_compression_mode`) and would silently discard
+                    // the user's UI input. See `live_edit_*` regression tests.
+                    tool_result_soft_threshold_chars,
                 } => {
                     tracing::info!(
 
@@ -1940,14 +1963,48 @@ async fn process_gateway_recv(
                             system_prompt_override,
                             shell_approval_threshold,
                             approval_timeout_secs,
-                            // ADR-032 C4a/C4b: hot-update via `RuntimeConfigUpdate`
-                            // is now plumbed through proto (C4b proto change).
-                            // `tool_result_keep_recent_n` is **boot-only** — not
-                            // carried in `RuntimeConfigUpdate`, so it stays None
-                            // here and is sourced from `agent_config.json` at boot
-                            // via `From<&AgentConfig> for RuntimeConfigOverrides`.
+                            // ADR-032 C4a: pass the live-edited threshold through to
+                            // `RuntimeConfigOverrides` so it (a) updates the
+                            // in-memory cache via `merge` and (b) lands in
+                            // `agent_config.json` via the persistence block
+                            // below. On next boot, `From<&AgentConfig> for
+                            // RuntimeConfigOverrides` re-derives it into
+                            // `soft_threshold_chars_override`, which is what
+                            // `compress_tool_results` reads.
+                            //
+                            // **Do not** revert this to
+                            // `tool_result_soft_threshold_chars: None` — that
+                            // was the original bug pattern in commit 75e0349
+                            // for `tool_result_compression_mode` and silently
+                            // discarded the user's UI input. See
+                            // `live_edit_*` regression tests.
+                            //
+                            // ADR-032 C4a: tool_result_keep_recent_n stays
+                            // None because it's sourced from
+                            // `agent_config.json` at boot (not carried in
+                            // `RuntimeConfigUpdate`); see comment near
+                            // `tool_result_keep_recent_n` field above.
                             tool_result_keep_recent_n: None,
+                            // ADR-032 C4b: pass `tool_result_compression_mode`
+                            // through verbatim. The Desktop and the Gateway
+                            // DTO own the "what counts as auto / manual /
+                            // unset" decision; the runtime is intentionally
+                            // dumb here and just forwards the wire value.
+                            //
+                            // Do **not** normalize `"auto"`, `""`, or any
+                            // other variant to `None` here — that would
+                            // silently swallow a user's explicit selection.
+                            // The only way to "clear" the field is via the
+                            // Gateway DTO contract (`null` → `None` →
+                            // `apply_to` skips → field absent on disk).
                             tool_result_compression_mode,
+                            // proto / grpc gives us `u64`; widen to `usize` for
+                            // in-process use. On a 64-bit target (the only
+                            // platform we ship for) this is a no-op; on a
+                            // 32-bit target a threshold > 4 GiB would truncate,
+                            // which is acceptable since `compress_tool_results`
+                            // only ever sees message bodies < a few MiB.
+                            tool_result_soft_threshold_chars: tool_result_soft_threshold_chars.map(|v| v as usize),
                         },
                     );
 

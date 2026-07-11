@@ -98,6 +98,12 @@ export function AgentSetupTab() {
           activeModel: data.model,
           activeProvider: data.provider,
           toolResultCompressionMode: data.tool_result_compression_mode,
+          // ADR-032 C4a: tool-result soft compression threshold.
+          // `data.tool_result_soft_threshold_chars` is `Option<usize>`
+          // from the runtime; a JSON `null` arrives as `undefined`,
+          // which the store normalize helper converts to `undefined`
+          // (= use DEFAULT_SOFT_THRESHOLD_CHARS = 2048).
+          toolResultSoftThresholdChars: data.tool_result_soft_threshold_chars ?? undefined,
         });
       })
       .catch((err) => {
@@ -129,6 +135,7 @@ export function AgentSetupTab() {
               activeModel: data.model,
               activeProvider: data.provider,
               toolResultCompressionMode: data.tool_result_compression_mode,
+              toolResultSoftThresholdChars: data.tool_result_soft_threshold_chars ?? undefined,
             });
           })
           .catch(() => { });
@@ -152,7 +159,32 @@ export function AgentSetupTab() {
       if (profile.contextWindow !== undefined) body.context_window = profile.contextWindow;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
-      if (profile.toolResultCompressionMode !== undefined) body.tool_result_compression_mode = profile.toolResultCompressionMode;
+      // ADR-032 C4b: compression mode.
+//
+// Profile state mirrors the wire format exactly:
+//   - `undefined` → field absent on disk → "don't change" (partial PUT
+//     semantics; if the user has never touched this setting we leave
+//     it alone so a partial save of an unrelated field doesn't clobber
+//     it).
+//   - `"auto"`   → wire `"auto"`   → persisted as `"auto"`
+//   - `"manual"` → wire `"manual"` → persisted as `"manual"`
+//
+// The frontend does **not** normalize `"auto"` to `null` here — the
+// user explicitly chose a value, and the disk should reflect that
+// choice verbatim. The runtime's `compression_mode()` accessor maps
+// any non-`"manual"` value (including `"auto"`) to `CompressionMode::Auto`,
+// so writing `"auto"` is harmless and self-documenting in the JSON.
+if (profile.toolResultCompressionMode !== undefined) {
+        body.tool_result_compression_mode = profile.toolResultCompressionMode;
+}
+      // ADR-032 C4a: tool-result soft compression threshold. Treat `0`
+      // and `undefined` as "use default" — only forward a positive
+      // integer to the runtime. The runtime is boot-only on this field,
+      // so a successful PUT lands in `agent_config.json` and takes
+      // effect on the next session restore / process restart.
+      if (profile.toolResultSoftThresholdChars !== undefined && profile.toolResultSoftThresholdChars > 0) {
+        body.tool_result_soft_threshold_chars = profile.toolResultSoftThresholdChars;
+      }
       const res = await fetch(
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
         { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
@@ -560,7 +592,11 @@ export function AgentSetupTab() {
           value={profile.toolResultCompressionMode ?? "auto"}
           onChange={(e) =>
             setProfile(selectedAgentId, {
-              toolResultCompressionMode: e.target.value === "auto" ? undefined : e.target.value,
+              // Pass the wire value verbatim — do **not** map "auto" to
+              // `undefined`. The user explicitly chose a value and the
+              // disk should reflect that. `undefined` in the profile
+              // is reserved for "user has never touched this setting".
+              toolResultCompressionMode: e.target.value,
             })
           }
           className="w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-700
@@ -571,6 +607,40 @@ export function AgentSetupTab() {
         </select>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.compressionModeDesc")}
+        </p>
+      </div>
+
+      {/* Compression Soft Threshold (ADR-032 C4a) */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.compressionSoftThreshold")}
+        </label>
+        <StyledInput
+          type="number"
+          min={64}
+          max={1_000_000}
+          step={64}
+          value={
+            profile.toolResultSoftThresholdChars && profile.toolResultSoftThresholdChars > 0
+              ? profile.toolResultSoftThresholdChars
+              : ""
+          }
+          onChange={(e) => {
+            const v = e.target.value;
+            // Empty input → fall back to default (undefined → runtime
+            // applies `DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
+            // Non-numeric input (NaN from `parseInt`) is coerced to 0,
+            // which the save guard converts back to "use default".
+            const parsed = v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0);
+            setProfile(selectedAgentId, {
+              toolResultSoftThresholdChars: parsed,
+            });
+          }}
+          placeholder="2048 (default)"
+          className="rounded-md bg-white dark:bg-zinc-800"
+        />
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.compressionSoftThresholdDesc")}
         </p>
       </div>
 

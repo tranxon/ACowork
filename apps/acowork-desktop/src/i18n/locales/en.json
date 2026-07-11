@@ -493,6 +493,8 @@
     "compressionAuto": "Auto — compress tool results when budget is low or after long responses",
     "compressionManual": "Manual — only compress when I click the button",
     "compressionModeDesc": "Controls when tool result compression triggers. Auto: system decides. Manual: you control via the context usage popover.",
+    "compressionSoftThreshold": "Compression Trigger Threshold (chars)",
+    "compressionSoftThresholdDesc": "Triggers auto-compression when a tool result or assistant long response exceeds this character count. Leave blank to use the default (2048 chars ≈ 512 tokens). Requires a session restart to take effect.",
     "builtinTools": "Builtin Tools",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
     "noBuiltinTools": "No builtin tools available."

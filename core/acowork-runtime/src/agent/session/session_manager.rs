@@ -21,7 +21,6 @@ use uuid::Uuid;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::loop_::SessionChunkEvent;
-use crate::agent::loop_context::SOFT_THRESHOLD_CHARS;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{SessionState, SessionStatus};
@@ -111,6 +110,18 @@ pub struct RuntimeConfigOverrides {
     /// ADR-032 C4b: compression trigger mode ("auto" | "manual").
     /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
     pub tool_result_compression_mode: Option<String>,
+
+    /// ADR-032 C4a: tool-result soft compression threshold in characters.
+    /// `None` falls through to `AgentConfig::tool_result_soft_threshold_chars`,
+    /// then to `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS`.
+    ///
+    /// Marked **boot-only**: the field is populated when `agent_config.json`
+    /// is loaded (`apply_runtime_config_override`) but is intentionally NOT
+    /// routed through `RuntimeConfigUpdate` — recomputing byte-offsets on
+    /// already-active sessions would invalidate in-flight conversation
+    /// history pointers. See ADR-032 C4a, and the matching
+    /// `cli.rs::RuntimeConfigUpdate::is_*_boot_only()` taxonomy.
+    pub tool_result_soft_threshold_chars: Option<usize>,
 }
 
 impl RuntimeConfigOverrides {
@@ -125,6 +136,7 @@ impl RuntimeConfigOverrides {
             && self.approval_timeout_secs.is_none()
             && self.tool_result_keep_recent_n.is_none()
             && self.tool_result_compression_mode.is_none()
+            && self.tool_result_soft_threshold_chars.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -156,6 +168,9 @@ impl RuntimeConfigOverrides {
         }
         if other.tool_result_compression_mode.is_some() {
             self.tool_result_compression_mode = other.tool_result_compression_mode.clone();
+        }
+        if other.tool_result_soft_threshold_chars.is_some() {
+            self.tool_result_soft_threshold_chars = other.tool_result_soft_threshold_chars;
         }
     }
 
@@ -197,6 +212,9 @@ impl RuntimeConfigOverrides {
         if let Some(v) = &self.tool_result_compression_mode {
             cfg.tool_result_compression_mode = Some(v.clone());
         }
+        if let Some(v) = self.tool_result_soft_threshold_chars {
+            cfg.tool_result_soft_threshold_chars = Some(v);
+        }
     }
 }
 
@@ -204,6 +222,13 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
     /// Project the subset of `AgentConfig` fields that participate in the
     /// runtime override chain. Other `AgentConfig` fields (max_sessions,
     /// avatar, etc.) are applied separately via their own code paths.
+    ///
+    /// Pass-through projection: every field maps 1:1 from `AgentConfig`.
+    /// In particular, `tool_result_compression_mode = Some("auto")` is
+    /// *not* collapsed to `None` — the on-disk value is the user's
+    /// explicit choice, and the runtime `compression_mode()` accessor
+    /// already maps every non-`"manual"` variant to `Auto`, so the
+    /// behaviour is consistent without touching the data.
     fn from(cfg: &AgentConfig) -> Self {
         Self {
             max_output_tokens: cfg.max_output_tokens,
@@ -215,6 +240,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             approval_timeout_secs: cfg.approval_timeout_secs,
             tool_result_keep_recent_n: cfg.tool_result_keep_recent_n,
             tool_result_compression_mode: cfg.tool_result_compression_mode.clone(),
+            tool_result_soft_threshold_chars: cfg.tool_result_soft_threshold_chars,
         }
     }
 }
@@ -787,14 +813,16 @@ impl SessionManager {
             // (lossless) recovers as much headroom as possible before the
             // lossy trim (which discards entire messages).
             let n = self.core.tool_result_keep_recent_n();
+            let soft_threshold = self.core.tool_result_soft_threshold_chars();
             let compressed = session_state
                 .history_mut()
-                .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
+                .compress_tool_results(soft_threshold, n as usize);
             if compressed > 0 {
                 session_state.history_mut().recalibrate_tokens();
                 tracing::info!(
                     compressed,
                     keep_recent_n = n,
+                    soft_threshold_chars = soft_threshold,
                     "ADR-032 restore: compressed oversized tool results"
                 );
             }
@@ -2498,6 +2526,7 @@ mod tests {
             approval_timeout_secs: Some(15),
             tool_result_keep_recent_n: Some(3),
             tool_result_compression_mode: Some("manual".into()),
+            tool_result_soft_threshold_chars: Some(4096),
         };
         ov.apply_to(&mut cfg);
 
@@ -2510,6 +2539,7 @@ mod tests {
         assert_eq!(cfg.approval_timeout_secs, Some(15));
         assert_eq!(cfg.tool_result_keep_recent_n, Some(3));
         assert_eq!(cfg.tool_result_compression_mode.as_deref(), Some("manual"));
+        assert_eq!(cfg.tool_result_soft_threshold_chars, Some(4096));
     }
 
     #[test]

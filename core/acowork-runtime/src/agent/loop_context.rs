@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
+use acowork_core::providers::traits::MessageRole;
 
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
@@ -78,10 +79,23 @@ pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
 // `RuntimeConfigOverrides.tool_result_keep_recent_n` config field with
 // the same three-level fallback (overrides → agent_config → this default).
 //
-// `SOFT_THRESHOLD_CHARS` — characters; an in-memory tool result longer
-// than this is replaced with a placeholder. 2048 chars ≈ 512 tokens,
-/// aligned with the typical "LLM context bloat" threshold.
-pub(crate) const SOFT_THRESHOLD_CHARS: usize = 2048;
+// `DEFAULT_SOFT_THRESHOLD_CHARS` — characters; an in-memory tool result
+// longer than this is replaced with a placeholder. 2048 chars ≈ 512
+// tokens, aligned with the typical "LLM context bloat" threshold.
+//
+// This constant is the **Layer-3 fallback** in the three-level
+// resolution chain (ADR-032 core principle #7):
+//   1. `RuntimeConfigOverrides.tool_result_soft_threshold_chars`
+//      (hot-pushed via Gateway `RuntimeConfigUpdate`)
+//   2. `AgentConfig.tool_result_soft_threshold_chars`
+//      (persisted in `agent_config.json`, user-editable via
+//      the Agent Setup panel)
+///   3. `DEFAULT_SOFT_THRESHOLD_CHARS` (this constant)
+///
+/// Call sites should always read through
+/// `AgentCore::tool_result_soft_threshold_chars()` rather than referencing
+/// this constant directly — see `agent_core.rs`.
+pub(crate) const DEFAULT_SOFT_THRESHOLD_CHARS: usize = 2048;
 
 /// Number of recent tool results kept raw (not compressed) at every
 /// trigger point (event / budget / restore / manual). N = 0 compresses
@@ -248,11 +262,17 @@ impl AgentLoop {
         // N resolves from agent_config.json via `AgentCore::tool_result_keep_recent_n`
         // (Layer 1), falling back to `DEFAULT_KEEP_RECENT_N` (Layer 2, ADR-032
         // hardcoded default). Configured via the Agent Setup panel.
+        //
+        // The soft-threshold `soft_threshold_chars` likewise resolves via
+        // `AgentCore::tool_result_soft_threshold_chars` (Layer 1 = user
+        // setting, Layer 2 = `DEFAULT_SOFT_THRESHOLD_CHARS` = 2048).
+        // Configured via the Agent Setup panel.
         let n = self.core.tool_result_keep_recent_n();
+        let soft_threshold = self.core.tool_result_soft_threshold_chars();
         let compressed = self
             .session
             .history
-            .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
+            .compress_tool_results(soft_threshold, n as usize);
         if compressed > 0 {
             self.session.history.recalibrate_tokens();
         }
@@ -490,10 +510,11 @@ impl AgentLoop {
                     // path — preserves recall-ability via tool_call_id; see history.rs
                     // for the unified N-rule rationale).
                     let n = self.core.tool_result_keep_recent_n();
+                    let soft_threshold = self.core.tool_result_soft_threshold_chars();
                     let compressed = self
                         .session
                         .history
-                        .compress_tool_results(SOFT_THRESHOLD_CHARS, n as usize);
+                        .compress_tool_results(soft_threshold, n as usize);
                     if compressed > 0 {
                         self.session.history.recalibrate_tokens();
                     }
@@ -693,19 +714,47 @@ impl AgentLoop {
             }
         }
 
-        // Inject transient tool results from the previous iteration
-        // (ADR-032 C3a).  These are one-shot messages (e.g., context_recall
-        // results) that are visible to the LLM for one request only.
-        if !self.pending_transient_tool_msgs.is_empty() {
-            let count = self.pending_transient_tool_msgs.len();
-            chat_request.messages.append(&mut self.pending_transient_tool_msgs);
-            // Cleared by the above `append` which takes ownership.
-            debug_assert!(self.pending_transient_tool_msgs.is_empty());
-            tracing::debug!(count, "Injected transient tool results into chat request");
+        // Replace compressed placeholders with full content from context_recall
+        // (ADR-032). context_recall splits its result: history gets a short
+        // placeholder, and the full content is stored in placeholder_replacements
+        // keyed by the TARGET tool_call_id. Here we scan the assembled messages
+        // and perform the actual substitution before the chat request is sent.
+        if !self.placeholder_replacements.is_empty() {
+            let mut replaced = 0usize;
+            for msg in &mut chat_request.messages {
+                if msg.role == MessageRole::Tool
+                    && let Some(tool_id) =
+                        extract_placeholder_tool_call_id(&msg.content)
+                    && let Some(full_content) =
+                        self.placeholder_replacements.remove(&tool_id)
+                {
+                    msg.content = full_content;
+                    replaced += 1;
+                }
+            }
+            if replaced > 0 {
+                tracing::debug!(
+                    count = replaced,
+                    "Replaced compressed placeholders with full content from context_recall"
+                );
+            }
+            // Clear any remaining unused replacements (they'll be re-fetched
+            // in a subsequent iteration if needed).
+            self.placeholder_replacements.clear();
         }
 
         // Compute total input chars for next round's token ratio calibration.
         self.last_input_chars = count_chat_request_chars(&chat_request);
+
+        // Inject transient tool results from the previous iteration
+        // (ADR-032 C3a). These are one-shot messages (e.g., non-context_recall
+        // transient results) that are visible to the LLM for one request only.
+        if !self.pending_transient_tool_msgs.is_empty() {
+            let count = self.pending_transient_tool_msgs.len();
+            chat_request.messages.append(&mut self.pending_transient_tool_msgs);
+            debug_assert!(self.pending_transient_tool_msgs.is_empty());
+            tracing::debug!(count, "Injected transient tool results into chat request");
+        }
 
         chat_request
     }
@@ -1055,4 +1104,18 @@ impl AgentLoop {
 
         truncated
     }
+}
+
+/// Extract the **target** tool_call_id from a compressed placeholder string.
+///
+/// The placeholder format is:
+/// `[Tool result compressed. Call context_recall(id="TOOL_CALL_ID") to retrieve the full content.]`
+///
+/// Returns `None` if the content doesn't match the expected pattern.
+fn extract_placeholder_tool_call_id(content: &str) -> Option<String> {
+    const MARKER: &str = "context_recall(id=\"";
+    let start = content.find(MARKER)?;
+    let start = start + MARKER.len();
+    let end = content[start..].find('"')?;
+    Some(content[start..start + end].to_string())
 }

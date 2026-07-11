@@ -40,6 +40,16 @@ export interface AgentProfileSettings {
   /** ADR-032 C4b: Compression trigger mode ("auto" | "manual").
    *  Undefined/empty = use default ("auto"). */
   toolResultCompressionMode?: string;
+  /** ADR-032 C4a: Tool-result soft compression threshold in **characters**.
+   *  Tool results whose `content.length` exceeds this value are replaced
+   *  with a fixed-length placeholder by `compress_tool_results`.
+   *  Undefined/0 = use default (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
+   *
+   *  Boot-only semantics on the runtime side (matches `toolResultCompressionMode`
+   *  flow, see `cli.rs::RuntimeConfigUpdate` taxonomy). The UI persists the
+   *  value via PUT `/api/agents/{id}/config`; the runtime consumes it on
+   *  the next session restore / process restart. */
+  toolResultSoftThresholdChars?: number;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -54,6 +64,7 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
   toolResultCompressionMode: undefined,
+  toolResultSoftThresholdChars: undefined,
 };
 
 const STORAGE_KEY = "acowork-agent-profiles";
@@ -118,6 +129,10 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     toolResultCompressionMode:
       typeof s.toolResultCompressionMode === "string"
         ? s.toolResultCompressionMode
+        : undefined,
+    toolResultSoftThresholdChars:
+      typeof s.toolResultSoftThresholdChars === "number" && s.toolResultSoftThresholdChars > 0
+        ? s.toolResultSoftThresholdChars
         : undefined,
   };
 }

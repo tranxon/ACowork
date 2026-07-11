@@ -170,6 +170,30 @@ pub struct AgentConfig {
     /// user invokes via Gateway API / CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_compression_mode: Option<String>,
+
+    /// ADR-032 C4a: tool-result **soft compression** threshold in characters.
+    ///
+    /// Any tool-result message whose `content.len()` exceeds this threshold
+    /// is replaced with a fixed-length placeholder by `compress_tool_results`.
+    /// `2048 chars ≈ 512 tokens`, which matches the typical "LLM context
+    /// bloat" threshold — see ADR-032 core principle #7.
+    ///
+    /// Resolution chain (highest to lowest priority):
+    /// 1. `RuntimeConfigOverrides::tool_result_soft_threshold_chars` —
+    ///    runtime push from Gateway (Layer 1'). Normally shadowed by
+    ///    `agent_config.json` on boot via `apply_runtime_config_override`.
+    /// 2. **this field** — user's agent-level setting persisted in
+    ///    `agent_config.json`. Editable via the Agent Setup panel.
+    /// 3. `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS` —
+    ///    hardcoded fallback (2048).
+    ///
+    /// `None` falls through to the next level. `Some(n)` activates the
+    /// user-chosen threshold. Stored as `usize` because `content.len()`
+    /// returns byte-equal character counts for the message bodies we
+    /// compress (validated against UTF-8 boundaries at the call site —
+    /// see ADR-032 "char vs byte" section).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_soft_threshold_chars: Option<usize>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.
@@ -544,6 +568,10 @@ pub fn merge_tools_config(
         .collect()
 }
 
+/// Tools that are part of the core platform protocol and must always be
+/// enabled. Users cannot disable these via frontend tool settings.
+const PLATFORM_TOOLS: &[&str] = &["context_recall"];
+
 /// Apply a partial `RuntimeConfigUpdate.builtin_tools_enabled` payload
 /// (only listed tool names are touched) onto an existing
 /// `AgentToolsConfig` in place. Returns the new full list — a copy of
@@ -552,6 +580,9 @@ pub fn merge_tools_config(
 /// Tool names in `patch` that are not present in `current` are
 /// silently ignored (defensive: future tools should arrive via
 /// `merge_tools_config` at startup, not via this incremental path).
+///
+/// Platform tools (see `PLATFORM_TOOLS`) are force-enabled and ignore
+/// any user-provided patch value.
 pub fn apply_builtin_tools_patch(
     current: &[AgentToolEntry],
     patch: &[AgentToolEntry],
@@ -564,6 +595,10 @@ pub fn apply_builtin_tools_patch(
     current
         .iter()
         .map(|e| {
+            // Platform tools are force-enabled — ignore user overrides.
+            if PLATFORM_TOOLS.contains(&e.name.as_str()) {
+                return AgentToolEntry::new(&e.name, true);
+            }
             let enabled = patch_map
                 .get(e.name.as_str())
                 .copied()
@@ -1417,6 +1452,240 @@ mod tests {
             after.tool_result_compression_mode.as_deref(),
             Some("manual"),
             "compression_mode must reflect the push"
+        );
+    }
+
+    // ── ADR-032 C4a: tool_result_soft_threshold_chars live-edit ─────
+    //
+    // Regression coverage for the bug pattern that bit
+    // `tool_result_compression_mode` in commit 75e0349: the field was
+    // destructured into `_` in cli.rs, so a live-edit push carrying
+    // `Some(1024)` was silently dropped before reaching
+    // `RuntimeConfigOverrides` — and therefore never landed in
+    // `agent_config.json`. The user would set the threshold in the UI,
+    // it would appear to save, but a restart would revert to 2048.
+    //
+    // The fix: cli.rs now binds `tool_result_soft_threshold_chars`
+    // directly (not `_`) so the value flows into `RuntimeConfigOverrides`
+    // → `apply_to` → `save_agent_config`. These tests pin that contract
+    // so it can't regress.
+
+    /// Mirror of `live_edit_compression_mode_round_trips_through_disk`
+    /// for the soft-threshold field: a push carrying `Some(1024)` must
+    /// round-trip through the load/apply_to/save chain and survive a
+    /// restart. Pre-fix, this test failed because the field was
+    /// destructured into `_` in cli.rs and never reached the override.
+    #[test]
+    fn live_edit_soft_threshold_chars_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Step 1-2: Desktop PUT pushes 1024 through the gateway.
+        let push = RuntimeConfigOverrides {
+            tool_result_soft_threshold_chars: Some(1024),
+            ..Default::default()
+        };
+
+        // Step 3: cli.rs persistence — load, apply_to, save.
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .unwrap_or_default();
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Step 4: simulate restart — load from disk again.
+        let reloaded = load_agent_config(dir.path())
+            .unwrap()
+            .expect("file should exist after save");
+        assert_eq!(
+            reloaded.tool_result_soft_threshold_chars,
+            Some(1024),
+            "restart must preserve the user's tool_result_soft_threshold_chars"
+        );
+
+        // Step 5: From<&AgentConfig> projects the persisted value back
+        // into runtime_overrides for the next session, which is what
+        // `AgentCore::tool_result_soft_threshold_chars()` reads.
+        let ov = RuntimeConfigOverrides::from(&reloaded);
+        assert_eq!(ov.tool_result_soft_threshold_chars, Some(1024));
+    }
+
+    /// Companion: a push that does **not** carry
+    /// `tool_result_soft_threshold_chars` (None) must NOT clobber a
+    /// previously-saved value. This is the partial-PUT semantic that
+    /// keeps an unrelated edit (e.g. changing model) from resetting the
+    /// threshold back to the default.
+    #[test]
+    fn live_edit_preserves_soft_threshold_chars_across_unrelated_push() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-existing disk: user set threshold=512 before.
+        let pre = AgentConfig {
+            tool_result_soft_threshold_chars: Some(512),
+            ..Default::default()
+        };
+        save_agent_config(dir.path(), &pre).unwrap();
+
+        // Live-edit push: only changes compression_mode, NOT threshold.
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("auto".into()),
+            ..Default::default()
+        };
+
+        // Round-trip through cli.rs persistence logic.
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .expect("should load existing");
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Reload and verify: threshold survived, mode updated.
+        let after = load_agent_config(dir.path())
+            .unwrap()
+            .expect("file should exist");
+        assert_eq!(
+            after.tool_result_soft_threshold_chars,
+            Some(512),
+            "soft_threshold_chars must survive an unrelated push"
+        );
+        assert_eq!(
+            after.tool_result_compression_mode.as_deref(),
+            Some("auto"),
+            "compression_mode must reflect the push"
+        );
+    }
+
+    /// Companion: documents the **partial-push** semantic for
+    /// `tool_result_soft_threshold_chars`. When the Desktop UI sends
+    /// `None` (i.e. omits the field from the PUT body — see
+    /// `AgentSetupTab.tsx` save-guard at
+    /// `if (profile.toolResultSoftThresholdChars !== undefined && > 0)`),
+    /// the runtime receives a `RuntimeConfigUpdate` without this field.
+    /// `apply_to` must then **preserve** the on-disk value rather than
+    /// wiping it.
+    ///
+    /// Companion: documents the **partial-push** semantic for
+    /// `tool_result_soft_threshold_chars`. When the Desktop UI does not
+    /// include the field in the PUT body (because the user didn't touch
+    /// the input), the runtime receives a `RuntimeConfigUpdate` with
+    /// the corresponding `RuntimeConfigOverrides` slot = `None`, and
+    /// `apply_to` must **preserve** the on-disk value.
+    ///
+    /// The `compression_mode` companion case
+    /// (`live_edit_preserves_unrelated_disk_fields`) uses
+    /// `tool_result_keep_recent_n` because it has no live-edit wire
+    /// slot at all; this test instead uses `compression_mode` as the
+    /// "actually-pushed" field to exercise the same partial-PUT path.
+    #[test]
+    fn live_edit_partial_push_preserves_soft_threshold_chars() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-existing disk: user had a custom threshold.
+        let pre = AgentConfig {
+            tool_result_soft_threshold_chars: Some(4096),
+            ..Default::default()
+        };
+        save_agent_config(dir.path(), &pre).unwrap();
+
+        // Live-edit push: only changes `compression_mode`. The
+        // threshold field is *omitted* (None), which on the frontend
+        // means the user didn't touch the input.
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        };
+
+        let mut cfg = load_agent_config(dir.path()).unwrap().unwrap();
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Reload: the threshold is preserved, the mode is updated.
+        let after = load_agent_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            after.tool_result_soft_threshold_chars,
+            Some(4096),
+            "partial push with threshold=None must preserve the on-disk value"
+        );
+        assert_eq!(
+            after.tool_result_compression_mode.as_deref(),
+            Some("manual"),
+            "the actually-pushed field is updated"
+        );
+    }
+
+    // ── ADR-032 C4b: explicit-value persistence ─────────────────────
+    //
+    // Regression coverage for the user's reported bug:
+    //   "改成auto，怎么配置文件写的是空"
+    //
+    // Two separate checks pin the contract:
+    //
+    //   1. `compression_mode_explicit_value_persists_verbatim` — when the
+    //      user picks "auto" in the UI, the runtime must write
+    //      `"tool_result_compression_mode": "auto"` to disk, **not**
+    //      collapse it to `null` / `""` / `None`. The runtime accessor
+    //      `compression_mode()` already maps non-`"manual"` to `Auto`,
+    //      so the on-disk form is the user's explicit choice — round-
+    //      trippable, self-documenting, never silently mutated.
+    //
+    //   2. `compression_mode_unset_round_trips_as_none` — `None` on the
+    //      push side means "don't change" (partial-PUT semantics), so
+    //      a previous on-disk value is preserved across an unrelated
+    //      save. Mirrors `live_edit_partial_push_preserves_*` above.
+
+    /// When the user picks `"auto"` and the runtime persists, the file
+    /// MUST contain `"auto"` (not `""`, not missing, not `null`). This
+    /// pins the contract that `tool_result_compression_mode = Some("auto")`
+    /// is **not** collapsed to `None` at any layer.
+    #[test]
+    fn compression_mode_explicit_value_persists_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("auto".into()),
+            ..Default::default()
+        };
+
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .unwrap_or_default();
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Reload and verify the **exact** wire value is on disk.
+        let reloaded = load_agent_config(dir.path())
+            .unwrap()
+            .expect("file should exist after save");
+        assert_eq!(
+            reloaded.tool_result_compression_mode.as_deref(),
+            Some("auto"),
+            "explicit user value must round-trip verbatim; never collapse to None / \"\""
+        );
+
+        // From<&AgentConfig> must project 1:1 (no normalization).
+        let ov = RuntimeConfigOverrides::from(&reloaded);
+        assert_eq!(ov.tool_result_compression_mode.as_deref(), Some("auto"));
+    }
+
+    /// Mirror of the above for `"manual"` — same 1:1 contract.
+    #[test]
+    fn compression_mode_explicit_manual_persists_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        };
+
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .unwrap_or_default();
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        let reloaded = load_agent_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            reloaded.tool_result_compression_mode.as_deref(),
+            Some("manual"),
         );
     }
 }

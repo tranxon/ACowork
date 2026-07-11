@@ -734,6 +734,13 @@ pub enum GatewayRequest {
         /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_result_compression_mode: Option<String>,
+        /// ADR-032 C4a: Tool-result **soft compression** threshold in
+        /// characters. `None` = not set / use default
+        /// (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`). Stored as `u64` for
+        /// protobuf / serde parity with `max_output_tokens`; the runtime
+        /// widens it to `usize` before invoking `compress_tool_results`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_result_soft_threshold_chars: Option<u64>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1104,6 +1111,14 @@ pub enum GatewayResponse {
         /// Some("") means "use default" (typically "auto").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_result_compression_mode: Option<String>,
+        /// ADR-032 C4a: Tool-result **soft compression** threshold in
+        /// characters. `None` = keep current value. Boot-only semantics
+        /// on the runtime side — see `cli.rs::RuntimeConfigUpdate::is_*_boot_only`
+        /// taxonomy. The runtime still accepts it via this push for shape
+        /// symmetry; the value is consumed at the next session restore
+        /// or process restart.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_result_soft_threshold_chars: Option<u64>,
     },
     /// Query config request (Gateway → Runtime)
     ///

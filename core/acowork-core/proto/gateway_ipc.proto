@@ -257,6 +257,11 @@ message ConfigSnapshot {
     // ADR-032 C4b: compression trigger mode ("auto" | "manual").
     // None / "" = not set / default.
     optional string tool_result_compression_mode = 33;
+    // ADR-032 C4a: tool-result soft compression threshold in characters.
+    // None = not set / use default (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
+    // uint64 keeps parity with `max_output_tokens` and matches the
+    // in-process `usize` on 64-bit platforms.
+    optional uint64 tool_result_soft_threshold_chars = 34;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -355,6 +360,10 @@ message RuntimeConfigUpdate      {
     // ADR-032 C4b: compression trigger mode ("auto" | "manual").
     // None / "" means "keep current value" (no change).
     optional string tool_result_compression_mode = 25;
+    // ADR-032 C4a: tool-result soft compression threshold in characters.
+    // None = keep current value (no change). Boot-only semantics on the
+    // runtime side — see `cli.rs` `RuntimeConfigUpdate` taxonomy.
+    optional uint64 tool_result_soft_threshold_chars = 26;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

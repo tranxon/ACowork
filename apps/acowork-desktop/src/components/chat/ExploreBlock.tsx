@@ -493,6 +493,9 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
     summary = call.content.slice(0, 60);
   }
 
+  // Detect compressed tool result (replaced by context_recall placeholder)
+  const isCompressed = result?.content?.startsWith("[Tool result compressed");
+
   return (
     <div className="min-w-0">
       <div
@@ -505,6 +508,11 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           {summary && (
             <span className="min-w-0 flex-1 truncate ml-1 text-left text-zinc-500 dark:text-zinc-400">
               {summary}
+            </span>
+          )}
+          {isCompressed && (
+            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+              已压缩
             </span>
           )}
         </button>

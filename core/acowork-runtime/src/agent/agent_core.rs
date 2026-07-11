@@ -134,6 +134,17 @@ pub struct AgentCore {
     /// ADR-032 C4b: compression trigger mode override ("auto" | "manual").
     /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
     pub(crate) compression_mode_override: Option<String>,
+    /// ADR-032 C4a: tool-result **soft compression** threshold in characters.
+    /// Any tool-result message longer than this is replaced with a placeholder.
+    /// `None` falls through to
+    /// `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS` (2048).
+    /// Boot-only: written by `apply_runtime_config_override` from
+    /// `agent_config.json`; intentionally **not** routed through
+    /// `RuntimeConfigUpdate` (see cli.rs taxonomy) because mid-session
+    /// threshold changes can leave dangling byte-offsets in already-
+    /// compressed placeholders. Reads always go through the
+    /// `tool_result_soft_threshold_chars()` accessor.
+    pub(crate) soft_threshold_chars_override: Option<usize>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -213,6 +224,7 @@ impl AgentCore {
             approval_timeout_secs: None,
             tool_result_keep_recent_n_override: None,
             compression_mode_override: None,
+            soft_threshold_chars_override: None,
             system_prompt_override: None,
             memory_store: None,
             memory_session: None,
@@ -531,6 +543,14 @@ impl AgentCore {
             );
             self.compression_mode_override = Some(mode.clone());
         }
+        if let Some(threshold) = overrides.tool_result_soft_threshold_chars {
+            tracing::info!(
+                old = ?self.soft_threshold_chars_override,
+                new = threshold,
+                "runtime config: tool_result_soft_threshold_chars updated"
+            );
+            self.soft_threshold_chars_override = Some(threshold);
+        }
     }
 
     pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
@@ -732,6 +752,27 @@ impl AgentCore {
             .unwrap_or(crate::agent::loop_context::DEFAULT_KEEP_RECENT_N as u32)
     }
 
+    /// ADR-032 C4a: resolve the effective **soft compression threshold** in
+    /// characters for `compress_tool_results`.
+    ///
+    /// Resolution chain (Layer 1 = highest priority):
+    /// 1. `self.soft_threshold_chars_override` — set from
+    ///    `agent_config.json::tool_result_soft_threshold_chars` via
+    ///    `apply_runtime_config_override` (boot-only by design — see
+    ///    `cli.rs::RuntimeConfigUpdate` taxonomy)
+    /// 2. `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS`
+    ///    — hardcoded fallback (2048 chars ≈ 512 tokens, ADR-032 default)
+    ///
+    /// Returns `usize` directly so call sites don't need to deal with
+    /// `Option`. Used by every `compress_tool_results` call site in
+    /// `loop_context.rs`, `loop_.rs`, `loop_session.rs`, `session_manager.rs`,
+    /// and `session_task.rs` — keep all of them funneled through this
+    /// accessor to avoid schema-drift when new override fields are added.
+    pub fn tool_result_soft_threshold_chars(&self) -> usize {
+        self.soft_threshold_chars_override
+            .unwrap_or(crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS)
+    }
+
     /// Resolve the effective context window budget for history trimming.
     ///
     /// Resolution chain for the user-configured cap:
@@ -809,6 +850,7 @@ impl Clone for AgentCore {
             approval_timeout_secs: self.approval_timeout_secs,
             tool_result_keep_recent_n_override: self.tool_result_keep_recent_n_override,
             compression_mode_override: self.compression_mode_override.clone(),
+            soft_threshold_chars_override: self.soft_threshold_chars_override,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_store: self.memory_store.clone(),
             memory_session: self.memory_session.clone(),
@@ -1239,6 +1281,63 @@ mod tests {
         core.apply_runtime_config(&overrides);
 
         assert_eq!(core.tool_result_keep_recent_n_override, Some(7));
+    }
+
+    /// ADR-032 C4a: companion to `apply_runtime_config_persists_compression_mode`
+    /// for the soft-threshold field. The push from the gateway carries
+    /// `Some(1024)`; `apply_runtime_config` must update the in-memory
+    /// `soft_threshold_chars_override` cache, and the public accessor
+    /// `tool_result_soft_threshold_chars()` must return that value.
+    ///
+    /// Pre-fix, cli.rs destructured `tool_result_soft_threshold_chars`
+    /// into `_`, so this field never reached `apply_runtime_config` and
+    /// the accessor always returned the default (2048).
+    #[test]
+    fn apply_runtime_config_persists_soft_threshold_chars() {
+        let mut core = make_core(Some(8192), None, None, 0);
+        assert_eq!(core.soft_threshold_chars_override, None);
+
+        let overrides = RuntimeConfigOverrides {
+            tool_result_soft_threshold_chars: Some(1024),
+            ..Default::default()
+        };
+        core.apply_runtime_config(&overrides);
+
+        assert_eq!(core.soft_threshold_chars_override, Some(1024));
+        assert_eq!(
+            core.tool_result_soft_threshold_chars(),
+            1024,
+            "accessor must surface the user-configured value"
+        );
+    }
+
+    /// Companion: a partial push with `tool_result_soft_threshold_chars = None`
+    /// must NOT wipe a previously-cached value. This is the merge semantic
+    /// that keeps an unrelated push (e.g. only changing the model) from
+    /// resetting the threshold back to the default.
+    #[test]
+    fn apply_runtime_config_preserves_soft_threshold_chars_across_none_push() {
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // First push: user sets 1024.
+        core.apply_runtime_config(&RuntimeConfigOverrides {
+            tool_result_soft_threshold_chars: Some(1024),
+            ..Default::default()
+        });
+        assert_eq!(core.tool_result_soft_threshold_chars(), 1024);
+
+        // Second push: only changes an unrelated field; the threshold
+        // is `None`, so it must NOT be wiped.
+        core.apply_runtime_config(&RuntimeConfigOverrides {
+            max_iterations: Some(50),
+            ..Default::default()
+        });
+        assert_eq!(
+            core.tool_result_soft_threshold_chars(),
+            1024,
+            "partial push with threshold=None must preserve the cached value"
+        );
+        assert_eq!(core.tool_result_keep_recent_n_override, None);
     }
 
     #[test]

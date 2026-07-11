@@ -391,6 +391,8 @@
     "compressionAuto": "自动 —— 当上下文预算不足或长回复后自动压缩",
     "compressionManual": "手动 —— 仅在我点击按钮时压缩",
     "compressionModeDesc": "控制工具结果压缩何时触发。自动：系统决策。手动：通过上下文用量弹出按钮手动控制。",
+    "compressionSoftThreshold": "工具压缩触发阈值（字符）",
+    "compressionSoftThresholdDesc": "工具结果或助手长回复超过此字符数时触发自动压缩。留空使用默认值 2048 字符（约 512 tokens）。修改后需要重启 session 生效。",
     "builtinTools": "内置工具",
     "builtinToolsDesc": "选择要为此 Agent 启用的内置工具。未启用的工具将对 LLM 隐藏。",
     "noBuiltinTools": "暂无内置工具。"
