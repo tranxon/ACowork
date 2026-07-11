@@ -83,6 +83,10 @@ pub struct AgentConfigResponse {
     /// ADR-029: Full builtin tools list with enabled flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tools_all: Option<serde_json::Value>,
+    /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+    /// None or empty = not set / use default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_compression_mode: Option<String>,
 }
 
 /// PUT request body for updating agent config.
@@ -113,6 +117,10 @@ pub struct UpdateAgentConfigRequest {
     /// Some(vec![]) disables all builtin tools. None leaves unchanged.
     #[serde(default)]
     pub builtin_tools: Option<Vec<String>>,
+    /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+    /// None = don't change, Some("") = use default (auto), Some("auto"/"manual") = explicit.
+    #[serde(default)]
+    pub tool_result_compression_mode: Option<String>,
 }
 
 /// Default global values used as fallback when no override exists.

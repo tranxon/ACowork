@@ -108,7 +108,9 @@
     "ariaLabel": "Context usage",
     "compressing": "Compacting...",
     "agentRunning": "Agent running",
-    "compressContext": "compact context"
+    "compressContext": "compact context",
+    "compressTools": "Compress Tools",
+    "compressSummary": "Compress Summary"
   },
   "onboarding": {
     "step": "Step {{current}} of {{total}}",
@@ -487,6 +489,10 @@
     "contextWindowPlaceholder": "200K (default)",
     "resetContextWindow": "Clear context window override, revert to package default",
     "tokens": "tokens",
+    "compressionMode": "Tool Result Compression Mode",
+    "compressionAuto": "Auto — compress tool results when budget is low or after long responses",
+    "compressionManual": "Manual — only compress when I click the button",
+    "compressionModeDesc": "Controls when tool result compression triggers. Auto: system decides. Manual: you control via the context usage popover.",
     "builtinTools": "Builtin Tools",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
     "noBuiltinTools": "No builtin tools available."

@@ -186,6 +186,10 @@ struct WsClientMessage {
     /// Passed through to Runtime for file-content injection via ContextBuilder.
     #[serde(default)]
     attached_context: Option<Vec<acowork_core::protocol::AttachedContextItem>>,
+    /// ADR-032 C4c: Compression action type ("compress_tool_results" | "compress_summary").
+    /// Used by the `compress_action` message type.
+    #[serde(default)]
+    compress_type: Option<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -835,6 +839,49 @@ async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState
             let err = serde_json::json!({
                 "type": "error",
                 "message": format!("Agent {} is not running, cannot compact context", agent_id),
+                "agentId": agent_id,
+            });
+            let _ = socket.send(Message::Text(err.to_string().into())).await;
+        }
+        return;
+    }
+
+    if client_msg.msg_type == "compress_action" {
+        // ADR-032 C4c: Forward user-initiated compression action to Runtime.
+        tracing::info!(agent = %agent_id, "Forwarding compress_action to agent");
+
+        let mut pushed_ok = false;
+        if let Some(session_mgr) = &state.grpc_session_mgr {
+            let mgr = session_mgr.lock().await;
+            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
+                let mut params = serde_json::json!({});
+                if let Some(ref sid) = client_msg.session_id {
+                    params["session_id"] = serde_json::json!(sid);
+                }
+                // Forward compress_type to the Runtime
+                if let Some(ref compress_type) = client_msg.compress_type {
+                    params["compress_type"] = serde_json::json!(compress_type);
+                }
+                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
+                    from: "http-ws".to_string(),
+                    action: "compress_action".to_string(),
+                    params,
+                    command: None,
+                };
+                pushed_ok = session.push_message(intent).await;
+            }
+        }
+
+        if pushed_ok {
+            let ack = serde_json::json!({
+                "type": "ack",
+                "agentId": agent_id,
+            });
+            let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        } else {
+            let err = serde_json::json!({
+                "type": "error",
+                "message": format!("Agent {} is not running, cannot compress", agent_id),
                 "agentId": agent_id,
             });
             let _ = socket.send(Message::Text(err.to_string().into())).await;

@@ -32,13 +32,17 @@ use crate::tools::builtin::ask_user_question::QuestionOption;
 
 use crate::agent::session_state::SessionStatus;
 
-/// ADR-032 C4b: Commands accepted by the manual compress channel.
+/// ADR-032 C4b: User-initiated compression actions.
+///
+/// These are triggered via frontend/CLI buttons regardless of the
+/// current `CompressionMode` (Auto/Manual).  In Auto mode the system
+/// also fires at event points; in Manual mode these are the only way.
 #[derive(Debug, Clone)]
-pub(crate) enum ManualCompressCommand {
+pub enum CompressionAction {
     /// Run `compress_tool_results` (L0 placeholder compression).
-    ToolResults,
+    CompressToolResults,
     /// Run LLM-based summary compaction.
-    Summary,
+    CompressSummary,
 }
 
 /// A ChunkEvent annotated with the session that produced it.
@@ -257,12 +261,11 @@ pub struct AgentLoop {
     /// permanently appended to history.  This vec is cleared after each
     /// `build_chat_request` call.
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
-    /// ADR-032 C4b: Manual compression command receiver.
+    /// ADR-032 C4b: Compression action receiver.
     ///
-    /// Set by the creator (SessionTask / Gateway wiring) to enable manual
-    /// compress triggers via `drain_manual_compress_commands()`.  `None`
-    /// means no channel was wired (manual triggers are no-ops).
-    pub(crate) manual_compress_rx: Option<mpsc::Receiver<ManualCompressCommand>>,
+    /// Set by the creator (SessionTask / Gateway wiring) to enable
+    /// `drain_compress_actions()`.  `None` means no channel was wired.
+    pub(crate) compress_action_rx: Option<mpsc::Receiver<CompressionAction>>,
 }
 
 impl AgentLoop {
@@ -328,7 +331,7 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
-            manual_compress_rx: None,
+            compress_action_rx: None,
         };
         // Initialize persistent model ratio store from agent config dir.
         let ratio_config_dir = Path::new(&loop_.core.config.work_dir).join("config");
@@ -396,7 +399,7 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
-            manual_compress_rx: None,
+            compress_action_rx: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -988,10 +991,10 @@ impl AgentLoop {
             .apply_pending_patches(context_builder);
         self.core.debug_observer.take_re_execute_pending();
 
-        // ADR-032 C4b: drain manual compress commands from Gateway channel.
+        // ADR-032 C4b: drain user-initiated compression actions.
         // This runs every iteration, both in auto mode (where events also
         // trigger) and manual mode (where manual commands are the only way).
-        self.drain_manual_compress_commands();
+        self.drain_compress_actions();
 
         // ── ② Budget + context build ──
         self.core
@@ -1258,7 +1261,7 @@ impl AgentLoop {
     //   - handle_ask_user_question
     //   - handle_todo_write
 
-    // ── ADR-032 C4b: manual compress + mode helpers ──
+    // ── ADR-032 C4b: compression action + mode helpers ──
 
     /// Resolve the effective compression mode for this session.
     ///
@@ -1274,20 +1277,20 @@ impl AgentLoop {
         }
     }
 
-    /// Drain any pending manual compress commands from the channel.
+    /// Drain any pending user-initiated compression actions from the channel.
     ///
-    /// Called at the start of each iteration so manual commands are
-    /// honored even when event-triggered compression is disabled.
-    /// Returns `true` if any command was processed (caller may want to
+    /// Called at the start of each iteration so user-initiated compression
+    /// actions are honored regardless of the current `CompressionMode`.
+    /// Returns `true` if any action was processed (caller may want to
     /// rebuild the chat request after this).
-    pub(crate) fn drain_manual_compress_commands(&mut self) -> bool {
-        let Some(rx) = &mut self.manual_compress_rx else {
+    pub(crate) fn drain_compress_actions(&mut self) -> bool {
+        let Some(rx) = &mut self.compress_action_rx else {
             return false;
         };
         let mut did_work = false;
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                ManualCompressCommand::ToolResults => {
+                CompressionAction::CompressToolResults => {
                     let n = self.core.tool_result_keep_recent_n();
                     let compressed = self.session.history.compress_tool_results(
                         crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
@@ -1299,7 +1302,7 @@ impl AgentLoop {
                     }
                     did_work = true;
                 }
-                ManualCompressCommand::Summary => {
+                CompressionAction::CompressSummary => {
                     // Summary compaction is handled by compact_history_if_needed
                     // (LLM-based). For now, just trigger the budget-trim path.
                     // Full LLM-based summary trigger will be wired in a later phase.

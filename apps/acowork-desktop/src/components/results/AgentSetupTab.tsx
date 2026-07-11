@@ -97,6 +97,7 @@ export function AgentSetupTab() {
           globalMaxTokens: data.global_max_output_tokens,
           activeModel: data.model,
           activeProvider: data.provider,
+          toolResultCompressionMode: data.tool_result_compression_mode,
         });
       })
       .catch((err) => {
@@ -127,6 +128,7 @@ export function AgentSetupTab() {
               globalMaxTokens: data.global_max_output_tokens,
               activeModel: data.model,
               activeProvider: data.provider,
+              toolResultCompressionMode: data.tool_result_compression_mode,
             });
           })
           .catch(() => { });
@@ -150,6 +152,7 @@ export function AgentSetupTab() {
       if (profile.contextWindow !== undefined) body.context_window = profile.contextWindow;
       if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
       if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
+      if (profile.toolResultCompressionMode !== undefined) body.tool_result_compression_mode = profile.toolResultCompressionMode;
       const res = await fetch(
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
         { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
@@ -545,6 +548,29 @@ export function AgentSetupTab() {
         </div>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.contextWindowDesc")}
+        </p>
+      </div>
+
+      {/* Compression Mode */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.compressionMode")}
+        </label>
+        <select
+          value={profile.toolResultCompressionMode ?? "auto"}
+          onChange={(e) =>
+            setProfile(selectedAgentId, {
+              toolResultCompressionMode: e.target.value === "auto" ? undefined : e.target.value,
+            })
+          }
+          className="w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-700
+                     dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
+        >
+          <option value="auto">{t("agentSetup.compressionAuto")}</option>
+          <option value="manual">{t("agentSetup.compressionManual")}</option>
+        </select>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.compressionModeDesc")}
         </p>
       </div>
 

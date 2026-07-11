@@ -731,6 +731,9 @@ pub enum GatewayRequest {
         /// ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<AgentToolEntry>).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_all_json: Option<String>,
+        /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_result_compression_mode: Option<String>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1096,6 +1099,11 @@ pub enum GatewayResponse {
         /// None means don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_enabled: Option<Vec<String>>,
+        /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+        /// None means "keep current value" (no change).
+        /// Some("") means "use default" (typically "auto").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_result_compression_mode: Option<String>,
     },
     /// Query config request (Gateway → Runtime)
     ///

@@ -252,8 +252,11 @@ message ConfigSnapshot {
    optional uint64 approval_timeout_secs = 30;
    // ADR-029: Builtin tools enabled list (JSON-serialized Vec<String> of enabled tool names)
    optional string builtin_tools_enabled_json = 31;
-   // ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<{name,enabled}>)
-   optional string builtin_tools_all_json = 32;
+    // ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<{name,enabled}>)
+    optional string builtin_tools_all_json = 32;
+    // ADR-032 C4b: compression trigger mode ("auto" | "manual").
+    // None / "" = not set / default.
+    optional string tool_result_compression_mode = 33;
 }
 
 message IntentReceived          { string from = 1; string action = 2; string params_json = 3; string command = 4; }
@@ -349,6 +352,9 @@ message RuntimeConfigUpdate      {
     // ADR-029: builtin tools enabled list (JSON-serialized Vec<String>)
     optional string builtin_tools_enabled_json = 23;
     bool builtin_tools_enabled_set = 24;
+    // ADR-032 C4b: compression trigger mode ("auto" | "manual").
+    // None / "" means "keep current value" (no change).
+    optional string tool_result_compression_mode = 25;
 }
 
 message StreamChunk             { string target = 1; string action = 2; string params_json = 3; }

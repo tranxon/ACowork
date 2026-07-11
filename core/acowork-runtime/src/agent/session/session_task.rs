@@ -124,6 +124,9 @@ pub enum SessionMessage {
     Close,
     /// Manually trigger context compaction (from user-initiated compact_context WebSocket action).
     CompactContext,
+    /// ADR-032 C4c: User-initiated compression action (from frontend buttons).
+    /// Carries the specific action type to execute.
+    CompressAction(crate::agent::loop_::CompressionAction),
     /// Update the embedding provider at runtime (hot-push from Gateway
     /// via SidecarEndpointUpdate(Embed, non-empty endpoint)).
     /// The session rebuilds its ONNX embedding provider with the new
@@ -256,6 +259,10 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::EnableDebugMode(_) => f.debug_tuple("EnableDebugMode").finish(),
             SessionMessage::Close => f.debug_tuple("Close").finish(),
             SessionMessage::CompactContext => f.debug_tuple("CompactContext").finish(),
+            SessionMessage::CompressAction(action) => f
+                .debug_tuple("CompressAction")
+                .field(&format!("{:?}", action))
+                .finish(),
             SessionMessage::UpdateEmbedConfig {
                 embed_endpoint,
                 embed_model_id,
@@ -1413,6 +1420,33 @@ impl SessionTask {
                     agent_loop
                         .compact_history_if_needed(&model_name, true)
                         .await;
+                }
+                Some(SessionMessage::CompressAction(action)) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        action = ?action,
+                        "SessionTask: manual compress action triggered"
+                    );
+                    match action {
+                        crate::agent::loop_::CompressionAction::CompressToolResults => {
+                            let n = agent_loop.core.tool_result_keep_recent_n();
+                            let compressed = agent_loop.session.history.compress_tool_results(
+                                crate::agent::loop_context::SOFT_THRESHOLD_CHARS,
+                                n as usize,
+                            );
+                            if compressed > 0 {
+                                agent_loop.session.history.recalibrate_tokens();
+                                agent_loop.emit_session_state();
+                            }
+                            tracing::info!(compressed, "CompressAction::CompressToolResults done");
+                        }
+                        crate::agent::loop_::CompressionAction::CompressSummary => {
+                            let model_name = agent_loop.session.model().unwrap_or("default").to_string();
+                            agent_loop
+                                .compact_history_if_needed(&model_name, true)
+                                .await;
+                        }
+                    }
                 }
                 Some(SessionMessage::UpdateEmbedConfig {
                     embed_endpoint,

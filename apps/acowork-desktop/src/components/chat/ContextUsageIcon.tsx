@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore } from "../../stores/chatStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 
@@ -60,7 +61,11 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   const contextUsage = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.contextUsage ?? null);
   const isCompacting = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.isCompacting ?? false);
   const sessionStatus = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus ?? null);
-  const compactContext = useChatStore((s) => s.compactContext);
+  const sendCompressAction = useChatStore((s) => s.sendCompressAction);
+
+  // Read the current compression mode from agent profile
+  const profile = useAgentStore((s) => (agentId ? s.agents[agentId]?.profile : null));
+  const compressionMode = profile?.toolResultCompressionMode ?? "auto";
 
   // Open popover on hover (not click), with a small delay before closing
   const handleMouseEnter = useCallback(() => {
@@ -91,14 +96,17 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
 
   const usagePercent = contextUsage?.usage_percent ?? 0;
   const isIdle = !sessionStatus || sessionStatus.status === "idle";
-  const canCompress =
-    isIdle &&
-    !isCompacting &&
-    contextUsage != null;
+  const canAct = isIdle && !isCompacting && contextUsage != null;
 
-  const handleCompress = () => {
-    if (!canCompress) return;
-    compactContext(agentId, sessionId);
+  const handleCompressTools = () => {
+    if (!canAct) return;
+    sendCompressAction(agentId, sessionId, "compress_tool_results");
+    setOpen(false);
+  };
+
+  const handleCompressSummary = () => {
+    if (!canAct) return;
+    sendCompressAction(agentId, sessionId, "compress_summary");
     setOpen(false);
   };
 
@@ -165,10 +173,33 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
             </span>
           </div>
 
-          {/* Line 2: compress button — matches model menu "Add Model" button */}
+          {/* Line 2: current compression mode indicator */}
+          <div className="px-3 pb-1 text-[9px] text-zinc-400 dark:text-zinc-500 select-none">
+            {compressionMode === "manual"
+              ? "\u{1F6A7} Manual — click to compress"
+              : "\u{2699}\u{FE0F} Auto — compression on event"}
+          </div>
+
+          {/* Line 3: Compress Tools button */}
           <button
-            onClick={handleCompress}
-            disabled={!canCompress}
+            onClick={handleCompressTools}
+            disabled={!canAct}
+            className={cn(
+              "mx-1.5 mt-1 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md",
+              "bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors",
+              "hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600",
+              "disabled:opacity-40 disabled:cursor-not-allowed",
+            )}
+          >
+            {isCompacting
+              ? t("contextUsage.compressing")
+              : t("contextUsage.compressTools")}
+          </button>
+
+          {/* Line 4: Compress Summary button */}
+          <button
+            onClick={handleCompressSummary}
+            disabled={!canAct}
             className={cn(
               "mx-1.5 mt-1 mb-2 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md",
               "bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors",
@@ -178,9 +209,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
           >
             {isCompacting
               ? t("contextUsage.compressing")
-              : !isIdle
-                ? t("contextUsage.agentRunning")
-                : t("contextUsage.compressContext")}
+              : t("contextUsage.compressSummary")}
           </button>
         </div>
       )}

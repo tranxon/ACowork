@@ -1320,4 +1320,103 @@ mod tests {
         assert!(!map["http_request"]);
         assert!(map["shell"]);
     }
+
+    // ── ADR-032 C4b: live-edit → persistence → restart round-trip ────
+
+    use crate::agent::session::session_manager::RuntimeConfigOverrides;
+
+    /// End-to-end regression test for the live-edit persistence bug.
+    ///
+    /// Chain under test (mirrors what `cli.rs` does at runtime):
+    ///   1. The Gateway PUTs a `RuntimeConfigUpdate` with
+    ///      `tool_result_compression_mode = "manual"`.
+    ///   2. cli.rs applies the push into a `RuntimeConfigOverrides`.
+    ///   3. cli.rs calls `overrides.apply_to(&mut agent_cfg)` — this is
+    ///      the fix path that previously had no `compression_mode` branch.
+    ///   4. cli.rs calls `save_agent_config(...)` so the on-disk file
+    ///      reflects the new mode.
+    ///   5. A subsequent `load_agent_config(...)` round-trip (simulating
+    ///      a restart) must round-trip the value.
+    ///
+    /// Pre-fix, step 3 was silently dropping the field, step 4 wrote
+    /// an unchanged file, and step 5 returned whatever default was in
+    /// place — making the UI "auto" stick on restart.
+    #[test]
+    fn live_edit_compression_mode_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        // Step 0: empty disk (first start) — user has never saved.
+        assert!(load_agent_config(dir.path()).unwrap().is_none());
+
+        // Step 1-2: Desktop PUT pushes "manual" through the gateway.
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        };
+
+        // Step 3: cli.rs persistence — load, apply_to, save.
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .unwrap_or_default();
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Step 4: simulate restart — load from disk again.
+        let reloaded = load_agent_config(dir.path())
+            .unwrap()
+            .expect("file should exist after save");
+        assert_eq!(
+            reloaded.tool_result_compression_mode.as_deref(),
+            Some("manual"),
+            "restart must preserve the user's tool_result_compression_mode"
+        );
+
+        // Step 5: From<&AgentConfig> projects the persisted value back
+        // into runtime_overrides for the next session.
+        let ov = RuntimeConfigOverrides::from(&reloaded);
+        assert_eq!(ov.tool_result_compression_mode.as_deref(), Some("manual"));
+    }
+
+    /// Companion test: `keep_recent_n` (which is boot-only and has no
+    /// proto plumb-through) must survive a partial live-edit push. The
+    /// `apply_to` semantic — only write `Some` fields, preserve the rest
+    /// — is what guarantees this.
+    #[test]
+    fn live_edit_preserves_unrelated_disk_fields() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-existing disk: user set keep_recent_n=7 before.
+        let pre = AgentConfig {
+            tool_result_keep_recent_n: Some(7),
+            ..Default::default()
+        };
+        save_agent_config(dir.path(), &pre).unwrap();
+
+        // Live-edit push: only changes compression_mode, NOT
+        // keep_recent_n.
+        let push = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        };
+
+        // Round-trip through cli.rs persistence logic.
+        let mut cfg = load_agent_config(dir.path())
+            .unwrap()
+            .expect("should load existing");
+        push.apply_to(&mut cfg);
+        save_agent_config(dir.path(), &cfg).unwrap();
+
+        // Reload and verify: only compression_mode changed.
+        let after = load_agent_config(dir.path())
+            .unwrap()
+            .expect("file should exist");
+        assert_eq!(
+            after.tool_result_keep_recent_n, Some(7),
+            "keep_recent_n must survive an unrelated push"
+        );
+        assert_eq!(
+            after.tool_result_compression_mode.as_deref(),
+            Some("manual"),
+            "compression_mode must reflect the push"
+        );
+    }
 }

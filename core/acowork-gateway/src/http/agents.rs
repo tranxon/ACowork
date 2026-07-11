@@ -754,6 +754,7 @@ pub async fn update_avatar_config(
                         context_window: None,
                         approval_timeout_secs: None,
                         builtin_tools_enabled: None,
+                        tool_result_compression_mode: None,
                     })
                     .await;
 
@@ -1023,6 +1024,7 @@ pub async fn delete_avatar_file(
                             context_window: None,
                             approval_timeout_secs: None,
                             builtin_tools_enabled: None,
+                            tool_result_compression_mode: None,
                         })
                         .await;
                 }
@@ -1884,6 +1886,7 @@ pub async fn get_agent_config(
         agent_cfg_approval_timeout,
         builtin_tools_enabled_json,
         builtin_tools_all_json,
+        tool_result_compression_mode,
     ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
         let query = acowork_core::proto::server_message::Payload::QueryConfig(
             acowork_core::proto::QueryConfig {
@@ -1910,15 +1913,16 @@ pub async fn get_agent_config(
                         snap.approval_timeout_secs,
                         snap.builtin_tools_enabled_json,
                         snap.builtin_tools_all_json,
+                        snap.tool_result_compression_mode,
                     )
                 } else {
-                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None)
+                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None)
                 }
             }
-            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None),
         }
     } else {
-        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None)
     };
 
     // Build the effective config from ConfigSnapshot data
@@ -1970,6 +1974,7 @@ pub async fn get_agent_config(
         builtin_tools_all: builtin_tools_all_json
             .as_deref()
             .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()),
+        tool_result_compression_mode,
     };
 
     Ok(Json(effective))
@@ -2044,6 +2049,7 @@ pub async fn update_agent_config(
                     context_window: req.context_window,
                     approval_timeout_secs: req.approval_timeout_secs,
                     builtin_tools_enabled: req.builtin_tools.clone(),
+                    tool_result_compression_mode: req.tool_result_compression_mode.clone(),
                 })
                 .await;
             if !push_result {
@@ -2098,6 +2104,7 @@ pub async fn update_agent_config(
         approval_timeout_secs: req.approval_timeout_secs,
         builtin_tools: req.builtin_tools.clone().unwrap_or_default(),
         builtin_tools_all: None,
+        tool_result_compression_mode: req.tool_result_compression_mode.clone(),
     };
 
     Ok(Json(effective))
@@ -2268,6 +2275,7 @@ pub async fn update_agent_mcp_servers(
                     context_window: None,
                     approval_timeout_secs: None,
                     builtin_tools_enabled: None,
+                    tool_result_compression_mode: None,
                 })
                 .await;
             if !push_result {
@@ -2470,6 +2478,7 @@ pub async fn update_agent_search_config(
                     context_window: None,
                     approval_timeout_secs: None,
                     builtin_tools_enabled: None,
+                    tool_result_compression_mode: None,
                 })
                 .await;
             if !push_result {

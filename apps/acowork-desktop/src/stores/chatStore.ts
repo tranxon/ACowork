@@ -337,6 +337,8 @@ interface ChatStore {
   getOpenSessionIds: (agentId: string) => string[];
   /** Trigger context compaction for the current session */
   compactContext: (agentId: string, sessionId: string) => void;
+  /** ADR-032 C4c: Send a user-initiated compression action (tool results or summary). */
+  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => void;
   /** Toggle a file tree directory expansion (per-session) */
   toggleTreeExpandedPath: (agentId: string, sessionId: string, relPath: string) => void;
   /**
@@ -534,6 +536,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "compact_context", session_id: sessionId }));
       set((state) => updateSessionState(state, agentId, sessionId, { isCompacting: true }));
+    }
+  },
+
+  /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
+   *  `compressType` is "compress_tool_results" or "compress_summary". */
+  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => {
+    const ws = get().wsMap[agentId];
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "compress_action",
+        session_id: sessionId,
+        compress_type: compressType,
+      }));
     }
   },
 

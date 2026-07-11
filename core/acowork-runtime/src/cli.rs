@@ -720,6 +720,8 @@ pub(crate) async fn run_gateway_loop(
                                     approval_timeout_secs: agent_cfg.approval_timeout_secs,
                                     builtin_tools_enabled_json: Some(builtin_tools_enabled_json),
                                     builtin_tools_all_json: Some(builtin_tools_all_json),
+                                    // ADR-032 C4b: compression trigger mode from runtime overrides
+                                    tool_result_compression_mode: overrides.tool_result_compression_mode.clone(),
                                 },
                                 );
                                 let response = proto::ClientMessage {
@@ -1464,6 +1466,52 @@ async fn process_gateway_recv(
                         return LoopAction::Continue;
                     }
 
+                    if action == "compress_action" {
+                        tracing::info!(
+                            session_id = %target_session_id,
+                            "Routing compress_action to session"
+                        );
+
+                        // Ensure session is in memory after potential Runtime restart.
+                        if let Err(e) = session_manager
+                            .ensure_session_in_memory(&target_session_id, std::path::Path::new(work_dir))
+                            .await
+                        {
+                            tracing::warn!(session_id = %target_session_id, error = %e, "Cannot route compress_action");
+                            return LoopAction::Continue;
+                        }
+
+                        // Parse the action type from params
+                        let compress_type = params
+                            .get("compress_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("compress_tool_results");
+
+                        let session_msg = match compress_type {
+                            "compress_summary" => {
+                                SessionMessage::CompressAction(
+                                    crate::agent::loop_::CompressionAction::CompressSummary,
+                                )
+                            }
+                            _ => {
+                                SessionMessage::CompressAction(
+                                    crate::agent::loop_::CompressionAction::CompressToolResults,
+                                )
+                            }
+                        };
+
+                        if let Err(e) = session_manager
+                            .send_to_session(&target_session_id, session_msg)
+                        {
+                            tracing::warn!(
+                                session_id = %target_session_id,
+                                error = %e,
+                                "Failed to route compress_action to session"
+                            );
+                        }
+                        return LoopAction::Continue;
+                    }
+
                     // Budget pre-check: skip processing if budget is exhausted.
                     if let Ok((remaining_tokens, _)) =
                         grpc_client.query_budget(budget_provider).await
@@ -1862,6 +1910,7 @@ async fn process_gateway_recv(
                     context_window,
                     approval_timeout_secs,
                     builtin_tools_enabled,
+                    tool_result_compression_mode, // ADR-032 C4b: plumbed through proto; forwarded below.
                 } => {
                     tracing::info!(
 
@@ -1891,17 +1940,14 @@ async fn process_gateway_recv(
                             system_prompt_override,
                             shell_approval_threshold,
                             approval_timeout_secs,
-                            // ADR-032: hot-update via `RuntimeConfigUpdate`
-                            // plumb-through is deferred to a follow-up phase.
-                            // For C4a, this field is only sourced via
-                            // `agent_config.json` at boot time via
-                            // `From<&AgentConfig> for RuntimeConfigOverrides`,
-                            // so we leave it `None` here (which means "don't
-                            // override the cached session_manager.runtime_overrides
-                            // value, which was set from agent_config.json at
-                            // session_init").
+                            // ADR-032 C4a/C4b: hot-update via `RuntimeConfigUpdate`
+                            // is now plumbed through proto (C4b proto change).
+                            // `tool_result_keep_recent_n` is **boot-only** — not
+                            // carried in `RuntimeConfigUpdate`, so it stays None
+                            // here and is sourced from `agent_config.json` at boot
+                            // via `From<&AgentConfig> for RuntimeConfigOverrides`.
                             tool_result_keep_recent_n: None,
-                            tool_result_compression_mode: None,
+                            tool_result_compression_mode,
                         },
                     );
 
@@ -2062,22 +2108,18 @@ async fn process_gateway_recv(
                         )
                         .unwrap_or_default()
                         .unwrap_or_default();
-                        agent_cfg.max_output_tokens = overrides.max_output_tokens;
-                        agent_cfg.max_iterations = overrides.max_iterations;
-                        agent_cfg.temperature = overrides.temperature;
-                        agent_cfg.system_prompt_override = overrides.system_prompt_override.clone();
-                        agent_cfg.shell_approval_threshold = overrides.shell_approval_threshold.clone();
-                        agent_cfg.context_window = overrides.context_window;
-                        agent_cfg.approval_timeout_secs = overrides.approval_timeout_secs;
-                        // ADR-032: keep N from the cached runtime override so
-                        // that Desktop-side edits of `tool_result_keep_recent_n`
-                        // (preserved via the read-modify-write loop above) are
-                        // not lost when an unrelated `RuntimeConfigUpdate` arrives.
-                        // C4a only sets this from agent_config.json at boot;
-                        // gateway-push plumb-through for live edits is deferred.
-                        if let Some(n) = overrides.tool_result_keep_recent_n {
-                            agent_cfg.tool_result_keep_recent_n = Some(n);
-                        }
+                        // Apply the runtime override cache onto AgentConfig.
+                        // `apply_to` is the single source of truth for the
+                        // RuntimeConfigOverrides → AgentConfig mapping and only
+                        // writes fields whose override is `Some(...)`, so partial
+                        // pushes do not clobber unrelated disk values.
+                        //
+                        // This is what fixes the bug where Desktop edits of
+                        // `tool_result_compression_mode` never reached
+                        // `agent_config.json` (the field was previously dropped
+                        // by the live-edit path and not present in the manual
+                        // read-modify-write below — see ADR-032 C4b regression).
+                        overrides.apply_to(&mut agent_cfg);
                         // ADR-017: Apply avatar config from RuntimeConfigUpdate.
                         // Some("path") = set, Some("") = clear, None = don't change.
                         if let Some(ref av) = avatar {

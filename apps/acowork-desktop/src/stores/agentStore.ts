@@ -37,6 +37,9 @@ export interface AgentProfileSettings {
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
+  /** ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+   *  Undefined/empty = use default ("auto"). */
+  toolResultCompressionMode?: string;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -50,6 +53,7 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
+  toolResultCompressionMode: undefined,
 };
 
 const STORAGE_KEY = "acowork-agent-profiles";
@@ -111,6 +115,10 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     globalMaxTokens: typeof s.globalMaxTokens === "number" ? s.globalMaxTokens : undefined,
     activeModel: typeof s.activeModel === "string" ? s.activeModel : undefined,
     activeProvider: typeof s.activeProvider === "string" ? s.activeProvider : undefined,
+    toolResultCompressionMode:
+      typeof s.toolResultCompressionMode === "string"
+        ? s.toolResultCompressionMode
+        : undefined,
   };
 }
 

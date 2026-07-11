@@ -1135,6 +1135,10 @@ fn proto_to_gateway_response(msg: proto::ServerMessage) -> GatewayResponse {
                 } else {
                     None
                 },
+                // ADR-032 C4b: compression trigger mode
+                // `optional string` in proto → Option<String> in Rust;
+                // None = don't change, Some(v) = set to v.
+                tool_result_compression_mode: rcu.tool_result_compression_mode,
             }
         }
         // Response messages (request_id > 0) — included for robustness

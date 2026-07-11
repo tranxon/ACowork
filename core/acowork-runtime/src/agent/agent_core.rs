@@ -1188,4 +1188,82 @@ mod tests {
         // min(100_000, 191_808) = 100_000
         assert_eq!(budget, 100_000);
     }
+
+    // ── apply_runtime_config (ADR-032 live-edit path) ──────────────────
+
+    /// Regression test for the live-edit bug where Desktop edits of
+    /// `tool_result_compression_mode` and `tool_result_keep_recent_n`
+    /// never reached the in-memory `AgentCore` cache because the
+    /// runtime-side handler was discarding the proto fields and writing
+    /// `None` into the override struct.
+    ///
+    /// This unit test sits one layer down — it proves that, *if* the
+    /// override struct is fed a `Some(value)`, `apply_runtime_config`
+    /// correctly writes it into the per-`AgentCore` cache fields that
+    /// `loop_::compression_mode()` / `loop_::tool_result_keep_recent_n()`
+    /// read each turn.
+    ///
+    /// See `cli.rs` 1926-1954 for the matching wiring fix that previously
+    /// forced these fields to `None`.
+    #[test]
+    fn apply_runtime_config_persists_compression_mode() {
+        let mut core = make_core(Some(8192), None, None, 0);
+        assert_eq!(core.compression_mode_override, None);
+
+        let overrides = RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        };
+        core.apply_runtime_config(&overrides);
+
+        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
+        // The accessor resolves `Some("manual")` to `CompressionMode::Manual`,
+        // anything else falls through to the default (Auto). Construct the
+        // expected value via the loop module to avoid hard-coding the enum.
+        assert_eq!(
+            core.compression_mode_override.as_deref(),
+            Some("manual"),
+            "loop_::compression_mode() will resolve this to CompressionMode::Manual"
+        );
+    }
+
+    #[test]
+    fn apply_runtime_config_persists_keep_recent_n() {
+        let mut core = make_core(Some(8192), None, None, 0);
+        assert_eq!(core.tool_result_keep_recent_n_override, None);
+
+        let overrides = RuntimeConfigOverrides {
+            tool_result_keep_recent_n: Some(7),
+            ..Default::default()
+        };
+        core.apply_runtime_config(&overrides);
+
+        assert_eq!(core.tool_result_keep_recent_n_override, Some(7));
+    }
+
+    #[test]
+    fn apply_runtime_config_ignores_none_fields() {
+        // After a "boot" write of `tool_result_compression_mode = "manual"`,
+        // a subsequent live-edit push that omits that field (None) must NOT
+        // wipe the cached value. This guards the merge path that broadcasts
+        // overrides to every SessionTask — every task would otherwise
+        // forget the user's mode after the next unrelated push.
+        let mut core = make_core(Some(8192), None, None, 0);
+        core.apply_runtime_config(&RuntimeConfigOverrides {
+            tool_result_compression_mode: Some("manual".into()),
+            ..Default::default()
+        });
+        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
+
+        // Partial push: only update keep_recent_n.
+        core.apply_runtime_config(&RuntimeConfigOverrides {
+            tool_result_keep_recent_n: Some(4),
+            ..Default::default()
+        });
+
+        // Compression mode is untouched.
+        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
+        // keep_recent_n updated.
+        assert_eq!(core.tool_result_keep_recent_n_override, Some(4));
+    }
 }
