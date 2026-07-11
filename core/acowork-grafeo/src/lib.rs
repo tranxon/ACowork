@@ -65,7 +65,7 @@ pub use spreading::{
     ExpandedNode, GraphExpandConfig, compute_edge_counts, config_from_hint, get_expand_thresholds,
     get_hint_weights, topology_boost, validate_expand_config,
 };
-pub use stats::{MemoryStats, SlaConfig, SlaStatus, check_sla, collect_stats};
+pub use stats::{MemoryStats, NodeStatusAggregate, SlaConfig, SlaStatus, aggregate_node_status, check_sla, collect_stats};
 pub use types::{
     AutobioCategory, AutobiographicalNode, DEFAULT_EMBEDDING_DIM, Episode, GrafeoConfig,
     KnowledgeNode, KnowledgeSubType, NodeStatus, ProceduralNode, edge_types, labels,

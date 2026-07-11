@@ -2795,6 +2795,15 @@ fn handle_memory_nodes_query(
         );
     }
 
+    // Order: most-recent first (created_at DESC). Use node_id DESC as a
+    // stable tiebreaker so paginated results stay deterministic when
+    // timestamps collide (or are missing).
+    all_entries.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.node_id.cmp(&a.node_id))
+    });
+
     let total = all_entries.len() as u64;
     let page = query.page.max(1);
     let size = query.size.clamp(1, 100) as usize;
@@ -2902,16 +2911,33 @@ fn handle_memory_stats_query(
     };
     match acowork_grafeo::stats::collect_stats(store) {
         Ok(stats) => {
-            let total_nodes: u64 = stats.label_counts.values().sum::<usize>() as u64;
+            // Node-level aggregation (status breakdown + decay score).
+            // Covers all user-visible memory labels so that every node
+            // contributes to the Active/Dormant/Pending counts.
+            let aggregate = acowork_grafeo::stats::aggregate_node_status(
+                store,
+                &[
+                    acowork_grafeo::labels::EPISODIC,
+                    acowork_grafeo::labels::KNOWLEDGE,
+                    acowork_grafeo::labels::PROCEDURAL,
+                    acowork_grafeo::labels::AUTOBIOGRAPHICAL,
+                ],
+            )
+            .unwrap_or_default();
+
+            let total_nodes = aggregate.total_nodes;
             let by_type: HashMap<String, u64> = stats
                 .label_counts
                 .into_iter()
                 .map(|(k, v)| (k, v as u64))
                 .collect();
-            let mut by_status = HashMap::new();
-            by_status.insert("dormant".to_string(), stats.dormant_count as u64);
+
+            // by_status comes from the per-node aggregate, augmented with
+            // the purged-node count from the global stats snapshot.
+            let mut by_status = aggregate.by_status;
             by_status.insert("purged".to_string(), stats.purged_count as u64);
-            let avg_decay_score = 0.0; // TODO P3: track in StatsCollector (acowork-grafeo stats)
+
+            let avg_decay_score = aggregate.avg_decay_score as f64;
             let index_health = "healthy".to_string();
 
             // Vector-index diagnostics used by the desktop "Rebuild Index" banner.

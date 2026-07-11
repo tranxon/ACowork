@@ -2,8 +2,12 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
+
 use crate::error::Result;
+use crate::forgetting::decay::{compute_decay_score, DecayConfig};
 use crate::grafeo::GrafeoStore;
+use crate::types::NodeStatus;
 
 /// Snapshot of memory system runtime statistics.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -66,6 +70,124 @@ fn count_dormant_nodes(db: &grafeo_engine::GrafeoDB) -> Result<usize> {
         .filter(|row| row.first().and_then(|v| v.as_str()) == Some("Dormant"))
         .count();
     Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// Per-node status aggregation (for the memory panel stats API)
+// ---------------------------------------------------------------------------
+
+/// Aggregated node-level information consumed by the memory panel.
+///
+/// The decay score is computed using the exact same formula as
+/// `forgetting::scan` so that the dashboard always reflects the
+/// numbers the forgetting engine actually acts on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeStatusAggregate {
+    /// Count of nodes keyed by status string (`"Active"`, `"Dormant"`,
+    /// `"Pending"` – see [`NodeStatus::as_str`]).
+    pub by_status: HashMap<String, u64>,
+    /// Total number of nodes examined across all requested labels.
+    pub total_nodes: u64,
+    /// Average decay score (0.0 ..= 1.0).  Falls back to `1.0` when no
+    /// node has enough property data for the computation.
+    pub avg_decay_score: f32,
+}
+
+/// Walk every node belonging to `labels` and collect per-status counts
+/// together with an average decay score.
+///
+/// The caller decides which labels to include; typically this should be
+/// the full set of memory-node labels (`Episodic`, `Knowledge`,
+/// `Procedural`, `Autobiographical`) so that all user-visible nodes
+/// contribute to the counts.
+///
+/// Nodes whose `status` property is missing default to
+/// [`NodeStatus::Active`].
+pub fn aggregate_node_status(
+    store: &GrafeoStore,
+    labels: &[&str],
+) -> Result<NodeStatusAggregate> {
+    let db = store.db();
+    let graph = db.graph_store();
+    let now = Utc::now();
+    let decay_config = DecayConfig::default();
+
+    let mut by_status: HashMap<String, u64> = HashMap::new();
+    let mut total_nodes: u64 = 0;
+    let mut decay_sum: f32 = 0.0;
+    let mut decay_count: u64 = 0;
+
+    for &label in labels {
+        let node_ids = graph.nodes_by_label(label);
+        for &nid in &node_ids {
+            let Some(node) = graph.get_node(nid) else { continue };
+            total_nodes += 1;
+
+            // --- status (default: Active) ---
+            let status = node
+                .properties
+                .get(&"status".into())
+                .and_then(|v| v.as_str())
+                .unwrap_or(NodeStatus::Active.as_str())
+                .to_string();
+            *by_status.entry(status).or_insert(0) += 1;
+
+            // --- decay score (mirrors forgetting::scan) ---
+            let importance = node
+                .properties
+                .get(&"importance".into())
+                .and_then(|v| v.as_float64())
+                .unwrap_or(0.5) as f32;
+
+            let access_count = node
+                .properties
+                .get(&"access_count".into())
+                .and_then(|v| v.as_int64())
+                .unwrap_or(0) as u32;
+
+            let hours_since = node
+                .properties
+                .get(&"last_accessed".into())
+                .and_then(|v| v.as_timestamp())
+                .and_then(|ts| {
+                    DateTime::from_timestamp_micros(ts.as_micros())
+                        .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                })
+                .unwrap_or_else(|| {
+                    // Fall back to created_at.
+                    node.properties
+                        .get(&"created_at".into())
+                        .and_then(|v| v.as_timestamp())
+                        .and_then(|ts| {
+                            DateTime::from_timestamp_micros(ts.as_micros())
+                                .map(|dt| (now - dt).num_seconds() as f64 / 3600.0)
+                        })
+                        .unwrap_or(0.0)
+                });
+
+            let score = compute_decay_score(
+                &decay_config,
+                importance,
+                hours_since.clamp(0.0, f64::MAX),
+                access_count,
+            );
+
+            decay_sum += score;
+            decay_count += 1;
+        }
+    }
+
+    let avg_decay_score = if decay_count > 0 {
+        decay_sum / decay_count as f32
+    } else {
+        1.0
+    };
+
+    Ok(NodeStatusAggregate {
+        by_status,
+        total_nodes,
+        avg_decay_score,
+    })
 }
 
 // ---------------------------------------------------------------------------
