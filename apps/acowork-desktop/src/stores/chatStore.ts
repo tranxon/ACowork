@@ -1878,50 +1878,30 @@ function handleMessageEvent(
     case "done": {
       if (!sid) break;
       const usage = data.usage as TokenUsage | undefined;
-      // DEBUG: trace final poll on done
-      console.log(
-        `[ChatStore:DEBUG] done event for ${agentId}/${sid} — starting final incremental poll`,
-      );
-      const pollStart = Date.now();
-      // ADR-025: Final poll to drain remaining data. No coordinates —
-      // the backend delivery cursor knows what's left. This is NOT
-      // "compensation" — it's the natural "fetch remaining data" step.
-      get().loadSessionMessages(
-        agentId,
-        sid!,
-        undefined,
-        50,
-        "backward",
-        true, // incremental = true (ADR-025)
-      ).then((result) => {
-        const elapsed = Date.now() - pollStart;
-        const state = get();
-        const ss = getSessionState(state, agentId, sid!);
-        console.log(
-          `[ChatStore:DEBUG] done final poll result: elapsed=${elapsed}ms, ` +
-          `hasMore=${result?.hasMore}, noNewData=${result?.noNewData}, ` +
-          `messageCount=${ss.messages.length}, ` +
-          `status=${ss.sessionStatus?.status}`,
-        );
-        // Log last 3 message IDs for traceability
-        const lastMsgs = ss.messages.slice(-3).map(m => ({
-          id: m.id, type: m.type,
-          contentLen: typeof m.content === 'string' ? m.content.length : String(m.content).length,
-          contentPreview: typeof m.content === 'string' ? m.content.slice(0, 60) : String(m.content).slice(0, 60),
-        }));
-        console.log(`[ChatStore:DEBUG] last 3 messages after done poll:`, lastMsgs);
-      }).finally(() => {
-        import("../lib/polling").then(({ stopPolling }) => {
-          stopPolling(agentId, sid!);
-        }).catch(() => {});
-      });
+
+      // ADR-025: The done event marks that the backend has finished
+      // processing the run.  Do NOT start a separate incremental poll
+      // here — that was the root cause of the missing-segments bug.
+      //
+      // Starting a fire-and-forget poll here caused a race: it
+      // increments loadSequence, aborts an in-flight doPoll, and its
+      // own response may arrive before the backend has flushed the last
+      // JSONL lines.  When streaming is null in that response, ALL
+      // streaming placeholders are dropped — but their JSONL
+      // replacements haven't arrived yet, so the last few
+      // toolcall/thought/assistant segments vanish.
+      //
+      // Instead, session_state_changed → idle does a single definitive
+      // final incremental poll before stopping the poll cycle.  Idle
+      // guarantees the backend has flushed everything, so the final
+      // poll always gets complete data.
       set((state) => {
         const ss = getSessionState(state, agentId, sid!);
         return {
           ...updateSessionState(state, agentId, sid!, {
             tokenUsage: usage ?? ss.tokenUsage,
-                      isCompacting: false,
-                }),
+            isCompacting: false,
+          }),
         };
       });
       break;
@@ -2159,9 +2139,20 @@ function handleMessageEvent(
                 startPolling(agentId, sid);
               }).catch(() => {});
             } else if (prevActive && !nextActive) {
-              import("../lib/polling").then(({ stopPolling }) => {
-                stopPolling(agentId, sid);
-              }).catch(() => {});
+              // ADR-025: Session transitioned out of active states.
+              // Do one final incremental poll now that the backend has
+              // truly finished (status → idle means all JSONL lines are
+              // flushed).  This is the definitive last poll — it
+              // replaces the old done-handler fire-and-forget poll that
+              // caused the race.
+              //
+              // Done no longer starts polls; idle is the single point
+              // where we (a) capture remaining data and (b) stop polling.
+              get().loadSessionMessages(agentId, sid, undefined, 50, "backward", true).finally(() => {
+                import("../lib/polling").then(({ stopPolling }) => {
+                  stopPolling(agentId, sid);
+                }).catch(() => {});
+              });
             }
 
             // When status transitions TO Idle from non-Idle, clear pending flags
