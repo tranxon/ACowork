@@ -58,7 +58,7 @@ pub async fn handle_intent_send(
     async_: bool,
     from: &str,
     state: &SharedState,
-    grpc_session_mgr: &crate::grpc::SharedGrpcSessionMgr,
+    grpc_session_mgr: &crate::compat::SharedGrpcSessionMgr,
     bridge_ctrl_tx: &Option<tokio::sync::broadcast::Sender<crate::http::routes::BridgeEvent>>,
 ) -> GatewayResponse {
     tracing::info!(
@@ -957,8 +957,8 @@ mod tests {
     async fn test_intent_send_capability_mismatch() {
         let dir = temp_vault_dir("intent_no_cap");
         let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
-        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
-            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        let grpc_session_mgr: crate::compat::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()),
         );
 
         // Install target (but don't register any capability)
@@ -1015,8 +1015,8 @@ mod tests {
     async fn test_intent_send_params_too_large() {
         let dir = temp_vault_dir("intent_large_params");
         let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
-        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
-            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        let grpc_session_mgr: crate::compat::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()),
         );
 
         // Install target with capability

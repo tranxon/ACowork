@@ -24,6 +24,7 @@
 
 mod commands;
 mod gateway_client;
+mod mqtt_client;
 mod state;
 mod tray;
 #[cfg(target_os = "windows")]
@@ -366,6 +367,11 @@ pub fn run() {
             commands::gateway::get_local_gateway_status,
             commands::gateway::ensure_system_agent,
             commands::effects::set_window_effect,
+            // ADR-033 Phase 3: MQTT real-time event commands
+            commands::chat_mqtt::connect_mqtt,
+            commands::chat_mqtt::disconnect_mqtt,
+            commands::chat_mqtt::mqtt_subscribe_agent_sessions,
+            commands::chat_mqtt::mqtt_publish_control,
         ])
         .setup(|app| {
             tray::setup(app)?;

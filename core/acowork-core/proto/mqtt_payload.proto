@@ -1,0 +1,440 @@
+syntax = "proto3";
+
+package acowork.mqtt.v1;
+
+// MQTT payload definitions for the ACowork.AI event bus.
+//
+// This file is INDEPENDENT from gateway_ipc.proto:
+//   - Separate namespace (acowork.mqtt.v1 vs acowork.gateway.v1)
+//   - No shared `service` declaration
+//   - No shared `message` definitions
+//
+// All MQTT PUBLISH payloads are wrapped in `DataEnvelope`. The `payload`
+// oneof is extended when a new data resource is added to the topic tree.
+// See docs/zh/protocols/mqtt.md for the topic tree and channel boundaries.
+//
+// Design principles (mqtt.md §3.5):
+//   - Single topic + Retained for snapshot+incremental semantics
+//   - Payload is always the latest complete value (no diff/update variants)
+//   - Field numbers are never reused (protobuf backward compatibility)
+
+// ── Envelope ───────────────────────────────────────────────────────────
+
+/// Unified envelope for every MQTT PUBLISH payload.
+///
+/// `version` is the protocol version (currently 1). Bump only on
+/// incompatible envelope-level changes — individual payload messages
+/// evolve via field addition per protobuf conventions.
+message DataEnvelope {
+  uint32 version = 1;
+  oneof payload {
+    // ── Global resources (Gateway → all Runtimes, Retained) ──
+    AvailableProviders       available_providers       = 10;
+    AvailableMcps            available_mcps            = 11;
+    AvailableSearches        available_searches        = 12;
+    AvailableEmbeddingModels available_embedding_models = 13;
+    AvailableLsps            available_lsps            = 14;
+
+    // ── Agent lifecycle (Runtime → subscribers, Retained) ──
+    AgentStatus              agent_status              = 20;
+    AgentMeta                agent_meta                = 21;
+    AgentConfig              agent_config              = 22;
+
+    // ── Session lifecycle (Runtime → Desktop) ──
+    SessionCreated           session_created           = 30;
+    SessionDeleted           session_deleted           = 31;
+    SessionMeta              session_meta              = 32;
+    SessionConfig            session_config            = 33;
+    SessionMessage           session_message           = 34;
+
+    // ── Control commands (Desktop → Runtime) ──
+    ControlCommand           control_command           = 40;
+
+    // ── Memory (Runtime → subscribers) ──
+    MemoryNodeUpdate         memory_node_update        = 50;
+
+    // ── Sidecar (Sidecar → subscribers, Retained) ──
+    SidecarStatus            sidecar_status            = 60;
+  }
+}
+
+// ── Global resources: available state (§3.1.1) ────────────────────────
+
+/// Available providers — Gateway health-check verified.
+/// Topic: acowork/global/providers (Retained, QoS 1)
+message AvailableProviders {
+  /// Monotonic version. Runtime compares to detect stale pushes.
+  uint64 version = 1;
+  repeated ProviderRef providers = 2;
+}
+
+/// Available MCP servers — Gateway health-check verified.
+/// Topic: acowork/global/mcps (Retained, QoS 1)
+message AvailableMcps {
+  uint64 version = 1;
+  repeated McpRef servers = 2;
+}
+
+/// Available search providers — Gateway health-check verified.
+/// Topic: acowork/global/searches (Retained, QoS 1)
+message AvailableSearches {
+  uint64 version = 1;
+  repeated SearchRef providers = 2;
+}
+
+/// Available embedding models — loaded into ONNX runtime.
+/// Topic: acowork/global/embedding_models (Retained, QoS 1)
+message AvailableEmbeddingModels {
+  uint64 version = 1;
+  repeated EmbeddingModelRef models = 2;
+  /// Active model ID (the one currently loaded), if any.
+  string active_model_id = 3;
+  /// Active embedding vector dimension, if a model is loaded.
+  uint32 active_dimension = 4;
+  /// Local embedding HTTP endpoint (e.g. "http://127.0.0.1:18080/v1").
+  string endpoint = 5;
+}
+
+/// Available LSP relays — single sidecar process.
+/// Topic: acowork/global/lsps (Retained, QoS 1)
+message AvailableLsps {
+  uint64 version = 1;
+  /// HTTP endpoint of the LSP relay, if running.
+  string endpoint = 2;
+  /// Whether the relay is healthy and ready.
+  bool ready = 3;
+}
+
+// ── Provider reference (mirrors ProviderListItem, no API keys) ─────────
+
+/// Lightweight provider reference for the available-state topic.
+/// API keys are NOT included — they are delivered via a separate
+/// secure channel (gRPC in Phase 1, MQTT secure topic in future).
+message ProviderRef {
+  string id = 1;
+  string base_url = 2;
+  LlmProtocol protocol_type = 3;
+  repeated ProviderModelRef models = 4;
+  string compact_model = 5;  // empty = none
+  bool custom = 6;
+}
+
+/// LLM protocol type (mirrors ProtocolType from domain).
+enum LlmProtocol {
+  LLM_PROTOCOL_UNSPECIFIED = 0;
+  LLM_PROTOCOL_OPENAI = 1;      // OpenAI-compatible (default)
+  LLM_PROTOCOL_ANTHROPIC = 2;   // Anthropic Messages API
+  LLM_PROTOCOL_GOOGLE = 3;      // Google Gemini
+  LLM_PROTOCOL_OLLAMA = 4;      // Ollama native
+}
+
+/// Model entry within a provider reference.
+message ProviderModelRef {
+  string id = 1;
+  ModelCapabilities capabilities = 2;
+  uint64 max_output_tokens_limit = 3;
+}
+
+/// Model capabilities (mirrors ModelCapabilitiesInfo).
+message ModelCapabilities {
+  uint64 context_window = 1;
+  uint64 max_output_tokens = 2;
+  repeated string input_modalities = 3;
+  repeated string output_modalities = 4;
+  // Cost info omitted from MQTT — Runtime doesn't need it for invocation.
+}
+
+// ── MCP reference (mirrors McpListItem, no API keys) ───────────────────
+
+/// Lightweight MCP server reference for the available-state topic.
+message McpRef {
+  string id = 1;
+  string name = 2;
+  McpTransport transport = 3;
+  string url = 4;           // empty for stdio
+  string command = 5;       // empty for http/sse
+  repeated string args = 6;
+  map<string, string> env = 7;
+  map<string, string> headers = 8;
+  uint64 tool_timeout_secs = 9;  // 0 = no override
+}
+
+/// MCP transport type (mirrors McpTransportDef).
+enum McpTransport {
+  MCP_TRANSPORT_UNSPECIFIED = 0;
+  MCP_TRANSPORT_STDIO = 1;
+  MCP_TRANSPORT_HTTP = 2;
+  MCP_TRANSPORT_SSE = 3;
+}
+
+// ── Search reference (mirrors SearchProviderListItem, no API keys) ──────
+
+/// Lightweight search provider reference for the available-state topic.
+message SearchRef {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  bool requires_api_key = 4;
+  string base_url = 5;
+}
+
+// ── Embedding model reference (mirrors EmbeddingModelEntry) ────────────
+
+/// Lightweight embedding model reference for the available-state topic.
+message EmbeddingModelRef {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  uint32 dimension = 4;
+  uint32 max_tokens = 5;
+  uint64 size_mb = 6;
+  repeated string languages = 7;
+  string hf_repo = 8;
+  string onnx_file = 9;
+  string tokenizer_file = 10;
+  bool bundled = 11;
+  bool recommended = 12;
+}
+
+// ── Agent lifecycle (§3.2) — Phase 2/3 stubs ──────────────────────────
+
+/// Agent online/offline status.
+/// Topic: acowork/agents/{id}/status (Retained + LWT)
+message AgentStatus {
+  string agent_id = 1;
+  bool online = 2;
+}
+
+/// Agent metadata.
+/// Topic: acowork/agents/{id}/meta (Retained)
+message AgentMeta {
+  string agent_id = 1;
+  string name = 2;
+  string version = 3;
+  string avatar = 4;       // empty = none
+  string builtin_avatar = 5;
+  // Reserved for Phase 2: full manifest fields as needed
+}
+
+/// Agent runtime config (Runtime's current effective agent_config.json).
+/// Topic: acowork/agents/{id}/config (Retained)
+message AgentConfig {
+  string agent_id = 1;
+  // The full agent_config.json content as a JSON string.
+  // This avoids duplicating the config schema in protobuf and lets
+  // the Runtime evolve its config format independently.
+  string config_json = 2;
+}
+
+// ── Session lifecycle (§3.2) — Phase 2/3 stubs ────────────────────────
+
+/// Session creation event (sid in payload, not in topic path).
+/// Topic: acowork/agents/{id}/sessions/created
+message SessionCreated {
+  string agent_id = 1;
+  string session_id = 2;
+  string title = 3;
+  string created_at = 4;  // ISO 8601
+}
+
+/// Session deletion event.
+/// Topic: acowork/agents/{id}/sessions/deleted
+message SessionDeleted {
+  string agent_id = 1;
+  string session_id = 2;
+  string deleted_at = 3;  // ISO 8601
+}
+
+/// Session metadata (always latest complete value).
+/// Topic: acowork/agents/{id}/sessions/{sid}/meta (Retained)
+message SessionMeta {
+  string agent_id = 1;
+  string session_id = 2;
+  string title = 3;
+  string state = 4;         // "idle" | "running" | "error" | ...
+  uint64 message_count = 5;
+  string provider_id = 6;
+  string model_id = 7;
+  string embedding_model_id = 8;
+  // Usage fields
+  uint64 input_tokens = 10;
+  uint64 output_tokens = 11;
+  uint64 total_input_tokens = 12;
+  uint64 total_output_tokens = 13;
+  string updated_at = 14;  // ISO 8601
+}
+
+/// Session config (always latest complete value).
+/// Topic: acowork/agents/{id}/sessions/{sid}/config (Retained)
+message SessionConfig {
+  string agent_id = 1;
+  string session_id = 2;
+  string config_json = 3;  // full session config as JSON
+}
+
+/// Session message event (incremental, QoS 0).
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/{event_type}
+message SessionMessage {
+  string agent_id = 1;
+  string session_id = 2;
+  oneof event {
+    ChunkPayload          chunk           = 10;
+    ToolCallPayload       tool_call       = 11;
+    ToolResultPayload     tool_result     = 12;
+    DonePayload           done            = 13;
+    ErrorPayload          error           = 14;
+    StoppedPayload        stopped         = 15;
+    AskQuestionPayload    ask_question    = 16;
+    TodoUpdatedPayload    todo_updated    = 17;
+    ReasoningPayload      reasoning_started = 18;
+    ReasoningPayload      reasoning_ended   = 19;
+    CompactingPayload     compacting_started = 20;
+    CompactingPayload     compacting_ended   = 21;
+    ContextUsagePayload   context_usage   = 22;
+    MemoryUpdatedPayload  memory_updated  = 23;
+    SkillExecutedPayload  skill_executed  = 24;
+  }
+}
+
+message ChunkPayload {
+  string message_id = 1;
+  string delta = 2;
+}
+
+message ToolCallPayload {
+  string message_id = 1;
+  string tool_name = 2;
+  string arguments_json = 3;
+  string call_id = 4;
+}
+
+message ToolResultPayload {
+  string call_id = 1;
+  string result_json = 2;
+  bool is_error = 3;
+}
+
+message DonePayload {
+  string message_id = 1;
+}
+
+message ErrorPayload {
+  string message_id = 1;
+  string error = 2;
+}
+
+message StoppedPayload {
+  string message_id = 1;
+}
+
+message AskQuestionPayload {
+  string message_id = 1;
+  string question_json = 2;
+}
+
+message TodoUpdatedPayload {
+  string todos_json = 1;
+}
+
+message ReasoningPayload {
+  string message_id = 1;
+}
+
+message CompactingPayload {
+  string session_id = 1;
+}
+
+message ContextUsagePayload {
+  string session_id = 1;
+  uint64 input_tokens = 2;
+  uint64 output_tokens = 3;
+  uint64 total_input_tokens = 4;
+  uint64 total_output_tokens = 5;
+}
+
+message MemoryUpdatedPayload {
+  string session_id = 1;
+  string node_id = 2;
+}
+
+message SkillExecutedPayload {
+  string session_id = 1;
+  string skill_name = 2;
+  bool success = 3;
+}
+
+// ── Control commands (§9) — Desktop → Runtime ─────────────────────────
+
+/// Control command (sid in payload for routing).
+/// Topic: acowork/agents/{id}/sessions/control/{cmd}
+message ControlCommand {
+  string agent_id = 1;
+  oneof command {
+    CreateSessionCommand     create_session     = 10;
+    DeleteSessionCommand     delete_session     = 11;
+    MessageCommand           message            = 12;
+    StopCommand              stop               = 13;
+    ModelSwitchCommand       model_switch       = 14;
+    ReasoningEffortCommand   reasoning_effort   = 15;
+    CompactContextCommand    compact_context    = 16;
+  }
+}
+
+message CreateSessionCommand {
+  string agent_id = 1;
+}
+
+message DeleteSessionCommand {
+  string agent_id = 1;
+  string session_id = 2;
+}
+
+message MessageCommand {
+  string agent_id = 1;
+  string session_id = 2;
+  string message_id = 3;
+  string content = 4;
+}
+
+message StopCommand {
+  string agent_id = 1;
+  string session_id = 2;
+}
+
+message ModelSwitchCommand {
+  string agent_id = 1;
+  string session_id = 2;
+  string model_id = 3;
+}
+
+message ReasoningEffortCommand {
+  string agent_id = 1;
+  string session_id = 2;
+  string effort = 3;  // "low" | "medium" | "high"
+}
+
+message CompactContextCommand {
+  string agent_id = 1;
+  string session_id = 2;
+}
+
+// ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────
+
+/// Memory node update (always latest complete node).
+/// Topic: acowork/agents/{id}/memory/nodes/{nid}/update
+message MemoryNodeUpdate {
+  string agent_id = 1;
+  string node_id = 2;
+  string node_json = 3;  // full node as JSON
+}
+
+// ── Sidecar (§3.3) ────────────────────────────────────────────────────
+
+/// Sidecar process status.
+/// Topic: acowork/sidecar/{kind}/status (Retained)
+message SidecarStatus {
+  string kind = 1;       // "lsp_relay" | "embed" | ...
+  string endpoint = 2;
+  bool ready = 3;
+  string spec_json = 4;  // sidecar-specific metadata
+}

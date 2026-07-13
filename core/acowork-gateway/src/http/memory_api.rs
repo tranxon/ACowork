@@ -14,7 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::grpc::SharedGrpcSessionMgr;
+use crate::compat::SharedGrpcSessionMgr;
 use crate::http::routes::{ApiError, AppState};
 
 /// Build the memory management router
@@ -151,7 +151,7 @@ pub(crate) async fn grpc_memory_roundtrip(
     query: acowork_core::proto::server_message::Payload,
 ) -> Option<acowork_core::proto::ClientMessage> {
     let (request_id, rx) = {
-        let mut mgr = grpc_mgr.lock().await;
+        let mgr = grpc_mgr.lock().await;
         match mgr.send_memory_request(agent_id, query) {
             Some(h) => h,
             None => return None,

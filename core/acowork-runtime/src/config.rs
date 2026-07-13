@@ -51,6 +51,12 @@ pub struct RuntimeConfig {
     /// When omitted, the runtime runs in standalone mode without Gateway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_endpoint: Option<String>,
+    /// ADR-033: MQTT broker port for Runtime MQTT client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt_port: Option<u16>,
+    /// ADR-033: Runtime localhost HTTP server port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
     /// Path to manifest.toml override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
@@ -208,6 +214,8 @@ impl Default for RuntimeConfig {
             package_path: String::new(),
             work_dir: String::new(),
             gateway_endpoint: None,
+            mqtt_port: None,
+            http_port: None,
             manifest_path: None,
             config_dir: None,
             dev_mode: false,
@@ -245,6 +253,8 @@ impl RuntimeConfig {
             log_level: cli.log_level.clone(),
             log_file_size_mb: cli.log_file_size_mb,
             log_file_count: cli.log_file_count,
+            mqtt_port: cli.mqtt_port,
+            http_port: cli.http_port,
             ..Default::default()
         }
     }

@@ -308,6 +308,10 @@ export interface ChatMessage {
   errorDetail?: string;
   /** For type=error: error type string for conditional rendering */
   errorType?: string;
+  /** ADR-027: `true` when this message is an in-progress streaming line projected
+   *  into messages[] by the Gateway. Renders with a pulse cursor and its content
+   *  is replaced by id on each poll (no placeholder machinery needed). */
+  isStreaming?: boolean;
 
 }
 
@@ -688,6 +692,10 @@ export interface ConversationEntry {
    *  `"compaction"` denotes an LLM-driven compaction summary event whose
    *  `content` is the summary text and `metadata` is `CompactionEventMeta`. */
   kind?: string;
+  /** ADR-027: `true` when this entry is an in-progress streaming line
+   *  projected into messages[] by the Gateway. Content is the FULL
+   *  accumulated text (not a delta) — the frontend replaces by id each poll. */
+  is_streaming?: boolean;
 }
 
 /** Metadata for document upload entries in conversation history */
@@ -708,13 +716,6 @@ export interface PaginatedMessages {
   has_more?: boolean;
   /** ADR-021: Total JSONL line count for incremental polling coordinate tracking */
   total_lines?: number;
-  /** ADR-021: In-progress streaming line delta */
-  streaming?: {
-    line: number;
-    role: string;
-    content: string;
-    char_offset: number;
-  } | null;
 }
 
 // ── User profile (persisted in localStorage) ──────────────────────────

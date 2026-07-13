@@ -109,7 +109,38 @@ pub struct GatewayConfig {
     /// Data flow tuning parameters (ADR-020: channel capacities, thread counts).
     #[serde(default)]
     pub data_flow: DataFlowConfig,
+    /// MQTT broker configuration (ADR-033).
+    #[serde(default)]
+    pub mqtt: MqttConfig,
 }
+
+/// MQTT broker configuration (ADR-033).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct MqttConfig {
+    /// Whether the embedded MQTT broker is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Broker listen host (localhost-only by default).
+    #[serde(default = "default_mqtt_host")]
+    pub host: String,
+    /// Broker listen port.
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+}
+
+impl Default for MqttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            host: default_mqtt_host(),
+            port: default_mqtt_port(),
+        }
+    }
+}
+
+fn default_true() -> bool { true }
+fn default_mqtt_host() -> String { "127.0.0.1".to_string() }
+fn default_mqtt_port() -> u16 { 19875 }
 
 /// Data flow tuning configuration (ADR-020).
 ///
@@ -427,6 +458,7 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.data_flow.clone())
                 .unwrap_or_default(),
+            mqtt: Default::default(),
         };
 
         config.validate()?;
@@ -517,6 +549,7 @@ impl Default for GatewayConfig {
             hf_mirrors: Vec::new(),
             embedding_model: None,
             data_flow: DataFlowConfig::default(),
+            mqtt: Default::default(),
         }
     }
 }

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::grpc::SharedGrpcSessionMgr;
+use crate::compat::SharedGrpcSessionMgr;
 pub use store::{CronStore, CronStoreError, StoredCronEntry};
 
 /// A registered cron entry (S5.8 enhanced)
@@ -405,7 +405,7 @@ pub async fn run_cron_scheduler(
                 let mut gw = gateway_state.write().await;
                 if gw.is_installed(&agent_id) {
                     // Start the agent process
-                    let grpc_addr = crate::grpc::server::default_grpc_addr();
+                    let grpc_addr = crate::compat::default_grpc_addr();
                     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
                     let log_file_size_mb =
                         gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
@@ -415,6 +415,7 @@ pub async fn run_cron_scheduler(
                         gateway_grpc_endpoint,
                         log_file_size_mb,
                         log_file_count,
+                        None,
                     );
                     match lifecycle.start_agent(&agent_id, &mut gw, false).await {
                         Ok(()) => {

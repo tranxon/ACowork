@@ -408,7 +408,8 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
                   const nextItem = displayMessages[virtualRow.index + 1];
                   const hasFollowUpReply = nextItem !== undefined && (nextItem as any).type !== "explore_group";
                   const isLastGroup = virtualRow.index === displayMessages.length - 1;
-                  const isStreamingGroup = sending && isLastGroup;
+                  const isStreamingGroup = sending && isLastGroup
+                    && displayItem.items.some((it: ChatMessage) => it.isStreaming === true);
                   return (
                     <div className="ml-12">
                       <ExploreBlock
@@ -426,13 +427,10 @@ export function VirtualMessageList(props: VirtualMessageListProps) {
                 {/* Regular message */}
                 {displayItem.type !== "explore_group" && (() => {
                   const msg = item as ChatMessage;
-                  const isStreamingMsg = sending
-                    && virtualRow.index === displayMessages.length - 1
-                    && msg.id.startsWith("msg-streaming-");
                   return (
                     <MessageBubble
                       message={msg}
-                      isStreaming={isStreamingMsg}
+                      currentSessionId={currentSessionId ?? ""}
                       liveUserName={userDisplayName}
                       liveUserAvatarUrl={userAvatarUrl}
                       liveUserBuiltinAvatarId={userBuiltinAvatarId}

@@ -23,7 +23,7 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::grpc::resource_pusher::GlobalResourcePusher;
+use crate::compat::GlobalResourcePusher;
 
 use super::lsp_relay::{
     check_lsp_relay_health, kill_lsp_relay, spawn_lsp_relay,

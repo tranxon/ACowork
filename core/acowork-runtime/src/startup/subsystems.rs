@@ -46,12 +46,12 @@ pub(crate) async fn phase_c_spawn_subsystems(
     // Data events (Delta, ReasoningDelta, ToolCall, ToolResult) are no
     // longer sent via channel — the frontend polls them via HTTP.
     let agent_id_for_relay = ctx.agent_id.clone();
-    let chunk_relay = if ctx.chunk_rx.is_some() {
+    let chunk_relay = if ctx.chunk_rx.is_some() && ctx.grpc_client.is_some() {
         let chunk_rx = ctx.chunk_rx.take().unwrap();
         let outbound_ctrl_tx = ctx
             .grpc_client
             .as_ref()
-            .expect("grpc_client must be Some in Gateway mode")
+            .unwrap()
             .outbound_ctrl_sender();
         Some(tokio::spawn(async move {
             tracing::info!("Chunk relay started (single channel)");

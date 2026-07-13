@@ -24,6 +24,18 @@ pub(crate) struct AgentBootContext {
     pub grpc_client: Option<crate::grpc::client::GatewayGrpcClient>,
     pub hello_config: Option<crate::grpc::client::AgentHelloConfig>,
 
+    // ADR-033: MQTT client (None when MQTT not available).
+    // These are populated during startup and will be consumed when
+    // session routing via control_handler is completed (Phase 4).
+    #[allow(dead_code)]
+    pub mqtt_client: Option<crate::mqtt::RuntimeMqttClient>,
+    #[allow(dead_code)]
+    pub available_cache: Option<crate::mqtt::SharedAvailableCache>,
+    /// Control command receiver (from MQTT control topics)
+    pub control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
+    #[allow(dead_code)]
+    pub runtime_http_port: Option<u16>,
+
     // LLM provider
     pub provider: Arc<dyn acowork_core::providers::traits::Provider>,
     /// Startup-resolved model (kept for future Phase 1/2/3 use).

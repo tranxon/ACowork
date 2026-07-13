@@ -13,7 +13,7 @@ use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
-use crate::grpc::resource_pusher::GlobalResourcePusher;
+use crate::compat::GlobalResourcePusher;
 use crate::handlers::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
@@ -50,8 +50,11 @@ impl Gateway {
 
         // Build the gRPC endpoint URL that Runtime processes will use to connect.
         // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
-        let grpc_addr = crate::grpc::server::default_grpc_addr();
+        let grpc_addr = crate::compat::default_grpc_addr();
         let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+
+        // ADR-033: MQTT port for Runtime lifecycle (if MQTT is enabled).
+        let lifecycle_mqtt_port = if config.mqtt.enabled { Some(config.mqtt.port) } else { None };
 
         // Wire up the per-agent interaction store. Keys are agent_id, so the
         // timestamps survive agent stop/restart. Loaded eagerly so the
@@ -69,6 +72,7 @@ impl Gateway {
                 gateway_grpc_endpoint,
                 log_file_size_mb,
                 log_file_count,
+                lifecycle_mqtt_port,
             ),
         })
     }
@@ -313,7 +317,7 @@ impl Gateway {
     /// Since Gateway is single-instance per host (enforced by HTTP port probing),
     /// scoping by endpoint is a safety measure against false positives.
     fn cleanup_orphaned_runtimes(&self) -> usize {
-        let grpc_endpoint = crate::grpc::server::default_grpc_addr().to_string();
+        let grpc_endpoint = crate::compat::default_grpc_addr().to_string();
         let grpc_endpoint_url = format!("http://{}", grpc_endpoint);
 
         // Find all acowork-runtime processes
@@ -643,8 +647,8 @@ impl Gateway {
 
         // Task #12: Create shared gRPC session manager for Gateway→Runtime request-response.
         // Both the gRPC server and HTTP server share this instance.
-        let grpc_session_mgr: crate::grpc::SharedGrpcSessionMgr = Arc::new(
-            tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()),
+        let grpc_session_mgr: crate::compat::SharedGrpcSessionMgr = Arc::new(
+            tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()),
         );
         let http_grpc_session_mgr = Some(grpc_session_mgr.clone());
 
@@ -797,6 +801,80 @@ impl Gateway {
             );
         }
 
+        // ADR-033: Start MQTT broker + Gateway client BEFORE HTTP server
+        // so it's available for chat handlers to publish control commands.
+        let mqtt_config = self.config.mqtt.clone();
+        let mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
+            // ADR-033: start_broker_in_thread runs in a separate OS thread
+            // because rumqttd creates its own tokio runtime internally.
+            match crate::mqtt::start_broker_in_thread(&mqtt_config.host, mqtt_config.port) {
+                Ok(h) => { tracing::info!(addr = %h.listen_addr, "MQTT broker started"); Some(h) }
+                Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
+            }
+        } else { None };
+
+        // ADR-033: Create runtime HTTP registry and agent registry.
+        let runtime_http_registry = crate::http::proxy::new_shared_registry();
+        let reg_for_mqtt = runtime_http_registry.clone();
+        let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
+        let agent_reg_for_mqtt = agent_registry.clone();
+
+        let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_handle.is_some() {
+            let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
+                if topic.ends_with("/http_port") {
+                    let agent_id = topic
+                        .strip_prefix("acowork/agents/")
+                        .and_then(|s| s.strip_suffix("/http_port"))
+                        .unwrap_or("");
+                    if let Ok(port_str) = std::str::from_utf8(&payload) {
+                        if let Ok(port) = port_str.trim().parse::<u16>() {
+                            let reg = reg_for_mqtt.clone();
+                            let aid = agent_id.to_string();
+                            tokio::spawn(async move {
+                                reg.write().await.register(&aid, port);
+                            });
+                        }
+                    }
+                } else if topic.ends_with("/status") {
+                    let reg = agent_reg_for_mqtt.clone();
+                    let topic_owned = topic.clone();
+                    let payload_owned = payload.clone();
+                    tokio::spawn(async move {
+                        reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
+                    });
+                }
+            });
+
+            match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
+                Ok(c) => {
+                    tracing::info!("MQTT Gateway client connected");
+                    let client = c.clone();
+                    tokio::spawn(async move {
+                        let _ = client.subscribe("acowork/agents/+/http_port", crate::mqtt::MqttQoS::AtLeastOnce).await;
+                        let _ = client.subscribe("acowork/agents/+/status", crate::mqtt::MqttQoS::AtLeastOnce).await;
+                    });
+                    Some(Arc::new(c))
+                }
+                Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
+            }
+        } else { None };
+
+        // ADR-033: Start MQTT Global Resources Publisher.
+        // Publishes providers, models, MCP catalog, searches, embedding models
+        // to acowork/global/* Retained topics so Runtime can discover them.
+        let mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger> = if let Some(ref client) = mqtt_gw_client {
+            let publisher = crate::mqtt::MqttGlobalResourcesPublisher::new(
+                client.as_ref().clone(),
+                shared_state.clone(),
+            );
+            let handle = publisher.start();
+            let trigger = handle.create_trigger();
+            tracing::info!("MQTT Global Resources Publisher started");
+            // Store the handle to keep the publisher loop alive.
+            // We don't hold it explicitly — it's kept alive by the tokio task.
+            Some(trigger)
+        } else { None };
+
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -807,6 +885,10 @@ impl Gateway {
                 http_session_pending,
                 log_reload_handle,
                 pusher,
+                mqtt_gw_client,
+                mqtt_publisher_trigger,
+                Some(runtime_http_registry),
+                Some(agent_registry),
             )
             .await
             {
@@ -824,8 +906,8 @@ impl Gateway {
         >(self.config.data_flow.capability_broadcast_capacity);
         let grpc_data_flow_config = self.config.data_flow.clone();
         let grpc_handle = tokio::spawn(async move {
-            let grpc_addr = crate::grpc::server::default_grpc_addr();
-            if let Err(e) = crate::grpc::server::start_grpc_server(
+            let grpc_addr = crate::compat::default_grpc_addr();
+            if let Err(e) = crate::compat::start_grpc_server(
                 grpc_addr,
                 grpc_state,
                 grpc_session_mgr,
@@ -1083,6 +1165,7 @@ mod tests {
             embedding_model: None,
             hf_mirrors: Vec::new(),
             data_flow: crate::config::DataFlowConfig::default(),
+            mqtt: crate::config::MqttConfig::default(),
         }
     }
 

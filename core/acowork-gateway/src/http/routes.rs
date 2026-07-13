@@ -16,9 +16,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
-use crate::grpc::SharedGrpcSessionMgr;
+use crate::compat::SharedGrpcSessionMgr;
 use crate::http::auth::HttpAuth;
-use crate::grpc::resource_pusher::GlobalResourcePusher;
+use crate::compat::GlobalResourcePusher;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
@@ -192,6 +192,15 @@ pub struct AppState {
     pub pusher: Option<Arc<GlobalResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
+    /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
+    pub mqtt_gateway_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
+    /// ADR-033: MQTT global resources publisher trigger.
+    /// HTTP handlers call `.trigger()` after resource changes to republish.
+    pub mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger>,
+    /// ADR-033: Runtime HTTP port registry for reverse proxy to Runtime localhost HTTP.
+    pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
+    /// ADR-033: Agent registry tracking online/offline status from MQTT.
+    pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
 }
 
 impl AppState {
@@ -214,6 +223,10 @@ impl AppState {
             log_reload_handle: None,
             pusher: None,
             cors_enabled: false,
+            mqtt_gateway_client: None,
+            mqtt_publisher_trigger: None,
+            runtime_http_registry: None,
+            agent_registry: None,
         }
     }
 
@@ -237,6 +250,10 @@ impl AppState {
             log_reload_handle,
             pusher: None,
             cors_enabled: false,
+            mqtt_gateway_client: None,
+            mqtt_publisher_trigger: None,
+            runtime_http_registry: None,
+            agent_registry: None,
         }
     }
 }
@@ -336,6 +353,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
+        .merge(crate::http::proxy::proxy_routes())
         .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         .layer(middleware::from_fn(log_request_origin))

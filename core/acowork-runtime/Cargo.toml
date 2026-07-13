@@ -56,6 +56,8 @@ toml.workspace = true
 serde_yaml.workspace = true
 tonic.workspace = true
 prost.workspace = true
+rumqttc.workspace = true
+axum.workspace = true
 
 # File system watching
 notify.workspace = true
@@ -90,3 +92,9 @@ tempfile = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart"] }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+
+# ── ADR-033: Standalone MQTT integration test binary ─────────────────
+[[test]]
+name = "mqtt_integration"
+harness = false    # We provide our own main()
+required-features = []

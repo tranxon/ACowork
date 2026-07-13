@@ -151,8 +151,13 @@ wasmtime-wasi = "29"
 # gRPC
 tonic = "0.12"
 prost = "0.13"
+prost-build = "0.13"
 tonic-build = "0.12"
 protoc-bin-vendored = "3"
+
+# MQTT (ADR-033)
+rumqttc = "0.24"
+rumqttd = { version = "0.14", default-features = false }
 
 # ONNX Runtime — static or dynamic linking.
 #
@@ -191,3 +196,6 @@ acowork-vault = { path = "acowork-vault" }
 acowork-sign = { path = "acowork-sign" }
 acowork-embed = { path = "acowork-embed" }
 acowork-lsp-relay = { path = "acowork-lsp-relay" }
+
+# The next build will work
+

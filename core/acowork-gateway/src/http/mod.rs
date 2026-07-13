@@ -23,4 +23,5 @@ pub mod server;
 pub mod skills_api;
 pub mod users_api;
 pub mod provider_api;
+pub mod proxy;
 pub mod workspaces;

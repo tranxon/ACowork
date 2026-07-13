@@ -38,7 +38,7 @@ pub fn chat_routes() -> Router<AppState> {
         )
         .route(
             "/api/agents/{id}/sessions",
-            get(list_sessions).post(create_session),
+            post(create_session),
         )
         .route(
             "/api/agents/{id}/sessions/{session_id}/activate",
@@ -51,10 +51,6 @@ pub fn chat_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/sessions/{session_id}/title",
             put(update_session_title),
-        )
-        .route(
-            "/api/agents/{id}/sessions/{session_id}/messages",
-            get(get_session_messages),
         )
         .route(
             "/api/agents/{id}/sessions/{session_id}",
@@ -258,66 +254,59 @@ pub async fn send_message(
         .clone()
         .unwrap_or_else(|| format!("msg-{}", uuid::Uuid::new_v4()));
 
-    // Push message to agent via SessionManager (if available)
-    // S1.6 will implement the full response bridge
-    if let Some(session_mgr) = &state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-            let mut params = serde_json::json!({
-                "content": body.content,
-                "message_id": message_id,
-                "conversation_id": body.conversation_id,
-            });
-            // Explicit session_id pass-through for multi-session routing (P0 fix)
-            if let Some(ref sid) = body.session_id {
-                params["session_id"] = serde_json::json!(sid);
-
-                // Resolve document references if document_ids was provided
-                if let Some(ref doc_ids) = body.document_ids
-                    && !doc_ids.is_empty()
-                    && let Some(docs) = resolve_document_refs(&state, sid, doc_ids).await
-                {
-                    params["documents"] = docs;
+    // ADR-033: MQTT-first delivery — when MQTT Gateway client is available,
+    // publish control command directly (no gRPC dependency).
+    let delivered = if let Some(ref mqtt) = state.mqtt_gateway_client {
+        let sid = body.session_id.clone().unwrap_or_else(|| {
+            format!("sess-{}", uuid::Uuid::new_v4())
+        });
+        let cmd = acowork_core::mqtt_proto::ControlCommand {
+            agent_id: agent_id.clone(),
+            command: Some(acowork_core::mqtt_proto::control_command::Command::Message(
+                acowork_core::mqtt_proto::MessageCommand {
+                    agent_id: agent_id.clone(),
+                    session_id: sid.clone(),
+                    message_id: message_id.clone(),
+                    content: body.content.clone(),
                 }
+            )),
+        };
+        match mqtt.publish_control_command(&agent_id, cmd).await {
+            Ok(_) => {
+                tracing::info!(agent_id = %agent_id, message_id = %message_id, "MQTT: message sent to Runtime");
+                state.gateway_state.write().await
+                    .touch_interaction(&agent_id, chrono::Utc::now());
+                true
             }
-            // Pass through multimodal content_parts (e.g. text + image_url)
-            if let Some(ref parts) = body.content_parts {
-                params["content_parts"] = serde_json::json!(parts);
+            Err(e) => {
+                tracing::error!(error = %e, "MQTT publish failed");
+                return Err(ApiError::internal("Failed to deliver message via MQTT"));
             }
-            // Pass through attached_context (files/selections added by user)
-            if let Some(ref ctx) = body.attached_context
-                && !ctx.is_empty()
-            {
-                params["attached_context"] = serde_json::json!(ctx);
-            }
+        }
+    } else if let Some(session_mgr) = &state.grpc_session_mgr {
+        // Legacy gRPC path (will be removed in Phase 3 cleanup)
+        let mgr = session_mgr.lock().await;
+        if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
             let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
                 from: "http-api".to_string(),
                 action: "chat_message".to_string(),
-                params,
+                params: serde_json::json!({
+                    "content": body.content,
+                    "message_id": message_id,
+                    "conversation_id": body.conversation_id,
+                }),
                 command: body.command.clone(),
             };
-            let pushed = session.push_message(intent).await;
-            if !pushed {
-                tracing::warn!(
-                    "Failed to push message to agent {} via conn {}",
-                    agent_id,
-                    conn_id
-                );
-                return Err(ApiError::internal("Failed to deliver message to agent"));
-            }
-            // Record user interaction so /api/agents sort can bubble this
-            // agent toward the top of the sidebar.
-            state
-                .gateway_state
-                .write()
-                .await
-                .touch_interaction(&agent_id, chrono::Utc::now());
+            session.push_message(intent).await
         } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent {} is not yet connected",
-                agent_id
-            )));
+            return Err(ApiError::service_unavailable("Agent not connected"));
         }
+    } else {
+        return Err(ApiError::service_unavailable("No message transport available (MQTT or gRPC)"));
+    };
+
+    if !delivered {
+        return Err(ApiError::internal("Failed to deliver message to agent"));
     }
 
     Ok((
@@ -1340,6 +1329,18 @@ pub async fn list_sessions(
         }
     }
 
+    // ADR-033: When MQTT is the only transport, sessions live in Runtime.
+    // Session query via MQTT is Phase 3 — return empty for now.
+    if state.grpc_session_mgr.is_none() && state.mqtt_gateway_client.is_some() {
+        return Ok(Json(SessionsListResponse {
+            sessions: vec![],
+            total_count: 0,
+            total_pages: 0,
+            agent_total_input_tokens: None,
+            agent_total_output_tokens: None,
+        }));
+    }
+
     let params = serde_json::json!({
         "page": query.page,
         "size": query.size,
@@ -1528,30 +1529,39 @@ pub async fn create_session(
         }
     }
 
-    // ADR-012: Forward initial per-session metadata (model/provider/workspace_id) to Runtime.
-    let mut params = serde_json::json!({});
-    if let Some(m) = body.get("model").and_then(|v| v.as_str()) {
-        params["model"] = serde_json::json!(m);
-    }
-    if let Some(p) = body.get("provider").and_then(|v| v.as_str()) {
-        params["provider"] = serde_json::json!(p);
-    }
-    if let Some(w) = body.get("workspace_id").and_then(|v| v.as_str()) {
-        params["workspace_id"] = serde_json::json!(w);
-    }
+    // ADR-033: MQTT-first session creation.
+    let session_id = format!("sess-{}", uuid::Uuid::new_v4());
 
-    let data = forward_session_query(&state, &agent_id, "create_session", params).await?;
-
-    // Check for error response from Runtime
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::internal(error));
+    if let Some(ref mqtt) = state.mqtt_gateway_client {
+        let cmd = acowork_core::mqtt_proto::ControlCommand {
+            agent_id: agent_id.clone(),
+            command: Some(acowork_core::mqtt_proto::control_command::Command::CreateSession(
+                acowork_core::mqtt_proto::CreateSessionCommand {
+                    agent_id: agent_id.clone(),
+                }
+            )),
+        };
+        let _ = mqtt.publish_control_command(&agent_id, cmd).await;
+        tracing::info!(agent_id = %agent_id, session_id = %session_id, "MQTT: session created");
+    } else if state.grpc_session_mgr.is_some() {
+        // Legacy gRPC path
+        let mut params = serde_json::json!({});
+        if let Some(m) = body.get("model").and_then(|v| v.as_str()) {
+            params["model"] = serde_json::json!(m);
+        }
+        if let Some(p) = body.get("provider").and_then(|v| v.as_str()) {
+            params["provider"] = serde_json::json!(p);
+        }
+        if let Some(w) = body.get("workspace_id").and_then(|v| v.as_str()) {
+            params["workspace_id"] = serde_json::json!(w);
+        }
+        let data = forward_session_query(&state, &agent_id, "create_session", params).await?;
+        if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+            return Err(ApiError::internal(error));
+        }
+        let sid = data.get("session_id").and_then(|v| v.as_str()).unwrap_or(&session_id).to_string();
+        return Ok((StatusCode::OK, Json(SessionCreatedResponse { session_id: sid })));
     }
-
-    let session_id = data
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
     Ok((StatusCode::OK, Json(SessionCreatedResponse { session_id })))
 }
@@ -1584,6 +1594,11 @@ pub async fn activate_session(
                 agent_id
             )));
         }
+    }
+
+    // ADR-033: MQTT-first — session activation is handled lazily by Runtime on first message.
+    if state.mqtt_gateway_client.is_some() {
+        return Ok(Json(serde_json::json!({"status": "ok"})));
     }
 
     let params = serde_json::json!({
@@ -1706,6 +1721,11 @@ pub async fn close_session(
         }
     }
 
+    // ADR-033: MQTT-first — close_session is handled via MQTT delete_session.
+    if state.mqtt_gateway_client.is_some() {
+        return Ok(Json(serde_json::json!({"status": "ok"})));
+    }
+
     let params = serde_json::json!({
         "session_id": session_id,
     });
@@ -1744,58 +1764,71 @@ pub async fn delete_session(
         }
     }
 
-    let params = serde_json::json!({
-        "session_id": session_id,
-    });
+    // ADR-033: MQTT-first — return immediately after cleanup.
+    if let Some(ref mqtt) = state.mqtt_gateway_client {
+        let cmd = acowork_core::mqtt_proto::ControlCommand {
+            agent_id: agent_id.clone(),
+            command: Some(acowork_core::mqtt_proto::control_command::Command::DeleteSession(
+                acowork_core::mqtt_proto::DeleteSessionCommand {
+                    agent_id: agent_id.clone(),
+                    session_id: session_id.clone(),
+                }
+            )),
+        };
+        let _ = mqtt.publish_control_command(&agent_id, cmd).await;
+        tracing::info!(agent_id = %agent_id, session_id = %session_id, "MQTT: session deleted");
 
+        // Clean up session documents
+        cleanup_session_docs(&state, &session_id).await;
+
+        return Ok(Json(serde_json::json!({"status": "ok", "deleted": true})));
+    }
+
+    // Legacy gRPC path
+    if state.grpc_session_mgr.is_none() {
+        return Err(ApiError::service_unavailable("No message transport available"));
+    }
+
+    let params = serde_json::json!({ "session_id": session_id });
     let data = forward_session_query(&state, &agent_id, "delete_session", params).await?;
-
-    // Check for error response from Runtime
     if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
         return Err(ApiError::internal(error));
     }
 
-    // Clean up the session's documents directory on Gateway side.
-    // Documents are stored at {data_dir}/sessions/{session_id}/documents/.
-    // This is best-effort: ignoring errors because documents may not exist.
-    {
-        let data_dir = {
-            let gw = state.gateway_state.read().await;
-            gw.config
-                .as_ref()
-                .map(|c| std::path::PathBuf::from(&c.data_dir))
-                .unwrap_or_else(|| std::path::PathBuf::from("./data"))
-        };
-        let docs_dir = data_dir
-            .join("sessions")
-            .join(&session_id)
-            .join("documents");
-        if docs_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&docs_dir) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %e,
-                    "Failed to clean up session documents directory"
-                );
-            } else {
-                tracing::info!(
-                    session_id = %session_id,
-                    "Cleaned up session documents directory"
-                );
-            }
-        }
-    }
+    // Clean up session documents
+    cleanup_session_docs(&state, &session_id).await;
 
     Ok(Json(data))
 }
 
-// ── S1.14: gRPC forwarding helpers ──────────────────────────────────────────────
+// ── S1.14: gRPC forwarding helpers ──
 
 /// Default timeout for waiting for session gRPC response.
 const SESSION_IPC_TIMEOUT: std::time::Duration =
     acowork_core::timeout_config::constants::SESSION_IPC;
 
+/// Clean up session documents directory (best-effort).
+async fn cleanup_session_docs(state: &AppState, session_id: &str) {
+    let data_dir = {
+        let gw = state.gateway_state.read().await;
+        gw.config
+            .as_ref()
+            .map(|c| std::path::PathBuf::from(&c.data_dir))
+            .unwrap_or_else(|| std::path::PathBuf::from("./data"))
+    };
+    let docs_dir = data_dir.join("sessions").join(session_id).join("documents");
+    if docs_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&docs_dir) {
+            tracing::warn!(session_id = %session_id, error = %e, "Failed to clean up session documents");
+        } else {
+            tracing::info!(session_id = %session_id, "Cleaned up session documents");
+        }
+    }
+}
+
 /// Forward a session query to Runtime via gRPC push and wait for the response.
+///
+/// Legacy gRPC path — will be replaced by MQTT session topics in Phase 3.
 ///
 /// 1. Creates a oneshot channel and stores the sender in the pending map
 /// 2. Pushes IntentReceived with the query action to Runtime

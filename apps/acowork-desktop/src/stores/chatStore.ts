@@ -8,6 +8,82 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
 import i18n from "../i18n";
 
+// ---------------------------------------------------------------------------
+// ADR-027: Mutable streaming content store (outside React/Zustand state).
+//
+// Streaming messages have a stable ChatMessage reference in React state — they
+// are only appended on first appearance and removed when flushed to JSONL,
+// never mutated in place. Their volatile `content` and `isStreaming` flag live
+// in this external Map, read by useSyncExternalStore hooks during rendering.
+// This avoids creating new ChatMessage objects on every poll when only the
+// streaming content changes (~500ms polling × N messages = GC pressure).
+//
+// Keyed by `{sessionId}:{messageId}` to avoid cross-session collisions.
+// ---------------------------------------------------------------------------
+
+interface StreamingEntry {
+  content: string;
+  isStreaming: boolean;
+}
+
+const streamingContents = new Map<string, StreamingEntry>();
+const streamingListeners = new Map<string, Set<() => void>>();
+
+function streamingKey(sessionId: string, messageId: string): string {
+  return `${sessionId}:${messageId}`;
+}
+
+/** Public reader for useSyncExternalStore */
+export function getStreamingContent(
+  sessionId: string,
+  messageId: string,
+): StreamingEntry | null {
+  return streamingContents.get(streamingKey(sessionId, messageId)) ?? null;
+}
+
+/** Public subscriber for useSyncExternalStore */
+export function subscribeStreaming(
+  sessionId: string,
+  messageId: string,
+  callback: () => void,
+): () => void {
+  const key = streamingKey(sessionId, messageId);
+  let set = streamingListeners.get(key);
+  if (!set) {
+    set = new Set();
+    streamingListeners.set(key, set);
+  }
+  set.add(callback);
+  return () => {
+    set!.delete(callback);
+    if (set!.size === 0) streamingListeners.delete(key);
+  };
+}
+
+/** Internal: notify all useSyncExternalStore subscribers for a single entry. */
+function notifyStreamingSubscribers(sessionId: string, messageId: string): void {
+  const set = streamingListeners.get(streamingKey(sessionId, messageId));
+  if (set) for (const cb of set) cb();
+}
+
+/** Internal: remove a streaming entry + its listeners. */
+function deleteStreamingEntry(sessionId: string, messageId: string): void {
+  const key = streamingKey(sessionId, messageId);
+  streamingContents.delete(key);
+  streamingListeners.delete(key);
+}
+
+/** Internal: clear all streaming state for a given session. */
+function clearSessionStreaming(sessionId: string): void {
+  const prefix = `${sessionId}:`;
+  for (const key of streamingContents.keys()) {
+    if (key.startsWith(prefix)) streamingListeners.delete(key);
+  }
+  for (const key of streamingContents.keys()) {
+    if (key.startsWith(prefix)) streamingContents.delete(key);
+  }
+}
+
 // ── Sender info helpers ────────────────────────────────────────────────
 
 function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; senderRole?: string } {
@@ -162,16 +238,6 @@ const DEFAULT_AGENT_STATE: AgentState = {
 
 const MAX_CACHED_SESSIONS = 32;
 const MAX_OPEN_TABS = 32;
-
-/**
- * Maximum content length (chars) retained for streaming placeholders in
- * background (non-active) sessions.  When a session is not the active tab,
- * its accumulated streaming content is truncated to this tail length to
- * prevent unbounded memory growth from concurrent deep-thinking sessions.
- * The full content is re-fetched from the backend when the user switches
- * back to the session.
- */
-const MAX_BACKGROUND_STREAMING_CONTENT = 10_000;
 
 // ---------------------------------------------------------------------------
 // Helper functions for state access
@@ -678,6 +744,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   removeSessionState: (agentId: string, sessionId: string) => {
+    clearSessionStreaming(sessionId);
     set((state) => {
       const agent = getAgentState(state, agentId);
       const newSessionStates = { ...agent.sessionStates };
@@ -1256,7 +1323,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return;
       }
 
-      console.log(`[ChatStore:DEBUG] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}, has_more=${data.has_more}, streaming=${!!data.streaming}${data.streaming ? ` (line=${data.streaming.line}, role=${data.streaming.role}, contentLen=${data.streaming.content?.length ?? 0})` : ""}`);
+      console.log(`[ChatStore:DEBUG] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}, has_more=${data.has_more}${data.messages ? `, streaming=${data.messages.some(m => m.is_streaming)}` : ""}`);
       if (data.messages && data.messages.length > 0) {
         const lastMsg = data.messages[data.messages.length - 1];
         console.log(`[ChatStore:DEBUG] Last incremental message: id=${lastMsg.id}, role=${lastMsg.role}, contentPreview=${typeof lastMsg.content === 'string' ? lastMsg.content.slice(0, 80) : String(lastMsg.content).slice(0, 80)}`);
@@ -1264,13 +1331,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       const converted = mergeDocumentUploads(data.messages ?? [], agentId);
 
-      // ADR-025: Compute poll result for PollingManager before set().
-      const pollResult = incremental
-        ? {
-            hasMore: data.has_more ?? false,
-            noNewData: converted.length === 0 && (!data.streaming || !data.streaming.content),
-          }
-        : undefined;
+      // ADR-025/027: Compute poll result for PollingManager.
+      // With mutable streaming content, noNewData = true only when:
+      //  1. No new settled messages appeared, AND
+      //  2. No streaming content changed (compare against mutable store)
+      const pollResult: { hasMore: boolean; noNewData: boolean } | undefined =
+        incremental
+          ? (() => {
+              const hasStreamingChanged = converted.some((m) => {
+                if (!m.isStreaming) return false;
+                const prev = streamingContents.get(
+                  streamingKey(sessionId, m.id),
+                );
+                return !prev || prev.content !== m.content;
+              });
+              const hasNewSettled = converted.some((m) => !m.isStreaming);
+              return {
+                hasMore: data.has_more ?? false,
+                noNewData: !hasNewSettled && !hasStreamingChanged,
+              };
+            })()
+          : undefined;
 
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
@@ -1279,95 +1360,87 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {};
         }
 
-        // ADR-021/022/025: Incremental poll — append new complete JSONL lines,
-        // then reconcile the in-progress streaming placeholder.
+        // ADR-027: Incremental poll — mutable streaming content.
+        //
+        // Streaming messages (is_streaming=true, id="streaming:{line}")
+        // are projected into messages[] by the Gateway. Their volatile
+        // content lives in the external `streamingContents` Map, NOT in
+        // React state. This avoids creating new ChatMessage objects on
+        // every poll, eliminating GC pressure from ~500ms polling cycles.
+        //
+        // Merge flow:
+        //   1. Streaming messages → update mutable Map; append to
+        //      messages[] only on first appearance (ChatMessage ref
+        //      stays stable across polls)
+        //   2. Settled messages → normal upsert by id
+        //   3. Stale streaming ids absent from poll → delete from Map +
+        //      remove from messages[]
+        //   4. Sort: non-streaming first (insertion order), streaming last
+        //   5. If nothing changed (no new settled, streaming content
+        //      unchanged) → return {} — zero allocations this poll cycle
         if (incremental) {
           const ss = getSessionState(state, agentId, sessionId);
+          const existingById = new Map(ss.messages.map((m) => [m.id, m]));
+          const respIds = new Set<string>();
+          let messagesChanged = false;
 
-          // ADR-025: The backend delivery cursor guarantees no duplicate
-          // messages across polls. However, the frontend may have already
-          // optimistically rendered a user message (sendMessage) that the
-          // backend returns via the first incremental poll. Filter by ID to
-          // prevent duplicates.
-          const existingIds = new Set(ss.messages.map((m) => m.id));
-          let messages = [...ss.messages, ...converted.filter((m) => !existingIds.has(m.id))];
-          const streaming = data.streaming;
-
-          // ADR-022 §6.1: JSONL line order is the ONLY display order. The
-          // frontend never rewrites the type/role of an already-created row.
-          //
-          // We model each streaming line as a placeholder keyed by its future
-          // JSONL line number: `msg-streaming-{sid}-{line}`. Because the id is
-          // line-scoped:
-          //   - A role transition on the Runtime flushes the old line to JSONL
-          //     and starts a NEW streaming line at a higher line_number. That
-          //     produces a DIFFERENT placeholder id, so the old placeholder is
-          //     never mutated in place — its type stays fixed for its lifetime.
-          //   - The old placeholder is removed once its content lands as a
-          //     complete JSONL line (or when streaming ends entirely).
-          const placeholderPrefix = `msg-streaming-${sessionId}-`;
-
-          // 1) Append new JSONL messages (already done above — no dedup).
-
-          // 2) Reconcile placeholders. Drop every streaming placeholder that
-          //    does not match the current streaming line — those lines have
-          //    been flushed to JSONL (or streaming stopped).
-          //
-          //    NOTE: currentPlaceholderId is derived from `streaming` existing
-          //    (not from `streaming.content` being truthy) because the backend
-          //    returns delta content — when no new characters have arrived since
-          //    the last poll, `streaming.content` is an empty string "".
-          //    Using `streaming.content` as a guard would set currentPlaceholderId
-          //    to null on empty-delta polls, causing the filter below to delete
-          //    the existing streaming placeholder and permanently lose its
-          //    accumulated content when the next delta arrives (regression:
-          //    assistant message starts from the middle or flashes empty).
-          const currentPlaceholderId =
-            streaming
-              ? `${placeholderPrefix}${streaming.line}`
-              : null;
-          messages = messages.filter(
-            (m) =>
-              !m.id.startsWith(placeholderPrefix) ||
-              m.id === currentPlaceholderId,
-          );
-
-          // 3) Create or grow the current streaming placeholder. Its type is
-          //    fixed from the role at creation time and never changed after.
-          //    When streaming.content is empty (no new delta), the existing
-          //    placeholder is preserved by the filter above — we skip the
-          //    append to avoid adding an empty string.
-          //
-          //    For background (non-active) sessions, content is truncated to
-          //    MAX_BACKGROUND_STREAMING_CONTENT to prevent unbounded memory
-          //    growth from concurrent deep-thinking sessions.
-          if (streaming && streaming.content && currentPlaceholderId) {
-            const isActiveSession = state.agentStates[agentId]?.activeSessionId === sessionId;
-            const idx = messages.findIndex((m) => m.id === currentPlaceholderId);
-            if (idx >= 0) {
-              const newContent = messages[idx].content + streaming.content;
-              const cappedContent = isActiveSession
-                ? newContent
-                : newContent.slice(-MAX_BACKGROUND_STREAMING_CONTENT);
-              messages[idx] = {
-                ...messages[idx],
-                content: cappedContent,
-              };
+          for (const m of converted) {
+            respIds.add(m.id);
+            if (m.isStreaming) {
+              // Streaming: update mutable store, React state only on first sight
+              const prev = streamingContents.get(streamingKey(sessionId, m.id));
+              if (!prev || prev.content !== m.content) {
+                streamingContents.set(streamingKey(sessionId, m.id), {
+                  content: m.content,
+                  isStreaming: true,
+                });
+                notifyStreamingSubscribers(sessionId, m.id);
+              }
+              if (!existingById.has(m.id)) {
+                // First appearance — add a shell message (content="" — the
+                // real content comes from useStreamingContent in the renderer)
+                existingById.set(m.id, {
+                  ...m,
+                  content: "",
+                  isStreaming: true,
+                } as ChatMessage);
+                messagesChanged = true;
+              }
+              // Already exists → ChatMessage ref unchanged, React skips
+              // reconciliation. Content changes are pushed via
+              // useSyncExternalStore → granular per-message re-renders.
             } else {
-              const cappedContent = isActiveSession
-                ? streaming.content
-                : streaming.content.slice(-MAX_BACKGROUND_STREAMING_CONTENT);
-              const streamingMsg: ChatMessage = {
-                id: currentPlaceholderId,
-                type: streaming.role === "thought" ? "thought" : "assistant",
-                content: cappedContent,
-                timestamp: Date.now(),
-                startTime: Date.now(),
-                ...getAgentSenderInfo(agentId),
-              };
-              messages = [...messages, streamingMsg];
+              // Settled message: normal upsert
+              const existing = existingById.get(m.id);
+              if (!existing || existing.content !== m.content || existing.type !== m.type) {
+                existingById.set(m.id, m);
+                messagesChanged = true;
+              }
             }
           }
+
+          // Cleanup: streaming ids absent from this poll → flushed to JSONL
+          for (const [id, m] of existingById) {
+            if (m.isStreaming && !respIds.has(id)) {
+              deleteStreamingEntry(sessionId, id);
+              existingById.delete(id);
+              messagesChanged = true;
+            }
+          }
+
+          if (!messagesChanged) {
+            // Zero allocations — content changes were handled by
+            // useSyncExternalStore notifications without touching React state
+            return {};
+          }
+
+          // Stable sort: settled first, streaming last
+          const settled: ChatMessage[] = [];
+          const streaming: ChatMessage[] = [];
+          for (const m of existingById.values()) {
+            (m.isStreaming ? streaming : settled).push(m);
+          }
+          const messages = [...settled, ...streaming];
 
           return {
             ...updateSessionState(state, agentId, sessionId, {
@@ -1396,7 +1469,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           };
         }
 
-        // Full initial load — replace all messages
+        // Full initial load — replace all messages + reset streaming state
+        clearSessionStreaming(sessionId);
         return {
           ...updateSessionState(state, agentId, sessionId, {
             messages: converted,
@@ -1644,6 +1718,7 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
     type: (entry.role === "think" ? "thought" : entry.role) as ChatMessage["type"],
     content: entry.content,
     timestamp: new Date(entry.ts).getTime(),
+    isStreaming: entry.is_streaming,
   };
 
   if (entry.role === "user") {
@@ -2139,20 +2214,20 @@ function handleMessageEvent(
                 startPolling(agentId, sid);
               }).catch(() => {});
             } else if (prevActive && !nextActive) {
-              // ADR-025: Session transitioned out of active states.
-              // Do one final incremental poll now that the backend has
-              // truly finished (status → idle means all JSONL lines are
-              // flushed).  This is the definitive last poll — it
-              // replaces the old done-handler fire-and-forget poll that
-              // caused the race.
-              //
-              // Done no longer starts polls; idle is the single point
-              // where we (a) capture remaining data and (b) stop polling.
-              get().loadSessionMessages(agentId, sid, undefined, 50, "backward", true).finally(() => {
-                import("../lib/polling").then(({ stopPolling }) => {
-                  stopPolling(agentId, sid);
-                }).catch(() => {});
-              });
+               // ADR-025: Session transitioned out of active states.
+               // Do one final incremental poll now that the backend has
+               // truly finished (status → idle means all JSONL lines are
+               // flushed).  This is the definitive last poll — it
+               // replaces the old done-handler fire-and-forget poll that
+               // caused the race.
+               //
+               // Done no longer starts polls; idle is the single point
+               // where we (a) capture remaining data and (b) stop polling.
+               get().loadSessionMessages(agentId, sid, undefined, 50, "backward", true).finally(() => {
+                 import("../lib/polling").then(({ stopPolling }) => {
+                   stopPolling(agentId, sid);
+                 }).catch(() => {});
+               });
             }
 
             // When status transitions TO Idle from non-Idle, clear pending flags

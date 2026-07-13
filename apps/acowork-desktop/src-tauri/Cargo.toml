@@ -27,6 +27,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml = "0.8"
 
+# MQTT (ADR-033 Phase 3): Desktop MQTT client for real-time events
+rumqttc = "0.25"
+# Required for MQTT payload protobuf encoding
+prost = "0.13"
+
 # Unix-specific: clock_gettime for sleep detection (macOS + Linux)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

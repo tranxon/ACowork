@@ -14,6 +14,11 @@ pub mod proto {
     tonic::include_proto!("acowork.gateway.v1");
 }
 
+pub mod mqtt_proto {
+    #![allow(clippy::large_enum_variant)]
+    include!(concat!(env!("OUT_DIR"), "/acowork.mqtt.v1.rs"));
+}
+
 pub mod budget;
 pub mod crlf;
 pub mod defaults;

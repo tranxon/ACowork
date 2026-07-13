@@ -12,5 +12,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_transport(false)
         .compile_protos(&["proto/gateway_ipc.proto"], &["proto"])?;
+
+    // ADR-033: Compile MQTT payload protos separately (no tonic/gRPC bindings).
+    // Uses prost-build for pure protobuf message types that go over MQTT.
+    prost_build::Config::new()
+        .compile_protos(&["proto/mqtt_payload.proto"], &["proto"])?;
+
     Ok(())
 }

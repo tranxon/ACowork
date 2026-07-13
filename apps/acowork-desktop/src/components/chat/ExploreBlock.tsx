@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X } from "lucide-react";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
+import { useStreamingContent } from "./useStreamingContent";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface ExploreBlockProps {
@@ -406,10 +407,18 @@ function buildPairedItems(items: ChatMessage[]): PairedItem[] {
 
 /** Render a paired item */
 function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove }: { item: PairedItem; isStreaming: boolean; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void }) {
+  // ADR-027: Read streaming content from mutable store for thought items.
+  // For settled thoughts, the hook returns null and we fall back to msg.content.
+  const msgId = item.kind === "thought" ? item.msg.id
+    : item.kind === "other" ? item.msg.id
+    : item.call.id;
+  const streamingContent = useStreamingContent(currentSessionId ?? "", msgId);
+
   if (item.kind === "thought") {
+    const content = streamingContent?.content || item.msg.content;
     return (
       <ThinkBlock
-        content={item.msg.content}
+        content={content}
         isStreaming={isStreaming && !item.msg.endTime}
         hasReplyStarted={false}
         startTime={item.msg.startTime}

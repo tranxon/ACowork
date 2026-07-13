@@ -458,18 +458,17 @@ export function ChatPanel() {
   // Working indicator — shown when the session is "streaming" but no
   // streaming placeholder message exists yet in the rendered messages.
   // This covers the gap between session_status→streaming and the first
-  // new_data_available poll response (~500-2000ms, LLM call startup).
+  // poll response (~500-2000ms, LLM call startup).
   //
-  // We scan both plain messages AND items inside explore_group because
-  // thought-type streaming placeholders are folded into explore_group
-  // by the displayMessages memo and would NOT be found by a top-level scan.
+  // ADR-027: Streaming messages are now regular messages with isStreaming=true,
+  // not prefixed placeholders.  Check via the flag instead of id prefix.
   const hasStreamingPlaceholder = displayMessages.some((m) => {
-    if ('id' in m && typeof m.id === 'string' && m.id.startsWith('msg-streaming-')) {
+    if ('isStreaming' in m && (m as ChatMessage).isStreaming) {
       return true;
     }
     if ('items' in m && Array.isArray(m.items)) {
       return (m.items as ChatMessage[]).some(
-        (item) => typeof item.id === 'string' && item.id.startsWith('msg-streaming-')
+        (item) => item.isStreaming === true,
       );
     }
     return false;

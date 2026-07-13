@@ -1,29 +1,31 @@
 # ACowork.AI 协议文档（纲要）
 
-> 本目录是 ACowork.AI Gateway 的 API 使用参考。按协议拆分为三份独立文档：
+> 本目录是 ACowork.AI Gateway 的 API 使用参考。按协议拆分为四份独立文档：
 >
-> - [HTTP](./http.md) — REST API + WebSocket 升级
-> - [gRPC](./grpc.md) — Gateway ↔ Agent Runtime 的双向流式 IPC
-> - [WebSocket](./websocket.md) — 聊天流式事件通道
+> - [HTTP](./http.md) — REST API + WebSocket 升级（现行）
+> - [gRPC](./grpc.md) — Gateway ↔ Agent Runtime 的双向流式 IPC（现行）
+> - [WebSocket](./websocket.md) — 聊天流式事件通道（现行）
+> - [MQTT](./mqtt.md) — 未来架构：实时事件总线 + 轻量状态同步（ADR-033 提案）
 >
 > 适用读者：Desktop App 前端、CLI 工具、二方集成方、调试脚本。
 
 ---
 
-## 1. 三种协议一览
+## 1. 四种协议一览
 
-| 协议 | 传输层 | 服务端框架 | 默认端口 | 主要调用方 | 主要用途 |
-|------|--------|------------|----------|------------|----------|
-| HTTP/1.1 | TCP | Axum (Rust) | `19876` | Desktop App、CLI、运维脚本 | 资源 CRUD、配置、会话列表、文件浏览等所有非流式场景 |
-| gRPC | HTTP/2 | Tonic (Rust) | `19877` | Agent Runtime 子进程 | Gateway 与 Runtime 之间唯一的 IPC 通道（双向流式） |
-| WebSocket | HTTP Upgrade | Axum ws | `19876`（与 HTTP 同端口） | Desktop App（流式 UI） | 聊天的实时事件推送（chunk、工具调用、停止信号等） |
+| 协议 | 传输层 | 服务端框架 | 默认端口 | 主要调用方 | 主要用途 | 状态 |
+|------|--------|------------|----------|------------|----------|------|
+| HTTP/1.1 | TCP | Axum (Rust) | `19876` | Desktop App、CLI、运维脚本 | 资源 CRUD、配置、会话列表、文件浏览等所有非流式场景 | 现行 |
+| gRPC | HTTP/2 | Tonic (Rust) | `19877` | Agent Runtime 子进程 | Gateway 与 Runtime 之间唯一的 IPC 通道（双向流式） | 现行 |
+| WebSocket | HTTP Upgrade | Axum ws | `19876`（与 HTTP 同端口） | Desktop App（流式 UI） | 聊天的实时事件推送（chunk、工具调用、停止信号等） | 现行 |
+| MQTT 3.1.1 | TCP | rumqttd (嵌入) | `19875` | Gateway、Runtime、Desktop Tauri backend | 实时事件总线 + 轻量级状态同步 + 设备生命周期管理（替代 gRPC + WebSocket） | **提案中**（ADR-033） |
 
-> **端口与绑定**：默认全部绑定 `127.0.0.1`（localhost only）。可在 `gateway.toml` 的
+> **端口与绑定**：默认全部绑定 `127.0.0.1`（localhost only）。Runtime localhost HTTP server 使用随机端口（`--http-port=0`），仅 Gateway 反向代理可达。可在 `gateway.toml` 的
 > `[http]` 节调整端口与 CORS；gRPC 端口见 [`core/acowork-core/src/defaults.rs`](../../../core/acowork-core/src/defaults.rs)。
 
 ---
 
-## 2. 总体架构
+## 2. 总体架构（当前 + MQTT 演进）
 
 ```mermaid
 graph LR
@@ -33,10 +35,11 @@ graph LR
     subgraph CLI["CLI / 脚本"]
         Script[CLI / curl]
     end
-    subgraph GW["Gateway (Axum + Tonic)"]
+    subgraph GW["Gateway (Axum + Tonic + rumqttd·规划)"]
         HTTP[HTTP API<br/>:19876]
         WS[WebSocket /ws<br/>:19876]
         GRPC[gRPC Server<br/>:19877]
+        BROKER[rumqttd Broker<br/>:19875·规划]
         Bus[(GatewayState<br/>bridge bus)]
     end
     subgraph RT["Agent Runtime 子进程"]
@@ -49,12 +52,17 @@ graph LR
     Script -->|HTTP REST| GW
     GW -->|Connect stream<br/>发送| RT
     RT -->|StreamChunk / Event<br/>上报| GW
+    GW -.->|MQTT PUB/SUB·规划| RT
+    UI <-->|MQTT 直连 broker·规划| BROKER
+    GW -.->|HTTP 反向代理·规划<br/>(大数据查询)| RT
 
     classDef ext fill:#eef,stroke:#88a
     classDef gw fill:#efe,stroke:#8a8
     classDef rt fill:#fee,stroke:#a88
+    classDef plan fill:#fff5d6,stroke:#cc9,stroke-dasharray: 4 2
     class UI,Script ext
     class HTTP,WS,GRPC,Bus gw
+    class BROKER plan
     class Loop,Mem rt
 ```
 
@@ -63,12 +71,13 @@ graph LR
 1. **Desktop App / CLI** → 通过 **HTTP REST** 调用 Gateway 完成资源 CRUD、配置与会话查询。
 2. **Desktop App** → 通过 **WebSocket**（同 HTTP 端口的 `/api/agents/{id}/stream`）订阅流式事件（chunk / tool / done 等）。
 3. **Agent Runtime** 子进程 → 通过 **gRPC 双向流** 与 Gateway 维持长连接，进行握手（AgentHello）、资源同步（Provider/MCP/Search 列表）、事件上报（StreamChunk、UsageReport）、接收 Gateway 下发的意图（IntentReceived）等。
+4. **（演进）** 未来 [MQTT 架构](./mqtt.md) 把 gRPC + WebSocket 收敛为 MQTT pub/sub + HTTP 反向代理：业务事件直连 broker，状态数据通过 retained 同步，大数据查询通过 Gateway 反向代理到 Runtime localhost HTTP。详见 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)。
 
 ---
 
 ## 3. 通信流程概览
 
-### 3.1 一次典型对话的端到端流程
+### 3.1 一次典型对话的端到端流程（当前）
 
 ```mermaid
 sequenceDiagram
@@ -102,13 +111,21 @@ sequenceDiagram
 - WebSocket 内容由 Gateway 透传自 Runtime 的 `StreamChunk`，Gateway 仅在 `chunk` 事件将 `content` 重命名为 `delta`，其余字段原样转发。
 - gRPC 同时承担**事件上报**（Runtime → Gateway）与**意图下发**（Gateway → Runtime）。
 
-### 3.2 三种协议的职责边界
+### 3.2 三种协议的职责边界（当前）
 
 | 协议 | Gateway 做 | Runtime 做 |
 |------|------------|-----------|
 | HTTP | 鉴权、状态聚合、文件 IO、跨 Agent 资源 CRUD | 不直接参与；Runtime 数据通过 gRPC 拉取 |
 | gRPC | 维护 session 表、能力广播、请求-响应路由（pending requests） | 真实业务执行：LLM 调用、Tool/Skill、Memory 存储 |
 | WebSocket | 单向广播桥接事件（bridge_ctrl_tx → socket） | 不参与；Runtime 通过 gRPC 上报 StreamChunk |
+
+### 3.3 演进架构（ADR-033）
+
+当前三种协议（含 Bridge 事件总线）的痛点（手工 `BridgeEventType` 字符串匹配、`GrpcSessionManager` 不可靠的进程感知、多用户需大改路由）在 ADR-033 中已系统论述。**演进目标**：
+
+- **MQTT 替换 gRPC + WebSocket**：Gateway 内嵌 [`rumqttd`](https://github.com/bytebeamio/rumqtt) 作为 broker，Runtime 改为纯 `rumqttc` 客户端 + localhost HTTP server（供 Gateway 反向代理大数据查询），Topic 树天然多租户隔离，Will Message + Retained 解决设备生命周期管理。
+- **HTTP 职责不变**：继续承担 CRUD / 全局资源全量管理 / 反向代理到 Runtime HTTP。
+- 完整方案：见 [mqtt.md](./mqtt.md)。
 
 ---
 
@@ -119,6 +136,7 @@ sequenceDiagram
 - HTTP 请求/响应：`application/json; charset=utf-8`
 - WebSocket 帧：文本帧（`Message::Text`），UTF-8 JSON
 - gRPC：标准 protobuf
+- MQTT（规划）：二进制 protobuf，独立文件 `mqtt_payload.proto`（独立命名空间，不与其他 proto 共享定义）
 
 ### 4.2 错误格式（HTTP）
 
@@ -143,6 +161,7 @@ HTTP 状态码语义：
 - `http.auth_enabled = true` 时，Gateway 启动时生成 256-bit 随机 token，写入 `<data_dir>/http_token`。
 - HTTP 请求需带 `Authorization: Bearer <token>` 头。
 - gRPC 与 WebSocket 当前绑定 `127.0.0.1`，依赖本地回路保护，**不在协议层做鉴权**。
+- MQTT（规划）：依赖 localhost-only 绑定；多用户阶段启用 rumqttd 内置 ACL。
 
 ### 4.4 数据发现文件
 
@@ -163,6 +182,7 @@ Gateway 启动后会在 `<data_dir>/` 下写入：
 | 发起聊天（HTTP） | [http.md §Chat 与会话](./http.md#三chat-与会话) |
 | 订阅流式事件 | [websocket.md](./websocket.md) |
 | 理解 Gateway ↔ Runtime 通信 | [grpc.md](./grpc.md) |
+| 了解 MQTT 架构（ADR-033 演进目标） | [mqtt.md](./mqtt.md) |
 | 管理 Provider/MCP/Search | [http.md §LLM Provider 与 Models](./http.md#五llm-provider-与-models) / [http.md §MCP 目录](./http.md#六mcp-目录) |
 | 操作 Memory | [http.md §记忆](./http.md#七记忆) |
 | 调试/重启 Agent / LSP | [http.md §调试与开发工具](./http.md#十三调试与开发工具) |
@@ -175,6 +195,12 @@ Gateway 启动后会在 `<data_dir>/` 下写入：
 - 各域 handler：`core/acowork-gateway/src/http/*.rs`
 - gRPC 服务：`core/acowork-gateway/src/grpc/server.rs`
 - gRPC 分发：`core/acowork-gateway/src/grpc/dispatch.rs`
-- Proto 定义：`core/acowork-core/proto/gateway_ipc.proto`
+- MQTT Broker / Publisher（规划）：`core/acowork-gateway/src/mqtt/*.rs`
+- Gateway HTTP 反向代理（规划）：`core/acowork-gateway/src/http/proxy.rs`
+- Runtime MQTT Client（规划）：`core/acowork-runtime/src/mqtt/client.rs`
+- Runtime HTTP Server（规划）：`core/acowork-runtime/src/http/server.rs`
+- Proto 定义（gRPC）：`core/acowork-core/proto/gateway_ipc.proto`
+- Proto 定义（MQTT，规划）：`core/acowork-core/proto/mqtt_payload.proto`
 - 默认端口：`core/acowork-core/src/defaults.rs`
 - WebSocket 实现：`core/acowork-gateway/src/http/chat.rs`（`agent_stream_ws` / `handle_ws`）
+- ADR-033（MQTT 演进）：[`docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md`](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)

@@ -9,6 +9,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
+import { useStreamingContent } from "./useStreamingContent";
 import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
@@ -209,17 +210,24 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
 /** Single message bubble */
 const MessageBubble = React.memo(function MessageBubble({
   message,
-  isStreaming,
+  currentSessionId,
   liveUserName: liveUserNameProp,
   liveUserAvatarUrl,
   liveUserBuiltinAvatarId,
 }: {
   message: ChatMessage;
-  isStreaming: boolean;
+  currentSessionId: string;
   liveUserName?: string;
   liveUserAvatarUrl?: string | null;
   liveUserBuiltinAvatarId?: string | null;
 }) {
+  // ADR-027: Streaming content lives in an external mutable Map, read via
+  // useSyncExternalStore.  The ChatMessage ref in React state is stable
+  // across polls — only the mutable Map update triggers a re-render of
+  // this single bubble.
+  const streaming = useStreamingContent(currentSessionId, message.id);
+  const displayContent = streaming?.content ?? message.content;
+  const isStreaming = streaming?.isStreaming ?? false;
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
@@ -269,18 +277,18 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "assistant") {
-    const showPlaceholder = !message.content;
+    const showPlaceholder = !displayContent;
 
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
 <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              {message.content && (
+              {displayContent && (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
-                  <StreamMarkdown content={message.content} />
+                  <StreamMarkdown content={displayContent} />
                 </div>
               )}
-              {!message.content && showPlaceholder && (
+              {!displayContent && showPlaceholder && (
                 <span className="inline-flex items-center gap-1.5">
                   <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                   <span className="text-zinc-400">{t("chatPanel.thinking")}</span>
@@ -299,7 +307,7 @@ const MessageBubble = React.memo(function MessageBubble({
         <div className="min-w-0 flex flex-col ml-12">
 <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
-                content={message.content}
+                content={displayContent || message.content}
                 isStreaming={isStreaming}
                 hasReplyStarted={!isStreaming}
                 startTime={message.startTime}
@@ -424,11 +432,16 @@ const MessageBubble = React.memo(function MessageBubble({
 
   return null;
 }, (prev, next) => {
-  // chatStore keeps message object references stable for unchanged
-  // messages, so reference equality correctly skips non-streaming items.
-  // Profile fields are included so name/avatar edits propagate instantly.
+  // ADR-027: chatStore keeps message object references stable for streaming
+  // messages (only appended on first appearance, never mutated).  Reference
+  // equality correctly skips re-renders for both settled and streaming
+  // messages alike.  Streaming content changes are delivered via
+  // useSyncExternalStore → useStreamingContent, which triggers a granular
+  // re-render of only the affected MessageBubble.
+  //
+  // isStreaming is intentionally NOT compared here — it's derived internally
+  // from useStreamingContent, not received as a prop.
   return prev.message === next.message
-    && prev.isStreaming === next.isStreaming
     && prev.liveUserName === next.liveUserName
     && prev.liveUserAvatarUrl === next.liveUserAvatarUrl
     && prev.liveUserBuiltinAvatarId === next.liveUserBuiltinAvatarId;

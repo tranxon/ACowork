@@ -34,6 +34,7 @@ pub async fn spawn_agent_process(
     debug_port: Option<u16>,
     log_file_size_mb: u64,
     log_file_count: u64,
+    mqtt_port: Option<u16>,
 ) -> Result<AgentChild, GatewayError> {
     // Locate the acowork-runtime binary (sibling of current executable)
     let runtime_bin = std::env::current_exe()
@@ -69,6 +70,13 @@ pub async fn spawn_agent_process(
         .arg(workspace)
         .arg("--gateway-endpoint")
         .arg(gateway_grpc_endpoint);
+
+    // ADR-033: Pass MQTT port so Runtime connects via MQTT instead of (or alongside) gRPC.
+    if let Some(port) = mqtt_port {
+        cmd.arg("--mqtt-port").arg(port.to_string());
+        // ADR-033: Enable Runtime HTTP server for Gateway reverse proxy.
+        cmd.arg("--http-port").arg("0"); // 0 = random port
+    }
 
     // Developer mode: lower log level to DEBUG for detailed diagnostics
     let log_level = if dev_mode { "debug" } else { "info" };
@@ -266,6 +274,7 @@ mod tests {
             None,
             10,
             20,
+            None,
         )
         .await;
         assert!(result.is_err());

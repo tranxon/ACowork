@@ -1459,15 +1459,17 @@ pub async fn start_agent(
 
     // Use the lifecycle manager to start the agent
     let idle_timeout = 300; // Default idle timeout
-    let grpc_addr = crate::grpc::server::default_grpc_addr();
+    let grpc_addr = crate::compat::default_grpc_addr();
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
+    let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
         log_file_size_mb,
         log_file_count,
+        mqtt_port,
     );
     lifecycle
         .start_agent(&agent_id, &mut gw, req.dev_mode)
@@ -1524,13 +1526,14 @@ pub async fn stop_agent(
     }
 
     let idle_timeout = 300;
-    let grpc_addr = crate::grpc::server::default_grpc_addr();
+    let grpc_addr = crate::compat::default_grpc_addr();
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
         10,
         20,
+        None,
     );
     lifecycle
         .stop_agent(&agent_id, &mut gw)
@@ -1581,15 +1584,17 @@ pub async fn restart_agent_in_debug(
         .ok_or_else(|| ApiError::internal("gRPC session manager not available"))?;
 
     let idle_timeout = 300;
-    let grpc_addr = crate::grpc::server::default_grpc_addr();
+    let grpc_addr = crate::compat::default_grpc_addr();
     let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
+    let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
     let lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
         log_file_size_mb,
         log_file_count,
+        mqtt_port,
     );
 
     lifecycle
@@ -2564,7 +2569,7 @@ pub async fn get_session_state(
 
     // Lock only for push, then release before awaiting response
     let (request_id, rx) = {
-        let mut mgr = grpc_mgr.lock().await;
+        let mgr = grpc_mgr.lock().await;
         match mgr.send_session_state_request(&agent_id, &session_id) {
             Some(h) => h,
             None => {
@@ -2739,7 +2744,7 @@ pub async fn get_latest_session(
     };
 
     let (request_id, rx) = {
-        let mut mgr = grpc_mgr.lock().await;
+        let mgr = grpc_mgr.lock().await;
         match mgr.send_latest_session_request(&agent_id) {
             Some(h) => h,
             None => {

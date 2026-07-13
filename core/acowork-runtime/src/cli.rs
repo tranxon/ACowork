@@ -85,6 +85,16 @@ pub struct Cli {
     /// Config directory for the agent
     #[arg(long, env = "ACOWORK_CONFIG_DIR")]
     pub config_dir: Option<String>,
+
+    /// ADR-033: MQTT broker port for Runtime MQTT client.
+    /// When set, Runtime connects to the Gateway's embedded MQTT broker.
+    #[arg(long, env = "ACOWORK_MQTT_PORT")]
+    pub mqtt_port: Option<u16>,
+
+    /// ADR-033: Runtime localhost HTTP server port.
+    /// When set, Runtime starts a local HTTP endpoint for Desktop discovery.
+    #[arg(long, env = "ACOWORK_HTTP_PORT")]
+    pub http_port: Option<u16>,
 }
 
 impl Cli {
@@ -347,7 +357,7 @@ async fn async_main(
     // Phase A: per-agent initialization (package, gateway, provider, tools, embedding).
     let mut agent_ctx = phase_a_init_agent(&config).await?;
 
-    if agent_ctx.grpc_client.is_some() {
+    if agent_ctx.grpc_client.is_some() || agent_ctx.mqtt_client.is_some() {
         // ── Gateway mode ────────────────────────────────────────────────────
         // Phase B: per-session initialization (conversation, AgentCore, SessionManager).
         let mut session_ctx = phase_b_init_session(&mut agent_ctx, &config).await?;
@@ -543,6 +553,7 @@ pub(crate) async fn run_gateway_loop(
     >,
     mcp_runtime_tx: tokio::sync::mpsc::Sender<crate::tools::mcp_manager::McpConnectResult>,
     mut mcp_runtime_rx: tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
+    mut mqtt_dispatch_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>>,
 ) -> Result<()> {
     // Retrieve the provider name for budget queries
     let budget_provider = session_manager.provider_name();
@@ -559,6 +570,20 @@ pub(crate) async fn run_gateway_loop(
     loop {
         if let Some(ref mut mq_rx) = gateway_query_rx {
             tokio::select! {
+                // ADR-033: MQTT control message dispatch.
+                dispatch_result = async {
+                    match &mut mqtt_dispatch_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some((session_id, msg)) = dispatch_result {
+                        if let Some(session) = session_manager.get_session(&session_id) {
+                            let _ = session.send_inbound(msg);
+                        }
+                    }
+                }
+
                 recv_result = grpc_client.recv_message() => {
                     match process_gateway_recv(
                         recv_result,

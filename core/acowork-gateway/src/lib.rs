@@ -9,12 +9,13 @@ pub mod config;
 pub mod cron;
 pub mod error;
 pub mod gateway;
-pub mod grpc;
+pub mod compat; // ADR-033: gRPC stubs replaced with minimal compat
 pub mod http;
 pub mod intent;
 pub mod interaction_store;
 pub mod handlers;
 pub mod lifecycle;
+pub mod mqtt;
 pub mod package_manager;
 pub mod rate;
 pub mod resource_cache;

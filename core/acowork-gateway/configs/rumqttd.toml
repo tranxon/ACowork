@@ -1,0 +1,39 @@
+// rumqttd broker configuration file for ACowork.AI Gateway.
+//
+// This file is loaded at startup by `mqtt/acl.rs` and merged with the
+// programmatic Config built in `mqtt/broker.rs`. The TOML structure mirrors
+// rumqttd's `Config` struct.
+//
+// See docs/zh/protocols/mqtt.md §10.2 for the ACL design.
+
+id = 0
+
+[router]
+max_connections = 100
+max_outgoing_packet_count = 100
+max_segment_size = 10485760  # 10 MB — matches GATEWAY_MQTT_MAX_PACKET_SIZE
+max_segment_count = 10
+
+# ── MQTT 3.1.1 (v4) TCP server ────────────────────────────────────────
+# The single TCP listener for all clients (Runtime, Desktop, Gateway publisher).
+# Bound to localhost only — no external exposure.
+
+[v4.acowork]
+name = "acowork"
+listen = "127.0.0.1:19875"
+next_connection_delay_ms = 1
+
+[v4.acowork.connections]
+connection_timeout_ms = 5000
+max_payload_size = 10485760  # 10 MB
+max_inflight_count = 100
+dynamic_filters = false
+
+# ── ACL (single-user phase — permissive) ──────────────────────────────
+# Multi-user phase: replace with per-user ACL rules generated dynamically.
+# See mqtt.md §10.2 for the ACL configuration syntax.
+
+# Note: rumqttd 0.20 does not have built-in TOML-based ACL.
+# ACL is enforced via the `set_auth_handler` callback in broker.rs,
+# which validates client_id patterns at connection time.
+# This file serves as documentation of the intended ACL policy.

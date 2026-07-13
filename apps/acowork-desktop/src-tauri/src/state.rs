@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::gateway_client::GatewayClient;
+use crate::mqtt_client::SharedDesktopMqttClient;
 
 #[cfg(target_os = "windows")]
 use crate::win_job::JobHandle;
@@ -52,6 +53,11 @@ pub struct AppState {
     /// On non-Windows platforms this field does not exist.
     #[cfg(target_os = "windows")]
     pub gateway_job: Arc<Mutex<Option<JobHandle>>>,
+
+    /// ADR-033 Phase 3: Desktop MQTT client for real-time events.
+    /// Connected after the Gateway is confirmed healthy. None until
+    /// `connect_mqtt` is called from the frontend.
+    pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
 }
 
 impl AppState {
@@ -67,6 +73,7 @@ impl AppState {
             gateway_process: Arc::new(Mutex::new(None)),
             #[cfg(target_os = "windows")]
             gateway_job: Arc::new(Mutex::new(None)),
+            mqtt_client: Arc::new(Mutex::new(None)),
         }
     }
 }

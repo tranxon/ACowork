@@ -41,7 +41,7 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::grpc::resource_pusher::{build_embed_sidecar_payload, GlobalResourcePusher};
+use crate::compat::{build_embed_sidecar_payload, GlobalResourcePusher};
 use acowork_core::protocol::SidecarKind;
 
 use super::embed::spawn_embed_process;

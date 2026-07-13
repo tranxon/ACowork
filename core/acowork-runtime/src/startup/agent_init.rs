@@ -47,9 +47,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     );
 
     // ── Step 2: Connect to Gateway gRPC ─────────────────────────────
+    // ADR-033: When MQTT is configured, skip gRPC entirely.
+    // gRPC connect retries for up to 300s, which blocks MQTT status publish.
     let mut grpc_client: Option<crate::grpc::client::GatewayGrpcClient> = None;
     let mut hello_config: Option<crate::grpc::client::AgentHelloConfig> = None;
-    if let Some(endpoint) = config.get_gateway_address()
+    if config.mqtt_port.is_none()
+        && let Some(endpoint) = config.get_gateway_address()
         && let Some((client, cfg)) = connect_gateway_client(
             endpoint,
             &loaded.manifest.agent_id,
@@ -112,6 +115,52 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         }
     } else {
         tracing::info!("Running in standalone mode (no Gateway)");
+    }
+
+    // ── ADR-033: Start MQTT client + HTTP server ─────────────────────
+    let mut mqtt_client: Option<crate::mqtt::RuntimeMqttClient> = None;
+    let mut available_cache: Option<crate::mqtt::SharedAvailableCache> = None;
+    let mut control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>> = None;
+    let mut runtime_http_port: Option<u16> = None;
+
+    if let Some(_http_port) = config.http_port {
+        match crate::http::RuntimeHttpServer::start(
+            std::path::PathBuf::from(&config.work_dir),
+            loaded.manifest.agent_id.clone(),
+        ).await {
+            Ok(server) => {
+                runtime_http_port = Some(server.port);
+                tracing::info!(port = server.port, "Runtime HTTP server started");
+                std::mem::forget(server);
+            }
+            Err(e) => tracing::warn!(error = %e, "Runtime HTTP server start failed"),
+        }
+    }
+
+    if let Some(mqtt_port) = config.mqtt_port {
+        let cache = crate::mqtt::new_shared_cache();
+        let (control_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
+            .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
+        match crate::mqtt::RuntimeMqttClient::connect(
+            "127.0.0.1", mqtt_port, &loaded.manifest.agent_id, &loaded.manifest.name,
+            &loaded.manifest.version, None, None, &config_json, cache.clone(), control_tx,
+        ).await {
+            Ok(client) => {
+                tracing::info!(agent_id=%loaded.manifest.agent_id, "Runtime MQTT client connected");
+                // ADR-033: Publish HTTP port so Gateway can proxy session queries.
+                if let Some(port) = runtime_http_port {
+                    let topic = format!("acowork/agents/{}/http_port", loaded.manifest.agent_id);
+                    let _ = client.publish_raw(
+                        &topic,
+                        port.to_string().as_bytes(),
+                        crate::mqtt::client::MqttQoS::AtLeastOnce,
+                    ).await;
+                }
+                mqtt_client = Some(client); available_cache = Some(cache); control_rx = Some(ctrl_rx);
+            }
+            Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
+        }
     }
 
     // ── Step 3: Build system prompt ─────────────────────────────────
@@ -193,8 +242,64 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
             }
         } else {
-            let p = crate::providers::router::create_noop_provider();
-            (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+            // ADR-033: Try MQTT available_cache when gRPC hello_config is unavailable.
+            let p = if let Some(ref cache) = available_cache {
+                // Wait up to 10s for the first acowork/global/providers to arrive.
+                // The Gateway publishes every 5s (non-retained due to rumqttd 0.14).
+                let mut waited = 0;
+                loop {
+                    let cache_read = cache.read().await;
+                    if cache_read.providers.is_some() || waited >= 20 {
+                        break;
+                    }
+                    drop(cache_read);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    waited += 1;
+                }
+                let cache_read = cache.read().await;
+                if let Some(ref available_providers) = cache_read.providers {
+                    // Use MQTT provider info. API keys from env: ACOWORK_PROVIDER_<ID>_KEY
+                    let chosen = available_providers.providers.first();
+                    
+                    if let Some(prov) = chosen {
+                        gateway_current_provider_id = Some(prov.id.clone());
+                        let env_var = format!("ACOWORK_PROVIDER_{}_KEY", prov.id.to_uppercase().replace('-', "_"));
+                        let api_key = std::env::var(&env_var).ok();
+                        let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+                        let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
+                        let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
+                        let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
+                        let provider = crate::providers::router::create_provider(
+                            &prov.id,
+                            &proto_str,
+                            api_key.as_deref(),
+                            Some(&prov.base_url),
+                            timeouts,
+                        );
+                        tracing::info!(
+                            provider = %prov.id,
+                            model = %model_id,
+                            num_models = available.len(),
+                            has_api_key = api_key.is_some(),
+                            source = "mqtt_available_cache",
+                            "Provider initialized from MQTT available cache"
+                        );
+                        (provider, model_id, available, proto_str)
+                    } else {
+                        tracing::warn!("MQTT providers available but none selected, using noop");
+                        let p = crate::providers::router::create_noop_provider();
+                        (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                    }
+                } else {
+                    tracing::warn!("MQTT connected but no providers in cache yet, using noop");
+                    let p = crate::providers::router::create_noop_provider();
+                    (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                }
+            } else {
+                let p = crate::providers::router::create_noop_provider();
+                (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+            };
+            p
         }
     };
 
@@ -489,7 +594,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ADR-021: Single channel for control events only.
     // Data events (Delta, ReasoningDelta, ToolCall, ToolResult) are no longer
     // pushed via channel — the frontend polls them via HTTP.
-    let (chunk_tx, chunk_rx) = if grpc_client.is_some() {
+    let (chunk_tx, chunk_rx) = if grpc_client.is_some() || mqtt_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(
             config.data_flow.chunk_capacity,
         );
@@ -506,6 +611,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         loaded,
         grpc_client,
         hello_config,
+        mqtt_client,
+        available_cache,
+        control_rx,
+        runtime_http_port,
         provider,
         resolved_model,
         available_models,

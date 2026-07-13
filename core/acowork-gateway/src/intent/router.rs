@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::intent::privacy;
 use crate::handlers::server::SharedState;
-use crate::grpc::SharedGrpcSessionMgr;
+use crate::compat::SharedGrpcSessionMgr;
 
 /// Default timeout for synchronous Intent routing.
 pub const DEFAULT_INTENT_TIMEOUT: Duration =
@@ -377,7 +377,7 @@ mod tests {
     async fn test_route_sync_agent_not_found() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()));
 
         let result = router
             .route_sync(
@@ -403,7 +403,7 @@ mod tests {
     async fn test_route_sync_agent_not_running() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()));
 
         // Install an agent but don't start it
         {
@@ -454,7 +454,7 @@ mod tests {
     async fn test_route_async_queues_intent() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()));
 
         // Install target agent
         {
@@ -620,7 +620,7 @@ mod tests {
     async fn test_route_async_agent_not_found() {
         let router = IntentRouter::new();
         let state = test_state();
-        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::grpc::server::GrpcSessionManager::new()));
+        let session_mgr = Arc::new(tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()));
 
         let result = router
             .route_async(
