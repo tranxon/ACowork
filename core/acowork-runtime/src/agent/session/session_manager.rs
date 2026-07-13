@@ -23,7 +23,7 @@ use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::loop_::SessionChunkEvent;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
-use crate::agent::session_state::{SessionState, SessionStatus};
+use crate::agent::session_state::{SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots};
 use crate::config::DEFAULT_TEMPERATURE;
 use crate::conversation::ConversationSession;
 use crate::debug::controller::DebugController;
@@ -61,6 +61,19 @@ pub struct SessionManagerConfig {
     pub identity_context: Option<String>,
     /// LLM protocol type derived from models.dev (used for image token estimation)
     pub protocol_type: ProtocolType,
+
+    /// Shared session snapshot map for the Runtime HTTP pull API.
+    /// When `Some`, SessionManager registers each session's snapshot Arc
+    /// here on creation and removes it on session destruction, so the
+    /// Runtime HTTP server can serve `GET /sessions/{sid}/state`.
+    pub session_snapshots: Option<SharedSessionSnapshots>,
+
+    /// Shared latest session Arc for the Runtime HTTP pull API.
+    /// When `Some`, SessionManager writes to this on every session creation
+    /// and startup scan completion, so the Runtime HTTP server's
+    /// `GET /sessions/latest` always returns the authoritative answer
+    /// without file-system scanning.
+    pub latest_session: Option<SharedLatestSession>,
 }
 
 impl Default for SessionManagerConfig {
@@ -81,6 +94,8 @@ impl Default for SessionManagerConfig {
             full_tool_specs: Vec::new(),
             identity_context: None,
             protocol_type: ProtocolType::default(),
+            session_snapshots: None,
+            latest_session: None,
         }
     }
 }
@@ -322,12 +337,18 @@ pub struct SessionManager {
     /// Latest session ID and title, determined during the startup session scan
     /// (by `last_active_at` descending). Set once after the background scan
     /// completes; `None` until the scan finishes or if no sessions exist.
-    latest_session: std::sync::RwLock<Option<(String, Option<String>)>>,
+    latest_session: SharedLatestSession,
 }
 
 impl SessionManager {
     /// Create a new SessionManager with the given shared core and config.
     pub fn new(core: Arc<AgentCore>, config: SessionManagerConfig) -> Self {
+        // Extract shared Arc before config is moved into self.config.
+        let latest_session = config
+            .latest_session
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(None)));
+
         Self {
             core,
             sessions: HashMap::new(),
@@ -345,7 +366,7 @@ impl SessionManager {
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            latest_session: std::sync::RwLock::new(None),
+            latest_session,
         }
     }
 
@@ -399,6 +420,11 @@ impl SessionManager {
             .map(|w| w.to_string());
 
         let (inbound_tx, inbound_rx) = mpsc::channel(self.config.inbound_channel_capacity);
+
+        // Snapshot the title (and other resume-only fields) before `conversation`
+                // is moved into `build_initial_session_state`. We need it after the
+                // move to seed `latest_session`.
+        let resumed_title = conversation.as_ref().and_then(|c| c.title());
 
         let session_state = self.build_initial_session_state(conversation);
 
@@ -553,7 +579,7 @@ impl SessionManager {
             status_rx,
             last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
             pending_debug_handles: pending_debug_handles.clone(),
-            snapshot: snapshot_arc,
+            snapshot: snapshot_arc.clone(),
             workspace_id,
             current_work_dir,
         };
@@ -561,10 +587,26 @@ impl SessionManager {
         self.sessions.insert(session_id.clone(), handle);
         tracing::info!(session_id = %session_id, "SessionManager: created new session");
 
-        // Every newly created session is the "latest" by definition.
-        // This powers /latest-session (used by selectAgent in the frontend),
-        // which must always return a valid session_id for running agents.
-        self.set_latest_session(session_id.clone(), None);
+        // Register the session's snapshot Arc in the shared map so the
+        // Runtime HTTP server can serve GET /sessions/{sid}/state.
+        if let Some(ref snapshots) = self.config.session_snapshots {
+            snapshots
+                .write()
+                .unwrap()
+                .insert(session_id.clone(), snapshot_arc);
+        }
+
+        // Every newly created or resumed session becomes the "latest" by
+        // definition. For resumed sessions we propagate the persisted
+        // title from `ConversationSession` so `/sessions/latest` returns
+        // the title the user previously set, instead of `null`. For
+        // brand-new sessions the title is `None` until the first
+        // user-driven rename.
+        //
+        // This single source of truth replaces the previous design where
+        // `session_init.rs` would seed the latest-session entry first and
+        // then this function would clobber it with `None`.
+        self.set_latest_session(session_id.clone(), resumed_title);
 
         // Initialize per-session workspace.
         // For resumed sessions, restore the persisted workspace_id from JSONL metadata.
@@ -935,6 +977,10 @@ impl SessionManager {
     pub async fn delete_session(&mut self, session_id: &str) {
         // 1. If in memory, close the task cleanly (with timeout)
         if let Some(handle) = self.sessions.remove(session_id) {
+            // Remove session snapshot from shared map (if registered)
+            if let Some(ref snapshots) = self.config.session_snapshots {
+                snapshots.write().unwrap().remove(session_id);
+            }
             // ADR-020: Disable notifications before Close
             let _ = handle.inbound_tx.try_send(SessionMessage::DisableNotify);
             let _ = handle.inbound_tx.send(SessionMessage::Close).await;
@@ -1053,6 +1099,9 @@ impl SessionManager {
                     // "Session not found" error instead of "channel closed".
                     let was_finished = handle.join_handle.is_finished();
                     self.sessions.remove(session_id);
+                    if let Some(ref snapshots) = self.config.session_snapshots {
+                        snapshots.write().unwrap().remove(session_id);
+                    }
                     self.urgent_stops.remove(session_id);
                     self.session_committed_lines.remove(session_id);
                     self.session_delivery_cursors.write().unwrap().remove(session_id);
@@ -1931,6 +1980,9 @@ After installation, ask the user to re-enable the MCP server.",
         for id in finished {
             tracing::debug!(session_id = %id, "Reaping finished session handle");
             self.sessions.remove(&id);
+            if let Some(ref snapshots) = self.config.session_snapshots {
+                snapshots.write().unwrap().remove(&id);
+            }
             self.session_committed_lines.remove(&id);
             self.session_delivery_cursors.write().unwrap().remove(&id);
         }
@@ -1985,6 +2037,9 @@ After installation, ask the user to re-enable the MCP server.",
         for session_id in &to_evict {
             if let Some(handle) = self.sessions.remove(session_id) {
                 let _ = handle.inbound_tx.send(SessionMessage::Close).await;
+                if let Some(ref snapshots) = self.config.session_snapshots {
+                    snapshots.write().unwrap().remove(session_id);
+                }
                 self.urgent_stops.remove(session_id);
                 self.session_committed_lines.remove(session_id);
                 self.session_delivery_cursors.write().unwrap().remove(session_id);

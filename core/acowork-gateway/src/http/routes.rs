@@ -23,152 +23,8 @@ use crate::compat::GlobalResourcePusher;
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
 
-/// Bridge event type — known event types for Agent → HTTP client forwarding
-///
-/// Provides compile-time safety instead of raw string matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BridgeEventType {
-    /// Streaming text chunk
-    Chunk,
-    /// LLM tool invocation
-    ToolCall,
-    /// Tool execution result
-    ToolResult,
-    /// Tool approval needed (user interaction required)
-    ToolApprovalNeeded,
-    /// Final response (complete)
-    Done,
-    /// Error response
-    Error,
-    /// Agent response stopped by user stop signal
-    Stopped,
-    /// Memory store updated (node added/removed/consolidated)
-    MemoryUpdated,
-    /// Skill execution event
-    SkillExecuted,
-    /// Iteration limit reached — agent paused, awaiting user decision
-    IterationLimitPaused,
-    /// Context usage report (from Runtime, forwarded to Desktop App)
-    ContextUsage,
-    /// Context compaction started (Runtime → Desktop App, so frontend shows "compacting..." indicator)
-    CompactingStarted,
-    /// Context compaction finished (Runtime → Desktop App, so frontend clears "compacting..." indicator)
-    CompactingEnded,
-    /// LLM reasoning phase started — frontend shows pulsing "..." indicator
-    ReasoningStarted,
-    /// Session lifecycle status changed (ADR-014)
-    SessionStateChanged,
-    /// LLM asks user a question with options (ask_user_question tool)
-    AskQuestion,
-    /// Todo list updated (Runtime → frontend, per-session task tracking)
-    TodoListUpdated,
-    /// Embedding migration progress (Gateway → frontend, shows migration queue)
-    EmbeddingMigrationProgress,
-    /// New data available notification (ADR-021): Runtime → frontend,
-    /// triggers HTTP poll for incremental message data.
-    NewDataAvailable,
-    /// Unknown/unrecognized action — payload is forwarded as-is so the
-    /// frontend can decide what to do. This avoids silently treating new
-    /// Runtime event types as "done" (which would break streaming state).
-    Unknown,
-}
-
-impl BridgeEventType {
-    /// Map a gRPC action string to a BridgeEventType.
-    /// Returns None for unrecognized actions.
-    pub fn from_action(action: &str) -> Option<Self> {
-        match action {
-            "agent_response" => Some(Self::Done),
-            "agent_chunk" => Some(Self::Chunk),
-            "agent_tool_call" => Some(Self::ToolCall),
-            "agent_tool_result" => Some(Self::ToolResult),
-            "agent_error" => Some(Self::Error),
-            "agent_stopped" => Some(Self::Stopped),
-            "tool_approval_needed" => Some(Self::ToolApprovalNeeded),
-            "memory_updated" => Some(Self::MemoryUpdated),
-            "skill_executed" => Some(Self::SkillExecuted),
-            "iteration_limit_paused" => Some(Self::IterationLimitPaused),
-            "context_usage" => Some(Self::ContextUsage),
-            "agent_reasoning_started" => Some(Self::ReasoningStarted),
-            "session_state_changed" => Some(Self::SessionStateChanged),
-            "ask_question" => Some(Self::AskQuestion),
-            "todo_list_updated" => Some(Self::TodoListUpdated),
-            "compacting_started" => Some(Self::CompactingStarted),
-            "compacting_ended" => Some(Self::CompactingEnded),
-            "embedding_migration_progress" => Some(Self::EmbeddingMigrationProgress),
-            "new_data_available" => Some(Self::NewDataAvailable),
-            _ => None,
-        }
-    }
-
-    /// Fallback event type for unrecognized actions.
-    ///
-    /// Returns `Unknown` instead of silently degrading to `Done`, which would
-    /// cause the frontend to incorrectly end a streaming session.
-    pub fn default_for_unknown() -> Self {
-        Self::Unknown
-    }
-
-    /// Get the serialized string value (matches frontend WebSocket protocol)
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Chunk => "chunk",
-            Self::ToolCall => "tool_call",
-            Self::ToolResult => "tool_result",
-            Self::ToolApprovalNeeded => "tool_approval_needed",
-            Self::Done => "done",
-            Self::Error => "error",
-            Self::Stopped => "stopped",
-            Self::MemoryUpdated => "memory_updated",
-            Self::SkillExecuted => "skill_executed",
-            Self::IterationLimitPaused => "iteration_limit_paused",
-            Self::ContextUsage => "context_usage",
-            Self::ReasoningStarted => "reasoning_started",
-            Self::SessionStateChanged => "session_state_changed",
-            Self::AskQuestion => "ask_question",
-            Self::TodoListUpdated => "todo_list_updated",
-            Self::CompactingStarted => "compacting_started",
-            Self::CompactingEnded => "compacting_ended",
-            Self::EmbeddingMigrationProgress => "embedding_migration_progress",
-            Self::NewDataAvailable => "new_data_available",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-impl std::fmt::Display for BridgeEventType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Bridge event for forwarding Agent responses to HTTP clients
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BridgeEvent {
-    /// Agent ID that produced the response
-    pub agent_id: String,
-    /// Message ID for correlation
-    pub message_id: String,
-    /// Event type
-    pub event_type: BridgeEventType,
-    /// Event payload (JSON)
-    pub payload: serde_json::Value,
-}
-
-/// Pending session request map (S1.14)
-///
-/// When the Gateway HTTP API forwards a session query to the Runtime
-/// via gRPC (IntentReceived push), it stores a oneshot sender here
-/// keyed by request_id. When the Runtime sends the result back via
-/// IntentSend with action "session_response", the gRPC dispatch handler
-/// finds the pending sender and fulfills it, which unblocks the
-/// HTTP handler awaiting the oneshot receiver.
-pub type SessionPendingRequests = Arc<
-    tokio::sync::Mutex<
-        std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>,
-    >,
->;
+/// DEPRECATED (ADR-033): Type kept for compilation compat, always empty.
+pub type SessionPendingRequests = Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
 
 /// Application state available to all HTTP handlers
 #[derive(Clone)]
@@ -177,15 +33,6 @@ pub struct AppState {
     pub gateway_state: SharedHttpState,
     /// HTTP authentication
     pub auth: Arc<HttpAuth>,
-    /// gRPC session manager for Gateway→Runtime push + request-response
-    pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
-    /// P2 (ADR-020): Bridge control channel for all events (tools,
-    /// control, metadata). The gRPC dispatch publishes here; WebSocket
-    /// subscribes. ADR-021 Phase 2: data channel removed — all events
-    /// now flow through this single control channel.
-    pub bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    /// Pending session requests for gRPC response correlation (S1.14)
-    pub session_pending: SessionPendingRequests,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// Unified global resource pusher (provider/model, MCP catalog, …)
@@ -201,6 +48,11 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
+    /// DEPRECATED (ADR-033): Always None — gRPC removed, kept for compilation compat.
+    #[allow(deprecated)]
+    pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
+    /// DEPRECATED (ADR-033): Always empty — gRPC removed, kept for compilation compat.
+    pub session_pending: SessionPendingRequests,
 }
 
 impl AppState {
@@ -208,18 +60,10 @@ impl AppState {
     pub fn new(
         gateway_state: SharedHttpState,
         auth: Arc<HttpAuth>,
-        grpc_session_mgr: Option<SharedGrpcSessionMgr>,
-        bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-        session_pending: Option<SessionPendingRequests>,
     ) -> Self {
         Self {
             gateway_state,
             auth,
-            grpc_session_mgr,
-            bridge_ctrl_tx,
-            session_pending: session_pending.unwrap_or_else(|| {
-                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
-            }),
             log_reload_handle: None,
             pusher: None,
             cors_enabled: false,
@@ -227,33 +71,8 @@ impl AppState {
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
-        }
-    }
-
-    /// Create a new AppState with explicit configuration
-    pub(crate) fn with_config(
-        gateway_state: SharedHttpState,
-        auth: Arc<HttpAuth>,
-        grpc_session_mgr: Option<SharedGrpcSessionMgr>,
-        bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-        session_pending: Option<SessionPendingRequests>,
-        log_reload_handle: Option<crate::LogReloadHandle>,
-    ) -> Self {
-        Self {
-            gateway_state,
-            auth,
-            grpc_session_mgr,
-            bridge_ctrl_tx,
-            session_pending: session_pending.unwrap_or_else(|| {
-                Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
-            }),
-            log_reload_handle,
-            pusher: None,
-            cors_enabled: false,
-            mqtt_gateway_client: None,
-            mqtt_publisher_trigger: None,
-            runtime_http_registry: None,
-            agent_registry: None,
+            grpc_session_mgr: None,
+            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -401,28 +220,14 @@ pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse>
     let mut checks = std::collections::HashMap::new();
     let mut has_degraded = false;
 
-    // 1. gRPC Session Manager check
-    match &state.grpc_session_mgr {
-        Some(_) => {
-            checks.insert(
-                "ipc".to_string(),
-                CheckResult {
-                    status: "ok".to_string(),
-                    detail: None,
-                },
-            );
-        }
-        None => {
-            has_degraded = true;
-            checks.insert(
-                "ipc".to_string(),
-                CheckResult {
-                    status: "degraded".to_string(),
-                    detail: Some("Session manager not initialized".to_string()),
-                },
-            );
-        }
-    }
+    // 1. IPC check — ADR-033: MQTT-based, always ok
+    checks.insert(
+        "ipc".to_string(),
+        CheckResult {
+            status: "ok".to_string(),
+            detail: Some("MQTT" .to_string()),
+        },
+    );
 
     // 2. CronStore database check
     {
@@ -540,10 +345,20 @@ pub struct SystemStatusResponse {
 /// `GET /api/status` — system status
 pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusResponse> {
     let gw = state.gateway_state.read().await;
+
+    // ADR-033: Prefer AgentRegistry (MQTT LWT-based) for agent online count.
+    // It reflects the broker's protocol-level view via Will Message, which is
+    // more accurate than the Gateway's process-level running_agents count.
+    let agents_running = if let Some(ref reg) = state.agent_registry {
+        reg.read().await.online_count()
+    } else {
+        gw.running_agents.len()
+    };
+
     Json(SystemStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents_installed: gw.installed_agents.len(),
-        agents_running: gw.running_agents.len(),
+        agents_running,
         uptime_secs: 0, // TODO: track actual uptime
     })
 }
@@ -658,9 +473,6 @@ mod tests {
         AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
-            None,
-            None,
-            None,
         )
     }
 
@@ -729,109 +541,6 @@ mod tests {
         let resp = lsp_endpoint(State(state)).await;
         assert!(!resp.available);
         assert!(resp.port.is_none());
-    }
-
-    // ── BridgeEventType tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_bridge_event_type_from_action() {
-        assert_eq!(
-            BridgeEventType::from_action("agent_response"),
-            Some(BridgeEventType::Done)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("agent_chunk"),
-            Some(BridgeEventType::Chunk)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("agent_tool_call"),
-            Some(BridgeEventType::ToolCall)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("agent_tool_result"),
-            Some(BridgeEventType::ToolResult)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("agent_error"),
-            Some(BridgeEventType::Error)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("agent_stopped"),
-            Some(BridgeEventType::Stopped)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("tool_approval_needed"),
-            Some(BridgeEventType::ToolApprovalNeeded)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("memory_updated"),
-            Some(BridgeEventType::MemoryUpdated)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("skill_executed"),
-            Some(BridgeEventType::SkillExecuted)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("compacting_started"),
-            Some(BridgeEventType::CompactingStarted)
-        );
-        assert_eq!(
-            BridgeEventType::from_action("compacting_ended"),
-            Some(BridgeEventType::CompactingEnded)
-        );
-        assert_eq!(BridgeEventType::from_action("unknown_action"), None);
-    }
-
-    #[test]
-    fn test_bridge_event_type_as_str() {
-        assert_eq!(BridgeEventType::Chunk.as_str(), "chunk");
-        assert_eq!(BridgeEventType::Done.as_str(), "done");
-        assert_eq!(BridgeEventType::Error.as_str(), "error");
-        assert_eq!(BridgeEventType::Stopped.as_str(), "stopped");
-        assert_eq!(BridgeEventType::ToolCall.as_str(), "tool_call");
-        assert_eq!(BridgeEventType::ToolResult.as_str(), "tool_result");
-        assert_eq!(
-            BridgeEventType::ToolApprovalNeeded.as_str(),
-            "tool_approval_needed"
-        );
-        assert_eq!(BridgeEventType::MemoryUpdated.as_str(), "memory_updated");
-        assert_eq!(BridgeEventType::SkillExecuted.as_str(), "skill_executed");
-        assert_eq!(
-            BridgeEventType::CompactingStarted.as_str(),
-            "compacting_started"
-        );
-        assert_eq!(
-            BridgeEventType::CompactingEnded.as_str(),
-            "compacting_ended"
-        );
-        assert_eq!(BridgeEventType::Unknown.as_str(), "unknown");
-    }
-
-    #[test]
-    fn test_default_for_unknown_is_not_done() {
-        // Unknown actions must NOT be silently treated as "done" —
-        // that would break streaming state in the frontend.
-        assert_ne!(
-            BridgeEventType::default_for_unknown(),
-            BridgeEventType::Done
-        );
-        assert_eq!(
-            BridgeEventType::default_for_unknown(),
-            BridgeEventType::Unknown
-        );
-    }
-
-    #[test]
-    fn test_bridge_event_type_serialization() {
-        let event = BridgeEvent {
-            agent_id: "com.test".to_string(),
-            message_id: "msg-1".to_string(),
-            event_type: BridgeEventType::Chunk,
-            payload: serde_json::json!({"delta": "hi"}),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        // serde rename_all = snake_case
-        assert!(json.contains("\"chunk\""));
     }
 }
 

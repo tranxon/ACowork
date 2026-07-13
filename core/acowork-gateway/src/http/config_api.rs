@@ -236,30 +236,9 @@ pub async fn update_config(
         // 1. Update Gateway's own file appender
         crate::cli::update_log_file_count(count);
 
-        // 2. Push to all connected Runtime agents
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            let agent_ids: Vec<String> = {
-                let gw = state.gateway_state.read().await;
-                gw.running_agents.keys().cloned().collect()
-            };
-            for agent_id in agent_ids {
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let push_result = session
-                        .push_message(
-                            acowork_core::protocol::GatewayResponse::LogFileCountUpdate {
-                                log_file_count: count,
-                            },
-                        )
-                        .await;
-                    if push_result {
-                        tracing::info!(agent = %agent_id, "Pushed LogFileCountUpdate to Runtime");
-                    } else {
-                        tracing::warn!(agent = %agent_id, "Failed to push LogFileCountUpdate (channel closed)");
-                    }
-                }
-            }
-        }
+        // 2. Push to all connected Runtime agents (ADR-033: TODO via MQTT)
+        // When MQTT global config topics are implemented, publish here.
+        tracing::debug!("LogFileCountUpdate: MQTT push not yet implemented");
     }
 
     // Apply log level change immediately via tracing reload
@@ -274,31 +253,16 @@ pub async fn update_config(
             }
         }
 
-        // 2. Push to all connected Runtimes
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            let agent_ids: Vec<String> = {
-                let gw = state.gateway_state.read().await;
-                gw.running_agents.keys().cloned().collect()
-            };
-            for agent_id in agent_ids {
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let push_result = session
-                        .push_message(acowork_core::protocol::GatewayResponse::LogLevelUpdate {
-                            log_level: level.clone(),
-                        })
-                        .await;
-                    if push_result {
-                        tracing::info!(agent = %agent_id, "Pushed LogLevelUpdate to Runtime");
-                    } else {
-                        tracing::warn!(agent = %agent_id, "Failed to push LogLevelUpdate (channel closed)");
-                    }
-                }
-            }
-        }
+        // 2. Push to all connected Runtimes (ADR-033: TODO via MQTT)
+        tracing::debug!("LogLevelUpdate: MQTT push not yet implemented");
     }
 
     tracing::info!("Config update applied: {}", updates.join(", "));
+
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
 
     Ok(Json(MessageResponse {
         message: format!("Config updated: {}", updates.join(", ")),
@@ -314,32 +278,13 @@ pub async fn update_config(
 /// 3. For **stopped** agents (installed but not running), delete
 ///    `{install_path}/workspace/logs/*.log` directly via filesystem.
 pub async fn delete_logs(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
     let mut total_deleted = 0u64;
 
-    // ── Phase 1: Push LogRotate to running agents via gRPC ──────────────
-    if let Some(session_mgr) = &state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        let agent_ids: Vec<String> = {
-            let gw = state.gateway_state.read().await;
-            gw.running_agents.keys().cloned().collect()
-        };
-        for agent_id in &agent_ids {
-            if let Some((_conn_id, session)) = mgr.find_by_agent_id(agent_id) {
-                let push_result = session
-                    .push_message(acowork_core::protocol::GatewayResponse::LogRotate)
-                    .await;
-                if push_result {
-                    tracing::info!(agent = %agent_id, "Pushed LogRotate to Runtime");
-                } else {
-                    tracing::warn!(agent = %agent_id, "Failed to push LogRotate (channel closed)");
-                }
-            }
-        }
-    }
-
-    // ── Phase 2: Delete Gateway's own log files ───────────────────────
+    // ── Phase 1: Push LogRotate to running agents (ADR-033: TODO via MQTT) ──
+    tracing::debug!("LogRotate: MQTT push not yet implemented");
+    // Phase 2: Delete Gateway logs─────────────────────
     {
         // Only `gateway-*.log`; leave `embed.log` and any other sibling
         // log files alone (they belong to other processes).

@@ -20,7 +20,6 @@ import { HarnessPage } from "../harness/HarnessPage";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore, type PanelTab } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Bot, MessagesSquare, Cpu } from "lucide-react";
 
@@ -361,20 +360,11 @@ export function AppLayout() {
         selectedAgentId: a.selectedAgentId,
         activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
         openSessionIds: c.agentStates[sid]?.openSessionIds ?? [],
-        wsKeys: Object.keys(c.wsMap),
         knownAgents: Object.keys(a.agents),
         sessionsForSelected: a.selectedAgentId ? (a.agents[a.selectedAgentId]?.sessions ?? []).map((s) => s.session_id) : null,
       });
       checkHealth();
-      // Reconnect all agent WebSocket connections
-      const store = useChatStore.getState();
-      const gwUrl = getGatewayUrl();
-      for (const agentId of Object.keys(store.wsMap)) {
-        const ws = store.wsMap[agentId];
-        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          store.connectStream(agentId, gwUrl);
-        }
-      }
+      // ADR-033: MQTT connection is managed by Rust backend — no reconnect needed.
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);

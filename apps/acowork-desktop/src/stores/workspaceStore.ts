@@ -208,26 +208,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const prevWorkspaces = get().workspaces;
     const prevMap = { ...get().sessionWorkspaceMap };
     try {
-      const baseUrl = getGatewayUrl();
-      const resp = await fetch(
-        `${baseUrl}/api/agents/${agentId}/workspaces/current?session_id=${encodeURIComponent(sessionId)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspace_id: workspaceId }),
-        },
-      );
-      if (!resp.ok) {
-        console.error("[WorkspaceStore] setSessionWorkspace failed:", resp.status, resp.statusText);
-        return;
-      }
-      // API returns the updated workspace list after switching
-      const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
-      const workspaces = data.workspaces || [];
-      // Discard stale response if a newer request has been issued
+      // ADR-033: Use MQTT for workspace switch (fire-and-forget)
+      useChatStore.getState().setSessionWorkspaceMqtt(agentId, sessionId, workspaceId);
+      // Optimistically update local state (Runtime will confirm via session state event)
       if (seq !== requestSeq) return;
       set({
-        workspaces,
         sessionWorkspaceMap: {
           ...get().sessionWorkspaceMap,
           [sessionId]: workspaceId,
@@ -235,11 +220,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
     } catch (e) {
       console.error("[WorkspaceStore] setSessionWorkspace error:", e);
-      // Revert to previous state on failure (only if still the latest request)
       if (seq !== requestSeq) return;
       set({ workspaces: prevWorkspaces, sessionWorkspaceMap: prevMap });
     }
   },
+
 
   setCurrentWorkspace: async (agentId: string, workspaceId: string) => {
     // Legacy wrapper: resolve active session ID and delegate to setSessionWorkspace

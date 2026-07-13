@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useAgentStore } from "../../stores/agentStore";
-import { useChatStore } from "../../stores/chatStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
@@ -149,13 +148,7 @@ export function AgentList({ width }: AgentListProps) {
     if (startingAgentIds.has(agentId)) return;
     setStartingAgentIds((prev) => new Set(prev).add(agentId));
     try {
-      // Clean up any stale chat store state before starting debug mode.
-      // Without this, a stopped agent may leave behind a stale wsMap entry
-      // that prevents connectStream from creating a new WebSocket.
-      const chatStore = useChatStore.getState();
-      if (chatStore.wsMap[agentId]) {
-        chatStore.disconnectStream(agentId);
-      }
+      // ADR-033: MQTT replaces WebSocket; no need to clean up wsMap.
       await startAgentAndSyncUI(agentId, true);
       addToast({ type: "success", message: t("agentList.agentStartedDebug") });
     } catch (e: any) {

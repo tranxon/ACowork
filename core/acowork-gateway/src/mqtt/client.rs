@@ -237,6 +237,9 @@ impl GatewayMqttClient {
                 Some(acowork_core::mqtt_proto::control_command::Command::Message(_)) => "message",
                 Some(acowork_core::mqtt_proto::control_command::Command::Stop(_)) => "stop",
                 Some(acowork_core::mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
+                Some(acowork_core::mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
+                Some(acowork_core::mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
+                Some(acowork_core::mqtt_proto::control_command::Command::Intent(_)) => "intent",
                 _ => "unknown",
             }
         );

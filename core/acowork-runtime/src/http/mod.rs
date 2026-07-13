@@ -7,6 +7,10 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §7.5.
 
+pub mod memory_query;
 pub mod server;
 
-pub use server::{RuntimeHttpServer, RuntimeHttpServerError};
+pub use server::{
+    RuntimeHttpServer, RuntimeHttpServerError, SharedDispatchSender, SharedEmbedDimension,
+    SharedMemoryStore,
+};

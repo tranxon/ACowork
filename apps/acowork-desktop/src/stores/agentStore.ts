@@ -368,7 +368,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // 原子化：选 agent 时加载 latest session 并激活。
     // switchSession 内部会调后端 /activate（拿到 model/provider/workspace）、
     // 写入 session 元数据、拉取 session 列表。fetchSessionState 补上 context
-    // usage / todos。connectStream 和 loadModels 由 ChatPanel 的 useEffect
+    // usage / todos。loadModels 由 ChatPanel 的 useEffect
     // 在 selectedAgentId 变化 + running && ready 时自动触发。
     const chat = useChatStore.getState();
     if (!chat.agentStates[id]?.activeSessionId) {
@@ -417,8 +417,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
 
       // Disconnect WebSocket and remove chatStore agent state
-      const chatStore = useChatStore.getState();
-      chatStore.disconnectStream(agentId);
       useChatStore.setState((state) => {
         const next = { ...state.agentStates };
         delete next[agentId];

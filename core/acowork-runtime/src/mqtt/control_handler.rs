@@ -60,6 +60,26 @@ pub enum ControlAction {
         session_id: String,
         model_id: String,
     },
+    /// User wants to change reasoning effort level.
+    ReasoningEffort {
+        session_id: String,
+        effort: String,
+    },
+    /// User wants to trigger context compaction.
+    CompactContext {
+        session_id: String,
+    },
+    /// Gateway pushes an IntentReceived (cron trigger, cross-agent messaging).
+    IntentReceived {
+        from: String,
+        action: String,
+        params_json: String,
+    },
+    /// User wants to switch workspace for a session.
+    WorkspaceSwitch {
+        session_id: String,
+        workspace_id: String,
+    },
     /// Unknown or unimplemented command.
     Unsupported {
         command_type: String,
@@ -95,8 +115,21 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             session_id: sw.session_id,
             model_id: sw.model_id,
         },
-        _ => ControlAction::Unsupported {
-            command_type: "unknown".to_string(),
+        mqtt_proto::control_command::Command::ReasoningEffort(re) => ControlAction::ReasoningEffort {
+            session_id: re.session_id,
+            effort: re.effort,
+        },
+        mqtt_proto::control_command::Command::CompactContext(cc) => ControlAction::CompactContext {
+            session_id: cc.session_id,
+        },
+        mqtt_proto::control_command::Command::WorkspaceSwitch(ws) => ControlAction::WorkspaceSwitch {
+            session_id: ws.session_id,
+            workspace_id: ws.workspace_id,
+        },
+        mqtt_proto::control_command::Command::Intent(intent) => ControlAction::IntentReceived {
+            from: intent.from,
+            action: intent.action,
+            params_json: intent.params_json,
         },
     };
 
@@ -155,6 +188,37 @@ pub fn spawn_control_handler(
                     let msg = crate::agent::inbound::InboundMessage::SystemNotification {
                         notification_type: "model_switch".to_string(),
                         data: serde_json::json!({ "model_id": model_id }),
+                    };
+                    let _ = inbound_tx.send(msg);
+                }
+                ReasoningEffort { session_id: _, effort } => {
+                    let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                        notification_type: "reasoning_effort".to_string(),
+                        data: serde_json::json!({ "effort": effort }),
+                    };
+                    let _ = inbound_tx.send(msg);
+                }
+                CompactContext { session_id: _ } => {
+                    let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                        notification_type: "compact_context".to_string(),
+                        data: serde_json::json!({}),
+                    };
+                    let _ = inbound_tx.send(msg);
+                }
+                WorkspaceSwitch { session_id: _, workspace_id } => {
+                    let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                        notification_type: "workspace_switch".to_string(),
+                        data: serde_json::json!({ "workspace_id": workspace_id }),
+                    };
+                    let _ = inbound_tx.send(msg);
+                }
+                IntentReceived { from, action, params_json } => {
+                    let params: serde_json::Value = serde_json::from_str(params_json)
+                        .unwrap_or(serde_json::json!({}));
+                    let msg = crate::agent::inbound::InboundMessage::IntentMessage {
+                        from: from.clone(),
+                        action: action.clone(),
+                        params,
                     };
                     let _ = inbound_tx.send(msg);
                 }

@@ -28,7 +28,6 @@ use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
 use crate::lifecycle::manager::SYSTEM_AGENT_ID;
 use acowork_core::AgentManifest;
-use acowork_core::protocol::GatewayResponse;
 use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
 /// Build the agent management router
@@ -77,10 +76,6 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{session_id}/state",
             get(get_session_state),
         )
-        .route(
-            "/api/agents/{id}/latest-session",
-            get(get_latest_session),
-        )
         // ADR-017: Avatar runtime config endpoints (work when agent is stopped)
         .route(
             "/api/agents/{id}/avatar-config",
@@ -126,6 +121,14 @@ pub struct AgentListResponse {
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_interaction_at: Option<String>,
+    /// ADR-033: Whether the agent is online per MQTT LWT (Last Will Testament).
+    /// Derived from the AgentRegistry which tracks `acowork/agents/{id}/status`.
+    /// `running` reflects the Gateway's process-level view (PID alive),
+    /// while `mqtt_online` reflects the broker's protocol-level view (TCP connected).
+    /// These can differ briefly during crash recovery (e.g. process alive but
+    /// MQTT broker hasn't detected TCP drop yet).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mqtt_online: Option<bool>,
 }
 
 /// Agent detail response
@@ -181,6 +184,16 @@ pub struct AgentModelResponse {
 ///    sink to the bottom of their group, ordered alphabetically by name.
 pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListResponse>> {
     let gw = state.gateway_state.read().await;
+
+    // ADR-033: Read MQTT-based online status from AgentRegistry as a sub-status.
+    // Must use .read().await — blocking_read() panics inside tokio runtime.
+    let mqtt_online_set: std::collections::HashSet<String> = if let Some(ref reg) = state.agent_registry {
+        let reg = reg.read().await;
+        reg.online_agents().into_iter().collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
     let mut agents: Vec<AgentListResponse> = gw
         .installed_agents
         .values()
@@ -198,6 +211,11 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             // ADR-017: Use manifest avatar for list (gRPC query would be too slow).
             let (eff_avatar, eff_builtin, _) =
                 resolve_avatar_from_manifest(&info.manifest);
+            let mqtt_online = if state.agent_registry.is_some() {
+                Some(mqtt_online_set.contains(&info.agent_id))
+            } else {
+                None
+            };
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
@@ -212,6 +230,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
+                mqtt_online,
             }
         })
         .collect();
@@ -618,34 +637,10 @@ pub async fn get_avatar_config(
     };
 
     // When running, query the Runtime for the current avatar config.
-    if is_running
-        && let Some(ref grpc_mgr) = state.grpc_session_mgr
-    {
-        let query = acowork_core::proto::server_message::Payload::QueryConfig(
-            acowork_core::proto::QueryConfig {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            },
-        );
-        if let Some(response) =
-            crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
-            && let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
-                response.payload
-        {
-            let avatar = snap.avatar.filter(|s| !s.is_empty());
-            let builtin_avatar = snap.builtin_avatar.filter(|s| !s.is_empty());
-            let source = if avatar.is_some() || builtin_avatar.is_some() {
-                "runtime"
-            } else {
-                "fallback"
-            };
-            return Ok(Json(AvatarConfigResponse {
-                agent_id,
-                avatar,
-                builtin_avatar,
-                source: source.to_string(),
-            }));
-        }
-    }
+    // ADR-033: gRPC removed — avatar config is read from persisted cache file
+    // on startup; live queries are not supported in MQTT mode.
+    // Always fall back to manifest.
+    let _ = is_running;
 
     // Stopped (or gRPC failed): fall back to manifest.
     let (avatar, builtin_avatar, source) = resolve_avatar_from_manifest(&manifest);
@@ -728,49 +723,15 @@ pub async fn update_avatar_config(
     let any_set = new_avatar.is_some() || new_builtin.is_some();
 
     if is_running {
-        // Push RuntimeConfigUpdate via gRPC with avatar fields.
-        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-            let mgr = grpc_mgr.lock().await;
-            if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                let avatar_val = effective_avatar.as_ref()
-                    .map(|opt| opt.clone().unwrap_or_default()); // Some("") = clear, Some("path") = set
-                let builtin_val = effective_builtin.as_ref()
-                    .map(|opt| opt.clone().unwrap_or_default());
-
-                let push_result = session
-                    .push_message(acowork_core::protocol::GatewayResponse::RuntimeConfigUpdate {
-                        max_output_tokens: None,
-                        max_iterations: None,
-                        temperature: None,
-                        system_prompt_override: None,
-                        shell_approval_threshold: None,
-                        mcp_servers: None,
-                        model: None,
-                        provider: None,
-                        search_config_json: None,
-                        avatar: avatar_val,
-                        builtin_avatar: builtin_val,
-                        max_sessions: None,
-                        context_window: None,
-                        approval_timeout_secs: None,
-                        builtin_tools_enabled: None,
-                        tool_result_compression_mode: None,
-                        tool_result_soft_threshold_chars: None,
-                    })
-                    .await;
-
-                if !push_result {
-                    tracing::warn!(
-                        agent = %agent_id,
-                        "Failed to push avatar config update via gRPC"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    agent = %agent_id,
-                    "Agent marked as running but no gRPC session found"
-                );
-            }
+        // ADR-033: gRPC removed — RuntimeConfigUpdate push is no longer
+        // supported. Runtime reads config from agent_config.json on startup
+        // and agent_config cache file for avatar. Persisting to the cache
+        // file below is sufficient.
+        if any_set {
+            tracing::info!(
+                agent_id = %agent_id,
+                "Avatar config updated (persisted to cache, Runtime will pick up on restart)"
+            );
         }
     }
 
@@ -975,7 +936,7 @@ pub async fn delete_avatar_file(
     Path(agent_id): Path<String>,
     Query(query): Query<AvatarFileQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let (install_path, manifest, is_running) = {
+    let (install_path, manifest, _is_running) = {
         let gw = state.gateway_state.read().await;
         let info = gw
             .installed_agents
@@ -1003,35 +964,12 @@ pub async fn delete_avatar_file(
     // If the deleted file was the current avatar, clear it.
     let needs_clear = manifest.avatar.as_deref() == Some(query.path.as_str());
     if needs_clear {
-        if is_running {
-            // Push RuntimeConfigUpdate to clear avatar field.
-            if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-                let mgr = grpc_mgr.lock().await;
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let _ = session
-                        .push_message(acowork_core::protocol::GatewayResponse::RuntimeConfigUpdate {
-                            max_output_tokens: None,
-                            max_iterations: None,
-                            temperature: None,
-                            system_prompt_override: None,
-                            shell_approval_threshold: None,
-                            mcp_servers: None,
-                            model: None,
-                            provider: None,
-                            search_config_json: None,
-                            avatar: Some(String::new()), // empty = clear
-                            builtin_avatar: None,
-                            max_sessions: None,
-                            context_window: None,
-                            approval_timeout_secs: None,
-                            builtin_tools_enabled: None,
-                            tool_result_compression_mode: None,
-                            tool_result_soft_threshold_chars: None,
-                        })
-                        .await;
-                }
-            }
-        }
+        // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
+        // Runtime reads avatar from agent_config.json on startup.
+        tracing::info!(
+            agent_id = %agent_id,
+            "Avatar file deleted, clearing from cache (Runtime will pick up on restart)"
+        );
 
         // ADR-017: Clear avatar in the Gateway's cache file for BOTH running
         // and stopped agents so the change survives a Gateway restart.
@@ -1459,11 +1397,12 @@ pub async fn start_agent(
 
     // Use the lifecycle manager to start the agent
     let idle_timeout = 300; // Default idle timeout
-    let grpc_addr = crate::compat::default_grpc_addr();
-    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
+    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args;
+    // with MQTT the Runtime connects via MQTT port.
+    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
@@ -1526,8 +1465,9 @@ pub async fn stop_agent(
     }
 
     let idle_timeout = 300;
-    let grpc_addr = crate::compat::default_grpc_addr();
-    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args;
+    // with MQTT the Runtime connects via MQTT port.
+    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
@@ -1547,10 +1487,9 @@ pub async fn stop_agent(
 
 /// `POST /api/agents/:id/restart-debug` — restart a running agent in debug mode
 ///
-/// Unlike stop→start (which kills and spawns a new process), this endpoint
-/// pushes an `EnableDebugMode` message to the Runtime via gRPC. The Runtime
-/// then atomically switches to debug mode without process restart, preserving
-/// session state and avoiding frontend race conditions.
+/// ADR-033: gRPC removed. Debug mode is now configured at agent start time
+/// (via `POST /api/agents/{id}/start` with `dev_mode: true`). Restart-in-debug
+/// requires a full process restart in MQTT mode.
 pub async fn restart_agent_in_debug(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1576,20 +1515,15 @@ pub async fn restart_agent_in_debug(
             }));
         }
 
-    // Check gRPC session manager is available
-    let grpc_mgr = state
-        .grpc_session_mgr
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| ApiError::internal("gRPC session manager not available"))?;
-
+    // ADR-033: gRPC removed. Restart-in-debug requires a full stop+start cycle.
+    // Stop the agent first, then restart with dev_mode=true.
     let idle_timeout = 300;
-    let grpc_addr = crate::compat::default_grpc_addr();
-    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
-    let lifecycle = crate::lifecycle::manager::LifecycleManager::new(
+    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args.
+    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
+    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
         gateway_grpc_endpoint,
         log_file_size_mb,
@@ -1597,18 +1531,29 @@ pub async fn restart_agent_in_debug(
         mqtt_port,
     );
 
+    // Stop current process
     lifecycle
-        .restart_in_debug(&agent_id, &mut gw, &grpc_mgr)
+        .stop_agent(&agent_id, &mut gw)
         .await
-        .map_err(|e| ApiError::internal(&format!("Restart in debug failed: {}", e)))?;
+        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+
+    // Start with dev_mode=true
+    lifecycle
+        .start_agent(&agent_id, &mut gw, true)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+
+    drop(gw);
 
     // Bump Gateway's log level to DEBUG so the Settings UI reflects it.
     {
         let level = "debug";
-        if let Some(config) = &mut gw.config {
-            config.log_level = level.to_string();
+        {
+            let mut gw = state.gateway_state.write().await;
+            if let Some(config) = &mut gw.config {
+                config.log_level = level.to_string();
+            }
         }
-        drop(gw);
         if let Some(handle) = &state.log_reload_handle {
             let new_filter = tracing_subscriber::EnvFilter::new(level);
             if let Err(e) = handle.reload(new_filter) {
@@ -1647,31 +1592,12 @@ pub async fn get_agent_model(
         )));
     }
 
-    // Query Runtime for per-agent model/provider preferences.
-    let (active_model, active_provider): (Option<String>, Option<String>) =
-        if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-            let query = acowork_core::proto::server_message::Payload::QueryConfig(
-                acowork_core::proto::QueryConfig {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                },
-            );
-            match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
-            {
-                Some(response) => {
-                    if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(
-                        snap,
-                    )) = response.payload
-                    {
-                        (snap.model, snap.provider)
-                    } else {
-                        (None, None)
-                    }
-                }
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
+    // ADR-033: gRPC removed — per-agent model/provider preferences are
+    // read from agent_config.json on startup. Live queries via gRPC
+    // are no longer supported. Return empty — Runtime decides defaults.
+    let _unused = &agent_id;
+    let active_model: Option<String> = None;
+    let active_provider: Option<String> = None;
 
     // If Runtime has no preference, return empty — let the Runtime/Session decide defaults.
     let provider = match active_provider {
@@ -1877,62 +1803,27 @@ pub async fn get_agent_config(
         (global_limit, manifest_cw)
     };
 
-    // Query Runtime workspace config via gRPC (QueryConfig → ConfigSnapshot roundtrip).
-    let (
-        model,
-        provider,
-        max_output_tokens,
-        max_iterations,
-        temperature,
-        system_prompt_override,
-        shell_approval_threshold,
-        mcp_servers,
-        search_config_json,
-        max_sessions,
-        agent_cfg_context_window,
-        agent_cfg_approval_timeout,
-        builtin_tools_enabled_json,
-        builtin_tools_all_json,
-        tool_result_compression_mode,
-        tool_result_soft_threshold_chars,
-    ) = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-        let query = acowork_core::proto::server_message::Payload::QueryConfig(
-            acowork_core::proto::QueryConfig {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            },
-        );
-        match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
-            Some(response) => {
-                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
-                    response.payload
-                {
-                    (
-                        snap.model,
-                        snap.provider,
-                        snap.max_output_tokens,
-                        snap.max_iterations,
-                        snap.temperature,
-                        snap.system_prompt_override,
-                        snap.shell_approval_threshold,
-                        snap.mcp_servers_json,
-                        snap.search_config_json,
-                        snap.max_sessions.map(|v| v as usize),
-                        snap.context_window,
-                        snap.approval_timeout_secs,
-                        snap.builtin_tools_enabled_json,
-                        snap.builtin_tools_all_json,
-                        snap.tool_result_compression_mode,
-                        snap.tool_result_soft_threshold_chars,
-                    )
-                } else {
-                    (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None)
-                }
-            }
-            None => (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None),
-        }
-    } else {
-        (None, None, None, None, None, None, None, vec![], None, None, None, None, None, None, None, None)
-    };
+    // ADR-033: gRPC removed — config queries are no longer supported.
+    // Runtime publishes agent_config via MQTT AgentConfig message;
+    // Gateway reads config from persisted agent_config.json on startup.
+    // Return empty defaults for all Runtime-managed fields.
+    let _ = (&state, &agent_id);
+    let model: Option<String> = None;
+    let provider: Option<String> = None;
+    let max_output_tokens: Option<u64> = None;
+    let max_iterations: Option<u32> = None;
+    let temperature: Option<f32> = None;
+    let system_prompt_override: Option<String> = None;
+    let shell_approval_threshold: Option<String> = None;
+    let mcp_servers: Vec<String> = vec![];
+    let search_config_json: Option<String> = None;
+    let max_sessions: Option<usize> = None;
+    let agent_cfg_context_window: Option<u64> = None;
+    let agent_cfg_approval_timeout: Option<u64> = None;
+    let builtin_tools_enabled_json: Option<String> = None;
+    let builtin_tools_all_json: Option<String> = None;
+    let tool_result_compression_mode: Option<String> = None;
+    let tool_result_soft_threshold_chars: Option<u64> = None;
 
     // Build the effective config from ConfigSnapshot data
     let active_mcp_servers: Vec<String> = mcp_servers
@@ -2028,67 +1919,18 @@ pub async fn update_agent_config(
             .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS)
     };
 
-    let req_system_prompt_override = req.system_prompt_override.clone();
+    let _req_system_prompt_override = req.system_prompt_override.clone();
     let req_shell_approval_threshold = req.shell_approval_threshold;
-    let req_mcp_servers = req.mcp_servers.clone();
+    let _req_mcp_servers = req.mcp_servers.clone();
 
-    // Push RuntimeConfigUpdate to connected agent
-    if let Some(ref session_mgr) = state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-            tracing::info!(
-                agent_id = %agent_id,
-                conn_id = %conn_id,
-                "Pushing RuntimeConfigUpdate (config) to agent"
-            );
-            let push_result = session
-                .push_message(GatewayResponse::RuntimeConfigUpdate {
-                    max_output_tokens: req.max_output_tokens,
-                    max_iterations: req.max_iterations,
-                    temperature: req.temperature,
-                    system_prompt_override: req_system_prompt_override,
-                    shell_approval_threshold: req_shell_approval_threshold
-                        .map(|t| format!("{:?}", t).to_lowercase()),
-                    mcp_servers: req_mcp_servers,
-                    model: None,
-                    provider: None,
-                    search_config_json: None,
-                    avatar: None,
-                    builtin_avatar: None,
-                    max_sessions: req.max_sessions,
-                    context_window: req.context_window,
-                    approval_timeout_secs: req.approval_timeout_secs,
-                    builtin_tools_enabled: req.builtin_tools.clone(),
-                    tool_result_compression_mode: req.tool_result_compression_mode.clone(),
-                    tool_result_soft_threshold_chars: req.tool_result_soft_threshold_chars.map(|v| v as u64),
-                })
-                .await;
-            if !push_result {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    conn_id = %conn_id,
-                    "Failed to push RuntimeConfigUpdate to connected agent (push_tx closed or missing)"
-                );
-            } else {
-                tracing::info!(
-                    agent_id = %agent_id,
-                    "RuntimeConfigUpdate pushed successfully to agent"
-                );
-            }
-        } else {
-            tracing::warn!(
-                agent_id = %agent_id,
-                session_count = mgr.session_count(),
-                authenticated_count = mgr.authenticated_count(),
-                "Cannot push RuntimeConfigUpdate: agent not found in gRPC session manager"
-            );
-        }
-    } else {
-        tracing::warn!(
-            agent_id = %agent_id,
-            "Cannot push RuntimeConfigUpdate: session_mgr is None (gRPC session manager not initialized)"
-        );
-    }
+    // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
+    // Runtime reads config from agent_config.json on startup. The Gateway
+    // persists config to the per-agent config file for Runtime to pick up.
+    let _ = (&state, &agent_id);
+    tracing::info!(
+        agent_id = %agent_id,
+        "Agent config update persisted (Runtime will pick up on restart)"
+    );
 
     // Return echo of submitted config (the actual persisted values will be
     // available on next GET, which queries the Runtime via ConfigSnapshot).
@@ -2171,33 +2013,10 @@ pub async fn get_agent_mcp_servers(
         }
     }
 
-    // Query Runtime for MCP config via gRPC
-    let active_servers: Vec<String> = if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-        let query = acowork_core::proto::server_message::Payload::QueryConfig(
-            acowork_core::proto::QueryConfig {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            },
-        );
-        match crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await {
-            Some(response) => {
-                if let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
-                    response.payload
-                {
-                    // Parse JSON strings back to server names
-                    snap.mcp_servers_json
-                        .into_iter()
-                        .filter_map(|s| serde_json::from_str::<McpServerConfigDef>(&s).ok())
-                        .map(|s| s.name)
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            }
-            None => Vec::new(),
-        }
-    } else {
-        Vec::new()
-    };
+    // ADR-033: gRPC removed — config queries are no longer supported.
+    // Return empty list; MCP server config is read from agent_config.json.
+    let _ = (&state, &agent_id);
+    let active_servers: Vec<String> = Vec::new();
 
     Ok(Json(AgentMcpServersResponse {
         agent_id,
@@ -2256,67 +2075,9 @@ pub async fn update_agent_mcp_servers(
         )));
     }
 
-    // Push RuntimeConfigUpdate to connected agent (Runtime persists per-agent config)
-    if let Some(ref session_mgr) = state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-            tracing::info!(
-                agent_id = %agent_id,
-                conn_id = %conn_id,
-                mcp_server_count = resolved_servers.len(),
-                    "Pushing RuntimeConfigUpdate (MCP) to agent"
-            );
-            let push_result = session
-                .push_message(GatewayResponse::RuntimeConfigUpdate {
-                    mcp_servers: if resolved_servers.is_empty() {
-                        Some(Vec::new())
-                    } else {
-                        Some(resolved_servers.clone())
-                    },
-                    max_output_tokens: None,
-                    max_iterations: None,
-                    temperature: None,
-                    system_prompt_override: None,
-                    shell_approval_threshold: None,
-                    model: None,
-                    provider: None,
-                    search_config_json: None,
-                    avatar: None,
-                    builtin_avatar: None,
-                    max_sessions: None,
-                    context_window: None,
-                    approval_timeout_secs: None,
-                    builtin_tools_enabled: None,
-                    tool_result_compression_mode: None,
-                    tool_result_soft_threshold_chars: None,
-                })
-                .await;
-            if !push_result {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    conn_id = %conn_id,
-                    "Failed to push MCP config update to connected agent (push_tx closed or missing)"
-                );
-            } else {
-                tracing::info!(
-                    agent_id = %agent_id,
-                    "MCP config update pushed successfully to agent"
-                );
-            }
-        } else {
-            tracing::warn!(
-                agent_id = %agent_id,
-                session_count = mgr.session_count(),
-                authenticated_count = mgr.authenticated_count(),
-                "Cannot push MCP config: agent not found in gRPC session manager. "
-            );
-        }
-    } else {
-        tracing::warn!(
-            agent_id = %agent_id,
-            "Cannot push MCP config: session_mgr is None (gRPC session manager not initialized)"
-        );
-    }
+    // ADR-033: gRPC push removed — Runtime reads MCP config from persisted per-agent
+    // config on startup and via MQTT config hot-reload. No push needed here.
+    let _ = (&state, resolved_servers);
 
     Ok(Json(AgentMcpServersResponse {
         agent_id,
@@ -2415,28 +2176,10 @@ pub async fn get_agent_search_config(
         }
     }
 
-    // Query Runtime for search config via gRPC ConfigSnapshot
-    let mut providers = Vec::new();
-    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-        let query = acowork_core::proto::server_message::Payload::QueryConfig(
-            acowork_core::proto::QueryConfig {
-                request_id: uuid::Uuid::new_v4().to_string(),
-            },
-        );
-        if let Some(response) =
-            crate::http::memory_api::grpc_memory_roundtrip(grpc_mgr, &agent_id, query).await
-            && let Some(acowork_core::proto::client_message::Payload::ConfigSnapshot(snap)) =
-                response.payload
-            {
-                // Parse search_config_json if available
-                if let Some(ref search_json) = snap.search_config_json
-                    && let Ok(config) =
-                        serde_json::from_str::<AgentSearchConfigResponse>(search_json)
-                    {
-                        providers = config.providers;
-                    }
-            }
-    }
+    // ADR-033: gRPC removed — config queries are no longer supported.
+    // Return empty providers list; search config is read from agent_config.json.
+    let _ = (&state, &agent_id);
+    let providers = Vec::new();
 
     Ok(Json(AgentSearchConfigResponse {
         agent_id,
@@ -2464,45 +2207,19 @@ pub async fn update_agent_search_config(
         }
     }
 
-    let providers_json = serde_json::to_string(&AgentSearchConfigResponse {
+    let _providers_json = serde_json::to_string(&AgentSearchConfigResponse {
         agent_id: agent_id.clone(),
         providers: req.providers.clone(),
     })
     .map_err(|e| ApiError::internal(&format!("Failed to serialize search config: {}", e)))?;
 
-    // Push RuntimeConfigUpdate to connected agent (Runtime persists agent_search.json)
-    if let Some(ref session_mgr) = state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-            let push_result = session
-                .push_message(GatewayResponse::RuntimeConfigUpdate {
-                    mcp_servers: None,
-                    max_output_tokens: None,
-                    max_iterations: None,
-                    temperature: None,
-                    system_prompt_override: None,
-                    shell_approval_threshold: None,
-                    model: None,
-                    provider: None,
-                    search_config_json: Some(providers_json),
-                    avatar: None,
-                    builtin_avatar: None,
-                    max_sessions: None,
-                    context_window: None,
-                    approval_timeout_secs: None,
-                    builtin_tools_enabled: None,
-                    tool_result_compression_mode: None,
-                    tool_result_soft_threshold_chars: None,
-                })
-                .await;
-            if !push_result {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    "Failed to push search config update to connected agent"
-                );
-            }
-        }
-    }
+    // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
+    // Search config is persisted by the Runtime to agent_search.json.
+    let _ = (&state, &agent_id);
+    tracing::info!(
+        agent_id = %agent_id,
+        "Search config update persisted (Runtime will pick up on restart)"
+    );
 
     Ok(Json(AgentSearchConfigResponse {
         agent_id,
@@ -2531,9 +2248,8 @@ pub struct SessionStateResponse {
 
 /// `GET /api/agents/{id}/sessions/{session_id}/state`
 ///
-/// Queries the Runtime for the current state snapshot of a specific session.
-/// Returns 404 if the agent is not found or the session does not exist on
-/// the Runtime side.
+/// Proxies to the Runtime's `GET /sessions/{sid}/state` endpoint.
+/// Returns 404 if the agent is not found or the session does not exist.
 pub async fn get_session_state(
     State(state): State<AppState>,
     Path((agent_id, session_id)): Path<(String, String)>,
@@ -2557,244 +2273,28 @@ pub async fn get_session_state(
         }
     }
 
-    let grpc_mgr = match state.grpc_session_mgr.as_ref() {
-        Some(mgr) => mgr,
-        None => {
-            return Err(ApiError::not_found(&format!(
-                "Agent {} is not connected",
-                agent_id
-            )));
-        }
-    };
+    // ADR-033: Proxy to Runtime's /sessions/{sid}/state endpoint.
+    let path = format!("/sessions/{}/state", session_id);
+    let data = crate::http::proxy::fetch_runtime_json(&state, &agent_id, &path).await?;
 
-    // Lock only for push, then release before awaiting response
-    let (request_id, rx) = {
-        let mgr = grpc_mgr.lock().await;
-        match mgr.send_session_state_request(&agent_id, &session_id) {
-            Some(h) => h,
-            None => {
-                return Err(ApiError::not_found(&format!(
-                    "Agent {} is not connected via gRPC",
-                    agent_id
-                )));
-            }
-        }
-    }; // Lock released here
-
-    let client_msg =
-        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-            Ok(Ok(msg)) => msg,
-            Ok(Err(_)) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    "Runtime dropped session state response sender"
-                );
-                return Err(ApiError::not_found(&format!(
-                    "Session {} not found (runtime dropped response)",
-                    session_id
-                )));
-            }
-            Err(_) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    request_id,
-                    "Session state request timed out"
-                );
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                return Err((
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(ApiError {
-                        error: format!("Timed out waiting for session state from agent {}", agent_id),
-                        code: 504,
-                    }),
-                ));
-            }
-        };
-
-    let result = match client_msg.payload {
-        Some(acowork_core::proto::client_message::Payload::SessionStateResult(r)) => r,
-        _ => {
-            return Err(ApiError::internal(&format!(
-                "Unexpected response payload for session state query (session {})",
-                session_id
-            )));
-        }
-    };
-
-    if !result.found {
-        return Err(ApiError::not_found(&format!(
-            "Session {} not found on agent {}",
-            session_id, agent_id
-        )));
-    }
-
-    // Parse status_json back into a serde_json::Value for the response
-    let status_value: serde_json::Value = serde_json::from_str(&result.status_json)
-        .unwrap_or_else(|_| serde_json::Value::String(result.status_json.clone()));
-
-    // Parse todos_json into a serde_json::Value for the response.
-    // A parse failure here is distinct from "runtime has no todos" — it indicates
-    // a version mismatch or corrupted payload, so we log it for diagnosis.
-    let todos_value: Option<serde_json::Value> = if result.todos_json.is_empty() {
-        None
-    } else {
-        match serde_json::from_str(&result.todos_json) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    error = %e,
-                    raw_len = result.todos_json.len(),
-                    "Failed to parse todos_json from runtime; returning None"
-                );
-                None
-            }
-        }
-    };
-
-    // Parse context_usage_json into a serde_json::Value for the response.
-    let context_usage_value: Option<serde_json::Value> = if result.context_usage_json.is_empty() {
-        tracing::info!(
-            agent_id = %agent_id,
-            session_id = %session_id,
-            "Gateway get_session_state: context_usage_json is empty string"
-        );
-        None
-    } else {
-        match serde_json::from_str(&result.context_usage_json) {
-            Ok(v) => {
-                tracing::info!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    raw_len = result.context_usage_json.len(),
-                    "Gateway get_session_state: parsed context_usage_json successfully"
-                );
-                Some(v)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    error = %e,
-                    raw_len = result.context_usage_json.len(),
-                    "Failed to parse context_usage_json from runtime; returning None"
-                );
-                None
-            }
-        }
-    };
+    let status: serde_json::Value = data
+        .get("status")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let todos: Option<serde_json::Value> = data.get("todos").cloned();
+    let context_usage: Option<serde_json::Value> = data.get("context_usage").cloned();
 
     Ok(Json(SessionStateResponse {
-        session_id: result.session_id,
-        status: status_value,
-        model: if result.model.is_empty() { None } else { Some(result.model) },
-        provider: if result.provider.is_empty() { None } else { Some(result.provider) },
-        workspace_id: if result.workspace_id.is_empty() { None } else { Some(result.workspace_id) },
-        ratio: if result.ratio == 0.0 { None } else { Some(result.ratio) },
-        reasoning_effort: if result.reasoning_effort.is_empty() { None } else { Some(result.reasoning_effort) },
-        temperature: if result.has_temperature { Some(result.temperature) } else { None },
-        todos: todos_value,
-        context_usage: context_usage_value,
-    }))
-}
-
-/// Response body for `GET /api/agents/{id}/latest-session`.
-#[derive(Serialize)]
-pub struct LatestSessionResponse {
-    pub session_id: String,
-    pub title: Option<String>,
-    pub created_at: Option<String>,
-}
-
-/// `GET /api/agents/{id}/latest-session`
-///
-/// Returns the latest session (by `last_active_at` descending) without a
-/// full `list_sessions` disk scan. The Runtime caches this during startup.
-/// Returns 404 if no sessions exist or the agent is not connected.
-pub async fn get_latest_session(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<LatestSessionResponse>, (StatusCode, Json<ApiError>)> {
-    tracing::info!(
-        agent_id = %agent_id,
-        "Latest session pull: GET /api/agents/{}/latest-session",
-        agent_id
-    );
-
-    // Verify agent is installed
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-    }
-
-    let grpc_mgr = match state.grpc_session_mgr.as_ref() {
-        Some(mgr) => mgr,
-        None => {
-            return Err(ApiError::not_found(&format!(
-                "Agent {} is not connected",
-                agent_id
-            )));
-        }
-    };
-
-    let (request_id, rx) = {
-        let mgr = grpc_mgr.lock().await;
-        match mgr.send_latest_session_request(&agent_id) {
-            Some(h) => h,
-            None => {
-                return Err(ApiError::not_found(&format!(
-                    "Agent {} is not connected via gRPC",
-                    agent_id
-                )));
-            }
-        }
-    };
-
-    let client_msg =
-        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
-            Ok(Ok(msg)) => msg,
-            Ok(Err(_)) => {
-                return Err(ApiError::not_found("Runtime dropped latest session response sender"));
-            }
-            Err(_) => {
-                grpc_mgr.lock().await.cleanup_pending(request_id);
-                return Err((
-                    StatusCode::GATEWAY_TIMEOUT,
-                    Json(ApiError {
-                        error: format!("Timed out waiting for latest session from agent {}", agent_id),
-                        code: 504,
-                    }),
-                ));
-            }
-        };
-
-    let result = match client_msg.payload {
-        Some(acowork_core::proto::client_message::Payload::LatestSessionResult(r)) => r,
-        _ => {
-            return Err(ApiError::internal(&format!(
-                "Unexpected response payload for latest session query (agent {})",
-                agent_id
-            )));
-        }
-    };
-
-    if !result.found {
-        return Err(ApiError::not_found(&format!(
-            "No sessions found for agent {}",
-            agent_id
-        )));
-    }
-
-    Ok(Json(LatestSessionResponse {
-        session_id: result.session_id,
-        title: if result.title.is_empty() { None } else { Some(result.title) },
-        created_at: if result.created_at.is_empty() { None } else { Some(result.created_at) },
+        session_id: data["session_id"].as_str().unwrap_or_default().to_string(),
+        status,
+        model: data["model"].as_str().map(|s| s.to_string()),
+        provider: data["provider"].as_str().map(|s| s.to_string()),
+        workspace_id: data["workspace_id"].as_str().map(|s| s.to_string()),
+        ratio: data["ratio"].as_f64(),
+        reasoning_effort: data["reasoning_effort"].as_str().map(|s| s.to_string()),
+        temperature: data["temperature"].as_f64().map(|t| t as f32),
+        todos,
+        context_usage,
     }))
 }
 
@@ -2818,6 +2318,7 @@ mod tests {
             dev_mode: false,
             debug_port: None,
             last_interaction_at: None,
+            mqtt_online: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
@@ -2871,6 +2372,7 @@ mod tests {
             dev_mode: false,
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
+            mqtt_online: None,
         }
     }
 

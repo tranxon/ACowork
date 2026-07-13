@@ -197,6 +197,29 @@ pub(crate) async fn phase_b_init_session(
         c.embedding_provider = ctx.emb_provider.clone();
         c.init_memory_store(work_dir_path);
 
+        // ADR-033 (Phase 2): Publish the late-bound Grafeo store to the
+        // shared handle consumed by the Runtime HTTP server. The HTTP
+        // server was already started in Phase A holding this same Arc,
+        // so handlers that fired while `init_memory_store` was still
+        // running will get a stable "no store" response until this
+        // mutation completes. After this point every memory_* endpoint
+        // (/memory/nodes, /memory/stats, /memory/nodes/{nid},
+        // /memory/consolidate) sees the live store.
+        let published_store = c.memory_store().cloned();
+        if let Some(store) = published_store {
+            match ctx.memory_store_shared.write() {
+                Ok(mut slot) => *slot = Some(store),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to publish memory_store_shared — HTTP memory endpoints will report 'no store'"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("init_memory_store completed but no store was assigned — HTTP memory endpoints will report 'no store'");
+        }
+
         // ── Resolve & persist agent_config.json defaults ─────────────
         //
         // agent_config.json is the single source of truth for the

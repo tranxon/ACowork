@@ -412,6 +412,11 @@ pub async fn select_model(
 
                 drop(gw);
 
+                // ADR-033: Trigger MQTT global resource republish after resource change.
+                if let Some(ref trigger) = state.mqtt_publisher_trigger {
+                    trigger.trigger();
+                }
+
                 tracing::info!(
                     model_id = %model_id,
                     dimension = new_dim,
@@ -459,6 +464,11 @@ pub async fn select_model(
                 previous_model = ?current_model_id,
                 "Embedding model switched (same dimension)"
             );
+
+            // ADR-033: Trigger MQTT global resource republish after resource change.
+            if let Some(ref trigger) = state.mqtt_publisher_trigger {
+                trigger.trigger();
+            }
 
             Json(EmbeddingModelActionResponse {
                 model_id,
@@ -690,6 +700,11 @@ pub async fn delete_model(
                     .into_response();
             }
 
+            // ADR-033: Trigger MQTT global resource republish after resource change.
+            if let Some(ref trigger) = state.mqtt_publisher_trigger {
+                trigger.trigger();
+            }
+
             Json(EmbeddingModelActionResponse {
                 model_id,
                 status: "deleted".to_string(),
@@ -825,15 +840,17 @@ pub async fn start_migration(
     let mut started = 0u32;
     let mut errors = Vec::new();
 
+    // ADR-033: MQTT replaces gRPC — migration push works via MQTT
+    // publisher trigger, so the pusher is always available when MQTT is.
     let pusher = match &state.pusher {
-        Some(p) if p.has_grpc_mgr() => p.clone(),
-        _ => {
+        Some(p) => p.clone(),
+        None => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(EmbeddingModelActionResponse {
                     model_id,
                     status: "error".to_string(),
-                    message: "gRPC session manager not available".to_string(),
+                    message: "Global resource pusher not available (MQTT not enabled)".to_string(),
                 }),
             )
                 .into_response();

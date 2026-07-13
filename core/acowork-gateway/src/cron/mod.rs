@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::compat::SharedGrpcSessionMgr;
+use crate::mqtt::GatewayMqttClient;
 pub use store::{CronStore, CronStoreError, StoredCronEntry};
 
 /// A registered cron entry (S5.8 enhanced)
@@ -362,14 +362,14 @@ fn parse_field(field: &str, min: u8, max: u8, name: &str) -> Result<Vec<u8>, Str
 
 /// Run the cron scheduler loop as a background task.
 ///
-/// Checks every minute for entries that should fire, and pushes
-/// IntentReceived messages to the target Agent's gRPC session.
+/// Checks every minute for entries that should fire, and publishes
+/// IntentReceived messages to the target Agent via MQTT ControlCommand.
 ///
 /// If the target Agent is not running, attempts to start it first
 /// (via LifecycleManager), then pushes the Intent.
 pub async fn run_cron_scheduler(
     scheduler: Arc<Mutex<CronScheduler>>,
-    session_mgr: SharedGrpcSessionMgr,
+    mqtt_client: Option<Arc<GatewayMqttClient>>,
     gateway_state: crate::handlers::server::SharedState,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -405,14 +405,13 @@ pub async fn run_cron_scheduler(
                 let mut gw = gateway_state.write().await;
                 if gw.is_installed(&agent_id) {
                     // Start the agent process
-                    let grpc_addr = crate::compat::default_grpc_addr();
-                    let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+                    let gateway_endpoint = "http://127.0.0.1:19877".to_string();
                     let log_file_size_mb =
                         gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
                     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
                     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
                         0,
-                        gateway_grpc_endpoint,
+                        gateway_endpoint,
                         log_file_size_mb,
                         log_file_count,
                         None,
@@ -435,33 +434,46 @@ pub async fn run_cron_scheduler(
                 }
             }
 
-            // Find the agent's session and push IntentReceived
-            let pushed = {
-                let mgr = session_mgr.lock().await;
-                if let Some((_conn_id, session)) = mgr.find_by_agent_id(&agent_id) {
-                    let intent_msg = acowork_core::protocol::GatewayResponse::IntentReceived {
-                        from: format!("cron:{}", agent_id),
-                        action: action.clone(),
-                        params: params.clone(),
-                        command: None,
-                    };
-                    let _ = session;
-                    drop(mgr);
-
-                    // Re-acquire just for pushing
-                    let mgr = session_mgr.lock().await;
-                    if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-                        session.push_message(intent_msg).await
-                    } else {
+            // ADR-033: Publish IntentReceived via MQTT ControlCommand
+            let pushed = if let Some(ref mqtt) = mqtt_client {
+                let intent_cmd = acowork_core::mqtt_proto::IntentCommand {
+                    agent_id: agent_id.clone(),
+                    from: format!("cron:{}", agent_id),
+                    action: action.clone(),
+                    params_json: serde_json::to_string(&params).unwrap_or_default(),
+                };
+                let control_cmd = acowork_core::mqtt_proto::ControlCommand {
+                    agent_id: agent_id.clone(),
+                    command: Some(
+                        acowork_core::mqtt_proto::control_command::Command::Intent(intent_cmd),
+                    ),
+                };
+                match mqtt.publish_control_command(&agent_id, control_cmd).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            "Cron intent published via MQTT: agent={} action={}",
+                            agent_id,
+                            action
+                        );
+                        true
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Cron: failed to publish intent via MQTT: agent={} action={} error={}",
+                            agent_id,
+                            action,
+                            e
+                        );
                         false
                     }
-                } else {
-                    tracing::warn!(
-                        "Cron trigger skipped: agent {} not connected (session not found)",
-                        agent_id
-                    );
-                    false
                 }
+            } else {
+                tracing::warn!(
+                    "Cron trigger skipped: MQTT client not available for agent={} action={}",
+                    agent_id,
+                    action
+                );
+                false
             };
 
             if !pushed {

@@ -49,9 +49,9 @@ impl Gateway {
         })?;
 
         // Build the gRPC endpoint URL that Runtime processes will use to connect.
+        // ADR-033: gRPC disabled; hardcoded endpoint kept for Runtime spawn args only.
         // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
-        let grpc_addr = crate::compat::default_grpc_addr();
-        let gateway_grpc_endpoint = format!("http://{}", grpc_addr);
+        let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
 
         // ADR-033: MQTT port for Runtime lifecycle (if MQTT is enabled).
         let lifecycle_mqtt_port = if config.mqtt.enabled { Some(config.mqtt.port) } else { None };
@@ -309,16 +309,15 @@ impl Gateway {
 
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
     ///
-    /// When Gateway restarts, previously spawned runtime processes lose their gRPC
+    /// When Gateway restarts, previously spawned runtime processes lose their
     /// connection and become useless orphans. This method finds them by scanning
-    /// /proc for acowork-runtime processes whose `--gateway-endpoint` argument
-    /// matches this Gateway's gRPC endpoint.
+    /// for acowork-runtime processes whose `--gateway-endpoint` argument
+    /// matches this Gateway's endpoint.
     ///
     /// Since Gateway is single-instance per host (enforced by HTTP port probing),
     /// scoping by endpoint is a safety measure against false positives.
     fn cleanup_orphaned_runtimes(&self) -> usize {
-        let grpc_endpoint = crate::compat::default_grpc_addr().to_string();
-        let grpc_endpoint_url = format!("http://{}", grpc_endpoint);
+        let grpc_endpoint_url = "http://127.0.0.1:19877".to_string();
 
         // Find all acowork-runtime processes
         let output = match std::process::Command::new("pgrep")
@@ -615,7 +614,7 @@ impl Gateway {
             crate::resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir_path);
         }
 
-        // S3.1: Start cron scheduler tick loop
+        // S3.1: Load cron scheduler entries from store
         let cron_scheduler = Arc::new(tokio::sync::Mutex::new({
             let gw = shared_state.read().await;
             std::mem::take(&mut gw.cron_scheduler.clone())
@@ -628,36 +627,6 @@ impl Gateway {
                 sched.clone()
             };
         }
-        // Cron spawned below after grpc_session_mgr creation.
-
-        // ADR-021 Phase 2: Single Bridge control channel for all events.
-        // Data channel (L1 chunks) removed — frontend now polls via HTTP.
-        let (bridge_ctrl_tx, _) = tokio::sync::broadcast::channel::<crate::http::routes::BridgeEvent>(
-            self.config.data_flow.bridge_ctrl_capacity,
-        );
-        let http_bridge_ctrl_tx = Some(bridge_ctrl_tx.clone());
-
-        // S1.14 / Task #12: Create shared session_pending for HTTP ↔ gRPC bridge.
-        // HTTP handlers store oneshot senders here; gRPC dispatch resolves them
-        // when Runtime replies with IntentSend(action=session_response).
-        let session_pending: crate::http::routes::SessionPendingRequests =
-            Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let http_session_pending = Some(session_pending.clone());
-        let grpc_session_pending = Some(session_pending);
-
-        // Task #12: Create shared gRPC session manager for Gateway→Runtime request-response.
-        // Both the gRPC server and HTTP server share this instance.
-        let grpc_session_mgr: crate::compat::SharedGrpcSessionMgr = Arc::new(
-            tokio::sync::Mutex::new(crate::compat::GrpcSessionManager::new()),
-        );
-        let http_grpc_session_mgr = Some(grpc_session_mgr.clone());
-
-        // Spawn cron scheduler (requires grpc_session_mgr for pushing IntentReceived)
-        let cron_session_mgr = grpc_session_mgr.clone();
-        let cron_gw_state = shared_state.clone();
-        let _cron_handle = tokio::spawn(async move {
-            crate::cron::run_cron_scheduler(cron_scheduler, cron_session_mgr, cron_gw_state).await;
-        });
 
         // Start HTTP server in a separate tokio task (parallel with gRPC)
         let http_state = shared_state.clone();
@@ -665,7 +634,7 @@ impl Gateway {
         // Create unified global resource pusher for hot-push of provider_list,
         // search_config, MCP catalog, and user profile changes to running agents.
         let pusher: Option<Arc<GlobalResourcePusher>> = Some(Arc::new(GlobalResourcePusher::new(
-            http_grpc_session_mgr.clone(),
+            None,
             http_state.clone(),
             data_dir_path.clone(),
         )));
@@ -815,34 +784,19 @@ impl Gateway {
 
         // ADR-033: Create runtime HTTP registry and agent registry.
         let runtime_http_registry = crate::http::proxy::new_shared_registry();
-        let reg_for_mqtt = runtime_http_registry.clone();
         let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
-        let agent_reg_for_mqtt = agent_registry.clone();
 
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_handle.is_some() {
+            let reg_for_dispatch = runtime_http_registry.clone();
+            let agent_reg_for_dispatch = agent_registry.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
-                if topic.ends_with("/http_port") {
-                    let agent_id = topic
-                        .strip_prefix("acowork/agents/")
-                        .and_then(|s| s.strip_suffix("/http_port"))
-                        .unwrap_or("");
-                    if let Ok(port_str) = std::str::from_utf8(&payload) {
-                        if let Ok(port) = port_str.trim().parse::<u16>() {
-                            let reg = reg_for_mqtt.clone();
-                            let aid = agent_id.to_string();
-                            tokio::spawn(async move {
-                                reg.write().await.register(&aid, port);
-                            });
-                        }
-                    }
-                } else if topic.ends_with("/status") {
-                    let reg = agent_reg_for_mqtt.clone();
-                    let topic_owned = topic.clone();
-                    let payload_owned = payload.clone();
-                    tokio::spawn(async move {
-                        reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
-                    });
-                }
+                // Unified dispatch: try DataEnvelope (protobuf) first,
+                // then fall through to plaintext (http_port, status).
+                crate::mqtt::dispatch::handle_message(
+                    &topic, &payload,
+                    &reg_for_dispatch,
+                    &agent_reg_for_dispatch,
+                );
             });
 
             match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
@@ -850,8 +804,34 @@ impl Gateway {
                     tracing::info!("MQTT Gateway client connected");
                     let client = c.clone();
                     tokio::spawn(async move {
-                        let _ = client.subscribe("acowork/agents/+/http_port", crate::mqtt::MqttQoS::AtLeastOnce).await;
-                        let _ = client.subscribe("acowork/agents/+/status", crate::mqtt::MqttQoS::AtLeastOnce).await;
+                        // Surface subscription errors instead of silently swallowing them —
+                        // if either subscription fails, the Gateway's runtime_http_registry
+                        // and agent_registry will stay empty and every reverse-proxy request
+                        // will 503 (latency=0) with no diagnostic trail.
+                        if let Err(e) = client
+                            .subscribe("acowork/agents/+/http_port", crate::mqtt::MqttQoS::AtLeastOnce)
+                            .await
+                        {
+                            tracing::error!(
+                                topic = "acowork/agents/+/http_port",
+                                error = %e,
+                                "Failed to subscribe to Runtime http_port topic — Gateway will 503 every reverse-proxy request"
+                            );
+                        } else {
+                            tracing::info!("Subscribed to acowork/agents/+/http_port");
+                        }
+                        if let Err(e) = client
+                            .subscribe("acowork/agents/+/status", crate::mqtt::MqttQoS::AtLeastOnce)
+                            .await
+                        {
+                            tracing::error!(
+                                topic = "acowork/agents/+/status",
+                                error = %e,
+                                "Failed to subscribe to Runtime status topic — AgentRegistry will never be populated"
+                            );
+                        } else {
+                            tracing::info!("Subscribed to acowork/agents/+/status");
+                        }
                     });
                     Some(Arc::new(c))
                 }
@@ -875,14 +855,21 @@ impl Gateway {
             Some(trigger)
         } else { None };
 
+        // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
+        // Must be started AFTER MQTT client is available.
+        {
+            let cron_mqtt = mqtt_gw_client.clone();
+            let cron_gw_state = shared_state.clone();
+            let _cron_handle = tokio::spawn(async move {
+                crate::cron::run_cron_scheduler(cron_scheduler, cron_mqtt, cron_gw_state).await;
+            });
+        }
+
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
                 http_state,
                 &data_dir_path,
-                http_grpc_session_mgr,
-                http_bridge_ctrl_tx,
-                http_session_pending,
                 log_reload_handle,
                 pusher,
                 mqtt_gw_client,
@@ -896,39 +883,13 @@ impl Gateway {
             }
         });
 
-        // Task #12: Start gRPC server so HTTP API can reach Runtime via gRPC.
-        // The gRPC server registers each connection in grpc_session_mgr,
-        // so HTTP handlers find gRPC-connected agents via the same path.
-        let grpc_state = shared_state.clone();
-        let grpc_bridge_ctrl_tx = Some(bridge_ctrl_tx);
-        let (capability_tx, _) = tokio::sync::broadcast::channel::<
-            acowork_core::protocol::GatewayResponse,
-        >(self.config.data_flow.capability_broadcast_capacity);
-        let grpc_data_flow_config = self.config.data_flow.clone();
-        let grpc_handle = tokio::spawn(async move {
-            let grpc_addr = crate::compat::default_grpc_addr();
-            if let Err(e) = crate::compat::start_grpc_server(
-                grpc_addr,
-                grpc_state,
-                grpc_session_mgr,
-                capability_tx,
-                grpc_bridge_ctrl_tx,
-                grpc_session_pending,
-                grpc_data_flow_config,
-            )
-            .await
-            {
-                tracing::error!("gRPC server failed: {}", e);
-            }
-        });
-
-        // S5.9: Wait for either SIGTERM/SIGINT or server exit.
+        // S5.9: Wait for either SIGTERM/SIGINT or HTTP server exit.
         // On signal, all server tasks are aborted, triggering
         // PidFileGuard::Drop which cleans up the pidfile.
         let shutdown_result = tokio::select! {
-            grpc_result = grpc_handle => {
-                tracing::info!("gRPC server exited");
-                grpc_result.map_err(|e| GatewayError::Config(format!("gRPC server task error: {}", e)))
+            http_result = http_handle => {
+                tracing::info!("HTTP server exited");
+                http_result.map_err(|e| GatewayError::Config(format!("HTTP server task error: {}", e)))
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received shutdown signal, cleaning up...");
@@ -995,12 +956,6 @@ impl Gateway {
                 Ok(())
             }
         };
-
-        // Clean up HTTP server on any exit path (triggers PidFileGuard::Drop for pidfile cleanup)
-        http_handle.abort();
-        // Wait for the HTTP task to actually drop, ensuring PidFileGuard::Drop runs
-        // before this function returns and the runtime is torn down.
-        let _ = http_handle.await;
 
         shutdown_result?;
 

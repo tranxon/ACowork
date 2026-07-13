@@ -283,6 +283,11 @@ pub async fn add_catalog_entry(
         pusher.push_mcp_catalog().await;
     }
 
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(MessageResponse {
@@ -357,6 +362,11 @@ pub async fn update_catalog_entry(
         pusher.push_mcp_catalog().await;
     }
 
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
     Ok(Json(MessageResponse {
         message: format!("MCP server '{}' updated in catalog", new_name),
     }))
@@ -390,6 +400,11 @@ pub async fn remove_catalog_entry(
     // Hot-push MCP config to all running agents
     if let Some(ref pusher) = state.pusher {
         pusher.push_mcp_catalog().await;
+    }
+
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     Ok(Json(MessageResponse {

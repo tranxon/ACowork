@@ -10,6 +10,7 @@ use crate::cli::RuntimeResourceCache;
 use crate::config::RuntimeConfig;
 use acowork_core::protocol::ProtocolType;
 use crate::agent::session::SessionManagerConfig;
+use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
 
 /// Intermediate context produced by Phase A (per-agent initialization).
 ///
@@ -88,9 +89,46 @@ pub(crate) struct AgentBootContext {
     // Resource cache (for session validation)
     pub resource_cache: RuntimeResourceCache,
 
+    /// Shared session snapshot map, populated by Phase A and consumed by
+    /// Phase B (via SessionManagerConfig). The same `Arc` is also held by
+    /// the Runtime HTTP server so session state writes from AgentLoop are
+    /// immediately visible to HTTP GET /sessions/{sid}/state.
+    pub session_snapshots: SharedSessionSnapshots,
+
+    /// Shared latest session Arc, populated by Phase A and consumed by
+    /// Phase B (via SessionManagerConfig). SessionManager writes to it on
+    /// every session creation; the HTTP server reads from it for
+    /// GET /sessions/latest.
+    pub latest_session: SharedLatestSession,
+
     // Reconnect params (Gateway mode)
     pub agent_id: String,
     pub version: String,
+
+    /// ADR-033: Dispatch receiver for Runtime HTTP → agent loop.
+    /// HTTP handlers send (session_id, InboundMessage); gateway loop
+    /// forwards to the right session's AgentLoop.
+    pub http_dispatch_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>>,
+
+    /// ADR-033: Shared handle to the Grafeo memory store. Cloned into
+    /// the Runtime HTTP server at Phase A and populated by Phase B once
+    /// [`crate::agent::AgentCore::init_memory_store`] succeeds. Memory
+    /// endpoints gracefully report "no store" when this is still `None`.
+    pub memory_store_shared: crate::http::SharedMemoryStore,
+
+    /// ADR-033: Shared embedding-provider dimension. Initialised to 0
+    /// in Phase A and updated once the embed provider is built. Read
+    /// by the memory-stats endpoint as `model_dim` for HNSW
+    /// dimension-mismatch detection.
+    ///
+    /// The HTTP server already holds a clone of the same `Arc` passed
+    /// to [`crate::http::RuntimeHttpServer::start`]; this slot in
+    /// `AgentBootContext` exists for symmetry with
+    /// [`Self::memory_store_shared`] and is reserved for any future
+    /// post-Phase-A consumer (e.g. memory diagnostics in the gateway
+    /// loop). Phase B does not currently read it.
+    #[allow(dead_code)]
+    pub embed_dim_shared: crate::http::SharedEmbedDimension,
 }
 
 /// Context produced by Phase B (per-session initialization).
@@ -124,5 +162,7 @@ pub(crate) fn build_session_manager_config(
         full_tool_specs: ctx.full_tool_specs.clone(),
         identity_context: ctx.identity_context.clone(),
         protocol_type: ctx.protocol_type.clone(),
+        session_snapshots: Some(ctx.session_snapshots.clone()),
+        latest_session: Some(ctx.latest_session.clone()),
     }
 }

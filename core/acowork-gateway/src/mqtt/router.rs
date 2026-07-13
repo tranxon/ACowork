@@ -1,14 +1,14 @@
-//! Topic Router (ADR-033 Phase 1 scaffolding).
+//! Topic Router (ADR-033).
 //!
 //! Matches incoming MQTT messages to handlers based on topic patterns.
-//! In Phase 1, this is minimal — the Gateway mainly publishes, not
-//! subscribes to business topics. In Phase 2+, when Runtime connects
-//! via MQTT, the router dispatches `agents/{id}/sessions/control/#`
-//! messages to the appropriate handlers.
+//!
+//! ## Current status
+//!
+//! `topic_matches()` is used by `dispatch::handle_plaintext_message()` for
+//! matching http_port and status topics. The `route_message_by_topic()` function is
+//! used by `dispatch::dispatch_message()` for DataEnvelope message routing.
 //!
 //! See `docs/zh/protocols/mqtt.md` §3 (Topic tree) and §8.4 (wildcards).
-
-use rumqttc::Publish;
 
 /// Result of routing a message.
 #[derive(Debug)]
@@ -50,8 +50,7 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 ///
 /// In Phase 1, this only logs the message. Phase 2+ will dispatch
 /// to business logic handlers (control commands, agent status, etc.).
-pub fn route_message(publish: &Publish) -> RouteResult {
-    let topic = &publish.topic;
+pub fn route_message_by_topic(topic: &str) -> RouteResult {
 
     // ── Global resources (we publish these, but might also receive echoes) ──
     if topic.starts_with("acowork/global/") {

@@ -49,6 +49,7 @@ max_connections = {max_conn}
 max_segment_size = {max_pkt}
 max_segment_count = 10
 max_read_len = 1048576
+max_outgoing_packet_count = 1000
 instant_ack = true
 
 [v4.acowork]
@@ -208,7 +209,7 @@ mod tests {
             "segment size should cover 10 MB packets"
         );
 
-        let v4 = &config.v4;
+        let v4 = config.v4.as_ref().expect("v4 servers must be configured");
         let server = v4.get("acowork").expect("server 'acowork' must exist");
         assert_eq!(server.listen.port(), defaults::GATEWAY_MQTT_PORT);
         assert_eq!(
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn test_build_broker_config_custom_host_port() {
         let config = build_broker_config("127.0.0.1", 32100);
-        let v4 = &config.v4;
+        let v4 = config.v4.as_ref().expect("v4 servers must be configured");
         let server = v4.get("acowork").unwrap();
         assert_eq!(server.listen.port(), 32100);
     }

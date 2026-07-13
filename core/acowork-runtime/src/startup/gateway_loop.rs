@@ -40,22 +40,104 @@ pub(crate) async fn phase_d_run(
     // ADR-033: MQTT control → session dispatch channel.
     let (mqtt_dispatch_tx, mqtt_dispatch_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    // ADR-033: Forward Runtime HTTP dispatch messages to the MQTT dispatch channel.
+    if let Some(http_rx) = ctx.http_dispatch_rx.take() {
+        let tx = mqtt_dispatch_tx.clone();
+        tokio::spawn(async move {
+            let mut rx = http_rx;
+            while let Some(msg) = rx.recv().await {
+                let _ = tx.send(msg);
+            }
+            tracing::info!("Runtime HTTP dispatch channel closed");
+        });
+    }
+
     let _mqtt_handle = ctx.control_rx.take().map(|ctrl_rx| {
         let tx = mqtt_dispatch_tx.clone();
         tokio::spawn(async move {
             let mut rx = ctrl_rx;
+            use crate::mqtt::control_handler::ControlAction;
             while let Some((topic, payload)) = rx.recv().await {
                 let action = crate::mqtt::control_handler::parse_control_payload(&topic, &payload);
                 match action {
-                    Some(crate::mqtt::control_handler::ControlAction::SendMessage { session_id, message_id: _, content }) => {
-                        let msg = crate::agent::inbound::InboundMessage::UserMessage(content);
+                    // ── Session-bound commands (route via session_id) ──
+                    Some(ControlAction::SendMessage { session_id, message_id, content }) => {
+                        // Wrap as SystemNotification to carry message_id alongside content.
+                        // mqtt_only_loop intercepts this and routes via SessionMessage channel.
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "mqtt_user_message".to_string(),
+                            data: serde_json::json!({
+                                "content": content,
+                                "message_id": message_id,
+                            }),
+                        };
                         let _ = tx.send((session_id, msg));
                     }
-                    Some(crate::mqtt::control_handler::ControlAction::StopGeneration { session_id }) => {
+                    Some(ControlAction::StopGeneration { session_id }) => {
                         let msg = crate::agent::inbound::InboundMessage::Stop { reason: "MQTT stop".to_string() };
                         let _ = tx.send((session_id, msg));
                     }
-                    _ => {}
+                    Some(ControlAction::DeleteSession { session_id }) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "delete_session".to_string(),
+                            data: serde_json::json!({ "session_id": session_id }),
+                        };
+                        let _ = tx.send((session_id, msg));
+                    }
+                    Some(ControlAction::ModelSwitch { session_id, model_id }) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "model_switch".to_string(),
+                            data: serde_json::json!({ "model_id": model_id }),
+                        };
+                        let _ = tx.send((session_id, msg));
+                    }
+                    Some(ControlAction::ReasoningEffort { session_id, effort }) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "reasoning_effort".to_string(),
+                            data: serde_json::json!({ "effort": effort }),
+                        };
+                        let _ = tx.send((session_id, msg));
+                    }
+                    Some(ControlAction::CompactContext { session_id }) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "compact_context".to_string(),
+                            data: serde_json::json!({}),
+                        };
+                        let _ = tx.send((session_id, msg));
+                    }
+                    Some(ControlAction::WorkspaceSwitch { session_id, workspace_id }) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "workspace_switch".to_string(),
+                            data: serde_json::json!({ "workspace_id": workspace_id }),
+                        };
+                        let _ = tx.send((session_id, msg));
+                    }
+                    // ── System commands (no session_id — empty string routes via session_manager) ──
+                    Some(ControlAction::CreateSession) => {
+                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
+                            notification_type: "create_session".to_string(),
+                            data: serde_json::json!({}),
+                        };
+                        // Empty session_id signals mqtt_only_loop to handle via session_manager
+                        let _ = tx.send((String::new(), msg));
+                    }
+                    Some(ControlAction::IntentReceived { from, action, params_json }) => {
+                        let params: serde_json::Value = serde_json::from_str(&params_json)
+                            .unwrap_or(serde_json::json!({}));
+                        let msg = crate::agent::inbound::InboundMessage::IntentMessage {
+                            from,
+                            action,
+                            params,
+                        };
+                        // Empty session_id — intent is delivered to the agent loop directly
+                        let _ = tx.send((String::new(), msg));
+                    }
+                    Some(ControlAction::Unsupported { command_type }) => {
+                        tracing::warn!(command_type, topic, "Unsupported MQTT control command");
+                    }
+                    None => {
+                        tracing::debug!(topic, "Failed to parse MQTT control payload");
+                    }
                 }
             }
         })
@@ -163,8 +245,125 @@ async fn mqtt_only_loop(
             dispatch_result = mqtt_dispatch_rx.recv() => {
                 match dispatch_result {
                     Some((session_id, msg)) => {
-                        if let Some(session) = session_manager.get_session(&session_id) {
-                            let _ = session.send_inbound(msg);
+                        if session_id.is_empty() {
+                            // System-level command (e.g., create_session) — handled by session_manager
+                            match &msg {
+                                crate::agent::inbound::InboundMessage::SystemNotification { notification_type, .. } => {
+                                    match notification_type.as_str() {
+                                        "create_session" => {
+                                            match session_manager.create_session().await {
+                                                Ok(new_sid) => {
+                                                    tracing::info!(new_sid, "MQTT: session created via control command");
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(error = %e, "MQTT: failed to create session");
+                                                }
+                                            }
+                                        }
+                                        other => {
+                                            tracing::warn!(notification_type = other, "Unhandled system notification with empty session_id");
+                                        }
+                                    }
+                                }
+                                other => {
+                                    tracing::warn!(?other, "Unexpected message type with empty session_id");
+                                }
+                            }
+                        } else {
+                            // Check for session-manager-level commands before forwarding to session task.
+                            let handled = match &msg {
+                                crate::agent::inbound::InboundMessage::SystemNotification { notification_type, data } => {
+                                    match notification_type.as_str() {
+                                        "mqtt_user_message" => {
+                                            let content = data.get("content")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            let msg_id = data.get("message_id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("")
+                                                .to_string();
+                                            tracing::info!(
+                                                session_id = %session_id,
+                                                content_len = content.len(),
+                                                "MQTT: routing user message via session_manager"
+                                            );
+                                            let _ = session_manager.send_to_session(
+                                                &session_id,
+                                                crate::agent::session::SessionMessage::ChatMessage {
+                                                    content,
+                                                    message_id: msg_id,
+                                                    skill_instructions: None,
+                                                    documents: None,
+                                                    content_parts: None,
+                                                    attached_context: None,
+                                                },
+                                            );
+                                            true
+                                        }
+                                        "workspace_switch" => {
+                                            if let Some(ws_id) = data.get("workspace_id").and_then(|v| v.as_str()) {
+                                                tracing::info!(
+                                                    session_id = %session_id,
+                                                    workspace_id = %ws_id,
+                                                    "MQTT: setting session workspace via session_manager"
+                                                );
+                                                session_manager.set_session_workspace(&session_id, ws_id);
+                                            }
+                                            true
+                                        }
+                                        "model_switch" => {
+                                            if let Some(model_id) = data.get("model_id").and_then(|v| v.as_str()) {
+                                                tracing::info!(
+                                                    session_id = %session_id,
+                                                    model_id = %model_id,
+                                                    "MQTT: routing model_switch via session_manager"
+                                                );
+                                                let _ = session_manager.route_model_switch(
+                                                    &session_id,
+                                                    model_id.to_string(),
+                                                    None,
+                                                );
+                                            }
+                                            true
+                                        }
+                                        "reasoning_effort" => {
+                                            if let Some(effort) = data.get("effort").and_then(|v| v.as_str()) {
+                                                tracing::info!(
+                                                    session_id = %session_id,
+                                                    effort = %effort,
+                                                    "MQTT: routing reasoning_effort via session_manager"
+                                                );
+                                                let _ = session_manager.route_reasoning_effort(
+                                                    &session_id,
+                                                    effort.to_string(),
+                                                );
+                                            }
+                                            true
+                                        }
+                                        "compact_context" => {
+                                            tracing::info!(
+                                                session_id = %session_id,
+                                                "MQTT: routing compact_context via session_manager"
+                                            );
+                                            let _ = session_manager.send_to_session(
+                                                &session_id,
+                                                crate::agent::session::SessionMessage::CompactContext,
+                                            );
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                }
+                                _ => false,
+                            };
+                            if !handled {
+                                if let Some(session) = session_manager.get_session(&session_id) {
+                                    let _ = session.send_inbound(msg);
+                                } else {
+                                    tracing::warn!(session_id, "MQTT dispatch: session not found");
+                                }
+                            }
                         }
                     }
                     None => break, // channel closed

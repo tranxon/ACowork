@@ -14,8 +14,7 @@ use crate::config::HttpConfig;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::http::routes::{self, AppState, BridgeEvent, SessionPendingRequests};
-use crate::compat::SharedGrpcSessionMgr;
+use crate::http::routes::{self, AppState};
 use crate::compat::GlobalResourcePusher;
 
 /// PID file content for Desktop App discovery
@@ -108,9 +107,6 @@ pub(crate) async fn start_http_server(
     http_config: &HttpConfig,
     gateway_state: Arc<RwLock<GatewayState>>,
     data_dir: &Path,
-    grpc_session_mgr: Option<SharedGrpcSessionMgr>,
-    bridge_ctrl_tx: Option<tokio::sync::broadcast::Sender<BridgeEvent>>,
-    session_pending: Option<SessionPendingRequests>,
     log_reload_handle: Option<crate::LogReloadHandle>,
     pusher: Option<Arc<GlobalResourcePusher>>,
     mqtt_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
@@ -128,14 +124,11 @@ pub(crate) async fn start_http_server(
     auth.write_token_file(data_dir)?;
 
     // Build app state
-    let mut app_state = AppState::with_config(
+    let mut app_state = AppState::new(
         gateway_state,
         auth,
-        grpc_session_mgr,
-        bridge_ctrl_tx,
-        session_pending,
-        log_reload_handle,
     );
+    app_state.log_reload_handle = log_reload_handle;
     app_state.pusher = pusher;
     app_state.cors_enabled = http_config.cors_enabled;
     app_state.mqtt_gateway_client = mqtt_client;

@@ -10,6 +10,10 @@
 //! loaded, etc.), both pushers fire: gRPC pushes to connected Runtimes,
 //! MQTT publishes the Retained snapshot for future subscribers.
 //!
+//! Retained messages ensure new Runtime subscribers receive the latest
+//! global resource state immediately on subscription, without waiting for
+//! the next periodic publish cycle.
+//!
 //! See `docs/zh/protocols/mqtt.md` §3.1.1 and §5.4.
 
 use std::sync::Arc;
@@ -101,10 +105,13 @@ impl MqttGlobalResourcesPublisher {
     /// Start the publisher background loop.
     ///
     /// The loop:
-    /// 1. Publishes all `acowork/global/*` topics once at startup (initial snapshot).
-    /// 2. Waits for `trigger_republish()` calls.
-    /// 3. On each trigger, re-reads state and republishes all topics.
-    /// 4. Also republishes periodically (every 60s) as a safety net.
+    /// 1. Publishes all `acowork/global/*` topics once at startup (initial Retained snapshot).
+    /// 2. Waits for `trigger_republish()` calls from HTTP handlers after resource changes.
+    /// 3. On each trigger, re-reads state and republishes all topics as Retained messages.
+    ///
+    /// No periodic polling — Retained messages ensure new subscribers get the latest
+    /// snapshot immediately, and every resource-mutating HTTP handler calls
+    /// `MqttPublisherTrigger::trigger()` to drive republish on change.
     pub fn start(self) -> MqttPublisherHandle {
         let notify = self.notify.clone();
         let notify_for_loop = self.notify.clone();
@@ -114,23 +121,14 @@ impl MqttGlobalResourcesPublisher {
             // Initial publish: send the current snapshot immediately.
             self.publish_all().await;
 
-            // periodic + trigger-driven republish loop.
-            // Note: rumqttd 0.14 does not support Retained messages reliably,
-            // so we use frequent periodic publishes instead (every 5s).
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            interval.tick().await; // skip immediate tick (already published above)
-
+            // Trigger-driven republish loop — no periodic polling needed.
+            // Every resource-mutating HTTP handler (add/remove/update provider,
+            // MCP catalog entry, embedding model, search key, global config)
+            // calls `trigger()` which wakes this loop via `Notify`.
             loop {
-                tokio::select! {
-                    _ = notify_for_loop.notified() => {
-                        tracing::debug!("MQTT publisher: triggered republish");
-                        self.publish_all().await;
-                    }
-                    _ = interval.tick() => {
-                        tracing::trace!("MQTT publisher: periodic republish");
-                        self.publish_all().await;
-                    }
-                }
+                notify_for_loop.notified().await;
+                tracing::debug!("MQTT publisher: triggered republish");
+                self.publish_all().await;
             }
         });
 
@@ -206,11 +204,11 @@ impl MqttGlobalResourcesPublisher {
         self.publish_envelope_raw(topics::LSPS, &envelope).await;
     }
 
-    /// Helper: publish a DataEnvelope (not Retained — rumqttd 0.14 issue).
+    /// Helper: publish a DataEnvelope with Retained=true.
     async fn publish_envelope_raw(&self, topic: &str, envelope: &DataEnvelope) {
         if let Err(e) = self
             .client
-            .publish_envelope(topic, envelope, MqttQoS::AtLeastOnce, false)
+            .publish_envelope(topic, envelope, MqttQoS::AtLeastOnce, true)
             .await
         {
             tracing::warn!(topic, error = %e, "Failed to publish MQTT global resource topic");

@@ -4,7 +4,7 @@
 //! 1. Starts the agent process
 //! 2. Waits for the Runtime to become ready
 //! 3. Initializes the session (fetch list, determine active, pull state)
-//! 4. Synchronizes UI (connect WebSocket, fetch workspaces, refresh config)
+//! 4. Synchronizes UI (fetch workspaces, refresh config)
 //!
 //! All callers (AgentList right-click, ChatPanel "Start Agent" button) use
 //! this single entry point so session data is always ready before rendering.
@@ -12,7 +12,6 @@
 import { useAgentStore } from "../stores/agentStore";
 import { useChatStore } from "../stores/chatStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
-import { getGatewayUrl } from "./config";
 import { emitAgentConfigRefresh } from "./refresh";
 
 /**
@@ -84,8 +83,7 @@ export async function startAgentAndSyncUI(
     // 3. Initialize session — fetch list, determine active, pull state
     await initSessionForAgent(agentId);
 
-    // 4. Sync UI — connect stream, workspaces, config refresh (pure render)
-    useChatStore.getState().connectStream(agentId, getGatewayUrl());
+    // 4. Sync UI — workspaces, config refresh (pure render)
     useWorkspaceStore.getState().fetchWorkspaces(agentId);
     emitAgentConfigRefresh(agentId);
 }

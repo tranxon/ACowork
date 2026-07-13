@@ -42,33 +42,54 @@ pub(crate) async fn phase_c_spawn_subsystems(
     // This must run before AgentReady is sent so the chunk channel is
     // already being drained when the Gateway loop starts.
     //
-    // ADR-021: Single channel for control events only.
-    // Data events (Delta, ReasoningDelta, ToolCall, ToolResult) are no
-    // longer sent via channel — the frontend polls them via HTTP.
+    // ADR-033: MQTT chunk relay takes priority over gRPC when MQTT is
+    // available. All chunk events are published to the MQTT broker as
+    // `DataEnvelope { payload: SessionMessage }` protobuf on session
+    // message topics. Desktop subscribes directly to the broker.
     let agent_id_for_relay = ctx.agent_id.clone();
-    let chunk_relay = if ctx.chunk_rx.is_some() && ctx.grpc_client.is_some() {
-        let chunk_rx = ctx.chunk_rx.take().unwrap();
-        let outbound_ctrl_tx = ctx
-            .grpc_client
-            .as_ref()
-            .unwrap()
-            .outbound_ctrl_sender();
-        Some(tokio::spawn(async move {
-            tracing::info!("Chunk relay started (single channel)");
-            let mut chunk_rx = chunk_rx;
-
-            // Simple relay: read from chunk_rx, forward to gRPC outbound.
-            while let Some(session_event) = chunk_rx.recv().await {
-                relay_chunk_event(
-                    &outbound_ctrl_tx,
-                    &agent_id_for_relay,
-                    &session_event.session_id,
-                    session_event.event,
-                )
-                .await;
-            }
-            tracing::debug!("Chunk relay task ended");
-        }))
+    let chunk_relay = if ctx.chunk_rx.is_some() {
+        if let Some(ref mqtt_client) = ctx.mqtt_client {
+            // MQTT chunk relay — publish all events via MQTT broker.
+            let chunk_rx = ctx.chunk_rx.take().unwrap();
+            let chunk_publisher = crate::mqtt::MqttChunkPublisher::from_runtime_client(mqtt_client);
+            Some(tokio::spawn(async move {
+                tracing::info!("MQTT chunk relay started");
+                let mut chunk_rx = chunk_rx;
+                while let Some(session_event) = chunk_rx.recv().await {
+                    relay_chunk_event_mqtt(
+                        &chunk_publisher,
+                        &agent_id_for_relay,
+                        &session_event.session_id,
+                        session_event.event,
+                    );
+                }
+                tracing::debug!("MQTT chunk relay task ended");
+            }))
+        } else if ctx.grpc_client.is_some() {
+            // Legacy gRPC chunk relay.
+            let chunk_rx = ctx.chunk_rx.take().unwrap();
+            let outbound_ctrl_tx = ctx
+                .grpc_client
+                .as_ref()
+                .unwrap()
+                .outbound_ctrl_sender();
+            Some(tokio::spawn(async move {
+                tracing::info!("Chunk relay started (single channel)");
+                let mut chunk_rx = chunk_rx;
+                while let Some(session_event) = chunk_rx.recv().await {
+                    relay_chunk_event(
+                        &outbound_ctrl_tx,
+                        &agent_id_for_relay,
+                        &session_event.session_id,
+                        session_event.event,
+                    )
+                    .await;
+                }
+                tracing::debug!("Chunk relay task ended");
+            }))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -348,6 +369,149 @@ async fn relay_chunk_event(
                 "session_id": sid,
             });
             relay_intent(outbound_ctrl_tx, "ask_question", &params).await;
+        }
+    }
+}
+
+// ── ADR-033: MQTT chunk relay ─────────────────────────────────────────
+
+/// Relay a `ChunkEvent` to the MQTT broker via `MqttChunkPublisher`.
+///
+/// All events are encoded as `DataEnvelope { payload: SessionMessage }`
+/// protobuf and published to `acowork/agents/{id}/sessions/{sid}/messages/{event_type}`.
+/// Desktop subscribes to these topics directly on the broker.
+fn relay_chunk_event_mqtt(
+    publisher: &crate::mqtt::MqttChunkPublisher,
+    _agent_id: &str,
+    sid: &str,
+    event: crate::agent::loop_::ChunkEvent,
+) {
+    use crate::agent::loop_::ChunkEvent;
+
+    match event {
+        ChunkEvent::ContextUsage(ctx_info) => {
+            publisher.publish_context_usage(
+                sid,
+                ctx_info.input_tokens,
+                ctx_info.output_tokens,
+                ctx_info.total_input_tokens.unwrap_or(0),
+                ctx_info.total_output_tokens.unwrap_or(0),
+            );
+        }
+
+        ChunkEvent::CompactingStarted => {
+            publisher.publish_compacting(sid, true);
+        }
+
+        ChunkEvent::CompactingEnded => {
+            publisher.publish_compacting(sid, false);
+        }
+
+        ChunkEvent::IterationLimitPaused {
+            iteration,
+            max_iterations,
+        } => {
+            publisher.publish_iteration_limit_paused(sid, iteration, max_iterations);
+        }
+
+        ChunkEvent::ToolApprovalNeeded {
+            request_id,
+            tool_name,
+            action,
+            risk_level,
+            reason,
+            tool_call_id,
+            approval_timeout_secs,
+        } => {
+            publisher.publish_tool_approval_needed(
+                sid,
+                &request_id,
+                &tool_name,
+                &action,
+                &risk_level,
+                &reason,
+                &tool_call_id,
+                approval_timeout_secs,
+            );
+        }
+
+        ChunkEvent::Done {
+            message_id, ..
+        } => {
+            publisher.publish_done(sid, &message_id);
+        }
+
+        ChunkEvent::Error {
+            user_message,
+            detail: _,
+            error_type: _,
+            message_id,
+        } => {
+            publisher.publish_error(sid, &message_id, &user_message);
+        }
+
+        ChunkEvent::Stopped { .. } => {
+            // Use empty message_id for stopped — the event itself is the signal.
+            publisher.publish_stopped(sid, "");
+        }
+
+        ChunkEvent::SessionStateChanged {
+            status,
+            model,
+            provider,
+            workspace_id,
+            ratio,
+            reasoning_effort,
+            temperature,
+            context_usage,
+        } => {
+            let status_json = serde_json::to_string(&status).unwrap_or_default();
+            publisher.publish_session_state_changed(
+                sid,
+                &status_json,
+                model.as_deref(),
+                provider.as_deref(),
+                workspace_id.as_deref(),
+                ratio,
+                reasoning_effort.as_deref(),
+                temperature,
+                context_usage.as_deref(),
+            );
+        }
+
+        ChunkEvent::TodoListUpdated { todos } => {
+            let todos_json = serde_json::to_string(&todos).unwrap_or_default();
+            publisher.publish_todo_updated(sid, &todos_json);
+        }
+
+        ChunkEvent::NewDataAvailable {
+            session_id,
+            interval_ms,
+            title,
+        } => {
+            publisher.publish_new_data_available(
+                &session_id,
+                interval_ms as u32,
+                title.as_deref(),
+            );
+        }
+
+        ChunkEvent::AskQuestion {
+            request_id,
+            question,
+            options,
+            title,
+            timeout_seconds,
+        } => {
+            let qjson = serde_json::json!({
+                "request_id": request_id,
+                "question": question,
+                "options": options,
+                "title": title,
+                "timeout_seconds": timeout_seconds,
+            });
+            let question_json = qjson.to_string();
+            publisher.publish_ask_question(sid, &request_id, &question_json);
         }
     }
 }

@@ -6,8 +6,8 @@
 //! No persistence to disk. Workspace config is maintained by Agent Runtime
 //! (in `agent_workspaces.json`). Gateway caches the config in `RunningAgentInfo`
 //! (in-memory only, cleared on disconnect) to serve HTTP API requests.
-//! CRUD operations serialize the full config → push `WorkspaceConfigUpdate` via gRPC.
-//! Agent must be running (HTTP API returns 409 if not).
+//! ADR-033: gRPC push replaced with MQTT; workspace mutations are persisted
+//! to agent_workspaces.json on startup by Runtime.
 
 use axum::{
     Json,
@@ -110,11 +110,11 @@ async fn get_cached_config(state: &AppState, agent_id: &str) -> Option<Workspace
     serde_json::from_str(json).ok()
 }
 
-/// Helper: push WorkspaceConfigUpdate to Runtime and update the cache.
+/// Helper: update the workspace config in-memory cache.
 ///
-/// ADR-009: gRPC push is synchronous — we await the result before updating
-/// the in-memory cache. This avoids TOCTOU where the cache shows a config
-/// that Runtime never received (e.g. channel closed mid-push).
+/// ADR-033: gRPC push replaced with MQTT. Workspace config mutations are
+/// persisted to the in-memory cache. Runtime reads agent_workspaces.json on
+/// startup and applies it; live updates are not supported in MQTT mode.
 async fn push_and_cache(
     state: &AppState,
     agent_id: &str,
@@ -123,28 +123,14 @@ async fn push_and_cache(
     let config_json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-    // Push to Runtime via gRPC session — only update cache on success
-    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-        let push_msg = acowork_core::protocol::GatewayResponse::WorkspaceConfigUpdate {
-            config_json: config_json.clone(),
-        };
-        let pushed = {
-            let mgr = grpc_mgr.lock().await;
-            mgr.push_to_agent(agent_id, push_msg).await
-        };
-        if pushed {
-            tracing::info!("Pushed WorkspaceConfigUpdate to agent={}", agent_id);
-        } else {
-            return Err(format!(
-                "Agent {} is not reachable (gRPC channel closed), cannot update workspace",
-                agent_id
-            ));
-        }
-    } else {
-        return Err("No session manager available".to_string());
-    }
+    // ADR-033: No live push channel available (gRPC removed, no MQTT equivalent).
+    // Persist to in-memory cache. Runtime reads agent_workspaces.json on startup.
+    tracing::info!(
+        agent_id = %agent_id,
+        "Workspace config updated in cache (Runtime will pick up on restart)"
+    );
 
-    // gRPC push succeeded — now update in-memory cache
+    // Update in-memory cache
     {
         let mut gw = state.gateway_state.write().await;
         if let Some(info) = gw.running_agents.get_mut(agent_id) {
@@ -157,37 +143,7 @@ async fn push_and_cache(
 
 // ─── Handlers ────────────────────────────────────────────────────────────
 
-/// `GET /api/agents/{agent_id}/workspaces` — list workspace directories for an agent
-pub async fn list_workspaces(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<WorkspaceListResponse>, (StatusCode, Json<ApiError>)> {
-    // ADR-009 v2: Read from RunningAgentInfo in-memory cache
-    // If agent is running → return its workspace config
-    // If agent exists but not running → return empty list (per ADR-009)
-    // If agent doesn't exist → return 404
-    let config = get_cached_config(&state, &agent_id).await;
 
-    match config {
-        Some(cfg) => Ok(Json(WorkspaceListResponse {
-            agent_id,
-            workspaces: cfg.additional_dirs,
-        })),
-        None => {
-            // Check if agent exists (installed but not running)
-            let gw = state.gateway_state.read().await;
-            if gw.installed_agents.contains_key(&agent_id) {
-                // Agent exists but not running → empty list per ADR-009
-                Ok(Json(WorkspaceListResponse {
-                    agent_id,
-                    workspaces: vec![],
-                }))
-            } else {
-                Err(ApiError::not_found("Agent not found"))
-            }
-        }
-    }
-}
 
 /// `POST /api/agents/{agent_id}/workspaces` — add a workspace directory
 pub async fn add_workspace(
@@ -330,32 +286,11 @@ pub async fn set_current_workspace(
         )));
     }
 
-    // When session_id is provided, push SetSessionWorkspace to Runtime
-    if let Some(ref session_id) = query.session_id
-        && let Some(ref grpc_mgr) = state.grpc_session_mgr {
-            let push_msg = acowork_core::protocol::GatewayResponse::SetSessionWorkspace {
-                session_id: session_id.clone(),
-                workspace_id: req.workspace_id.clone(),
-            };
-            let pushed = {
-                let mgr = grpc_mgr.lock().await;
-                mgr.push_to_agent(&agent_id, push_msg).await
-            };
-            if pushed {
-                tracing::info!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    workspace_id = %req.workspace_id,
-                    "Pushed SetSessionWorkspace to Runtime"
-                );
-            } else {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    session_id = %session_id,
-                    "Failed to push SetSessionWorkspace (channel closed)"
-                );
-            }
-        }
+    // ADR-033: gRPC removed — SetSessionWorkspace push is no longer
+    // supported. Session workspace is tracked by the Runtime via MQTT
+    // context. The workspace stats (select_count, timestamps) are updated
+    // in the in-memory cache below.
+    let _ = query.session_id;
 
     // Update select_count and last_selected_at for the selected workspace (if it's a user workspace)
     if !is_agent_home {
@@ -515,163 +450,7 @@ fn resolve_tree_path(
     Ok((canonical_root, abs, rel_path))
 }
 
-/// `GET /api/agents/{agent_id}/workspaces/tree` — list directory contents
-///
-/// Returns a flat list of entries for a single directory level (depth=1).
-/// Security: only allows browsing within the workspace root directory.
-/// The `path` query parameter is relative to the workspace root.
-/// The `workspace_id` parameter selects which workspace to browse:
-///   - empty or `"__agent_home__"` → agent installation directory
-///   - a workspace ID (e.g. `"ws-abc123"`) → that workspace's path
-pub async fn list_tree(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(query): Query<TreeQuery>,
-) -> Result<Json<TreeResponse>, (StatusCode, Json<ApiError>)> {
-    // Determine the workspace root based on workspace_id
-    let workspace_root = {
-        let gw = state.gateway_state.read().await;
-        let info = gw
-            .running_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found("Agent not running — cannot browse workspace"))?;
 
-        let ws_id = query.workspace_id.as_deref().unwrap_or("");
-
-        if ws_id.is_empty() || ws_id == "__agent_home__" {
-            // Agent home directory
-            info.workspace.clone()
-        } else {
-            // Look up workspace path from cached config
-            let config = info
-                .workspace_config_json
-                .as_ref()
-                .and_then(|json| serde_json::from_str::<WorkspaceConfig>(json).ok());
-            match config {
-                Some(cfg) => cfg
-                    .additional_dirs
-                    .iter()
-                    .find(|d| d.id == ws_id)
-                    .map(|d| d.path.clone())
-                    .ok_or_else(|| {
-                        ApiError::not_found(&format!("Workspace directory not found: {}", ws_id))
-                    })?,
-                None => {
-                    return Err(ApiError::not_found(
-                        "Agent workspace config not available yet",
-                    ));
-                }
-            }
-        }
-    };
-
-    let requested_path = query.path.as_deref().unwrap_or("").to_string();
-    let (canonical_root, abs_path, rel_path) = resolve_tree_path(&workspace_root, &requested_path)
-        .map_err(|e| ApiError::bad_request(&e))?;
-
-    // Read directory entries
-    let read_dir = match std::fs::read_dir(&abs_path) {
-        Ok(rd) => rd,
-        Err(e) => {
-            return Err(ApiError::internal(&format!(
-                "Failed to read directory: {}",
-                e
-            )));
-        }
-    };
-
-    // Strip the Windows extended-length path prefix (\\?\) that canonicalize()
-    // produces on Windows. This prefix is not valid in file URIs and breaks
-    // LSP document URIs (e.g. "file:////?/C:/..." instead of "file:///C:/...").
-    let canonical_str = canonical_root.to_string_lossy();
-    let stripped = canonical_str
-        .strip_prefix(r"\\?\")
-        .unwrap_or(canonical_str.as_ref());
-    let root_str = stripped.replace('\\', "/");
-    let mut dirs: Vec<TreeEntry> = Vec::new();
-    let mut files: Vec<TreeEntry> = Vec::new();
-
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue, // Skip unreadable entries
-        };
-
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip hidden files/dirs (starting with '.')
-        if name.starts_with('.') {
-            continue;
-        }
-
-        let metadata = entry.metadata().ok();
-        let is_dir = metadata.as_ref().is_some_and(|m| m.is_dir());
-
-        if is_dir {
-            // Count children for the expansion indicator
-            let children_count = std::fs::read_dir(entry.path())
-                .ok()
-                .map(|rd| {
-                    rd.filter(|e| {
-                        e.as_ref()
-                            .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                            .unwrap_or(false)
-                    })
-                    .count()
-                })
-                .unwrap_or(0);
-
-            dirs.push(TreeEntry {
-                name,
-                entry_type: "directory".to_string(),
-                size: None,
-                modified: metadata.and_then(|m| {
-                    m.modified().ok().and_then(|t| {
-                        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                            .ok()
-                            .map(|d| {
-                                chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
-                                    .map(|dt| dt.to_rfc3339())
-                                    .unwrap_or_default()
-                            })
-                    })
-                }),
-                children_count: Some(children_count),
-            });
-        } else {
-            files.push(TreeEntry {
-                name,
-                entry_type: "file".to_string(),
-                size: metadata.as_ref().map(|m| m.len()),
-                modified: metadata.and_then(|m| {
-                    m.modified().ok().and_then(|t| {
-                        t.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                            .ok()
-                            .map(|d| {
-                                chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
-                                    .map(|dt| dt.to_rfc3339())
-                                    .unwrap_or_default()
-                            })
-                    })
-                }),
-                children_count: None,
-            });
-        }
-    }
-
-    // Sort: directories first, then files — both alphabetical (case-insensitive)
-    dirs.sort_by_key(|a| a.name.to_lowercase());
-    files.sort_by_key(|a| a.name.to_lowercase());
-
-    let mut entries = dirs;
-    entries.append(&mut files);
-
-    Ok(Json(TreeResponse {
-        root: root_str,
-        path: rel_path,
-        entries,
-    }))
-}
 
 // ─── File Content API ────────────────────────────────────────────────────
 
@@ -1848,7 +1627,7 @@ pub fn workspace_routes() -> Router<AppState> {
     Router::new()
         .route(
             "/api/agents/{agent_id}/workspaces",
-            get(list_workspaces).post(add_workspace),
+            post(add_workspace),
         )
         .route(
             "/api/agents/{agent_id}/workspaces/current",
@@ -1862,7 +1641,6 @@ pub fn workspace_routes() -> Router<AppState> {
             "/api/agents/{agent_id}/workspaces/{ws_id}/prompt-file",
             put(set_prompt_file),
         )
-        .route("/api/agents/{agent_id}/workspaces/tree", get(list_tree))
         .route("/api/agents/{agent_id}/workspaces/find", get(find_files))
         .route("/api/agents/{agent_id}/workspaces/file",
             get(read_file)

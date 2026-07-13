@@ -11,8 +11,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use tokio::sync::Mutex;
+
+use acowork_core::mqtt_proto::{self, ControlCommand, DataEnvelope, data_envelope};
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
@@ -160,6 +162,10 @@ impl DesktopMqttClient {
     }
 
     /// Subscribe to all session events for a specific agent.
+    ///
+    /// Subscribes to ALL sessions of the agent. For per-session subscriptions,
+    /// use `subscribe_agent_session` instead to avoid bandwidth waste.
+    #[deprecated = "ADR-033: Use subscribe_agent_session() for per-session subscriptions to avoid bandwidth waste when an agent has many sessions"]
     pub async fn subscribe_agent_sessions(&self, agent_id: &str) -> Result<(), String> {
         let filter = format!("acowork/agents/{}/sessions/+/meta", agent_id);
         self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
@@ -171,6 +177,62 @@ impl DesktopMqttClient {
         self.subscribe(&filter, MqttQoS::AtMostOnce).await?;
 
         tracing::info!(agent_id, "Subscribed to agent session topics");
+        Ok(())
+    }
+
+    /// Subscribe to events for a single session of a specific agent.
+    ///
+    /// Recommended over `subscribe_agent_sessions()` when the Desktop only
+    /// displays one active session at a time — avoids receiving events from
+    /// other sessions and wasting bandwidth/CPU.
+    #[allow(dead_code)]
+    pub async fn subscribe_agent_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let filter = format!("acowork/agents/{}/sessions/{}/messages/#", agent_id, session_id);
+        self.subscribe(&filter, MqttQoS::AtMostOnce).await?;
+
+        let filter = format!("acowork/agents/{}/sessions/{}/meta", agent_id, session_id);
+        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
+
+        let filter = format!("acowork/agents/{}/sessions/{}/config", agent_id, session_id);
+        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
+
+        tracing::info!(agent_id, session_id, "Subscribed to agent session topics (per-session)");
+        Ok(())
+    }
+
+    /// Unsubscribe from a single session's events.
+    ///
+    /// Call this when switching away from a session to avoid receiving
+    /// stale events from the old session.
+    #[allow(dead_code)]
+    pub async fn unsubscribe_agent_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<(), String> {
+        let filter = format!("acowork/agents/{}/sessions/{}/messages/#", agent_id, session_id);
+        self.client
+            .unsubscribe(&filter)
+            .await
+            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
+
+        let filter = format!("acowork/agents/{}/sessions/{}/meta", agent_id, session_id);
+        self.client
+            .unsubscribe(&filter)
+            .await
+            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
+
+        let filter = format!("acowork/agents/{}/sessions/{}/config", agent_id, session_id);
+        self.client
+            .unsubscribe(&filter)
+            .await
+            .map_err(|e| format!("unsubscribe '{}': {}", filter, e))?;
+
+        tracing::info!(agent_id, session_id, "Unsubscribed from agent session topics");
         Ok(())
     }
 
@@ -198,6 +260,8 @@ impl DesktopMqttClient {
     }
 
     /// Publish a control command as JSON text.
+    #[deprecated = "ADR-033: Use publish_control_protobuf() instead — all MQTT payloads must be DataEnvelope protobuf per mqtt.md §4"]
+    #[allow(dead_code)]
     pub async fn publish_control_json(
         &self,
         agent_id: &str,
@@ -206,6 +270,43 @@ impl DesktopMqttClient {
     ) -> Result<(), String> {
         let payload = serde_json::to_vec(json)
             .map_err(|e| format!("serialize control payload: {}", e))?;
+        self.publish_control(agent_id, command, &payload).await
+    }
+
+    /// Publish a control command as a `DataEnvelope` protobuf payload.
+    ///
+    /// This is the canonical way to send control commands via MQTT
+    /// per `docs/zh/protocols/mqtt.md` §4 — all messages must use
+    /// Protobuf `DataEnvelope` encoding for wire compatibility.
+    pub async fn publish_control_protobuf(
+        &self,
+        agent_id: &str,
+        control_command: ControlCommand,
+    ) -> Result<(), String> {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::ControlCommand(control_command)),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+
+        // Determine the sub-topic from the command type
+        let command = match &envelope.payload {
+            Some(data_envelope::Payload::ControlCommand(cmd)) => {
+                match &cmd.command {
+                    Some(mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
+                    Some(mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
+                    Some(mqtt_proto::control_command::Command::Message(_)) => "message",
+                    Some(mqtt_proto::control_command::Command::Stop(_)) => "stop",
+                    Some(mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
+                    Some(mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
+                    Some(mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
+                    None => "message", // fallback
+                    _ => "message",
+                }
+            }
+            _ => "message",
+        };
+
         self.publish_control(agent_id, command, &payload).await
     }
 
@@ -225,6 +326,7 @@ impl DesktopMqttClient {
     }
 
     /// Get the inner AsyncClient.
+    #[allow(dead_code)]
     pub fn inner(&self) -> AsyncClient {
         self.client.clone()
     }

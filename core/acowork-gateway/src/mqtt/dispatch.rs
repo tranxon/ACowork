@@ -1,29 +1,40 @@
-//! MQTT message dispatch (ADR-033 Phase 1 scaffolding).
+//! MQTT message dispatch (ADR-033).
 //!
 //! Parses `DataEnvelope` payloads from incoming MQTT messages and routes
-//! them to the appropriate business logic handler. In Phase 1, this is
-//! minimal — the Gateway mainly publishes, not subscribes to business
-//! topics. Phase 2+ will implement full dispatch for control commands,
-//! session messages, etc.
+//! them to the appropriate business logic handler. Plain text messages
+//! (http_port, status) are handled separately via `handle_plaintext_message`.
 //!
 //! See `docs/zh/protocols/mqtt.md` §8 (Topic patterns).
 
-use rumqttc::Publish;
-
 use acowork_core::mqtt_proto::DataEnvelope;
 
-use crate::mqtt::router::{route_message, RouteResult};
+use crate::mqtt::router::{route_message_by_topic, topic_matches, RouteResult};
 
-/// Dispatch an incoming MQTT message.
+/// Unified MQTT message handler — called from the Gateway's MQTT callback.
+///
+/// Tries both dispatch paths:
+/// 1. `dispatch_message` — protobuf `DataEnvelope` parsing + routing
+/// 2. `handle_plaintext_message` — plain-text http_port / status registration
+pub fn handle_message(
+    topic: &str,
+    payload: &[u8],
+    runtime_http_registry: &crate::http::proxy::SharedRuntimeHttpRegistry,
+    agent_registry: &crate::mqtt::agent_registry::SharedAgentRegistry,
+) {
+    dispatch_message(topic, payload);
+    handle_plaintext_message(topic, payload, runtime_http_registry, agent_registry);
+}
+
+/// Dispatch an incoming MQTT message (protobuf DataEnvelope).
 ///
 /// Steps:
 /// 1. Route the message by topic (router.rs).
 /// 2. If the route is unimplemented (Phase 2+ handler), log and return.
 /// 3. If the route matches, attempt to parse the payload as a `DataEnvelope`.
 /// 4. Dispatch the envelope's oneof payload to the appropriate handler.
-pub fn dispatch_message(publish: &Publish) {
+pub fn dispatch_message(topic: &str, payload: &[u8]) {
     // Step 1: Route by topic
-    match route_message(publish) {
+    match route_message_by_topic(topic) {
         RouteResult::NoMatch => {
             // Not a known route pattern. Still try to parse as DataEnvelope
             // in case it's a generic proto message (Step 2 below).
@@ -33,7 +44,7 @@ pub fn dispatch_message(publish: &Publish) {
         }
         RouteResult::Unimplemented(reason) => {
             tracing::debug!(
-                topic = %publish.topic,
+                topic,
                 reason,
                 "MQTT message routed to unimplemented handler (Phase 2+)"
             );
@@ -42,13 +53,13 @@ pub fn dispatch_message(publish: &Publish) {
     }
 
     // Step 2: Parse the payload as a DataEnvelope
-    let envelope = match prost::Message::decode(publish.payload.as_ref()) {
+    let envelope = match prost::Message::decode(payload) {
         Ok(e) => e,
         Err(e) => {
             // The payload might be plain text (e.g. agent status "online"/"offline")
             // rather than a protobuf envelope. Log at trace level to avoid noise.
             tracing::trace!(
-                topic = %publish.topic,
+                topic,
                 error = %e,
                 "MQTT payload is not a valid DataEnvelope (may be plain text)"
             );
@@ -57,14 +68,10 @@ pub fn dispatch_message(publish: &Publish) {
     };
 
     // Step 3: Dispatch by payload type
-    dispatch_envelope(&publish.topic, &envelope);
+    dispatch_envelope(topic, &envelope);
 }
 
 /// Dispatch a parsed `DataEnvelope` to the appropriate handler.
-///
-/// In Phase 1, most payload types are unimplemented (they arrive from
-/// Runtime, which doesn't use MQTT yet). The Gateway only publishes
-/// `Available*` payloads — it doesn't receive them.
 fn dispatch_envelope(topic: &str, envelope: &DataEnvelope) {
     let payload = match &envelope.payload {
         Some(p) => p,
@@ -84,28 +91,28 @@ fn dispatch_envelope(topic: &str, envelope: &DataEnvelope) {
             // These are our own published topics — ignore echoes.
         }
 
-        // ── Agent lifecycle (Phase 2: Runtime publishes) ──
+        // ── Agent lifecycle ──
         acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(status) => {
             tracing::debug!(
                 agent_id = %status.agent_id,
                 online = status.online,
-                "MQTT AgentStatus received (Phase 2: update AgentRegistry)"
+                "MQTT AgentStatus received"
             );
         }
         acowork_core::mqtt_proto::data_envelope::Payload::AgentMeta(meta) => {
             tracing::debug!(
                 agent_id = %meta.agent_id,
-                "MQTT AgentMeta received (Phase 2: cache for HTTP API)"
+                "MQTT AgentMeta received"
             );
         }
         acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(config) => {
             tracing::debug!(
                 agent_id = %config.agent_id,
-                "MQTT AgentConfig received (Phase 2: cache for HTTP API)"
+                "MQTT AgentConfig received"
             );
         }
 
-        // ── Session lifecycle (Phase 2: Runtime publishes, Desktop subscribes) ──
+        // ── Session lifecycle ──
         acowork_core::mqtt_proto::data_envelope::Payload::SessionCreated(_)
         | acowork_core::mqtt_proto::data_envelope::Payload::SessionDeleted(_)
         | acowork_core::mqtt_proto::data_envelope::Payload::SessionMeta(_)
@@ -113,34 +120,102 @@ fn dispatch_envelope(topic: &str, envelope: &DataEnvelope) {
         | acowork_core::mqtt_proto::data_envelope::Payload::SessionMessage(_) => {
             tracing::debug!(
                 topic,
-                "MQTT session event received (Phase 2: forward to Desktop)"
+                "MQTT session event received (Desktop-bound, Gateway does not process)"
             );
         }
 
-        // ── Control commands (Phase 2: Desktop publishes, Runtime subscribes) ──
+        // ── Control commands (Desktop → Runtime, Gateway does not process) ──
         acowork_core::mqtt_proto::data_envelope::Payload::ControlCommand(_cmd) => {
             tracing::debug!(
                 topic,
-                "MQTT ControlCommand received (Phase 2: forward to Runtime)"
+                "MQTT ControlCommand received (Desktop→Runtime, Gateway does not process)"
             );
         }
 
-        // ── Memory (Phase 2: Runtime publishes) ──
+        // ── Memory ──
         acowork_core::mqtt_proto::data_envelope::Payload::MemoryNodeUpdate(_) => {
-            tracing::debug!(topic, "MQTT MemoryNodeUpdate received (Phase 2)");
+            tracing::debug!(topic, "MQTT MemoryNodeUpdate received");
         }
 
-        // ── Sidecar (Phase 2: sidecar processes publish) ──
+        // ── Sidecar ──
         acowork_core::mqtt_proto::data_envelope::Payload::SidecarStatus(_) => {
-            tracing::debug!(topic, "MQTT SidecarStatus received (Phase 2)");
+            tracing::debug!(topic, "MQTT SidecarStatus received");
         }
+    }
+}
+
+/// Handle a plain-text MQTT message (non-DataEnvelope payload).
+///
+/// Called by the Gateway's MQTT message callback for topics that carry
+/// simple text payloads rather than protobuf envelopes:
+/// - `acowork/agents/+/http_port` → registers Runtime HTTP port for reverse proxy
+/// - `acowork/agents/+/status` → updates AgentRegistry online/offline status
+///
+/// This replaces the inline callback previously in `gateway/mod.rs`.
+pub fn handle_plaintext_message(
+    topic: &str,
+    payload: &[u8],
+    runtime_http_registry: &crate::http::proxy::SharedRuntimeHttpRegistry,
+    agent_registry: &crate::mqtt::agent_registry::SharedAgentRegistry,
+) {
+    if topic_matches("acowork/agents/+/http_port", topic) {
+        let agent_id = topic
+            .strip_prefix("acowork/agents/")
+            .and_then(|s| s.strip_suffix("/http_port"))
+            .unwrap_or("");
+        if agent_id.is_empty() {
+            tracing::warn!(topic, "http_port topic matched but agent_id extraction failed");
+            return;
+        }
+        // Surface malformed payloads as warnings — the runtime publishes the
+        // port as a decimal string, so any other shape means a bug or a
+        // misbehaving client. Without these warnings, a malformed payload
+        // would cause the Gateway to return 503 with no diagnostic trail.
+        let port = match std::str::from_utf8(payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    topic,
+                    agent_id,
+                    error = %e,
+                    "http_port payload is not valid UTF-8 — ignoring"
+                );
+                return;
+            }
+        };
+        let port = match port.trim().parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    topic,
+                    agent_id,
+                    payload = %port,
+                    error = %e,
+                    "http_port payload is not a valid u16 — Gateway will 503 every reverse-proxy request for this agent"
+                );
+                return;
+            }
+        };
+        let reg = runtime_http_registry.clone();
+        let aid = agent_id.to_string();
+        let aid_for_log = aid.clone();
+        tokio::spawn(async move {
+            reg.write().await.register(&aid, port);
+        });
+        tracing::info!(agent_id = %aid_for_log, port, "Registered Runtime HTTP port via MQTT");
+    } else if topic_matches("acowork/agents/+/status", topic) {
+        let reg = agent_registry.clone();
+        let topic_owned = topic.to_string();
+        let payload_owned = payload.to_vec();
+        tokio::spawn(async move {
+            reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rumqttc::Publish;
 
     #[test]
     fn test_dispatch_global_resource_echo_is_ignored() {
@@ -156,25 +231,13 @@ mod tests {
         };
         let payload = prost::Message::encode_to_vec(&envelope);
 
-        let publish = Publish::new(
-            "acowork/global/providers",
-            rumqttc::QoS::AtLeastOnce,
-            payload,
-        );
-
         // Should not panic or log warnings — echoes are silently ignored
-        dispatch_message(&publish);
+        dispatch_message("acowork/global/providers", &payload);
     }
 
     #[test]
     fn test_dispatch_invalid_payload_does_not_panic() {
-        let publish = Publish::new(
-            "acowork/agents/foo/status",
-            rumqttc::QoS::AtLeastOnce,
-            b"not a protobuf payload",
-        );
-
         // Should handle gracefully (plain text "online"/"offline")
-        dispatch_message(&publish);
+        dispatch_message("acowork/agents/foo/status", b"not a protobuf payload");
     }
 }

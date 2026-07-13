@@ -306,12 +306,11 @@ export function ChatPanel() {
   const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
 
   // Global state and actions — selectors to avoid full-store re-render
-  const wsMap = useChatStore((s) => s.wsMap);
+  const mqttConnected = useChatStore((s) => s.mqttConnected);
   const availableModels = useChatStore((s) => s.availableModels);
   const isLoadingMore = useChatStore((s) => s.isLoadingMore);
   // Stable function refs
   const {
-    connectStream,
     sendMessage,
     sendStop,
     setCurrentModel,
@@ -632,9 +631,7 @@ export function ChatPanel() {
       hasMessages,
     });
 
-    // 1. Connect stream (idempotent — no-op if already connected)
-    connectStream(selectedAgentId, getGatewayUrl());
-
+    // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
     if (!hasMessages) {
       // 2a. No messages in store — load from backend (first mount or new session).
       session.scope.current.isInitialLoad = currentSessId;
@@ -1484,7 +1481,7 @@ export function ChatPanel() {
             placeholder={
               gatewayStatus !== "connected"
                 ? t("chatPanel.inputGatewayDisconnected")
-                : !wsMap[selectedAgentId!] || wsMap[selectedAgentId!].readyState !== WebSocket.OPEN
+                : !mqttConnected
                   ? activeSkill
                     ? t("chatPanel.inputParamsConnecting")
                     : t("chatPanel.inputMessageConnecting")

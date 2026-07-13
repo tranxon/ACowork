@@ -317,6 +317,11 @@ pub async fn add_provider(
         pusher.push_llm_config().await;
     }
 
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(MessageResponse {
@@ -348,6 +353,11 @@ pub async fn remove_provider(
     // 4. Hot-push.
     if let Some(ref pusher) = state.pusher {
         pusher.push_llm_config().await;
+    }
+
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     Ok(Json(MessageResponse {
@@ -490,6 +500,11 @@ pub async fn update_provider(
         pusher.push_llm_config().await;
     }
 
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
     Ok(Json(MessageResponse {
         message: format!("Key updated for provider: {}", provider),
     }))
@@ -545,6 +560,11 @@ pub async fn add_search_key(
         pusher.push_search_config().await;
     }
 
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(MessageResponse {
@@ -570,6 +590,11 @@ pub async fn remove_search_key(
 
     if let Some(ref pusher) = state.pusher {
         pusher.push_search_config().await;
+    }
+
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     Ok(Json(MessageResponse {
@@ -612,6 +637,11 @@ pub async fn update_search_key(
 
     if let Some(ref pusher) = state.pusher {
         pusher.push_search_config().await;
+    }
+
+    // ADR-033: Trigger MQTT global resource republish after resource change.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     Ok(Json(MessageResponse {

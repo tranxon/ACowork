@@ -5,7 +5,6 @@ use crate::gateway::state::{GatewayState, RunningAgentInfo};
 use crate::lifecycle::process::{
     check_health, find_available_debug_port, kill_agent_process, spawn_agent_process,
 };
-use acowork_core::protocol::GatewayResponse;
 use std::path::PathBuf;
 
 /// System Agent ID — always auto-started with Gateway
@@ -158,70 +157,6 @@ impl LifecycleManager {
         state.remove_running(agent_id);
 
         tracing::info!("Stopped agent: {} (was PID: {})", agent_id, running.pid);
-        Ok(())
-    }
-
-    /// Restart a running agent in debug mode without restarting the process.
-    ///
-    /// Instead of stop→start (which kills and spawns a new process), this
-    /// pushes an `EnableDebugMode` message to the Runtime via gRPC. The
-    /// Runtime then fires `urgent_stop` to cancel any in-flight
-    /// tools/LLM, starts the Debug WebSocket server on the allocated port,
-    /// and injects `DebugController` + notify handles into the shared
-    /// `AgentCore`. If the agent loop is idle, the stop step is skipped
-    /// and debug mode is initialized directly.
-    pub async fn restart_in_debug(
-        &self,
-        agent_id: &str,
-        state: &mut GatewayState,
-        grpc_session_mgr: &crate::compat::SharedGrpcSessionMgr,
-    ) -> Result<(), GatewayError> {
-        // Validate agent is running
-        let running = state
-            .running_agents
-            .get(agent_id)
-            .ok_or_else(|| GatewayError::AgentNotRunning(agent_id.to_string()))?
-            .clone();
-
-        // Allocate a debug port (reuse existing if already allocated)
-        let debug_port = running
-            .debug_port
-            .unwrap_or_else(|| find_available_debug_port(19878));
-
-        tracing::info!(
-            agent_id = %agent_id,
-            debug_port = debug_port,
-            "RestartInDebug: pushing EnableDebugMode to Runtime"
-        );
-
-        // Push EnableDebugMode to Runtime via gRPC
-        let msg = GatewayResponse::EnableDebugMode {
-            debug_port: debug_port as u32,
-        };
-
-        let pushed = {
-            let mgr = grpc_session_mgr.lock().await;
-            mgr.push_to_agent(agent_id, msg).await
-        };
-
-        if !pushed {
-            return Err(GatewayError::Lifecycle(
-                "Failed to push EnableDebugMode to Runtime (agent not connected or channel closed)"
-                    .to_string(),
-            ));
-        }
-
-        // Update running agent info in Gateway state
-        if let Some(info) = state.running_agents.get_mut(agent_id) {
-            info.dev_mode = true;
-            info.debug_port = Some(debug_port);
-        }
-
-        tracing::info!(
-            agent_id = %agent_id,
-            debug_port = debug_port,
-            "RestartInDebug: debug mode enabled successfully"
-        );
         Ok(())
     }
 

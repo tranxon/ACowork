@@ -53,7 +53,18 @@ impl AgentRegistry {
         }
 
         let agent_id = parts[2].to_string();
-        let payload_str = std::str::from_utf8(payload).unwrap_or("");
+        let payload_str = match std::str::from_utf8(payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    topic,
+                    agent_id = %parts[2],
+                    error = %e,
+                    "agent status payload is not valid UTF-8 — treating as offline"
+                );
+                ""
+            }
+        };
         let online = payload_str.trim() == "online";
 
         self.agents.insert(

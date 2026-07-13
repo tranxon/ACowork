@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { initMqttListener } from "../../stores/chatStore";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -55,6 +56,17 @@ async function bootGateway(): Promise<void> {
     } catch (err) {
         // Non-fatal: user can install agents manually
         console.warn("ensure_system_agent failed:", err);
+    }
+
+    // 4) Connect MQTT client for real-time events (ADR-033).
+    try {
+        await invoke("connect_mqtt");
+        console.log("[bootGateway] MQTT connected");
+        // ADR-033: Register frontend MQTT event listener
+        await initMqttListener();
+        console.log("[bootGateway] MQTT listener initialized");
+    } catch (err) {
+        console.warn("connect_mqtt failed:", err);
     }
 }
 
@@ -214,6 +226,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         }
         const gDone = await doCheck();
         if (gDone) {
+            // Connect MQTT on retry too
+            try { await invoke("connect_mqtt"); } catch {}
+            // ADR-033: (Re)register MQTT listener on retry
+            try { await initMqttListener(); } catch {}
             // Poll for agent readiness
             const ready = await checkAgentReady();
             if (ready) {

@@ -2,26 +2,20 @@
 //!
 //! Implements the conversation endpoints:
 //! - POST /api/agents/:id/message — send a message (fire-and-forget)
-//! - GET  /api/agents/:id/stream  — WebSocket upgrade for streaming
 //!
-//! WebSocket message format:
-//!   Client → Server:  { "type": "message", "content": "..." }
-//!   Server → Client:  { "type": "chunk", "delta": "...", "message_id": "..." }
-//!                     { "type": "tool_call", "name": "...", "params": {...} }
-//!                     { "type": "tool_result", "name": "...", "result": {...} }
-//!                     { "type": "done", "message_id": "...", "usage": {...} }
+//! ADR-033: WebSocket streaming replaced by MQTT topic-based pub/sub.
+//! Desktop subscribes to `acowork/agents/{id}/sessions/{sid}/messages/#`
+//! for streaming events instead of using WebSocket.
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
     routing::{delete, get, post, put},
 };
 use serde::{Deserialize, Serialize};
 
-use crate::http::routes::{ApiError, AppState, BridgeEvent};
+use crate::http::routes::{ApiError, AppState};
 
 /// Maximum content length for a single message (32 KB)
 const MAX_CONTENT_LENGTH: usize = 32 * 1024;
@@ -30,7 +24,6 @@ const MAX_CONTENT_LENGTH: usize = 32 * 1024;
 pub fn chat_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents/{id}/message", post(send_message))
-        .route("/api/agents/{id}/stream", get(agent_stream_ws))
         .route("/api/agents/{id}/conversations", get(get_conversations))
         .route(
             "/api/agents/{id}/conversations/latest",
@@ -147,54 +140,12 @@ pub struct LatestConversationResponse {
     pub messages: Vec<ConversationMessage>,
 }
 
-/// WebSocket client message (inbound from Desktop App)
-#[derive(Deserialize)]
-struct WsClientMessage {
-    #[serde(rename = "type")]
-    msg_type: String,
-    content: Option<String>,
-    /// Frontend-generated message ID for dedup (e.g. "msg-{uuid}").
-    /// When set, the Gateway forwards it to the Runtime as-is so the
-    /// JSONL entry ID matches the frontend's optimistic message ID.
-    #[serde(default)]
-    message_id: Option<String>,
-    /// Model name for model_switch messages
-    model: Option<String>,
-    /// Provider name for model_switch messages
-    provider: Option<String>,
-    /// Reasoning effort for reasoning_effort messages (Off/Low/Medium/High/Max)
-    #[serde(default)]
-    effort: Option<String>,
-    /// Session ID for multi-session routing (explicit pass-through)
-    #[serde(default)]
-    session_id: Option<String>,
-    /// Skill command selected by the user (e.g. "/commit", "/review-pr")
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    command: Option<String>,
-    /// Document IDs to attach to this message
-    #[serde(default)]
-    document_ids: Option<Vec<String>>,
-    /// Multimodal content parts (e.g. text + image_url).
-    /// When present, providers serialize content as an array instead of a plain string.
-    #[serde(default)]
-    content_parts: Option<Vec<serde_json::Value>>,
-    /// Files/selections attached by the user from workspace explorer / editor.
-    /// Passed through to Runtime for file-content injection via ContextBuilder.
-    #[serde(default)]
-    attached_context: Option<Vec<acowork_core::protocol::AttachedContextItem>>,
-    /// ADR-032 C4c: Compression action type ("compress_tool_results" | "compress_summary").
-    /// Used by the `compress_action` message type.
-    #[serde(default)]
-    compress_type: Option<String>,
-}
-
 // ── Handlers ──────────────────────────────────────────────────────────
 
 /// `POST /api/agents/:id/message` — send a message to an agent
 ///
-/// Validates the agent exists and is running, then pushes the message
-/// to the agent's gRPC session via the SessionManager.
-/// Returns a message_id for correlation.
+/// Validates the agent exists and is running, then publishes the message
+/// via MQTT control command to the Runtime.
 pub async fn send_message(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -255,7 +206,7 @@ pub async fn send_message(
         .unwrap_or_else(|| format!("msg-{}", uuid::Uuid::new_v4()));
 
     // ADR-033: MQTT-first delivery — when MQTT Gateway client is available,
-    // publish control command directly (no gRPC dependency).
+    // publish control command directly.
     let delivered = if let Some(ref mqtt) = state.mqtt_gateway_client {
         let sid = body.session_id.clone().unwrap_or_else(|| {
             format!("sess-{}", uuid::Uuid::new_v4())
@@ -283,26 +234,8 @@ pub async fn send_message(
                 return Err(ApiError::internal("Failed to deliver message via MQTT"));
             }
         }
-    } else if let Some(session_mgr) = &state.grpc_session_mgr {
-        // Legacy gRPC path (will be removed in Phase 3 cleanup)
-        let mgr = session_mgr.lock().await;
-        if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-            let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                from: "http-api".to_string(),
-                action: "chat_message".to_string(),
-                params: serde_json::json!({
-                    "content": body.content,
-                    "message_id": message_id,
-                    "conversation_id": body.conversation_id,
-                }),
-                command: body.command.clone(),
-            };
-            session.push_message(intent).await
-        } else {
-            return Err(ApiError::service_unavailable("Agent not connected"));
-        }
     } else {
-        return Err(ApiError::service_unavailable("No message transport available (MQTT or gRPC)"));
+        return Err(ApiError::service_unavailable("MQTT transport not available"));
     };
 
     if !delivered {
@@ -320,9 +253,8 @@ pub async fn send_message(
 
 /// `GET /api/agents/:id/conversations` — list conversation sessions for an agent
 ///
-/// S1.14: Forwards the query to Runtime via gRPC (IntentReceived push)
-/// and waits for the response. Falls back to the legacy Grafeo-based
-/// implementation if the agent is not running via gRPC.
+/// ADR-033: Proxies to Runtime's `GET /sessions` endpoint.
+/// Returns session list from the Runtime's local HTTP server.
 pub async fn get_conversations(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -336,61 +268,33 @@ pub async fn get_conversations(
                 agent_id
             )));
         }
-    }
-
-    // S1.14: Try gRPC forwarding first (if agent is running)
-    if let Some(ref session_mgr) = state.grpc_session_mgr {
-        let request_id = format!("sess-list-{}", uuid::Uuid::new_v4());
-        let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-            from: "http-api".to_string(),
-            action: "list_sessions".to_string(),
-            params: serde_json::json!({
-                "request_id": request_id,
-            }),
-            command: None,
-        };
-
-        let pushed = {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-                session.push_message(intent).await
-            } else {
-                false
-            }
-        }; // mgr dropped here
-
-        if pushed {
-            // Wait for Runtime response via gRPC
-            match wait_for_session_response(&state, &request_id).await {
-                Ok(data) => {
-                    // Convert SessionInfoDto to ConversationSummary
-                    let sessions: Vec<acowork_core::protocol::SessionInfoDto> = data
-                        .get("sessions")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let conversations: Vec<ConversationSummary> = sessions
-                        .into_iter()
-                        .map(|s| ConversationSummary {
-                            session_id: s.session_id,
-                            started_at: parse_iso8601_to_unix(&s.created_at),
-                            message_count: s.message_count,
-                            last_message_at: parse_iso8601_to_unix(&s.created_at),
-                        })
-                        .collect();
-                    return Ok(Json(ConversationsListResponse { conversations }));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Session gRPC query timed out or failed: {}, falling back to Grafeo",
-                        e
-                    );
-                }
-            }
+        if !gw.is_running(&agent_id) {
+            return Ok(Json(ConversationsListResponse { conversations: vec![] }));
         }
     }
 
-    // No running agent with gRPC session — return empty list
-    let conversations = vec![];
+    // ADR-033: Proxy to Runtime HTTP /sessions endpoint.
+    let data = crate::http::proxy::fetch_runtime_json(&state, &agent_id, "/sessions").await?;
+
+    let conversations: Vec<ConversationSummary> = data
+        .get("sessions")
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| ConversationSummary {
+            session_id: s.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            started_at: s.get("created_at")
+                .and_then(|v| v.as_str())
+                .map(|ts| parse_iso8601_to_unix(ts))
+                .unwrap_or(0),
+            message_count: s.get("message_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            last_message_at: s.get("created_at")
+                .and_then(|v| v.as_str())
+                .map(|ts| parse_iso8601_to_unix(ts))
+                .unwrap_or(0),
+        })
+        .collect();
+
     Ok(Json(ConversationsListResponse { conversations }))
 }
 
@@ -430,557 +334,28 @@ pub async fn get_latest_conversation(
         ));
     }
 
-    // Fetch messages for the target session via gRPC
-    let params = serde_json::json!({
-        "session_id": &query.session_id,
-        "limit": 100,
-        "direction": "backward",
-    });
+    // ADR-033: Proxy to Runtime HTTP /sessions/{sid}/messages endpoint.
+    let path = format!("/sessions/{}/messages", query.session_id);
+    let data = crate::http::proxy::fetch_runtime_json(&state, &agent_id, &path).await?;
 
-    let messages =
-        match forward_session_query(&state, &agent_id, "get_session_messages", params).await {
-            Ok(data) => data
-                .get("messages")
-                .and_then(|v| {
-                    serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(
-                        v.clone(),
-                    )
-                    .ok()
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .enumerate()
-                .map(|(i, m)| ConversationMessage {
-                    role: m.role,
-                    content: m.content,
-                    timestamp: parse_iso8601_to_unix(&m.ts),
-                    turn_index: i as u32,
-                })
-                .collect(),
-            Err(_) => vec![],
-        };
+    let messages: Vec<ConversationMessage> = data
+        .get("messages")
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| ConversationMessage {
+            role: m.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            content: m.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            timestamp: m.get("ts").and_then(|v| v.as_str()).map(|ts| parse_iso8601_to_unix(ts)).unwrap_or(0),
+            turn_index: i as u32,
+        })
+        .collect();
 
     Ok(Json(LatestConversationResponse {
         session_id: query.session_id,
         messages,
     }))
-}
-
-/// `GET /api/agents/:id/stream` — WebSocket upgrade for streaming chat
-///
-/// Upgrades the HTTP connection to a WebSocket for bidirectional
-/// streaming communication with an agent.
-pub async fn agent_stream_ws(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    // Validate agent exists
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-    }
-
-    // Upgrade to WebSocket
-    Ok(ws.on_upgrade(move |socket| handle_ws(socket, agent_id, state)))
-}
-
-/// Handle the WebSocket connection lifecycle
-///
-/// Receives messages from the client, pushes them to the Agent's gRPC session,
-/// and subscribes to the bridge channel for streaming responses back.
-async fn handle_ws(mut socket: WebSocket, agent_id: String, state: AppState) {
-    tracing::info!("WebSocket connected for agent: {}", agent_id);
-
-    // ADR-021 Phase 2: Single bridge channel for all events.
-    // Data channel removed — frontend polls via HTTP for message data.
-    let mut bridge_ctrl_rx = state.bridge_ctrl_tx.as_ref().map(|tx| tx.subscribe());
-
-    // Send initial connection acknowledgment
-    let welcome = serde_json::json!({
-        "type": "connected",
-        "agent_id": agent_id,
-    });
-    let _ = socket.send(Message::Text(welcome.to_string().into())).await;
-
-    loop {
-        tokio::select! {
-            // Branch 1: Bridge control events (all event types)
-            // ADR-021 Phase 2: Single channel — data events (Chunk, ReasoningStarted)
-            // no longer flow through WebSocket. Frontend polls via HTTP.
-            ctrl_event = async {
-                match &mut bridge_ctrl_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match ctrl_event {
-                    Ok(event) => {
-                        if event.agent_id == agent_id {
-                            forward_bridge_event(&mut socket, &event).await;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Bridge ctrl channel lagged for {}: skipped {} events", agent_id, n);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::info!("Bridge ctrl channel closed for agent: {}", agent_id);
-                        break;
-                    }
-                }
-            }
-
-            // Branch 2: Incoming message from client
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        handle_ws_text(&mut socket, &agent_id, &state, &text).await;
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("WebSocket closed for agent: {}", agent_id);
-                        break;
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        let _ = socket.send(Message::Pong(data)).await;
-                    }
-                    _ => {
-                        // Ignore binary, pong, etc.
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Forward a BridgeEvent to the WebSocket as a JSON text message.
-async fn forward_bridge_event(socket: &mut WebSocket, event: &BridgeEvent) {
-    let mut json = serde_json::json!({
-        "type": event.event_type.as_str(),
-        "message_id": event.message_id,
-    });
-    // Merge payload fields into the top-level JSON
-    if let serde_json::Value::Object(map) = &event.payload {
-        for (k, v) in map {
-            json[k] = v.clone();
-        }
-    }
-    let _ = socket.send(Message::Text(json.to_string().into())).await;
-}
-
-/// Handle a single text message from the WebSocket client
-async fn handle_ws_text(socket: &mut WebSocket, agent_id: &str, state: &AppState, text: &str) {
-    // Parse client message
-    let client_msg: WsClientMessage = match serde_json::from_str(text) {
-        Ok(m) => m,
-        Err(e) => {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Invalid message format: {}", e),
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-            return;
-        }
-    };
-
-    if client_msg.msg_type == "model_switch" {
-        // Handle model switch: push to running agent via gRPC
-        // Only running agents can switch models — persistence is handled here
-        // because the Agent Runtime's in-memory override is lost on restart.
-        let model = match client_msg.model {
-            Some(ref m) if !m.is_empty() => m.clone(),
-            _ => {
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": "model_switch requires a non-empty model field",
-                });
-                let _ = socket.send(Message::Text(err.to_string().into())).await;
-                return;
-            }
-        };
-
-        let provider = client_msg.provider.filter(|p| !p.is_empty());
-        tracing::info!(agent = %agent_id, model = %model, provider = ?provider, "Forwarding model_switch to agent");
-
-        let message_id = format!("msg-{}", uuid::Uuid::new_v4());
-        let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-                let mut params = serde_json::json!({
-                    "model": model,
-                    "message_id": message_id,
-                });
-                if let Some(ref p) = provider {
-                    params["provider"] = serde_json::json!(p);
-                }
-                // ADR-012: Pass session_id so Runtime can route model_switch to the correct session.
-                if let Some(ref sid) = client_msg.session_id {
-                    params["session_id"] = serde_json::json!(sid);
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-ws".to_string(),
-                    action: "model_switch".to_string(),
-                    params,
-                    command: None,
-                };
-                pushed_ok = session.push_message(intent).await;
-            }
-        }
-
-        // Model persistence is now handled by the Agent Runtime via the
-        // model_switch intent handler (save_agent_model) and RuntimeConfigUpdate.
-        // The Gateway no longer writes to the agent workspace.
-
-        if pushed_ok {
-            let ack = serde_json::json!({
-                "type": "ack",
-                "message_id": message_id,
-            });
-            let _ = socket.send(Message::Text(ack.to_string().into())).await;
-            let mut confirmed = serde_json::json!({
-                "type": "model_confirmed",
-                "model": model,
-                "agentId": agent_id,
-            });
-            if let Some(ref p) = provider {
-                confirmed["provider"] = serde_json::json!(p);
-            }
-            // ADR-012: Include session_id so frontend knows which session was updated.
-            if let Some(ref sid) = client_msg.session_id {
-                confirmed["session_id"] = serde_json::json!(sid);
-            }
-            let _ = socket
-                .send(Message::Text(confirmed.to_string().into()))
-                .await;
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Agent {} is not running, cannot switch model", agent_id),
-                "message_id": message_id,
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-        }
-        return;
-    }
-
-    if client_msg.msg_type == "reasoning_effort" {
-        // Handle reasoning effort override: push to running agent via gRPC.
-        // The Runtime persists and applies the override per-session.
-        let effort = match client_msg.effort {
-            Some(ref e) if !e.is_empty() => e.clone(),
-            _ => {
-                let err = serde_json::json!({
-                    "type": "error",
-                    "message": "reasoning_effort requires a non-empty effort field",
-                });
-                let _ = socket.send(Message::Text(err.to_string().into())).await;
-                return;
-            }
-        };
-
-        tracing::info!(agent = %agent_id, effort = %effort, "Forwarding reasoning_effort to agent");
-
-        let message_id = format!("msg-{}", uuid::Uuid::new_v4());
-        let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-                let mut params = serde_json::json!({
-                    "effort": effort,
-                    "message_id": message_id,
-                });
-                if let Some(ref sid) = client_msg.session_id {
-                    params["session_id"] = serde_json::json!(sid);
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-ws".to_string(),
-                    action: "reasoning_effort".to_string(),
-                    params,
-                    command: None,
-                };
-                pushed_ok = session.push_message(intent).await;
-            }
-        }
-
-        if pushed_ok {
-            let ack = serde_json::json!({
-                "type": "ack",
-                "message_id": message_id,
-            });
-            let _ = socket.send(Message::Text(ack.to_string().into())).await;
-            let mut confirmed = serde_json::json!({
-                "type": "reasoning_effort_confirmed",
-                "effort": effort,
-                "agentId": agent_id,
-            });
-            if let Some(ref sid) = client_msg.session_id {
-                confirmed["session_id"] = serde_json::json!(sid);
-            }
-            let _ = socket
-                .send(Message::Text(confirmed.to_string().into()))
-                .await;
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Agent {} is not running, cannot set reasoning effort", agent_id),
-                "message_id": message_id,
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-        }
-        return;
-    }
-
-    if client_msg.msg_type == "stop" {
-        // Handle stop: send interrupt signal to running agent via gRPC
-        tracing::info!(agent = %agent_id, "Forwarding stop signal to agent");
-
-        let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-                let mut params = serde_json::json!({
-                    "reason": "user_requested",
-                });
-                // Explicit session_id pass-through for multi-session routing
-                if let Some(ref sid) = client_msg.session_id {
-                    params["session_id"] = serde_json::json!(sid);
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-ws".to_string(),
-                    action: "interrupt".to_string(),
-                    params,
-                    command: None,
-                };
-                pushed_ok = session.push_message(intent).await;
-            }
-        }
-
-        if pushed_ok {
-            // Acknowledge receipt of the stop request — but do NOT claim the
-            // agent has already stopped.  The Runtime's actual Stopped event
-            // (routed via chunk channel → bridge) carries the real state
-            // transition.  Using "stopped" here was premature: it caused the
-            // frontend to clear streamingMessageId while sessionStatus still
-            // reported "streaming" (which IS the truth — the Runtime hasn't
-            // processed the interrupt yet), leaving the UI in an inconsistent
-            // state where sending stayed true and the user couldn't send a new
-            // message until session_state_changed{idle} arrived.
-            let ack = serde_json::json!({
-                "type": "stop_received",
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(ack.to_string().into())).await;
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Agent {} is not running, cannot stop", agent_id),
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-        }
-        return;
-    }
-
-    if client_msg.msg_type == "compact_context" {
-        // Handle compact context: forward to Runtime via gRPC IntentReceived.
-        // The Runtime's compact_history_if_needed will emit CompactingStarted
-        // and ContextUsage events automatically.
-        tracing::info!(agent = %agent_id, "Forwarding compact_context to agent");
-
-        let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-                let mut params = serde_json::json!({});
-                if let Some(ref sid) = client_msg.session_id {
-                    params["session_id"] = serde_json::json!(sid);
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-ws".to_string(),
-                    action: "compact_context".to_string(),
-                    params,
-                    command: None,
-                };
-                pushed_ok = session.push_message(intent).await;
-            }
-        }
-
-        if pushed_ok {
-            // Record user interaction for /api/agents sort order.
-            state
-                .gateway_state
-                .write()
-                .await
-                .touch_interaction(agent_id, chrono::Utc::now());
-            let ack = serde_json::json!({
-                "type": "ack",
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(ack.to_string().into())).await;
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Agent {} is not running, cannot compact context", agent_id),
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-        }
-        return;
-    }
-
-    if client_msg.msg_type == "compress_action" {
-        // ADR-032 C4c: Forward user-initiated compression action to Runtime.
-        tracing::info!(agent = %agent_id, "Forwarding compress_action to agent");
-
-        let mut pushed_ok = false;
-        if let Some(session_mgr) = &state.grpc_session_mgr {
-            let mgr = session_mgr.lock().await;
-            if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-                let mut params = serde_json::json!({});
-                if let Some(ref sid) = client_msg.session_id {
-                    params["session_id"] = serde_json::json!(sid);
-                }
-                // Forward compress_type to the Runtime
-                if let Some(ref compress_type) = client_msg.compress_type {
-                    params["compress_type"] = serde_json::json!(compress_type);
-                }
-                let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                    from: "http-ws".to_string(),
-                    action: "compress_action".to_string(),
-                    params,
-                    command: None,
-                };
-                pushed_ok = session.push_message(intent).await;
-            }
-        }
-
-        if pushed_ok {
-            let ack = serde_json::json!({
-                "type": "ack",
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(ack.to_string().into())).await;
-        } else {
-            let err = serde_json::json!({
-                "type": "error",
-                "message": format!("Agent {} is not running, cannot compress", agent_id),
-                "agentId": agent_id,
-            });
-            let _ = socket.send(Message::Text(err.to_string().into())).await;
-        }
-        return;
-    }
-
-    if client_msg.msg_type != "message" {
-        let err = serde_json::json!({
-            "type": "error",
-            "message": format!("Unknown message type: {}", client_msg.msg_type),
-        });
-        let _ = socket.send(Message::Text(err.to_string().into())).await;
-        return;
-    }
-
-    let content = client_msg.content.unwrap_or_default();
-
-    // Validate content length for WebSocket messages too
-    // Allow empty content when multimodal content_parts are provided (e.g. image-only message)
-    if content.is_empty() && client_msg.content_parts.is_none() {
-        let err = serde_json::json!({
-            "type": "error",
-            "message": "content must not be empty",
-        });
-        let _ = socket.send(Message::Text(err.to_string().into())).await;
-        return;
-    }
-    if content.len() > MAX_CONTENT_LENGTH {
-        let err = serde_json::json!({
-            "type": "error",
-            "message": format!("content too long (max {} bytes)", MAX_CONTENT_LENGTH),
-        });
-        let _ = socket.send(Message::Text(err.to_string().into())).await;
-        return;
-    }
-
-    // Use frontend-generated message_id when provided (for ID-based dedup).
-    // Only fall back to Gateway-generated ID for legacy clients.
-    let message_id = client_msg
-        .message_id
-        .clone()
-        .unwrap_or_else(|| format!("msg-{}", uuid::Uuid::new_v4()));
-
-    // Push to agent via SessionManager
-    let mut pushed_ok = false;
-    if let Some(session_mgr) = &state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((_, session)) = mgr.find_by_agent_id(agent_id) {
-            let mut params = serde_json::json!({
-                "content": content,
-                "message_id": message_id,
-            });
-            // Explicit session_id pass-through for multi-session routing (P0 fix)
-            if let Some(ref sid) = client_msg.session_id {
-                params["session_id"] = serde_json::json!(sid);
-
-                // Resolve document references if document_ids was provided
-                if let Some(ref doc_ids) = client_msg.document_ids
-                    && !doc_ids.is_empty()
-                    && let Some(docs) = resolve_document_refs(state, sid, doc_ids).await
-                {
-                    params["documents"] = docs;
-                }
-            }
-            // Pass through multimodal content_parts (e.g. text + image_url)
-            if let Some(ref parts) = client_msg.content_parts {
-                params["content_parts"] = serde_json::json!(parts);
-            }
-            // Pass through attached_context (files/selections added by user)
-            if let Some(ref ctx) = client_msg.attached_context
-                && !ctx.is_empty()
-            {
-                params["attached_context"] = serde_json::json!(ctx);
-            }
-            let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                from: "http-ws".to_string(),
-                action: "chat_message".to_string(),
-                params,
-                command: client_msg.command.clone(),
-            };
-            pushed_ok = session.push_message(intent).await;
-        }
-    }
-
-    if !pushed_ok {
-        let err = serde_json::json!({
-            "type": "error",
-            "message": format!("Agent {} is not connected via gRPC", agent_id),
-            "message_id": message_id,
-        });
-        let _ = socket.send(Message::Text(err.to_string().into())).await;
-        return;
-    }
-
-    // Record user interaction so /api/agents sort can bubble this agent
-    // toward the top of the sidebar.
-    state
-        .gateway_state
-        .write()
-        .await
-        .touch_interaction(agent_id, chrono::Utc::now());
-
-    // Acknowledge message received — the actual Agent response
-    // (chunk/tool_call/tool_result/done) will arrive via bridge_rx.
-    let ack = serde_json::json!({
-        "type": "ack",
-        "message_id": message_id,
-    });
-    let _ = socket.send(Message::Text(ack.to_string().into())).await;
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -1026,24 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_client_message_deserialization() {
-        let json = r#"{"type": "message", "content": "Hi there"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.msg_type, "message");
-        assert_eq!(msg.content, Some("Hi there".to_string()));
-        assert!(msg.command.is_none());
-    }
-
-    #[test]
-    fn test_ws_client_message_with_command() {
-        let json = r#"{"type": "message", "content": "Review code", "command": "/review-pr"}"#;
-        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.msg_type, "message");
-        assert_eq!(msg.content, Some("Review code".to_string()));
-        assert_eq!(msg.command, Some("/review-pr".to_string()));
-    }
-
-    #[test]
     fn test_content_length_limit() {
         // 32KB is the limit
         assert_eq!(MAX_CONTENT_LENGTH, 32 * 1024);
@@ -1086,8 +443,7 @@ pub struct ContinueExecutionRequest {
 
 /// Continue agent execution after iteration limit was reached.
 ///
-/// This sends a `ContinueExecution` signal to the Agent Runtime via gRPC,
-/// which resets the iteration counter and resumes the agent loop.
+/// ADR-033: Proxies to Runtime's `POST /sessions/{sid}/continue` endpoint.
 pub async fn continue_execution(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1110,184 +466,33 @@ pub async fn continue_execution(
         }
     }
 
-    // Forward continue_execution to agent via gRPC
-    if let Some(ref session_mgr) = state.grpc_session_mgr {
-        let mgr = session_mgr.lock().await;
-        if let Some((_, session)) = mgr.find_by_agent_id(&agent_id) {
-            let mut params = serde_json::json!({
-                "reason": "user_requested",
-            });
-            // Explicit session_id pass-through for multi-session routing
-            if let Some(ref sid) = body.session_id {
-                params["session_id"] = serde_json::json!(sid);
-            }
-            let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-                from: "http-api".to_string(),
-                action: "continue_execution".to_string(),
-                params,
-                command: None,
-            };
-            let pushed = session.push_message(intent).await;
-            if !pushed {
-                return Err(ApiError::internal(
-                    "Failed to deliver continue signal to agent",
-                ));
-            }
-        } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent {} is not yet connected",
-                agent_id
-            )));
+    // ADR-033: session_id is required for MQTT multi-session routing.
+    let session_id = match &body.session_id {
+        Some(sid) if !sid.is_empty() => sid.as_str(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "session_id is required for continue_execution in MQTT mode",
+            ));
         }
-    } else {
-        return Err(ApiError::internal("Session manager not available"));
-    }
+    };
+    let path = format!("/sessions/{}/continue", session_id);
+    let req_body = serde_json::json!({
+        "reason": "user_requested",
+        "session_id": session_id,
+    });
 
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "continued",
-            "agent_id": agent_id,
-        })),
-    ))
+    let data = crate::http::proxy::send_runtime_json(
+        &state,
+        &agent_id,
+        &path,
+        reqwest::Method::POST,
+        Some(&req_body),
+    ).await?;
+
+    Ok((StatusCode::OK, Json(data)))
 }
 
 // ── S1.14: Session API endpoints ─────────────────────────────────────────
-
-/// Query parameters for session messages endpoint
-#[derive(Deserialize)]
-pub struct SessionMessagesQuery {
-    /// Cursor for pagination (message ID)
-    #[serde(default)]
-    pub cursor: Option<String>,
-    /// Maximum number of messages to return (default: 50)
-    #[serde(default = "default_limit")]
-    pub limit: u32,
-    /// Pagination direction: "forward" or "backward" (default: "backward")
-    #[serde(default = "default_direction")]
-    pub direction: String,
-    /// ADR-021: JSONL line coordinate for incremental polling (deprecated,
-    /// use `incremental` instead — ADR-025)
-    #[serde(default)]
-    pub line_number: Option<usize>,
-    /// ADR-021: Character offset within streaming line (deprecated, use
-    /// `incremental` instead — ADR-025)
-    #[serde(default)]
-    pub line_char_offset: Option<usize>,
-    /// ADR-025: Backend-managed incremental polling. When true, the backend
-    /// uses its own per-session delivery cursor instead of receiving
-    /// coordinates from the frontend.
-    #[serde(default)]
-    pub incremental: Option<bool>,
-}
-
-fn default_limit() -> u32 {
-    50
-}
-
-fn default_direction() -> String {
-    "backward".to_string()
-}
-
-/// Response for listing sessions
-#[derive(Serialize)]
-pub struct SessionsListResponse {
-    /// List of session summaries
-    pub sessions: Vec<SessionInfoResponse>,
-    /// Total number of sessions
-    pub total_count: usize,
-    /// Total number of pages
-    pub total_pages: usize,
-    /// ADR-028: agent-scoped cumulative input tokens (summed across every
-    /// on-disk session meta file). Acts as a fallback data source for the
-    /// Desktop App's "Agent total input tokens" row in the Results Panel
-    /// before the live `context_usage` WebSocket pushes start arriving.
-    /// Omitted from JSON when absent (older Runtime without ADR-028).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_total_input_tokens: Option<u64>,
-    /// ADR-028: agent-scoped cumulative output tokens. See
-    /// [`Self::agent_total_input_tokens`] for semantics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_total_output_tokens: Option<u64>,
-}
-
-/// Query parameters for session list pagination
-#[derive(Deserialize)]
-pub struct SessionListQuery {
-    pub page: Option<u32>,
-    pub size: Option<u32>,
-}
-
-/// Single session info in the response
-#[derive(Serialize)]
-pub struct SessionInfoResponse {
-    /// Session identifier
-    pub session_id: String,
-    /// ISO 8601 creation timestamp
-    pub created_at: String,
-    /// Number of messages in the session
-    pub message_count: u32,
-    /// Optional session title
-    pub title: Option<String>,
-    /// Current session lifecycle status (ADR-014)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<acowork_core::SessionStatusDto>,
-    /// Per-session workspace selection ("__agent_home__" = agent home)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-}
-
-/// Response for session messages
-#[derive(Serialize)]
-pub struct SessionMessagesResponse {
-    /// Messages in the current page
-    pub messages: Vec<MessageEntryResponse>,
-    /// Cursor for the next page
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-    /// Whether more messages exist
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_more: Option<bool>,
-    /// ADR-021: Total JSONL line count for incremental polling coordinate tracking
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_lines: Option<usize>,
-    /// ADR-021: In-progress streaming line delta, if any
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub streaming: Option<StreamingDeltaResponse>,
-}
-
-/// ADR-021: Streaming line delta carried in session-messages response
-#[derive(Serialize)]
-pub struct StreamingDeltaResponse {
-    /// JSONL line index of the in-progress streaming line
-    pub line: usize,
-    /// Role of the streaming content ("assistant" or "thought")
-    pub role: String,
-    /// Delta content — only new characters since the requested char_offset
-    pub content: String,
-    /// Total character count of the streaming line (used as next line_char_offset)
-    pub char_offset: usize,
-}
-
-/// Single message in the session messages response
-#[derive(Serialize)]
-pub struct MessageEntryResponse {
-    /// Unique message ID
-    pub id: String,
-    /// ISO 8601 timestamp
-    pub ts: String,
-    /// Message role
-    pub role: String,
-    /// Message content
-    pub content: String,
-    /// Optional metadata
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    /// Entry kind. `None`/`"message"` denotes a regular role-based message.
-    /// `"compaction"` denotes an LLM-driven compaction summary event.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-}
 
 /// Response for creating a session
 #[derive(Serialize)]
@@ -1296,221 +501,14 @@ pub struct SessionCreatedResponse {
     pub session_id: String,
 }
 
-/// `GET /api/agents/{id}/sessions` — list conversation sessions (S1.14)
-///
-/// Forwards the query to Runtime via gRPC and returns the session list.
-pub async fn list_sessions(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(query): Query<SessionListQuery>,
-) -> Result<Json<SessionsListResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        // If agent is not running, return empty list instead of error.
-        // This is friendlier for clients like AgentList that fetch the latest session title
-        // for every installed agent, regardless of whether it's running.
-        if !gw.is_running(&agent_id) {
-            return Ok(Json(SessionsListResponse {
-                sessions: vec![],
-                total_count: 0,
-                total_pages: 0,
-                // ADR-028: no Runtime → no fallback data; omit fields so
-                // older Desktop clients don't see stray zeros.
-                agent_total_input_tokens: None,
-                agent_total_output_tokens: None,
-            }));
-        }
-    }
-
-    // ADR-033: When MQTT is the only transport, sessions live in Runtime.
-    // Session query via MQTT is Phase 3 — return empty for now.
-    if state.grpc_session_mgr.is_none() && state.mqtt_gateway_client.is_some() {
-        return Ok(Json(SessionsListResponse {
-            sessions: vec![],
-            total_count: 0,
-            total_pages: 0,
-            agent_total_input_tokens: None,
-            agent_total_output_tokens: None,
-        }));
-    }
-
-    let params = serde_json::json!({
-        "page": query.page,
-        "size": query.size,
-    });
-    let data = forward_session_query(&state, &agent_id, "list_sessions", params).await?;
-
-    let sessions: Vec<SessionInfoResponse> = data
-        .get("sessions")
-        .and_then(|v| {
-            serde_json::from_value::<Vec<acowork_core::protocol::SessionInfoDto>>(v.clone()).ok()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| SessionInfoResponse {
-            session_id: s.session_id,
-            created_at: s.created_at,
-            message_count: s.message_count,
-            title: s.title,
-            status: s.status,
-            workspace_id: s.workspace_id,
-        })
-        .collect();
-
-    let total_count = data
-        .get("total_count")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(sessions.len());
-    let total_pages = data
-        .get("total_pages")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(1);
-    // ADR-028: agent-scoped cumulative totals (fallback for the
-    // context_usage live path). Provided by Runtime after atomic-max
-    // merge with the on-disk scan; missing on older Runtimes.
-    let agent_total_input_tokens = data
-        .get("agent_total_input_tokens")
-        .and_then(|v| v.as_u64());
-    let agent_total_output_tokens = data
-        .get("agent_total_output_tokens")
-        .and_then(|v| v.as_u64());
-
-    Ok(Json(SessionsListResponse {
-        sessions,
-        total_count,
-        total_pages,
-        agent_total_input_tokens,
-        agent_total_output_tokens,
-    }))
-}
-
-/// `GET /api/agents/{id}/sessions/{session_id}/messages` — get paginated session messages (S1.14)
-///
-/// Forwards the query to Runtime via gRPC and returns the messages.
-pub async fn get_session_messages(
-    State(state): State<AppState>,
-    Path((agent_id, session_id)): Path<(String, String)>,
-    Query(query): Query<SessionMessagesQuery>,
-) -> Result<Json<SessionMessagesResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists and is running
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        if !gw.is_running(&agent_id) {
-            return Err(ApiError::bad_request(&format!(
-                "Agent {} is not running",
-                agent_id
-            )));
-        }
-    }
-
-    let mut params = serde_json::json!({
-        "session_id": session_id,
-        "cursor": query.cursor,
-        "limit": query.limit,
-        "direction": query.direction,
-    });
-
-    // ADR-021: Forward line coordinate params for incremental polling (deprecated)
-    if let Some(ln) = query.line_number {
-        params["line_number"] = serde_json::json!(ln);
-    }
-    if let Some(co) = query.line_char_offset {
-        params["line_char_offset"] = serde_json::json!(co);
-    }
-
-    // ADR-025: Forward incremental flag for backend-managed delivery cursor
-    if let Some(inc) = query.incremental {
-        params["incremental"] = serde_json::json!(inc);
-    }
-
-    let data = forward_session_query(&state, &agent_id, "get_session_messages", params).await?;
-
-    // Check for error response from Runtime
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::bad_request(error));
-    }
-
-    let messages: Vec<MessageEntryResponse> = data
-        .get("messages")
-        .and_then(|v| {
-            serde_json::from_value::<Vec<acowork_core::protocol::ConversationEntryDto>>(v.clone())
-                .ok()
-        })
-        .unwrap_or_default()
-        .into_iter()
-        .map(|m| MessageEntryResponse {
-            id: m.id,
-            ts: m.ts,
-            role: m.role,
-            content: m.content,
-            metadata: m.metadata,
-            kind: m.kind,
-        })
-        .collect();
-
-    let cursor = data
-        .get("cursor")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let has_more = data.get("has_more").and_then(|v| v.as_bool());
-
-    // ADR-021: Extract total_lines and streaming delta from Runtime response
-    let total_lines = data
-        .get("total_lines")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let streaming = data.get("streaming").and_then(|v| {
-        if v.is_null() {
-            return None;
-        }
-        Some(StreamingDeltaResponse {
-            line: v.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize,
-            role: v
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("")
-                .to_string(),
-            content: v
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("")
-                .to_string(),
-            char_offset: v.get("char_offset").and_then(|c| c.as_u64()).unwrap_or(0) as usize,
-        })
-    });
-
-    Ok(Json(SessionMessagesResponse {
-        messages,
-        cursor,
-        has_more,
-        total_lines,
-        streaming,
-    }))
-}
-
 /// `POST /api/agents/{id}/sessions` — create a new conversation session (S1.14)
 ///
-/// Forwards the request to Runtime via gRPC, which creates a new
-/// ConversationSession and returns the session_id.
+/// ADR-033: Creates session via MQTT CreateSession control command.
+/// The session ID is generated by the Gateway.
 pub async fn create_session(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    Json(_body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<SessionCreatedResponse>), (StatusCode, Json<ApiError>)> {
     // Verify agent exists and is running
     {
@@ -1543,24 +541,9 @@ pub async fn create_session(
         };
         let _ = mqtt.publish_control_command(&agent_id, cmd).await;
         tracing::info!(agent_id = %agent_id, session_id = %session_id, "MQTT: session created");
-    } else if state.grpc_session_mgr.is_some() {
-        // Legacy gRPC path
-        let mut params = serde_json::json!({});
-        if let Some(m) = body.get("model").and_then(|v| v.as_str()) {
-            params["model"] = serde_json::json!(m);
-        }
-        if let Some(p) = body.get("provider").and_then(|v| v.as_str()) {
-            params["provider"] = serde_json::json!(p);
-        }
-        if let Some(w) = body.get("workspace_id").and_then(|v| v.as_str()) {
-            params["workspace_id"] = serde_json::json!(w);
-        }
-        let data = forward_session_query(&state, &agent_id, "create_session", params).await?;
-        if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-            return Err(ApiError::internal(error));
-        }
-        let sid = data.get("session_id").and_then(|v| v.as_str()).unwrap_or(&session_id).to_string();
-        return Ok((StatusCode::OK, Json(SessionCreatedResponse { session_id: sid })));
+    } else {
+        // ADR-033: Without MQTT, the session is created lazily on first message.
+        tracing::info!(agent_id = %agent_id, session_id = %session_id, "Session created (lazy, no MQTT)");
     }
 
     Ok((StatusCode::OK, Json(SessionCreatedResponse { session_id })))
@@ -1596,30 +579,16 @@ pub async fn activate_session(
         }
     }
 
-    // ADR-033: MQTT-first — session activation is handled lazily by Runtime on first message.
-    if state.mqtt_gateway_client.is_some() {
-        return Ok(Json(serde_json::json!({"status": "ok"})));
-    }
-
-    let params = serde_json::json!({
-        "session_id": session_id,
-    });
-
-    let data = forward_session_query(&state, &agent_id, "activate_session", params).await?;
-
-    // Check for error response from Runtime
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::internal(error));
-    }
-
-    Ok(Json(data))
+    // ADR-033: MQTT — session activation is handled lazily by Runtime on first message.
+    let _ = (state, agent_id, session_id);
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// `POST /api/agents/{id}/sessions/{session_id}/deactivate`
 ///
-/// Notify Runtime to stop real-time data push for this session.
-/// Fire-and-forget — no response body, just 200 OK on delivery.
-/// Paired with `activate_session`; called by frontend `switchSession`.
+/// ADR-033: MQTT — deactivation is a client-side concept.
+/// The frontend stops listening to the session's MQTT topic.
+/// No Runtime notification needed; fire-and-forget.
 pub async fn deactivate_session(
     State(state): State<AppState>,
     Path((agent_id, session_id)): Path<(String, String)>,
@@ -1641,19 +610,14 @@ pub async fn deactivate_session(
         }
     }
 
-    let params = serde_json::json!({
-        "session_id": session_id,
-    });
-
-    forward_session_action(&state, &agent_id, "deactivate_session", params).await?;
+    let _ = (state, agent_id, session_id);
     Ok(StatusCode::OK)
 }
 
 /// `PUT /api/agents/{id}/sessions/{session_id}/title` — update session title (S1.14)
 ///
-/// Persists the session title to the JSONL metadata via Runtime's
-/// `update_session_title` action. This is the canonical way to set a
-/// session title that survives frontend refreshes.
+/// ADR-033: Proxies to Runtime's `PUT /sessions/{sid}/title` endpoint.
+/// The Runtime persists the title to JSONL metadata.
 #[derive(Deserialize)]
 pub struct UpdateTitleRequest {
     pub title: String,
@@ -1681,25 +645,26 @@ pub async fn update_session_title(
         }
     }
 
-    let params = serde_json::json!({
-        "title": body.title,
-        "session_id": session_id,
-    });
+    // ADR-033: Proxy to Runtime HTTP PUT /sessions/{sid}/title.
+    let path = format!("/sessions/{}/title", session_id);
+    let req_body = serde_json::json!({"title": body.title});
 
-    let data = forward_session_query(&state, &agent_id, "update_session_title", params).await?;
-
-    // Check for error response from Runtime
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::internal(error));
-    }
+    crate::http::proxy::send_runtime_json(
+        &state,
+        &agent_id,
+        &path,
+        reqwest::Method::PUT,
+        Some(&req_body),
+    ).await?;
 
     Ok(StatusCode::OK)
 }
 
 /// `POST /api/agents/{id}/sessions/{session_id}/close` — close a session
 ///
-/// Triggers distillation and frees resources, but preserves the JSONL history file.
-/// Use `DELETE` to also remove the history file.
+/// ADR-033: MQTT — close is handled lazily; the Runtime processes
+/// delete_session via MQTT control command when `DELETE` is used.
+/// Close without delete is a no-op at the Gateway level.
 pub async fn close_session(
     State(state): State<AppState>,
     Path((agent_id, session_id)): Path<(String, String)>,
@@ -1721,28 +686,14 @@ pub async fn close_session(
         }
     }
 
-    // ADR-033: MQTT-first — close_session is handled via MQTT delete_session.
-    if state.mqtt_gateway_client.is_some() {
-        return Ok(Json(serde_json::json!({"status": "ok"})));
-    }
-
-    let params = serde_json::json!({
-        "session_id": session_id,
-    });
-
-    let data = forward_session_query(&state, &agent_id, "close_session", params).await?;
-
-    // Check for error response from Runtime
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::internal(error));
-    }
-
-    Ok(Json(data))
+    let _ = (state, agent_id, session_id);
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 /// `DELETE /api/agents/{id}/sessions/{session_id}` — delete a session
 ///
-/// Closes the session (triggers distillation) and removes the JSONL history file.
+/// ADR-033: Publishes MQTT DeleteSession control command to the Runtime,
+/// which handles JSONL cleanup and resource teardown.
 pub async fn delete_session(
     State(state): State<AppState>,
     Path((agent_id, session_id)): Path<(String, String)>,
@@ -1764,48 +715,33 @@ pub async fn delete_session(
         }
     }
 
-    // ADR-033: MQTT-first — return immediately after cleanup.
-    if let Some(ref mqtt) = state.mqtt_gateway_client {
-        let cmd = acowork_core::mqtt_proto::ControlCommand {
-            agent_id: agent_id.clone(),
-            command: Some(acowork_core::mqtt_proto::control_command::Command::DeleteSession(
-                acowork_core::mqtt_proto::DeleteSessionCommand {
-                    agent_id: agent_id.clone(),
-                    session_id: session_id.clone(),
-                }
-            )),
-        };
-        let _ = mqtt.publish_control_command(&agent_id, cmd).await;
-        tracing::info!(agent_id = %agent_id, session_id = %session_id, "MQTT: session deleted");
+    // ADR-033: MQTT — delete via MQTT DeleteSession control command.
+    let mqtt = state.mqtt_gateway_client.as_ref().ok_or_else(|| {
+        ApiError::service_unavailable("MQTT transport not available")
+    })?;
 
-        // Clean up session documents
-        cleanup_session_docs(&state, &session_id).await;
-
-        return Ok(Json(serde_json::json!({"status": "ok", "deleted": true})));
-    }
-
-    // Legacy gRPC path
-    if state.grpc_session_mgr.is_none() {
-        return Err(ApiError::service_unavailable("No message transport available"));
-    }
-
-    let params = serde_json::json!({ "session_id": session_id });
-    let data = forward_session_query(&state, &agent_id, "delete_session", params).await?;
-    if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-        return Err(ApiError::internal(error));
-    }
+    let cmd = acowork_core::mqtt_proto::ControlCommand {
+        agent_id: agent_id.clone(),
+        command: Some(acowork_core::mqtt_proto::control_command::Command::DeleteSession(
+            acowork_core::mqtt_proto::DeleteSessionCommand {
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
+            }
+        )),
+    };
+    let _ = mqtt.publish_control_command(&agent_id, cmd).await;
+    tracing::info!(agent_id = %agent_id, session_id = %session_id, "MQTT: session deleted");
 
     // Clean up session documents
     cleanup_session_docs(&state, &session_id).await;
 
-    Ok(Json(data))
+    Ok(Json(serde_json::json!({"status": "ok", "deleted": true})))
 }
 
 // ── S1.14: gRPC forwarding helpers ──
-
-/// Default timeout for waiting for session gRPC response.
-const SESSION_IPC_TIMEOUT: std::time::Duration =
-    acowork_core::timeout_config::constants::SESSION_IPC;
+//
+// ADR-033: All gRPC forwarding helpers removed — MQTT replaces gRPC
+// for push operations, Runtime HTTP proxy replaces gRPC for queries.
 
 /// Clean up session documents directory (best-effort).
 async fn cleanup_session_docs(state: &AppState, session_id: &str) {
@@ -1826,137 +762,6 @@ async fn cleanup_session_docs(state: &AppState, session_id: &str) {
     }
 }
 
-/// Forward a session query to Runtime via gRPC push and wait for the response.
-///
-/// Legacy gRPC path — will be replaced by MQTT session topics in Phase 3.
-///
-/// 1. Creates a oneshot channel and stores the sender in the pending map
-/// 2. Pushes IntentReceived with the query action to Runtime
-/// 3. Waits for Runtime's IntentSend response ("session_response")
-/// 4. Returns the response data
-async fn forward_session_query(
-    state: &AppState,
-    agent_id: &str,
-    action: &str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, (StatusCode, Json<ApiError>)> {
-    let session_mgr = state
-        .grpc_session_mgr
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("Session manager not available"))?;
-
-    let request_id = format!("sess-{}-{}", action, uuid::Uuid::new_v4());
-
-    // Create oneshot channel for response
-    let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-    {
-        let mut pending = state.session_pending.lock().await;
-        pending.insert(request_id.clone(), tx);
-    }
-
-    // Push IntentReceived to Runtime
-    let mgr = session_mgr.lock().await;
-    let (_, session) = mgr.find_by_agent_id(agent_id).ok_or_else(|| {
-        ApiError::service_unavailable(&format!("Agent {} is not yet connected", agent_id))
-    })?;
-
-    let mut query_params = params;
-    query_params["request_id"] = serde_json::json!(request_id);
-
-    let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-        from: "http-api".to_string(),
-        action: action.to_string(),
-        params: query_params,
-        command: None,
-    };
-
-    if !session.push_message(intent).await {
-        // Clean up pending request
-        let mut pending = state.session_pending.lock().await;
-        pending.remove(&request_id);
-        return Err(ApiError::internal(
-            "Failed to deliver session query to agent",
-        ));
-    }
-    drop(mgr); // Release lock before awaiting
-
-    // Wait for response with timeout
-    match tokio::time::timeout(SESSION_IPC_TIMEOUT, rx).await {
-        Ok(Ok(data)) => Ok(data),
-        Ok(Err(_)) => Err(ApiError::internal(
-            "Session response channel closed unexpectedly",
-        )),
-        Err(_) => {
-            // Timeout — clean up pending request
-            let mut pending = state.session_pending.lock().await;
-            pending.remove(&request_id);
-            Err(ApiError::internal(
-                "Session query timed out — agent did not respond",
-            ))
-        }
-    }
-}
-
-/// Push a session action to Runtime without waiting for a response.
-///
-/// Fire-and-forget variant of [`forward_session_query`]. Used for actions
-/// that don't need a response (e.g., `deactivate_session`).
-async fn forward_session_action(
-    state: &AppState,
-    agent_id: &str,
-    action: &str,
-    params: serde_json::Value,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let session_mgr = state
-        .grpc_session_mgr
-        .as_ref()
-        .ok_or_else(|| ApiError::internal("Session manager not available"))?;
-
-    let mgr = session_mgr.lock().await;
-    let (_, session) = mgr.find_by_agent_id(agent_id).ok_or_else(|| {
-        ApiError::service_unavailable(&format!("Agent {} is not yet connected", agent_id))
-    })?;
-
-    let intent = acowork_core::protocol::GatewayResponse::IntentReceived {
-        from: "http-api".to_string(),
-        action: action.to_string(),
-        params,
-        command: None,
-    };
-
-    if !session.push_message(intent).await {
-        return Err(ApiError::internal(
-            "Failed to deliver session action to agent",
-        ));
-    }
-    Ok(())
-}
-
-/// Wait for a session response from the pending map.
-///
-/// Similar to forward_session_query but for cases where the IntentReceived
-/// has already been pushed (e.g., in get_conversations/get_latest_conversation).
-async fn wait_for_session_response(
-    state: &AppState,
-    request_id: &str,
-) -> Result<serde_json::Value, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
-    {
-        let mut pending = state.session_pending.lock().await;
-        pending.insert(request_id.to_string(), tx);
-    }
-
-    match tokio::time::timeout(SESSION_IPC_TIMEOUT, rx).await {
-        Ok(Ok(data)) => Ok(data),
-        Ok(Err(_)) => Err("Session response channel closed".to_string()),
-        Err(_) => {
-            let mut pending = state.session_pending.lock().await;
-            pending.remove(request_id);
-            Err("Session query timed out".to_string())
-        }
-    }
-}
-
 /// Parse an ISO 8601 timestamp to Unix epoch seconds.
 ///
 /// Returns 0 if parsing fails.
@@ -1968,10 +773,11 @@ fn parse_iso8601_to_unix(ts: &str) -> i64 {
 
 // ── Document resolution helper ───────────────────────────────────────
 
-/// Resolve document IDs to their metadata (filename, abs_path, format, size).
+/// Resolve document IDs to their metadata.
 ///
 /// Reads the `.meta.json` files stored alongside the uploaded documents.
 /// Returns `None` if the session documents directory doesn't exist.
+#[allow(dead_code)]
 async fn resolve_document_refs(
     state: &AppState,
     session_id: &str,

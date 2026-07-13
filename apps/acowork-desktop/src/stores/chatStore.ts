@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem } from "../lib/types";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore } from "./gatewayStore";
@@ -342,18 +343,16 @@ interface ChatStore {
   agentStates: Record<string, AgentState>;
 
   // ---- Global fields (not per-agent) ----
-  /** Per-agent WebSocket connections: agentId → WebSocket */
-  wsMap: Record<string, WebSocket>;
+  /** Whether the MQTT connection to the Gateway broker is established (ADR-033) */
+  mqttConnected: boolean;
   availableModels: ModelEntry[];
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
 
   // ---- Actions ----
-  connectStream: (agentId: string, gatewayUrl: string) => void;
   sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => Promise<void>;
   stopCurrentMessage: (agentId: string) => Promise<void>;
   sendStop: (agentId: string) => void;
-  disconnectStream: (agentId?: string) => void;
   /** Clear session state for a specific agent's active session */
   clearMessages: (agentId: string) => void;
   /** Clear a specific session's state */
@@ -362,10 +361,11 @@ interface ChatStore {
   removeSessionState: (agentId: string, sessionId: string) => void;
   trimMessagesTo: (agentId: string, count: number) => void;
   setCurrentModel: (model: string, provider: string, agentId: string) => void;
+  /** ADR-033: Send workspace switch via MQTT (per-session). */
+  setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => void;
   setAvailableModels: (models: ModelEntry[]) => void;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
-  getWs: (agentId: string) => WebSocket | undefined;
   continueExecution: (agentId: string) => Promise<void>;
   resolveApproval: (agentId: string) => void;
   /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
@@ -432,70 +432,47 @@ interface ChatStore {
   fetchSessionState: (agentId: string, sessionId: string) => Promise<void>;
 }
 
-function toWsUrl(httpUrl: string, agentId: string): string {
-  return `${httpUrl.replace("http://", "ws://").replace("https://", "wss://")}/api/agents/${agentId}/stream`;
-}
+// ADR-033: Initialize MQTT event listener.
+// Called once after MQTT connection is established.
+// Routes structured agent-event JSON from the Rust backend to handleMessageEvent.
+let _mqttUnlisten: (() => void) | null = null;
 
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 30000;
-
-function scheduleReconnect(agentId: string, gatewayUrl: string) {
-  const store = useChatStore.getState();
-  const agent = getAgentState(store, agentId);
-  if (agent.reconnectTimer) return;
-  if (agent.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.warn(`[ChatStore] Max reconnect attempts reached for agent ${agentId}, giving up`);
-    return;
+export async function initMqttListener(): Promise<void> {
+  // Unregister previous listener if any
+  if (_mqttUnlisten) {
+    _mqttUnlisten();
+    _mqttUnlisten = null;
   }
-  const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, agent.reconnectAttempts), RECONNECT_MAX_MS);
-  const newAttempts = agent.reconnectAttempts + 1;
-  console.log(`[ChatStore] Reconnecting agent ${agentId} in ${Math.round(delay)}ms (attempt ${newAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
-  const timer = setTimeout(() => {
-    // Clear timer ref first
-    useChatStore.setState((state) => updateAgentState(state, agentId, { reconnectTimer: null }));
-    const currentStore = useChatStore.getState();
-    if (!currentStore.wsMap[agentId]) {
-      currentStore.connectStream(agentId, gatewayUrl);
+
+  _mqttUnlisten = await listen("agent-event", (event) => {
+    const data = event.payload as Record<string, unknown>;
+    const agentId = data.agent_id as string;
+    if (!agentId) {
+      // Events without an agent_id are ignored at the store level
+      return;
     }
-  }, delay);
-  useChatStore.setState((state) =>
-    updateAgentState(state, agentId, { reconnectTimer: timer, reconnectAttempts: newAttempts })
-  );
+
+    const store = useChatStore;
+    handleMessageEvent(data, store.setState, store.getState, agentId);
+  });
+
+  // Mark MQTT as connected
+  useChatStore.setState({ mqttConnected: true });
 }
 
-function resetReconnect(agentId: string) {
-  const store = useChatStore.getState();
-  const agent = getAgentState(store, agentId);
-  if (agent.reconnectTimer) {
-    clearTimeout(agent.reconnectTimer);
+export function disposeMqttListener(): void {
+  if (_mqttUnlisten) {
+    _mqttUnlisten();
+    _mqttUnlisten = null;
   }
-  useChatStore.setState((state) =>
-    updateAgentState(state, agentId, { reconnectTimer: null, reconnectAttempts: 0 })
-  );
-}
-
-function resetAllReconnects() {
-  const store = useChatStore.getState();
-  for (const agentId of Object.keys(store.agentStates)) {
-    const agent = store.agentStates[agentId];
-    if (agent.reconnectTimer) clearTimeout(agent.reconnectTimer);
-  }
-  // Batch reset all agents' reconnect state
-  const newAgentStates: Record<string, AgentState> = {};
-  for (const [id, agent] of Object.entries(store.agentStates)) {
-    newAgentStates[id] = { ...agent, reconnectTimer: null, reconnectAttempts: 0 };
-  }
-  useChatStore.setState({ agentStates: newAgentStates });
+  useChatStore.setState({ mqttConnected: false });
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
-  wsMap: {},
+  mqttConnected: false,
   availableModels: [],
   isLoadingMore: false,
-
-  getWs: (agentId: string) => get().wsMap[agentId],
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -598,24 +575,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    *  The backend emits CompactingStarted → compacting_started → isCompacting = true
    *  When compaction completes, context_usage event clears isCompacting. */
   compactContext: (agentId: string, sessionId: string) => {
-    const ws = get().wsMap[agentId];
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "compact_context", session_id: sessionId }));
-      set((state) => updateSessionState(state, agentId, sessionId, { isCompacting: true }));
-    }
+    set((state) => updateSessionState(state, agentId, sessionId, { isCompacting: true }));
+    // ADR-033: Send via MQTT; silently ignore if MQTT is not connected
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "compact_context",
+      payloadJson: { session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] compact_context via MQTT failed:", err));
   },
 
   /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
-   *  `compressType` is "compress_tool_results" or "compress_summary". */
-  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => {
-    const ws = get().wsMap[agentId];
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "compress_action",
-        session_id: sessionId,
-        compress_type: compressType,
-      }));
-    }
+   *  ADR-033: Sent via MQTT compact_context (no dedicated compress_action in MQTT proto). */
+  sendCompressAction: (agentId: string, sessionId: string, _compressType: string) => {
+    // ADR-033: Route via MQTT compact_context (the closest MQTT equivalent)
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "compact_context",
+      payloadJson: { session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] compress_action via MQTT failed:", err));
   },
 
   activateSession: (agentId: string, sessionId: string) => {
@@ -753,105 +730,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  connectStream: (agentId: string, gatewayUrl: string = getGatewayUrl()) => {
-    resetReconnect(agentId);
-
-    const existing = get().wsMap[agentId];
-    if (existing && existing.readyState === WebSocket.OPEN) {
-      console.log("[ChatStore] Reusing existing WebSocket for agent:", agentId);
-      return;
-    }
-
-    if (existing) {
-      existing.onopen = null;
-      existing.onmessage = null;
-      existing.onclose = null;
-      existing.onerror = null;
-      existing.close();
-    }
-
-    const wsUrl = toWsUrl(gatewayUrl, agentId);
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(wsUrl);
-    } catch (e) {
-      console.warn("[ChatStore] WebSocket creation failed, will retry:", e);
-      set((state) => {
-        const newMap = { ...state.wsMap };
-        delete newMap[agentId];
-        return { wsMap: newMap };
-      });
-      scheduleReconnect(agentId, gatewayUrl);
-      return;
-    }
-
-    ws.onopen = () => {
-      console.log("[ChatStore] WebSocket connected for agent:", agentId);
-      resetReconnect(agentId);
-      set((state) => ({ wsMap: { ...state.wsMap, [agentId]: ws } }));
-
-      // ADR-014: Pull repair — refresh session statuses on WS (re)connect
-      useAgentStore.getState().fetchSessions(agentId);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleMessageEvent(data, set, get, agentId);
-      } catch (e) {
-        console.error("[ChatStore] Failed to parse WS message:", e);
-      }
-    };
-
-    ws.onclose = () => {
-      if (get().wsMap[agentId] !== ws) {
-        console.log("[ChatStore] Stale WebSocket closed, ignoring");
-        return;
-      }
-      console.log("[ChatStore] WebSocket closed for agent:", agentId);
-      set((state) => {
-        const newMap = { ...state.wsMap };
-        delete newMap[agentId];
-        // Clear streaming state for the active session of this agent
-        const agent = getAgentState(state, agentId);
-        const sessionId = agent.activeSessionId;
-        const sessionPatch = sessionId
-          ? updateSessionState(state, agentId, sessionId, {
-              })
-          : {};
-        return {
-          wsMap: newMap,
-          ...sessionPatch,
-        };
-      });
-      scheduleReconnect(agentId, gatewayUrl);
-    };
-
-    ws.onerror = (err) => {
-      if (get().wsMap[agentId] !== ws) {
-        console.log("[ChatStore] Stale WebSocket error, ignoring");
-        return;
-      }
-      console.warn("[ChatStore] WebSocket error:", err);
-    };
-
-    set((state) => ({
-      wsMap: { ...state.wsMap, [agentId]: ws },
-    }));
-    // Clear active session's transient state
-    const activeSessionId = getAgentState(get(), agentId).activeSessionId;
-    if (activeSessionId) {
-      set((state) => ({
-        ...updateSessionState(state, agentId, activeSessionId, {
-          tokenUsage: null,
-          contextUsage: null,
-        }),
-      }));
-    }
-  },
+  // ADR-033: connectStream removed — MQTT connection is managed by the Rust backend.
+  // The frontend no longer creates WebSocket connections.
 
   sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => {
-    const ws = get().wsMap[agentId];
     const sessionId = getAgentState(get(), agentId).activeSessionId;
 
     // Add user message to the active session's state
@@ -929,11 +811,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Build attached context payload from session state (files/selections from
     // workspace explorer right-click or editor "Add to Chat" button).
-    // Passes file paths + line ranges as structured metadata in the WebSocket
-    // message so the Runtime can assemble the enriched context and inject it
-    // into the LLM prompt. The frontend no longer assembles prompt text — all
-    // context enrichment (including human-readable file summaries) is done by
-    // the backend.
+    // Passes file paths + line ranges as structured metadata so the Runtime
+    // can assemble the enriched context and inject it into the LLM prompt.
+    // The frontend no longer assembles prompt text — all context enrichment
+    // (including human-readable file summaries) is done by the backend.
     let attachedContextPayload: Array<{ absPath: string; type: string; startLine?: number; endLine?: number }> | undefined;
     if (sessionId) {
       const ss = getSessionState(get(), agentId, sessionId);
@@ -947,83 +828,48 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
 
-    const sendViaWs = (socket: WebSocket) => {
-      socket.send(JSON.stringify({
-        type: "message",
-        message_id: userMsgId,
-        content,
-        command,
-        ...(sessionId ? { session_id: sessionId } : {}),
-        ...(documentIds && documentIds.length > 0 ? { document_ids: documentIds } : {}),
-        ...(contentParts ? { content_parts: contentParts } : {}),
-        ...(attachedContextPayload ? { attached_context: attachedContextPayload } : {}),
-      }));
-
-      // Clear attached context after sending (one-shot)
-      if (sessionId) {
-        const state = get();
-        const ss = getSessionState(state, agentId, sessionId);
-        if (ss.attachedContext.length > 0) {
-          set((s) => updateSessionState(s, agentId, sessionId, { attachedContext: [] }));
-        }
-      }
-
-      // ADR-021 Phase 4: Polling coordinates are maintained by loadSessionMessages
-      // based on backend's total_lines — do NOT reset them here.  A reset to 0
-      // would cause the next incremental poll to fetch from the beginning of the
-      // JSONL file, potentially overwriting optimistically rendered messages in a
-      // race with the full-load path (see ChatPanel currentSessionId effect).
-    };
-
-    if (ws) {
-      if (ws.readyState === WebSocket.OPEN) {
-        sendViaWs(ws);
-        return;
-      }
-      if (ws.readyState === WebSocket.CONNECTING) {
-        const connected = await new Promise<boolean>((resolve) => {
-          const timeout = setTimeout(() => resolve(false), 2000);
-          const onOpen = () => {
-            clearTimeout(timeout);
-            ws.removeEventListener("open", onOpen);
-            ws.removeEventListener("error", onError);
-            resolve(true);
-          };
-          const onError = () => {
-            clearTimeout(timeout);
-            ws.removeEventListener("open", onOpen);
-            ws.removeEventListener("error", onError);
-            resolve(false);
-          };
-          ws.addEventListener("open", onOpen);
-          ws.addEventListener("error", onError);
-        });
-        if (connected) {
-          sendViaWs(ws);
-          return;
-        }
+    // Clear attached context after sending (one-shot)
+    if (sessionId) {
+      const ss = getSessionState(get(), agentId, sessionId);
+      if (ss.attachedContext.length > 0) {
+        set((s) => updateSessionState(s, agentId, sessionId, { attachedContext: [] }));
       }
     }
 
-    // Fallback: send via Tauri HTTP command
+    // ADR-033: Try MQTT first for simple text messages (fast path).
+    // For messages with extra payload (documents, images, attached context),
+    // fall back to HTTP since the MQTT MessageCommand proto doesn't carry
+    // those fields yet.
+    const hasExtraPayload = !!(documentIds?.length || contentParts || attachedContextPayload);
+
+    if (!hasExtraPayload && sessionId) {
+      try {
+        await invoke("mqtt_publish_control", {
+          agentId,
+          command: "message",
+          payloadJson: {
+            session_id: sessionId,
+            message_id: userMsgId,
+            content,
+          },
+        });
+        console.log("[ChatStore] Message sent via MQTT:", userMsgId);
+        return;
+      } catch (err) {
+        console.warn("[ChatStore] MQTT message send failed, falling back to HTTP:", err);
+      }
+    }
+
+    // Fallback: send via Tauri HTTP command (supports all payload fields)
     try {
       const result = await invoke<{ message_id: string; status: string }>(
         "send_message",
         { agentId, content, messageId: userMsgId, command, sessionId, documentIds, attachedContext: attachedContextPayload },
       );
       console.log("[ChatStore] Message sent via HTTP:", result);
-      const replyMsg: ChatMessage = {
-        id: `msg-assistant-${Date.now()}`,
-        type: "system",
-        content: "Message sent. Waiting for agent response... (streaming not available)",
-        timestamp: Date.now(),
-      };
-      if (sessionId) {
-        set((state) => ({
-          ...updateSessionState(state, agentId, sessionId, {
-                messages: [...getSessionState(state, agentId, sessionId).messages, replyMsg],
-          }),
-        }));
+      if (hasExtraPayload) {
+        // For messages with extra payload, streaming events will arrive via MQTT
+        // since the Runtime still publishes session messages via MQTT.
       }
     } catch (error) {
       console.error("[ChatStore] HTTP message send failed:", error);
@@ -1046,15 +892,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   stopCurrentMessage: async (agentId: string) => {
     console.log("[ChatStore] Stopping current message for agent:", agentId);
 
-    const ws = get().wsMap[agentId];
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const sessionId = getAgentState(get(), agentId).activeSessionId;
-      ws.send(JSON.stringify({
-        type: "stop",
-        agentId,
-        ...(sessionId ? { session_id: sessionId } : {}),
-      }));
-    }
+    // ADR-033: Send stop via MQTT
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "stop",
+      payloadJson: { session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] stop via MQTT failed:", err));
 
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
     if (activeSessionId) {
@@ -1066,15 +910,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   sendStop: (agentId: string) => {
-    const ws = get().wsMap[agentId];
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const sessionId = getAgentState(get(), agentId).activeSessionId;
-      ws.send(JSON.stringify({
-        type: "stop",
-        agentId,
-        ...(sessionId ? { session_id: sessionId } : {}),
-      }));
-    }
+    // ADR-033: Send stop via MQTT
+    const sessionId = getAgentState(get(), agentId).activeSessionId;
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "stop",
+      payloadJson: { session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] sendStop via MQTT failed:", err));
+
     // Optimistic: immediately mark as stopping so the UI exits "working" state
     // without waiting for the backend Stopped/SessionStateChanged event.
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1085,58 +928,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
-  disconnectStream: (agentId?: string) => {
-    if (agentId) {
-      resetReconnect(agentId);
-      const ws = get().wsMap[agentId];
-      if (ws) {
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.close();
-      }
-      set((state) => {
-        const newMap = { ...state.wsMap };
-        delete newMap[agentId];
-        const agent = getAgentState(state, agentId);
-        const sessionId = agent.activeSessionId;
-        return {
-          wsMap: newMap,
-          ...(sessionId
-            ? updateSessionState(state, agentId, sessionId, {
-                  })
-            : {}),
-        };
-      });
-    } else {
-      resetAllReconnects();
-      const allWs = get().wsMap;
-      for (const id of Object.keys(allWs)) {
-        const ws = allWs[id];
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onclose = null;
-        ws.onerror = null;
-        ws.close();
-      }
-      // ADR-021: Clear pending flags for all agents' active sessions
-      const clearedAgentStates: Record<string, AgentState> = {};
-      for (const [id, agent] of Object.entries(get().agentStates)) {
-        const newSessionStates = { ...agent.sessionStates };
-        if (agent.activeSessionId && newSessionStates[agent.activeSessionId]) {
-          newSessionStates[agent.activeSessionId] = {
-            ...newSessionStates[agent.activeSessionId],
-          };
-        }
-        clearedAgentStates[id] = { ...agent, sessionStates: newSessionStates };
-      }
-      set({
-        wsMap: {},
-        agentStates: clearedAgentStates,
-      });
-    }
-  },
 
   trimMessagesTo: (agentId: string, count: number) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1170,10 +961,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Update agent's default model (new sessions inherit this)
     set((state) => updateAgentState(state, agentId, { preferredModel: model, preferredProvider: provider }));
 
-    const ws = get().wsMap[agentId];
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "model_switch", model, provider, agentId, session_id: sessionId }));
-    }
+    // ADR-033: Send model switch via MQTT
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "model_switch",
+      payloadJson: { model_id: model, session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] model_switch via MQTT failed:", err));
+  },
+
+  setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => {
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "workspace_switch",
+      payloadJson: { workspace_id: workspaceId, session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] workspace_switch via MQTT failed:", err));
   },
   setReasoningEffort: (effort: string, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1182,10 +983,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Optimistically update frontend state (Runtime will confirm)
     set((state) => updateSessionState(state, agentId, sessionId, { reasoningEffort: effort }));
 
-    const ws = get().wsMap[agentId];
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "reasoning_effort", effort, agentId, session_id: sessionId }));
-    }
+    // ADR-033: Send reasoning effort via MQTT
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "reasoning_effort",
+      payloadJson: { effort, session_id: sessionId },
+    }).catch((err: unknown) => console.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
   },
   setAvailableModels: (models: ModelEntry[]) => {
     set({ availableModels: models });

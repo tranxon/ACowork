@@ -292,7 +292,11 @@ message SessionMessage {
     CompactingPayload     compacting_ended   = 21;
     ContextUsagePayload   context_usage   = 22;
     MemoryUpdatedPayload  memory_updated  = 23;
-    SkillExecutedPayload  skill_executed  = 24;
+    SkillExecutedPayload       skill_executed          = 24;
+    SessionStateChangedPayload session_state_changed   = 25;
+    IterationLimitPausedPayload iteration_limit_paused = 26;
+    ToolApprovalNeededPayload   tool_approval_needed    = 27;
+    NewDataAvailablePayload     new_data_available      = 28;
   }
 }
 
@@ -363,6 +367,41 @@ message SkillExecutedPayload {
   bool success = 3;
 }
 
+message SessionStateChangedPayload {
+  string session_id = 1;
+  string status_json = 2;
+  string model = 3;
+  string provider = 4;
+  string workspace_id = 5;
+  double ratio = 6;
+  string reasoning_effort = 7;
+  float temperature = 8;
+  string context_usage_json = 9;
+}
+
+message IterationLimitPausedPayload {
+  string session_id = 1;
+  uint32 iteration = 2;
+  uint32 max_iterations = 3;
+}
+
+message ToolApprovalNeededPayload {
+  string session_id = 1;
+  string request_id = 2;
+  string tool_name = 3;
+  string action = 4;
+  string risk_level = 5;
+  string reason = 6;
+  string tool_call_id = 7;
+  uint64 approval_timeout_secs = 8;
+}
+
+message NewDataAvailablePayload {
+  string session_id = 1;
+  uint32 interval_ms = 2;
+  string title = 3;
+}
+
 // ── Control commands (§9) — Desktop → Runtime ─────────────────────────
 
 /// Control command (sid in payload for routing).
@@ -377,6 +416,8 @@ message ControlCommand {
     ModelSwitchCommand       model_switch       = 14;
     ReasoningEffortCommand   reasoning_effort   = 15;
     CompactContextCommand    compact_context    = 16;
+    IntentCommand            intent             = 17;
+    WorkspaceSwitchCommand    workspace_switch   = 18;
   }
 }
 
@@ -413,9 +454,27 @@ message ReasoningEffortCommand {
   string effort = 3;  // "low" | "medium" | "high"
 }
 
+message WorkspaceSwitchCommand {
+  string agent_id = 1;
+  string session_id = 2;
+  string workspace_id = 3;
+}
+
 message CompactContextCommand {
   string agent_id = 1;
   string session_id = 2;
+}
+
+/// Intent command — Gateway pushes an IntentReceived to a Runtime agent.
+/// Used for cron triggers and cross-agent messaging via MQTT.
+message IntentCommand {
+  string agent_id = 1;
+  /// Source of the intent (e.g. "cron:<agent_id>" for cron triggers).
+  string from = 2;
+  /// Action name (e.g. "hourly_check").
+  string action = 3;
+  /// Intent parameters as JSON.
+  string params_json = 4;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

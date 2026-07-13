@@ -2610,6 +2610,12 @@ async fn process_gateway_recv(
 }
 
 // ── Memory query handler ────────────────────────────────────────────────────
+//
+// ADR-033: Memory queries are now served by the Runtime's localhost HTTP
+// server (reverse-proxied by the Gateway).  The gRPC path is retained for
+// compatibility but is implemented as a thin wire-format adapter over the
+// shared [`crate::http::memory_query`] module — the HTTP and gRPC paths
+// MUST stay in sync, and that module is the single source of truth.
 
 /// Handle a memory API query from Gateway (via gRPC, not IntentReceived).
 ///
@@ -2627,6 +2633,7 @@ async fn spawn_memory_query_handler(
 ) {
     use acowork_core::proto;
     use acowork_core::proto::server_message::Payload as ServerPayload;
+    use crate::http::memory_query::ListNodesParams;
     tracing::info!(
         request_id,
         payload_type = ?std::mem::discriminant(&payload),
@@ -2635,13 +2642,24 @@ async fn spawn_memory_query_handler(
         "Memory query handler spawned"
     );
     let response_payload = match payload {
-        ServerPayload::MemoryNodesQuery(q) => handle_memory_nodes_query(memory_store.as_ref(), q),
+        ServerPayload::MemoryNodesQuery(q) => {
+            let params = ListNodesParams {
+                page: q.page,
+                size: q.size,
+                node_type: q.r#type,
+                keyword: q.keyword,
+                time_range: q.time_range,
+            };
+            handle_memory_nodes_query(memory_store.as_ref(), params)
+        }
         ServerPayload::MemoryStatsQuery(_) => {
             handle_memory_stats_query(memory_store.as_ref(), embed_provider_dim)
         }
-        ServerPayload::MemoryDeleteQuery(q) => handle_memory_delete_query(memory_store.as_ref(), q),
+        ServerPayload::MemoryDeleteQuery(q) => {
+            handle_memory_delete_query(memory_store.as_ref(), q.node_id)
+        }
         ServerPayload::MemoryConsolidateQuery(q) => {
-            handle_memory_consolidate_query(memory_store.as_ref(), q)
+            handle_memory_consolidate_query(memory_store.as_ref(), q.force, q.retention_days)
         }
 
         _ => {
@@ -2662,436 +2680,103 @@ async fn spawn_memory_query_handler(
 }
 
 /// Handle MemoryNodesQuery — list nodes with pagination, filtering, search.
-/// Maximum number of nodes to scan without any filter (keyword or type).
-/// Queries exceeding this limit are rejected to prevent unbounded memory
-/// allocation and excessive CPU usage on the Runtime side.
-const MAX_UNFILTERED_MEMORY_SCAN: usize = 10_000;
-
+///
+/// Thin adapter over [`memory_query::list_nodes`]. The shared module owns
+/// the scan logic (label iteration, filters, time-range parsing, the P0
+/// unfiltered-scan guard); this function just maps the intermediate
+/// `MemoryNodeRecord` slice back to the proto wire format used by the
+/// legacy gRPC path.
+///
+/// HTTP handlers in [`crate::http::server`] call the same module and
+/// serialize the same records into JSON — keeps both paths consistent.
 fn handle_memory_nodes_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
-
-    query: acowork_core::proto::MemoryNodesQuery,
+    params: crate::http::memory_query::ListNodesParams,
 ) -> acowork_core::proto::client_message::Payload {
     use acowork_core::proto;
     use acowork_core::proto::client_message::Payload as ClientPayload;
-    let store = match memory_store {
-        Some(s) => s,
-
-        None => {
-            tracing::warn!("MemoryNodesQuery: no Grafeo store available");
-            return ClientPayload::MemoryNodesResult(proto::MemoryNodesResult {
-                total: 0,
-                page: query.page,
-                size: query.size,
-                nodes: vec![],
-            });
-        }
-    };
-    let graph = store.db().graph_store();
-
-    // Parse time_range into a cutoff timestamp.
-    // Supported values: "1h", "1d", "7d", "30d".
-    // Nodes with created_at before the cutoff are excluded.
-    let cutoff: Option<i64> = match query.time_range.as_str() {
-        "" | "all" => None,
-        "1h" => Some(chrono::Utc::now() - chrono::Duration::hours(1)),
-        "1d" => Some(chrono::Utc::now() - chrono::Duration::days(1)),
-        "7d" => Some(chrono::Utc::now() - chrono::Duration::days(7)),
-        "30d" => Some(chrono::Utc::now() - chrono::Duration::days(30)),
-        other => {
-            tracing::warn!(
-                time_range = %other,
-                "MemoryNodesQuery: unknown time_range value, ignoring filter"
-            );
-            None
-        }
-    }
-    .map(|ts| ts.timestamp());
-
-    // Collect nodes from all memory labels
-    let labels = ["Episodic", "Knowledge", "Procedural", "Autobiographical"];
-
-    // P0: Reject unfiltered queries when the database is too large.
-    // Without a filter (keyword or type), the handler scans every node
-    // and builds a full Vec in memory before paginating.  This is safe
-    // for small databases but becomes a denial-of-service vector when
-    // the node count grows into the tens of thousands.
-    let has_filter = !query.keyword.is_empty()
-        || !query.r#type.is_empty()
-        || !query.time_range.is_empty() && query.time_range != "all";
-    if !has_filter {
-        let total_nodes: usize = labels.iter().map(|l| graph.nodes_by_label(l).len()).sum();
-        if total_nodes > MAX_UNFILTERED_MEMORY_SCAN {
-            tracing::warn!(
-                total_nodes,
-                max = MAX_UNFILTERED_MEMORY_SCAN,
-                "MemoryNodesQuery: rejected unfiltered scan (too many nodes)"
-            );
-            return ClientPayload::MemoryNodesResult(proto::MemoryNodesResult {
-                total: total_nodes as u64,
-                page: query.page,
-                size: query.size,
-                nodes: vec![],
-            });
-        }
-    }
-
-    let mut all_entries: Vec<proto::MemoryNodeEntry> = Vec::new();
-    for label in &labels {
-        // Filter by type if specified
-        if !query.r#type.is_empty() && query.r#type != *label {
-            continue;
-        }
-
-        let node_ids = graph.nodes_by_label(label);
-        let label_node_count = node_ids.len();
-        let mut matched = 0usize;
-        for id in node_ids {
-            if let Some(n) = store.db().get_node(id) {
-                let content = extract_node_content(label, &n);
-
-                // Keyword filter — case-insensitive substring match.
-                // NOTE: This is a naive O(n·m) scan; not BM25 semantic search.
-                // Adequate for the Desktop App manual-search UX where node
-                // counts are expected to stay under ~10K.  Upgrade path:
-                // either use Grafeo's built-in text index or delegate to
-                // a dedicated full-text engine (Tantivy / Meilisearch) once
-                // search latency becomes a bottleneck.
-                if !query.keyword.is_empty()
-                    && !content
-                        .to_lowercase()
-                        .contains(&query.keyword.to_lowercase())
-                {
-                    continue;
-                }
-
-                let created_at = n
-                    .get_property("created_at")
-                    .and_then(|v| v.as_timestamp())
-                    .map(|ts| ts.as_secs())
-                    .unwrap_or(0);
-                // Time range filter: skip nodes older than the cutoff.
-                if let Some(cutoff_ts) = cutoff
-                    && created_at < cutoff_ts {
-                        continue;
-                    }
-                let last_accessed_at = n
-                    .get_property("last_accessed_at")
-                    .and_then(|v| v.as_timestamp())
-                    .map(|ts| ts.as_secs())
-                    .unwrap_or(created_at);
-                let access_count = n
-                    .get_property("access_count")
-                    .and_then(|v| v.as_int64())
-                    .unwrap_or(0) as u32;
-                let confidence = n
-                    .get_property("confidence")
-                    .and_then(|v| v.as_float64())
-                    .unwrap_or(0.0);
-                let decay_score = n
-                    .get_property("decay_score")
-                    .and_then(|v| v.as_float64())
-                    .unwrap_or(1.0);
-                let status = n
-                    .get_property("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Active")
-                    .to_string();
-                all_entries.push(proto::MemoryNodeEntry {
-                    node_id: id.0,
-                    node_type: label.to_string(),
-                    content,
-                    confidence,
-                    decay_score,
-                    created_at,
-                    last_accessed_at,
-                    access_count,
-                    status,
-                });
-                matched += 1;
-            }
-        }
-
-        tracing::info!(
-            label,
-            total_in_label = label_node_count,
-            matched,
-            "MemoryNodesQuery: label scan"
-        );
-    }
-
-    // Order: most-recent first (created_at DESC). Use node_id DESC as a
-    // stable tiebreaker so paginated results stay deterministic when
-    // timestamps collide (or are missing).
-    all_entries.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| b.node_id.cmp(&a.node_id))
-    });
-
-    let total = all_entries.len() as u64;
-    let page = query.page.max(1);
-    let size = query.size.clamp(1, 100) as usize;
-    let start = ((page - 1) as usize) * size;
-    let nodes: Vec<_> = if start < all_entries.len() {
-        all_entries.into_iter().skip(start).take(size).collect()
-    } else {
-        vec![]
-    };
-    tracing::info!(
-        total,
-        page,
-        returned = nodes.len(),
-        "MemoryNodesQuery: final result"
-    );
-
+    let out = crate::http::memory_query::list_nodes(memory_store, params);
+    let nodes: Vec<proto::MemoryNodeEntry> = out
+        .nodes
+        .into_iter()
+        .map(|n| proto::MemoryNodeEntry {
+            node_id: n.node_id,
+            node_type: n.node_type,
+            content: n.content,
+            confidence: n.confidence,
+            decay_score: n.decay_score,
+            created_at: n.created_at,
+            last_accessed_at: n.last_accessed_at,
+            access_count: n.access_count,
+            status: n.status,
+        })
+        .collect();
     ClientPayload::MemoryNodesResult(proto::MemoryNodesResult {
-        total,
-        page,
-        size: size as u32,
+        total: out.total,
+        page: out.page,
+        size: out.size,
         nodes,
     })
 }
 
-/// Extract a human-readable content string from a Grafeo node.
-fn extract_node_content(label: &str, n: &grafeo_core::graph::lpg::Node) -> String {
-    match label {
-        "Episodic" => {
-            let role = n
-                .get_property("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let content = n
-                .get_property("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("[{}] {}", role, content)
-        }
-
-        "Knowledge" => {
-            let subject = n
-                .get_property("subject")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let predicate = n
-                .get_property("predicate")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let object = n
-                .get_property("object")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("{} {} {}", subject, predicate, object)
-        }
-
-        "Procedural" => {
-            let name = n
-                .get_property("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let action = n
-                .get_property("action_pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("When {}: {}", name, action)
-        }
-
-        "Autobiographical" => {
-            let key = n.get_property("key").and_then(|v| v.as_str()).unwrap_or("");
-            let value = n
-                .get_property("value")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            format!("{}: {}", key, value)
-        }
-
-        _ => "Unknown".to_string(),
-    }
-}
-
 /// Handle MemoryStatsQuery — get memory statistics.
+///
+/// Thin adapter over [`memory_query::get_stats`].
 fn handle_memory_stats_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     embed_provider_dim: u64,
 ) -> acowork_core::proto::client_message::Payload {
     use acowork_core::proto;
     use acowork_core::proto::client_message::Payload as ClientPayload;
-    use std::collections::HashMap;
-    let store = match memory_store {
-        Some(s) => s,
-
-        None => {
-            return ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
-                total_nodes: 0,
-                storage_bytes: 0,
-                by_type: HashMap::new(),
-                by_status: HashMap::new(),
-                avg_decay_score: 0.0,
-                index_health: "no_store".to_string(),
-                stored_dim: 0,
-                nodes_with_embedding: 0,
-                model_dim: embed_provider_dim,
-            });
-        }
-    };
-    match acowork_grafeo::stats::collect_stats(store) {
-        Ok(stats) => {
-            // Node-level aggregation (status breakdown + decay score).
-            // Covers all user-visible memory labels so that every node
-            // contributes to the Active/Dormant/Pending counts.
-            let aggregate = acowork_grafeo::stats::aggregate_node_status(
-                store,
-                &[
-                    acowork_grafeo::labels::EPISODIC,
-                    acowork_grafeo::labels::KNOWLEDGE,
-                    acowork_grafeo::labels::PROCEDURAL,
-                    acowork_grafeo::labels::AUTOBIOGRAPHICAL,
-                ],
-            )
-            .unwrap_or_default();
-
-            let total_nodes = aggregate.total_nodes;
-            let by_type: HashMap<String, u64> = stats
-                .label_counts
-                .into_iter()
-                .map(|(k, v)| (k, v as u64))
-                .collect();
-
-            // by_status comes from the per-node aggregate, augmented with
-            // the purged-node count from the global stats snapshot.
-            let mut by_status = aggregate.by_status;
-            by_status.insert("purged".to_string(), stats.purged_count as u64);
-
-            let avg_decay_score = aggregate.avg_decay_score as f64;
-            let index_health = "healthy".to_string();
-
-            // Vector-index diagnostics used by the desktop "Rebuild Index" banner.
-            // These are best-effort: a single failed Cypher query must not break
-            // the whole stats response.
-            let stored_dim = store.embedding_dim() as u64;
-            let nodes_with_embedding = store.count_nodes_with_embedding();
-
-            ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
-                total_nodes,
-                storage_bytes: 0, // TODO P3: track file size in StatsCollector
-                by_type,
-                by_status,
-                avg_decay_score,
-                index_health,
-                stored_dim,
-                nodes_with_embedding,
-                model_dim: embed_provider_dim,
-            })
-        }
-
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to collect memory stats");
-
-            ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
-                total_nodes: 0,
-                storage_bytes: 0,
-                by_type: HashMap::new(),
-                by_status: HashMap::new(),
-                avg_decay_score: 0.0,
-                index_health: format!("error: {}", e),
-                stored_dim: 0,
-                nodes_with_embedding: 0,
-                model_dim: embed_provider_dim,
-            })
-        }
-    }
+    let out = crate::http::memory_query::get_stats(memory_store, embed_provider_dim);
+    ClientPayload::MemoryStatsResult(proto::MemoryStatsResult {
+        total_nodes: out.total_nodes,
+        storage_bytes: out.storage_bytes,
+        by_type: out.by_type,
+        by_status: out.by_status,
+        avg_decay_score: out.avg_decay_score,
+        index_health: out.index_health,
+        stored_dim: out.stored_dim,
+        nodes_with_embedding: out.nodes_with_embedding,
+        model_dim: out.model_dim,
+    })
 }
 
 /// Handle MemoryDeleteQuery — delete a memory node by ID.
+///
+/// Thin adapter over [`memory_query::delete_node`].
 fn handle_memory_delete_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
-
-    query: acowork_core::proto::MemoryDeleteQuery,
+    node_id: u64,
 ) -> acowork_core::proto::client_message::Payload {
     use acowork_core::proto;
     use acowork_core::proto::client_message::Payload as ClientPayload;
-    let store = match memory_store {
-        Some(s) => s,
-
-        None => {
-            return ClientPayload::MemoryDeleteResult(proto::MemoryDeleteResult {
-                node_id: query.node_id,
-                deleted: false,
-                message: "Memory store not available".to_string(),
-            });
-        }
-    };
-    let node_id = grafeo_common::types::NodeId(query.node_id);
-    match store.delete_node(node_id) {
-        Ok(deleted) => ClientPayload::MemoryDeleteResult(proto::MemoryDeleteResult {
-            node_id: query.node_id,
-            deleted,
-            message: if deleted {
-                "Node deleted".to_string()
-            } else {
-                "Node not found".to_string()
-            },
-        }),
-
-        Err(e) => ClientPayload::MemoryDeleteResult(proto::MemoryDeleteResult {
-            node_id: query.node_id,
-            deleted: false,
-            message: format!("Error: {}", e),
-        }),
-    }
+    let out = crate::http::memory_query::delete_node(memory_store, node_id);
+    ClientPayload::MemoryDeleteResult(proto::MemoryDeleteResult {
+        node_id: out.node_id,
+        deleted: out.deleted,
+        message: out.message,
+    })
 }
 
 /// Handle MemoryConsolidateQuery — trigger memory consolidation.
+///
+/// Thin adapter over [`memory_query::trigger_consolidate`].
 fn handle_memory_consolidate_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
-
-    query: acowork_core::proto::MemoryConsolidateQuery,
+    force: bool,
+    retention_days: u32,
 ) -> acowork_core::proto::client_message::Payload {
     use acowork_core::proto;
     use acowork_core::proto::client_message::Payload as ClientPayload;
-    let store = match memory_store {
-        Some(s) => s,
-
-        None => {
-            return ClientPayload::MemoryConsolidateResult(proto::MemoryConsolidateResult {
-                started: false,
-                duration_ms: 0,
-                episodes_consolidated: 0,
-                knowledge_nodes_generated: 0,
-                message: "Memory store not available".to_string(),
-            });
-        }
-    };
-    let config = acowork_grafeo::consolidation::OfflineConsolidationConfig {
-        batch_size: 50,
-
-        min_pending_age_hours: if query.force { 0 } else { 1 },
-    };
-    let start = std::time::Instant::now();
-    match store.run_offline_consolidation(&config) {
-        Ok(result) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
-
-            ClientPayload::MemoryConsolidateResult(proto::MemoryConsolidateResult {
-                started: true,
-                duration_ms,
-                episodes_consolidated: result.upgraded as u64,
-                knowledge_nodes_generated: 0, // Phase 2 consolidation doesn't generate new nodes
-                message: format!(
-                    "Upgraded: {}, Kept pending: {}, Marked dormant: {}",
-                    result.upgraded, result.kept_pending, result.marked_dormant
-                ),
-            })
-        }
-
-        Err(e) => ClientPayload::MemoryConsolidateResult(proto::MemoryConsolidateResult {
-            started: false,
-            duration_ms: 0,
-            episodes_consolidated: 0,
-            knowledge_nodes_generated: 0,
-            message: format!("Consolidation error: {}", e),
-        }),
-    }
+    let out = crate::http::memory_query::trigger_consolidate(memory_store, force, retention_days);
+    ClientPayload::MemoryConsolidateResult(proto::MemoryConsolidateResult {
+        started: out.started,
+        duration_ms: out.duration_ms,
+        episodes_consolidated: out.episodes_consolidated,
+        knowledge_nodes_generated: out.knowledge_nodes_generated,
+        message: out.message,
+    })
 }
 
 // ── S1.14: Session query handlers ─────────────────────────────────────────────

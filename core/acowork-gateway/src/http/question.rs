@@ -1,9 +1,9 @@
 //! Ask Question HTTP endpoint
 //!
 //! Provides the HTTP API that the Desktop App calls when the user
-//! answers an ask_user_question prompt. The endpoint pushes a
-//! `question_answer` IntentReceived to the Runtime's AgentLoop
-//! (unified push architecture, same as approval_decision).
+//! answers an ask_user_question prompt.
+//!
+//! ADR-033: Proxies question answers to Runtime's `POST /sessions/{sid}/question` endpoint.
 
 use axum::{
     Json, Router,
@@ -11,8 +11,6 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-
-use acowork_core::protocol::GatewayResponse;
 
 use crate::http::routes::{ApiError, AppState};
 
@@ -25,9 +23,8 @@ pub struct QuestionAnswerRequest {
     /// - If they chose a pre-defined option: the option's label
     /// - If they typed free text (via "Other"): their free-text input
     pub answer: String,
-    /// Session ID for multi-session routing (explicit pass-through)
-    #[serde(default)]
-    pub session_id: Option<String>,
+    /// Session ID for multi-session routing (required in MQTT mode)
+    pub session_id: String,
 }
 
 /// Response body for the question answer endpoint.
@@ -39,10 +36,7 @@ pub struct QuestionAnswerResponse {
 
 /// POST /api/agents/:agent_id/question — submit user's answer to an ask_user_question prompt.
 ///
-/// The Desktop App calls this when the user selects an option or types
-/// free text in the AskQuestionCard. The handler pushes the answer
-/// back to the Runtime via gRPC IntentReceived (question_answer action),
-/// which the Runtime's AgentLoop receives as InboundMessage::QuestionAnswer.
+/// ADR-033: Proxies to Runtime's `POST /sessions/{sid}/question` endpoint.
 async fn handle_question_answer(
     Path(agent_id): Path<String>,
     State(state): State<AppState>,
@@ -54,68 +48,29 @@ async fn handle_question_answer(
         agent_id = %agent_id,
         request_id = %request_id,
         answer_preview = %req.answer.chars().take(80).collect::<String>(),
+        session_id = %req.session_id,
         "Question answer received from Desktop App"
     );
 
-    // Push question_answer back to Runtime via gRPC (unified push architecture).
-    // The Runtime's AgentLoop is blocked in `await_question_answer()`
-    // waiting for InboundMessage::QuestionAnswer.
-    if let Some(ref grpc_mgr) = state.grpc_session_mgr {
-        let grpc_mgr = grpc_mgr.lock().await;
-        if let Some((_, session)) = grpc_mgr.find_by_agent_id(&agent_id) {
-            let mut params = serde_json::json!({
-                "request_id": &request_id,
-                "answer": &req.answer,
-            });
-            // Explicit session_id pass-through for multi-session routing (P0 fix)
-            if let Some(ref sid) = req.session_id {
-                params["session_id"] = serde_json::json!(sid);
-            }
-            let pushed = session
-                .push_message(GatewayResponse::IntentReceived {
-                    from: "http-api".to_string(),
-                    action: "question_answer".to_string(),
-                    params,
-                    command: None,
-                })
-                .await;
-            if !pushed {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    request_id = %request_id,
-                    "Failed to push question_answer to Runtime — gRPC channel may be closed"
-                );
-                return Err(ApiError::internal("Failed to deliver answer to Runtime"));
-            }
-            tracing::info!(
-                agent_id = %agent_id,
-                request_id = %request_id,
-                "Pushed question_answer to Runtime"
-            );
-            // Record user interaction for /api/agents sort order.
-            state
-                .gateway_state
-                .write()
-                .await
-                .touch_interaction(&agent_id, chrono::Utc::now());
-        } else {
-            tracing::warn!(
-                agent_id = %agent_id,
-                "No gRPC session found for agent — cannot push question_answer"
-            );
-            return Err(ApiError::not_found(&format!(
-                "No active session for agent '{}'",
-                agent_id
-            )));
-        }
-    } else {
-        tracing::warn!("No grpc_session_mgr available — cannot push question_answer");
-        return Err(ApiError::internal("Gateway session manager not available"));
-    }
+    // ADR-033: Proxy to Runtime HTTP POST /sessions/{sid}/question.
+    let path = format!("/sessions/{}/question", req.session_id);
+    let req_body = serde_json::json!({
+        "request_id": req.request_id,
+        "answer": req.answer,
+        "session_id": req.session_id,
+    });
+
+    crate::http::proxy::send_runtime_json(
+        &state,
+        &agent_id,
+        &path,
+        reqwest::Method::POST,
+        Some(&req_body),
+    ).await?;
 
     Ok(Json(QuestionAnswerResponse {
         request_id,
-        status: "delivered".to_string(),
+        status: "resolved".to_string(),
     }))
 }
 
@@ -141,15 +96,13 @@ mod tests {
         let req: QuestionAnswerRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.request_id, "q-1");
         assert_eq!(req.answer, "Option A");
-        assert_eq!(req.session_id, Some("sess-123".to_string()));
+        assert_eq!(req.session_id, "sess-123");
     }
 
     #[test]
     fn test_question_answer_request_no_session() {
         let json = r#"{"request_id":"q-2","answer":"My custom input"}"#;
-        let req: QuestionAnswerRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.request_id, "q-2");
-        assert_eq!(req.answer, "My custom input");
-        assert!(req.session_id.is_none());
+        let result: Result<QuestionAnswerRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "session_id is now required");
     }
 }

@@ -157,7 +157,7 @@ protoc-bin-vendored = "3"
 
 # MQTT (ADR-033)
 rumqttc = "0.24"
-rumqttd = { version = "0.14", default-features = false }
+rumqttd = { version = "0.20", default-features = false }
 
 # ONNX Runtime — static or dynamic linking.
 #

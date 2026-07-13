@@ -123,10 +123,47 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>> = None;
     let mut runtime_http_port: Option<u16> = None;
 
+    // Shared session snapshot map, created here so it can be passed to both
+    // the HTTP server (Phase A) and SessionManager (Phase B). The same Arc
+    // is shared, so session state writes are immediately visible to HTTP reads.
+    let session_snapshots: crate::agent::session_state::SharedSessionSnapshots =
+        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // Shared latest session Arc, written by SessionManager on every session
+    // creation and startup scan, read by the HTTP /sessions/latest endpoint.
+    let latest_session: crate::agent::session_state::SharedLatestSession =
+        Arc::new(std::sync::RwLock::new(None));
+
+    // ADR-033: Dispatch channel for Runtime HTTP → agent loop write operations.
+    // HTTP handlers send (session_id, InboundMessage) tuples; the gateway loop
+    // forwards them to the right session's AgentLoop via send_inbound().
+    let (http_dispatch_tx, http_dispatch_rx) = tokio::sync::mpsc::unbounded_channel::<(String, crate::agent::inbound::InboundMessage)>();
+    let http_dispatch_shared: crate::http::SharedDispatchSender =
+        Arc::new(tokio::sync::Mutex::new(Some(http_dispatch_tx)));
+
+    // ADR-033: Shared handle to the Grafeo memory store. Created empty here
+    // and populated by Phase B (`init_memory_store`) so the HTTP server can
+    // start serving requests before the store is ready. The HTTP handlers
+    // return a stable "no store" response when this is still `None`.
+    let memory_store_shared: crate::http::SharedMemoryStore =
+        Arc::new(std::sync::RwLock::new(None));
+
+    // Shared embedding-provider dimension. Starts at 0 (no provider) and
+    // is updated once `embed_dimension` is resolved below (after the HTTP
+    // server has already started listening). The memory-stats handler
+    // surfaces this as `model_dim` for HNSW dimension-mismatch detection.
+    let embed_dim_shared: crate::http::SharedEmbedDimension =
+        Arc::new(std::sync::RwLock::new(0));
+
     if let Some(_http_port) = config.http_port {
         match crate::http::RuntimeHttpServer::start(
             std::path::PathBuf::from(&config.work_dir),
             loaded.manifest.agent_id.clone(),
+            session_snapshots.clone(),
+            latest_session.clone(),
+            http_dispatch_shared,
+            memory_store_shared.clone(),
+            embed_dim_shared.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -148,14 +185,31 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         ).await {
             Ok(client) => {
                 tracing::info!(agent_id=%loaded.manifest.agent_id, "Runtime MQTT client connected");
-                // ADR-033: Publish HTTP port so Gateway can proxy session queries.
+                // ADR-033: Publish HTTP port (Retained) so Gateway can proxy session queries.
+                // Surface publish errors instead of silently swallowing them — a failed publish
+                // is the most likely cause of the Gateway returning 503 with latency=0ms
+                // (the Gateway subscribes to this retained topic on startup; if the publish
+                // never lands, the registry stays empty and every reverse-proxy request 503s).
                 if let Some(port) = runtime_http_port {
                     let topic = format!("acowork/agents/{}/http_port", loaded.manifest.agent_id);
-                    let _ = client.publish_raw(
+                    match client.publish_raw(
                         &topic,
                         port.to_string().as_bytes(),
                         crate::mqtt::client::MqttQoS::AtLeastOnce,
-                    ).await;
+                        true, // Retained — so Gateway can discover on restart
+                    ).await {
+                        Ok(()) => tracing::info!(
+                            agent_id=%loaded.manifest.agent_id,
+                            port,
+                            "Published retained http_port for Gateway reverse-proxy discovery"
+                        ),
+                        Err(e) => tracing::error!(
+                            agent_id=%loaded.manifest.agent_id,
+                            port,
+                            error=%e,
+                            "Failed to publish retained http_port — Gateway will return 503 until the Runtime restarts and re-publishes"
+                        ),
+                    }
                 }
                 mqtt_client = Some(client); available_cache = Some(cache); control_rx = Some(ctrl_rx);
             }
@@ -366,6 +420,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         provider_name = %name,
                         "✅ Embedding provider initialized successfully (Tier 1: local ONNX)"
                     );
+                    // Publish the resolved dimension to the HTTP server so the
+                    // memory-stats endpoint can report `model_dim` for
+                    // dimension-mismatch detection on the very next request.
+                    if let Ok(mut slot) = embed_dim_shared.write() {
+                        *slot = dim as u64;
+                    }
                     Some(Arc::new(ep))
                 }
                 Err(e) => {
@@ -635,7 +695,15 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         chunk_rx,
         budget,
         resource_cache,
+        session_snapshots,
+        latest_session,
         agent_id,
         version,
+        http_dispatch_rx: Some(http_dispatch_rx),
+        // ADR-033: shared memory store + embed dim are populated by Phase B
+        // and read by the Runtime HTTP memory handlers. The HTTP server was
+        // already given clones of these Arcs in the `start(...)` call above.
+        memory_store_shared,
+        embed_dim_shared,
     })
 }

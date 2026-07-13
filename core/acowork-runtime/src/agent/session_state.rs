@@ -17,6 +17,24 @@ use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 use acowork_core::providers::traits::ReasoningEffort;
 
+/// Shared map of session snapshots, keyed by session_id.
+///
+/// Used by the Runtime HTTP server to serve `GET /sessions/{sid}/state`.
+/// Each value is an `Arc<RwLock<SessionStateSnapshot>>` — the same Arc
+/// held by [`SessionHandle`], so reads are always up-to-date without
+/// explicit refresh.
+pub type SharedSessionSnapshots =
+    Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<SessionStateSnapshot>>>>>;
+
+/// Shared latest session info, updated by [`SessionManager`] and read by the
+/// Runtime HTTP server's `GET /sessions/latest` endpoint.
+///
+/// Stored as `(session_id, title)`.  The SessionManager writes to this on
+/// every session creation and on startup scan completion.  The HTTP handler
+/// reads from the same `Arc`, so it always reflects the authoritative latest
+/// session without any file-system scanning.
+pub type SharedLatestSession = Arc<RwLock<Option<(String, Option<String>)>>>;
+
 /// Lightweight snapshot of per-session runtime state.
 ///
 /// Written by `AgentLoop::emit_session_state` on every status transition
