@@ -1,4 +1,7 @@
 //! CLI definitions for Agent Runtime
+// ADR-034 Phase 8 cleanup: gRPC-era legacy references in cli.rs are preserved
+// for CLI arg backward compatibility. The gRPC gateway was superseded by MQTT
+// transport (Phase 1-5). These aliases are kept as dead code for reference.
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session::{SessionManager, SessionMessage};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
@@ -14,15 +17,6 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, reload, util::Subscrib
 
 /// Type alias for the reload handle used to dynamically change log level.
 pub type LogReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
-
-/// Retry interval when Gateway recv encounters a transient error
-const GATEWAY_RECV_RETRY_INTERVAL_MS: u64 = 100;
-
-/// Per-tool rate limit used by `RateLimitedTool` when wrapping tools at
-/// startup (`ToolRegistry::activate`) and for runtime-registered dynamic
-/// tools (`SessionManager::register_dynamic_tool`, ADR-030 C3).
-/// Hard-coded to match the value used in `startup::agent_init::phase_a_init_agent`.
-const MAX_TOOL_CALLS_PER_MINUTE: u32 = 60;
 
 /// Global reference to the SizeRollingFileAppender for runtime log rotation.
 /// Set by init_tracing() and read by the LogRotate gRPC handler.
@@ -531,6 +525,7 @@ async fn run_chat_loop(
 /// Messages are forwarded to the appropriate SessionHandle's inbound channel
 /// and the loop immediately returns to recv the next message.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub(crate) async fn run_gateway_loop(
     session_manager: &mut SessionManager,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
@@ -541,9 +536,7 @@ pub(crate) async fn run_gateway_loop(
     agent_id_for_reconnect: String,
     version_for_reconnect: String,
     log_reload_handle: Option<LogReloadHandle>,
-    skill_registry: crate::skills::parser::SkillRegistry,
     resolver: crate::tools::workspace_resolver::SharedResolver,
-    _initial_session_id: String,
     _session_idle_timeout_secs: u64,
     max_sessions: usize,
     timeouts: acowork_core::Timeouts,
@@ -577,10 +570,10 @@ pub(crate) async fn run_gateway_loop(
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some((session_id, msg)) = dispatch_result {
-                        if let Some(session) = session_manager.get_session(&session_id) {
-                            let _ = session.send_inbound(msg);
-                        }
+                    if let Some((session_id, msg)) = dispatch_result
+                        && let Some(session) = session_manager.get_session(&session_id)
+                    {
+                        let _ = session.send_inbound(msg);
                     }
                 }
 
@@ -593,7 +586,6 @@ pub(crate) async fn run_gateway_loop(
                         &resolver,
                         &agent_id_for_reconnect,
                         &version_for_reconnect,
-                        &skill_registry,
                         &budget_provider,
                         &log_reload_handle,
                         max_sessions,
@@ -773,8 +765,8 @@ pub(crate) async fn run_gateway_loop(
                                 // the select! loop from processing Gateway messages (session
 
                                 // refresh, etc.). The task holds cloned Arc/Sender handles.
-                                let store_opt = session_manager.memory_store().cloned();
-                                let embed_dim = session_manager.embedding_provider_dim();
+                                let store_opt = session_manager.core().memory_store().cloned();
+                                let embed_dim = session_manager.core().embedding_provider.as_ref().map(|p| p.dimension() as u64).unwrap_or(0);
                                 let outbound = grpc_client.outbound_ctrl_sender();
 
                                 // Handle GetLatestSessionQuery inline — reads the cached
@@ -876,7 +868,6 @@ pub(crate) async fn run_gateway_loop(
                 &resolver,
                 &agent_id_for_reconnect,
                 &version_for_reconnect,
-                &skill_registry,
                 &budget_provider,
                 &log_reload_handle,
                 max_sessions,
@@ -897,7 +888,7 @@ pub(crate) async fn run_gateway_loop(
     // entries are checkpointed to the .grafeo file on disk.  Relying
     // solely on Drop is fragile when the process is terminated via
     // Ctrl+C or the desktop app kills the child process.
-    if let Some(store) = session_manager.memory_store() {
+    if let Some(store) = session_manager.core().memory_store() {
         if let Err(e) = store.close() {
             tracing::warn!(
                 error = %e,
@@ -914,6 +905,7 @@ pub(crate) async fn run_gateway_loop(
 // ── Loop control ────────────────────────────────────────────────────────────
 
 /// Return value for process_gateway_recv to control loop flow.
+#[allow(dead_code)]
 enum LoopAction {
     Continue,
 
@@ -925,6 +917,7 @@ enum LoopAction {
 /// Process a single recv_message() result from the Gateway gRPC connection.
 /// Returns LoopAction::Continue to keep looping, LoopAction::Break to exit.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn process_gateway_recv(
     recv_result: std::result::Result<
         Option<acowork_core::protocol::GatewayResponse>,
@@ -936,7 +929,6 @@ async fn process_gateway_recv(
     resolver: &crate::tools::workspace_resolver::SharedResolver,
     agent_id_for_reconnect: &str,
     version_for_reconnect: &str,
-    skill_registry: &crate::skills::parser::SkillRegistry,
     budget_provider: &str,
     log_reload_handle: &Option<LogReloadHandle>,
     _max_sessions: usize,
@@ -952,7 +944,7 @@ async fn process_gateway_recv(
                     from,
                     action,
                     params,
-                    command,
+                    command: _,
                 } => {
                     tracing::info!("Received intent from {}: {}", from, action);
 
@@ -1309,10 +1301,11 @@ async fn process_gateway_recv(
                             .to_string();
                         tracing::info!(reason = %reason, session_id = %target_session_id, "Routing stop to session");
 
-                        // 1. Fire urgent_stop Notify for ONLY the target session —
-                        //    other sessions' LLM streaming and tool execution
-                        //    are completely unaffected.
-                        session_manager.fire_urgent_stop(&target_session_id);
+                        tracing::warn!(
+                            reason = %reason,
+                            session_id = %target_session_id,
+                            "gRPC removed (ADR-033): fire_urgent_stop is no-op"
+                        );
 
                         // 2. Deliver InboundMessage::Stop to the specific session's
                         //    AgentLoop inbox — this sets the stop flag that poll_stop()
@@ -1348,9 +1341,13 @@ async fn process_gateway_recv(
                         // immediately.
                         match session_manager.get_session(&target_session_id) {
                             Some(handle) => {
-                                if let Err(e) = handle
-                                    .send_inbound(InboundMessage::ContinueExecution { reason })
-                                {
+                                if let Err(e) = handle.send_inbound(
+                                    InboundMessage::ContinueExecution {
+                                        // ADR-034: populate session_id for Phase 2 routing.
+                                        session_id: target_session_id.clone(),
+                                        reason,
+                                    },
+                                ) {
                                     tracing::warn!(
                                         "Failed to deliver continue signal to AgentLoop: {}",
                                         e
@@ -1404,6 +1401,8 @@ async fn process_gateway_recv(
                                         approved,
                                         allow_all_session,
                                         reason,
+                                        // ADR-034: populate session_id for Phase 2 routing.
+                                        session_id: target_session_id.clone(),
                                     })
                                 {
                                     tracing::warn!(
@@ -1457,6 +1456,8 @@ async fn process_gateway_recv(
                                         request_id,
 
                                         answer,
+                                        // ADR-034: populate session_id for Phase 2 routing.
+                                        session_id: target_session_id.clone(),
                                     })
                                 {
                                     tracing::warn!(
@@ -1582,23 +1583,8 @@ async fn process_gateway_recv(
                     // Instructions are passed separately (via ContextBuilder / system prompt)
                     // instead of being prepended to the user message, making them
                     // visible in the debug panel's context snapshot.
-                    let skill_instructions = if let Some(skill_name) = command {
-                        if let Some(skill) = skill_registry.get(&skill_name) {
-                            tracing::info!(
-                                skill = %skill_name,
-                                "Resolved skill instructions for ContextBuilder injection"
-                            );
-                            Some(skill.instructions.clone())
-                        } else {
-                            tracing::warn!(
-                                skill = %skill_name,
-                                "Command skill not found in registry"
-                            );
-                            None
-                        }
-                    } else {
-                        None
-                    };
+                    // ADR-034: skill_registry removed from context — gRPC path only.
+                    let skill_instructions: Option<String> = None;
                     let message_id = params
                         .get("message_id")
                         .and_then(|v| v.as_str())
@@ -2240,7 +2226,7 @@ async fn process_gateway_recv(
                     // 1. Fire urgent_stop to ALL sessions — EnableDebugMode
                     //    requires all sessions to stop so they restart with
                     //    debug capabilities injected.
-                    session_manager.fire_urgent_stop_all();
+                    // ADR-033: gRPC removed — fire_urgent_stop_all is no-op.
 
                     // 2. Start the DebugProtocolServer and store handles so that
                     //    sessions created *after* this call inherit debug mode.
@@ -2309,7 +2295,7 @@ async fn process_gateway_recv(
                                 session_manager.register_dynamic_tool(
                                     tool,
                                     resolver.clone(),
-                                    MAX_TOOL_CALLS_PER_MINUTE,
+                                    60,
                                     true,
                                 );
                                 // Persist addition to agent_tools.json so the
@@ -2385,9 +2371,9 @@ async fn process_gateway_recv(
 
                     // Stop all sessions to prevent concurrent memory writes
                     // during migration (the user already acknowledged this).
-                    session_manager.fire_urgent_stop_all();
+                    // ADR-033: gRPC removed — fire_urgent_stop_all is no-op.
 
-                    let store = session_manager.memory_store().cloned();
+                    let store = session_manager.core().memory_store().cloned();
                     let outbound = grpc_client.outbound_ctrl_sender();
                     let req_id = request_id.clone();
                     let endpoint = embed_endpoint.clone();
@@ -2601,7 +2587,7 @@ async fn process_gateway_recv(
 
             // Don't break on transient errors — try to continue
             tokio::time::sleep(std::time::Duration::from_millis(
-                GATEWAY_RECV_RETRY_INTERVAL_MS,
+                100,
             ))
             .await;
             LoopAction::Continue
@@ -2624,6 +2610,7 @@ async fn process_gateway_recv(
 /// calls GrafeoStore methods and sends the proto response back.
 /// Spawned as a tokio task to handle a memory query without blocking the main
 /// select! loop. Takes owned data (Arc, Sender) so it can run independently.
+#[allow(dead_code)]
 async fn spawn_memory_query_handler(
     memory_store: Option<Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     embed_provider_dim: u64,
@@ -2689,6 +2676,7 @@ async fn spawn_memory_query_handler(
 ///
 /// HTTP handlers in [`crate::http::server`] call the same module and
 /// serialize the same records into JSON — keeps both paths consistent.
+#[allow(dead_code)]
 fn handle_memory_nodes_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     params: crate::http::memory_query::ListNodesParams,
@@ -2722,6 +2710,7 @@ fn handle_memory_nodes_query(
 /// Handle MemoryStatsQuery — get memory statistics.
 ///
 /// Thin adapter over [`memory_query::get_stats`].
+#[allow(dead_code)]
 fn handle_memory_stats_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     embed_provider_dim: u64,
@@ -2745,6 +2734,7 @@ fn handle_memory_stats_query(
 /// Handle MemoryDeleteQuery — delete a memory node by ID.
 ///
 /// Thin adapter over [`memory_query::delete_node`].
+#[allow(dead_code)]
 fn handle_memory_delete_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     node_id: u64,
@@ -2762,6 +2752,7 @@ fn handle_memory_delete_query(
 /// Handle MemoryConsolidateQuery — trigger memory consolidation.
 ///
 /// Thin adapter over [`memory_query::trigger_consolidate`].
+#[allow(dead_code)]
 fn handle_memory_consolidate_query(
     memory_store: Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>>,
     force: bool,
@@ -2789,6 +2780,7 @@ fn handle_memory_consolidate_query(
 ///
 /// ADR-014: Merges live session status from SessionManager into
 /// the DTOs, so the frontend gets real-time status via Pull path.
+#[allow(dead_code)]
 async fn handle_list_sessions(
     work_dir: &str,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
@@ -2919,6 +2911,7 @@ async fn handle_list_sessions(
 ///
 /// Reads paginated messages from the specified session's JSONL file
 /// and sends them back to Gateway via IntentSend.
+#[allow(dead_code)]
 async fn handle_get_session_messages(
     work_dir: &str,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
@@ -3222,6 +3215,7 @@ pub(crate) async fn relay_intent(
     }
 }
 
+#[allow(dead_code)]
 async fn send_session_response(
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
     request_id: &str,
@@ -3359,6 +3353,7 @@ pub(crate) fn resolve_skill_mode(
 ///
 /// Called when the gRPC connection drops (Gateway restart, network issue, etc.).
 /// Returns Ok(()) if reconnection succeeds, Err if all attempts fail.
+#[allow(dead_code)]
 async fn try_reconnect_gateway(
     agent_id: &str,
 

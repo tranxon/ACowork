@@ -74,6 +74,34 @@ pub(crate) async fn phase_b_init_session(
             )?)
         };
 
+    // ADR-033 (MQTT path): pre-compute the set of provider IDs that have a
+    // decrypted API key in the cached `AvailableProviders` payload. This is
+    // the MQTT-path counterpart of `hello_config.provider_key_vault` from
+    // gRPC. Without this, the Phase B is_valid check below used to only
+    // consider `hello_config` — so any provider other than the Phase A
+    // default (`gateway_current_provider_id`, taken from the first entry in
+    // the MQTT available cache) was always treated as invalid and silently
+    // overwritten back to the default model, destroying per-session
+    // model/provider choices on every restart.
+    let available_cache_provider_ids: std::collections::HashSet<String> =
+        if let Some(ref cache) = ctx.available_cache {
+            let cache_read = cache.read().await;
+            cache_read
+                .providers
+                .as_ref()
+                .map(|available| {
+                    available
+                        .providers
+                        .iter()
+                        .filter(|p| !p.api_key.is_empty())
+                        .map(|p| p.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+
     // Validate the resumed session's model/provider against the cached provider list.
     if let Some(ref conv) = conversation_session {
         let session_model = conv.model();
@@ -93,12 +121,19 @@ pub(crate) async fn phase_b_init_session(
                 if !in_cache {
                     false
                 } else {
+                    // Three independent sources can authorize a provider_id:
+                    //   1. Phase A default (`gateway_current_provider_id`) —
+                    //      the first provider with a key in the MQTT cache.
+                    //   2. gRPC `hello_config.provider_key_vault` (legacy).
+                    //   3. MQTT `available_cache` (ADR-033 Phase 2) — keys
+                    //      are shipped inline per `mqtt.md` §3.1.1.
                     ctx.gateway_current_provider_id.as_deref() == Some(provider_id.as_str())
                         || ctx.hello_config.as_ref().is_some_and(|cfg| {
                             cfg.provider_key_vault
                                 .iter()
                                 .any(|k| k.provider_id == *provider_id)
                         })
+                        || available_cache_provider_ids.contains(provider_id)
                 }
             }
             _ => true,
@@ -191,6 +226,28 @@ pub(crate) async fn phase_b_init_session(
                 key_count = vault.len(),
                 "Populated AgentCore provider_key_vault from hello_config"
             );
+        } else if let Some(ref cache) = ctx.available_cache {
+            // ADR-033 (Phase 2): MQTT path. The available cache is updated
+            // by the Runtime MQTT event loop whenever the Gateway publishes
+            // `acowork/global/providers` (retained). Each `ProviderRef`
+            // carries the decrypted API key inline (see mqtt.md §3.1.1) so
+            // the model_switch path can look up the key by provider_id.
+            let cache_read = cache.read().await;
+            if let Some(available) = cache_read.providers.as_ref() {
+                let mut vault = c.provider_key_vault.write().unwrap();
+                vault.clear();
+                for p in &available.providers {
+                    if !p.api_key.is_empty() {
+                        vault.insert(p.id.clone(), p.api_key.clone());
+                    }
+                }
+                tracing::info!(
+                    version = available.version,
+                    provider_count = available.providers.len(),
+                    key_count = vault.len(),
+                    "Populated AgentCore provider_key_vault from MQTT available cache"
+                );
+            }
         }
 
         c.memory_session = Some(ctx.memory_session.clone());
@@ -415,7 +472,6 @@ pub(crate) async fn phase_b_init_session(
     }
 
     Ok(SessionBootContext {
-        initial_session_id,
         session_manager,
         committed_lines,
     })

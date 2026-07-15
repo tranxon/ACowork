@@ -16,9 +16,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
-use crate::compat::SharedGrpcSessionMgr;
 use crate::http::auth::HttpAuth;
-use crate::compat::GlobalResourcePusher;
+use crate::resource_pusher::ResourcePusher;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
@@ -36,7 +35,7 @@ pub struct AppState {
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
     /// Unified global resource pusher (provider/model, MCP catalog, …)
-    pub pusher: Option<Arc<GlobalResourcePusher>>,
+    pub pusher: Option<Arc<ResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
     /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
@@ -48,9 +47,6 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
-    /// DEPRECATED (ADR-033): Always None — gRPC removed, kept for compilation compat.
-    #[allow(deprecated)]
-    pub grpc_session_mgr: Option<SharedGrpcSessionMgr>,
     /// DEPRECATED (ADR-033): Always empty — gRPC removed, kept for compilation compat.
     pub session_pending: SessionPendingRequests,
 }
@@ -71,7 +67,6 @@ impl AppState {
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
-            grpc_session_mgr: None,
             session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -165,9 +160,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::skills_api::skills_routes())
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
-        .merge(crate::http::approval::approval_routes())
-        .merge(crate::http::question::question_routes())
-        .merge(crate::http::documents::documents_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())

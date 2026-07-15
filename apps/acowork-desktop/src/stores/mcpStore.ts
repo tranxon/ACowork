@@ -10,7 +10,6 @@ import { emitAgentConfigRefresh } from "../lib/refresh";
 import type {
   McpCatalogEntryResponse,
   McpServerConfigDef,
-  AgentMcpServersResponse,
   McpProbeResponse,
   McpHealthStatus,
 } from "../lib/types";
@@ -202,11 +201,11 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       error: null,
     }));
     try {
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-servers`);
+      const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/tools`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = (await resp.json()) as AgentMcpServersResponse;
+      const data = await resp.json() as { mcp_servers?: string[] };
       set((s) => ({
-        activeServers: { ...s.activeServers, [agentId]: data.active_servers },
+        activeServers: { ...s.activeServers, [agentId]: data.mcp_servers ?? [] },
         activationLoading: { ...s.activationLoading, [agentId]: false },
       }));
     } catch (e: unknown) {

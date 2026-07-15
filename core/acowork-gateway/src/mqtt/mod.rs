@@ -12,9 +12,9 @@
 //!   Gateway's own MQTT client (`client_id: gateway:publisher`) that
 //!   publishes `acowork/global/{kind}` Retained topics.
 //! - **ACL** (`acl.rs`): Access control configuration (permissive in Phase 1).
-//! - **Router** (`router.rs`): Topic matching for incoming messages (Phase 2+).
-//! - **Agent Registry** (`agent_registry.rs`): Online status tracking (Phase 2+).
-//! - **Dispatch** (`dispatch.rs`): Message → handler routing (Phase 2+).
+//! - **Agent Registry** (`agent_registry.rs`): Online status tracking via LWT.
+//! - **Dispatch** (`dispatch.rs`): Plain-text MQTT message dispatcher
+//!   (http_port registration + agent status update) with topic wildcard matcher.
 //!
 //! See `docs/zh/protocols/mqtt.md` for the full protocol specification.
 
@@ -24,7 +24,6 @@ pub mod broker;
 pub mod client;
 pub mod dispatch;
 pub mod global_resources_publisher;
-pub mod router;
 pub mod sidecar;
 
 // Re-export key types

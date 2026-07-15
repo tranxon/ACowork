@@ -161,30 +161,11 @@ impl DesktopMqttClient {
         Ok(())
     }
 
-    /// Subscribe to all session events for a specific agent.
-    ///
-    /// Subscribes to ALL sessions of the agent. For per-session subscriptions,
-    /// use `subscribe_agent_session` instead to avoid bandwidth waste.
-    #[deprecated = "ADR-033: Use subscribe_agent_session() for per-session subscriptions to avoid bandwidth waste when an agent has many sessions"]
-    pub async fn subscribe_agent_sessions(&self, agent_id: &str) -> Result<(), String> {
-        let filter = format!("acowork/agents/{}/sessions/+/meta", agent_id);
-        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
-
-        let filter = format!("acowork/agents/{}/sessions/+/config", agent_id);
-        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
-
-        let filter = format!("acowork/agents/{}/sessions/+/messages/#", agent_id);
-        self.subscribe(&filter, MqttQoS::AtMostOnce).await?;
-
-        tracing::info!(agent_id, "Subscribed to agent session topics");
-        Ok(())
-    }
-
     /// Subscribe to events for a single session of a specific agent.
     ///
-    /// Recommended over `subscribe_agent_sessions()` when the Desktop only
-    /// displays one active session at a time — avoids receiving events from
-    /// other sessions and wasting bandwidth/CPU.
+    /// Use this when the Desktop only displays one active session at a time
+    /// to avoid receiving events from other sessions and wasting
+    /// bandwidth/CPU.
     #[allow(dead_code)]
     pub async fn subscribe_agent_session(
         &self,
@@ -259,20 +240,6 @@ impl DesktopMqttClient {
             .map_err(|e| format!("publish control '{}': {}", command, e))
     }
 
-    /// Publish a control command as JSON text.
-    #[deprecated = "ADR-033: Use publish_control_protobuf() instead — all MQTT payloads must be DataEnvelope protobuf per mqtt.md §4"]
-    #[allow(dead_code)]
-    pub async fn publish_control_json(
-        &self,
-        agent_id: &str,
-        command: &str,
-        json: &serde_json::Value,
-    ) -> Result<(), String> {
-        let payload = serde_json::to_vec(json)
-            .map_err(|e| format!("serialize control payload: {}", e))?;
-        self.publish_control(agent_id, command, &payload).await
-    }
-
     /// Publish a control command as a `DataEnvelope` protobuf payload.
     ///
     /// This is the canonical way to send control commands via MQTT
@@ -295,16 +262,25 @@ impl DesktopMqttClient {
                 match &cmd.command {
                     Some(mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
                     Some(mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
-                    Some(mqtt_proto::control_command::Command::Message(_)) => "message",
+                    Some(mqtt_proto::control_command::Command::CloseSession(_)) => "close_session",
+                    Some(mqtt_proto::control_command::Command::UpdateSessionTitle(_)) => "update_session_title",
+                    Some(mqtt_proto::control_command::Command::ChatMessage(_)) => "chat_message",
                     Some(mqtt_proto::control_command::Command::Stop(_)) => "stop",
+                    Some(mqtt_proto::control_command::Command::ContinueExecution(_)) => "continue_execution",
+                    Some(mqtt_proto::control_command::Command::EnableNotify(_)) => "enable_notify",
+                    Some(mqtt_proto::control_command::Command::DisableNotify(_)) => "disable_notify",
+                    Some(mqtt_proto::control_command::Command::ApprovalDecision(_)) => "approval_decision",
+                    Some(mqtt_proto::control_command::Command::QuestionAnswer(_)) => "question_answer",
                     Some(mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
                     Some(mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
+                    Some(mqtt_proto::control_command::Command::WorkspaceSwitch(_)) => "workspace_switch",
                     Some(mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
-                    None => "message", // fallback
-                    _ => "message",
+                    Some(mqtt_proto::control_command::Command::CompressAction(_)) => "compress_action",
+                    Some(mqtt_proto::control_command::Command::Intent(_)) => "intent",
+                    None => "chat_message",
                 }
             }
-            _ => "message",
+            _ => "chat_message",
         };
 
         self.publish_control(agent_id, command, &payload).await

@@ -586,12 +586,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
    *  ADR-033: Sent via MQTT compact_context (no dedicated compress_action in MQTT proto). */
-  sendCompressAction: (agentId: string, sessionId: string, _compressType: string) => {
-    // ADR-033: Route via MQTT compact_context (the closest MQTT equivalent)
+  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => {
+    // ADR-034 Phase 5: Use dedicated compress_action command with compress_type
     invoke("mqtt_publish_control", {
       agentId,
-      command: "compact_context",
-      payloadJson: { session_id: sessionId },
+      command: "compress_action",
+      payloadJson: { session_id: sessionId, compress_type: compressType },
     }).catch((err: unknown) => console.warn("[ChatStore] compress_action via MQTT failed:", err));
   },
 
@@ -836,43 +836,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
 
-    // ADR-033: Try MQTT first for simple text messages (fast path).
-    // For messages with extra payload (documents, images, attached context),
-    // fall back to HTTP since the MQTT MessageCommand proto doesn't carry
-    // those fields yet.
-    const hasExtraPayload = !!(documentIds?.length || contentParts || attachedContextPayload);
+    // ADR-034 Phase 5: All messages sent via MQTT with params_json for rich payload.
+    // HTTP fallback removed — Gateway no longer has send_message endpoint.
+    const params: Record<string, unknown> = {};
+    if (documentIds?.length) params.document_ids = documentIds;
+    if (contentParts?.length) params.content_parts = contentParts;
+    if (attachedContextPayload?.length) params.attached_context = attachedContextPayload;
+    const paramsJson = Object.keys(params).length > 0 ? JSON.stringify(params) : "";
 
-    if (!hasExtraPayload && sessionId) {
-      try {
-        await invoke("mqtt_publish_control", {
-          agentId,
-          command: "message",
-          payloadJson: {
-            session_id: sessionId,
-            message_id: userMsgId,
-            content,
-          },
-        });
-        console.log("[ChatStore] Message sent via MQTT:", userMsgId);
-        return;
-      } catch (err) {
-        console.warn("[ChatStore] MQTT message send failed, falling back to HTTP:", err);
-      }
-    }
-
-    // Fallback: send via Tauri HTTP command (supports all payload fields)
     try {
-      const result = await invoke<{ message_id: string; status: string }>(
-        "send_message",
-        { agentId, content, messageId: userMsgId, command, sessionId, documentIds, attachedContext: attachedContextPayload },
-      );
-      console.log("[ChatStore] Message sent via HTTP:", result);
-      if (hasExtraPayload) {
-        // For messages with extra payload, streaming events will arrive via MQTT
-        // since the Runtime still publishes session messages via MQTT.
-      }
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "chat_message",
+        payloadJson: {
+          session_id: sessionId,
+          message_id: userMsgId,
+          content,
+          command: command ?? "",
+          params_json: paramsJson,
+        },
+      });
+      console.log("[ChatStore] Message sent via MQTT:", userMsgId);
     } catch (error) {
-      console.error("[ChatStore] HTTP message send failed:", error);
+      console.error("[ChatStore] MQTT message send failed:", error);
       const errorMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
         type: "system",
@@ -892,12 +878,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   stopCurrentMessage: async (agentId: string) => {
     console.log("[ChatStore] Stopping current message for agent:", agentId);
 
-    // ADR-033: Send stop via MQTT
+    // ADR-034 Phase 5: Send stop via MQTT with reason
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     invoke("mqtt_publish_control", {
       agentId,
       command: "stop",
-      payloadJson: { session_id: sessionId },
+      payloadJson: { session_id: sessionId, reason: "user_requested" },
     }).catch((err: unknown) => console.warn("[ChatStore] stop via MQTT failed:", err));
 
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
@@ -910,12 +896,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   sendStop: (agentId: string) => {
-    // ADR-033: Send stop via MQTT
+    // ADR-034 Phase 5: Send stop via MQTT with reason
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     invoke("mqtt_publish_control", {
       agentId,
       command: "stop",
-      payloadJson: { session_id: sessionId },
+      payloadJson: { session_id: sessionId, reason: "user_requested" },
     }).catch((err: unknown) => console.warn("[ChatStore] sendStop via MQTT failed:", err));
 
     // Optimistic: immediately mark as stopping so the UI exits "working" state
@@ -961,11 +947,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Update agent's default model (new sessions inherit this)
     set((state) => updateAgentState(state, agentId, { preferredModel: model, preferredProvider: provider }));
 
-    // ADR-033: Send model switch via MQTT
+    // ADR-033: Send model switch via MQTT.
+    // `provider_id` mirrors the gRPC/WebSocket-era payload field
+    // (`params["provider"]` extracted by `cli.rs::process_gateway_recv`).
+    // The Runtime uses it to rebuild the per-session Provider instance when
+    // the user picks a model from a different provider (e.g. switching
+    // deepseek-v4-flash → minimax-cn-coding-plan/MiniMax-M3). Without
+    // this field, the LLM call would still target the previous provider's
+    // base_url and yield 401 errors on the new model's endpoint.
     invoke("mqtt_publish_control", {
       agentId,
       command: "model_switch",
-      payloadJson: { model_id: model, session_id: sessionId },
+      payloadJson: { model_id: model, session_id: sessionId, provider_id: provider },
     }).catch((err: unknown) => console.warn("[ChatStore] model_switch via MQTT failed:", err));
   },
 
@@ -996,22 +989,32 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   continueExecution: async (agentId: string) => {
     try {
       const sessionId = getAgentState(get(), agentId).activeSessionId;
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/continue`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...(sessionId ? { session_id: sessionId } : {}) }),
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "continue_execution",
+        payloadJson: {
+          session_id: sessionId ?? "",
+          reason: "user_requested",
+        },
       });
-      if (resp.ok) {
-        if (sessionId) {
-          set((state) => ({
-            ...updateSessionState(state, agentId, sessionId, { iterationLimitPaused: null }),
-          }));
-        }
+      if (sessionId) {
+        set((state) => ({
+          ...updateSessionState(state, agentId, sessionId, { iterationLimitPaused: null }),
+        }));
       }
     } catch (error) {
       console.error("[ChatStore] Failed to send continue signal:", error);
     }
   },
+
+  publishUpdateSessionTitle: (agentId: string, sessionId: string, title: string) => {
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "update_session_title",
+      payloadJson: { session_id: sessionId, title },
+    }).catch((err: unknown) => console.warn("[ChatStore] update_session_title via MQTT failed:", err));
+  },
+
   resolveApproval: (agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
@@ -1435,7 +1438,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   fetchSessionState: async (agentId: string, sessionId: string) => {
     try {
       const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/state`,
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
       );
       if (!resp.ok) {
         console.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
@@ -1944,9 +1947,26 @@ function handleMessageEvent(
 
     case "context_usage": {
       if (sid) {
-        const usage = data as unknown as ContextUsageInfo;
-        console.log("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
-        set((state) => updateSessionState(state, agentId, sid, { contextUsage: usage, isCompacting: false }));
+        // ADR-033: Runtime now publishes a fully-populated `ContextUsageInfo`
+        // under `data.context_usage` (serialised from `ContextUsagePayload.context_usage_json`).
+        // The top-level `input_tokens` / `output_tokens` / `total_*_tokens` fields
+        // are legacy per-turn counts only and must NOT be used to populate
+        // `ContextUsageInfo` — they lack `context_window` / `total_tokens` /
+        // `usage_percent` / `usable_context`, which the StatusBar reads.
+        const nested = (data as Record<string, unknown>).context_usage;
+        const usage: ContextUsageInfo | null =
+          nested && typeof nested === "object"
+            ? (nested as ContextUsageInfo)
+            : null;
+        if (usage) {
+          console.log("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
+          set((state) => updateSessionState(state, agentId, sid, { contextUsage: usage, isCompacting: false }));
+        } else {
+          console.warn(
+            "[ChatStore] context_usage event missing nested context_usage payload — skipping StatusBar update to avoid undefined fields:",
+            data,
+          );
+        }
       }
       break;
     }
@@ -2086,6 +2106,37 @@ function handleMessageEvent(
           set((state) => updateSessionState(state, agentId, sid, { todos }));
         }
       }
+      break;
+    }
+
+    // Session lifecycle (Runtime → Desktop, ADR-033 Phase 4).
+    // Backend publishes `acowork/agents/{id}/sessions/{created|deleted}`
+    // protobuf events whenever a session is created or destroyed (close/delete).
+    // We refresh the session list so the UI reflects the change immediately,
+    // and auto-activate a freshly created session so the user's "+" button click
+    // lands them on the new chat without a follow-up click.
+    case "session_created": {
+      const newSessionId = data.session_id as string | undefined;
+      if (!newSessionId) break;
+      const agentStore = useAgentStore.getState();
+      // Refresh the list first so the new entry is rendered.
+      agentStore.fetchSessions(agentId).catch((e) => {
+        console.warn("[ChatStore] fetchSessions after session_created failed:", e);
+      });
+      // Auto-activate the new session — matches the "+" button UX where the
+      // user expects to land on the empty new chat immediately.
+      agentStore.switchSession(newSessionId, agentId);
+      break;
+    }
+
+    case "session_deleted": {
+      // Refresh the session list so the deleted entry disappears from the UI.
+      const deletedSessionId = data.session_id as string | undefined;
+      if (!deletedSessionId) break;
+      const agentStore = useAgentStore.getState();
+      agentStore.fetchSessions(agentId).catch((e) => {
+        console.warn("[ChatStore] fetchSessions after session_deleted failed:", e);
+      });
       break;
     }
 

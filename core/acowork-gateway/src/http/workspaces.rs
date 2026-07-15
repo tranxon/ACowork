@@ -10,16 +10,21 @@
 //! to agent_workspaces.json on startup by Runtime.
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::path::Path as StdPath;
-use uuid::Uuid;
 
 use crate::http::routes::{ApiError, AppState};
+
+/// Workspace configuration file structure (for JSON serialization)
+#[derive(Debug, Serialize, Deserialize)]
+struct WorkspaceConfig {
+    pub version: String,
+    pub additional_dirs: Vec<WorkspaceDir>,
+}
 
 /// Workspace directory entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,297 +58,9 @@ pub enum AccessLevel {
     ReadWrite,
 }
 
-/// Workspace configuration file structure (for JSON serialization)
-#[derive(Debug, Serialize, Deserialize)]
-struct WorkspaceConfig {
-    pub version: String,
-    pub additional_dirs: Vec<WorkspaceDir>,
-}
-
-/// Request to add a workspace directory
-#[derive(Debug, Deserialize)]
-pub struct AddWorkspaceRequest {
-    pub path: String,
-    pub alias: Option<String>,
-    pub access: AccessLevel,
-}
-
-/// Request to set the current (active) workspace
-#[derive(Debug, Deserialize)]
-pub struct SetCurrentWorkspaceRequest {
-    pub workspace_id: String,
-}
-
-/// Query parameters for set_current_workspace (optional session_id for per-session selection).
-#[derive(Debug, Deserialize, Default)]
-pub struct SetCurrentWorkspaceQuery {
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-/// Request to update a workspace directory
-#[derive(Debug, Deserialize)]
-pub struct UpdateWorkspaceRequest {
-    pub access: Option<AccessLevel>,
-    pub alias: Option<String>,
-}
-
-/// Request to set/unset prompt file for a workspace
-#[derive(Debug, Deserialize)]
-pub struct SetPromptFileRequest {
-    pub prompt_file: Option<String>,
-}
-
-/// List of workspace directories
-#[derive(Debug, Serialize)]
-pub struct WorkspaceListResponse {
-    pub agent_id: String,
-    pub workspaces: Vec<WorkspaceDir>,
-}
-
-/// Helper: get workspace config from RunningAgentInfo cache.
-/// Returns None if agent not running.
-async fn get_cached_config(state: &AppState, agent_id: &str) -> Option<WorkspaceConfig> {
-    let gw = state.gateway_state.read().await;
-    let info = gw.running_agents.get(agent_id)?;
-    let json = info.workspace_config_json.as_ref()?;
-    serde_json::from_str(json).ok()
-}
-
-/// Helper: update the workspace config in-memory cache.
-///
-/// ADR-033: gRPC push replaced with MQTT. Workspace config mutations are
-/// persisted to the in-memory cache. Runtime reads agent_workspaces.json on
-/// startup and applies it; live updates are not supported in MQTT mode.
-async fn push_and_cache(
-    state: &AppState,
-    agent_id: &str,
-    config: &WorkspaceConfig,
-) -> Result<(), String> {
-    let config_json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-
-    // ADR-033: No live push channel available (gRPC removed, no MQTT equivalent).
-    // Persist to in-memory cache. Runtime reads agent_workspaces.json on startup.
-    tracing::info!(
-        agent_id = %agent_id,
-        "Workspace config updated in cache (Runtime will pick up on restart)"
-    );
-
-    // Update in-memory cache
-    {
-        let mut gw = state.gateway_state.write().await;
-        if let Some(info) = gw.running_agents.get_mut(agent_id) {
-            info.workspace_config_json = Some(config_json);
-        }
-    }
-
-    Ok(())
-}
-
-// ─── Handlers ────────────────────────────────────────────────────────────
 
 
 
-/// `POST /api/agents/{agent_id}/workspaces` — add a workspace directory
-pub async fn add_workspace(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<AddWorkspaceRequest>,
-) -> Result<(StatusCode, Json<WorkspaceDir>), (StatusCode, Json<ApiError>)> {
-    // Validate path exists and is a directory
-    if !StdPath::new(&req.path).is_dir() {
-        return Err(ApiError::bad_request(&format!(
-            "Directory not found: {}",
-            req.path
-        )));
-    }
-
-    // Load current config from cache
-    let mut config = get_cached_config(&state, &agent_id)
-        .await
-        .ok_or_else(|| ApiError::not_found("Agent not running — cannot add workspace"))?;
-
-    // Check for duplicate path
-    if config.additional_dirs.iter().any(|d| d.path == req.path) {
-        return Err(ApiError::bad_request(
-            "Directory already exists in workspace list",
-        ));
-    }
-
-    // Create new entry
-    let new_dir = WorkspaceDir {
-        id: format!("ws-{}", &Uuid::new_v4().to_string().replace("-", "")[..12]),
-        path: req.path.clone(),
-        alias: req.alias,
-        access: req.access,
-        added_at: chrono::Utc::now().to_rfc3339(),
-        last_active: false,
-        select_count: 0,
-        last_selected_at: None,
-        prompt_file: None,
-    };
-
-    let result = new_dir.clone();
-    config.additional_dirs.push(new_dir);
-
-    // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    Ok((StatusCode::CREATED, Json(result)))
-}
-
-/// `PUT /api/agents/{agent_id}/workspaces/{ws_id}` — update a workspace directory
-pub async fn update_workspace(
-    State(state): State<AppState>,
-    Path((agent_id, ws_id)): Path<(String, String)>,
-    Json(req): Json<UpdateWorkspaceRequest>,
-) -> Result<Json<WorkspaceDir>, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id)
-        .await
-        .ok_or_else(|| ApiError::not_found("Agent not running — cannot update workspace"))?;
-
-    // Find and update directory
-    let dir = config
-        .additional_dirs
-        .iter_mut()
-        .find(|d| d.id == ws_id)
-        .ok_or_else(|| ApiError::not_found(&format!("Workspace directory not found: {}", ws_id)))?;
-
-    if let Some(access) = req.access {
-        dir.access = access;
-    }
-    if let Some(alias) = req.alias {
-        dir.alias = Some(alias);
-    }
-
-    let updated = dir.clone();
-
-    // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    Ok(Json(updated))
-}
-
-/// `PUT /api/agents/{agent_id}/workspaces/{ws_id}/prompt-file` — set/unset prompt file for a workspace
-pub async fn set_prompt_file(
-    State(state): State<AppState>,
-    Path((agent_id, ws_id)): Path<(String, String)>,
-    Json(req): Json<SetPromptFileRequest>,
-) -> Result<Json<WorkspaceDir>, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id)
-        .await
-        .ok_or_else(|| ApiError::not_found("Agent not running — cannot update workspace"))?;
-
-    // Find and update directory
-    let dir = config
-        .additional_dirs
-        .iter_mut()
-        .find(|d| d.id == ws_id)
-        .ok_or_else(|| ApiError::not_found(&format!("Workspace directory not found: {}", ws_id)))?;
-
-    dir.prompt_file = req.prompt_file;
-    let updated = dir.clone();
-
-    // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    Ok(Json(updated))
-}
-
-/// `PUT /api/agents/{agent_id}/workspaces/current` — set the current (active) workspace
-///
-/// Optional query param `session_id` enables per-session workspace selection.
-/// When provided, Gateway also sends `SetSessionWorkspace` gRPC to the Runtime
-/// in addition to the `WorkspaceConfigUpdate` (which updates list stats).
-pub async fn set_current_workspace(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Query(query): Query<SetCurrentWorkspaceQuery>,
-    Json(req): Json<SetCurrentWorkspaceRequest>,
-) -> Result<Json<WorkspaceListResponse>, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id)
-        .await
-        .ok_or_else(|| ApiError::not_found("Agent not running — cannot set workspace"))?;
-
-    // Validate workspace: either "__agent_home__" or an existing workspace ID
-    let is_agent_home = req.workspace_id == "__agent_home__";
-    if !is_agent_home
-        && !config
-            .additional_dirs
-            .iter()
-            .any(|d| d.id == req.workspace_id)
-    {
-        return Err(ApiError::not_found(&format!(
-            "Workspace directory not found: {}",
-            req.workspace_id
-        )));
-    }
-
-    // ADR-033: gRPC removed — SetSessionWorkspace push is no longer
-    // supported. Session workspace is tracked by the Runtime via MQTT
-    // context. The workspace stats (select_count, timestamps) are updated
-    // in the in-memory cache below.
-    let _ = query.session_id;
-
-    // Update select_count and last_selected_at for the selected workspace (if it's a user workspace)
-    if !is_agent_home {
-        let now = chrono::Utc::now().to_rfc3339();
-        for dir in &mut config.additional_dirs {
-            if dir.id == req.workspace_id {
-                dir.last_active = true;
-                dir.select_count += 1;
-                dir.last_selected_at = Some(now.clone());
-            } else {
-                dir.last_active = false;
-            }
-        }
-    }
-
-    // Push WorkspaceConfigUpdate to Runtime (updates list stats + cache)
-    push_and_cache(&state, &agent_id, &config)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    Ok(Json(WorkspaceListResponse {
-        agent_id,
-        workspaces: config.additional_dirs,
-    }))
-}
-
-/// `DELETE /api/agents/{agent_id}/workspaces/{ws_id}` — remove a workspace directory
-pub async fn delete_workspace(
-    State(state): State<AppState>,
-    Path((agent_id, ws_id)): Path<(String, String)>,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let mut config = get_cached_config(&state, &agent_id)
-        .await
-        .ok_or_else(|| ApiError::not_found("Agent not running — cannot delete workspace"))?;
-
-    // Check if exists
-    if !config.additional_dirs.iter().any(|d| d.id == ws_id) {
-        return Err(ApiError::not_found(&format!(
-            "Workspace directory not found: {}",
-            ws_id
-        )));
-    }
-
-    // Remove directory
-    config.additional_dirs.retain(|d| d.id != ws_id);
-
-    // Push to Runtime + update cache
-    push_and_cache(&state, &agent_id, &config)
-        .await
-        .map_err(|e| ApiError::internal(&e))?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
 
 // ─── File Tree Explorer API ─────────────────────────────────────────────
 
@@ -567,13 +284,13 @@ pub struct DeleteRequest {
 /// Shared between tree and file APIs.
 async fn resolve_workspace_root(
     state: &AppState,
-    agent_id: &str,
+    id: &str,
     workspace_id: Option<&str>,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
     let info = gw
         .running_agents
-        .get(agent_id)
+        .get(id)
         .ok_or_else(|| ApiError::not_found("Agent not running — cannot access workspace"))?;
 
     let ws_id = workspace_id.unwrap_or("");
@@ -600,10 +317,10 @@ async fn resolve_workspace_root(
     }
 }
 
-/// `GET /api/agents/{agent_id}/workspaces/file` — read a file's content
+/// `GET /api/agents/{id}/workspaces/file` — read a file's content
 pub async fn read_file(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<FileResponse>, (StatusCode, Json<ApiError>)> {
     let file_rel_path = query.path.as_deref().unwrap_or("");
@@ -612,7 +329,7 @@ pub async fn read_file(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -668,14 +385,14 @@ pub async fn read_file(
     }))
 }
 
-/// `GET /api/agents/{agent_id}/workspaces/file-raw` — read a file's raw bytes
+/// `GET /api/agents/{id}/workspaces/file-raw` — read a file's raw bytes
 ///
 /// Returns the file content directly (not wrapped in JSON) with the correct
 /// Content-Type header. This is used for iframe src URLs (HTML preview, etc.)
 /// where a proper HTTP origin is required for scripts to load without CORS issues.
 pub async fn read_raw_file(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<(StatusCode, [(String, String); 1], axum::body::Body), (StatusCode, Json<ApiError>)> {
     let file_rel_path = query.path.as_deref().unwrap_or("");
@@ -684,7 +401,7 @@ pub async fn read_raw_file(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -799,10 +516,10 @@ pub async fn serve_workspace_ws_file(
     serve_workspace_file_from_root(workspace_root, &file_rel_path)
 }
 
-/// `PUT /api/agents/{agent_id}/workspaces/file` — write content to a file
+/// `PUT /api/agents/{id}/workspaces/file` — write content to a file
 pub async fn write_file(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<WriteFileRequest>,
 ) -> Result<Json<WriteFileResponse>, (StatusCode, Json<ApiError>)> {
@@ -827,7 +544,7 @@ pub async fn write_file(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -844,7 +561,7 @@ pub async fn write_file(
     // Check write access for read-only workspaces
     {
         let gw = state.gateway_state.read().await;
-        if let Some(info) = gw.running_agents.get(&agent_id) {
+        if let Some(info) = gw.running_agents.get(&id) {
             let ws_id = query.workspace_id.as_deref().unwrap_or("");
             if !ws_id.is_empty() && ws_id != "__agent_home__"
                 && let Some(config) = info
@@ -870,10 +587,10 @@ pub async fn write_file(
     }))
 }
 
-/// `POST /api/agents/{agent_id}/workspaces/file` — create an empty new file
+/// `POST /api/agents/{id}/workspaces/file` — create an empty new file
 pub async fn create_file(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<CreateFileRequest>,
 ) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
@@ -887,7 +604,7 @@ pub async fn create_file(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -917,10 +634,10 @@ pub async fn create_file(
     ))
 }
 
-/// `POST /api/agents/{agent_id}/workspaces/dir` — create a new directory
+/// `POST /api/agents/{id}/workspaces/dir` — create a new directory
 pub async fn create_dir(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<CreateFileRequest>,
 ) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
@@ -934,7 +651,7 @@ pub async fn create_dir(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -953,10 +670,10 @@ pub async fn create_dir(
 
 // ─── Delete / Copy API ─────────────────────────────────────────────────
 
-/// `DELETE /api/agents/{agent_id}/workspaces/file` — delete a file
+/// `DELETE /api/agents/{id}/workspaces/file` — delete a file
 pub async fn delete_file(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<CreateFileResponse>, (StatusCode, Json<ApiError>)> {
@@ -970,7 +687,7 @@ pub async fn delete_file(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -993,10 +710,10 @@ pub async fn delete_file(
     }))
 }
 
-/// `DELETE /api/agents/{agent_id}/workspaces/dir` — delete a directory recursively
+/// `DELETE /api/agents/{id}/workspaces/dir` — delete a directory recursively
 pub async fn delete_dir(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<DeleteRequest>,
 ) -> Result<Json<CreateFileResponse>, (StatusCode, Json<ApiError>)> {
@@ -1010,7 +727,7 @@ pub async fn delete_dir(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_path, _rel_path) =
         resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
@@ -1055,10 +772,10 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     Ok(())
 }
 
-/// `POST /api/agents/{agent_id}/workspaces/copy` — copy a file or directory
+/// `POST /api/agents/{id}/workspaces/copy` — copy a file or directory
 pub async fn copy_item(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FileQuery>,
     Json(req): Json<CopyRequest>,
 ) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
@@ -1069,7 +786,7 @@ pub async fn copy_item(
     }
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let (_canonical_root, abs_src, _rel_src) =
         resolve_tree_path(&workspace_root, &req.source).map_err(|e| ApiError::bad_request(&e))?;
@@ -1153,7 +870,7 @@ pub struct SearchResponse {
     pub truncated: bool,
 }
 
-/// `GET /api/agents/{agent_id}/workspaces/search` — search file contents
+/// `GET /api/agents/{id}/workspaces/search` — search file contents
 ///
 /// Uses the `ignore` crate (same as ripgrep) for .gitignore-aware file
 /// traversal and regex matching. Results are case-insensitive by default.
@@ -1162,7 +879,7 @@ pub struct SearchResponse {
 /// `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 pub async fn search_files(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ApiError>)> {
     let pattern = query.q.as_deref().unwrap_or("");
@@ -1184,7 +901,7 @@ pub async fn search_files(
 
     // Resolve workspace root
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     let max_results = query.max_results.unwrap_or(200).min(1000);
     let include_glob = query.include.map(|s| s.to_string());
@@ -1383,7 +1100,7 @@ pub struct FindResponse {
     pub matches: Vec<FindMatch>,
 }
 
-/// `GET /api/agents/{agent_id}/workspaces/find` — search for files/dirs by name
+/// `GET /api/agents/{id}/workspaces/find` — search for files/dirs by name
 ///
 /// Walks the workspace with the `ignore` crate (respects `.gitignore`,
 /// skips hidden/system directories) and ranks entries whose name or path
@@ -1403,7 +1120,7 @@ pub struct FindResponse {
 /// Tie-break: shorter path, then alphabetical.
 pub async fn find_files(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(query): Query<FindQuery>,
 ) -> Result<Json<FindResponse>, (StatusCode, Json<ApiError>)> {
     let pattern = query.q.as_deref().unwrap_or("").trim();
@@ -1419,7 +1136,7 @@ pub async fn find_files(
         .clamp(1, MAX_FILENAME_LIMIT);
 
     let workspace_root =
-        resolve_workspace_root(&state, &agent_id, query.workspace_id.as_deref()).await?;
+        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
 
     // Offload the synchronous walk + scoring to a blocking thread.
     let result = tokio::task::spawn_blocking(move || {
@@ -1619,46 +1336,27 @@ fn match_word_boundary(name: &str, seg: &str) -> bool {
 
 // ─── Routes ─────────────────────────────────────────────────────────────
 
-use axum::Router;
-use axum::routing::{post, put};
-
 /// Create workspace management routes
 pub fn workspace_routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/agents/{agent_id}/workspaces",
-            post(add_workspace),
-        )
-        .route(
-            "/api/agents/{agent_id}/workspaces/current",
-            put(set_current_workspace),
-        )
-        .route(
-            "/api/agents/{agent_id}/workspaces/{ws_id}",
-            put(update_workspace).delete(delete_workspace),
-        )
-        .route(
-            "/api/agents/{agent_id}/workspaces/{ws_id}/prompt-file",
-            put(set_prompt_file),
-        )
-        .route("/api/agents/{agent_id}/workspaces/find", get(find_files))
-        .route("/api/agents/{agent_id}/workspaces/file",
+        .route("/api/agents/{id}/workspaces/find", get(find_files))
+        .route("/api/agents/{id}/workspaces/file",
             get(read_file)
                 .put(write_file)
                 .post(create_file)
                 .delete(delete_file),
         )
         .route(
-            "/api/agents/{agent_id}/workspaces/file-raw",
+            "/api/agents/{id}/workspaces/file-raw",
             get(read_raw_file),
         )
         .route(
-            "/api/agents/{agent_id}/workspaces/dir",
+            "/api/agents/{id}/workspaces/dir",
             post(create_dir).delete(delete_dir),
         )
-        .route("/api/agents/{agent_id}/workspaces/copy", post(copy_item))
+        .route("/api/agents/{id}/workspaces/copy", post(copy_item))
         .route(
-            "/api/agents/{agent_id}/workspaces/search",
+            "/api/agents/{id}/workspaces/search",
             get(search_files),
         )
         .route(

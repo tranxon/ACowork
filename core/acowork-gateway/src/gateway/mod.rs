@@ -13,7 +13,7 @@ use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
-use crate::compat::GlobalResourcePusher;
+use crate::resource_pusher::ResourcePusher;
 use crate::handlers::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
@@ -633,8 +633,7 @@ impl Gateway {
 
         // Create unified global resource pusher for hot-push of provider_list,
         // search_config, MCP catalog, and user profile changes to running agents.
-        let pusher: Option<Arc<GlobalResourcePusher>> = Some(Arc::new(GlobalResourcePusher::new(
-            None,
+        let pusher: Option<Arc<ResourcePusher>> = Some(Arc::new(ResourcePusher::new(
             http_state.clone(),
             data_dir_path.clone(),
         )));
@@ -790,8 +789,7 @@ impl Gateway {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
-                // Unified dispatch: try DataEnvelope (protobuf) first,
-                // then fall through to plaintext (http_port, status).
+                // Plain-text dispatch (http_port, status, …)
                 crate::mqtt::dispatch::handle_message(
                     &topic, &payload,
                     &reg_for_dispatch,
@@ -802,13 +800,13 @@ impl Gateway {
             match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected");
-                    let client = c.clone();
+                    let client = Arc::new(c.clone());
+                    let client_for_subs = client.clone();
                     tokio::spawn(async move {
                         // Surface subscription errors instead of silently swallowing them —
-                        // if either subscription fails, the Gateway's runtime_http_registry
-                        // and agent_registry will stay empty and every reverse-proxy request
-                        // will 503 (latency=0) with no diagnostic trail.
-                        if let Err(e) = client
+                        // if any subscription fails, downstream state will be stale with no
+                        // diagnostic trail (latency=0, 503s, agent list empty, etc.).
+                        if let Err(e) = client_for_subs
                             .subscribe("acowork/agents/+/http_port", crate::mqtt::MqttQoS::AtLeastOnce)
                             .await
                         {
@@ -820,7 +818,7 @@ impl Gateway {
                         } else {
                             tracing::info!("Subscribed to acowork/agents/+/http_port");
                         }
-                        if let Err(e) = client
+                        if let Err(e) = client_for_subs
                             .subscribe("acowork/agents/+/status", crate::mqtt::MqttQoS::AtLeastOnce)
                             .await
                         {
@@ -833,7 +831,7 @@ impl Gateway {
                             tracing::info!("Subscribed to acowork/agents/+/status");
                         }
                     });
-                    Some(Arc::new(c))
+                    Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
             }

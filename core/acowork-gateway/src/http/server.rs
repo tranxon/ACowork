@@ -15,7 +15,7 @@ use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
 use crate::http::routes::{self, AppState};
-use crate::compat::GlobalResourcePusher;
+use crate::resource_pusher::ResourcePusher;
 
 /// PID file content for Desktop App discovery
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -108,7 +108,7 @@ pub(crate) async fn start_http_server(
     gateway_state: Arc<RwLock<GatewayState>>,
     data_dir: &Path,
     log_reload_handle: Option<crate::LogReloadHandle>,
-    pusher: Option<Arc<GlobalResourcePusher>>,
+    pusher: Option<Arc<ResourcePusher>>,
     mqtt_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
     mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger>,
     runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,

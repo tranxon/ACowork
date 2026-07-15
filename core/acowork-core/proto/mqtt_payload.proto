@@ -105,11 +105,16 @@ message AvailableLsps {
   bool ready = 3;
 }
 
-// ── Provider reference (mirrors ProviderListItem, no API keys) ─────────
+// ── Provider reference (mirrors ProviderListItem; carries the decrypted
+//     API key inline so Runtime does not need a separate handshake) ───
 
-/// Lightweight provider reference for the available-state topic.
-/// API keys are NOT included — they are delivered via a separate
-/// secure channel (gRPC in Phase 1, MQTT secure topic in future).
+/// LLM provider reference published on `acowork/global/providers`.
+///
+/// Carries the decrypted API key inline (in `api_key`). MQTT broker runs
+/// on localhost only (Gateway embeds the broker — see rumqttd), so the
+/// retained payload is not exposed to the network. The key is decrypted
+/// by the Gateway before PUBLISH (see [`MqttGlobalResourcesPublisher`])
+/// and consumed by Runtime's startup cache.
 message ProviderRef {
   string id = 1;
   string base_url = 2;
@@ -117,6 +122,11 @@ message ProviderRef {
   repeated ProviderModelRef models = 4;
   string compact_model = 5;  // empty = none
   bool custom = 6;
+  /// Decrypted API key for this provider. Empty when the provider has
+  /// no key configured (e.g. local Ollama). Runtime uses this to populate
+  /// the LLM provider's auth header directly; no env var or separate
+  /// handshake is required.
+  string api_key = 7;
 }
 
 /// LLM protocol type (mirrors ProtocolType from domain).
@@ -144,9 +154,14 @@ message ModelCapabilities {
   // Cost info omitted from MQTT — Runtime doesn't need it for invocation.
 }
 
-// ── MCP reference (mirrors McpListItem, no API keys) ───────────────────
+// ── MCP reference (mirrors McpListItem; carries auth token inline) ────
 
-/// Lightweight MCP server reference for the available-state topic.
+/// MCP server reference published on `acowork/global/mcps`.
+///
+/// `headers` and `auth_token` together replace the missing
+/// `mcp_key_vault` in the gRPC AgentHello handshake — the Gateway
+/// decrypts the token at PUBLISH time and Runtime uses it directly
+/// when establishing the MCP connection.
 message McpRef {
   string id = 1;
   string name = 2;
@@ -157,6 +172,8 @@ message McpRef {
   map<string, string> env = 7;
   map<string, string> headers = 8;
   uint64 tool_timeout_secs = 9;  // 0 = no override
+  /// Decrypted MCP bearer token (empty = no auth required).
+  string auth_token = 10;
 }
 
 /// MCP transport type (mirrors McpTransportDef).
@@ -167,15 +184,20 @@ enum McpTransport {
   MCP_TRANSPORT_SSE = 3;
 }
 
-// ── Search reference (mirrors SearchProviderListItem, no API keys) ──────
+// ── Search reference (mirrors SearchProviderListItem; key inline) ──────
 
-/// Lightweight search provider reference for the available-state topic.
+/// Search provider reference published on `acowork/global/searches`.
+///
+/// `api_key` is the decrypted search provider key (Brave / Serper /
+/// etc.). Runtime uses it directly when calling the search endpoint.
 message SearchRef {
   string id = 1;
   string name = 2;
   string description = 3;
   bool requires_api_key = 4;
   string base_url = 5;
+  /// Decrypted search API key (empty = no key required).
+  string api_key = 6;
 }
 
 // ── Embedding model reference (mirrors EmbeddingModelEntry) ────────────
@@ -348,12 +370,26 @@ message CompactingPayload {
   string session_id = 1;
 }
 
+// ADR-033: ContextUsagePayload is delivered to the frontend on every
+// LLM call completion. The frontend renders the StatusBar from this
+// payload directly (chatStore `case "context_usage"`), so it must
+// carry enough information to populate `ContextUsageInfo`:
+// `context_window`, `input_tokens`, `output_tokens`, `total_tokens`,
+// `usage_percent`, `usable_context`. The legacy 4 token-count fields
+// are kept for backward compatibility with any in-flight Desktop
+// subscriber; new code should consume `context_usage_json` (a
+// fully-populated JSON-serialized `ContextUsageInfo`).
 message ContextUsagePayload {
   string session_id = 1;
   uint64 input_tokens = 2;
   uint64 output_tokens = 3;
   uint64 total_input_tokens = 4;
   uint64 total_output_tokens = 5;
+  // Fully-populated JSON-serialized `ContextUsageInfo`. Includes
+  // `context_window`, `total_tokens`, `usage_percent`, `usable_context`
+  // and all optional cumulative fields. Frontend must prefer this over
+  // the legacy individual token fields.
+  string context_usage_json = 6;
 }
 
 message MemoryUpdatedPayload {
@@ -409,66 +445,162 @@ message NewDataAvailablePayload {
 message ControlCommand {
   string agent_id = 1;
   oneof command {
-    CreateSessionCommand     create_session     = 10;
-    DeleteSessionCommand     delete_session     = 11;
-    MessageCommand           message            = 12;
-    StopCommand              stop               = 13;
-    ModelSwitchCommand       model_switch       = 14;
-    ReasoningEffortCommand   reasoning_effort   = 15;
-    CompactContextCommand    compact_context    = 16;
-    IntentCommand            intent             = 17;
-    WorkspaceSwitchCommand    workspace_switch   = 18;
+    CreateSession       create_session        = 10;
+    DeleteSession       delete_session        = 11;
+    // 12, 13 reserved (原 MessageCommand / Stop 已迁移, 字段号保留空缺)
+    CloseSession        close_session         = 19;
+    UpdateSessionTitle  update_session_title  = 20;
+
+    // ── Chat (5) ──
+    ChatMessage         chat_message          = 21;
+    Stop                stop                  = 22;
+    ContinueExecution   continue_execution    = 23;
+    EnableNotify        enable_notify         = 24;
+    DisableNotify       disable_notify        = 25;
+
+    // ── User responses to runtime prompts (2) ──
+    ApprovalDecision    approval_decision     = 26;
+    QuestionAnswer      question_answer       = 27;
+
+    // ── Per-session config (3) ──
+    ModelSwitch         model_switch          = 14;
+    ReasoningEffort     reasoning_effort      = 15;
+    WorkspaceSwitch     workspace_switch      = 18;
+
+    // ── Context management (2) ──
+    CompactContext      compact_context       = 16;
+    CompressAction      compress_action       = 28;
+
+    // ── System (1) ──
+    Intent              intent                = 17;
   }
 }
 
-message CreateSessionCommand {
-  string agent_id = 1;
+message CreateSession {
 }
 
-message DeleteSessionCommand {
-  string agent_id = 1;
+message DeleteSession {
   string session_id = 2;
 }
 
-message MessageCommand {
-  string agent_id = 1;
+/// Graceful close: triggers distillation, preserves JSONL history.
+/// Use Delete to also remove the file.
+message CloseSession {
+  string session_id = 2;
+}
+
+message UpdateSessionTitle {
+  string session_id = 2;
+  string title = 3;
+}
+
+// ── Chat ─────────────────────────────────────────────────────────────────
+
+/// User chat message with rich payload support.
+///
+/// Rich fields are carried via `params_json` (string-encoded JSON) to keep
+/// MQTT messages small and let Runtime/LLM clients evolve the rich shape
+/// independently from the proto schema. Document content is NOT inlined —
+/// clients upload via HTTP `POST /sessions/{sid}/documents` and pass the
+/// returned `doc_id` list in `params_json.document_ids` instead.
+message ChatMessage {
   string session_id = 2;
   string message_id = 3;
   string content = 4;
+  /// Optional slash command prefix (e.g. "/commit", "/review-pr")
+  string command = 5;
+  /// Rich payload as JSON. Shape:
+  ///   {
+  ///     "document_ids":     ["doc-abc"],      // uploaded via HTTP POST /documents
+  ///     "content_parts":    [{type:"text",text:"..."}, {type:"image_url",image_url:{url:"..."}}],
+  ///     "attached_context": [{abs_path, type:"file"|"selection", startLine?, endLine?}]
+  ///   }
+  /// Empty string = plain text only.
+  string params_json = 6;
 }
 
-message StopCommand {
-  string agent_id = 1;
+message Stop {
+  string session_id = 2;
+  /// Stop reason for logging. Free-form but conventionally:
+  /// "user_requested" | "iteration_limit" | "budget_exceeded" | "error" | ...
+  string reason = 3;
+}
+
+message ContinueExecution {
+  string session_id = 2;
+  /// "user_requested" | "auto_resume"
+  string reason = 3;
+}
+
+message EnableNotify {
   string session_id = 2;
 }
 
-message ModelSwitchCommand {
-  string agent_id = 1;
+message DisableNotify {
+  string session_id = 2;
+}
+
+// ── User responses ────────────────────────────────────────────────────────
+
+message ApprovalDecision {
+  string session_id = 2;
+  string request_id = 3;
+  bool approved = 4;
+  bool allow_all_session = 5;
+  /// Optional reason (e.g. user typed "this is a typo")
+  string reason = 6;
+}
+
+message QuestionAnswer {
+  string session_id = 2;
+  string request_id = 3;
+  string answer = 4;
+}
+
+// ── Per-session config ────────────────────────────────────────────────────
+
+message ModelSwitch {
   string session_id = 2;
   string model_id = 3;
+  // ADR-012: per-session provider override. Mirrors the `provider` field
+  // from the gRPC/WebSocket-era model_switch payload. Empty string means
+  // "do not change the current Provider instance — only update the model name".
+  string provider_id = 4;
 }
 
-message ReasoningEffortCommand {
-  string agent_id = 1;
+message ReasoningEffort {
   string session_id = 2;
-  string effort = 3;  // "low" | "medium" | "high"
+  /// "low" | "medium" | "high" | "auto"
+  string effort = 3;
 }
 
-message WorkspaceSwitchCommand {
-  string agent_id = 1;
+message WorkspaceSwitch {
   string session_id = 2;
   string workspace_id = 3;
 }
 
-message CompactContextCommand {
-  string agent_id = 1;
+// ── Context management ────────────────────────────────────────────────────
+
+message CompactContext {
   string session_id = 2;
 }
 
+enum CompressType {
+  COMPRESS_TYPE_UNSPECIFIED  = 0;
+  COMPRESS_TYPE_SUMMARY      = 1;  // → CompressionAction::CompressSummary
+  COMPRESS_TYPE_TOOL_RESULTS = 2;  // → CompressionAction::CompressToolResults
+}
+
+message CompressAction {
+  string session_id = 2;
+  CompressType compress_type = 3;
+}
+
+// ── System ────────────────────────────────────────────────────────────────
+
 /// Intent command — Gateway pushes an IntentReceived to a Runtime agent.
 /// Used for cron triggers and cross-agent messaging via MQTT.
-message IntentCommand {
-  string agent_id = 1;
+message Intent {
   /// Source of the intent (e.g. "cron:<agent_id>" for cron triggers).
   string from = 2;
   /// Action name (e.g. "hourly_check").

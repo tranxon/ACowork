@@ -90,24 +90,24 @@ impl Drop for AppState {
     fn drop(&mut self) {
         // Only try to lock if the mutex isn't poisoned. During unwind from
         // a panic, the mutex may be poisoned.
-        if let Ok(mut proc) = self.gateway_process.try_lock() {
-            if let Some(mut child) = proc.take() {
-                let pid = child.id();
-                tracing::info!(pid = pid, "AppState dropped, killing Gateway process tree");
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/T", "/F"])
-                        .output();
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .args(["-INT", &pid.to_string()])
-                        .output();
-                }
-                let _ = child.wait();
+        if let Ok(mut proc) = self.gateway_process.try_lock()
+            && let Some(mut child) = proc.take()
+        {
+            let pid = child.id();
+            tracing::info!(pid = pid, "AppState dropped, killing Gateway process tree");
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output();
             }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-INT", &pid.to_string()])
+                    .output();
+            }
+            let _ = child.wait();
         }
         // On Windows, drop the Job Object handle so KILL_ON_JOB_CLOSE fires.
         // On abrupt exit (Ctrl+C) this Drop may not run, but the OS closes

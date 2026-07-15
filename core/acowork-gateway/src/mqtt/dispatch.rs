@@ -1,153 +1,55 @@
 //! MQTT message dispatch (ADR-033).
 //!
-//! Parses `DataEnvelope` payloads from incoming MQTT messages and routes
-//! them to the appropriate business logic handler. Plain text messages
-//! (http_port, status) are handled separately via `handle_plaintext_message`.
+//! Handles incoming MQTT messages on the Gateway's broker connection.
+//! Plain-text payloads (`http_port`, agent `status`) carry simple semantic
+//! data (port number, online/offline) rather than `DataEnvelope` protobuf,
+//! so they are matched by topic pattern and parsed inline.
 //!
 //! See `docs/zh/protocols/mqtt.md` §8 (Topic patterns).
 
-use acowork_core::mqtt_proto::DataEnvelope;
-
-use crate::mqtt::router::{route_message_by_topic, topic_matches, RouteResult};
+use crate::http::proxy::SharedRuntimeHttpRegistry;
+use crate::mqtt::agent_registry::SharedAgentRegistry;
 
 /// Unified MQTT message handler — called from the Gateway's MQTT callback.
 ///
-/// Tries both dispatch paths:
-/// 1. `dispatch_message` — protobuf `DataEnvelope` parsing + routing
-/// 2. `handle_plaintext_message` — plain-text http_port / status registration
+/// Currently only `handle_plaintext_message` is implemented; future phases
+/// may add protobuf `DataEnvelope` dispatchers alongside it.
 pub fn handle_message(
     topic: &str,
     payload: &[u8],
-    runtime_http_registry: &crate::http::proxy::SharedRuntimeHttpRegistry,
-    agent_registry: &crate::mqtt::agent_registry::SharedAgentRegistry,
+    runtime_http_registry: &SharedRuntimeHttpRegistry,
+    agent_registry: &SharedAgentRegistry,
 ) {
-    dispatch_message(topic, payload);
     handle_plaintext_message(topic, payload, runtime_http_registry, agent_registry);
 }
 
-/// Dispatch an incoming MQTT message (protobuf DataEnvelope).
+/// Topic pattern matcher.
 ///
-/// Steps:
-/// 1. Route the message by topic (router.rs).
-/// 2. If the route is unimplemented (Phase 2+ handler), log and return.
-/// 3. If the route matches, attempt to parse the payload as a `DataEnvelope`.
-/// 4. Dispatch the envelope's oneof payload to the appropriate handler.
-pub fn dispatch_message(topic: &str, payload: &[u8]) {
-    // Step 1: Route by topic
-    match route_message_by_topic(topic) {
-        RouteResult::NoMatch => {
-            // Not a known route pattern. Still try to parse as DataEnvelope
-            // in case it's a generic proto message (Step 2 below).
+/// Supports MQTT wildcard matching:
+/// - `+` matches a single level
+/// - `#` matches all remaining levels (must be the last character)
+pub fn topic_matches(filter: &str, topic: &str) -> bool {
+    let filter_parts: Vec<&str> = filter.split('/').collect();
+    let topic_parts: Vec<&str> = topic.split('/').collect();
+
+    for (i, fp) in filter_parts.iter().enumerate() {
+        if *fp == "#" {
+            return true; // matches everything remaining
         }
-        RouteResult::Handled => {
-            return;
+        if i >= topic_parts.len() {
+            return false;
         }
-        RouteResult::Unimplemented(reason) => {
-            tracing::debug!(
-                topic,
-                reason,
-                "MQTT message routed to unimplemented handler (Phase 2+)"
-            );
-            return;
+        if *fp != "+" && *fp != topic_parts[i] {
+            return false;
         }
     }
 
-    // Step 2: Parse the payload as a DataEnvelope
-    let envelope = match prost::Message::decode(payload) {
-        Ok(e) => e,
-        Err(e) => {
-            // The payload might be plain text (e.g. agent status "online"/"offline")
-            // rather than a protobuf envelope. Log at trace level to avoid noise.
-            tracing::trace!(
-                topic,
-                error = %e,
-                "MQTT payload is not a valid DataEnvelope (may be plain text)"
-            );
-            return;
-        }
-    };
-
-    // Step 3: Dispatch by payload type
-    dispatch_envelope(topic, &envelope);
-}
-
-/// Dispatch a parsed `DataEnvelope` to the appropriate handler.
-fn dispatch_envelope(topic: &str, envelope: &DataEnvelope) {
-    let payload = match &envelope.payload {
-        Some(p) => p,
-        None => {
-            tracing::warn!(topic, "MQTT DataEnvelope has no payload");
-            return;
-        }
-    };
-
-    match payload {
-        // ── Global resources (we publish these, ignore echoes) ──
-        acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::AvailableMcps(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::AvailableSearches(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::AvailableEmbeddingModels(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::AvailableLsps(_) => {
-            // These are our own published topics — ignore echoes.
-        }
-
-        // ── Agent lifecycle ──
-        acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(status) => {
-            tracing::debug!(
-                agent_id = %status.agent_id,
-                online = status.online,
-                "MQTT AgentStatus received"
-            );
-        }
-        acowork_core::mqtt_proto::data_envelope::Payload::AgentMeta(meta) => {
-            tracing::debug!(
-                agent_id = %meta.agent_id,
-                "MQTT AgentMeta received"
-            );
-        }
-        acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(config) => {
-            tracing::debug!(
-                agent_id = %config.agent_id,
-                "MQTT AgentConfig received"
-            );
-        }
-
-        // ── Session lifecycle ──
-        acowork_core::mqtt_proto::data_envelope::Payload::SessionCreated(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::SessionDeleted(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::SessionMeta(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::SessionConfig(_)
-        | acowork_core::mqtt_proto::data_envelope::Payload::SessionMessage(_) => {
-            tracing::debug!(
-                topic,
-                "MQTT session event received (Desktop-bound, Gateway does not process)"
-            );
-        }
-
-        // ── Control commands (Desktop → Runtime, Gateway does not process) ──
-        acowork_core::mqtt_proto::data_envelope::Payload::ControlCommand(_cmd) => {
-            tracing::debug!(
-                topic,
-                "MQTT ControlCommand received (Desktop→Runtime, Gateway does not process)"
-            );
-        }
-
-        // ── Memory ──
-        acowork_core::mqtt_proto::data_envelope::Payload::MemoryNodeUpdate(_) => {
-            tracing::debug!(topic, "MQTT MemoryNodeUpdate received");
-        }
-
-        // ── Sidecar ──
-        acowork_core::mqtt_proto::data_envelope::Payload::SidecarStatus(_) => {
-            tracing::debug!(topic, "MQTT SidecarStatus received");
-        }
-    }
+    filter_parts.len() == topic_parts.len()
 }
 
 /// Handle a plain-text MQTT message (non-DataEnvelope payload).
 ///
-/// Called by the Gateway's MQTT message callback for topics that carry
-/// simple text payloads rather than protobuf envelopes:
+/// Topics with simple text payloads rather than protobuf envelopes:
 /// - `acowork/agents/+/http_port` → registers Runtime HTTP port for reverse proxy
 /// - `acowork/agents/+/status` → updates AgentRegistry online/offline status
 ///
@@ -155,8 +57,8 @@ fn dispatch_envelope(topic: &str, envelope: &DataEnvelope) {
 pub fn handle_plaintext_message(
     topic: &str,
     payload: &[u8],
-    runtime_http_registry: &crate::http::proxy::SharedRuntimeHttpRegistry,
-    agent_registry: &crate::mqtt::agent_registry::SharedAgentRegistry,
+    runtime_http_registry: &SharedRuntimeHttpRegistry,
+    agent_registry: &SharedAgentRegistry,
 ) {
     if topic_matches("acowork/agents/+/http_port", topic) {
         let agent_id = topic
@@ -218,26 +120,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dispatch_global_resource_echo_is_ignored() {
-        // Build an AvailableProviders envelope
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
-                acowork_core::mqtt_proto::AvailableProviders {
-                    version: 1,
-                    providers: vec![],
-                },
-            )),
-        };
-        let payload = prost::Message::encode_to_vec(&envelope);
-
-        // Should not panic or log warnings — echoes are silently ignored
-        dispatch_message("acowork/global/providers", &payload);
+    fn test_topic_matches_exact() {
+        assert!(topic_matches("acowork/global/providers", "acowork/global/providers"));
+        assert!(!topic_matches("acowork/global/providers", "acowork/global/mcps"));
     }
 
     #[test]
-    fn test_dispatch_invalid_payload_does_not_panic() {
-        // Should handle gracefully (plain text "online"/"offline")
-        dispatch_message("acowork/agents/foo/status", b"not a protobuf payload");
+    fn test_topic_matches_single_wildcard() {
+        assert!(topic_matches("acowork/agents/+/status", "acowork/agents/com.example/status"));
+        assert!(topic_matches("acowork/agents/+/status", "acowork/agents/foo/status"));
+        assert!(!topic_matches("acowork/agents/+/status", "acowork/agents/foo/meta"));
+        assert!(!topic_matches("acowork/agents/+/status", "acowork/agents/foo/sessions/s1/meta"));
+    }
+
+    #[test]
+    fn test_topic_matches_multi_wildcard() {
+        assert!(topic_matches("acowork/agents/+/sessions/+/messages/#", "acowork/agents/foo/sessions/s1/messages/chunk"));
+        assert!(topic_matches("acowork/global/#", "acowork/global/providers"));
+        assert!(topic_matches("acowork/global/#", "acowork/global/anything/deep"));
+        assert!(!topic_matches("acowork/global/#", "acowork/agents/foo/status"));
+    }
+
+    #[test]
+    fn test_topic_matches_edge_cases() {
+        // # must be last
+        assert!(topic_matches("#", "anything/at/all"));
+        // + matches exactly one level
+        assert!(!topic_matches("a/+", "a/b/c"));
+        assert!(topic_matches("a/+/c", "a/b/c"));
     }
 }

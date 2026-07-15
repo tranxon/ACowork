@@ -308,11 +308,11 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
     let mut proc_guard = state.gateway_process.lock().await;
 
     // 1) In-process handle check: did we already spawn one?
-    if let Some(ref child) = *proc_guard {
-        if child_output_is_alive(child) {
-            tracing::info!("[BOOT] Gateway already running (in-process handle), skipping spawn");
-            return Ok(());
-        }
+    if let Some(ref child) = *proc_guard
+        && child_output_is_alive(child)
+    {
+        tracing::info!("[BOOT] Gateway already running (in-process handle), skipping spawn");
+        return Ok(());
     }
 
     // 2) Port probe: is there already a Gateway listening on the default

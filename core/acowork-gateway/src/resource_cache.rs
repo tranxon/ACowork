@@ -719,7 +719,7 @@ pub fn build_mcp_key_vault(
 }
 
 /// Try to extract an API key from MCP server config env vars and headers.
-fn extract_api_key_from_mcp_config(
+pub fn extract_api_key_from_mcp_config(
     config: &acowork_core::protocol::McpServerConfigDef,
 ) -> Option<String> {
     let key_patterns = ["api_key", "api-key", "token", "auth", "secret", "password"];

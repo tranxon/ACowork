@@ -345,7 +345,6 @@ pub fn run() {
             commands::agent::update_agent_manifest_avatar,
             commands::agent::upload_agent_file,
             commands::agent::upload_user_avatar_file,
-            commands::chat::send_message,
             commands::chat::upload_document,
             commands::vault::list_keys,
             commands::vault::add_key,
@@ -370,7 +369,6 @@ pub fn run() {
             // ADR-033 Phase 3: MQTT real-time event commands
             commands::chat_mqtt::connect_mqtt,
             commands::chat_mqtt::disconnect_mqtt,
-            commands::chat_mqtt::mqtt_subscribe_agent_sessions,
             commands::chat_mqtt::mqtt_publish_control,
         ])
         .setup(|app| {
@@ -618,24 +616,24 @@ pub fn run() {
             // that command will store the child and this handler won't see it,
             // but the next exit attempt will catch it. This is non-blocking
             // because RunEvent::Exit fires in the main thread context.
-            if let Ok(mut proc) = gateway_handle.try_lock() {
-                if let Some(mut child) = proc.take() {
-                    let pid = child.id();
-                    tracing::info!(pid = pid, "App exiting, killing Gateway process tree");
-                    #[cfg(target_os = "windows")]
-                    {
-                        let _ = std::process::Command::new("taskkill")
-                            .args(["/PID", &pid.to_string(), "/T", "/F"])
-                            .output();
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-INT", &pid.to_string()])
-                            .output();
-                    }
-                    let _ = child.wait();
+            if let Ok(mut proc) = gateway_handle.try_lock()
+                && let Some(mut child) = proc.take()
+            {
+                let pid = child.id();
+                tracing::info!(pid = pid, "App exiting, killing Gateway process tree");
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/PID", &pid.to_string(), "/T", "/F"])
+                        .output();
                 }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-INT", &pid.to_string()])
+                        .output();
+                }
+                let _ = child.wait();
             }
         }
 
@@ -645,11 +643,11 @@ pub fn run() {
         // RunEvent::Reopen.  We show the window and focus it.
         #[cfg(target_os = "macos")]
         {
-            if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+            if let tauri::RunEvent::Reopen { .. } = event
+                && let Some(window) = app_handle.get_webview_window("main")
+            {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
         }
 

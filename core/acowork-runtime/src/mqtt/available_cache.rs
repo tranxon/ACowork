@@ -167,6 +167,7 @@ mod tests {
                         models: vec![],
                         compact_model: String::new(),
                         custom: false,
+                        api_key: String::new(),
                     }],
                 },
             )),

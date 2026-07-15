@@ -21,14 +21,14 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post, put, delete},
 };
 use axum::body::Bytes;
 use tokio::sync::RwLock;
 
 use crate::http::routes::AppState;
 
-/// Registry mapping agent_id → Runtime HTTP port.
+/// Registry mapping id → Runtime HTTP port.
 ///
 /// Populated by [`crate::mqtt::dispatch::handle_plaintext_message`] when the
 /// Gateway receives a **retained** `acowork/agents/{id}/http_port` payload
@@ -38,7 +38,7 @@ use crate::http::routes::AppState;
 /// data queries without waiting for the next Runtime-side publish.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeHttpRegistry {
-    /// agent_id → (http_port, registered_at)
+    /// id → (http_port, registered_at)
     ports: HashMap<String, u16>,
 }
 
@@ -48,23 +48,23 @@ impl RuntimeHttpRegistry {
     }
 
     /// Register a Runtime's HTTP port.
-    pub fn register(&mut self, agent_id: &str, http_port: u16) {
+    pub fn register(&mut self, id: &str, http_port: u16) {
         tracing::info!(
-            agent_id,
+            id,
             http_port,
             "Runtime HTTP port registered for reverse proxy"
         );
-        self.ports.insert(agent_id.to_string(), http_port);
+        self.ports.insert(id.to_string(), http_port);
     }
 
     /// Unregister a Runtime (e.g. on disconnect/stop).
-    pub fn unregister(&mut self, agent_id: &str) {
-        self.ports.remove(agent_id);
+    pub fn unregister(&mut self, id: &str) {
+        self.ports.remove(id);
     }
 
     /// Get the HTTP port for a Runtime.
-    pub fn get_port(&self, agent_id: &str) -> Option<u16> {
-        self.ports.get(agent_id).copied()
+    pub fn get_port(&self, id: &str) -> Option<u16> {
+        self.ports.get(id).copied()
     }
 
     /// Number of registered Runtimes.
@@ -96,11 +96,11 @@ pub fn new_shared_registry() -> SharedRuntimeHttpRegistry {
 pub fn proxy_routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/api/agents/{agent_id}/workspaces",
-            get(proxy_list_workspaces),
+            "/api/agents/{id}/workspaces",
+            get(proxy_list_workspaces).post(proxy_add_workspace),
         )
         .route(
-            "/api/agents/{agent_id}/workspaces/tree",
+            "/api/agents/{id}/workspaces/tree",
             get(proxy_list_tree),
         )
         .route(
@@ -125,100 +125,136 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route(
             "/api/agents/{id}/memory/nodes/{nid}",
-            axum::routing::delete(proxy_memory_delete_node),
+            delete(proxy_memory_delete_node).get(proxy_get_memory_node),
         )
         .route(
             "/api/agents/{id}/memory/consolidate",
-            axum::routing::post(proxy_memory_consolidate),
+            post(proxy_memory_consolidate),
         )
         .route(
             "/api/agents/{id}/memory/graph",
             get(proxy_get_memory_graph),
+        )
+        // Route 1: Get single session
+        .route(
+            "/api/agents/{id}/sessions/{sid}",
+            get(proxy_get_session),
+        )
+        // Routes 2-5: Session documents proxy
+        .route(
+            "/api/agents/{id}/sessions/{sid}/documents",
+            post(proxy_upload_document).get(proxy_list_documents),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/documents/{doc_id}",
+            get(proxy_read_document).delete(proxy_delete_document),
+        )
+        // Routes 6-9: Workspace config CRUD
+        .route(
+            "/api/agents/{id}/workspaces/{ws_id}",
+            put(proxy_update_workspace).delete(proxy_delete_workspace),
+        )
+        .route(
+            "/api/agents/{id}/workspaces/{ws_id}/prompt-file",
+            put(proxy_set_prompt_file),
+        )
+        // Routes 11-13: Agent config / tools / status
+        .route(
+            "/api/agents/{id}/config",
+            get(proxy_get_config),
+        )
+        .route(
+            "/api/agents/{id}/tools",
+            get(proxy_get_tools),
+        )
+        .route(
+            "/api/agents/{id}/status",
+            get(proxy_get_status),
         )
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/workspaces` to Runtime's `GET /workspaces`.
 async fn proxy_list_workspaces(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    proxy_to_runtime(&state, &agent_id, "/workspaces", "").await
+    proxy_to_runtime(&state, &id, "/workspaces", "").await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/workspaces/tree` to Runtime's `GET /workspaces/tree`.
 async fn proxy_list_tree(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &agent_id, "/workspaces/tree", &query).await
+    proxy_to_runtime(&state, &id, "/workspaces/tree", &query).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
 async fn proxy_list_sessions(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &agent_id, "/sessions", &query).await
+    proxy_to_runtime(&state, &id, "/sessions", &query).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/latest-session` to Runtime's `GET /sessions/latest`.
 async fn proxy_latest_session(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    proxy_to_runtime(&state, &agent_id, "/sessions/latest", "").await
+    proxy_to_runtime(&state, &id, "/sessions/latest", "").await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/messages` to Runtime's `GET /sessions/{sid}/messages`.
 async fn proxy_get_messages(
     State(state): State<AppState>,
-    Path((agent_id, sid)): Path<(String, String)>,
+    Path((id, sid)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let path = format!("/sessions/{}/messages", sid);
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &agent_id, &path, &query).await
+    proxy_to_runtime(&state, &id, &path, &query).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/graph` to Runtime's `GET /memory/graph`.
 async fn proxy_get_memory_graph(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    proxy_to_runtime(&state, &agent_id, "/memory/graph", "").await
+    proxy_to_runtime(&state, &id, "/memory/graph", "").await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes` to Runtime's `GET /memory/nodes`.
 async fn proxy_memory_nodes(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &agent_id, "/memory/nodes", &query).await
+    proxy_to_runtime(&state, &id, "/memory/nodes", &query).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/stats` to Runtime's `GET /memory/stats`.
 async fn proxy_memory_stats(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
 ) -> Response {
-    proxy_to_runtime(&state, &agent_id, "/memory/stats", "").await
+    proxy_to_runtime(&state, &id, "/memory/stats", "").await
 }
 
 /// Reverse-proxy `DELETE /api/agents/{id}/memory/nodes/{nid}` to Runtime's `DELETE /memory/nodes/{nid}`.
 async fn proxy_memory_delete_node(
     State(state): State<AppState>,
-    Path((agent_id, nid)): Path<(String, String)>,
+    Path((id, nid)): Path<(String, String)>,
 ) -> Response {
     let path = format!("/memory/nodes/{}", nid);
     proxy_to_runtime_with_method(
         &state,
-        &agent_id,
+        &id,
         &path,
         "",
         reqwest::Method::DELETE,
@@ -235,7 +271,7 @@ async fn proxy_memory_delete_node(
 /// handler treats this as "use defaults".
 async fn proxy_memory_consolidate(
     State(state): State<AppState>,
-    Path(agent_id): Path<String>,
+    Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
     let payload: Option<Vec<u8>> = if body.is_empty() {
@@ -245,13 +281,152 @@ async fn proxy_memory_consolidate(
     };
     proxy_to_runtime_with_method(
         &state,
-        &agent_id,
+        &id,
         "/memory/consolidate",
         "",
         reqwest::Method::POST,
         payload,
     )
     .await
+}
+
+// ── New Phase 4 proxy handlers ─────────────────────────────────────────
+
+/// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/documents`
+/// to Runtime's `POST /sessions/{sid}/documents`.
+async fn proxy_upload_document(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/documents", sid);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents`
+/// to Runtime's `GET /sessions/{sid}/documents`.
+async fn proxy_list_documents(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+) -> Response {
+    let path = format!("/sessions/{}/documents", sid);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
+/// to Runtime's `GET /sessions/{sid}/documents/{doc_id}`.
+async fn proxy_read_document(
+    State(state): State<AppState>,
+    Path((id, sid, doc_id)): Path<(String, String, String)>,
+) -> Response {
+    let path = format!("/sessions/{}/documents/{}", sid, doc_id);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
+/// to Runtime's `DELETE /sessions/{sid}/documents/{doc_id}`.
+async fn proxy_delete_document(
+    State(state): State<AppState>,
+    Path((id, sid, doc_id)): Path<(String, String, String)>,
+) -> Response {
+    let path = format!("/sessions/{}/documents/{}", sid, doc_id);
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}`
+/// to Runtime's `GET /sessions/{sid}`.
+async fn proxy_get_session(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+) -> Response {
+    let path = format!("/sessions/{}", sid);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/workspaces`
+/// to Runtime's `POST /workspaces`.
+async fn proxy_add_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, "/workspaces", "", reqwest::Method::POST, payload).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}`
+/// to Runtime's `PUT /workspaces/{ws_id}`.
+async fn proxy_update_workspace(
+    State(state): State<AppState>,
+    Path((id, ws_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let path = format!("/workspaces/{}", ws_id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/prompt-file`
+/// to Runtime's `PUT /workspaces/{ws_id}/prompt-file`.
+async fn proxy_set_prompt_file(
+    State(state): State<AppState>,
+    Path((id, ws_id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let path = format!("/workspaces/{}/prompt-file", ws_id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload).await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/workspaces/{ws_id}`
+/// to Runtime's `DELETE /workspaces/{ws_id}`.
+async fn proxy_delete_workspace(
+    State(state): State<AppState>,
+    Path((id, ws_id)): Path<(String, String)>,
+) -> Response {
+    let path = format!("/workspaces/{}", ws_id);
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/memory/nodes/{nid}`
+/// to Runtime's `GET /memory/nodes/{nid}`.
+async fn proxy_get_memory_node(
+    State(state): State<AppState>,
+    Path((id, nid)): Path<(String, String)>,
+) -> Response {
+    let path = format!("/memory/nodes/{}", nid);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/config`
+/// to Runtime's `GET /agents/{id}/config`.
+async fn proxy_get_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let path = format!("/agents/{}/config", id);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/tools`
+/// to Runtime's `GET /agents/{id}/tools`.
+async fn proxy_get_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let path = format!("/agents/{}/tools", id);
+    proxy_to_runtime(&state, &id, &path, "").await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/status`
+/// to Runtime's `GET /agents/{id}/status`.
+async fn proxy_get_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let path = format!("/agents/{}/status", id);
+    proxy_to_runtime(&state, &id, &path, "").await
 }
 
 /// Build a query string from a HashMap of params.
@@ -281,11 +456,11 @@ fn urlencoding(s: &str) -> String {
 /// Core reverse-proxy logic: look up the Runtime's HTTP port and forward a GET request.
 async fn proxy_to_runtime(
     state: &AppState,
-    agent_id: &str,
+    id: &str,
     path: &str,
     query: &str,
 ) -> Response {
-    proxy_to_runtime_with_method(state, agent_id, path, query, reqwest::Method::GET, None).await
+    proxy_to_runtime_with_method(state, id, path, query, reqwest::Method::GET, None).await
 }
 
 /// Core reverse-proxy logic with configurable HTTP method and optional body.
@@ -301,7 +476,7 @@ async fn proxy_to_runtime(
 /// [`send_runtime_json`] instead (which builds the body from a typed value).
 async fn proxy_to_runtime_with_method(
     state: &AppState,
-    agent_id: &str,
+    id: &str,
     path: &str,
     query: &str,
     method: reqwest::Method,
@@ -315,7 +490,7 @@ async fn proxy_to_runtime_with_method(
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
                     "error": "Runtime HTTP proxy registry not initialized",
-                    "agent_id": agent_id,
+                    "id": id,
                 })),
             )
                 .into_response();
@@ -324,7 +499,7 @@ async fn proxy_to_runtime_with_method(
 
     let http_port = {
         let reg = registry.read().await;
-        reg.get_port(agent_id)
+        reg.get_port(id)
     };
 
     let http_port = match http_port {
@@ -334,7 +509,7 @@ async fn proxy_to_runtime_with_method(
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
                     "error": "Runtime HTTP port not registered",
-                    "agent_id": agent_id,
+                    "id": id,
                     "message": "The Gateway has not yet discovered this Runtime's HTTP port. The Runtime should publish a retained message on `acowork/agents/{id}/http_port` at startup (ADR-033). Verify the Runtime is running, has connected to the MQTT broker, and was started with `--http-port 0` so its localhost HTTP server is up."
                 })),
             )
@@ -350,7 +525,7 @@ async fn proxy_to_runtime_with_method(
     };
 
     tracing::debug!(
-        agent_id,
+        id,
         http_port,
         target_url = %target_url,
         "Reverse-proxying to Runtime HTTP server"
@@ -387,7 +562,7 @@ async fn proxy_to_runtime_with_method(
                 StatusCode::BAD_GATEWAY,
                 axum::Json(serde_json::json!({
                     "error": "Failed to connect to Runtime HTTP server",
-                    "agent_id": agent_id,
+                    "id": id,
                     "detail": e.to_string(),
                 })),
             )
@@ -403,10 +578,10 @@ async fn proxy_to_runtime_with_method(
 /// responses from Runtime endpoints (e.g. latest-session, session-state).
 pub(crate) async fn fetch_runtime_json(
     state: &AppState,
-    agent_id: &str,
+    id: &str,
     path: &str,
 ) -> Result<serde_json::Value, (StatusCode, axum::Json<crate::http::routes::ApiError>)> {
-    send_runtime_json(state, agent_id, path, reqwest::Method::GET, None).await
+    send_runtime_json(state, id, path, reqwest::Method::GET, None).await
 }
 
 /// Send JSON to a Runtime HTTP endpoint with configurable method and body.
@@ -415,7 +590,7 @@ pub(crate) async fn fetch_runtime_json(
 /// with optional JSON body, and returns the parsed response.
 pub(crate) async fn send_runtime_json(
     state: &AppState,
-    agent_id: &str,
+    id: &str,
     path: &str,
     method: reqwest::Method,
     body: Option<&serde_json::Value>,
@@ -428,13 +603,13 @@ pub(crate) async fn send_runtime_json(
 
     let http_port = {
         let reg = registry.read().await;
-        reg.get_port(agent_id)
+        reg.get_port(id)
     };
 
     let http_port = http_port.ok_or_else(|| {
         ApiError::not_found(&format!(
             "Agent {} is not running (no Runtime HTTP port registered)",
-            agent_id
+            id
         ))
     })?;
 

@@ -59,6 +59,51 @@ impl From<MqttQoS> for QoS {
     }
 }
 
+/// Configuration for `RuntimeMqttClient::connect`.
+///
+/// ADR-034 Phase 8: replaces 11 individual parameters.
+pub struct MqttConnectConfig<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub agent_id: &'a str,
+    pub agent_name: &'a str,
+    pub agent_version: &'a str,
+    pub avatar: Option<&'a str>,
+    pub builtin_avatar: Option<&'a str>,
+    pub config_json: &'a str,
+    pub available_cache: SharedAvailableCache,
+    pub control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+}
+
+/// Event payload for `publish_session_state_changed`.
+///
+/// ADR-034 Phase 8: replaces 8 individual `Option<&str>` arguments.
+pub struct SessionStateChangeEvent<'a> {
+    pub session_id: &'a str,
+    pub status_json: &'a str,
+    pub model: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub workspace_id: Option<&'a str>,
+    pub ratio: Option<f64>,
+    pub reasoning_effort: Option<&'a str>,
+    pub temperature: Option<f32>,
+    pub context_usage_json: Option<&'a str>,
+}
+
+/// Event payload for `publish_tool_approval_needed`.
+///
+/// ADR-034 Phase 8: replaces 8 individual arguments.
+pub struct ToolApprovalNeededEvent<'a> {
+    pub session_id: &'a str,
+    pub request_id: &'a str,
+    pub tool_name: &'a str,
+    pub action: &'a str,
+    pub risk_level: &'a str,
+    pub reason: &'a str,
+    pub tool_call_id: &'a str,
+    pub approval_timeout_secs: u64,
+}
+
 /// The Runtime's MQTT client.
 ///
 /// Wraps `rumqttc::AsyncClient` with:
@@ -81,35 +126,18 @@ struct EventLoopGuard {
 impl RuntimeMqttClient {
     /// Connect to the MQTT broker and perform the Phase 2 startup sequence.
     ///
-    /// 1. Connect with Last Will (`agents/{id}/status = "offline"`, Retained)
-    /// 2. PUBLISH `agents/{id}/status = "online"` (Retained)
-    /// 3. PUBLISH `agents/{id}/meta` (Retained) — AgentMeta
-    /// 4. PUBLISH `agents/{id}/config` (Retained) — AgentConfig
-    /// 5. SUBSCRIBE `acowork/global/#`
-    /// 6. SUBSCRIBE `acowork/agents/{id}/sessions/control/#`
-    ///
-    /// The `available_cache` is updated from `acowork/global/#` messages.
-    /// Control commands are forwarded to the provided `control_tx` channel.
+    /// ADR-034 Phase 8: takes a single `MqttConnectConfig` struct.
     pub async fn connect(
-        host: &str,
-        port: u16,
-        agent_id: &str,
-        agent_name: &str,
-        agent_version: &str,
-        avatar: Option<&str>,
-        builtin_avatar: Option<&str>,
-        config_json: &str,
-        available_cache: SharedAvailableCache,
-        control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+        cfg: MqttConnectConfig<'_>,
     ) -> Result<Self, RuntimeMqttClientError> {
-        let client_id = format!("agent:{}", agent_id);
-        let status_topic = format!("acowork/agents/{}/status", agent_id);
-        let meta_topic = format!("acowork/agents/{}/meta", agent_id);
-        let config_topic = format!("acowork/agents/{}/config", agent_id);
-        let control_filter = format!("acowork/agents/{}/sessions/control/#", agent_id);
+        let client_id = format!("agent:{}", cfg.agent_id);
+        let status_topic = format!("acowork/agents/{}/status", cfg.agent_id);
+        let meta_topic = format!("acowork/agents/{}/meta", cfg.agent_id);
+        let config_topic = format!("acowork/agents/{}/config", cfg.agent_id);
+        let control_filter = format!("acowork/agents/{}/sessions/control/#", cfg.agent_id);
 
         // Configure MQTT options with Last Will
-        let mut options = MqttOptions::new(client_id.clone(), host, port);
+        let mut options = MqttOptions::new(client_id.clone(), cfg.host, cfg.port);
         options.set_keep_alive(Duration::from_secs(30));
         options.set_clean_session(true);
 
@@ -122,9 +150,9 @@ impl RuntimeMqttClient {
         // Spawn event loop poller that:
         // - Updates available_cache from acowork/global/# messages
         // - Forwards control commands to control_tx
-        let poll_agent_id = agent_id.to_string();
-        let poll_cache = available_cache.clone();
-        let poll_control_tx = control_tx.clone();
+        let poll_agent_id = cfg.agent_id.to_string();
+        let poll_cache = cfg.available_cache.clone();
+        let poll_control_tx = cfg.control_tx.clone();
         let poll_task = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -158,16 +186,16 @@ impl RuntimeMqttClient {
         Self::wait_for_connection(&client, 20).await;
 
         tracing::info!(
-            host,
-            port,
+            host = %cfg.host,
+            port = %cfg.port,
             client_id = %client_id,
-            agent_id = %agent_id,
+            agent_id = %cfg.agent_id,
             "Runtime MQTT client connected to broker"
         );
 
         let mqtt_client = Self {
             client: client.clone(),
-            agent_id: agent_id.to_string(),
+            agent_id: cfg.agent_id.to_string(),
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
         };
 
@@ -178,11 +206,11 @@ impl RuntimeMqttClient {
 
         // ── Step 3: PUBLISH meta (Retained) ──
         let meta = AgentMeta {
-            agent_id: agent_id.to_string(),
-            name: agent_name.to_string(),
-            version: agent_version.to_string(),
-            avatar: avatar.unwrap_or("").to_string(),
-            builtin_avatar: builtin_avatar.unwrap_or("").to_string(),
+            agent_id: cfg.agent_id.to_string(),
+            name: cfg.agent_name.to_string(),
+            version: cfg.agent_version.to_string(),
+            avatar: cfg.avatar.unwrap_or("").to_string(),
+            builtin_avatar: cfg.builtin_avatar.unwrap_or("").to_string(),
         };
         mqtt_client
             .publish_envelope(&meta_topic, &DataEnvelope {
@@ -193,8 +221,8 @@ impl RuntimeMqttClient {
 
         // ── Step 4: PUBLISH config (Retained) ──
         let config = AgentConfig {
-            agent_id: agent_id.to_string(),
-            config_json: config_json.to_string(),
+            agent_id: cfg.agent_id.to_string(),
+            config_json: cfg.config_json.to_string(),
         };
         mqtt_client
             .publish_envelope(&config_topic, &DataEnvelope {
@@ -213,7 +241,7 @@ impl RuntimeMqttClient {
             .subscribe(&control_filter, MqttQoS::AtLeastOnce)
             .await?;
 
-        tracing::info!(agent_id = %agent_id, "Runtime MQTT client: published status/meta/config + subscribed to global + control");
+        tracing::info!(agent_id = %cfg.agent_id, "Runtime MQTT client: published status/meta/config + subscribed to global + control");
 
         Ok(mqtt_client)
     }
@@ -375,6 +403,26 @@ impl MqttChunkPublisher {
         }
     }
 
+    /// Return the agent_id this publisher is bound to.
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    /// Publish a session lifecycle envelope (created/deleted) to the
+    /// `acowork/agents/{id}/sessions/{event_type}` topic with QoS 1.
+    pub async fn publish_lifecycle(
+        &self,
+        event_type: &str,
+        envelope: &DataEnvelope,
+    ) -> Result<(), RuntimeMqttClientError> {
+        let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
+        let bytes = prost::Message::encode_to_vec(envelope);
+        self.client
+            .publish(topic, QoS::AtLeastOnce, false, bytes)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))
+    }
+
     /// Publish a session event envelope to the broker.
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {
         let topic = format!(
@@ -400,7 +448,7 @@ impl MqttChunkPublisher {
         let agent_id = self.agent_id.clone();
         tokio::spawn(async move {
             let event = SessionMessage {
-                agent_id: agent_id,
+                agent_id,
                 session_id: sid.clone(),
                 event: Some(session_message::Event::Chunk(ChunkPayload {
                     message_id: mid,
@@ -424,7 +472,7 @@ impl MqttChunkPublisher {
         let agent_id = self.agent_id.clone();
         tokio::spawn(async move {
             let event = SessionMessage {
-                agent_id: agent_id,
+                agent_id,
                 session_id: sid.clone(),
                 event: Some(session_message::Event::Done(DonePayload {
                     message_id: mid,
@@ -449,7 +497,7 @@ impl MqttChunkPublisher {
         let agent_id = self.agent_id.clone();
         tokio::spawn(async move {
             let event = SessionMessage {
-                agent_id: agent_id,
+                agent_id,
                 session_id: sid.clone(),
                 event: Some(session_message::Event::ToolCall(ToolCallPayload {
                     message_id: String::new(),
@@ -543,28 +591,22 @@ impl MqttChunkPublisher {
     }
 
     /// Publish a session_state_changed event via MQTT (QoS 1).
+    ///
+    /// ADR-034 Phase 8: takes a single `SessionStateChangeEvent` struct.
     pub(crate) fn publish_session_state_changed(
         &self,
-        session_id: &str,
-        status_json: &str,
-        model: Option<&str>,
-        provider: Option<&str>,
-        workspace_id: Option<&str>,
-        ratio: Option<f64>,
-        reasoning_effort: Option<&str>,
-        temperature: Option<f32>,
-        context_usage_json: Option<&str>,
+        ev: SessionStateChangeEvent<'_>,
     ) {
         let publisher = self.clone();
-        let sid = session_id.to_string();
-        let sjson = status_json.to_string();
-        let m = model.map(|s| s.to_string()).unwrap_or_default();
-        let p = provider.map(|s| s.to_string()).unwrap_or_default();
-        let w = workspace_id.map(|s| s.to_string()).unwrap_or_default();
-        let r = ratio.unwrap_or(0.0);
-        let re = reasoning_effort.map(|s| s.to_string()).unwrap_or_default();
-        let t = temperature.unwrap_or(0.0);
-        let cu = context_usage_json.map(|s| s.to_string()).unwrap_or_default();
+        let sid = ev.session_id.to_string();
+        let sjson = ev.status_json.to_string();
+        let m = ev.model.map(|s| s.to_string()).unwrap_or_default();
+        let p = ev.provider.map(|s| s.to_string()).unwrap_or_default();
+        let w = ev.workspace_id.map(|s| s.to_string()).unwrap_or_default();
+        let r = ev.ratio.unwrap_or(0.0);
+        let re = ev.reasoning_effort.map(|s| s.to_string()).unwrap_or_default();
+        let t = ev.temperature.unwrap_or(0.0);
+        let cu = ev.context_usage_json.map(|s| s.to_string()).unwrap_or_default();
         let agent_id = self.agent_id.clone();
         tokio::spawn(async move {
             let event = SessionMessage {
@@ -594,17 +636,27 @@ impl MqttChunkPublisher {
     }
 
     /// Publish a context_usage event via MQTT (QoS 0).
+    ///
+    /// Carries the full [`acowork_core::protocol::ContextUsageInfo`] serialised
+    /// as JSON in `context_usage_json`. The Desktop Rust subscriber expands it
+    /// into the same shape it emits for `SessionStateChanged`, so the frontend
+    /// can render the StatusBar from either source without special-casing.
     pub(crate) fn publish_context_usage(
         &self,
         session_id: &str,
-        input_tokens: u64,
-        output_tokens: u64,
-        total_input_tokens: u64,
-        total_output_tokens: u64,
+        ctx_info: &acowork_core::protocol::ContextUsageInfo,
     ) {
         let publisher = self.clone();
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
+        // Backwards-compat: keep the legacy individual token fields populated
+        // for any in-flight Desktop subscriber that hasn't switched to
+        // `context_usage_json` yet.
+        let input_tokens = ctx_info.input_tokens;
+        let output_tokens = ctx_info.output_tokens;
+        let total_input_tokens = ctx_info.total_input_tokens.unwrap_or(0);
+        let total_output_tokens = ctx_info.total_output_tokens.unwrap_or(0);
+        let cu_json = serde_json::to_string(ctx_info).unwrap_or_default();
         tokio::spawn(async move {
             let event = SessionMessage {
                 agent_id,
@@ -615,6 +667,7 @@ impl MqttChunkPublisher {
                     output_tokens,
                     total_input_tokens,
                     total_output_tokens,
+                    context_usage_json: cu_json,
                 })),
             };
             let envelope = DataEnvelope {
@@ -734,26 +787,20 @@ impl MqttChunkPublisher {
     }
 
     /// Publish a tool_approval_needed event via MQTT (QoS 1).
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// ADR-034 Phase 8: takes a single `ToolApprovalNeededEvent` struct.
     pub(crate) fn publish_tool_approval_needed(
         &self,
-        session_id: &str,
-        request_id: &str,
-        tool_name: &str,
-        action: &str,
-        risk_level: &str,
-        reason: &str,
-        tool_call_id: &str,
-        approval_timeout_secs: u64,
+        ev: ToolApprovalNeededEvent<'_>,
     ) {
         let publisher = self.clone();
-        let sid = session_id.to_string();
-        let rid = request_id.to_string();
-        let tn = tool_name.to_string();
-        let act = action.to_string();
-        let rl = risk_level.to_string();
-        let rsn = reason.to_string();
-        let tcid = tool_call_id.to_string();
+        let sid = ev.session_id.to_string();
+        let rid = ev.request_id.to_string();
+        let tn = ev.tool_name.to_string();
+        let act = ev.action.to_string();
+        let rl = ev.risk_level.to_string();
+        let rsn = ev.reason.to_string();
+        let tcid = ev.tool_call_id.to_string();
         let agent_id = self.agent_id.clone();
         tokio::spawn(async move {
             let event = SessionMessage {
@@ -768,7 +815,7 @@ impl MqttChunkPublisher {
                         risk_level: rl,
                         reason: rsn,
                         tool_call_id: tcid,
-                        approval_timeout_secs,
+                        approval_timeout_secs: ev.approval_timeout_secs,
                     },
                 )),
             };
@@ -830,16 +877,18 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
         let client = RuntimeMqttClient::connect(
-            "127.0.0.1",
-            port,
-            "com.test.agent",
-            "Test Agent",
-            "1.0.0",
-            None,
-            None,
-            "{}",
-            cache,
-            control_tx,
+            MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.agent",
+                agent_name: "Test Agent",
+                agent_version: "1.0.0",
+                avatar: None,
+                builtin_avatar: None,
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+            },
         )
         .await
         .expect("Runtime MQTT client should connect");

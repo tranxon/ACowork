@@ -27,7 +27,6 @@ export function AgentList({ width }: AgentListProps) {
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
-  const fetchLatestSessionTitle = useAgentStore((s) => s.fetchLatestSessionTitle);
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -88,16 +87,6 @@ export function AgentList({ width }: AgentListProps) {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-
-  // Fetch latest session title for each agent
-  useEffect(() => {
-    if (agentsList.length === 0) return;
-    for (const agent of agentsList) {
-      if (agentsMap[agent.agent_id]?.sessionTitle === undefined) {
-        void fetchLatestSessionTitle(agent.agent_id);
-      }
-    }
-  }, [agentsList, agentsMap, fetchLatestSessionTitle]);
 
   const handleInstall = async () => {
     try {
@@ -326,18 +315,47 @@ export function AgentList({ width }: AgentListProps) {
                       fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)",
                     }}
                   >
-                    {sessionTitle === undefined ? (
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "block h-2.5 w-2/3 animate-pulse rounded",
-                          selectedAgentId === agent.agent_id
-                            ? "bg-white/40"
-                            : "bg-zinc-300/60 dark:bg-zinc-600/60",
-                        )}
-                      />
+                    {agent.running ? (
+                      sessionTitle === undefined ? (
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "block h-2.5 w-2/3 animate-pulse rounded",
+                            selectedAgentId === agent.agent_id
+                              ? "bg-white/40"
+                              : "bg-zinc-300/60 dark:bg-zinc-600/60",
+                          )}
+                        />
+                      ) : (
+                        <span
+                          className={cn(
+                            "block truncate",
+                            selectedAgentId === agent.agent_id
+                              ? "text-white/70"
+                              : "text-zinc-500 dark:text-zinc-400",
+                          )}
+                        >
+                          {sessionTitle === null ? (
+                            <span aria-label="agent sleeping" className="inline-flex items-baseline">
+                              <span className="zzz-n">z</span>
+                              <span className="zzz-n">z</span>
+                              <span className="zzz-n">z</span>
+                              <span className="zzz-n">z</span>
+                              <span className="zzz-n">z</span>
+                            </span>
+                          ) : (sessionTitle || t("sessionTabBar.untitled"))}
+                        </span>
+                      )
                     ) : (
+                      // Stopped agent — render the sleep animation directly
+                      // rather than the loading skeleton. A stopped agent will
+                      // never have its sessionTitle populated by the backend
+                      // (Runtime HTTP server is not listening), so the
+                      // `undefined → skeleton` branch would otherwise stay
+                      // stuck forever, misleading the user into thinking a
+                      // session is still being fetched.
                       <span
+                        aria-label="agent sleeping"
                         className={cn(
                           "block truncate",
                           selectedAgentId === agent.agent_id
@@ -345,15 +363,13 @@ export function AgentList({ width }: AgentListProps) {
                             : "text-zinc-500 dark:text-zinc-400",
                         )}
                       >
-                        {sessionTitle === null ? (
-                          <span aria-label="agent sleeping" className="inline-flex items-baseline">
-                            <span className="zzz-n">z</span>
-                            <span className="zzz-n">z</span>
-                            <span className="zzz-n">z</span>
-                            <span className="zzz-n">z</span>
-                            <span className="zzz-n">z</span>
-                          </span>
-                        ) : (sessionTitle || t("sessionTabBar.untitled"))}
+                        <span className="inline-flex items-baseline">
+                          <span className="zzz-n">z</span>
+                          <span className="zzz-n">z</span>
+                          <span className="zzz-n">z</span>
+                          <span className="zzz-n">z</span>
+                          <span className="zzz-n">z</span>
+                        </span>
                       </span>
                     )}
                   </div>

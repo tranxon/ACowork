@@ -12,4 +12,4 @@ pub mod client;
 pub mod control_handler;
 
 pub use available_cache::{AvailableResourceCache, SharedAvailableCache, new_shared_cache};
-pub use client::{RuntimeMqttClient, RuntimeMqttClientError, MqttChunkPublisher};
+pub use client::{MqttChunkPublisher, MqttConnectConfig, RuntimeMqttClient, RuntimeMqttClientError, SessionStateChangeEvent, ToolApprovalNeededEvent};

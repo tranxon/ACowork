@@ -117,11 +117,26 @@ acowork/global/
 │                              #   version: u64,
 │                              #   providers: [ProviderRef],   # 仅包含 Gateway 验证过的
 │                              # }
+│                              # 注：ProviderRef 内嵌 `api_key` 字段
+│                              # （Gateway 在 PUBLISH 前从 Vault 解密后填入）
 ├── mcps                       # [Retained] 当前已就绪的 MCP 列表
+│                              # 注：McpRef 内嵌 `auth_token` 字段
+│                              # （提取自 catalog 中 env/headers 的 token 类键值）
 ├── lsps                       # [Retained] 当前已就绪的 LSP 列表
 ├── searches                   # [Retained] 当前已就绪的 search provider 列表
+│                              # 注：SearchRef 内嵌 `api_key` 字段
+│                              # （Gateway 从 Vault 解密后填入）
 └── embedding_models           # [Retained] 当前已就绪的 embedding model 列表
 ```
+
+**为什么密钥在 `acowork/global/*` 主题里一起发布？** 这是 Runtime **唯一**的密钥获取路径——Runtime 启动时只 SUB `acowork/global/#`，没有 gRPC AgentHello 握手也没有单独的密钥请求主题：
+
+1. **Gateway 是 broker 的同进程宿主**（见 §11），broker 只绑定 localhost（`127.0.0.1`），不出主机。PUBLISH 的 payload（含解密的密钥）不会进入网络。
+2. **Runtime 与 Gateway 同用户**——Runtime 是 Gateway 拉起的子进程，不存在"跨租户"密钥泄露场景。
+3. **运行期变更推送**——用户从 Desktop 改了某个 provider 的 API key、添加了新 MCP token、改了 search key 后，Gateway health-check 触发 publisher 重算并重发 `acowork/global/{kind}`（retain=true）。所有已订阅的 Runtime **立即**收到带新密钥的 push，无需重新启动或额外的 request/response 往返。
+
+密钥是 **acowork/global/* retained push 通道** 的合法载荷，**不是**违反 §28 “MQTT 不承载 req/res 模式”（这里没 req/res 语义，就是单向 PUBLISH 推快照 + 后续变更）。
+
 
 - **Owner**:**Gateway**(数据源权威)。Gateway 后台 health-check loop 检测到 provider/mcp/lsp/search/embedding 状态变化(就绪/失效/卸载)时,重算该主题 payload 并 PUBLISH(retain=true)。
 - **订阅者**:
@@ -142,7 +157,9 @@ acowork/global/
 > Runtime 不能每次调用前都 HTTP 拉一次(频繁/慢),也不能用"全量列表"(可能包含未就绪的资源)。Retained + push 模式让 Runtime 在启动后就能拿到一份"现在能用什么"的实时视图,后续增量同步变化。
 >
 > 此外,所有 Runtime 看到的是同一份数据——这是它**不放在 `agents/{id}/` 下的根本原因**:没有 per-agent 差异。
-
+>
+> 这一层同时**携带每个 provider/MCP/search 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、从 `SearchRef.api_key` 取得 search provider key，填入 provider factory 与 MCP 客户端。**不**读环境变量、**不**走 gRPC AgentHello 握手——这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
+>
 > **为什么不用 `current` / `update` 两个子主题?**
 >
 > - `current` Retained + `update` 普通 两阶段的设计目的是区分"快照语义 vs 增量语义"。
@@ -403,8 +420,9 @@ sequenceDiagram
     RT->>BROKER: PUBLISH acowork/agents/{id}/status = "online" (Retained)
     RT->>BROKER: PUBLISH acowork/agents/{id}/meta (Retained, 完整 meta)
     RT->>BROKER: PUBLISH acowork/agents/{id}/config (Retained, Runtime 当前生效的完整 agent_config.json)
-    RT->>BROKER: SUBSCRIBE acowork/global/# (立即收到全局资源 retained 快照)
+    RT->>BROKER: SUBSCRIBE acowork/global/# (立即收到全局资源 retained 快照——含各 provider/MCP/search 的解密后 key)
     RT->>BROKER: SUBSCRIBE acowork/agents/{id}/sessions/control/#
+    Note over RT: 收到 acowork/global/providers retained → Phase A 从 ProviderRef.api_key 取出 key 创建 LLM provider（不读环境变量、不走 gRPC AgentHello 握手）
 
     Note over DA,BROKER: 6. Desktop (Tauri Backend) 连接
     DA->>BROKER: CONNECT (client_id: "user:{uid}:desktop:{pid}")

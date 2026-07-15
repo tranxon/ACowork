@@ -180,8 +180,18 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
-            "127.0.0.1", mqtt_port, &loaded.manifest.agent_id, &loaded.manifest.name,
-            &loaded.manifest.version, None, None, &config_json, cache.clone(), control_tx,
+            crate::mqtt::client::MqttConnectConfig {
+                host: "127.0.0.1",
+                port: mqtt_port,
+                agent_id: &loaded.manifest.agent_id,
+                agent_name: &loaded.manifest.name,
+                agent_version: &loaded.manifest.version,
+                avatar: None,
+                builtin_avatar: None,
+                config_json: &config_json,
+                available_cache: cache.clone(),
+                control_tx,
+            },
         ).await {
             Ok(client) => {
                 tracing::info!(agent_id=%loaded.manifest.agent_id, "Runtime MQTT client connected");
@@ -225,7 +235,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
     let skills_dir = loaded.package_dir.join("skills");
-    let skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
+    let _skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
         .unwrap_or_else(|e| {
             tracing::warn!(
                 skills_dir = %skills_dir.display(),
@@ -287,17 +297,15 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         available = ?providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
                         "No provider with API key found, using noop"
                     );
-                    let p = crate::providers::router::create_noop_provider();
-                    (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                    noop_provider_tuple()
                 }
             } else {
                 tracing::warn!("No provider list available from Gateway or cache, using noop");
-                let p = crate::providers::router::create_noop_provider();
-                (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                noop_provider_tuple()
             }
         } else {
             // ADR-033: Try MQTT available_cache when gRPC hello_config is unavailable.
-            let p = if let Some(ref cache) = available_cache {
+            if let Some(ref cache) = available_cache {
                 // Wait up to 10s for the first acowork/global/providers to arrive.
                 // The Gateway publishes every 5s (non-retained due to rumqttd 0.14).
                 let mut waited = 0;
@@ -312,13 +320,24 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 }
                 let cache_read = cache.read().await;
                 if let Some(ref available_providers) = cache_read.providers {
-                    // Use MQTT provider info. API keys from env: ACOWORK_PROVIDER_<ID>_KEY
+                    // Use MQTT provider info. API key resolution now happens
+                    // via the `api_key` field embedded in the
+                    // `acowork/global/providers` payload itself — see
+                    // [global_resources_publisher] and mqtt.md §3.1.1. The
+                    // legacy `ACOWORK_PROVIDER_<ID>_KEY` env var is no longer
+                    // used because the Gateway does not inject keys into the
+                    // Runtime process environment (bug 1 of the
+                    // senior-engineer startup log).
                     let chosen = available_providers.providers.first();
-                    
+
                     if let Some(prov) = chosen {
                         gateway_current_provider_id = Some(prov.id.clone());
-                        let env_var = format!("ACOWORK_PROVIDER_{}_KEY", prov.id.to_uppercase().replace('-', "_"));
-                        let api_key = std::env::var(&env_var).ok();
+                        let api_key = prov.api_key.clone();
+                        // Empty string means "no key configured" (e.g. local
+                        // Ollama). Convert to Option<&str> for the provider
+                        // factory, which treats None as "no auth header".
+                        let api_key_opt: Option<&str> =
+                            if api_key.is_empty() { None } else { Some(api_key.as_str()) };
                         let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
                         let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
                         let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
@@ -326,7 +345,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         let provider = crate::providers::router::create_provider(
                             &prov.id,
                             &proto_str,
-                            api_key.as_deref(),
+                            api_key_opt,
                             Some(&prov.base_url),
                             timeouts,
                         );
@@ -334,26 +353,22 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                             provider = %prov.id,
                             model = %model_id,
                             num_models = available.len(),
-                            has_api_key = api_key.is_some(),
+                            has_api_key = api_key_opt.is_some(),
                             source = "mqtt_available_cache",
                             "Provider initialized from MQTT available cache"
                         );
                         (provider, model_id, available, proto_str)
                     } else {
                         tracing::warn!("MQTT providers available but none selected, using noop");
-                        let p = crate::providers::router::create_noop_provider();
-                        (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                        noop_provider_tuple()
                     }
                 } else {
                     tracing::warn!("MQTT connected but no providers in cache yet, using noop");
-                    let p = crate::providers::router::create_noop_provider();
-                    (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
+                    noop_provider_tuple()
                 }
             } else {
-                let p = crate::providers::router::create_noop_provider();
-                (p, "no-model".to_string(), vec![], ProtocolType::OpenAI)
-            };
-            p
+                noop_provider_tuple()
+            }
         }
     };
 
@@ -665,7 +680,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Capture reconnect params for Gateway mode ───────────────────
     let agent_id = config.agent_id.clone();
-    let version = loaded.manifest.version.clone();
 
     Ok(AgentBootContext {
         loaded,
@@ -684,7 +698,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         active_tools,
         tool_definitions,
         full_tool_specs,
-        skill_registry,
         system_prompt,
         memory_session,
         mcp_notifier,
@@ -698,7 +711,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         session_snapshots,
         latest_session,
         agent_id,
-        version,
         http_dispatch_rx: Some(http_dispatch_rx),
         // ADR-033: shared memory store + embed dim are populated by Phase B
         // and read by the Runtime HTTP memory handlers. The HTTP server was
@@ -706,4 +718,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_store_shared,
         embed_dim_shared,
     })
+}
+
+/// Return a noop provider tuple for fallback cases where no provider list
+/// is available from Gateway or MQTT cache.
+fn noop_provider_tuple(
+) -> (
+    std::sync::Arc<dyn acowork_core::providers::traits::Provider>,
+    String,
+    Vec<String>,
+    ProtocolType,
+) {
+    (
+        crate::providers::router::create_noop_provider(),
+        "no-model".to_string(),
+        vec![],
+        ProtocolType::OpenAI,
+    )
 }

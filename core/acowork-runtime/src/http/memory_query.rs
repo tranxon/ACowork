@@ -109,6 +109,32 @@ pub(crate) struct ConsolidateOutput {
     pub message: String,
 }
 
+/// Result of a single-node GET query (`GET /memory/nodes/{nid}`).
+///
+/// ADR-034 §11.2 #12: returns the full node detail when `found`, plus
+/// every property on the Grafeo node so the desktop UI can render any
+/// custom fields the engine attached to the node. The `properties`
+/// snapshot is intentionally `HashMap<String, serde_json::Value>` (not
+/// strongly typed) — schema is per-label and varies over time, so we
+/// ferry the keys through verbatim instead of guessing.
+#[derive(Debug, Clone)]
+pub(crate) struct GetNodeOutput {
+    pub node_id: u64,
+    pub found: bool,
+    pub node_type: String,
+    pub content: String,
+    pub confidence: f64,
+    pub decay_score: f64,
+    pub created_at: i64,
+    pub last_accessed_at: i64,
+    pub access_count: u32,
+    pub status: String,
+    /// All Grafeo node properties, serialised as JSON values.
+    /// Empty when `found == false` or the store is unavailable.
+    pub properties: HashMap<String, serde_json::Value>,
+    pub message: String,
+}
+
 /// Parameters for [`list_nodes`].
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ListNodesParams {
@@ -169,6 +195,28 @@ pub(crate) fn consolidate_output_to_json(out: &ConsolidateOutput) -> serde_json:
         "duration_ms": out.duration_ms,
         "episodes_consolidated": out.episodes_consolidated,
         "knowledge_nodes_generated": out.knowledge_nodes_generated,
+        "message": out.message,
+    })
+}
+
+/// Convert a [`GetNodeOutput`] to JSON.
+///
+/// Schema mirrors [`GetNodeOutput`] 1:1 (`found` flag leads so the UI can
+/// distinguish "missing" from "missing fields"; `properties` is included
+/// as a nested object whenever `found == true`, otherwise as `{}`).
+pub(crate) fn get_output_to_json(out: &GetNodeOutput) -> serde_json::Value {
+    serde_json::json!({
+        "node_id": out.node_id,
+        "found": out.found,
+        "node_type": out.node_type,
+        "content": out.content,
+        "confidence": out.confidence,
+        "decay_score": out.decay_score,
+        "created_at": out.created_at,
+        "last_accessed_at": out.last_accessed_at,
+        "access_count": out.access_count,
+        "status": out.status,
+        "properties": out.properties,
         "message": out.message,
     })
 }
@@ -492,6 +540,137 @@ pub(crate) fn get_stats(
     }
 }
 
+/// Look up a single memory node by numeric ID.
+///
+/// Scans every [`MEMORY_LABELS`] entry and returns the first node whose
+/// `NodeId` matches. The lookup is intentionally cheap (`O(n)` over
+/// labels, then `O(1)` once the right label is identified via
+/// `get_node`) — the alternative (`graph.get_node_by_id`) is not part of
+/// the public API and we don't want to depend on internals.
+///
+/// When the store is unavailable the result reports `"found": false`
+/// with `node_id` echoed back so the HTTP handler can distinguish
+/// "store cold" (503) from "no such node" (404) — this matches the
+/// pattern already used by `delete_node` / `trigger_consolidate`.
+pub(crate) fn get_node(
+    memory_store: Option<&Arc<GrafeoStore>>,
+    node_id: u64,
+) -> GetNodeOutput {
+    let not_available = GetNodeOutput {
+        node_id,
+        found: false,
+        node_type: String::new(),
+        content: String::new(),
+        confidence: 0.0,
+        decay_score: 0.0,
+        created_at: 0,
+        last_accessed_at: 0,
+        access_count: 0,
+        status: String::new(),
+        properties: HashMap::new(),
+        message: "Memory store not available".to_string(),
+    };
+    let store = match memory_store {
+        Some(s) => s,
+        None => {
+            tracing::warn!("memory get_node: no Grafeo store available");
+            return not_available;
+        }
+    };
+    let target = grafeo_common::types::NodeId(node_id);
+    for label in &MEMORY_LABELS {
+        let ids = store.db().graph_store().nodes_by_label(label);
+        if !ids.contains(&target) {
+            continue;
+        }
+        let n = match store.db().get_node(target) {
+            Some(n) => n,
+            None => {
+                // Index says the node exists but the lookup failed —
+                // should not happen in practice, but treat as "not found".
+                tracing::warn!(
+                    node_id,
+                    label,
+                    "memory get_node: label index hit but get_node returned None"
+                );
+                continue;
+            }
+        };
+
+        let content = extract_node_content(label, &n);
+        let created_at = n
+            .get_property("created_at")
+            .and_then(|v| v.as_timestamp())
+            .map(|ts| ts.as_secs())
+            .unwrap_or(0);
+        let last_accessed_at = n
+            .get_property("last_accessed_at")
+            .and_then(|v| v.as_timestamp())
+            .map(|ts| ts.as_secs())
+            .unwrap_or(created_at);
+        let access_count = n
+            .get_property("access_count")
+            .and_then(|v| v.as_int64())
+            .unwrap_or(0) as u32;
+        let confidence = n
+            .get_property("confidence")
+            .and_then(|v| v.as_float64())
+            .unwrap_or(0.0);
+        let decay_score = n
+            .get_property("decay_score")
+            .and_then(|v| v.as_float64())
+            .unwrap_or(1.0);
+        let status = n
+            .get_property("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Active")
+            .to_string();
+
+        // Snapshot every property the engine attached to the node so the
+        // desktop UI can render detail views without us having to know
+        // the per-label schema in advance. Reuse the `Serialize`
+        // impl on `grafeo_common::types::Value` (it already covers
+        // every variant — Int64/Float64/String/Bool/Timestamp/List/
+        // Map/Vector/Bytes/... ) so we don't have to enumerate them
+        // ourselves and risk drifting from upstream.
+        let mut properties: HashMap<String, serde_json::Value> = HashMap::new();
+        for (key, value) in n.properties_as_btree() {
+            let json_val = serde_json::to_value(&value).unwrap_or(serde_json::Value::Null);
+            properties.insert(key.as_str().to_string(), json_val);
+        }
+
+        return GetNodeOutput {
+            node_id,
+            found: true,
+            node_type: label.to_string(),
+            content,
+            confidence,
+            decay_score,
+            created_at,
+            last_accessed_at,
+            access_count,
+            status,
+            properties,
+            message: "ok".to_string(),
+        };
+    }
+
+    GetNodeOutput {
+        node_id,
+        found: false,
+        node_type: String::new(),
+        content: String::new(),
+        confidence: 0.0,
+        decay_score: 0.0,
+        created_at: 0,
+        last_accessed_at: 0,
+        access_count: 0,
+        status: String::new(),
+        properties: HashMap::new(),
+        message: "Node not found".to_string(),
+    }
+}
+
 /// Delete a memory node by ID.
 pub(crate) fn delete_node(
     memory_store: Option<&Arc<GrafeoStore>>,
@@ -626,6 +805,49 @@ mod tests {
         assert_eq!(out.node_id, 9_999_999);
         assert!(!out.deleted);
         assert_eq!(out.message, "Node not found");
+    }
+
+    #[test]
+    fn get_node_reports_unavailable_without_store() {
+        let out = get_node(None, 42);
+        assert_eq!(out.node_id, 42);
+        assert!(!out.found);
+        assert_eq!(out.message, "Memory store not available");
+        assert!(out.properties.is_empty());
+    }
+
+    #[test]
+    fn get_node_reports_not_found_for_missing_id() {
+        let store = Arc::new(make_store());
+        let out = get_node(Some(&store), 9_999_999);
+        assert_eq!(out.node_id, 9_999_999);
+        assert!(!out.found);
+        assert_eq!(out.message, "Node not found");
+        assert!(out.node_type.is_empty());
+        assert!(out.properties.is_empty());
+    }
+
+    #[test]
+    fn get_output_to_json_includes_found_flag_and_properties() {
+        let out = GetNodeOutput {
+            node_id: 7,
+            found: true,
+            node_type: "Episodic".to_string(),
+            content: "[user] hi".to_string(),
+            confidence: 0.5,
+            decay_score: 0.9,
+            created_at: 100,
+            last_accessed_at: 100,
+            access_count: 0,
+            status: "Active".to_string(),
+            properties: HashMap::new(),
+            message: "ok".to_string(),
+        };
+        let v = get_output_to_json(&out);
+        assert_eq!(v["node_id"], 7);
+        assert_eq!(v["found"], true);
+        assert_eq!(v["node_type"], "Episodic");
+        assert_eq!(v["message"], "ok");
     }
 
     #[test]

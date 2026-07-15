@@ -357,56 +357,6 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
-    // ── Chat ───────────────────────────────────────────────────────────
-
-    /// `POST /api/agents/:id/message`
-    pub async fn send_message(
-        &self,
-        agent_id: &str,
-        content: &str,
-        message_id: Option<&str>,
-        session_id: Option<&str>,
-        command: Option<&str>,
-        document_ids: Option<&[String]>,
-        attached_context: Option<&[serde_json::Value]>,
-    ) -> Result<SendMessageResponse> {
-        let mut body = serde_json::json!({ "content": content });
-        if let Some(mid) = message_id {
-            body["message_id"] = serde_json::json!(mid);
-        }
-        if let Some(sid) = session_id {
-            body["session_id"] = serde_json::json!(sid);
-        }
-        if let Some(cmd) = command {
-            body["command"] = serde_json::json!(cmd);
-        }
-        if let Some(ids) = document_ids {
-            if !ids.is_empty() {
-                body["document_ids"] = serde_json::json!(ids);
-            }
-        }
-        if let Some(ctx) = attached_context {
-            if !ctx.is_empty() {
-                body["attached_context"] = serde_json::json!(ctx);
-            }
-        }
-        let resp = self
-            .client
-            .post(format!("{}/api/agents/{}/message", self.base_url, agent_id))
-            .json(&body)
-            .send()
-            .await?;
-        parse_gateway_response(resp).await
-    }
-
-    /// Get the WebSocket URL for streaming chat
-    #[allow(dead_code)]
-    pub fn stream_url(&self, agent_id: &str) -> String {
-        format!("{}/api/agents/{}/stream", self.base_url, agent_id)
-            .replace("http://", "ws://")
-            .replace("https://", "wss://")
-    }
-
     // ── Documents ──────────────────────────────────────────────────────
 
     /// `POST /api/sessions/:session_id/documents` — multipart upload
@@ -454,6 +404,7 @@ impl GatewayClient {
     }
 
     /// `POST /api/providers` (with optional base_url, default_model, models, model_capabilities, and custom flag)
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_key(
         &self,
         provider: &str,
@@ -521,6 +472,7 @@ impl GatewayClient {
     ///
     /// If `key` is None, the existing API key is preserved on the Gateway side.
     /// This prevents the masked key_preview from overwriting the real key.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_key(
         &self,
         provider: &str,
@@ -532,10 +484,10 @@ impl GatewayClient {
         compact_model: Option<&str>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
-        if let Some(k) = key {
-            if !k.is_empty() {
-                body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
-            }
+        if let Some(k) = key
+            && !k.is_empty()
+        {
+            body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
         }
         if let Some(url) = base_url {
             body.insert(
@@ -544,18 +496,18 @@ impl GatewayClient {
             );
         }
         // Send models list if provided; otherwise fallback to default_model
-        if let Some(models_list) = models {
-            if !models_list.is_empty() {
-                body.insert(
-                    "models".to_string(),
-                    serde_json::Value::Array(
-                        models_list
-                            .iter()
-                            .map(|m| serde_json::Value::String(m.clone()))
-                            .collect(),
-                    ),
-                );
-            }
+        if let Some(models_list) = models
+            && !models_list.is_empty()
+        {
+            body.insert(
+                "models".to_string(),
+                serde_json::Value::Array(
+                    models_list
+                        .iter()
+                        .map(|m| serde_json::Value::String(m.clone()))
+                        .collect(),
+                ),
+            );
         } else if let Some(model) = default_model {
             body.insert(
                 "default_model".to_string(),
@@ -609,10 +561,10 @@ impl GatewayClient {
         base_url: Option<&str>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::json!({ "provider": provider, "key": key });
-        if let Some(url) = base_url {
-            if !url.is_empty() {
-                body["base_url"] = serde_json::Value::String(url.to_string());
-            }
+        if let Some(url) = base_url
+            && !url.is_empty()
+        {
+            body["base_url"] = serde_json::Value::String(url.to_string());
         }
         let resp = self
             .client
@@ -641,10 +593,10 @@ impl GatewayClient {
         base_url: Option<&str>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
-        if let Some(k) = key {
-            if !k.is_empty() {
-                body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
-            }
+        if let Some(k) = key
+            && !k.is_empty()
+        {
+            body.insert("key".to_string(), serde_json::Value::String(k.to_string()));
         }
         if let Some(url) = base_url {
             body.insert(
@@ -716,13 +668,6 @@ pub struct AgentDetailResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericMessageResponse {
     pub message: String,
-}
-
-/// Send message response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendMessageResponse {
-    pub message_id: String,
-    pub status: String,
 }
 
 /// Clone response

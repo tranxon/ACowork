@@ -17,6 +17,7 @@ pub async fn list_keys(state: State<'_, AppState>) -> Result<Vec<VaultKeyEntry>,
 
 /// Add a new API key (with optional base_url, models list, per-model capabilities, and custom flag)
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_key(
     state: State<'_, AppState>,
     provider: String,
@@ -60,6 +61,7 @@ pub async fn remove_key(
 
 /// Update an API key (supports partial updates — key is optional)
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_key(
     state: State<'_, AppState>,
     provider: String,

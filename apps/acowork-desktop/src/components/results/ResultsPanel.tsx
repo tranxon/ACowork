@@ -19,7 +19,7 @@ import { ToolsTab } from "./ToolsTab";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
-import { isGatewayLocal } from "../../lib/config";
+import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface ResultsPanelProps {
@@ -230,6 +230,17 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     }
     prevRunning.current = isRunning;
   }, [selectedAgent?.running, activeTab]);
+
+  // ADR-034 Phase 5: Agent status query (fire-and-forget, no UI rendering yet)
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data) console.debug("[ResultsPanel] Agent status:", data);
+      })
+      .catch(() => {/* ignore */});
+  }, [selectedAgentId]);
 
   return (
     <div className="relative flex flex-col shrink-0 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl ml-1" style={{ width }}>

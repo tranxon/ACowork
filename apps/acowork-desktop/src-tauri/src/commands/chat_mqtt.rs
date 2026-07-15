@@ -3,7 +3,6 @@
 //! These commands are called from the React frontend via `invoke()`:
 //! - `connect_mqtt` — connect to the MQTT broker
 //! - `disconnect_mqtt` — disconnect and clean up
-//! - `mqtt_subscribe_agent` — subscribe to session events for an agent
 //! - `mqtt_publish_control` — publish a control command (protobuf-encoded)
 
 use std::sync::Arc;
@@ -55,10 +54,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         match payload {
             // ── Session message events (streaming) ──
             data_envelope::Payload::SessionMessage(sm) => {
-                if let Some(event) = &sm.event {
-                    if let Some(flat) = session_message_to_flat(sm.agent_id.as_str(), sm.session_id.as_str(), event) {
-                        let _ = app_handle.emit("agent-event", flat);
-                    }
+                if let Some(event) = &sm.event
+                    && let Some(flat) = session_message_to_flat(sm.agent_id.as_str(), sm.session_id.as_str(), event)
+                {
+                    let _ = app_handle.emit("agent-event", flat);
                 }
             }
 
@@ -179,8 +178,7 @@ pub async fn disconnect_mqtt(state: tauri::State<'_, AppState>) -> Result<(), St
 /// Subscribe to session events for a specific agent session.
 ///
 /// Called when the user enters the chat view for a specific session.
-/// Use this instead of `mqtt_subscribe_agent_sessions` when only one
-/// session is active to avoid bandwidth waste from other sessions.
+/// Use this to avoid bandwidth waste from other sessions.
 #[allow(dead_code)]
 #[tauri::command]
 pub async fn mqtt_subscribe_agent_session(
@@ -216,41 +214,28 @@ pub async fn mqtt_unsubscribe_agent_session(
     client.unsubscribe_agent_session(&agent_id, &session_id).await
 }
 
-/// Subscribe to session events for a specific agent.
-///
-/// Called when the user enters the chat view for an agent.
-#[tauri::command]
-pub async fn mqtt_subscribe_agent_sessions(
-    agent_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let guard = state.mqtt_client.lock().await;
-    let client = guard
-        .as_ref()
-        .ok_or_else(|| "MQTT client not connected".to_string())?;
-
-    let client = client.lock().await;
-    // ADR-033: subscribe_agent_sessions is deprecated but this is the
-    // all-sessions subscription — per-session requires a session_id
-    #[allow(deprecated)]
-    client.subscribe_agent_sessions(&agent_id).await
-}
-
 /// Publish a control command via MQTT (protobuf-encoded DataEnvelope).
 ///
-/// Used for fire-and-forget commands: send_message, stop, create_session,
-/// delete_session, model_switch, reasoning_effort, compact_context, workspace_switch.
-/// For commands requiring acknowledgment, use HTTP instead.
+/// ADR-034 Phase 5: All 17 control commands supported via MQTT.
+/// No HTTP fallback for any control command.
 ///
 /// The payload_json is a JSON object whose shape depends on the command:
-/// - "message": { "session_id", "message_id", "content" }
-/// - "stop": { "session_id" }
+/// - "chat_message": { "session_id", "message_id", "content", "command", "params_json" }
+/// - "stop": { "session_id", "reason" }
 /// - "create_session": {}
 /// - "delete_session": { "session_id" }
-/// - "model_switch": { "session_id", "model_id" }
+/// - "close_session": { "session_id" }
+/// - "update_session_title": { "session_id", "title" }
+/// - "continue_execution": { "session_id", "reason" }
+/// - "enable_notify": { "session_id" }
+/// - "disable_notify": { "session_id" }
+/// - "approval_decision": { "session_id", "request_id", "approved", "allow_all_session", "reason" }
+/// - "question_answer": { "session_id", "request_id", "answer" }
+/// - "model_switch": { "session_id", "model_id", "provider_id" }
 /// - "reasoning_effort": { "session_id", "effort" }
-/// - "compact_context": { "session_id" }
 /// - "workspace_switch": { "session_id", "workspace_id" }
+/// - "compact_context": { "session_id" }
+/// - "compress_action": { "session_id", "compress_type" }
 #[tauri::command]
 pub async fn mqtt_publish_control(
     agent_id: String,
@@ -279,7 +264,9 @@ pub async fn mqtt_publish_control(
 
 /// Build a `ControlCommand` protobuf from a JSON payload and command type.
 ///
-/// Maps frontend JSON → protobuf per `docs/zh/protocols/mqtt.md` §9.1.
+/// Maps frontend JSON → protobuf per ADR-034 §3.2 / `docs/zh/protocols/mqtt.md` §9.1.
+/// ADR-034 Phase 5: all sub-command `agent_id` fields removed (now only in ControlCommand top level);
+/// 8 new commands added; "message" renamed to "chat_message" with params_json.
 fn build_control_command(
     agent_id: &str,
     command: &str,
@@ -291,18 +278,35 @@ fn build_control_command(
         .to_string();
 
     let cmd = match command {
+        // ── Session lifecycle ──
         "create_session" => control_command::Command::CreateSession(
-            mqtt_proto::CreateSessionCommand {
-                agent_id: agent_id.to_string(),
-            },
+            mqtt_proto::CreateSession {},
         ),
         "delete_session" => control_command::Command::DeleteSession(
-            mqtt_proto::DeleteSessionCommand {
-                agent_id: agent_id.to_string(),
+            mqtt_proto::DeleteSession {
                 session_id,
             },
         ),
-        "message" => {
+        "close_session" => control_command::Command::CloseSession(
+            mqtt_proto::CloseSession {
+                session_id,
+            },
+        ),
+        "update_session_title" => {
+            let title = json.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            control_command::Command::UpdateSessionTitle(
+                mqtt_proto::UpdateSessionTitle {
+                    session_id,
+                    title,
+                },
+            )
+        }
+
+        // ── Chat ──
+        "chat_message" => {
             let message_id = json.get("message_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -311,31 +315,118 @@ fn build_control_command(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            control_command::Command::Message(
-                mqtt_proto::MessageCommand {
-                    agent_id: agent_id.to_string(),
+            let cmd_text = json.get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let params_json = json.get("params_json")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            control_command::Command::ChatMessage(
+                mqtt_proto::ChatMessage {
                     session_id,
                     message_id,
                     content,
+                    command: cmd_text,
+                    params_json,
                 },
             )
         }
-        "stop" => control_command::Command::Stop(
-            mqtt_proto::StopCommand {
-                agent_id: agent_id.to_string(),
+        "stop" => {
+            let reason = json.get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user_requested")
+                .to_string();
+            control_command::Command::Stop(
+                mqtt_proto::Stop {
+                    session_id,
+                    reason,
+                },
+            )
+        }
+        "continue_execution" => {
+            let reason = json.get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user_requested")
+                .to_string();
+            control_command::Command::ContinueExecution(
+                mqtt_proto::ContinueExecution {
+                    session_id,
+                    reason,
+                },
+            )
+        }
+        "enable_notify" => control_command::Command::EnableNotify(
+            mqtt_proto::EnableNotify {
                 session_id,
             },
         ),
+        "disable_notify" => control_command::Command::DisableNotify(
+            mqtt_proto::DisableNotify {
+                session_id,
+            },
+        ),
+
+        // ── User responses to runtime prompts ──
+        "approval_decision" => {
+            let request_id = json.get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let approved = json.get("approved")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let allow_all = json.get("allow_all_session")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let reason = json.get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            control_command::Command::ApprovalDecision(
+                mqtt_proto::ApprovalDecision {
+                    session_id,
+                    request_id,
+                    approved,
+                    allow_all_session: allow_all,
+                    reason,
+                },
+            )
+        }
+        "question_answer" => {
+            let request_id = json.get("request_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let answer = json.get("answer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            control_command::Command::QuestionAnswer(
+                mqtt_proto::QuestionAnswer {
+                    session_id,
+                    request_id,
+                    answer,
+                },
+            )
+        }
+
+        // ── Per-session config ──
         "model_switch" => {
             let model_id = json.get("model_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let provider_id = json.get("provider_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             control_command::Command::ModelSwitch(
-                mqtt_proto::ModelSwitchCommand {
-                    agent_id: agent_id.to_string(),
+                mqtt_proto::ModelSwitch {
                     session_id,
                     model_id,
+                    provider_id,
                 },
             )
         }
@@ -345,32 +436,43 @@ fn build_control_command(
                 .unwrap_or("medium")
                 .to_string();
             control_command::Command::ReasoningEffort(
-                mqtt_proto::ReasoningEffortCommand {
-                    agent_id: agent_id.to_string(),
+                mqtt_proto::ReasoningEffort {
                     session_id,
                     effort,
                 },
             )
         }
-        "compact_context" => control_command::Command::CompactContext(
-            mqtt_proto::CompactContextCommand {
-                agent_id: agent_id.to_string(),
-                session_id,
-            },
-        ),
         "workspace_switch" => {
             let workspace_id = json.get("workspace_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
             control_command::Command::WorkspaceSwitch(
-                mqtt_proto::WorkspaceSwitchCommand {
-                    agent_id: agent_id.to_string(),
+                mqtt_proto::WorkspaceSwitch {
                     session_id,
                     workspace_id,
                 },
             )
         }
+
+        // ── Context management ──
+        "compact_context" => control_command::Command::CompactContext(
+            mqtt_proto::CompactContext {
+                session_id,
+            },
+        ),
+        "compress_action" => {
+            let compress_type = json.get("compress_type")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i32;
+            control_command::Command::CompressAction(
+                mqtt_proto::CompressAction {
+                    session_id,
+                    compress_type,
+                },
+            )
+        }
+
         other => return Err(format!("Unknown control command: {}", other)),
     };
 
@@ -481,12 +583,26 @@ fn session_message_to_flat(
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::ContextUsage(p) => {
+            // Prefer the fully-populated `context_usage_json` payload when the
+            // Runtime publishes it: it carries `context_window`, `total_tokens`,
+            // `usage_percent` and `usable_context` that the StatusBar needs.
+            // Falling back to the legacy 4 token-count fields would render the
+            // StatusBar with `undefined` and crash `formatTokenCount`.
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("context_usage".into()));
+            // Legacy per-field tokens (kept for any older subscriber).
             m.insert("input_tokens".into(), serde_json::json!(p.input_tokens));
             m.insert("output_tokens".into(), serde_json::json!(p.output_tokens));
             m.insert("total_input_tokens".into(), serde_json::json!(p.total_input_tokens));
             m.insert("total_output_tokens".into(), serde_json::json!(p.total_output_tokens));
+            if !p.context_usage_json.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&p.context_usage_json) {
+                    Ok(val) => { m.insert("context_usage".into(), val); }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse ContextUsagePayload.context_usage_json");
+                    }
+                }
+            }
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::MemoryUpdated(p) => {

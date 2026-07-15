@@ -81,14 +81,19 @@ pub enum InboundMessage {
     },
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
-    /// Continue execution after iteration limit was reached.
+    /// ADR-034: Continue execution after iteration limit was reached.
     /// Resets the iteration counter and resumes the agent loop.
+    /// Carries `session_id` so MQTT dispatch can route via the
+    /// same channel used by gRPC era (no change of semantics).
     ContinueExecution {
-        /// Reason for continuing (optional, for logging)
+        /// ADR-034: session_id for routing (Phase 2 may deprecate).
+        session_id: String,
+        /// Reason for continuing (optional, for logging).
         reason: String,
     },
-    /// Tool approval decision from user (shell command risk confirmation).
+    /// ADR-034: Tool approval decision from user (shell command risk confirmation).
     /// Delivered by Gateway after user clicks Allow/Deny in the Desktop App.
+    /// Carries `session_id` for parity with proto Message.
     ApprovalDecision {
         /// The approval request ID (matches ChunkEvent::ToolApprovalNeeded)
         request_id: String,
@@ -98,9 +103,12 @@ pub enum InboundMessage {
         allow_all_session: bool,
         /// Optional reason for denial
         reason: Option<String>,
+        /// ADR-034: session_id for routing (Phase 2 may deprecate).
+        session_id: String,
     },
     /// User's answer to an ask_user_question prompt.
     /// Delivered by Gateway after the user selects an option or types free text.
+    /// Carries `session_id` for parity with proto Message.
     QuestionAnswer {
         /// The request ID (matches ChunkEvent::AskQuestion)
         request_id: String,
@@ -108,12 +116,68 @@ pub enum InboundMessage {
         /// - If they chose a pre-defined option: the option's label
         /// - If they typed free text (via "Other"): their free-text input
         answer: String,
+        /// ADR-034: session_id for routing (Phase 2 may deprecate).
+        session_id: String,
+    },
+    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
+    /// graceful close of a session (preserves JSONL, triggers distillation).
+    CloseSession { session_id: String },
+    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
+    /// rename a session's title. Phase 2 will route this via
+    /// `SessionMessage::UpdateSessionTitle` directly, instead of
+    /// wrapping in `SystemNotification` (fixes §7.1 G1).
+    UpdateSessionTitle {
+        session_id: String,
+        title: String,
+    },
+    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
+    /// session switched to foreground — Desktop starts receiving
+    /// NewDataAvailable events. Control events always pushed regardless.
+    EnableNotify { session_id: String },
+    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
+    /// session switched to background — Desktop stops receiving
+    /// NewDataAvailable events. Control events still pushed.
+    DisableNotify { session_id: String },
+    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
+    /// user-initiated compress action. `compress_type` is the prost-generated
+    /// `CompressType` i32: 0=UNSPECIFIED, 1=SUMMARY, 2=TOOL_RESULTS.
+    /// Phase 2 will dispatch to `SessionMessage::CompressAction(CompressionAction)`.
+    CompressAction {
+        session_id: String,
+        compress_type: i32,
     },
     /// Unified user operation delivered via the fast `send_inbound()`
     /// channel.  These bypass SessionTask's message loop and are
     /// consumed by `poll_stop()` / `drain_inbound_queue()` for
     /// immediate in-flight effect.
     UserOperation(UserOp),
+    /// ADR-034 Phase 7: Create a new session (system-level, session_id empty).
+    CreateSession,
+    /// ADR-034 Phase 7: Delete a session by ID.
+    DeleteSession {
+        session_id: String,
+    },
+    /// ADR-034 Phase 7: User chat message from MQTT SendMessage.
+    /// Carries content and message_id for SessionMessage::ChatMessage.
+    ChatMessage {
+        content: String,
+        message_id: String,
+    },
+    /// ADR-034 Phase 7: Per-session model switch.
+    ModelSwitchAction {
+        model_id: String,
+        provider_id: Option<String>,
+    },
+    /// ADR-034 Phase 7: Per-session reasoning effort change.
+    ReasoningEffortAction {
+        effort: String,
+    },
+    /// ADR-034 Phase 7: Per-session workspace switch.
+    WorkspaceSwitchAction {
+        workspace_id: String,
+    },
+    /// ADR-034 Phase 7: Per-session compact context.
+    CompactContextAction,
 }
 
 impl InboundMessage {
@@ -194,6 +258,21 @@ impl InboundMessage {
             InboundMessage::UserOperation(_) => {
                 // UserOperation variants don't need size limits
             }
+            // ADR-034 §8 Phase 1C placeholder: new control commands.
+            // Phase 2 will route these through AgentLoop. For now,
+            // they don't carry user-supplied bytes, so no size limit.
+            InboundMessage::CloseSession { .. } => {}
+            InboundMessage::UpdateSessionTitle { .. } => {}
+            InboundMessage::EnableNotify { .. } => {}
+            InboundMessage::DisableNotify { .. } => {}
+            InboundMessage::CompressAction { .. } => {}
+            InboundMessage::CreateSession => {}
+            InboundMessage::DeleteSession { .. } => {}
+            InboundMessage::ChatMessage { .. } => {}
+            InboundMessage::ModelSwitchAction { .. } => {}
+            InboundMessage::ReasoningEffortAction { .. } => {}
+            InboundMessage::WorkspaceSwitchAction { .. } => {}
+            InboundMessage::CompactContextAction => {}
         }
         (self, truncated)
     }

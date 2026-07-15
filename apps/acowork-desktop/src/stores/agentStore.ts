@@ -246,11 +246,12 @@ interface AgentStoreState {
   // ── Session actions (write to agents[agentId].*) ──
 
   fetchSessions: (agentId: string, page?: number) => Promise<void>;
-  /** Fetch just the latest session ID and title (no full disk scan).
-   *  The Runtime caches this during startup. */
+  /** Fetch the latest session (by last_active_at desc) and persist its title
+   *  into `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
+   *  without a separate title-only fetch. Returns null if the agent has no
+   *  sessions, is not connected, or the Runtime HTTP server is not yet
+   *  listening. */
   fetchLatestSession: (agentId: string) => Promise<{ session_id: string; title: string | null } | null>;
-  /** Fetch just the latest session title for the AgentList sidebar (lightweight). */
-  fetchLatestSessionTitle: (agentId: string) => Promise<string | null>;
   /** Activate a session on the backend and update frontend state. */
   switchSession: (sessionId: string, agentId?: string) => Promise<void>;
   /** Remember the last selected session for an agent (survives remount). */
@@ -588,28 +589,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }
   },
 
-  fetchLatestSessionTitle: async (agentId: string) => {
-    try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions?page=1&size=1`,
-      );
-      if (!resp.ok) return null;
-      const data = (await resp.json()) as { sessions: SessionInfo[] };
-      const session = data.sessions?.[0];
-      if (!session) {
-        set((state) => patchAgent(state, agentId, { sessionTitle: null }));
-        return null;
-      }
-      const title = session.title ?? "";
-      set((state) => patchAgent(state, agentId, { sessionTitle: title }));
-      return title;
-    } catch {
-      return null;
-    }
-  },
-
   /** Fetch the latest session (by last_active_at desc) without a full disk scan.
-   *  The Runtime caches this during startup. Returns null if no sessions exist
+   *  The Runtime caches this during startup. Persists the returned title into
+   *  `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
+   *  without a separate title-only fetch. Returns null if no sessions exist
    *  or the agent is not connected. */
   fetchLatestSession: async (agentId: string) => {
     try {
@@ -622,7 +605,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         title: string | null;
         created_at: string | null;
       };
-      return { session_id: data.session_id, title: data.title ?? null };
+      const title = data.title ?? null;
+      // Persist into the sidebar cache. Empty string matches the legacy
+      // `fetchLatestSessionTitle` semantics so UI consumers keep working
+      // (the AgentList treats `""` and `null` differently: `""` → untitled,
+      // `null` → sleep animation). Only running agents reach this branch.
+      set((state) => patchAgent(state, agentId, { sessionTitle: title ?? "" }));
+      return { session_id: data.session_id, title };
     } catch {
       return null;
     }
@@ -636,10 +625,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // Fire-and-forget — don't block the switch on deactivation.
     const oldSessionId = useChatStore.getState().getActiveSessionId(agentId);
     if (oldSessionId) {
-      fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${oldSessionId}/deactivate`,
-        { method: "POST" },
-      ).catch(() => {
+      invoke("mqtt_publish_control", {
+        agentId,
+        command: "disable_notify",
+        payloadJson: { session_id: oldSessionId },
+      }).catch(() => {
         // Silently ignore — deactivation is best-effort
       });
     }
@@ -648,22 +638,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     useChatStore.getState().abortSessionLoad(agentId, sessionId);
 
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/activate`,
-        { method: "POST" },
-      );
-      if (resp.ok) {
-        const meta = (await resp.json()) as {
-          session_id: string;
-          activated: boolean;
-          model?: string | null;
-          provider?: string | null;
-          workspace_id?: string | null;
-        };
-        useChatStore.getState().applySessionMeta(agentId, sessionId, meta);
-      }
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "enable_notify",
+        payloadJson: { session_id: sessionId },
+      });
     } catch (e) {
-      console.warn("[AgentStore] activate_session failed:", e);
+      console.warn("[AgentStore] enable_notify failed:", e);
     }
 
     get().saveSessionForAgent(agentId, sessionId);
@@ -694,34 +675,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const body: Record<string, string> = {};
       if (lastActiveWs) body.workspace_id = lastActiveWs;
 
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = (await resp.json()) as { session_id: string };
-      const newSession: SessionInfo = {
-        session_id: data.session_id,
-        created_at: new Date().toISOString(),
-        message_count: 0,
-        title: null,
-        status: { status: "idle" },
-      };
-
-      set((state) => {
-        const existing = state.agents[agentId];
-        if (!existing) return state;
-        return patchAgent(state, agentId, {
-          sessions: [newSession, ...existing.sessions],
-        });
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "create_session",
+        payloadJson: body,
       });
 
-      if (lastActiveWs) {
-        useWorkspaceStore.getState().setSessionWorkspaceLocal(data.session_id, lastActiveWs);
-      }
-
-      useChatStore.getState().activateSession(agentId, data.session_id);
+      // NOTE: MQTT create_session does not return a session_id synchronously.
+      // The frontend must listen for the `session_created` MQTT event (handled
+      // by the Rust backend and forwarded via Tauri event) to obtain the new
+      // session_id and proceed with activation.
+      // Session meta (workspace_id) will be applied when the session_created
+      // event arrives.
     } catch (e) {
       console.error("[AgentStore] Failed to create session:", e);
     }
@@ -729,12 +694,11 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   closeSession: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/close`,
-        { method: "POST" },
-      );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      await resp.json();
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "close_session",
+        payloadJson: { session_id: sessionId },
+      });
 
       const storage = get().agents[agentId];
       if (!storage) return;
@@ -782,24 +746,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   deleteSession: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
-        { method: "DELETE" },
-      );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = (await resp.json()) as {
-        deleted: boolean;
-        session_id: string;
-        new_session_id?: string;
-      };
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "delete_session",
+        payloadJson: { session_id: sessionId },
+      });
 
       const storage = get().agents[agentId];
       if (!storage) return;
       const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = storage.sessions.filter((s) => s.session_id !== sessionId);
       const newCurrentId = isCurrent
-        ? data.new_session_id ||
-          (remaining.length > 0 ? remaining[0].session_id : null)
+        ? (remaining.length > 0 ? remaining[0].session_id : null)
         : useChatStore.getState().getActiveSessionId(agentId);
 
       set((state) => patchAgent(state, agentId, { sessions: remaining }));

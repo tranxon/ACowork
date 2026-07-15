@@ -722,7 +722,7 @@ impl AgentLoop {
                 // Also checks UserOperation variants for the unified fast channel.
                 loop {
                     match self.inbound_rx.recv().await {
-                        Some(InboundMessage::ContinueExecution { reason }) => {
+                        Some(InboundMessage::ContinueExecution { session_id: _, reason }) => {
                             tracing::info!(
                                 reason = %reason,
                                 "User chose to continue, resetting iteration counter"

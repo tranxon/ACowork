@@ -900,6 +900,21 @@ impl OpenAIProvider {
         native_request: &NativeChatRequest,
     ) -> acowork_core::error::Result<reqwest::Response> {
         let mut req_builder = self.http_client.post(url);
+        let api_key_prefix = self.api_key.as_ref().map(|k| {
+            let len = k.len();
+            if len <= 8 {
+                format!("<{}>", len)
+            } else {
+                format!("{}...{}", &k[..4], &k[len - 4..])
+            }
+        });
+        tracing::debug!(
+            url = %url,
+            model = %native_request.model,
+            api_key_present = self.api_key.is_some(),
+            api_key_prefix = ?api_key_prefix,
+            "OpenAI streaming request prepared (debug)"
+        );
         if let Some(ref api_key) = self.api_key {
             req_builder = req_builder.bearer_auth(api_key);
         }

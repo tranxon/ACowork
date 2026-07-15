@@ -41,18 +41,46 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::compat::{build_embed_sidecar_payload, GlobalResourcePusher};
+use crate::resource_pusher::{build_embed_sidecar_payload, ResourcePusher};
 use acowork_core::protocol::SidecarKind;
 
 use super::embed::spawn_embed_process;
+
+/// Shared HTTP client for embed supervisor REST calls (short-lived
+/// `/health`, `/v1/embeddings`, `/events` probe, …). Reusing a single
+/// `reqwest::Client` gives us connection pooling across the supervisor's
+/// many probe / bootstrap calls.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build embed supervisor HTTP client")
+    })
+}
+
+/// Shared HTTP client for the embed `/events` SSE stream.
+///
+/// SSE connections are held open for hours/days, so this client
+/// deliberately sets only `connect_timeout` (for the initial TCP
+/// handshake) and leaves the per-request timeout unset — the
+/// heartbeat watchdog is the liveness bound, not reqwest.
+pub(crate) fn sse_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build embed SSE HTTP client")
+    })
+}
 
 /// Shared gateway state handle. Same as `crate::handlers::server::SharedState`
 /// but re-declared here to avoid a cycle (lifecycle shouldn't import
 /// from handlers, and handlers shouldn't import lifecycle).
 pub type SharedState = Arc<RwLock<GatewayState>>;
-
-/// Connect / reconnect backoff bounds.
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Configuration passed in from the gateway when starting the supervisor.
 /// Holds the same args used to spawn the initial embed instance so we
@@ -105,7 +133,7 @@ pub type SharedEmbedState = SharedState;
 pub fn start_embed_supervisor(
     cfg: EmbedSupervisorConfig,
     state: SharedEmbedState,
-    pusher: Option<Arc<GlobalResourcePusher>>,
+    pusher: Option<Arc<ResourcePusher>>,
 ) {
     let port = cfg.port;
     tokio::spawn(async move {
@@ -120,7 +148,7 @@ pub fn start_embed_supervisor(
 async fn run_supervisor(
     cfg: EmbedSupervisorConfig,
     state: SharedEmbedState,
-    pusher: Option<Arc<GlobalResourcePusher>>,
+    pusher: Option<Arc<ResourcePusher>>,
     port: u16,
 ) {
     let mut history = RestartHistory::new();
@@ -399,7 +427,7 @@ enum MonitorExit {
 async fn run_monitor_session(
     _cfg: &EmbedSupervisorConfig,
     state: &SharedEmbedState,
-    pusher: &Option<Arc<GlobalResourcePusher>>,
+    pusher: &Option<Arc<ResourcePusher>>,
     port: u16,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
@@ -410,18 +438,7 @@ async fn run_monitor_session(
     // timeout for the TCP handshake; the per-connection total-timeout
     // would kill the stream after 30s and falsely trigger a restart.
     // Liveness is enforced by the heartbeat watchdog at the app level.
-    let client = match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to build HTTP client for SSE");
-            // No point retrying immediately — this is a config-level error.
-            sleep(RECONNECT_MAX).await;
-            return MonitorExit::ConnectionLost;
-        }
-    };
+    let client = sse_http_client();
 
     let resp = match client
         .get(&url)
@@ -544,15 +561,13 @@ async fn run_monitor_session(
 async fn bootstrap_state_from_health(
     port: u16,
     state: &SharedEmbedState,
-    pusher: &Option<Arc<GlobalResourcePusher>>,
+    pusher: &Option<Arc<ResourcePusher>>,
 ) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/health");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = http_client();
     let body: serde_json::Value = client
         .get(&url)
+        .timeout(Duration::from_secs(2))
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -611,15 +626,15 @@ async fn bootstrap_state_from_health(
 /// Returns `true` if the embed returns a valid embedding vector.
 async fn probe_inference(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let client = http_client();
     let body = serde_json::json!({"input": "health check"});
-    match client.post(&url).json(&body).send().await {
+    match client
+        .post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
         Ok(resp) => {
             if !resp.status().is_success() {
                 return false;
@@ -657,16 +672,11 @@ async fn embed_process_alive(state: &SharedEmbedState, port: u16) -> bool {
 
 async fn try_connect_events(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/events");
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let client = http_client();
     match client
         .get(&url)
         .header("Accept", "text/event-stream")
+        .timeout(Duration::from_secs(2))
         .send()
         .await
     {
@@ -679,7 +689,7 @@ async fn try_connect_events(port: u16) -> bool {
 /// the change to running agents so they pick up the new model.
 async fn apply_state_event(
     state: &SharedEmbedState,
-    pusher: &Option<Arc<GlobalResourcePusher>>,
+    pusher: &Option<Arc<ResourcePusher>>,
     event: StateEvent,
 ) {
     // Snapshot the new values for the lock, plus the old values for change
@@ -722,7 +732,7 @@ async fn apply_state_event(
 /// No-op if the embed process has not yet resolved its active model
 /// (`build_embed_sidecar_payload` returns `None`).
 async fn push_embed_sidecar_to_agents(
-    pusher: &GlobalResourcePusher,
+    pusher: &ResourcePusher,
     state: &SharedEmbedState,
 ) {
     let (endpoint, spec_json) = {

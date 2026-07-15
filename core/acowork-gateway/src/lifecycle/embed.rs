@@ -9,6 +9,25 @@ use std::process::Stdio;
 
 use crate::error::GatewayError;
 
+/// Shared HTTP client for all embed REST calls.
+///
+/// reqwest strongly recommends reusing a single client instance to
+/// take advantage of connection pooling. Each embed operation
+/// (`/health`, `/models/{id}/load`, `/v1/embeddings`, …) goes
+/// through this client; if a particular call needs a different
+/// per-request timeout it can override it with
+/// [`reqwest::RequestBuilder::timeout`].
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build embed HTTP client")
+    })
+}
+
 /// Default port for the embedding service.
 #[allow(dead_code)]
 const EMBED_DEFAULT_PORT: u16 = 18080;
@@ -211,12 +230,14 @@ pub async fn kill_embed_process(pid: u32) -> Result<(), GatewayError> {
 /// Check if the embedding service is healthy by calling its /health endpoint.
 pub async fn check_embed_health(port: u16) -> Option<EmbedHealthStatus> {
     let url = format!("http://127.0.0.1:{}/health", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
+    let client = http_client();
 
-    let resp = client.get(&url).send().await.ok()?;
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
 
     let status = body.get("status")?.as_str()?.to_string();
@@ -249,17 +270,19 @@ pub struct EmbedModelInfo {
 /// Select an embedding model by triggering acowork-embed's load endpoint.
 pub async fn select_embed_model(port: u16, model_id: &str) -> Result<(), GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}/load", port, model_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60)) // model loading can take a while
-        .build()
-        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+    let client = http_client();
 
-    let resp = client.post(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!(
-            "Failed to call load endpoint for model '{}': {}",
-            model_id, e
-        ))
-    })?;
+    let resp = client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(60)) // model loading can take a while
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayError::Lifecycle(format!(
+                "Failed to call load endpoint for model '{}': {}",
+                model_id, e
+            ))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -285,21 +308,23 @@ pub async fn download_embed_model(
     variant: Option<&str>,
 ) -> Result<(), GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}/download", port, model_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30)) // quick handshake only
-        .build()
-        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+    let client = http_client();
 
     let body = serde_json::json!({
         "variant": variant
     });
 
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!(
-            "Failed to call download endpoint for model '{}': {}",
-            model_id, e
-        ))
-    })?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayError::Lifecycle(format!(
+                "Failed to call download endpoint for model '{}': {}",
+                model_id, e
+            ))
+        })?;
 
     // 202 Accepted (fire-and-forget) or 200 OK (already_downloaded)
     if !resp.status().is_success() && resp.status() != reqwest::StatusCode::ACCEPTED {
@@ -321,17 +346,19 @@ pub async fn get_embed_model_status(
     model_id: &str,
 ) -> Result<serde_json::Value, GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}/status", port, model_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+    let client = http_client();
 
-    let resp = client.get(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!(
-            "Failed to get status for model '{}': {}",
-            model_id, e
-        ))
-    })?;
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayError::Lifecycle(format!(
+                "Failed to get status for model '{}': {}",
+                model_id, e
+            ))
+        })?;
 
     let body: serde_json::Value = resp
         .json()
@@ -349,17 +376,19 @@ pub async fn delete_embed_model(
     model_id: &str,
 ) -> Result<serde_json::Value, GatewayError> {
     let url = format!("http://127.0.0.1:{}/models/{}", port, model_id);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+    let client = http_client();
 
-    let resp = client.delete(&url).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!(
-            "Failed to call delete endpoint for model '{}': {}",
-            model_id, e
-        ))
-    })?;
+    let resp = client
+        .delete(&url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayError::Lifecycle(format!(
+                "Failed to call delete endpoint for model '{}': {}",
+                model_id, e
+            ))
+        })?;
 
     let body: serde_json::Value = resp
         .json()
@@ -390,19 +419,22 @@ pub struct EmbedTestResult {
 /// and verifies a valid embedding vector is returned.
 pub async fn test_embed_model(port: u16) -> Result<EmbedTestResult, GatewayError> {
     let url = format!("http://127.0.0.1:{}/v1/embeddings", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| GatewayError::Lifecycle(format!("Failed to build HTTP client: {}", e)))?;
+    let client = http_client();
 
     let body = serde_json::json!({
         "input": "ACowork embedding test sentence."
     });
 
     let start = std::time::Instant::now();
-    let resp = client.post(&url).json(&body).send().await.map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to call embeddings endpoint: {}", e))
-    })?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| {
+            GatewayError::Lifecycle(format!("Failed to call embeddings endpoint: {}", e))
+        })?;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     if !resp.status().is_success() {

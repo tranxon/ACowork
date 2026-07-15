@@ -408,6 +408,16 @@ impl SessionCore {
             vault.get(provider_id).cloned()
         };
 
+        tracing::debug!(
+            provider_id = %provider_id,
+            base_url = %provider_meta.base_url,
+            protocol_type = ?provider_meta.protocol_type,
+            api_key_len = api_key.as_ref().map(|k| k.len()).unwrap_or(0),
+            api_key_present = api_key.is_some(),
+            vault_contains_provider = provider_key_vault.read().unwrap().contains_key(provider_id),
+            "build_provider_for resolved credentials (debug)"
+        );
+
         let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
         let raw = crate::providers::router::create_provider(
             &provider_meta.id,

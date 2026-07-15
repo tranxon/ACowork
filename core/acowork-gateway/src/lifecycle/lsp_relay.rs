@@ -14,6 +14,23 @@ use std::process::Stdio;
 
 use crate::error::GatewayError;
 
+/// Shared HTTP client for LSP Relay REST calls.
+///
+/// Single static `reqwest::Client` reused across the lifecycle module
+/// to take advantage of connection pooling — see
+/// `acowork-gateway/src/http/proxy.rs::runtime_http_client` for the
+/// canonical pattern this mirrors.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build LSP Relay HTTP client")
+    })
+}
+
 /// Default port for the LSP Relay service.
 pub const LSP_RELAY_DEFAULT_PORT: u16 = 19878;
 
@@ -180,12 +197,14 @@ pub async fn kill_lsp_relay(pid: u32) -> Result<(), GatewayError> {
 /// not responding, or invalid response).
 pub async fn check_lsp_relay_health(port: u16) -> Option<LspRelayHealthStatus> {
     let url = format!("http://127.0.0.1:{}/health", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
+    let client = http_client();
 
-    let resp = client.get(&url).send().await.ok()?;
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .ok()?;
     let body: serde_json::Value = resp.json().await.ok()?;
 
     let status = body.get("status")?.as_str()?.to_string();

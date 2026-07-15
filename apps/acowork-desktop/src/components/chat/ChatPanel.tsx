@@ -8,7 +8,6 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { getGatewayUrl } from "../../lib/config";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
@@ -1022,21 +1021,22 @@ export function ChatPanel() {
     session.setPendingImages(prev => prev.filter((img) => img.tempId !== tempId));
   };
 
-  // Tool approval: send decision to Gateway API directly, then clear inline state
+  // Tool approval: send decision via MQTT, then clear inline state
   const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
     const agentId = String(approval.agent_id ?? selectedAgentId ?? "");
     const requestId = String(approval.request_id ?? "");
     const sessionId = approval.session_id;
     try {
-      const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/approval`;
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "approval_decision",
+        payloadJson: {
+          session_id: sessionId ?? "",
           request_id: requestId,
-          action,
-          ...(sessionId ? { session_id: sessionId } : {}),
-        }),
+          approved: action === "allow",
+          allow_all_session: false,
+          reason: "",
+        },
       });
     } catch (err) {
       console.error("[ChatPanel] Failed to send approval:", err);
@@ -1049,17 +1049,20 @@ export function ChatPanel() {
     }
   };
 
-  // Ask question answer: send answer to Gateway API, then clear pendingQuestion
+  // Ask question answer: send answer via MQTT, then clear pendingQuestion
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
     const agentId = String(selectedAgentId);
     const sessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
     try {
-      const url = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/question`;
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_id: requestId, answer, session_id: sessionId }),
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "question_answer",
+        payloadJson: {
+          session_id: sessionId ?? "",
+          request_id: requestId,
+          answer,
+        },
       });
     } catch (err) {
       console.error("[ChatPanel] Failed to send question answer:", err);

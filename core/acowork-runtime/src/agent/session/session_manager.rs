@@ -1947,23 +1947,6 @@ After installation, ask the user to re-enable the MCP server.",
         (model, provider)
     }
 
-    /// Access the Grafeo memory store from the shared core.
-    /// Returns None if the memory store was not initialized.
-    pub(crate) fn memory_store(&self) -> Option<&Arc<acowork_grafeo::grafeo::GrafeoStore>> {
-        self.core.memory_store()
-    }
-
-    /// Return the embedding dimension of the currently configured
-    /// [`EmbeddingProvider`](crate::embedding::EmbeddingProvider), or 0 if no
-    /// provider is configured. Used by the runtime's `MemoryStatsQuery` handler
-    /// so the desktop can detect a stored vs. model dimension mismatch.
-    pub(crate) fn embedding_provider_dim(&self) -> u64 {
-        self.core
-            .embedding_provider
-            .as_ref()
-            .map(|p| p.dimension() as u64)
-            .unwrap_or(0)
-    }
 
     /// Reap completed sessions (remove handles for tasks that have finished).
     ///
@@ -2112,6 +2095,74 @@ After installation, ask the user to re-enable the MCP server.",
         self.set_session_workspace(session_id, workspace_id);
     }
 
+    /// ADR-034 §8 Phase 2-3: consolidated workspace switch entry point.
+    ///
+    /// Single source of truth — every workspace switch (gRPC era's
+    /// `workspace_switch`, MQTT's `WorkspaceSwitch` command, future
+    /// internal callers) MUST go through this method instead of calling
+    /// `set_session_workspace` / `update_session_workspace_context`
+    /// directly.
+    ///
+    /// Combines 4 steps from the legacy gRPC-era `route_workspace_switch`
+    /// (§6 P0-C / P0-D fix):
+    ///   1. Validate `workspace_id` against `allowed_dirs` (resolver)
+    ///   2. If invalid: register as `pending_workspace` + fall back to
+    ///      `"__agent_home__"` (ADR-034 §4.3 step 4 — re-addable later)
+    ///   3. Synchronously set the session's workspace_id + current_work_dir
+    ///      via `set_session_workspace`
+    ///   4. Push the per-session workspace context + prompt file via
+    ///      `update_session_workspace_context`
+    ///
+    /// Original gRPC-era implementation lives in `cli.rs` (deprecated,
+    /// to be removed in Phase 4).
+    pub fn route_workspace_switch(&mut self, session_id: &str, workspace_id: &str) {
+        // Step 1: validate against the resolver's allowed_dirs.
+        let is_valid = if workspace_id == "__agent_home__" {
+            true
+        } else {
+            match self.resolver.as_ref() {
+                Some(resolver) => {
+                    let guard = resolver.read().unwrap();
+                    guard.find_by_id(workspace_id).is_some()
+                }
+                None => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        workspace_id = %workspace_id,
+                        "route_workspace_switch: resolver not set — accepting workspace_id without validation"
+                    );
+                    true
+                }
+            }
+        };
+
+        let effective_workspace_id = if is_valid {
+            workspace_id.to_string()
+        } else {
+            // Step 2: invalid → register as pending + fallback to agent home.
+            tracing::warn!(
+                session_id = %session_id,
+                workspace_id = %workspace_id,
+                "route_workspace_switch: workspace_id not in allowed_dirs — registered as pending, fallback to __agent_home__"
+            );
+            self.add_pending_workspace(session_id, workspace_id);
+            "__agent_home__".to_string()
+        };
+
+        // Step 3: synchronously set workspace_id + current_work_dir + JSONL persist.
+        self.set_session_workspace(session_id, &effective_workspace_id);
+
+        // Step 4: push per-session workspace context + prompt file to the SessionTask.
+        self.update_session_workspace_context(session_id);
+
+        tracing::info!(
+            session_id = %session_id,
+            requested = %workspace_id,
+            effective = %effective_workspace_id,
+            "route_workspace_switch: complete"
+        );
+    }
+
     /// Get the current workspace ID for a session.
     /// Returns `"__agent_home__"` if the session has no explicit workspace set
     /// or the session is not found.
@@ -2215,36 +2266,6 @@ After installation, ask the user to re-enable the MCP server.",
             .insert(session_id.to_string(), workspace_id.to_string());
     }
 
-    /// Fire the urgent_stop notify for a specific session.
-    ///
-    /// Wakes the target session's tokio::select! branches (LLM streaming,
-    /// tool execution) immediately, without waiting for the 500ms poll
-    /// interval. Other sessions are completely unaffected.
-    ///
-    /// This is a no-op in standalone mode (where urgent_stop is None).
-    pub(crate) fn fire_urgent_stop(&self, session_id: &str) {
-        if let Some(urgent) = self.urgent_stops.get(session_id) {
-            urgent.notify_waiters();
-            tracing::info!(session_id = %session_id, "SessionManager: urgent_stop fired");
-        } else {
-            tracing::debug!(session_id = %session_id, "SessionManager: fire_urgent_stop — session not found (may have already closed)");
-        }
-    }
-
-    /// Fire the urgent_stop notify for ALL active sessions.
-    ///
-    /// Used by EnableDebugMode to cancel in-flight work across all sessions
-    /// so they restart with debug capabilities.
-    pub(crate) fn fire_urgent_stop_all(&self) {
-        let count = self.urgent_stops.len();
-        for urgent in self.urgent_stops.values() {
-            urgent.notify_waiters();
-        }
-        tracing::info!(
-            session_count = count,
-            "SessionManager: urgent_stop fired (all sessions)"
-        );
-    }
 
     /// Initialize debug mode at runtime (called when Gateway pushes EnableDebugMode).
     ///

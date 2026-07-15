@@ -65,8 +65,7 @@ pub(crate) struct AgentBootContext {
     /// used by `/api/agents/{id}/builtin-tools` GET responses.
     pub full_tool_specs: Vec<(String, serde_json::Value)>,
 
-    // Skills
-    pub skill_registry: crate::skills::parser::SkillRegistry,
+    // ADR-034 §8 Phase 6 cleanup: legacy standalone-mode gRPC path removed.
     pub system_prompt: String,
 
     // Shared handles
@@ -103,8 +102,7 @@ pub(crate) struct AgentBootContext {
 
     // Reconnect params (Gateway mode)
     pub agent_id: String,
-    pub version: String,
-
+    // ADR-034 §8 Phase 6 cleanup: gRPC reconnect param removed.
     /// ADR-033: Dispatch receiver for Runtime HTTP → agent loop.
     /// HTTP handlers send (session_id, InboundMessage); gateway loop
     /// forwards to the right session's AgentLoop.
@@ -135,7 +133,7 @@ pub(crate) struct AgentBootContext {
 ///
 /// Contains session-specific resources needed by Phase C and D.
 pub(crate) struct SessionBootContext {
-    pub initial_session_id: String,
+    // ADR-034 §8 Phase 6 cleanup: legacy standalone-mode gRPC path removed.
     pub session_manager: crate::agent::session::SessionManager,
     /// ADR-022: Shared committed-lines counter for the initial session.
     /// The writer thread increments this after each disk write.

@@ -1148,6 +1148,8 @@ impl SessionTask {
                     }
                     let _ = agent_inbound_tx
                         .send(crate::agent::inbound::InboundMessage::ContinueExecution {
+                            // ADR-034: populate session_id for Phase 2 routing.
+                            session_id: session_id.clone(),
                             reason: "user_requested".to_string(),
                         })
                         .await;

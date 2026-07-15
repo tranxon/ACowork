@@ -436,8 +436,7 @@ pub async fn run_cron_scheduler(
 
             // ADR-033: Publish IntentReceived via MQTT ControlCommand
             let pushed = if let Some(ref mqtt) = mqtt_client {
-                let intent_cmd = acowork_core::mqtt_proto::IntentCommand {
-                    agent_id: agent_id.clone(),
+                let intent_cmd = acowork_core::mqtt_proto::Intent {
                     from: format!("cron:{}", agent_id),
                     action: action.clone(),
                     params_json: serde_json::to_string(&params).unwrap_or_default(),

@@ -15,7 +15,7 @@ use axum::{
     body::Body,
     extract::{Multipart, Path, Query, State},
     http::{Response, StatusCode, header},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,7 +58,7 @@ pub fn agent_routes() -> Router<AppState> {
         .route("/api/agents/{id}/model", get(get_agent_model))
         .route(
             "/api/agents/{id}/config",
-            get(get_agent_config).put(update_agent_config),
+            put(update_agent_config),
         )
         .route(
             "/api/agents/{id}/mcp-servers",
@@ -116,7 +116,7 @@ pub struct AgentListResponse {
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
     /// RFC3339 timestamp of the last user-driven interaction with this agent
-    /// (send_message / approval / question_answer / compact_context).
+    /// (chat_message / approval / question_answer / compact_context).
     /// `None` for agents the user has never interacted with. Drives the
     /// sidebar sort order: newest first within each running/stopped group.
     #[serde(skip_serializing_if = "Option::is_none")]

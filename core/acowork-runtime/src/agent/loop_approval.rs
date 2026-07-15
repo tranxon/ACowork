@@ -135,6 +135,10 @@ impl AgentLoop {
                                 approved,
                                 allow_all_session,
                                 reason: None,
+                                // ADR-034: populate session_id for Phase 2 routing.
+                                // At this point, the buffer is local to this session's
+                                // AgentLoop — session_id is for telemetry/Phase 2 dispatch.
+                                session_id: self.session_core.session_id.clone().unwrap_or_default(),
                             });
                         }
                         Some(InboundMessage::Stop { reason }) => {
@@ -256,12 +260,14 @@ impl AgentLoop {
                         msg = self.inbound_rx.recv() => {
                             match msg {
                             Some(InboundMessage::QuestionAnswer {
+                                session_id: _,
                                 request_id: rid,
                                 answer,
                             }) if rid == request_id => {
                                 return answer;
                             }
                             Some(InboundMessage::QuestionAnswer {
+                                session_id: _,
                                 request_id: rid,
                                 answer,
                             }) => {
@@ -272,6 +278,7 @@ impl AgentLoop {
                                     "Buffering question answer for different request"
                                 );
                                 self.session.deferred_inbound.push(InboundMessage::QuestionAnswer {
+                                    session_id: self.session_core.session_id.clone().unwrap_or_default(),
                                     request_id: rid,
                                     answer,
                                 });

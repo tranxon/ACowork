@@ -8,11 +8,6 @@ import type { SearchProviderListItem, AgentSearchProvider } from "../../lib/type
 
 const EMPTY_ARRAY: string[] = [];
 
-interface SearchProvidersResponse {
-  agent_id: string;
-  providers: SearchProviderListItem[];
-}
-
 interface BuiltinToolEntry {
   name: string;
   enabled: boolean;
@@ -48,30 +43,31 @@ export function ToolsTab() {
     // MCP catalog (gateway global, independent of agent state)
     loadCatalog();
 
-    // Search providers + agent config — fetch once on mount.
+    // Tools, MCP servers, search providers — fetch once from merged /tools endpoint.
+    // ADR-034 Phase 5: Replaces 3 separate calls (config, mcp-servers, search-providers).
     (async () => {
-      const base = `${getGatewayUrl()}/api/agents/${selectedAgentId}`;
       try {
-        const spRes = await fetch(`${base}/search-providers`);
-        if (spRes.ok && !cancelled) {
-          const spData: SearchProvidersResponse = await spRes.json();
-          setSearchProviders(spData.providers);
-        }
-      } catch { /* ignore */ }
-
-      try {
-        const cfgRes = await fetch(`${base}/config`);
-        if (cfgRes.ok && !cancelled) {
-          const data = await cfgRes.json();
-          useMcpStore.setState((s) => ({
-            activeServers: {
-              ...s.activeServers,
-              [selectedAgentId!]: data.active_mcp_servers ?? [],
-            },
-          }));
-          setActiveSearch(data.search_config?.providers ?? []);
-          if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
-            setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
+        const resp = await fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/tools`);
+        if (resp.ok && !cancelled) {
+          const data = await resp.json();
+          // tools — builtin tools list
+          if (data.tools && Array.isArray(data.tools)) {
+            setBuiltinToolsAll(data.tools as BuiltinToolEntry[]);
+          }
+          // mcp_servers — active MCP server names
+          if (data.mcp_servers && Array.isArray(data.mcp_servers)) {
+            useMcpStore.setState((s) => ({
+              activeServers: { ...s.activeServers, [selectedAgentId!]: data.mcp_servers },
+            }));
+          }
+          // search — search providers (both available list and active config)
+          if (data.search) {
+            if (Array.isArray(data.search.providers)) {
+              setSearchProviders(data.search.providers as SearchProviderListItem[]);
+            }
+            if (Array.isArray(data.search.active_providers)) {
+              setActiveSearch(data.search.active_providers as AgentSearchProvider[]);
+            }
           }
         }
       } catch { /* agent not ready — user can re-open tab later */ }
@@ -87,17 +83,25 @@ export function ToolsTab() {
       const ce = e as CustomEvent<{ agentId: string }>;
       if (ce.detail?.agentId !== selectedAgentId) return;
       try {
-        const cfgRes = await fetch(
-          `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+        const resp = await fetch(
+          `${getGatewayUrl()}/api/agents/${selectedAgentId}/tools`,
         );
-        if (!cfgRes.ok) return;
-        const data = await cfgRes.json();
-        useMcpStore.setState((s) => ({
-          activeServers: { ...s.activeServers, [selectedAgentId!]: data.active_mcp_servers ?? [] },
-        }));
-        setActiveSearch(data.search_config?.providers ?? []);
-        if (data.builtin_tools_all && Array.isArray(data.builtin_tools_all)) {
-          setBuiltinToolsAll(data.builtin_tools_all as BuiltinToolEntry[]);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.tools && Array.isArray(data.tools)) {
+          setBuiltinToolsAll(data.tools as BuiltinToolEntry[]);
+        }
+        if (data.mcp_servers && Array.isArray(data.mcp_servers)) {
+          useMcpStore.setState((s) => ({
+            activeServers: { ...s.activeServers, [selectedAgentId!]: data.mcp_servers },
+          }));
+        }
+        if (data.search) {
+          // ADR-034 §7.6.5: server returns `search.providers` (no separate
+          // `active_providers` key — agents consume the full ordered list).
+          if (Array.isArray(data.search.providers)) {
+            setActiveSearch(data.search.providers as AgentSearchProvider[]);
+          }
         }
       } catch { /* ignore */ }
     };

@@ -1,9 +1,8 @@
 //! Phase D: announce ready and enter the main Gateway loop.
 //!
-//! Sends `AgentReady` to Gateway, then enters `run_gateway_loop`.
-//! When the loop exits, waits for the chunk relay task to finish.
-//!
-//! ADR-033: Supports both gRPC and MQTT-only modes.
+//! ADR-033: MQTT-only mode (gRPC removed per ADR-034 §8 Phase 2).
+//! ADR-034 §8 Phase 2-1: single dispatch table for InboundMessage.
+//! ADR-034 §8 Phase 2-2: gRPC path removed.
 
 use crate::cli::LogReloadHandle;
 use crate::config::RuntimeConfig;
@@ -14,18 +13,21 @@ use crate::startup::subsystems::SubsystemHandles;
 /// Phase D: notify Gateway that the agent is ready, then run the message loop.
 ///
 /// This is the last phase of the startup sequence.  It runs until the
-/// Gateway connection is closed or a fatal error occurs.
+/// MQTT connection is closed or a fatal error occurs.
+///
+/// ADR-034 §8 Phase 2-2: gRPC path removed; `log_reload_handle` is no
+/// longer used (was only consumed by `run_gateway_loop` for gRPC-era
+/// log-level push from Gateway).
 pub(crate) async fn phase_d_run(
     ctx: &mut AgentBootContext,
     session_ctx: SessionBootContext,
     handles: SubsystemHandles,
     config: &RuntimeConfig,
-    log_reload_handle: Option<LogReloadHandle>,
+    _log_reload_handle: Option<LogReloadHandle>,
 ) -> Result<()> {
     let _span = tracing::info_span!("startup_phase_d").entered();
 
     let SessionBootContext {
-        initial_session_id,
         mut session_manager,
         committed_lines: _committed_lines,
     } = session_ctx;
@@ -52,88 +54,21 @@ pub(crate) async fn phase_d_run(
         });
     }
 
+    // ADR-034 §8 Phase 2-1: ControlAction → InboundMessage via single mapper.
+    // Replaces the legacy 11-arm match that wrapped every command in
+    // SystemNotification { notification_type: ... }.
     let _mqtt_handle = ctx.control_rx.take().map(|ctrl_rx| {
         let tx = mqtt_dispatch_tx.clone();
         tokio::spawn(async move {
             let mut rx = ctrl_rx;
-            use crate::mqtt::control_handler::ControlAction;
             while let Some((topic, payload)) = rx.recv().await {
-                let action = crate::mqtt::control_handler::parse_control_payload(&topic, &payload);
-                match action {
-                    // ── Session-bound commands (route via session_id) ──
-                    Some(ControlAction::SendMessage { session_id, message_id, content }) => {
-                        // Wrap as SystemNotification to carry message_id alongside content.
-                        // mqtt_only_loop intercepts this and routes via SessionMessage channel.
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "mqtt_user_message".to_string(),
-                            data: serde_json::json!({
-                                "content": content,
-                                "message_id": message_id,
-                            }),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::StopGeneration { session_id }) => {
-                        let msg = crate::agent::inbound::InboundMessage::Stop { reason: "MQTT stop".to_string() };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::DeleteSession { session_id }) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "delete_session".to_string(),
-                            data: serde_json::json!({ "session_id": session_id }),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::ModelSwitch { session_id, model_id }) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "model_switch".to_string(),
-                            data: serde_json::json!({ "model_id": model_id }),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::ReasoningEffort { session_id, effort }) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "reasoning_effort".to_string(),
-                            data: serde_json::json!({ "effort": effort }),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::CompactContext { session_id }) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "compact_context".to_string(),
-                            data: serde_json::json!({}),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    Some(ControlAction::WorkspaceSwitch { session_id, workspace_id }) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "workspace_switch".to_string(),
-                            data: serde_json::json!({ "workspace_id": workspace_id }),
-                        };
-                        let _ = tx.send((session_id, msg));
-                    }
-                    // ── System commands (no session_id — empty string routes via session_manager) ──
-                    Some(ControlAction::CreateSession) => {
-                        let msg = crate::agent::inbound::InboundMessage::SystemNotification {
-                            notification_type: "create_session".to_string(),
-                            data: serde_json::json!({}),
-                        };
-                        // Empty session_id signals mqtt_only_loop to handle via session_manager
-                        let _ = tx.send((String::new(), msg));
-                    }
-                    Some(ControlAction::IntentReceived { from, action, params_json }) => {
-                        let params: serde_json::Value = serde_json::from_str(&params_json)
-                            .unwrap_or(serde_json::json!({}));
-                        let msg = crate::agent::inbound::InboundMessage::IntentMessage {
-                            from,
-                            action,
-                            params,
-                        };
-                        // Empty session_id — intent is delivered to the agent loop directly
-                        let _ = tx.send((String::new(), msg));
-                    }
-                    Some(ControlAction::Unsupported { command_type }) => {
-                        tracing::warn!(command_type, topic, "Unsupported MQTT control command");
+                match crate::mqtt::control_handler::parse_control_payload(&topic, &payload) {
+                    Some(action) => {
+                        if let Some((session_id, msg)) = control_action_to_inbound(action)
+                            && tx.send((session_id, msg)).is_err()
+                        {
+                            tracing::warn!(topic, "MQTT dispatch channel closed");
+                        }
                     }
                     None => {
                         tracing::debug!(topic, "Failed to parse MQTT control payload");
@@ -143,83 +78,219 @@ pub(crate) async fn phase_d_run(
         })
     });
 
-    if let Some(mut client) = ctx.grpc_client.take() {
-        // ── gRPC Gateway mode ──────────────────────────────────────
-        tracing::info!("All subsystems ready, sending AgentReady to Gateway via gRPC");
-        {
-            let agent_ready_msg = acowork_core::proto::ClientMessage {
-                request_id: 0,
-                payload: Some(acowork_core::proto::client_message::Payload::AgentReady(
-                    acowork_core::proto::AgentReadyRequest {
-                        agent_id: ctx.agent_id.clone(),
-                    },
-                )),
-            };
-            if client
-                .outbound_ctrl_sender()
-                .send(agent_ready_msg)
-                .await
-                .is_err()
-            {
-                tracing::warn!("Failed to send AgentReady to Gateway — stream may already be closed");
-            } else {
-                tracing::info!("AgentReady sent to Gateway for agent={}", ctx.agent_id);
-            }
-        }
+    // ADR-034 §8 Phase 2-2: gRPC path removed. MQTT client is mandatory.
+    if ctx.mqtt_client.is_none() {
+        return Err(crate::error::RuntimeError::Config(
+            "Phase D entered without MQTT client (gRPC path removed per ADR-034 §8 Phase 2)"
+                .into(),
+        ));
+    }
 
-        let gateway_query_rx = client.take_gateway_query_rx();
-
-        let result = crate::cli::run_gateway_loop(
-            &mut session_manager,
-            &mut client,
-            gateway_query_rx,
-            config.work_dir.clone(),
-            ctx.agent_id.clone(),
-            ctx.version.clone(),
-            log_reload_handle,
-            ctx.skill_registry.clone(),
-            ctx.workspace_resolver.clone(),
-            initial_session_id,
-            config.timeouts.session_idle_timeout_secs,
-            config.max_sessions,
-            config.timeouts.clone(),
-            ctx.mcp_notifier.subscribe(),
-            mcp_startup_rx,
-            mcp_runtime_tx,
-            mcp_runtime_rx,
-            Some(mqtt_dispatch_rx),
-        ).await;
-
-        if let Some(handle) = chunk_relay {
-            let _ = handle.await;
-        }
-        result
-    } else if ctx.mqtt_client.is_some() {
-        // ── ADR-033: MQTT-only Gateway mode ────────────────────────
-        tracing::info!("All subsystems ready, announcing via MQTT (gRPC disabled)");
-        if let Some(ref mqtt) = ctx.mqtt_client {
-            let _ = mqtt.publish_status(true).await;
-            tracing::info!("Agent status published via MQTT for agent={}", ctx.agent_id);
-        }
-
-        let result = mqtt_only_loop(
-            &mut session_manager,
-            mqtt_dispatch_rx,
-            mcp_startup_rx,
-            mcp_runtime_tx,
-            mcp_runtime_rx,
-            ctx.mcp_notifier.subscribe(),
-            &config.work_dir,
-        ).await;
-
-        if let Some(handle) = chunk_relay {
-            let _ = handle.await;
-        }
-        result
+    tracing::info!("All subsystems ready, announcing via MQTT");
+    // Lifecycle publisher: used by dispatch_inbound to push SessionCreated /
+    // SessionDeleted events to the MQTT broker so the Desktop (and any other
+    // subscriber) can update its session list without polling. Cloned cheaply.
+    let lifecycle_publisher: crate::mqtt::MqttChunkPublisher = if let Some(ref mqtt) =
+        ctx.mqtt_client
+    {
+        let _ = mqtt.publish_status(true).await;
+        tracing::info!(
+            "Agent status published via MQTT for agent={}",
+            ctx.agent_id
+        );
+        crate::mqtt::MqttChunkPublisher::from_runtime_client(mqtt)
     } else {
-        Err(crate::error::RuntimeError::Config(
-            "Phase D entered without gRPC or MQTT client".into(),
-        ))
+        // Unreachable: checked above.
+        return Err(crate::error::RuntimeError::Config(
+            "lifecycle publisher: MQTT client disappeared".into(),
+        ));
+    };
+
+    let result = mqtt_only_loop(
+        &mut session_manager,
+        &lifecycle_publisher,
+        mqtt_dispatch_rx,
+        mcp_startup_rx,
+        mcp_runtime_tx,
+        mcp_runtime_rx,
+        ctx.mcp_notifier.subscribe(),
+        &config.work_dir,
+    )
+    .await;
+
+    if let Some(handle) = chunk_relay {
+        let _ = handle.await;
+    }
+    result
+}
+
+/// ADR-034 §8 Phase 2-1: ControlAction → InboundMessage single mapper.
+///
+/// Returns `Some((session_id, msg))` for every supported control command.
+/// The mapper is exhaustive over `ControlAction` — adding a new variant
+/// in `control_handler.rs` triggers a compile error here.
+///
+/// Session-bound commands return `Some((session_id, msg))` where
+/// `session_id` is the proto field.  System-level commands (CreateSession,
+/// IntentReceived) return `Some(("", msg))` to signal `mqtt_only_loop` to
+/// route through `session_manager` (system-level) instead of a session task.
+///
+/// Unsupported / parse-failure returns `None` (caller logs).
+fn control_action_to_inbound(
+    action: crate::mqtt::control_handler::ControlAction,
+) -> Option<(String, crate::agent::inbound::InboundMessage)> {
+    use crate::agent::inbound::InboundMessage;
+    use crate::mqtt::control_handler::ControlAction;
+
+    match action {
+        // ── Session lifecycle ──────────────────────────────────────────
+        ControlAction::CreateSession => Some((
+            String::new(),
+            InboundMessage::CreateSession,
+        )),
+        ControlAction::DeleteSession { session_id } => Some((
+            session_id.clone(),
+            InboundMessage::DeleteSession { session_id },
+        )),
+        ControlAction::CloseSession { session_id } => {
+            Some((session_id.clone(), InboundMessage::CloseSession { session_id }))
+        }
+        ControlAction::UpdateSessionTitle { session_id, title } => Some((
+            session_id.clone(),
+            InboundMessage::UpdateSessionTitle { session_id, title },
+        )),
+
+        // ── Chat ────────────────────────────────────────────────────────
+        ControlAction::SendMessage {
+            session_id,
+            message_id,
+            content,
+            ..
+        } => Some((
+            session_id,
+            InboundMessage::ChatMessage {
+                content,
+                message_id,
+            },
+        )),
+        ControlAction::StopGeneration { session_id, .. } => Some((
+            session_id,
+            InboundMessage::Stop {
+                reason: "MQTT stop".to_string(),
+            },
+        )),
+        ControlAction::ContinueExecution { session_id, reason } => Some((
+            session_id.clone(),
+            InboundMessage::ContinueExecution { session_id, reason },
+        )),
+        ControlAction::EnableNotify { session_id } => {
+            Some((session_id.clone(), InboundMessage::EnableNotify { session_id }))
+        }
+        ControlAction::DisableNotify { session_id } => Some((
+            session_id.clone(),
+            InboundMessage::DisableNotify { session_id },
+        )),
+
+        // ── User responses ─────────────────────────────────────────────
+        ControlAction::ApprovalDecision {
+            session_id,
+            request_id,
+            approved,
+            allow_all_session,
+            reason,
+        } => Some((
+            session_id.clone(),
+            InboundMessage::ApprovalDecision {
+                session_id,
+                request_id,
+                approved,
+                allow_all_session,
+                // ADR-034: proto `string` is non-null but semantically optional.
+                // Empty string is normalized to None to preserve gRPC-era semantics
+                // where proto-empty = "no reason given".
+                reason: if reason.is_empty() {
+                    None
+                } else {
+                    Some(reason)
+                },
+            },
+        )),
+        ControlAction::QuestionAnswer {
+            session_id,
+            request_id,
+            answer,
+        } => Some((
+            session_id.clone(),
+            InboundMessage::QuestionAnswer {
+                session_id,
+                request_id,
+                answer,
+            },
+        )),
+
+        // ── Per-session config ─────────────────────────────────────────
+        ControlAction::ModelSwitch {
+            session_id,
+            model_id,
+            provider_id,
+        } => Some((
+            session_id,
+            InboundMessage::ModelSwitchAction {
+                model_id,
+                provider_id,
+            },
+        )),
+        ControlAction::ReasoningEffort { session_id, effort } => Some((
+            session_id,
+            InboundMessage::ReasoningEffortAction { effort },
+        )),
+        ControlAction::WorkspaceSwitch {
+            session_id,
+            workspace_id,
+        } => Some((
+            session_id,
+            InboundMessage::WorkspaceSwitchAction { workspace_id },
+        )),
+
+        // ── Context management ─────────────────────────────────────────
+        ControlAction::CompactContext { session_id } => Some((
+            session_id,
+            InboundMessage::CompactContextAction,
+        )),
+        ControlAction::CompressAction {
+            session_id,
+            compress_type,
+        } => Some((
+            session_id.clone(),
+            InboundMessage::CompressAction {
+                session_id,
+                compress_type,
+            },
+        )),
+
+        // ── System ─────────────────────────────────────────────────────
+        ControlAction::IntentReceived {
+            from,
+            action,
+            params_json,
+        } => {
+            let params: serde_json::Value =
+                serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
+            Some((
+                String::new(),
+                InboundMessage::IntentMessage {
+                    from,
+                    action,
+                    params,
+                },
+            ))
+        }
+
+        // ── Unsupported / parse failures (Phase 2-1: warn and drop) ───
+        ControlAction::Unsupported { command_type } => {
+            tracing::warn!(command_type, "Unsupported MQTT control command");
+            None
+        }
     }
 }
 
@@ -227,10 +298,17 @@ pub(crate) async fn phase_d_run(
 ///
 /// Listens for MQTT control dispatch and MCP events. The actual
 /// chat loop runs in session tasks; this loop just routes messages.
+#[allow(clippy::too_many_arguments)]
 async fn mqtt_only_loop(
     session_manager: &mut crate::agent::session::SessionManager,
-    mut mqtt_dispatch_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>,
-    mut mcp_startup_rx: Option<tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>>,
+    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
+    mut mqtt_dispatch_rx: tokio::sync::mpsc::UnboundedReceiver<(
+        String,
+        crate::agent::inbound::InboundMessage,
+    )>,
+    mut mcp_startup_rx: Option<
+        tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
+    >,
     mcp_runtime_tx: tokio::sync::mpsc::Sender<crate::tools::mcp_manager::McpConnectResult>,
     mut mcp_runtime_rx: tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
     mut mcp_config_rx: tokio::sync::watch::Receiver<()>,
@@ -241,129 +319,17 @@ async fn mqtt_only_loop(
 
     loop {
         tokio::select! {
-            // MQTT control message dispatch
+            // ── ADR-034 §8 Phase 2-1: single dispatch table ────────────
             dispatch_result = mqtt_dispatch_rx.recv() => {
                 match dispatch_result {
                     Some((session_id, msg)) => {
-                        if session_id.is_empty() {
-                            // System-level command (e.g., create_session) — handled by session_manager
-                            match &msg {
-                                crate::agent::inbound::InboundMessage::SystemNotification { notification_type, .. } => {
-                                    match notification_type.as_str() {
-                                        "create_session" => {
-                                            match session_manager.create_session().await {
-                                                Ok(new_sid) => {
-                                                    tracing::info!(new_sid, "MQTT: session created via control command");
-                                                }
-                                                Err(e) => {
-                                                    tracing::error!(error = %e, "MQTT: failed to create session");
-                                                }
-                                            }
-                                        }
-                                        other => {
-                                            tracing::warn!(notification_type = other, "Unhandled system notification with empty session_id");
-                                        }
-                                    }
-                                }
-                                other => {
-                                    tracing::warn!(?other, "Unexpected message type with empty session_id");
-                                }
-                            }
-                        } else {
-                            // Check for session-manager-level commands before forwarding to session task.
-                            let handled = match &msg {
-                                crate::agent::inbound::InboundMessage::SystemNotification { notification_type, data } => {
-                                    match notification_type.as_str() {
-                                        "mqtt_user_message" => {
-                                            let content = data.get("content")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let msg_id = data.get("message_id")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            tracing::info!(
-                                                session_id = %session_id,
-                                                content_len = content.len(),
-                                                "MQTT: routing user message via session_manager"
-                                            );
-                                            let _ = session_manager.send_to_session(
-                                                &session_id,
-                                                crate::agent::session::SessionMessage::ChatMessage {
-                                                    content,
-                                                    message_id: msg_id,
-                                                    skill_instructions: None,
-                                                    documents: None,
-                                                    content_parts: None,
-                                                    attached_context: None,
-                                                },
-                                            );
-                                            true
-                                        }
-                                        "workspace_switch" => {
-                                            if let Some(ws_id) = data.get("workspace_id").and_then(|v| v.as_str()) {
-                                                tracing::info!(
-                                                    session_id = %session_id,
-                                                    workspace_id = %ws_id,
-                                                    "MQTT: setting session workspace via session_manager"
-                                                );
-                                                session_manager.set_session_workspace(&session_id, ws_id);
-                                            }
-                                            true
-                                        }
-                                        "model_switch" => {
-                                            if let Some(model_id) = data.get("model_id").and_then(|v| v.as_str()) {
-                                                tracing::info!(
-                                                    session_id = %session_id,
-                                                    model_id = %model_id,
-                                                    "MQTT: routing model_switch via session_manager"
-                                                );
-                                                let _ = session_manager.route_model_switch(
-                                                    &session_id,
-                                                    model_id.to_string(),
-                                                    None,
-                                                );
-                                            }
-                                            true
-                                        }
-                                        "reasoning_effort" => {
-                                            if let Some(effort) = data.get("effort").and_then(|v| v.as_str()) {
-                                                tracing::info!(
-                                                    session_id = %session_id,
-                                                    effort = %effort,
-                                                    "MQTT: routing reasoning_effort via session_manager"
-                                                );
-                                                let _ = session_manager.route_reasoning_effort(
-                                                    &session_id,
-                                                    effort.to_string(),
-                                                );
-                                            }
-                                            true
-                                        }
-                                        "compact_context" => {
-                                            tracing::info!(
-                                                session_id = %session_id,
-                                                "MQTT: routing compact_context via session_manager"
-                                            );
-                                            let _ = session_manager.send_to_session(
-                                                &session_id,
-                                                crate::agent::session::SessionMessage::CompactContext,
-                                            );
-                                            true
-                                        }
-                                        _ => false,
-                                    }
-                                }
-                                _ => false,
-                            };
-                            if !handled {
-                                if let Some(session) = session_manager.get_session(&session_id) {
-                                    let _ = session.send_inbound(msg);
-                                } else {
-                                    tracing::warn!(session_id, "MQTT dispatch: session not found");
-                                }
-                            }
+                        if let Err(e) = dispatch_inbound(
+                            session_manager,
+                            lifecycle_publisher,
+                            session_id,
+                            msg,
+                        ).await {
+                            tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
                     }
                     None => break, // channel closed
@@ -412,7 +378,9 @@ async fn mqtt_only_loop(
                     for prefixed_name in registry.tool_names() {
                         if let Some(def) = registry.get_tool_def(&prefixed_name) {
                             let wrapper = acowork_mcp::wrapper::McpToolWrapper::new(
-                                prefixed_name.clone(), def, registry.clone(),
+                                prefixed_name.clone(),
+                                def,
+                                registry.clone(),
                             );
                             use acowork_core::tools::traits::Tool;
                             let tool_spec = wrapper.spec();
@@ -430,3 +398,364 @@ async fn mqtt_only_loop(
     tracing::info!("MQTT-only gateway loop ended");
     Ok(())
 }
+
+/// ADR-034 §8 Phase 2-1: single dispatch table for `InboundMessage`.
+///
+/// One arm per `InboundMessage` variant — no notification_type string
+/// parsing, no SystemNotification re-mapping for the 8 new control commands.
+///
+/// Routes:
+/// - `UserMessage` / `Stop` / `ContinueExecution` / `ApprovalDecision` /
+///   `QuestionAnswer` / `UserOperation` / `IntentMessage` → session task inbox
+/// - `CloseSession` → `SessionManager::delete_session`
+/// - `UpdateSessionTitle` → `SessionMessage::UpdateSessionTitle` (direct,
+///   does NOT wrap in `SystemNotification` — ADR-034 §7.1 G1 fix)
+/// - `EnableNotify` / `DisableNotify` → `SessionMessage::EnableNotify` /
+///   `SessionMessage::DisableNotify` (the existing session_task handler
+///   sets `session_core.notify_enabled` AtomicBool)
+/// - `CompressAction` → `SessionMessage::CompressAction(CompressionAction)`
+///   with explicit CompressType i32 → CompressionAction mapping
+///   (1=SUMMARY → CompressSummary, 2=TOOL_RESULTS → CompressToolResults)
+/// - `SystemNotification` → legacy fallback (Phase 7: no longer produced by control path)
+async fn dispatch_inbound(
+    session_manager: &mut crate::agent::session::SessionManager,
+    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
+    session_id: String,
+    msg: crate::agent::inbound::InboundMessage,
+) -> crate::error::Result<()> {
+    use crate::agent::inbound::InboundMessage;
+    use crate::agent::loop_::CompressionAction;
+    use crate::agent::session::SessionMessage;
+    use crate::error::RuntimeError;
+    use acowork_core::mqtt_proto::{data_envelope, DataEnvelope};
+
+    // ── System-level (session_id empty) ─────────────────────────────
+    if session_id.is_empty() {
+        return match msg {
+            InboundMessage::CreateSession => {
+                // Phase A fix: route through `create_frontend_session` so the
+                // session gets a JSONL file, per-session meta, and enable_notify —
+                // not just an in-memory spawn. Without this the Desktop never
+                // sees the new session via fetchSessions and the session has no
+                // persisted workspace context.
+                match session_manager.create_frontend_session(None, None, None).await {
+                    Ok(sid) => {
+                        tracing::info!(new_sid = %sid, "MQTT: session created via control command");
+                        // Publish SessionCreated to the lifecycle topic so the
+                        // Desktop updates its session list immediately.
+                        let created = data_envelope::Payload::SessionCreated(
+                            acowork_core::mqtt_proto::SessionCreated {
+                                agent_id: lifecycle_publisher.agent_id().to_string(),
+                                session_id: sid.clone(),
+                                title: String::new(),
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                            },
+                        );
+                        let envelope = DataEnvelope {
+                            version: 1,
+                            payload: Some(created),
+                        };
+                        if let Err(e) = lifecycle_publisher
+                            .publish_lifecycle("created", &envelope)
+                            .await
+                        {
+                            tracing::warn!(
+                                session_id = %sid,
+                                error = %e,
+                                "Failed to publish SessionCreated lifecycle event"
+                            );
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "MQTT: create_session failed");
+                        Err(e)
+                    }
+                }
+            }
+            InboundMessage::IntentMessage { from, action, .. } => {
+                tracing::warn!(
+                    from = %from,
+                    action = %action,
+                    "IntentMessage without target session — dropped (MQTT dispatch expects session_id)"
+                );
+                Err(RuntimeError::Config(
+                    "IntentMessage without target session".to_string(),
+                ))
+            }
+            other => Err(RuntimeError::Config(format!(
+                "system-level dispatch: unsupported variant {:?}",
+                std::mem::discriminant(&other)
+            ))),
+        };
+    }
+
+    // ── Session-level: single dispatch table ─────────────────────────
+    match msg {
+        // ① User chat message → session task inbox
+        InboundMessage::UserMessage(text) => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::UserMessage(text),
+        ),
+
+        // ② Stop signal → session task inbox
+        InboundMessage::Stop { reason } => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::Stop { reason },
+        ),
+
+        // ③ Continue execution → session task inbox
+        InboundMessage::ContinueExecution { reason, .. } => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::ContinueExecution {
+                session_id: session_id.clone(),
+                reason,
+            },
+        ),
+
+        // ④ Approval decision → session task inbox
+        InboundMessage::ApprovalDecision {
+            request_id,
+            approved,
+            allow_all_session,
+            reason,
+            ..
+        } => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::ApprovalDecision {
+                session_id: session_id.clone(),
+                request_id,
+                approved,
+                allow_all_session,
+                reason,
+            },
+        ),
+
+        // ⑤ Question answer → session task inbox
+        InboundMessage::QuestionAnswer {
+            request_id, answer, ..
+        } => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::QuestionAnswer {
+                session_id: session_id.clone(),
+                request_id,
+                answer,
+            },
+        ),
+
+        // ⑥ UserOperation (StopLoop, ContinueLoop, ApprovalDecision, QuestionAnswer, UpdateRuntimeConfig)
+        InboundMessage::UserOperation(op) => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::UserOperation(op),
+        ),
+
+        // ⑦ IntentMessage → session task inbox
+        InboundMessage::IntentMessage {
+            from,
+            action,
+            params,
+        } => forward_to_session_inbound(
+            session_manager,
+            &session_id,
+            InboundMessage::IntentMessage { from, action, params },
+        ),
+
+        // ── ADR-034 §8 Phase 2: 8 new control commands ────────────────
+
+        // ⑧ CloseSession → SessionManager::close_session (preserves JSONL, triggers
+        // distillation). Publishes SessionDeleted so the Desktop can prune its
+        // session list immediately.
+        //
+        // This used to call delete_session — a Phase 6 gRPC-cleanup regression
+        // that physically removed the JSONL/meta files and made the closed
+        // session disappear from fetchSessions. Bug 2/Bug 3 root cause.
+        InboundMessage::CloseSession { session_id: sid } => {
+            let result = session_manager.close_session(&sid).await;
+            // Publish SessionDeleted regardless of close result so the Desktop
+            // prunes its UI list. close_session returns Err if the session was
+            // already gone — that's still a "gone" signal for the Desktop.
+            let deleted = data_envelope::Payload::SessionDeleted(
+                acowork_core::mqtt_proto::SessionDeleted {
+                    agent_id: lifecycle_publisher.agent_id().to_string(),
+                    session_id: sid.clone(),
+                    deleted_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            let envelope = DataEnvelope {
+                version: 1,
+                payload: Some(deleted),
+            };
+            if let Err(e) = lifecycle_publisher
+                .publish_lifecycle("deleted", &envelope)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "Failed to publish SessionDeleted lifecycle event (close)"
+                );
+            }
+            // Log but don't propagate close errors (idempotent close is the
+            // best UX — re-closing an already-closed session should not break
+            // the dispatch loop).
+            if let Err(e) = result {
+                tracing::warn!(session_id = %sid, error = %e, "close_session reported error (ignored)");
+            }
+            Ok(())
+        }
+
+        // ⑨ UpdateSessionTitle — direct SessionMessage dispatch (Phase 2-6).
+        // Replaces the gRPC-era SystemNotification detour (fixes §7.1 G1).
+        // session_task.rs handles SessionMessage::UpdateSessionTitle at line ~1344.
+        InboundMessage::UpdateSessionTitle { title, .. } => session_manager
+            .send_to_session(&session_id, SessionMessage::UpdateSessionTitle { title })
+            .map_err(|e| RuntimeError::Config(format!("UpdateSessionTitle: {}", e))),
+
+        // ⑩ EnableNotify → SessionMessage::EnableNotify
+        // session_task.rs handler (line ~1625) sets session_core.notify_enabled=true.
+        InboundMessage::EnableNotify { .. } => session_manager
+            .send_to_session(&session_id, SessionMessage::EnableNotify)
+            .map_err(|e| RuntimeError::Config(format!("EnableNotify: {}", e))),
+
+        // ⑪ DisableNotify → SessionMessage::DisableNotify
+        // session_task.rs handler (line ~1635) sets session_core.notify_enabled=false.
+        InboundMessage::DisableNotify { .. } => session_manager
+            .send_to_session(&session_id, SessionMessage::DisableNotify)
+            .map_err(|e| RuntimeError::Config(format!("DisableNotify: {}", e))),
+
+        // ⑫ CompressAction — explicit CompressType i32 → CompressionAction mapping
+        // (Phase 2-7: two paths must not cross).
+        // CompressType::SUMMARY (1)     → CompressionAction::CompressSummary
+        // CompressType::TOOL_RESULTS(2)→ CompressionAction::CompressToolResults
+        // Anything else is rejected (forwarded to session_task which emits an error).
+        InboundMessage::CompressAction {
+            compress_type, ..
+        } => {
+            let action = match compress_type {
+                1 => CompressionAction::CompressSummary,
+                2 => CompressionAction::CompressToolResults,
+                other => {
+                    return Err(RuntimeError::Config(format!(
+                        "CompressAction: invalid compress_type {} (expected 1=SUMMARY or 2=TOOL_RESULTS)",
+                        other
+                    )));
+                }
+            };
+            session_manager
+                .send_to_session(&session_id, SessionMessage::CompressAction(action))
+                .map_err(|e| RuntimeError::Config(format!("CompressAction: {}", e)))
+        }
+
+        // ⑬ CreateSession (session-level DeleteSession)
+        InboundMessage::DeleteSession { session_id: sid } => {
+            session_manager.delete_session(&sid).await;
+            // Notify the Desktop so it can prune its session list immediately.
+            let deleted = data_envelope::Payload::SessionDeleted(
+                acowork_core::mqtt_proto::SessionDeleted {
+                    agent_id: lifecycle_publisher.agent_id().to_string(),
+                    session_id: sid.clone(),
+                    deleted_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            let envelope = DataEnvelope {
+                version: 1,
+                payload: Some(deleted),
+            };
+            if let Err(e) = lifecycle_publisher
+                .publish_lifecycle("deleted", &envelope)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "Failed to publish SessionDeleted lifecycle event (delete)"
+                );
+            }
+            Ok(())
+        }
+
+        // ⑭ ChatMessage → SessionMessage::ChatMessage (from MQTT SendMessage)
+        InboundMessage::ChatMessage { content, message_id } => {
+            session_manager
+                .send_to_session(
+                    &session_id,
+                    SessionMessage::ChatMessage {
+                        content,
+                        message_id,
+                        skill_instructions: None,
+                        documents: None,
+                        content_parts: None,
+                        attached_context: None,
+                    },
+                )
+                .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
+        }
+
+        // ⑮ ModelSwitchAction → SessionManager::route_model_switch
+        InboundMessage::ModelSwitchAction {
+            model_id,
+            provider_id,
+        } => session_manager
+            .route_model_switch(&session_id, model_id, provider_id)
+            .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction: {}", e))),
+
+        // ⑯ ReasoningEffortAction → SessionManager::route_reasoning_effort
+        InboundMessage::ReasoningEffortAction { effort } => session_manager
+            .route_reasoning_effort(&session_id, effort)
+            .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction: {}", e))),
+
+        // ⑰ WorkspaceSwitchAction → SessionManager::route_workspace_switch
+        InboundMessage::WorkspaceSwitchAction { workspace_id } => {
+            session_manager.route_workspace_switch(&session_id, &workspace_id);
+            Ok(())
+        }
+
+        // ⑱ CompactContextAction → SessionMessage::CompactContext
+        InboundMessage::CompactContextAction => session_manager
+            .send_to_session(&session_id, SessionMessage::CompactContext)
+            .map_err(|e| RuntimeError::Config(format!("CompactContextAction: {}", e))),
+
+        // ── Legacy fallback (Phase 7: no longer produced by control path) ──
+        InboundMessage::SystemNotification {
+            notification_type,
+            ..
+        } => {
+            tracing::warn!(
+                notification_type,
+                "SystemNotification received at session level — no longer expected (Phase 7 cleanup)"
+            );
+            Ok(())
+        }
+
+        // CreateSession at session level is a no-op (only meaningful at system level)
+        InboundMessage::CreateSession => {
+            tracing::warn!(
+                "CreateSession received at session level — ignoring (system-level only)"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Forward an `InboundMessage` to the session task's `agent_inbound_tx`.
+/// Returns `Ok(())` on success or an error message describing the failure.
+fn forward_to_session_inbound(
+    session_manager: &mut crate::agent::session::SessionManager,
+    session_id: &str,
+    msg: crate::agent::inbound::InboundMessage,
+) -> crate::error::Result<()> {
+    use crate::error::RuntimeError;
+    let handle = session_manager
+        .get_session(session_id)
+        .ok_or_else(|| RuntimeError::Config(format!("session not found: {}", session_id)))?;
+    handle
+        .send_inbound(msg)
+        .map_err(|e| RuntimeError::Config(format!("send_inbound failed: {}", e)))
+}
+

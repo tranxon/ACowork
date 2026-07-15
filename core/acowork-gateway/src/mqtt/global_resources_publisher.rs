@@ -153,6 +153,16 @@ impl MqttGlobalResourcesPublisher {
         let embedding_payload = build_available_embedding_models(&gw);
         let lsp_payload = build_available_lsps(&gw);
 
+        tracing::debug!(
+            provider_count = providers_payload.providers.len(),
+            api_key_lengths = ?providers_payload
+                .providers
+                .iter()
+                .map(|p| (p.id.clone(), p.api_key.len()))
+                .collect::<Vec<_>>(),
+            "MQTT publisher: built AvailableProviders payload (debug)"
+        );
+
         // Drop the read lock before publishing (don't hold it across network I/O).
         drop(gw);
 
@@ -230,34 +240,46 @@ fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
     let providers: Vec<ProviderRef> = cache
         .providers
         .iter()
-        .map(|p| ProviderRef {
-            id: p.id.clone(),
-            base_url: p.base_url.clone(),
-            protocol_type: map_protocol_type(&p.protocol_type).into(),
-            models: p
-                .models
-                .iter()
-                .map(|m| {
-                    let (input_modalities, output_modalities) = m
-                        .capabilities
-                        .modalities
-                        .as_ref()
-                        .map(|moda| (moda.input.clone(), moda.output.clone()))
-                        .unwrap_or_default();
-                    ProviderModelRef {
-                        id: m.id.clone(),
-                        capabilities: Some(mqtt_proto::ModelCapabilities {
-                            context_window: m.capabilities.context_window,
-                            max_output_tokens: m.capabilities.max_output_tokens,
-                            input_modalities,
-                            output_modalities,
-                        }),
-                        max_output_tokens_limit: m.max_output_tokens_limit,
-                    }
-                })
-                .collect(),
-            compact_model: p.compact_model.clone().unwrap_or_default(),
-            custom: p.custom,
+        .map(|p| {
+            // Decrypt the provider's API key from the Gateway's Vault.
+            // Empty string when no key is configured (e.g. local Ollama).
+            // MQTT broker is localhost-only so it's safe to publish the
+            // decrypted key in the retained payload — see mqtt.md §3.1.1.
+            let api_key = gw
+                .vault
+                .get_provider(&p.id)
+                .map(|entry| entry.api_key)
+                .unwrap_or_default();
+            ProviderRef {
+                id: p.id.clone(),
+                base_url: p.base_url.clone(),
+                protocol_type: map_protocol_type(&p.protocol_type).into(),
+                models: p
+                    .models
+                    .iter()
+                    .map(|m| {
+                        let (input_modalities, output_modalities) = m
+                            .capabilities
+                            .modalities
+                            .as_ref()
+                            .map(|moda| (moda.input.clone(), moda.output.clone()))
+                            .unwrap_or_default();
+                        ProviderModelRef {
+                            id: m.id.clone(),
+                            capabilities: Some(mqtt_proto::ModelCapabilities {
+                                context_window: m.capabilities.context_window,
+                                max_output_tokens: m.capabilities.max_output_tokens,
+                                input_modalities,
+                                output_modalities,
+                            }),
+                            max_output_tokens_limit: m.max_output_tokens_limit,
+                        }
+                    })
+                    .collect(),
+                compact_model: p.compact_model.clone().unwrap_or_default(),
+                custom: p.custom,
+                api_key,
+            }
         })
         .collect();
 
@@ -268,21 +290,44 @@ fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
 }
 
 /// Build `AvailableMcps` from the GatewayState resource cache.
+///
+/// The `auth_token` is extracted from env vars and headers via
+/// `extract_api_key_from_mcp_config` — same logic that builds
+/// `mcp_key_vault` for gRPC AgentHello. Empty when no auth required.
 fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
     let cache = &gw.resource_cache.mcp_list;
+    // MCP catalog is the source of truth for env/headers, not the
+    // resource_cache (which only stores server lists). Load it here.
+    let data_dir = gw
+        .config
+        .as_ref()
+        .map(|c| std::path::PathBuf::from(&c.data_dir))
+        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
+    let catalog: Vec<acowork_core::protocol::McpServerConfigDef> = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir)
+        .ok()
+        .unwrap_or_default();
     let servers: Vec<McpRef> = cache
         .servers
         .iter()
-        .map(|s| McpRef {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            transport: map_mcp_transport(&s.transport).into(),
-            url: s.url.clone().unwrap_or_default(),
-            command: s.command.clone(),
-            args: s.args.clone(),
-            env: s.env.clone(),
-            headers: s.headers.clone(),
-            tool_timeout_secs: s.tool_timeout_secs.unwrap_or(0),
+        .map(|s| {
+            // Look up the catalog entry to extract env/headers for the token.
+            let auth_token = catalog
+                .iter()
+                .find(|c| c.name == s.id)
+                .and_then(crate::resource_cache::extract_api_key_from_mcp_config)
+                .unwrap_or_default();
+            McpRef {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                transport: map_mcp_transport(&s.transport).into(),
+                url: s.url.clone().unwrap_or_default(),
+                command: s.command.clone(),
+                args: s.args.clone(),
+                env: s.env.clone(),
+                headers: s.headers.clone(),
+                tool_timeout_secs: s.tool_timeout_secs.unwrap_or(0),
+                auth_token,
+            }
         })
         .collect();
 
@@ -293,17 +338,29 @@ fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
 }
 
 /// Build `AvailableSearches` from the GatewayState resource cache.
+///
+/// `api_key` is decrypted from the Gateway's Vault at PUBLISH time,
+/// mirroring the logic in `build_search_key_vault` for gRPC AgentHello.
+/// Empty when the search provider has no key configured.
 fn build_available_searches(gw: &GatewayState) -> AvailableSearches {
     let cache = &gw.resource_cache.search_list;
     let providers: Vec<SearchRef> = cache
         .providers
         .iter()
-        .map(|s| SearchRef {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            description: s.description.clone(),
-            requires_api_key: s.requires_api_key,
-            base_url: s.base_url.clone(),
+        .map(|s| {
+            let api_key = gw
+                .vault
+                .get_search_key(&s.id)
+                .map(|entry| entry.api_key)
+                .unwrap_or_default();
+            SearchRef {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                description: s.description.clone(),
+                requires_api_key: s.requires_api_key,
+                base_url: s.base_url.clone(),
+                api_key,
+            }
         })
         .collect();
 

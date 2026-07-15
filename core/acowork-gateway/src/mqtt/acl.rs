@@ -229,7 +229,13 @@ mod tests {
         // Gateway publisher rule
         let publisher = &rules[2];
         assert_eq!(publisher.client_id_pattern, "gateway:publisher");
-        assert!(publisher.topics.iter().all(|(t, _)| t.starts_with("acowork/global/")));
+        assert!(
+            publisher
+                .topics
+                .iter()
+                .any(|(t, _)| t == "acowork/global/#"),
+            "gateway publisher should publish global resources"
+        );
     }
 
     #[test]

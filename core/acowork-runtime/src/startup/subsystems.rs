@@ -65,14 +65,10 @@ pub(crate) async fn phase_c_spawn_subsystems(
                 }
                 tracing::debug!("MQTT chunk relay task ended");
             }))
-        } else if ctx.grpc_client.is_some() {
+        } else if let Some(grpc_client) = ctx.grpc_client.as_ref() {
             // Legacy gRPC chunk relay.
             let chunk_rx = ctx.chunk_rx.take().unwrap();
-            let outbound_ctrl_tx = ctx
-                .grpc_client
-                .as_ref()
-                .unwrap()
-                .outbound_ctrl_sender();
+            let outbound_ctrl_tx = grpc_client.outbound_ctrl_sender();
             Some(tokio::spawn(async move {
                 tracing::info!("Chunk relay started (single channel)");
                 let mut chunk_rx = chunk_rx;
@@ -390,13 +386,10 @@ fn relay_chunk_event_mqtt(
 
     match event {
         ChunkEvent::ContextUsage(ctx_info) => {
-            publisher.publish_context_usage(
-                sid,
-                ctx_info.input_tokens,
-                ctx_info.output_tokens,
-                ctx_info.total_input_tokens.unwrap_or(0),
-                ctx_info.total_output_tokens.unwrap_or(0),
-            );
+            // Publish the full ContextUsageInfo so the StatusBar can render
+            // total_tokens / context_window / usage_percent, not just the
+            // last-turn input/output tokens.
+            publisher.publish_context_usage(sid, &ctx_info);
         }
 
         ChunkEvent::CompactingStarted => {
@@ -424,14 +417,16 @@ fn relay_chunk_event_mqtt(
             approval_timeout_secs,
         } => {
             publisher.publish_tool_approval_needed(
-                sid,
-                &request_id,
-                &tool_name,
-                &action,
-                &risk_level,
-                &reason,
-                &tool_call_id,
-                approval_timeout_secs,
+                crate::mqtt::client::ToolApprovalNeededEvent {
+                    session_id: sid,
+                    request_id: &request_id,
+                    tool_name: &tool_name,
+                    action: &action,
+                    risk_level: &risk_level,
+                    reason: &reason,
+                    tool_call_id: &tool_call_id,
+                    approval_timeout_secs,
+                },
             );
         }
 
@@ -467,15 +462,17 @@ fn relay_chunk_event_mqtt(
         } => {
             let status_json = serde_json::to_string(&status).unwrap_or_default();
             publisher.publish_session_state_changed(
-                sid,
-                &status_json,
-                model.as_deref(),
-                provider.as_deref(),
-                workspace_id.as_deref(),
-                ratio,
-                reasoning_effort.as_deref(),
-                temperature,
-                context_usage.as_deref(),
+                crate::mqtt::client::SessionStateChangeEvent {
+                    session_id: sid,
+                    status_json: &status_json,
+                    model: model.as_deref(),
+                    provider: provider.as_deref(),
+                    workspace_id: workspace_id.as_deref(),
+                    ratio,
+                    reasoning_effort: reasoning_effort.as_deref(),
+                    temperature,
+                    context_usage_json: context_usage.as_deref(),
+                },
             );
         }
 

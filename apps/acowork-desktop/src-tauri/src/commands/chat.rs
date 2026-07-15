@@ -1,37 +1,9 @@
 //! Chat commands
 
-use serde_json::Value as JsonValue;
 use tauri::State;
 
-use crate::gateway_client::{DocumentUploadResponse, SendMessageResponse};
+use crate::gateway_client::DocumentUploadResponse;
 use crate::state::AppState;
-
-/// Send a message to an agent (HTTP POST, non-streaming)
-#[tauri::command]
-pub async fn send_message(
-    state: State<'_, AppState>,
-    agent_id: String,
-    content: String,
-    message_id: Option<String>,
-    session_id: Option<String>,
-    command: Option<String>,
-    document_ids: Option<Vec<String>>,
-    attached_context: Option<Vec<JsonValue>>,
-) -> Result<SendMessageResponse, String> {
-    let client = state.gateway.read().await;
-    client
-        .send_message(
-            &agent_id,
-            &content,
-            message_id.as_deref(),
-            session_id.as_deref(),
-            command.as_deref(),
-            document_ids.as_deref(),
-            attached_context.as_deref(),
-        )
-        .await
-        .map_err(|e| e.to_string())
-}
 
 /// Upload a document to a session (multipart POST)
 #[tauri::command]

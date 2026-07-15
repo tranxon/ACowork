@@ -23,16 +23,51 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::compat::GlobalResourcePusher;
+use crate::resource_pusher::ResourcePusher;
 
 use super::lsp_relay::{
     check_lsp_relay_health, kill_lsp_relay, spawn_lsp_relay,
 };
 
+/// Shared HTTP client for LSP Relay supervisor REST calls
+/// (short-lived `/health`, `/events` probe, …). Reusing a single
+/// `reqwest::Client` gives us connection pooling across the
+/// supervisor's many probe calls.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build LSP Relay supervisor HTTP client")
+    })
+}
+
+/// Shared HTTP client for the LSP Relay `/events` SSE stream.
+///
+/// SSE connections are held open for hours/days, so this client
+/// deliberately sets only `connect_timeout` (for the initial TCP
+/// handshake) and leaves the per-request timeout unset — the
+/// heartbeat watchdog is the liveness bound, not reqwest.
+pub(crate) fn sse_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build LSP Relay SSE HTTP client")
+    })
+}
+
 /// Shared gateway state handle.
 pub type SharedState = Arc<RwLock<GatewayState>>;
 
-/// Connect / reconnect backoff bounds.
+/// Connect / reconnect backoff bounds. The SSE client itself is
+/// built via `expect` in `sse_http_client`, so this constant is
+/// only referenced by the unit tests below (asserted for sanity).
+/// `#[allow(dead_code)]` suppresses the lib-only dead-code warning.
+#[allow(dead_code)]
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 /// Configuration for the LSP Relay supervisor.
@@ -44,7 +79,7 @@ pub struct LspRelaySupervisorConfig {
     /// ADR-030 C3: optional pusher for `SidecarEndpointUpdate(LspRelay, ...)`
     /// notifications when the relay endpoint changes (ready, restart,
     /// shutdown). Mirrors `EmbedSupervisorConfig::pusher`.
-    pub pusher: Option<Arc<GlobalResourcePusher>>,
+    pub pusher: Option<Arc<ResourcePusher>>,
 }
 
 /// Spawn the supervisor task. Must be called from an async context,
@@ -52,7 +87,7 @@ pub struct LspRelaySupervisorConfig {
 pub fn start_lsp_relay_supervisor(
     cfg: LspRelaySupervisorConfig,
     state: SharedState,
-    pusher: Option<Arc<GlobalResourcePusher>>,
+    pusher: Option<Arc<ResourcePusher>>,
 ) {
     let port = cfg.port;
     tokio::spawn(async move {
@@ -80,7 +115,7 @@ fn build_lsp_relay_sidecar_payload(state: &GatewayState) -> (String, String) {
 /// listed in ADR-030 §C3.4 (startup ready, restart success/failure,
 /// reaper exit, etc.).
 async fn push_lsp_relay_sidecar(
-    pusher: &Option<Arc<GlobalResourcePusher>>,
+    pusher: &Option<Arc<ResourcePusher>>,
     state: &SharedState,
 ) {
     if let Some(p) = pusher {
@@ -99,7 +134,7 @@ async fn push_lsp_relay_sidecar(
 async fn run_supervisor(
     cfg: LspRelaySupervisorConfig,
     state: SharedState,
-    pusher: Option<Arc<GlobalResourcePusher>>,
+    pusher: Option<Arc<ResourcePusher>>,
     port: u16,
 ) {
     let mut history = RestartHistory::new();
@@ -291,23 +326,17 @@ enum MonitorExit {
 async fn run_monitor_session(
     state: &SharedState,
     port: u16,
-    pusher: &Option<Arc<GlobalResourcePusher>>,
+    pusher: &Option<Arc<ResourcePusher>>,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
     let url = format!("http://127.0.0.1:{port}/events");
     tracing::info!(%url, "Connecting to LSP Relay SSE event stream");
 
-    let client = match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to build HTTP client for SSE");
-            sleep(RECONNECT_MAX).await;
-            return MonitorExit::ConnectionLost;
-        }
-    };
+    // SSE is a long-lived connection (hours/days). Use only a connect
+    // timeout for the TCP handshake; the per-connection total-timeout
+    // would kill the stream after 30s and falsely trigger a restart.
+    // Liveness is enforced by the heartbeat watchdog at the app level.
+    let client = sse_http_client();
 
     let resp = match client
         .get(&url)
@@ -419,16 +448,11 @@ async fn lsp_relay_alive(state: &SharedState, port: u16) -> bool {
 /// Try once to connect to /events and confirm it returns 2xx.
 async fn try_connect_events(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/events");
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    let client = http_client();
     match client
         .get(&url)
         .header("Accept", "text/event-stream")
+        .timeout(Duration::from_secs(2))
         .send()
         .await
     {
