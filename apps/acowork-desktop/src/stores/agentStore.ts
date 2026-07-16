@@ -366,6 +366,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (!id) return;
     set({ selectedAgentId: id });
 
+    // Guard: business endpoints (fetchLatestSession → switchSession →
+    // fetchSessionState) all 503 against an unregistered Runtime.  Unstarted
+    // agents are a legitimate UI state — the user picks the Start button (or
+    // double-clicks the list item) to launch them, and startAgentAndSyncUI
+    // atomically bootstraps the session there.  Probing here would only
+    // produce a 503 + console error for an expected, user-driven transition.
+    //
+    // Same gate used by ChatPanel's mount effect ("if (!running || !ready)
+    // return") so the two paths can never drift out of sync.
+    const meta = get().agents[id]?.meta;
+    if (!meta?.running || !meta?.ready) return;
+
     // 原子化：选 agent 时加载 latest session 并激活。
     // switchSession 内部会调后端 /activate（拿到 model/provider/workspace）、
     // 写入 session 元数据、拉取 session 列表。fetchSessionState 补上 context
@@ -621,31 +633,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (!agentId) return;
     if (sessionId === useChatStore.getState().getActiveSessionId(agentId)) return;
 
-    // P1: Deactivate the old session's real-time push before switching.
-    // Fire-and-forget — don't block the switch on deactivation.
-    const oldSessionId = useChatStore.getState().getActiveSessionId(agentId);
-    if (oldSessionId) {
-      invoke("mqtt_publish_control", {
-        agentId,
-        command: "disable_notify",
-        payloadJson: { session_id: oldSessionId },
-      }).catch(() => {
-        // Silently ignore — deactivation is best-effort
-      });
-    }
-
+    // ADR-035: runtime pushes stream_delta to ALL subscribed sessions
+    // uniformly — there is no foreground/background suppression anymore, so
+    // the old enable_notify/disable_notify control calls are removed. The
+    // desktop keeps its MQTT subscription to every opened session; switching
+    // only flips which session is rendered (chatStore foreground flag).
     useChatStore.getState().activateSession(agentId, sessionId);
     useChatStore.getState().abortSessionLoad(agentId, sessionId);
-
-    try {
-      await invoke("mqtt_publish_control", {
-        agentId,
-        command: "enable_notify",
-        payloadJson: { session_id: sessionId },
-      });
-    } catch (e) {
-      console.warn("[AgentStore] enable_notify failed:", e);
-    }
 
     get().saveSessionForAgent(agentId, sessionId);
 

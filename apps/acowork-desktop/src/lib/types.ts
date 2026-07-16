@@ -708,14 +708,96 @@ export interface DocumentUploadMeta {
   path: string;
 }
 
-/** Paginated messages response from Gateway */
+/**
+ * Paginated messages response from Gateway.
+ *
+ * Pagination uses an `offset` model — direction is NOT a parameter. Both
+ * `offset` and `limit` are measured in **raw entries** (one JSONL line
+ * each: a single user / assistant / thought / tool_call / tool_result
+ * row). A displayed "explore group" (think + tool_call + tool_result
+ * folded into one chip) is a **frontend UI abstraction only** and is
+ * never exposed on the wire.
+ *
+ * - `offset=0` returns the latest `limit` raw entries.
+ * - `offset=K` returns entries[total-K-limit .. total-K) in chronological order.
+ * - To scroll older:  `offset += limit`.
+ * - To scroll newer:  `offset = max(0, offset - limit)`.
+ * - At top (oldest):  `offset + limit >= total`.
+ * - At bottom (latest): `offset == 0`.
+ */
 export interface PaginatedMessages {
-  session_id: string;
   messages: ConversationEntry[];
-  cursor: string | null;
-  has_more?: boolean;
-  /** ADR-021: Total JSONL line count for incremental polling coordinate tracking */
-  total_lines?: number;
+  /** Echo of the requested offset, in raw entries (0 = newest). */
+  offset: number;
+  /** Number of raw entries actually returned (≤ requested limit). */
+  limit: number;
+  /** Total raw-entry line count in the session JSONL. */
+  total: number;
+}
+
+// ── ADR-035: per-session streaming data structures ───────────────────
+
+/** A single complete streaming line pushed via MQTT `stream_delta`. */
+export interface StreamLine {
+  role: "thought" | "assistant";
+  lineNo: number;
+  content: string;
+}
+
+/** Per-session active stream buffer (ADR-035 D3, replaces ADR-027 multi-buffer).
+ *
+ *  `prevMessageId` records the message_id of the last entry in messages[]
+ *  at the time this stream started. It is the physical predecessor of this
+ *  streaming record in the linear conversation. When record_complete
+ *  arrives, the frontend checks whether prevMessageId is still in the
+ *  messages[] cache window:
+ *    - present → the record is continuous with the cache → freeze it in.
+ *    - absent  → the user scrolled away, the predecessor was evicted by
+ *      scroll-back trim → discard; the next HTTP scroll-back/forward will
+ *      load the complete record from JSONL (it sits right after its
+ *      predecessor, which HTTP will reach linearly). */
+export interface ActiveStream {
+  messageId: string;
+  role: "thought" | "assistant";
+  lines: StreamLine[];
+  prevMessageId: string | null;
+}
+
+/**
+ * ADR-035 D3: per-session data store. Each opened session owns one.
+ *
+ * - `messages[]` is the current cache window covering the offset range
+ *   `[loadedOffset, loadedOffset + loadedCount)` out of `loadedTotal`.
+ *   It is NOT full history.
+ * - The window slides by `offset ± limit` requests to the paginated
+ *   messages HTTP endpoint (no `direction` parameter; see PaginatedMessages).
+ *   MQTT `record_complete` and `tool_call`/`tool_result` events append
+ *   to `messages[]` and bump `loadedTotal`; the user sees new content by
+ *   scrolling down or paging down (no separate "forward load" needed).
+ * - HTTP scroll-back trims the newest end of the window; HTTP scroll-forward
+ *   trims the oldest end — both keep the window size bounded by
+ *   MESSAGE_CACHE_WINDOW.
+ * - `activeStream` is the single active streaming buffer (null when idle).
+ * - Receiving/storing is decoupled from rendering (foreground flag only
+ *   controls rendering, not data receipt).
+ *
+ * Note: the actual runtime storage is split across Zustand `SessionChatState`
+ * (messages, offset/total, meta) and the module-level `activeStreams` Map
+ * in chatStore.ts. This interface documents the logical grouping per ADR D3.
+ */
+export interface SessionDataStore {
+  sessionId: string;
+  messages: ConversationEntry[];
+  activeStream: ActiveStream | null;
+  /** Window's starting offset (from newest, going older; 0 = newest). */
+  loadedOffset: number;
+  /** Number of message entries in the cache window. */
+  loadedCount: number;
+  /** Total message count in the session (returned by HTTP /messages). */
+  loadedTotal: number;
+  meta: unknown | null;
+  subscribed: boolean;
+  foreground: boolean;
 }
 
 // ── User profile (persisted in localStorage) ──────────────────────────

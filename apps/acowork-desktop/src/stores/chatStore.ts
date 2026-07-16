@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, ActiveStream } from "../lib/types";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
@@ -10,16 +10,8 @@ import { getGatewayUrl } from "../lib/config";
 import i18n from "../i18n";
 
 // ---------------------------------------------------------------------------
-// ADR-027: Mutable streaming content store (outside React/Zustand state).
-//
-// Streaming messages have a stable ChatMessage reference in React state — they
-// are only appended on first appearance and removed when flushed to JSONL,
-// never mutated in place. Their volatile `content` and `isStreaming` flag live
-// in this external Map, read by useSyncExternalStore hooks during rendering.
-// This avoids creating new ChatMessage objects on every poll when only the
-// streaming content changes (~500ms polling × N messages = GC pressure).
-//
-// Keyed by `{sessionId}:{messageId}` to avoid cross-session collisions.
+// ADR-035: per-session active stream buffer (replaces ADR-027 multi-buffer).
+// Keyed by sessionId. useStreamingContent reads from here exclusively.
 // ---------------------------------------------------------------------------
 
 interface StreamingEntry {
@@ -27,63 +19,112 @@ interface StreamingEntry {
   isStreaming: boolean;
 }
 
-const streamingContents = new Map<string, StreamingEntry>();
+// ADR-035 D3: StreamLine / ActiveStream types now live in lib/types.ts.
+const activeStreams = new Map<string, ActiveStream>();
 const streamingListeners = new Map<string, Set<() => void>>();
 
-function streamingKey(sessionId: string, messageId: string): string {
-  return `${sessionId}:${messageId}`;
-}
-
-/** Public reader for useSyncExternalStore */
-export function getStreamingContent(
-  sessionId: string,
-  messageId: string,
-): StreamingEntry | null {
-  return streamingContents.get(streamingKey(sessionId, messageId)) ?? null;
-}
-
-/** Public subscriber for useSyncExternalStore */
-export function subscribeStreaming(
-  sessionId: string,
-  messageId: string,
-  callback: () => void,
-): () => void {
-  const key = streamingKey(sessionId, messageId);
-  let set = streamingListeners.get(key);
-  if (!set) {
-    set = new Set();
-    streamingListeners.set(key, set);
-  }
-  set.add(callback);
-  return () => {
-    set!.delete(callback);
-    if (set!.size === 0) streamingListeners.delete(key);
-  };
-}
-
-/** Internal: notify all useSyncExternalStore subscribers for a single entry. */
-function notifyStreamingSubscribers(sessionId: string, messageId: string): void {
-  const set = streamingListeners.get(streamingKey(sessionId, messageId));
+function notifyActiveStreamSubscribers(sessionId: string, messageId: string): void {
+  const set = streamingListeners.get(`${sessionId}:${messageId}`);
   if (set) for (const cb of set) cb();
 }
 
-/** Internal: remove a streaming entry + its listeners. */
-function deleteStreamingEntry(sessionId: string, messageId: string): void {
-  const key = streamingKey(sessionId, messageId);
-  streamingContents.delete(key);
-  streamingListeners.delete(key);
+/**
+ * Per-session snapshot cache for useSyncExternalStore.
+ *
+ * `getStreamingContent` MUST return a stable reference between mutations,
+ * otherwise React's `useSyncExternalStore` Object.is check sees a "new"
+ * value on every call and enters an infinite re-render loop
+ * ("The result of getSnapshot should be cached to avoid an infinite loop"
+ * → "Maximum update depth exceeded").
+ *
+ * Lifecycle:
+ *   - `stream_delta` handler rebuilds the entry on every push so React sees
+ *     a fresh reference ONLY when content actually changed, then notifies.
+ *   - `record_complete` deletes the activeStream; the next `getSnapshot`
+ *     call returns null, which is itself a different reference and correctly
+ *     triggers the final re-render.
+ *   - `clearSessionStreaming` evicts the cache entry alongside the
+ *     activeStream so stale entries don't leak after a session switch.
+ */
+const streamingSnapshots = new Map<string, StreamingEntry>();
+
+export function getStreamingContent(sessionId: string, messageId: string): StreamingEntry | null {
+  const as = activeStreams.get(sessionId);
+  if (as && as.messageId === messageId) {
+    let entry = streamingSnapshots.get(sessionId);
+    if (!entry) {
+      entry = {
+        content: as.lines.map(l => l.content).join("\n"),
+        isStreaming: true,
+      };
+      streamingSnapshots.set(sessionId, entry);
+    }
+    return entry;
+  }
+  // Active stream gone (record_complete or session evicted) — drop the
+  // cached snapshot too so a stale entry can't be returned if a NEW stream
+  // for the same session later starts without first populating the cache.
+  streamingSnapshots.delete(sessionId);
+  return null;
 }
 
-/** Internal: clear all streaming state for a given session. */
-function clearSessionStreaming(sessionId: string): void {
-  const prefix = `${sessionId}:`;
-  for (const key of streamingContents.keys()) {
-    if (key.startsWith(prefix)) streamingListeners.delete(key);
-  }
-  for (const key of streamingContents.keys()) {
-    if (key.startsWith(prefix)) streamingContents.delete(key);
-  }
+export function subscribeStreaming(sessionId: string, messageId: string, callback: () => void): () => void {
+  const key = `${sessionId}:${messageId}`;
+  let set = streamingListeners.get(key);
+  if (!set) { set = new Set(); streamingListeners.set(key, set); }
+  set.add(callback);
+  return () => { set!.delete(callback); if (set!.size === 0) streamingListeners.delete(key); };
 }
+
+function clearSessionStreaming(sessionId: string): void {
+  activeStreams.delete(sessionId);
+  // Drop the cached snapshot too — otherwise the next getSnapshot for this
+  // session (e.g. a brand-new stream for the same session id) would lazily
+  // notice `as` is missing and delete the entry on its own, but in the
+  // window between the evict and the next getSnapshot call we'd hand out a
+  // stale reference pointing at the OLD stream's content.
+  streamingSnapshots.delete(sessionId);
+}
+
+// ── ADR-035 O1: messages[] cache window ──
+//
+// MESSAGE_CACHE_WINDOW is NOT a hard conversation limit — sessions may have
+// thousands of raw entries; the user can always scroll backward through all
+// of them via HTTP pagination. This window is a frontend memory
+// optimization: keep at most 150 raw entries in React state to bound DOM
+// nodes and render cost. Scroll-back slides the window forward (drops
+// newest from the back to make room for older at the front); real-time
+// MQTT appends slide it forward naturally (drops oldest from the front).
+//
+// Counted in raw-entry units (same as backend `PaginatedMessages.limit`)
+// — a single display group can occupy multiple slots here, which is fine:
+// the cache only bounds memory, the UI rendering handles folding.
+const MESSAGE_CACHE_WINDOW = 150; // 3 pages of 50
+
+/** Trim oldest entries from the front — keep the last `cap` (newest).
+ *  Used for initial load and real-time MQTT appends. */
+function trimOldest(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.length <= MESSAGE_CACHE_WINDOW) return messages;
+  return messages.slice(-MESSAGE_CACHE_WINDOW);
+}
+
+// ── ADR-035 C2: assistant activeStream safety valve ──
+//
+// assistant content is NEVER truncated for display — the user must see the
+// full reply. But if record_complete is lost (QoS edge case) AND the idle
+// realignment fallback also fails (e.g. session closed mid-stream), the
+// activeStream.lines array would grow unbounded and leak memory.
+//
+// This cap is a SAFETY VALVE only — set far above any realistic assistant
+// reply (10k lines ≈ 500k chars ≈ a small novel). Normal replies are well
+// under 1k lines. If this cap ever triggers, it indicates a bug in the
+// record_complete delivery path; a warning is logged for diagnosis.
+//
+// thought lines are already capped at 5 (D9.1), so this only applies to
+// assistant. When triggered, we keep the NEWEST lines (slice(-N)) so the
+// end of the reply is preserved; the oldest lines are dropped as they are
+// the least likely to be the user's focus.
+const ASSISTANT_LINE_SAFETY_CAP = 10_000;
 
 // ── Sender info helpers ────────────────────────────────────────────────
 
@@ -115,8 +156,29 @@ interface SessionChatState {
   messages: ChatMessage[];
   tokenUsage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
-  hasMoreMessages: boolean;
-  messageCursor: string | null;
+  /**
+   * Pagination window coordinates returned by the last /messages HTTP
+   * response. Both `messageOffset` and `messageLimit` are measured in
+   * **raw entries** (one JSONL line each — a single user / assistant /
+   * thought / tool_call / tool_result row), exactly like the backend
+   * `PaginatedMessages` response. Display-group collapsing
+   * (think + tool_call + tool_result → one chip) is the `MessageBlock`
+   * abstraction local to `ChatPanel.tsx` and never reaches this state.
+   *
+   * Direction is **derived from these**, not stored separately:
+   *
+   * - `messageOffset == 0`               → window touches the newest entry.
+   * - `messageOffset + messageLimit < messageTotal` → there are older entries
+   *   beyond this window (scroll-up can load them).
+   * - `messageOffset > 0`                → there are newer entries below the
+   *   window (scroll-down can load them).
+   *
+   * Initial load sets `messageOffset = 0` and `messageLimit = 0`.
+   * See `PaginatedMessages` in `lib/types.ts` for the request/response shape.
+   */
+  messageOffset: number;
+  messageLimit: number;
+  messageTotal: number;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
   /** 429 retry wait info — populated from session_state_changed when the provider is rate-limited */
   retryWaitInfo: {
@@ -174,8 +236,9 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messages: [],
   tokenUsage: null,
   contextUsage: null,
-  hasMoreMessages: false,
-  messageCursor: null,
+  messageOffset: 0,
+  messageLimit: 0,
+  messageTotal: 0,
   iterationLimitPaused: null,
   retryWaitInfo: null,
   pendingApproval: {},
@@ -325,6 +388,16 @@ function evictStaleSessions(
   const newSessionStates = { ...agent.sessionStates };
   for (const id of toEvict) {
     delete newSessionStates[id];
+    // Release the evicted session's streaming buffer (max 10k lines ~= 1MB)
+    // and its listener sets.  Without this, evicting a session that's mid-stream
+    // would leak the ActiveStream entry AND every per-message Set<callback> in
+    // `streamingListeners` — the messages are gone from state but the external
+    // Maps still hold references, growing unboundedly with each evict+stream
+    // overlap.
+    clearSessionStreaming(id);
+    for (const key of streamingListeners.keys()) {
+      if (key.startsWith(`${id}:`)) streamingListeners.delete(key);
+    }
   }
 
   return {
@@ -372,17 +445,51 @@ interface ChatStore {
   resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => void;
   resolveQuestion: (agentId: string) => void;
   loadConversationHistory: (agentId: string) => Promise<void>;
+  /**
+   * Load messages for a session via HTTP pagination.
+   * - `offset === undefined` (default): initial load — fetches the newest `limit` raw entries.
+   * - `offset > 0`: paginated load — fetches `limit` raw entries older than the current window.
+   *
+   * Both `offset` and `limit` are in **raw-entry units** (one JSONL line
+   * each — see `PaginatedMessages` in `lib/types.ts`). Display-group
+   * collapsing is handled locally in `ChatPanel.messageBlocks` (the
+   * `MessageBlock` strict intermediate layer) and is never transmitted.
+   *
+   * Direction is **derived** from `sessionState.messageOffset` after the response
+   * lands (see `SessionChatState` for the rules); callers don't need to specify it.
+   *
+   * Returns the window coordinates returned by the server, or `undefined` if
+   * the response was discarded (stale sequence / aborted).
+   */
   loadSessionMessages: (
     agentId: string,
     sessionId: string,
-    cursor?: string,
+    offset?: number,
     limit?: number,
-    direction?: string,
-    /** ADR-025: when true, uses backend-managed delivery cursor */
-    incremental?: boolean,
-  ) => Promise<{ hasMore: boolean; noNewData: boolean } | undefined>;
+  ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
-  loadMoreMessages: (agentId: string, sessionId: string) => Promise<void>;
+  /**
+   * Load older messages (scroll-up): next offset = messageOffset + messageLimit.
+   * Single-page load — caller (VirtualMessageList.ensureRenderable effect) decides
+   * whether to invoke again based on whether the viewport is full yet.
+   */
+  loadMoreOlderMessages: (agentId: string, sessionId: string) => Promise<void>;
+  /**
+   * One-shot jump to the latest page: replace cache with the LAST
+   * MESSAGE_CACHE_WINDOW raw entries (offset=0, limit=MESSAGE_CACHE_WINDOW).
+   *
+   * Used by all "navigate to the bottom" scenarios:
+   *  - Initial session mount / session switch
+   *  - Scroll-to-bottom button click
+   *  - Initial state where the cache is parked at an older window
+   *
+   * Replaces the old per-page `loadMoreNewerMessages` loop, which had to issue
+   * N HTTP requests to slide a cache from the middle to the tail.  This is
+   * strictly more efficient: one request, fresh cache, then the rendering
+   * layer's ensureRenderable effect decides if more prepended data is needed
+   * to fill the viewport (same loop as load-older).
+   */
+  ensureLatestInCache: (agentId: string, sessionId: string) => Promise<void>;
   /** Activate a session — sets activeSessionId and triggers cleanup */
   activateSession: (agentId: string, sessionId: string) => void;
   /** Apply session metadata (model/provider/workspace_id) from activate_session response */
@@ -690,11 +797,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: [],
         tokenUsage: null,
         contextUsage: null,
-        hasMoreMessages: false,
-        messageCursor: null,
+        messageOffset: 0,
+        messageLimit: 0,
+        messageTotal: 0,
         iterationLimitPaused: null,
         pendingApproval: {},
-              loadError: null,
+        loadError: null,
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
@@ -708,11 +816,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: [],
         tokenUsage: null,
         contextUsage: null,
-        hasMoreMessages: false,
-        messageCursor: null,
+        messageOffset: 0,
+        messageLimit: 0,
+        messageTotal: 0,
         iterationLimitPaused: null,
         pendingApproval: {},
-              loadError: null,
+        loadError: null,
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
@@ -923,8 +1032,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (session.messages.length <= count) return {};
       return updateSessionState(state, agentId, sessionId, {
         messages: session.messages.slice(0, count),
-        hasMoreMessages: false,
-        messageCursor: null,
+        messageOffset: 0,
+        messageLimit: 0,
+        messageTotal: 0,
       });
     });
   },
@@ -1073,11 +1183,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   loadSessionMessages: async (
     agentId: string,
     sessionId: string,
-    cursor?: string,
+    offset?: number,
     limit: number = 50,
-    direction: string = "backward",
-    incremental?: boolean,
-  ): Promise<{ hasMore: boolean; noNewData: boolean } | undefined> => {
+  ): Promise<{ offset: number; limit: number; total: number } | undefined> => {
     // ADR-021: Per-session abortController + loadSequence (no cross-session interference).
     const sessionState = getSessionState(get(), agentId, sessionId);
     const seq = sessionState.loadSequence + 1;
@@ -1094,9 +1202,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }),
     }));
 
-    // Only show loading indicator for initial loads (no cursor, not incremental)
-    const isIncremental = !!(cursor || incremental);
-    if (!isIncremental) {
+    // "Initial load" = the caller is fetching the session for the first time
+    // (caller passes `offset === undefined`) AND the cache is empty.  This is
+    // the only path that:
+    //   - shows the "Loading conversation..." indicator
+    //   - clears streaming buffers (activeStream entries that predate this
+    //     load cycle and would otherwise be orphaned)
+    //
+    // offset===0 with a non-empty cache is NOT initial — it's a user-initiated
+    // "jump to the latest page" (ensureLatestInCache from a middle-of-conversation
+    // cache position).  We must NOT clear streaming in that case (the agent may
+    // still be writing live), and we must NOT show the loading overlay (the
+    // cache already has content to render).
+    const cacheIsEmpty = sessionState.messages.length === 0;
+    const isInitialLoad = offset === undefined && cacheIsEmpty;
+    if (isInitialLoad) {
       set((state) => ({
         ...updateSessionState(state, agentId, sessionId, { isLoadingSession: true, loadError: null }),
       }));
@@ -1105,10 +1225,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
-      params.set("direction", direction);
-      if (cursor) params.set("cursor", cursor);
-      // ADR-025: incremental flag for backend-managed delivery cursor
-      if (incremental) params.set("incremental", "true");
+      params.set("offset", String(offset ?? 0));
+      // ADR-035 Phase 3: no HTTP incremental endpoint
 
       const resp = await fetch(
         `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
@@ -1129,159 +1247,54 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return;
       }
 
-      console.log(`[ChatStore:DEBUG] Loaded ${data.messages?.length ?? 0} messages for session ${sessionId}${incremental ? " (incremental)" : ""}, has_more=${data.has_more}${data.messages ? `, streaming=${data.messages.some(m => m.is_streaming)}` : ""}`);
-      if (data.messages && data.messages.length > 0) {
-        const lastMsg = data.messages[data.messages.length - 1];
-        console.log(`[ChatStore:DEBUG] Last incremental message: id=${lastMsg.id}, role=${lastMsg.role}, contentPreview=${typeof lastMsg.content === 'string' ? lastMsg.content.slice(0, 80) : String(lastMsg.content).slice(0, 80)}`);
-      }
-
       const converted = mergeDocumentUploads(data.messages ?? [], agentId);
-
-      // ADR-025/027: Compute poll result for PollingManager.
-      // With mutable streaming content, noNewData = true only when:
-      //  1. No new settled messages appeared, AND
-      //  2. No streaming content changed (compare against mutable store)
-      const pollResult: { hasMore: boolean; noNewData: boolean } | undefined =
-        incremental
-          ? (() => {
-              const hasStreamingChanged = converted.some((m) => {
-                if (!m.isStreaming) return false;
-                const prev = streamingContents.get(
-                  streamingKey(sessionId, m.id),
-                );
-                return !prev || prev.content !== m.content;
-              });
-              const hasNewSettled = converted.some((m) => !m.isStreaming);
-              return {
-                hasMore: data.has_more ?? false,
-                noNewData: !hasNewSettled && !hasStreamingChanged,
-              };
-            })()
-          : undefined;
+      const returnedOffset = data.offset;
+      const returnedLimit = data.limit;
+      const returnedTotal = data.total;
 
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
-        if (ss.loadSequence !== seq) {
-          console.log(`[ChatStore] Discarding state update — sequence changed`);
-          return {};
+        const prevOffset = ss.messageOffset;
+
+        let nextMessages: ChatMessage[];
+
+        if (isInitialLoad) {
+          // Full initial load — replace all messages + reset streaming state.
+          clearSessionStreaming(sessionId);
+          nextMessages = trimOldest(converted);
+        } else if (returnedOffset > prevOffset) {
+          // Loading OLDER messages (scroll-up).  The server returned messages
+          // with indices further into the past; prepend them, then slide the
+          // cache window toward the past (drop newest from the back).
+          const existingIds = new Set(ss.messages.map((m) => m.id));
+          const older = converted.filter((m) => !existingIds.has(m.id));
+          const merged = [...older, ...ss.messages];
+          nextMessages = merged.length > MESSAGE_CACHE_WINDOW
+            ? merged.slice(0, MESSAGE_CACHE_WINDOW)
+            : merged;
+        } else if (returnedOffset < prevOffset) {
+          // Loading NEWER messages (scroll-down).  The server returned messages
+          // closer to the present; append them, then slide the cache window
+          // toward the past (drop oldest from the front).
+          const existingIds = new Set(ss.messages.map((m) => m.id));
+          const newer = converted.filter((m) => !existingIds.has(m.id));
+          const merged = [...ss.messages, ...newer];
+          nextMessages = merged.length > MESSAGE_CACHE_WINDOW
+            ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
+            : merged;
+        } else {
+          // offset === prevOffset: refresh in place (e.g. retry).  Just merge.
+          const existingIds = new Set(ss.messages.map((m) => m.id));
+          const same = converted.filter((m) => !existingIds.has(m.id));
+          nextMessages = [...ss.messages, ...same];
         }
 
-        // ADR-027: Incremental poll — mutable streaming content.
-        //
-        // Streaming messages (is_streaming=true, id="streaming:{line}")
-        // are projected into messages[] by the Gateway. Their volatile
-        // content lives in the external `streamingContents` Map, NOT in
-        // React state. This avoids creating new ChatMessage objects on
-        // every poll, eliminating GC pressure from ~500ms polling cycles.
-        //
-        // Merge flow:
-        //   1. Streaming messages → update mutable Map; append to
-        //      messages[] only on first appearance (ChatMessage ref
-        //      stays stable across polls)
-        //   2. Settled messages → normal upsert by id
-        //   3. Stale streaming ids absent from poll → delete from Map +
-        //      remove from messages[]
-        //   4. Sort: non-streaming first (insertion order), streaming last
-        //   5. If nothing changed (no new settled, streaming content
-        //      unchanged) → return {} — zero allocations this poll cycle
-        if (incremental) {
-          const ss = getSessionState(state, agentId, sessionId);
-          const existingById = new Map(ss.messages.map((m) => [m.id, m]));
-          const respIds = new Set<string>();
-          let messagesChanged = false;
-
-          for (const m of converted) {
-            respIds.add(m.id);
-            if (m.isStreaming) {
-              // Streaming: update mutable store, React state only on first sight
-              const prev = streamingContents.get(streamingKey(sessionId, m.id));
-              if (!prev || prev.content !== m.content) {
-                streamingContents.set(streamingKey(sessionId, m.id), {
-                  content: m.content,
-                  isStreaming: true,
-                });
-                notifyStreamingSubscribers(sessionId, m.id);
-              }
-              if (!existingById.has(m.id)) {
-                // First appearance — add a shell message (content="" — the
-                // real content comes from useStreamingContent in the renderer)
-                existingById.set(m.id, {
-                  ...m,
-                  content: "",
-                  isStreaming: true,
-                } as ChatMessage);
-                messagesChanged = true;
-              }
-              // Already exists → ChatMessage ref unchanged, React skips
-              // reconciliation. Content changes are pushed via
-              // useSyncExternalStore → granular per-message re-renders.
-            } else {
-              // Settled message: normal upsert
-              const existing = existingById.get(m.id);
-              if (!existing || existing.content !== m.content || existing.type !== m.type) {
-                existingById.set(m.id, m);
-                messagesChanged = true;
-              }
-            }
-          }
-
-          // Cleanup: streaming ids absent from this poll → flushed to JSONL
-          for (const [id, m] of existingById) {
-            if (m.isStreaming && !respIds.has(id)) {
-              deleteStreamingEntry(sessionId, id);
-              existingById.delete(id);
-              messagesChanged = true;
-            }
-          }
-
-          if (!messagesChanged) {
-            // Zero allocations — content changes were handled by
-            // useSyncExternalStore notifications without touching React state
-            return {};
-          }
-
-          // Stable sort: settled first, streaming last
-          const settled: ChatMessage[] = [];
-          const streaming: ChatMessage[] = [];
-          for (const m of existingById.values()) {
-            (m.isStreaming ? streaming : settled).push(m);
-          }
-          const messages = [...settled, ...streaming];
-
-          return {
-            ...updateSessionState(state, agentId, sessionId, {
-              messages,
-              hasMoreIncremental: data.has_more ?? false,
-              isLoadingSession: false,
-              loadError: null,
-            }),
-            isLoadingMore: false,
-          };
-        }
-
-        // Cursor-based pagination (load more history)
-        if (cursor) {
-          const existingIds = new Set(getSessionState(state, agentId, sessionId).messages.map((m) => m.id));
-          const newMessages = converted.filter((m) => !existingIds.has(m.id));
-          return {
-            ...updateSessionState(state, agentId, sessionId, {
-              messages: [...newMessages, ...getSessionState(state, agentId, sessionId).messages],
-              hasMoreMessages: data.has_more,
-              messageCursor: data.cursor,
-              isLoadingSession: false,
-              loadError: null,
-            }),
-            isLoadingMore: false,
-          };
-        }
-
-        // Full initial load — replace all messages + reset streaming state
-        clearSessionStreaming(sessionId);
         return {
           ...updateSessionState(state, agentId, sessionId, {
-            messages: converted,
-            hasMoreMessages: data.has_more,
-            messageCursor: data.cursor,
+            messages: nextMessages,
+            messageOffset: returnedOffset,
+            messageLimit: returnedLimit,
+            messageTotal: returnedTotal,
             isLoadingSession: false,
             loadError: null,
           }),
@@ -1289,7 +1302,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         };
       });
 
-      return pollResult;
+      return { offset: returnedOffset, limit: returnedLimit, total: returnedTotal };
     } catch (e: unknown) {
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
         console.log(`[ChatStore] Discarding stale error response (seq ${seq})`);
@@ -1307,8 +1320,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => ({
         ...updateSessionState(state, agentId, sessionId, {
           messages: [],
-          hasMoreMessages: false,
-          messageCursor: null,
+          messageOffset: 0,
+          messageLimit: 0,
+          messageTotal: 0,
           isLoadingSession: false,
           loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
         }),
@@ -1339,13 +1353,62 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
   },
 
-  loadMoreMessages: async (agentId: string, sessionId: string) => {
+  /** Load older messages (scroll-up). offset advances by messageLimit each call. */
+  loadMoreOlderMessages: async (agentId: string, sessionId: string) => {
     const { isLoadingMore } = get();
     const sessionState = getSessionState(get(), agentId, sessionId);
-    if (isLoadingMore || !sessionState.hasMoreMessages || !sessionState.messageCursor) return;
+    if (isLoadingMore) return;
+    const { messageOffset, messageLimit, messageTotal } = sessionState;
+    // No older messages available.
+    if (messageOffset + messageLimit >= messageTotal) return;
+    if (messageLimit <= 0) return;
+    const nextOffset = messageOffset + messageLimit;
     set({ isLoadingMore: true });
     try {
-      await get().loadSessionMessages(agentId, sessionId, sessionState.messageCursor, 50, "backward");
+      await get().loadSessionMessages(agentId, sessionId, nextOffset, messageLimit);
+    } finally {
+      set({ isLoadingMore: false });
+    }
+  },
+
+  /**
+   * One-shot jump to the latest page (offset=0, limit=MESSAGE_CACHE_WINDOW).
+   *
+   * Replaces the old `loadMoreNewerMessages` loop which had to issue N HTTP
+   * requests to slide a cache from the middle to the tail.  After this call
+   * the cache holds the LAST `MESSAGE_CACHE_WINDOW` raw entries (or all of
+   * them if the session has fewer); `messageOffset` becomes 0; the rendering
+   * layer's ensureRenderable effect then decides if more prepended data is
+   * needed to fill the viewport (same load-older path).
+   *
+   * No-op if the cache is already at the latest page (`messageOffset === 0`)
+   * — the caller is expected to check `messageOffset > 0` before invoking.
+   */
+  ensureLatestInCache: async (agentId: string, sessionId: string) => {
+    const { isLoadingMore } = get();
+    if (isLoadingMore) return;
+    const sessionState = getSessionState(get(), agentId, sessionId);
+    const { messageOffset, messageTotal, messages } = sessionState;
+    // Already at the newest page:
+    //   - messageOffset === 0 (window anchored at the tail), AND
+    //   - messageTotal > 0 (we know the conversation has data — guards against
+    //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
+    //     empty, which would otherwise be mistaken for "already at tail"), AND
+    //   - messages.length covers at least min(WINDOW, total) items (the cache
+    //     window is fully populated at the tail end).
+    //
+    // The naive `if (messageOffset === 0) return;` check incorrectly no-ops
+    // on first-ever load of a new session: DEFAULT_SESSION_STATE initializes
+    // messageOffset to 0, so the very call that is supposed to load the first
+    // page short-circuits and leaves the user staring at a blank chat.
+    const tailCovered =
+      messageOffset === 0 &&
+      messageTotal > 0 &&
+      messages.length >= Math.min(MESSAGE_CACHE_WINDOW, messageTotal);
+    if (tailCovered) return;
+    set({ isLoadingMore: true });
+    try {
+      await get().loadSessionMessages(agentId, sessionId, 0, MESSAGE_CACHE_WINDOW);
     } finally {
       set({ isLoadingMore: false });
     }
@@ -1669,8 +1732,23 @@ const CONTENT_EVENT_TYPES = new Set([
   "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
   "context_usage", "session_state_changed", "stopped", "todo_list_updated",
   "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
-  "new_data_available",
+  "stream_delta", "record_complete",
 ]);
+
+// ── ADR-035: upsert a message into a session's messages[] by id ──
+//
+// Real-time MQTT appends (record_complete / tool_call / etc.) slide the
+// cache window forward: trim the oldest entries from the front.
+function upsertMessageInSession(state: ChatStore, agentId: string, sid: string, msg: ChatMessage): Partial<ChatStore> {
+  const ss = getSessionState(state, agentId, sid);
+  const idx = ss.messages.findIndex(m => m.id === msg.id);
+  if (idx >= 0) {
+    const arr = ss.messages.slice();
+    arr[idx] = msg;
+    return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+  }
+  return updateSessionState(state, agentId, sid, { messages: trimOldest([...ss.messages, msg]) });
+}
 
 function handleMessageEvent(
   data: Record<string, unknown>,
@@ -1726,33 +1804,93 @@ function handleMessageEvent(
       // processes the interrupt.
       break;
 
-    // ADR-021: new_data_available — triggers HTTP poll for incremental message data.
-    case "new_data_available": {
+    // ADR-035: new_data_available removed. Push-driven streaming below.
+    case "stream_delta": {
       if (!sid) break;
-      const intervalMs = (data.interval_ms as number) ?? undefined;
-      // DEBUG: log session state when new_data_available arrives
-      const state = get();
-      const ss = getSessionState(state, agentId, sid!);
-      console.log(
-        `[ChatStore:DEBUG] new_data_available for ${agentId}/${sid}: ` +
-        `interval_ms=${intervalMs}, ` +
-        `status=${ss.sessionStatus?.status}, ` +
-        `messageCount=${ss.messages.length}, ` +
-        `isLoadingSession=${ss.isLoadingSession}, ` +
-        `loadSequence=${ss.loadSequence}`,
-      );
-      // ADR-025: Pure signal — no totalLines. Backend maintains delivery cursor.
-      // Import PollingManager dynamically to avoid circular dependency
-      import("../lib/polling").then(({ notifyNewData }) => {
-        notifyNewData(agentId, sid!, intervalMs);
-      }).catch((e) => {
-        console.warn("[ChatStore] Failed to import PollingManager:", e);
-      });
-      // Update session title from backend async summarization
-      const title = data.title as string | undefined;
-      if (title) {
-        useAgentStore.getState().updateSessionTitle(sid!, title);
+      const lines = (data.lines as Array<{role:string;message_id:string;line_no:number;content:string}>) ?? [];
+      if (!lines.length) break;
+      const role = lines[0].role === 'assistant' ? 'assistant' as const : 'thought' as const;
+      const msgId = lines[0].message_id;
+      let as = activeStreams.get(sid);
+      const prevMsgId = as?.messageId;
+      if (!as || as.messageId !== msgId) {
+        // Record the physical predecessor: the last message currently in
+        // messages[] at the time this stream starts. Conversation data is
+        // linearly ordered — this relationship is immutable. When
+        // record_complete arrives, checking whether prevMessageId is still
+        // in the cache window determines whether to freeze or discard.
+        const state = get();
+        const msgs = getSessionState(state, agentId, sid!).messages;
+        const prevMessageId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
+        as = { messageId: msgId, role, lines: [], prevMessageId };
+        activeStreams.set(sid, as);
+        set(state => upsertMessageInSession(state, agentId, sid!, { id: msgId, type: role, content: '', isStreaming: true, timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+        if (prevMsgId) notifyActiveStreamSubscribers(sid, prevMsgId);
       }
+      if (!as) break;
+      for (const l of lines) as.lines.push({ role: l.role === 'assistant' ? 'assistant' : 'thought', lineNo: l.line_no, content: l.content });
+      if (as.role === 'thought' && as.lines.length > 5) {
+        as.lines = as.lines.slice(-5);
+      } else if (as.role === 'assistant' && as.lines.length > ASSISTANT_LINE_SAFETY_CAP) {
+        // ADR-035 C2 safety valve: assistant content is never truncated for
+        // display, but if record_complete is lost AND idle realignment fails,
+        // prevent unbounded memory growth. Keep the newest lines. This should
+        // never trigger in normal operation — if it does, the record_complete
+        // delivery path has a bug.
+        console.warn(
+          `[ChatStore] ADR-035 C2 safety valve: assistant activeStream hit` +
+          ` ${ASSISTANT_LINE_SAFETY_CAP}-line cap (messageId=${as.messageId}).` +
+          ` record_complete likely lost — trimming oldest to prevent OOM.`,
+        );
+        as.lines = as.lines.slice(-ASSISTANT_LINE_SAFETY_CAP);
+      }
+      // Rebuild the cached snapshot with a fresh reference BEFORE notifying
+      // subscribers, so the next useSyncExternalStore getSnapshot() returns
+      // a different object than the previous render and the bubble actually
+      // re-renders with the new content.  Without this, line changes land
+      // in `as.lines` but `getStreamingContent` would still return the
+      // pre-rebuild snapshot → React thinks nothing changed → no re-render.
+      streamingSnapshots.set(sid, {
+        content: as.lines.map(l => l.content).join("\n"),
+        isStreaming: true,
+      });
+      notifyActiveStreamSubscribers(sid, msgId);
+      break;
+    }
+
+    case "record_complete": {
+      if (!sid) break;
+      const rawRole = data.role as string;
+      const role = (rawRole === 'assistant' || rawRole === 'thought' || rawRole === 'tool_call' || rawRole === 'tool_result')
+        ? rawRole as 'assistant' | 'thought' | 'tool_call' | 'tool_result'
+        : 'assistant';
+      const msgId = data.message_id as string;
+      const payloadContent = (data.content as string) ?? '';
+      const as = activeStreams.get(sid);
+      if (as && as.messageId === msgId) {
+        // Stream completed. Check whether the physical predecessor
+        // (prevMessageId) is still in the messages[] cache window.
+        // Conversation data is linearly ordered — if the predecessor is
+        // in the window, this record is continuous and must be frozen in.
+        // If the predecessor was evicted by scroll-back trim, the user
+        // scrolled away → discard; HTTP will load this record (which sits
+        // right after its predecessor) when the user scrolls back.
+        activeStreams.delete(sid);
+        const state = get();
+        const msgs = getSessionState(state, agentId, sid).messages;
+        const prevInWindow = as.prevMessageId == null
+          || msgs.some(m => m.id === as.prevMessageId);
+        if (prevInWindow) {
+          const fc = role === 'thought' ? as.lines.map(l => l.content).join('\n') : payloadContent;
+          set(s => upsertMessageInSession(s, agentId, sid, { id: msgId, type: role, content: fc, isStreaming: false, endTime: Date.now(), timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+        }
+        // else: predecessor evicted → user scrolled away → discard.
+        // HTTP scroll-back will load the complete record from JSONL.
+      } else {
+        // tool_call / tool_result (no activeStream) — insert directly.
+        set(state => upsertMessageInSession(state, agentId, sid!, { id: msgId, type: role, content: payloadContent, isStreaming: false, endTime: Date.now(), timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+      }
+      notifyActiveStreamSubscribers(sid, msgId);
       break;
     }
 
@@ -1831,10 +1969,7 @@ function handleMessageEvent(
       const errorDetail = (data.detail) as string | undefined;
       const errorType = (data.error_type) as string | undefined;
       console.error("[ChatStore] Server error:", errorMsg, errorDetail);
-      // ADR-021: Stop polling on error
-      import("../lib/polling").then(({ stopPolling }) => {
-        stopPolling(agentId, sid!);
-      }).catch(() => {});
+      // ADR-035 Phase 3: no polling
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
         type: "error",
@@ -1855,10 +1990,7 @@ function handleMessageEvent(
 
     case "stopped": {
       if (!sid) break;
-      // ADR-021: Stop polling on user stop
-      import("../lib/polling").then(({ stopPolling }) => {
-        stopPolling(agentId, sid!);
-      }).catch(() => {});
+      // ADR-035 Phase 3: no polling
       set((state) => ({
         ...updateSessionState(state, agentId, sid!, {
           isCompacting: false,
@@ -1927,10 +2059,7 @@ function handleMessageEvent(
         set((state) => updateSessionState(state, agentId, sid, { isCompacting: false }));
         // ADR-025: One-shot poll to fetch the compaction record. No
         // coordinates — backend delivery cursor handles it.
-        get().loadSessionMessages(
-          agentId, sid, undefined, 50, "backward",
-          true, // incremental = true (ADR-025)
-        );
+        get().loadSessionMessages(agentId, sid);  // ADR-035 Phase 3: no incremental
       }
       break;
 
@@ -2023,41 +2152,37 @@ function handleMessageEvent(
 
             // ADR-021: Start/stop polling based on status transitions.
             // When entering streaming/waiting_approval/paused → start polling.
-            // When leaving these states → stop polling.
+            // ADR-035 Phase 3: prevActive/nextActive removed — push drives streaming.
             const prev = getSessionState(state, agentId, sid);
-            const prevActive = prev.sessionStatus?.status === "streaming"
-              || prev.sessionStatus?.status === "waiting_approval"
-              || prev.sessionStatus?.status === "paused";
-            const nextActive = status.status === "streaming"
-              || status.status === "waiting_approval"
-              || status.status === "paused";
 
-            if (!prevActive && nextActive) {
-              import("../lib/polling").then(({ startPolling }) => {
-                startPolling(agentId, sid);
-              }).catch(() => {});
-            } else if (prevActive && !nextActive) {
-               // ADR-025: Session transitioned out of active states.
-               // Do one final incremental poll now that the backend has
-               // truly finished (status → idle means all JSONL lines are
-               // flushed).  This is the definitive last poll — it
-               // replaces the old done-handler fire-and-forget poll that
-               // caused the race.
-               //
-               // Done no longer starts polls; idle is the single point
-               // where we (a) capture remaining data and (b) stop polling.
-               get().loadSessionMessages(agentId, sid, undefined, 50, "backward", true).finally(() => {
-                 import("../lib/polling").then(({ stopPolling }) => {
-                   stopPolling(agentId, sid);
-                 }).catch(() => {});
-               });
-            }
+            // ADR-035 Phase 3: streaming driven by push; no HTTP polling on status transitions.
 
             // When status transitions TO Idle from non-Idle, clear pending flags
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestion = null;
               sessionPatch.iterationLimitPaused = null;
+
+              // ADR-035 C2/O2: if activeStream still has unfrozen content at
+              // idle, record_complete was lost (QoS edge case). Trigger HTTP
+              // full realignment to recover — this is the only HTTP pull-back
+              // scenario, fires only when push delivery is suspected incomplete.
+              // assistant content is NEVER truncated; we recover the full
+              // message from JSONL via the HTTP reload.
+              const activeStream = activeStreams.get(sid);
+              if (activeStream) {
+                console.warn(
+                  `[ChatStore] ADR-035 C2: activeStream still present at idle` +
+                  ` (messageId=${activeStream.messageId}, role=${activeStream.role},` +
+                  ` lines=${activeStream.lines.length}) — record_complete likely lost,` +
+                  ` triggering HTTP realignment`,
+                );
+                activeStreams.delete(sid);
+                // Defer the HTTP reload to after the state update completes.
+                queueMicrotask(() => {
+                  get().loadSessionMessages(agentId, sid);
+                });
+              }
             }
 
             // 429 retry UX: populate retryWaitInfo when paused with retry_info

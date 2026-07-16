@@ -669,6 +669,38 @@ fn session_message_to_flat(
             }
             Some(serde_json::Value::Object(m))
         }
+        session_message::Event::StreamDelta(p) => {
+            // ADR-035: incremental streaming delta carrying whole new lines.
+            // Each line is ALWAYS a complete line (never a partial/token), so
+            // the frontend appends without re-splitting.
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("stream_delta".into()));
+            let lines: Vec<serde_json::Value> = p
+                .lines
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "role": l.role,
+                        "message_id": l.message_id,
+                        "line_no": l.line_no,
+                        "content": l.content,
+                    })
+                })
+                .collect();
+            m.insert("lines".into(), serde_json::Value::Array(lines));
+            Some(serde_json::Value::Object(m))
+        }
+        session_message::Event::RecordComplete(p) => {
+            // ADR-035: a record finalized (committed to JSONL), carrying the
+            // COMPLETE content. Frontend freezes the active stream into
+            // messages[] on receipt.
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("record_complete".into()));
+            m.insert("role".into(), serde_json::Value::String(p.role.clone()));
+            m.insert("message_id".into(), serde_json::Value::String(p.message_id.clone()));
+            m.insert("content".into(), serde_json::Value::String(p.content.clone()));
+            Some(serde_json::Value::Object(m))
+        }
     }
 }
 

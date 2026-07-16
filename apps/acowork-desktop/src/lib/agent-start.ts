@@ -45,20 +45,45 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     // rememberedSessionId needed.
     const targetSessionId = latestSession.session_id;
 
-    // Load the full session list before switching.  ChatPanel's
-    // message-loading useEffect checks that the session exists in
-    // agentStore.sessions (agent-start.ts → agentStore.switchSession →
-    // fire-and-forget fetchSessions → ChatPanel.tsx useEffect guard).
-    // Without this await the effect fires while the list is still
-    // empty and permanently skips loadSessionMessages.
+    // Atomically bootstrap the session BEFORE returning.  This must run as a
+    // single serial chain so the ChatPanel sees a fully-rendered chat on its
+    // very first mount — no "blank chat then messages pop in" flicker, no
+    // mount effect that has to re-fire when activeSessionId finally lands:
+    //
+    //   1. fetchSessions         — populate agentStore.sessions (sidebar list).
+    //   2. fetchSessionState     — pulls model/provider/workspace_id and
+    //                              context usage via applySessionMeta so the
+    //                              header bar and metadata don't pop in
+    //                              piecewise.
+    //   3. ensureLatestInCache   — loads the latest message window into the
+    //                              cache so messages are available when
+    //                              ChatPanel first renders.
+    //   4. activateSession       — atomically write activeSessionId (LAST).
+    //                              We MUST call this AFTER messages are in
+    //                              the cache because writing activeSessionId
+    //                              causes ChatPanel to re-render with
+    //                              `key={currentScrollKey}` →
+    //                              VirtualMessageList mounts → the mount
+    //                              effect runs `virtualizer.scrollToIndex(end)`.
+    //                              If messages haven't loaded yet (virtualCount
+    //                              == 0) the effect sets didInitialScrollRef
+    //                              and returns early, permanently missing the
+    //                              scroll-to-bottom.  Calling activateSession
+    //                              last guarantees virtualCount > 0 on mount.
+    //
+    // We deliberately do NOT call switchSession here: that path is for the
+    // user manually clicking a different session tab, and it aborts in-flight
+    // loads, persists the user's "preferred session" choice, and re-runs
+    // fetchSessions — all of which are either no-ops or double-work on first
+    // launch.
     await useAgentStore.getState().fetchSessions(agentId);
-
-    await useAgentStore
-        .getState()
-        .switchSession(targetSessionId, agentId);
     await useChatStore
         .getState()
         .fetchSessionState(agentId, targetSessionId);
+    await useChatStore
+        .getState()
+        .ensureLatestInCache(agentId, targetSessionId);
+    useChatStore.getState().activateSession(agentId, targetSessionId);
 }
 
 /**
