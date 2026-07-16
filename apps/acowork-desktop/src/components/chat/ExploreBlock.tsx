@@ -579,7 +579,9 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           {/* Result */}
           {result && (
             <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-zinc-600 dark:bg-[var(--color-accent)]/10 dark:text-zinc-400"}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
-              {result.content.length > 500 ? result.content.slice(0, 500) + "\n..." : result.content}
+              {/* ADR-035 D9.2: backend already truncates tool_result to first 5 lines
+                  in ALL paths (MQTT + HTTP); frontend does NOT re-truncate. */}
+              {result.content}
             </pre>
           )}
         </div>

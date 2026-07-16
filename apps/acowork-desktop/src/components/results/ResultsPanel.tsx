@@ -231,16 +231,20 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     prevRunning.current = isRunning;
   }, [selectedAgent?.running, activeTab]);
 
-  // ADR-034 Phase 5: Agent status query (fire-and-forget, no UI rendering yet)
+  // ADR-034 Phase 5: Agent status query (fire-and-forget, no UI rendering yet).
+  // Guarded on running+ready — the status endpoint proxies through the
+  // Runtime and 503s against an unregistered one.  When the user starts the
+  // agent, this selector re-fires the effect.
   useEffect(() => {
     if (!selectedAgentId) return;
+    if (!selectedAgent?.running || !selectedAgent?.ready) return;
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (data) console.debug("[ResultsPanel] Agent status:", data);
       })
       .catch(() => {/* ignore */});
-  }, [selectedAgentId]);
+  }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
 
   return (
     <div className="relative flex flex-col shrink-0 bg-[#fafafa] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl ml-1" style={{ width }}>

@@ -36,10 +36,22 @@ export interface PendingImage {
  */
 export interface SessionScope {
   // ── Scroll & Virtual ──
-  /** Captured scrollHeight before "load more" prepends messages upstream. */
-  prevScrollHeight: number;
-  /** True while the load-more HTTP request is in flight. */
-  isLoadingMore: boolean;
+  /**
+   * Block id of the MessageBlock the user was reading at the moment the
+   * last "load older" was triggered.  Set by ChatPanel.handleScroll right
+   * before it calls `loadMoreOlderMessages` (using
+   * `VirtualMessageListHandle.getFirstVisibleBlockIndex()` to pick the
+   * block — a pure data query, not a scrollTop guess).  Read by
+   * `messageBlocks` useMemo in ChatPanel to mark exactly one block as
+   * `anchorToUser: true`.  The rendering layer (`VirtualMessageList`)
+   * then scrolls to that block once the new prepended data lands, and
+   * ChatPanel clears the field so the next "load older" cycle starts
+   * from a clean slate.
+   *
+   * `null` means "no pending anchor" — normal operation between
+   * pagination cycles.
+   */
+  anchorToUserBlockId: string | null;
   /** Tracks which session ID is being initial-loaded. `null` when no load is in flight. */
   isInitialLoad: string | null;
   /** True for the render immediately after the user sends a message. */
@@ -48,21 +60,17 @@ export interface SessionScope {
   thinkingWasShowing: boolean;
   /** Previous display count for scroll-on-new-message logic. */
   prevDisplayCount: number;
-  /** Previous virtualCount for sticky-bottom logic. */
-  prevStickyCount: number;
 
 }
 
 /** Factory: returns a fresh default SessionScope. */
 export function createDefaultSessionScope(): SessionScope {
   return {
-    prevScrollHeight: 0,
-    isLoadingMore: false,
+    anchorToUserBlockId: null,
     isInitialLoad: null,
     userJustSent: false,
     thinkingWasShowing: false,
     prevDisplayCount: 0,
-    prevStickyCount: 0,
   };
 }
 

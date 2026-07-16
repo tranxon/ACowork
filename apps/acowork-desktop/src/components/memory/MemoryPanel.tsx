@@ -13,6 +13,14 @@ import { ErrorBox } from "../common/ErrorBox";
 export function MemoryPanel() {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
+  // Gate data fetching on agent readiness — memory endpoints proxy through
+  // the Runtime and 503 against an unregistered one.  Stopped agents are a
+  // legitimate UI state; the user picks the Start button to bring them up,
+  // and once `running && ready` flips to true this selector re-runs the
+  // load effects below.
+  const isAgentReady = useAgentStore((s) =>
+    selectedAgentId ? !!(s.agents[selectedAgentId]?.meta.running && s.agents[selectedAgentId]?.meta.ready) : false
+  );
   const {
     nodes,
     total,
@@ -43,29 +51,29 @@ export function MemoryPanel() {
 
   const selectedNode = nodes.find((n) => n.node_id === selectedNodeId) ?? null;
 
-  // Load data when agent changes
+  // Load data when agent changes (or transitions from stopped → running).
   useEffect(() => {
-    if (!selectedAgentId) return;
+    if (!selectedAgentId || !isAgentReady) return;
     clearMemory();
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [selectedAgentId, clearMemory, fetchNodes, fetchStats]);
+  }, [selectedAgentId, isAgentReady, clearMemory, fetchNodes, fetchStats]);
 
   // Re-fetch when filters or pagination change
   useEffect(() => {
-    if (!selectedAgentId) return;
+    if (!selectedAgentId || !isAgentReady) return;
     void fetchNodes(selectedAgentId);
-  }, [filters, page, pageSize, selectedAgentId, fetchNodes]);
+  }, [filters, page, pageSize, selectedAgentId, isAgentReady, fetchNodes]);
 
   // Re-fetch when the memory tab becomes visible (e.g. agent was started
   // while another tab was active, so data was never loaded for the running agent)
   const activePanelTab = useLayoutStore((s) => s.activePanelTab);
   useEffect(() => {
-    if (!selectedAgentId) return;
+    if (!selectedAgentId || !isAgentReady) return;
     if (activePanelTab !== "memory") return;
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [activePanelTab, selectedAgentId, fetchNodes, fetchStats]);
+  }, [activePanelTab, selectedAgentId, isAgentReady, fetchNodes, fetchStats]);
 
   // Auto-dismiss consolidate message after 6 seconds
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

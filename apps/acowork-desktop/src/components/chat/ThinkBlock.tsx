@@ -61,36 +61,14 @@ const THINK_HEADER_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
 const THINK_DURATION_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
 
 /**
- * Number of trailing paragraphs to render during streaming.
- *
- * The content area is capped at 5 visible lines with overflow-y:auto and
- * auto-scrolls to bottom, so the user can only see the last ~5 lines.
- * Rendering only the tail paragraphs avoids O(n²) ReactMarkdown re-parses
- * as the accumulated content grows during long thinking phases.
- *
- * Splitting on \n\n+ (paragraph boundaries) is safe for markdown — it
- * never cuts through inline syntax (bold, code, links) or fenced blocks.
+ * ADR-035 / D4: during thinking the active buffer already holds only the
+ * last 5 lines (see chatStore `stream_delta` → `activeStream` truncation,
+ * D9.1). So `content` passed here is ALWAYS at most 5 lines. We render it
+ * directly inside a fixed-height, non-scrolling container — React reuses
+ * the same DOM nodes and only overwrites their text on each 500ms tick
+ * (no append, no scroll). This keeps markdown re-parse cheap and avoids
+ * the memory churn of an ever-growing auto-scrolling log.
  */
-const TAIL_PARAGRAPHS = 5;
-
-/**
- * Return only the last `maxParagraphs` paragraphs of `content`, split on
- * blank-line boundaries.  When the input has fewer paragraphs than the
- * limit the full content is returned with `truncated = false`.
- */
-function tailContent(content: string, maxParagraphs: number): {
-  display: string;
-  truncated: boolean;
-} {
-  const paragraphs = content.split(/\n\n+/);
-  if (paragraphs.length <= maxParagraphs) {
-    return { display: content, truncated: false };
-  }
-  return {
-    display: paragraphs.slice(-maxParagraphs).join("\n\n"),
-    truncated: true,
-  };
-}
 
 /**
  * Collapsible think block with timer and auto-expand/collapse.
@@ -109,13 +87,6 @@ export const ThinkBlock = React.memo(function ThinkBlock({ content, isStreaming,
   const [expanded, setExpanded] = useState(defaultExpanded ?? isThinking);
   const contentRef = useRef<HTMLDivElement>(null);
   const manuallyCollapsed = useRef(false);
-
-  // Auto-scroll to bottom when content updates
-  useEffect(() => {
-    if (expanded && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
-    }
-  }, [content, expanded]);
 
   // Auto-expand when thinking starts (respect user manual collapse)
   useEffect(() => {
@@ -137,15 +108,11 @@ export const ThinkBlock = React.memo(function ThinkBlock({ content, isStreaming,
     ? Math.round(((endTime ?? Date.now()) - startTime) / 1000)
     : null;
 
-  // During streaming (thinking phase), render only the tail paragraphs so
-  // ReactMarkdown doesn't re-parse the entire accumulated content on every
-  // ~500ms poll cycle.  When thinking completes, render the full content.
+  // ADR-035 D4: content already holds at most the last 5 lines (D9.1), so we
+  // always render it directly with a "latest 5 lines" notice. No tail/scroll.
   const { display: renderContent, truncated } = useMemo(
-    () =>
-      isThinking
-        ? tailContent(content, TAIL_PARAGRAPHS)
-        : { display: content, truncated: false },
-    [content, isThinking],
+    () => ({ display: content, truncated: true }),
+    [content],
   );
 
   // Defer the ReactMarkdown input so rapid poll-cycle updates (every ~500ms)
@@ -178,7 +145,7 @@ export const ThinkBlock = React.memo(function ThinkBlock({ content, isStreaming,
       {expanded && (
         <div
           ref={contentRef}
-          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-y-auto"
+          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-300 dark:border-zinc-600 overflow-hidden"
           style={{ maxHeight: `${MAX_VISIBLE_LINES * LINE_HEIGHT_REM}rem` }}
         >
           <div className="prose prose-sm prose-zinc max-w-none [&_*]:!text-zinc-500 dark:[&_*]:!text-zinc-400 [&_table]:bg-zinc-200/20 [&_tbody_tr]:!bg-transparent dark:[&_table]:bg-zinc-900/30" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
