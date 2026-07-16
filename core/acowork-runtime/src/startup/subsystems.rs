@@ -10,6 +10,7 @@
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
+use acowork_core::mqtt_proto::StreamLine;
 
 /// Resources produced by Phase C, needed by Phase D.
 pub(crate) struct SubsystemHandles {
@@ -348,6 +349,16 @@ async fn relay_chunk_event(
             relay_intent(outbound_ctrl_tx, "new_data_available", &params).await;
         }
 
+        // ADR-035: StreamDelta is MQTT-only in Phase 1. The legacy gRPC path
+        // does not carry streaming data, so it is dropped here (MQTT relay
+        // handles it).
+        ChunkEvent::StreamDelta { .. } => {}
+
+        // ADR-035 C1: RecordComplete is MQTT-only — the legacy gRPC path
+        // does not carry finalized record data. Dropped here; MQTT relay
+        // publishes it at QoS 1.
+        ChunkEvent::RecordComplete { .. } => {}
+
         ChunkEvent::AskQuestion {
             request_id,
             question,
@@ -491,6 +502,27 @@ fn relay_chunk_event_mqtt(
                 interval_ms as u32,
                 title.as_deref(),
             );
+        }
+
+        ChunkEvent::StreamDelta { session_id, lines } => {
+            // ADR-035 M2: lines is Vec<(role, message_id, content)>.
+            let lines_proto: Vec<StreamLine> = lines
+                .into_iter()
+                .map(|(role, message_id, content)| StreamLine {
+                    role,
+                    message_id,
+                    line_no: 0,
+                    content,
+                })
+                .collect();
+            publisher.publish_stream_delta(&session_id, &lines_proto);
+        }
+
+        // ADR-035 C1: publish record_complete at QoS 1 (authoritative
+        // terminal event). tool_result content is truncated to first 5
+        // lines inside publish_record_complete (D9.2).
+        ChunkEvent::RecordComplete { session_id, role, message_id, content } => {
+            publisher.publish_record_complete(&session_id, &role, &message_id, &content);
         }
 
         ChunkEvent::AskQuestion {

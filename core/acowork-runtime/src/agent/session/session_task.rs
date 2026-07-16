@@ -5,7 +5,6 @@
 //! session's lifetime, ensuring per-session isolation of history,
 //! budget, and loop detection while sharing provider/tools via Arc.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use acowork_core::providers::traits::ChatMessage;
@@ -145,12 +144,8 @@ pub enum SessionMessage {
     /// Used to surface MCP connection failures and other async events
     /// to the LLM context so the Agent can self-heal.
     SystemNotification { content: String },
-    /// Enable NewDataAvailable notifications (session switched to foreground).
-    /// Control events (Stopped, Done, Error, etc.) are always pushed regardless.
-    EnableNotify,
-    /// Disable NewDataAvailable notifications (session switched to background).
-    /// Control events are still pushed; only NewDataAvailable is suppressed.
-    DisableNotify,
+    // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
+    // streaming, the front/back suppression mechanism is gone.
 }
 
 impl std::fmt::Debug for SessionMessage {
@@ -280,8 +275,6 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("SystemNotification")
                 .field("len", &content.len())
                 .finish(),
-            SessionMessage::EnableNotify => f.debug_tuple("EnableNotify").finish(),
-            SessionMessage::DisableNotify => f.debug_tuple("DisableNotify").finish(),
         }
     }
 }
@@ -478,6 +471,7 @@ impl SessionTask {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
 
         // Build per-session AgentCore clone from the shared template.
@@ -1622,23 +1616,7 @@ impl SessionTask {
                             "[System Notification] {content}"
                         )));
                 }
-                Some(SessionMessage::EnableNotify) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        "SessionTask: enabling NewDataAvailable notifications (session activated)"
-                    );
-                    agent_loop.session_core.notify_enabled.store(true, Ordering::Relaxed);
-                    // Immediately emit current session state so the frontend
-                    // can render the latest status, model, provider, etc.
-                    agent_loop.emit_session_state();
-                }
-                Some(SessionMessage::DisableNotify) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        "SessionTask: disabling NewDataAvailable notifications (session deactivated)"
-                    );
-                    agent_loop.session_core.notify_enabled.store(false, Ordering::Relaxed);
-                }
+                // ADR-035 Phase 3: EnableNotify/DisableNotify removed.
                 None => {
                     tracing::info!(
                         session_id = %session_id,

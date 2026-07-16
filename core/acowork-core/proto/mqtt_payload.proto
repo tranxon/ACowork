@@ -318,7 +318,15 @@ message SessionMessage {
     SessionStateChangedPayload session_state_changed   = 25;
     IterationLimitPausedPayload iteration_limit_paused = 26;
     ToolApprovalNeededPayload   tool_approval_needed    = 27;
+    // DEPRECATED (ADR-035): superseded by `stream_delta`, which carries the
+    // actual data instead of a pure signal. Kept for backward compatibility
+    // during the dual-channel migration (Phase 1).
     NewDataAvailablePayload     new_data_available      = 28;
+    // ADR-035: incremental streaming delta carrying whole new lines (QoS 0).
+    StreamDeltaPayload          stream_delta            = 29;
+    // ADR-035: a record finalized (committed to JSONL) carrying COMPLETE
+    // content. Wired in Phase 2; proto defined now for the contract.
+    RecordCompletePayload       record_complete         = 30;
   }
 }
 
@@ -436,6 +444,38 @@ message NewDataAvailablePayload {
   string session_id = 1;
   uint32 interval_ms = 2;
   string title = 3;
+}
+
+// ── ADR-035: streaming delta with data (replaces NewDataAvailable signal) ──
+
+/// A single COMPLETE streaming line pushed via MQTT `stream_delta`.
+/// `content` is ALWAYS a whole line (terminated by '\n' in the source),
+/// never a partial line or a token. The frontend appends each line to the
+/// per-session active stream buffer; it never re-splits or re-joins.
+message StreamLine {
+  string role = 1;        // "thought" | "assistant"
+  string message_id = 2;  // stable id of the streaming record ("" until assigned)
+  uint32 line_no = 3;     // line index within the streaming record (informational)
+  string content = 4;     // one complete line of text
+}
+
+/// Incremental streaming delta — whole new lines since the last push.
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/stream_delta (QoS 0).
+/// Pushed every `notify_interval_ms` (default 500); an empty push (no new
+/// complete line) is never sent.
+message StreamDeltaPayload {
+  string session_id = 1;
+  repeated StreamLine lines = 2;
+}
+
+/// A record finalized (committed to JSONL). Carries the COMPLETE content.
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/record_complete (QoS 0).
+/// Wired in Phase 2 of ADR-035; Phase 1 keeps HTTP record delivery in parallel.
+message RecordCompletePayload {
+  string session_id = 1;
+  string role = 2;        // "assistant" | "thought" | "tool_call" | "tool_result"
+  string message_id = 3;
+  string content = 4;
 }
 
 // ── Control commands (§9) — Desktop → Runtime ─────────────────────────

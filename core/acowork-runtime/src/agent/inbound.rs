@@ -130,14 +130,9 @@ pub enum InboundMessage {
         session_id: String,
         title: String,
     },
-    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
-    /// session switched to foreground — Desktop starts receiving
-    /// NewDataAvailable events. Control events always pushed regardless.
-    EnableNotify { session_id: String },
-    /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
-    /// session switched to background — Desktop stops receiving
-    /// NewDataAvailable events. Control events still pushed.
-    DisableNotify { session_id: String },
+    // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
+    // streaming, no front/back suppression. Proto ControlCommand fields 24/25
+    // retained for wire compatibility but the runtime no longer acts on them.
     /// ADR-034 §8 Phase 1C placeholder (Phase 2 adds business logic):
     /// user-initiated compress action. `compress_type` is the prost-generated
     /// `CompressType` i32: 0=UNSPECIFIED, 1=SUMMARY, 2=TOOL_RESULTS.
@@ -263,8 +258,6 @@ impl InboundMessage {
             // they don't carry user-supplied bytes, so no size limit.
             InboundMessage::CloseSession { .. } => {}
             InboundMessage::UpdateSessionTitle { .. } => {}
-            InboundMessage::EnableNotify { .. } => {}
-            InboundMessage::DisableNotify { .. } => {}
             InboundMessage::CompressAction { .. } => {}
             InboundMessage::CreateSession => {}
             InboundMessage::DeleteSession { .. } => {}

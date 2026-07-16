@@ -76,14 +76,9 @@ pub enum ControlAction {
         session_id: String,
         reason: String,
     },
-    /// User wants the Desktop to start receiving events for this session.
-    EnableNotify {
-        session_id: String,
-    },
-    /// User wants the Desktop to stop receiving events for this session.
-    DisableNotify {
-        session_id: String,
-    },
+    // ADR-035 Phase 3: EnableNotify/DisableNotify removed from ControlAction —
+    // push drives all streaming, no front/back suppression. Proto fields
+    // retained for wire compat but mapped to None (no-op) below.
     /// User wants to switch model.
     ///
     /// `provider_id` is `Some(non_empty_string)` when the frontend wants the
@@ -185,12 +180,18 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             session_id: ce.session_id,
             reason: ce.reason,
         },
-        mqtt_proto::control_command::Command::EnableNotify(en) => ControlAction::EnableNotify {
-            session_id: en.session_id,
-        },
-        mqtt_proto::control_command::Command::DisableNotify(dn) => ControlAction::DisableNotify {
-            session_id: dn.session_id,
-        },
+        // ADR-035 Phase 3: EnableNotify/DisableNotify proto commands are
+        // no-ops now — push drives all streaming. Return None so the caller
+        // skips sending an InboundMessage. We still need to handle the proto
+        // variants to keep the match exhaustive.
+        mqtt_proto::control_command::Command::EnableNotify(_) => {
+            tracing::debug!("EnableNotify command received — ADR-035 no-op");
+            return None;
+        }
+        mqtt_proto::control_command::Command::DisableNotify(_) => {
+            tracing::debug!("DisableNotify command received — ADR-035 no-op");
+            return None;
+        }
         mqtt_proto::control_command::Command::ModelSwitch(sw) => {
             // ADR-012: provider_id is optional. Empty/missing means "keep the
             // current Provider instance, only update the model name" — the

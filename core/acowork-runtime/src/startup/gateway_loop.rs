@@ -183,13 +183,10 @@ fn control_action_to_inbound(
             session_id.clone(),
             InboundMessage::ContinueExecution { session_id, reason },
         )),
-        ControlAction::EnableNotify { session_id } => {
-            Some((session_id.clone(), InboundMessage::EnableNotify { session_id }))
-        }
-        ControlAction::DisableNotify { session_id } => Some((
-            session_id.clone(),
-            InboundMessage::DisableNotify { session_id },
-        )),
+        // ADR-035 Phase 3: EnableNotify/DisableNotify removed from the
+        // control-action → inbound-message mapping. The proto fields are
+        // retained for wire compatibility but the runtime no longer acts
+        // on them.
 
         // ── User responses ─────────────────────────────────────────────
         ControlAction::ApprovalDecision {
@@ -617,17 +614,9 @@ async fn dispatch_inbound(
             .send_to_session(&session_id, SessionMessage::UpdateSessionTitle { title })
             .map_err(|e| RuntimeError::Config(format!("UpdateSessionTitle: {}", e))),
 
-        // ⑩ EnableNotify → SessionMessage::EnableNotify
-        // session_task.rs handler (line ~1625) sets session_core.notify_enabled=true.
-        InboundMessage::EnableNotify { .. } => session_manager
-            .send_to_session(&session_id, SessionMessage::EnableNotify)
-            .map_err(|e| RuntimeError::Config(format!("EnableNotify: {}", e))),
-
-        // ⑪ DisableNotify → SessionMessage::DisableNotify
-        // session_task.rs handler (line ~1635) sets session_core.notify_enabled=false.
-        InboundMessage::DisableNotify { .. } => session_manager
-            .send_to_session(&session_id, SessionMessage::DisableNotify)
-            .map_err(|e| RuntimeError::Config(format!("DisableNotify: {}", e))),
+        // ADR-035 Phase 3: ⑩/⑪ EnableNotify/DisableNotify removed — push
+        // drives all streaming, no front/back suppression. InboundMessage
+        // variants removed; proto fields retained for wire compat.
 
         // ⑫ CompressAction — explicit CompressType i32 → CompressionAction mapping
         // (Phase 2-7: two paths must not cross).

@@ -1024,12 +1024,8 @@ async fn process_gateway_recv(
                             return LoopAction::Continue;
                         }
 
-                        // P1: Enable real-time push for the activated session.
-                        // Control events are always pushed; this enables data events
-                        // (Delta, ReasoningDelta, ToolCall, ToolResult) as well.
-                        if let Err(e) = session_manager.send_to_session(&session_id, SessionMessage::EnableNotify) {
-                            tracing::warn!(session_id = %session_id, error = %e, "Failed to enable notify for activated session");
-                        }
+                        // ADR-035 Phase 3: EnableNotify removed — push drives
+                        // all streaming, no activation-time notify needed.
 
                         // Read session metadata from JSONL to return model/provider/workspace_id
                         // to the frontend in the activation response, so it can populate the UI
@@ -1057,19 +1053,16 @@ async fn process_gateway_recv(
                     }
 
                     if action == "deactivate_session" {
-                        let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
+                        // ADR-035 Phase 3: deactivate_session is now a no-op —
+                        // EnableNotify/DisableNotify removed, push drives all
+                        // streaming uniformly. Validate session_id for logging.
+                        let _session_id = match params.get("session_id").and_then(|v| v.as_str()) {
                             Some(sid) if !sid.is_empty() => sid.to_string(),
                             _ => {
                                 tracing::warn!("deactivate_session: missing or empty session_id");
                                 return LoopAction::Continue;
                             }
                         };
-
-                        // P1: Disable NewDataAvailable notifications for the deactivated session.
-                        // Fire-and-forget — no response needed.
-                        if let Err(e) = session_manager.send_to_session(&session_id, SessionMessage::DisableNotify) {
-                            tracing::warn!(session_id = %session_id, error = %e, "Failed to disable notify for deactivated session");
-                        }
                         return LoopAction::Continue;
                     }
 
@@ -2912,6 +2905,22 @@ async fn handle_list_sessions(
 /// Reads paginated messages from the specified session's JSONL file
 /// and sends them back to Gateway via IntentSend.
 #[allow(dead_code)]
+/// ADR-035 D9.2: truncate tool_result content to first 5 lines for display.
+/// Full content stays in JSONL (LLM context). No exception — all paths
+/// (MQTT push, HTTP first-page, scroll-back, reconnect realign) use this.
+pub(crate) fn truncate_tool_result_for_display(role: &str, content: &str) -> String {
+    if role != "tool_result" {
+        return content.to_string();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= 5 {
+        return content.to_string();
+    }
+    let mut truncated = lines.into_iter().take(5).collect::<Vec<_>>().join("\n");
+    truncated.push_str("\n...(truncated)");
+    truncated
+}
+
 async fn handle_get_session_messages(
     work_dir: &str,
     grpc_client: &mut crate::grpc::client::GatewayGrpcClient,
@@ -2928,34 +2937,15 @@ async fn handle_get_session_messages(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let cursor = params
-        .get("cursor")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    // ADR-035: `offset` and `limit` are both measured in raw entries
+    // (one JSONL line each).  Display-group collapsing is a frontend
+    // UI abstraction; the CLI protocol never reasons about groups.
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as u32;
-    let direction = params
-        .get("direction")
-        .and_then(|v| v.as_str())
-        .unwrap_or("backward")
-        .to_string();
 
-    // ADR-021: line-number coordinate parameters for incremental polling
-    let line_number: Option<usize> = params
-        .get("line_number")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    let line_char_offset: Option<usize> = params
-        .get("line_char_offset")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-
-    // ADR-025: incremental polling via backend-managed delivery cursor.
-    // When `incremental=true`, the backend uses its own per-session cursor
-    // instead of receiving coordinates from the frontend.
-    let incremental: bool = params
-        .get("incremental")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // ADR-035 Phase 3: incremental polling parameters removed.
+    // Frontend no longer sends `incremental`, `line_number`, or
+    // `line_char_offset`. Only offset-based pagination remains.
 
     if session_id.is_empty() {
         let data = serde_json::json!({
@@ -2976,103 +2966,10 @@ async fn handle_get_session_messages(
         return;
     }
 
-    // ADR-025: Backend-managed delivery cursor path.
-    // The frontend sends `incremental=true` (no coordinates). The backend
-    // reads its own cursor, returns a batch, and advances the cursor.
-    if incremental {
-        let cursor = session_manager.get_delivery_cursor(&session_id);
-        let batch_limit = limit as usize;
-        match crate::conversation::read_messages_since_cursor(
-            &file_path,
-            cursor,
-            batch_limit,
-            &session_manager.streaming_lines(),
-            &session_id,
-            session_manager.committed_lines_for(&session_id),
-        ) {
-            Ok(result) => {
-                // Advance the delivery cursor.
-                session_manager.advance_delivery_cursor(
-                    &session_id,
-                    result.new_cursor.line_number,
-                    result.new_cursor.char_offset,
-                );
-
-                let message_dtos: Vec<acowork_core::protocol::ConversationEntryDto> = result
-                    .messages
-                    .into_iter()
-                    .map(|m| acowork_core::protocol::ConversationEntryDto {
-                        id: m.id,
-                        ts: m.ts,
-                        role: m.role,
-                        content: m.content,
-                        metadata: m.metadata,
-                        kind: m.kind,
-                    })
-                    .collect();
-                let data = serde_json::json!({
-                    "messages": message_dtos,
-                    "streaming": result.streaming,
-                    "total_lines": result.total_lines,
-                    "has_more": result.has_more,
-                });
-                send_session_response(grpc_client, &request_id, data).await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to read session messages (incremental cursor): {}", e);
-                let data = serde_json::json!({
-                    "error": format!("Failed to read messages: {}", e),
-                });
-                send_session_response(grpc_client, &request_id, data).await;
-            }
-        }
-        return;
-    }
-
-    // ADR-021 legacy: line_number coordinate path (deprecated, kept for
-    // backward compatibility during the transition period).
-    if let Some(ln) = line_number {
-        let co = line_char_offset.unwrap_or(0);
-        match crate::conversation::read_messages_since(
-            &file_path,
-            ln,
-            co,
-            &session_manager.streaming_lines(),
-            &session_id,
-            session_manager.committed_lines_for(&session_id),
-        ) {
-            Ok(result) => {
-                let message_dtos: Vec<acowork_core::protocol::ConversationEntryDto> = result
-                    .messages
-                    .into_iter()
-                    .map(|m| acowork_core::protocol::ConversationEntryDto {
-                        id: m.id,
-                        ts: m.ts,
-                        role: m.role,
-                        content: m.content,
-                        metadata: m.metadata,
-                        kind: m.kind,
-                    })
-                    .collect();
-                let data = serde_json::json!({
-                    "messages": message_dtos,
-                    "streaming": result.streaming,
-                    "total_lines": result.total_lines,
-                });
-                send_session_response(grpc_client, &request_id, data).await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to read session messages (incremental): {}", e);
-                let data = serde_json::json!({
-                    "error": format!("Failed to read messages: {}", e),
-                });
-                send_session_response(grpc_client, &request_id, data).await;
-            }
-        }
-        return;
-    }
-
-    match crate::conversation::read_messages_paginated(&file_path, cursor, limit, &direction) {
+    // ADR-035 Phase 3: only offset-based pagination remains.  The
+    // `incremental` cursor path and `line_number` coordinate path are
+    // removed — streaming data arrives exclusively via MQTT push.
+    match crate::conversation::read_messages_paginated(&file_path, offset, limit) {
         Ok(paginated) => {
             let message_dtos: Vec<acowork_core::protocol::ConversationEntryDto> = paginated
                 .messages
@@ -3080,24 +2977,21 @@ async fn handle_get_session_messages(
                 .map(|m| acowork_core::protocol::ConversationEntryDto {
                     id: m.id,
                     ts: m.ts,
+                    content: truncate_tool_result_for_display(&m.role, &m.content),
                     role: m.role,
-                    content: m.content,
                     metadata: m.metadata,
                     kind: m.kind,
                 })
                 .collect();
-            // ADR-021: Include total_lines so the frontend PollingManager can
-            // initialize its line coordinate on the first full load. Without this,
-            // pollLineNumber stays at 0 and the backoff logic kills the poller
-            // after 3 "empty" cycles (lineNumber === prevLineNumber === 0).
             let total_lines = session_manager.committed_lines_for(&session_id);
             // ADR-025: Reset delivery cursor on non-incremental full load —
             // all existing lines are now "delivered" via pagination.
             session_manager.reset_delivery_cursor(&session_id, total_lines);
             let data = serde_json::json!({
                 "messages": message_dtos,
-                "cursor": paginated.cursor,
-                "has_more": paginated.has_more,
+                "offset": paginated.offset,
+                "limit": paginated.limit,
+                "total": paginated.total,
                 "total_lines": total_lines,
             });
             send_session_response(grpc_client, &request_id, data).await;

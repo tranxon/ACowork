@@ -187,6 +187,43 @@ pub enum ChunkEvent {
         /// `None` when title has not been generated yet.
         title: Option<String>,
     },
+    /// ADR-035: incremental streaming delta carrying actual data.
+    ///
+    /// Pushed via MQTT `messages/stream_delta` every `notify_interval_ms`
+    /// (default 500). Each entry in `lines` is ONE COMPLETE line
+    /// (terminated by '\n' in the source) — never a partial line or a token.
+    /// The frontend appends these to the per-session active stream buffer.
+    /// Sent regardless of foreground/background (replaces the
+    /// `notify_enabled`-gated `NewDataAvailable` signal for the live path).
+    ///
+    /// ADR-035 M2: each tuple is `(role, message_id, content)` — the
+    /// `message_id` is the streaming line's stable id, shared with the
+    /// eventual `RecordComplete` event so the frontend can match them.
+    StreamDelta {
+        session_id: String,
+        /// (role, message_id, content) triples. `role` ∈ {"thought", "assistant"};
+        /// `content` is a complete line of text.
+        lines: Vec<(String, String, String)>,
+    },
+    /// ADR-035 C1: a record finalized (committed to JSONL). Carries the
+    /// COMPLETE content. The frontend freezes the active stream buffer into
+    /// `messages[]` on receipt and clears `activeStream`.
+    ///
+    /// Emitted by `flush_streaming_line` (assistant / thought) and by the
+    /// tool_call / tool_result persistence paths. For `tool_result` the
+    /// content is truncated to the first 5 lines at the MQTT publish layer
+    /// (D9.2) — the full content stays in JSONL for LLM context.
+    ///
+    /// Published at QoS 1 (ADR-035 O2) — `record_complete` is the
+    /// authoritative terminal event; losing it leaves the message stuck
+    /// in the streaming state.
+    RecordComplete {
+        session_id: String,
+        /// "assistant" | "thought" | "tool_call" | "tool_result"
+        role: String,
+        message_id: String,
+        content: String,
+    },
 }
 
 /// Unified control signal returned by `poll_control()`.
@@ -342,6 +379,7 @@ impl AgentLoop {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
         let mut loop_ = Self {
             core,
@@ -2913,6 +2951,7 @@ mod tests {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
 
         // All events go through the single channel
@@ -2945,6 +2984,7 @@ mod tests {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
 
         assert!(!session_core.try_send_chunk(ChunkEvent::Stopped {

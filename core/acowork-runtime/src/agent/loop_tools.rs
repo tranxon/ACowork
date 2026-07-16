@@ -733,7 +733,25 @@ impl AgentLoop {
                     "tool_name": tc.function.name,
                     "tool_call_id": tc.id,
                 });
-                conversation.append_message("tool_call", &tc.function.arguments, Some(metadata));
+                // ADR-035 M2: pre-assign a stable message_id so the JSONL
+                // entry and the record_complete event share the same id.
+                let message_id = uuid::Uuid::new_v4().to_string();
+                conversation.append_message_with_id(
+                    "tool_call",
+                    &tc.function.arguments,
+                    Some(metadata),
+                    Some(message_id.clone()),
+                );
+                // ADR-035 C1: emit record_complete so the frontend inserts
+                // the tool_call directly into messages[] (no streaming phase).
+                let _ = self.session_core.try_send_chunk(
+                    crate::agent::loop_::ChunkEvent::RecordComplete {
+                        session_id: self.session_core.session_id.clone().unwrap_or_default(),
+                        role: "tool_call".to_string(),
+                        message_id,
+                        content: tc.function.arguments.clone(),
+                    },
+                );
             }
         }
 
@@ -885,7 +903,29 @@ impl AgentLoop {
                     "tool_name": tc.function.name,
                     "tool_call_id": tc.id,
                 });
-                conversation.append_message("tool_result", result_content, Some(metadata));
+                // ADR-035 M2: pre-assign a stable message_id so the JSONL
+                // entry (full content) and the record_complete event
+                // (truncated to 5 lines at publish time, D9.2) share the
+                // same id.
+                let message_id = uuid::Uuid::new_v4().to_string();
+                conversation.append_message_with_id(
+                    "tool_result",
+                    result_content,
+                    Some(metadata),
+                    Some(message_id.clone()),
+                );
+                // ADR-035 C1/D9.2: emit record_complete with the FULL
+                // content; the MQTT publish layer truncates tool_result to
+                // the first 5 lines for frontend display. JSONL keeps the
+                // full content for LLM context.
+                let _ = self.session_core.try_send_chunk(
+                    crate::agent::loop_::ChunkEvent::RecordComplete {
+                        session_id: self.session_core.session_id.clone().unwrap_or_default(),
+                        role: "tool_result".to_string(),
+                        message_id,
+                        content: result_content.clone(),
+                    },
+                );
             }
         }
     }

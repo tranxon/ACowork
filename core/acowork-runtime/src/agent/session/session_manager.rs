@@ -683,11 +683,8 @@ impl SessionManager {
         )
         .await?;
 
-        // ADR-020: Enable notifications for the newly created session
-        // (it starts in the foreground, frontend will switch to it immediately).
-        if let Some(handle) = self.sessions.get(&session_id) {
-            let _ = handle.inbound_tx.try_send(SessionMessage::EnableNotify);
-        }
+        // ADR-035 Phase 3: EnableNotify removed — push drives all streaming,
+        // no front/back suppression mechanism remains.
 
         Ok(session_id)
     }
@@ -940,8 +937,7 @@ impl SessionManager {
             .remove(session_id)
             .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
 
-        // ADR-020: Disable notifications before Close to avoid stale events
-        let _ = handle.inbound_tx.try_send(SessionMessage::DisableNotify);
+        // ADR-035 Phase 3: DisableNotify removed — push drives all streaming.
 
         // Send Close signal; ignore errors (session may have already stopped)
         let _ = handle.inbound_tx.send(SessionMessage::Close).await;
@@ -981,8 +977,7 @@ impl SessionManager {
             if let Some(ref snapshots) = self.config.session_snapshots {
                 snapshots.write().unwrap().remove(session_id);
             }
-            // ADR-020: Disable notifications before Close
-            let _ = handle.inbound_tx.try_send(SessionMessage::DisableNotify);
+            // ADR-035 Phase 3: DisableNotify removed.
             let _ = handle.inbound_tx.send(SessionMessage::Close).await;
 
             // Clean up in-memory mappings

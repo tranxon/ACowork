@@ -341,23 +341,27 @@ async fn get_latest_session(State(state): State<HttpState>) -> Result<Json<serde
 /// Query parameters for `GET /sessions/{sid}/messages`.
 #[derive(Debug, Deserialize)]
 struct GetMessagesQuery {
-    /// Pagination cursor (opaque — produced by previous response).
+    /// Offset from the newest end, in **raw entries** (one JSONL line each).
+    /// 0 = latest raw entries.  See
+    /// [`crate::conversation::PaginatedMessages`] for the contract.
     #[serde(default)]
-    cursor: Option<String>,
-    /// Maximum number of entries to return (default 50, capped at 500).
+    offset: Option<u64>,
+    /// Maximum number of **raw entries** to return (default 50, capped at 500).
+    /// A raw entry is one JSONL line — a single user / assistant /
+    /// thought / tool_call / tool_result row. Display-group collapsing
+    /// is a frontend UI abstraction and is not visible here.
     #[serde(default)]
     limit: Option<u32>,
-    /// `"backward"` (older, default) or `"forward"` (newer).
-    #[serde(default)]
-    direction: Option<String>,
 }
 
 /// `GET /sessions/{sid}/messages` — paginated message list for a session.
 ///
 /// Delegates to [`crate::conversation::read_messages_paginated`], which is
-/// the same backend used by the legacy gRPC path. Supports `cursor` /
-/// `limit` / `direction` query parameters; returns 404 when the session
-/// JSONL file does not exist under `workspace/conversations/`.
+/// the same backend used by the legacy gRPC path. Supports `offset` /
+/// `limit` query parameters (no `direction`; direction is derived from
+/// `offset` itself). Both `offset` and `limit` are measured in raw
+/// entries, never in display groups. Returns 404 when the session JSONL
+/// file does not exist under `workspace/conversations/`.
 async fn get_messages(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
@@ -372,16 +376,10 @@ async fn get_messages(
         return Err(StatusCode::NOT_FOUND);
     }
 
+    let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    let direction = query.direction.as_deref().unwrap_or("backward");
 
-    let paginated = read_messages_paginated(
-        &session_path,
-        query.cursor.clone(),
-        limit,
-        direction,
-    )
-    .map_err(|e| {
+    let paginated = read_messages_paginated(&session_path, offset, limit).map_err(|e| {
         tracing::warn!(
             session_id = %sid,
             error = %e,
@@ -390,32 +388,29 @@ async fn get_messages(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // `ConversationEntry` already implements Serialize with the exact
-    // shape the desktop expects (`id`, `ts`, `role`, `content`,
-    // `metadata?`, `kind?`). Use the typed struct so a future field
-    // added to the JSONL format surfaces as a clear compile error here
-    // rather than a silent JSON-shape drift.
-    let messages: Vec<ConversationEntry> = paginated.messages;
+    // ADR-035 D9.2: truncate tool_result content to first 5 lines for
+    // display in ALL HTTP paths (first-page, scroll-back, reconnect
+    // realign). Full content stays in JSONL for LLM context. No exception.
+    let messages: Vec<ConversationEntry> = paginated
+        .messages
+        .into_iter()
+        .map(|mut m| {
+            if m.role == "tool_result" {
+                m.content = crate::cli::truncate_tool_result_for_display(&m.role, &m.content);
+            }
+            m
+        })
+        .collect();
     let messages_value = serde_json::to_value(&messages)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let count = messages.len();
 
-    // ADR-021 hint for the frontend PollingManager: total committed lines
-    // (approximate — counts non-empty lines in the JSONL file). The gRPC
-    // path uses the writer-thread atomic counter, but the HTTP state
-    // currently does not have access to it; an accurate count is not
-    // required for cursor-based pagination to work correctly.
-    let total_lines = std::fs::read_to_string(&session_path)
-        .map(|content| content.lines().filter(|l| !l.is_empty()).count() as u64)
-        .unwrap_or(0);
-
     Ok(Json(serde_json::json!({
-        "session_id": sid,
         "messages": messages_value,
+        "offset": paginated.offset,
+        "limit": paginated.limit,
+        "total": paginated.total,
         "count": count,
-        "has_more": paginated.has_more,
-        "cursor": paginated.cursor,
-        "total_lines": total_lines,
     })))
 }
 

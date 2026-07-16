@@ -7,7 +7,7 @@
 //! Each `AgentLoop` owns one `SessionCore`, constructed from the shared
 //! `AgentCore` template at session creation time.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
@@ -34,10 +34,6 @@ pub(crate) struct SessionCore {
     /// None in standalone mode.
     pub(crate) chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
 
-    /// Whether this session is allowed to send NewDataAvailable notifications.
-    /// Defaults to false — set to true by EnableNotify message on session activation.
-    pub(crate) notify_enabled: Arc<AtomicBool>,
-
     /// Unix timestamp (ms) of the last `NewDataAvailable` notification.
     /// Used for 500ms throttle — ADR-021 §难点 1.
     pub(crate) last_notify_ts: Arc<AtomicI64>,
@@ -61,6 +57,12 @@ pub(crate) struct SessionCore {
     /// Each session holds an Arc clone of the same shared map — created
     /// once in SessionManager, cloned into each SessionCore.
     pub(crate) streaming_lines: StreamingStateMap,
+
+    /// ADR-035: number of chars of the current streaming line's
+    /// `accumulated_content` already pushed via `stream_delta`. Reset to 0
+    /// whenever a new streaming line is created (role transition), because
+    /// the new line starts with empty `accumulated_content`.
+    pub(crate) stream_push_offset: Arc<AtomicUsize>,
 
     /// Urgent stop notify — fired by Gateway to cancel tool execution
     /// immediately.  Each session gets its own independent Notify.
@@ -123,16 +125,17 @@ impl SessionCore {
         workspace_id: Arc<RwLock<String>>,
         current_work_dir: Arc<RwLock<Option<String>>>,
         streaming_lines: StreamingStateMap,
+        stream_push_offset: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             session_id: Some(session_id),
             chunk_tx,
-            notify_enabled: Arc::new(AtomicBool::new(false)),
             last_notify_ts: Arc::new(AtomicI64::new(0)),
             notify_interval_ms,
             committed_lines,
             streaming_flush_count: Arc::new(AtomicU64::new(0)),
             streaming_lines,
+            stream_push_offset,
             urgent_stop: Some(Arc::new(Notify::new())),
             status_tx: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
@@ -221,12 +224,25 @@ impl SessionCore {
             return;
         }
         let line_number = self.get_committed_lines(&sid);
+        // ADR-035: a new streaming line starts with empty `accumulated_content`,
+        // so reset the push cursor — the previous line's offset is meaningless now.
+        self.stream_push_offset.store(0, Ordering::Relaxed);
+        // ADR-035 M2: assign a stable message_id up front so every stream_delta
+        // push and the final record_complete event carry the same id. The id is
+        // also written to JSONL via append_message_with_id on flush, keeping the
+        // persisted entry consistent with the streamed one.
+        let message_id = uuid::Uuid::new_v4().to_string();
         map.insert(
             sid,
             crate::conversation::StreamingLine {
                 line_number,
                 role: role.to_string(),
-                accumulated_content: String::new(),
+                message_id,
+                // ADR-035 D8.1 #2: pre-allocate 4 KB to avoid early realloc
+                // churn during the first few hundred chars of streaming.
+                // The String will still grow if needed, but the common case
+                // (short-to-medium lines) won't trigger reallocation.
+                accumulated_content: String::with_capacity(4096),
                 started_at: chrono::Utc::now().to_rfc3339(),
                 started_at_ms: chrono::Utc::now().timestamp_millis(),
             },
@@ -247,6 +263,12 @@ impl SessionCore {
     }
 
     /// Flush the current streaming line to JSONL and remove it from the map.
+    ///
+    /// ADR-035 C1: after persisting, emits `ChunkEvent::RecordComplete`
+    /// carrying the finalized record's role / message_id / content. The
+    /// frontend uses this event to freeze the active stream buffer into
+    /// `messages[]` and clear `activeStream` — without it the assistant
+    /// reply would stay in the "processing" animation forever.
     pub(crate) fn flush_streaming_line(
         &self,
         conversation: Option<&crate::conversation::ConversationSession>,
@@ -258,8 +280,10 @@ impl SessionCore {
         };
         let sl = removed?;
         let content = sl.accumulated_content.clone();
+        let role = sl.role.clone();
+        let message_id = sl.message_id.clone();
         tracing::info!(
-            role = %sl.role,
+            role = %role,
             content_len = content.len(),
             has_conversation = conversation.is_some(),
             "ADR-022 flush_streaming_line: flushing line"
@@ -267,7 +291,7 @@ impl SessionCore {
         if !content.trim().is_empty()
             && let Some(conv) = conversation
         {
-            let metadata = if sl.role == "thought" {
+            let metadata = if role == "thought" {
                 Some(serde_json::json!({
                     "startTime": sl.started_at_ms,
                     "endTime": chrono::Utc::now().timestamp_millis(),
@@ -275,16 +299,30 @@ impl SessionCore {
             } else {
                 None
             };
-            conv.append_message(&sl.role, &content, metadata);
+            // ADR-035 M2: persist with the same message_id assigned at
+            // streaming line creation so JSONL, stream_delta, and
+            // record_complete all share one stable id.
+            conv.append_message_with_id(&role, &content, metadata, Some(message_id.clone()));
             self.streaming_flush_count.fetch_add(1, Ordering::Relaxed);
             tracing::info!(
-                role = %sl.role,
+                role = %role,
                 content_len = content.len(),
                 "ADR-022 flush_streaming_line: wrote to JSONL"
             );
+            // ADR-035 C1: emit RecordComplete so the frontend can finalize
+            // the active stream into messages[] and clear the buffer.
+            // QoS 1 (see publish_record_complete) — record_complete is the
+            // authoritative terminal event; losing it leaves the message
+            // stuck in the streaming state (ADR-035 O2).
+            let _ = self.try_send_chunk(ChunkEvent::RecordComplete {
+                session_id: sid.clone(),
+                role: role.clone(),
+                message_id: message_id.clone(),
+                content: content.clone(),
+            });
         } else if content.trim().is_empty() {
             tracing::warn!(
-                role = %sl.role,
+                role = %role,
                 content_len = content.len(),
                 "ADR-022 flush_streaming_line: content is whitespace-only, skipping write"
             );
@@ -347,19 +385,20 @@ impl SessionCore {
 
     // ── Notification ─────────────────────────────────────────────────
 
-    /// ADR-021/025: Send a `NewDataAvailable` notification via the control channel.
+    /// ADR-021/025 + ADR-035: throttled signal + data push.
     ///
-    /// This is a **pure signal** — no state data is carried. The frontend
-    /// triggers an incremental poll and the backend uses its own delivery
-    /// cursor to determine what to return.
-    ///
-    /// Only sends if `notify_enabled` is true and at least `notify_interval_ms`
-    /// have elapsed since the last notification (ADR-021 §难点 1).
+    /// Throttled to `notify_interval_ms` (default 500). On each allowed tick:
+    ///  - ADR-035: push any new COMPLETE streaming lines via `stream_delta`
+    ///    (MQTT). Sent regardless of foreground/background — the runtime now
+    ///    pushes to all subscribed sessions uniformly (the old
+    ///    `enable/disable_notify` front/back suppression no longer applies to
+    ///    the streaming push).
+    ///  - ADR-021: emit the legacy `NewDataAvailable` pure signal, but only
+        // ADR-035: stream_delta is pushed unconditionally.
+    ///    path is retained in parallel during the migration (Phase 1).
     pub(crate) fn notify_new_data_available(&self) {
-        if !self.notify_enabled.load(Ordering::Relaxed) {
-            return;
-        }
-
+        // 500ms throttle — shared by both the new StreamDelta push and the
+        // legacy NewDataAvailable signal.
         let now = Utc::now().timestamp_millis();
         let last = self.last_notify_ts.load(Ordering::Relaxed);
         if now - last < self.notify_interval_ms as i64 {
@@ -373,18 +412,69 @@ impl SessionCore {
             return;
         }
 
+        // ADR-035: push new whole streaming lines via MQTT (all sessions).
+        self.try_send_stream_delta();
+    }
+
+    /// ADR-035: compute and emit a `stream_delta` carrying the new COMPLETE
+    /// lines of the current streaming buffer since the last push.
+    ///
+    /// Only whole lines (terminated by '\n') are emitted; a trailing partial
+    /// line is held back until a newline arrives or the line is finalized.
+    /// The push cursor (`stream_push_offset`) advances only past the complete
+    /// lines, so a partial line is re-examined on the next tick. Allocation
+    /// is bounded to the delta (we collect only the new chars), per D8.
+    ///
+    /// ADR-035 M2: each emitted line carries the streaming line's stable
+    /// `message_id` so the frontend can match `stream_delta` lines to the
+    /// eventual `record_complete` event for the same record.
+    fn try_send_stream_delta(&self) {
         let sid = match &self.session_id {
             Some(s) => s.clone(),
             None => return,
         };
 
-        let title = self.title.read().unwrap().clone();
+        // Gather new complete lines under a read lock (clone only what we need).
+        // ADR-035 M2: tuple is now (role, message_id, content).
+        let new_lines: Vec<(String, String, String)> = {
+            let map = self.streaming_lines.read().unwrap();
+            let mut lines: Vec<(String, String, String)> = Vec::new();
+            if let Some(sl) = map.get(&sid) {
+                let total = sl.accumulated_content.chars().count();
+                let offset = self.stream_push_offset.load(Ordering::Relaxed);
+                if total > offset {
+                    // Collect only the new chars (the delta) — bounded alloc (D8).
+                    let new_chars: Vec<char> = sl.accumulated_content.chars().skip(offset).collect();
+                    let mut consumed: usize = 0; // chars consumed by complete lines
+                    let mut line_start: usize = 0;
+                    let role = sl.role.clone();
+                    let message_id = sl.message_id.clone();
+                    for (ci, ch) in new_chars.iter().enumerate() {
+                        if *ch == '\n' {
+                            let line: String = new_chars[line_start..ci].iter().collect();
+                            if !line.is_empty() {
+                                lines.push((role.clone(), message_id.clone(), line));
+                            }
+                            consumed = ci + 1;
+                            line_start = ci + 1;
+                        }
+                    }
+                    // Advance the cursor past the complete lines only; the
+                    // trailing partial line is re-examined next tick.
+                    if consumed > 0 {
+                        self.stream_push_offset.fetch_add(consumed, Ordering::Relaxed);
+                    }
+                }
+            }
+            lines
+        };
 
-        let _ = self.try_send_chunk(ChunkEvent::NewDataAvailable {
-            session_id: sid,
-            interval_ms: self.notify_interval_ms,
-            title,
-        });
+        if !new_lines.is_empty() {
+            let _ = self.try_send_chunk(ChunkEvent::StreamDelta {
+                session_id: sid,
+                lines: new_lines,
+            });
+        }
     }
 
     // ── Provider builder (retry UX) ──────────────────────────────────
@@ -465,7 +555,7 @@ mod tests {
     // ── Helpers ────────────────────────────────────────────────────────
 
     /// Create a SessionCore with a chunk channel for notification tests.
-    fn make_core_with_notify(enabled: bool) -> (SessionCore, mpsc::Receiver<SessionChunkEvent>) {
+    fn make_core() -> (SessionCore, mpsc::Receiver<SessionChunkEvent>) {
         let (tx, rx) = mpsc::channel(16);
         let streaming_lines: StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
@@ -479,8 +569,8 @@ mod tests {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(AtomicUsize::new(0)),
         );
-        core.notify_enabled.store(enabled, Ordering::Relaxed);
         (core, rx)
     }
 
@@ -511,8 +601,8 @@ mod tests {
             workspace_id,
             current_work_dir,
             streaming_lines,
+            Arc::new(AtomicUsize::new(0)),
         );
-        core.notify_enabled.store(true, Ordering::Relaxed);
 
         let session = ConversationSession::new(
             &work_dir,
@@ -547,47 +637,113 @@ mod tests {
             .collect()
     }
 
-    // ── Notification tests (ADR-021) ───────────────────────────────────
+    // ── ADR-035 stream_delta push tests ──────────────────────────────
 
     #[test]
-    fn test_notify_disabled_suppresses_new_data_available() {
-        // notify_enabled=false → NewDataAvailable is NOT sent
-        let (core, mut rx) = make_core_with_notify(false);
-        // Set up streaming_lines so notify_new_data_available has something to read
+    fn test_stream_delta_pushes_complete_lines_only() {
+        // A streaming line with two complete lines + one partial (no '\n').
+        let (core, mut rx) = make_core();
         core.streaming_lines.write().unwrap().insert(
             "s1".to_string(),
             crate::conversation::StreamingLine {
                 line_number: 1,
-                accumulated_content: String::new(),
+                message_id: "test-mid-1".to_string(),
+                accumulated_content: "first line\nsecond line\npartial".to_string(),
                 role: "assistant".to_string(),
                 started_at: String::new(),
                 started_at_ms: 0,
             },
         );
-        core.notify_new_data_available();
+
+        // First push: only the two COMPLETE lines; "partial" is held back.
+        core.try_send_stream_delta();
+        let evt = rx.try_recv().unwrap();
+        match evt.event {
+            ChunkEvent::StreamDelta { session_id, lines } => {
+                assert_eq!(session_id, "s1");
+                // ADR-035 M2: lines is Vec<(role, message_id, content)>;
+                // project to (role, content) for the assertion.
+                let projected: Vec<(String, String)> = lines
+                    .into_iter()
+                    .map(|(role, _mid, content)| (role, content))
+                    .collect();
+                assert_eq!(
+                    projected,
+                    vec![
+                        ("assistant".to_string(), "first line".to_string()),
+                        ("assistant".to_string(), "second line".to_string()),
+                    ]
+                );
+            }
+            _other => panic!("expected StreamDelta, got non-stream_delta event"),
+        }
+        // Nothing else queued — the partial line is not pushed yet.
         assert!(rx.try_recv().is_err());
+
+        // The partial line completes (newline appended). Next push emits it.
+        {
+            let mut map = core.streaming_lines.write().unwrap();
+            let sl = map.get_mut("s1").unwrap();
+            sl.accumulated_content.push('\n');
+        }
+        core.try_send_stream_delta();
+        let evt = rx.try_recv().unwrap();
+        match evt.event {
+            ChunkEvent::StreamDelta { lines, .. } => {
+                // ADR-035 M2: lines is Vec<(role, message_id, content)>;
+                // project to (role, content) for the assertion.
+                let projected: Vec<(String, String)> = lines
+                    .into_iter()
+                    .map(|(role, _mid, content)| (role, content))
+                    .collect();
+                assert_eq!(projected, vec![("assistant".to_string(), "partial".to_string())]);
+            }
+            _other => panic!("expected StreamDelta, got non-stream_delta event"),
+        }
     }
 
     #[test]
-    fn test_notify_enabled_sends_new_data_available() {
-        // notify_enabled=true → NewDataAvailable IS sent
-        let (core, mut rx) = make_core_with_notify(true);
+    fn test_stream_delta_advances_cursor_across_role_transition() {
+        // After a role transition (new streaming line), the push cursor resets
+        // to 0 so the new line's content is pushed from the start.
+        let (core, mut rx) = make_core();
         core.streaming_lines.write().unwrap().insert(
             "s1".to_string(),
             crate::conversation::StreamingLine {
                 line_number: 1,
-                accumulated_content: String::new(),
-                role: "assistant".to_string(),
+                message_id: "test-mid-thought".to_string(),
+                accumulated_content: "thought line\n".to_string(),
+                role: "thought".to_string(),
                 started_at: String::new(),
                 started_at_ms: 0,
             },
         );
-        core.notify_new_data_available();
+        core.try_send_stream_delta();
+        // Drain the thought line.
+        assert!(matches!(rx.try_recv().unwrap().event, ChunkEvent::StreamDelta { .. }));
+
+        // Simulate a role transition: flush + new assistant line (offset resets).
+        core.flush_and_new_streaming_line("assistant", None);
+        core.streaming_lines.write().unwrap().get_mut("s1").unwrap()
+            .accumulated_content
+            .push_str("assistant line\n");
+
+        core.try_send_stream_delta();
         let evt = rx.try_recv().unwrap();
-        assert!(matches!(
-            evt.event,
-            ChunkEvent::NewDataAvailable { .. }
-        ));
+        match evt.event {
+            ChunkEvent::StreamDelta { lines, .. } => {
+                // ADR-035 M2: lines is Vec<(role, message_id, content)>;
+                // project to (role, content) for the assertion. The
+                // message_id is a fresh UUID assigned by
+                // flush_and_new_streaming_line, so we don't assert it.
+                let projected: Vec<(String, String)> = lines
+                    .into_iter()
+                    .map(|(role, _mid, content)| (role, content))
+                    .collect();
+                assert_eq!(projected, vec![("assistant".to_string(), "assistant line".to_string())]);
+            }
+            _other => panic!("expected StreamDelta, got non-stream_delta event"),
+        }
     }
 
     // ── 429 retry UX initialization tests ─────────────────────────────
@@ -596,7 +752,7 @@ mod tests {
     fn test_retry_ux_fields_initialized() {
         // SessionCore::new() must initialize retry_session_status and
         // retry_wait_handle so that build_provider_for can wire up UX.
-        let (core, _rx) = make_core_with_notify(false);
+        let (core, _rx) = make_core();
         assert!(
             core.retry_session_status.is_some(),
             "retry_session_status must be Some for 429 retry UX wiring"
@@ -611,7 +767,7 @@ mod tests {
     fn test_retry_ux_initial_status_is_streaming() {
         // The initial retry_session_status should be Streaming
         // (the session hasn't been paused yet).
-        let (core, _rx) = make_core_with_notify(false);
+        let (core, _rx) = make_core();
         let guard = core.retry_session_status.as_ref().unwrap().read().unwrap();
         assert!(
             matches!(*guard, SessionStatus::Streaming { .. }),
@@ -624,7 +780,7 @@ mod tests {
     fn test_retry_ux_session_status_writable() {
         // Simulate what ReliableProvider::emit_retry_pause does:
         // write Paused with retry_info into the shared status lock.
-        let (core, _rx) = make_core_with_notify(false);
+        let (core, _rx) = make_core();
         let status_lock = core.retry_session_status.as_ref().unwrap();
         {
             let mut guard = status_lock.write().unwrap();
@@ -652,7 +808,7 @@ mod tests {
         // Verify the skip_notify in retry_wait_handle can be triggered.
         // This simulates SessionTask handling ContinueExecution →
         // handle.skip_notify.notify_one() to wake the retry loop.
-        let (core, _rx) = make_core_with_notify(false);
+        let (core, _rx) = make_core();
         let handle = core.retry_wait_handle.as_ref().unwrap();
 
         // notify_one is idempotent and non-blocking — just verify it
@@ -671,7 +827,7 @@ mod tests {
     /// same pattern used by ReliableProvider::retry_sleep.
     #[tokio::test]
     async fn test_retry_ux_skip_notify_wakes_waiter() {
-        let (core, _rx) = make_core_with_notify(false);
+        let (core, _rx) = make_core();
         let handle = core.retry_wait_handle.as_ref().unwrap();
         let skip = handle.skip_notify.clone();
 

@@ -24,9 +24,9 @@ use tokio::sync::Mutex;
 use acowork_core::mqtt_proto::{
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
-    IterationLimitPausedPayload, NewDataAvailablePayload, SessionMessage,
-    SessionStateChangedPayload, StoppedPayload, TodoUpdatedPayload,
-    ToolApprovalNeededPayload, ToolCallPayload, ToolResultPayload,
+    IterationLimitPausedPayload, NewDataAvailablePayload, RecordCompletePayload,
+    SessionMessage, SessionStateChangedPayload, StoppedPayload, StreamDeltaPayload,
+    StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
     data_envelope, session_message,
 };
 
@@ -423,15 +423,33 @@ impl MqttChunkPublisher {
             .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))
     }
 
-    /// Publish a session event envelope to the broker.
+    /// Publish a session event envelope to the broker at QoS 0 (default for
+    /// `messages/*` streaming events per ADR-035 D1 / `mqtt.md` §8.3).
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {
+        self.publish_with_qos(session_id, event_type, payload, QoS::AtMostOnce).await;
+    }
+
+    /// Publish a session event envelope at the given QoS.
+    ///
+    /// ADR-035 O2: `record_complete` is published at QoS 1 (AtLeastOnce)
+    /// because it is the authoritative terminal event — losing it leaves
+    /// the message stuck in the streaming state with no fallback. All other
+    /// `messages/*` events stay at QoS 0 (a lost `stream_delta` frame is
+    /// covered by the next frame or the final `record_complete`).
+    async fn publish_with_qos(
+        &self,
+        session_id: &str,
+        event_type: &str,
+        payload: &[u8],
+        qos: QoS,
+    ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
             self.agent_id, session_id, event_type
         );
         if let Err(e) = self
             .client
-            .publish(topic, QoS::AtMostOnce, false, payload)
+            .publish(topic, qos, false, payload)
             .await
         {
             tracing::warn!(error = %e, session_id, event_type, "Failed to publish MQTT session event");
@@ -487,60 +505,11 @@ impl MqttChunkPublisher {
         });
     }
 
-    /// Publish a tool_call event via MQTT (QoS 0, protobuf DataEnvelope).
-    #[allow(dead_code)]
-    pub(crate) fn publish_tool_call(&self, session_id: &str, tool_name: &str, tool_input: &str) {
-        let publisher = self.clone();
-        let sid = session_id.to_string();
-        let tn = tool_name.to_string();
-        let ti = tool_input.to_string();
-        let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::ToolCall(ToolCallPayload {
-                    message_id: String::new(),
-                    tool_name: tn,
-                    arguments_json: ti,
-                    call_id: String::new(),
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "tool_call", &bytes).await;
-        });
-    }
-
-    /// Publish a tool_result event via MQTT (QoS 0, protobuf DataEnvelope).
-    #[allow(dead_code)]
-    pub(crate) fn publish_tool_result(&self, session_id: &str, call_id: &str, result_json: &str, is_error: bool) {
-        let publisher = self.clone();
-        let sid = session_id.to_string();
-        let cid = call_id.to_string();
-        let rj = result_json.to_string();
-        let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::ToolResult(ToolResultPayload {
-                    call_id: cid,
-                    result_json: rj,
-                    is_error,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "tool_result", &bytes).await;
-        });
-    }
+    // ADR-035 C1: publish_tool_call / publish_tool_result removed — tool_call
+    // and tool_result records are now delivered via the unified
+    // `record_complete` event (see publish_record_complete below), which
+    // carries role / message_id / content and applies D9.2 truncation for
+    // tool_result at the publish layer.
 
     /// Publish an error event via MQTT (QoS 1, protobuf DataEnvelope).
     pub(crate) fn publish_error(&self, session_id: &str, message_id: &str, error_msg: &str) {
@@ -859,6 +828,104 @@ impl MqttChunkPublisher {
             publisher.publish(&sid, "new_data_available", &bytes).await;
         });
     }
+
+    /// Publish a `stream_delta` event via MQTT (QoS 0, ADR-035).
+    ///
+    /// Carries the new COMPLETE streaming lines since the last push. Each
+    /// `StreamLine.content` is a whole line — never a partial line or token.
+    pub(crate) fn publish_stream_delta(
+        &self,
+        session_id: &str,
+        lines: &[StreamLine],
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        let publisher = self.clone();
+        let sid = session_id.to_string();
+        let agent_id = self.agent_id.clone();
+        let lines = lines.to_vec();
+        tokio::spawn(async move {
+            let event = SessionMessage {
+                agent_id,
+                session_id: sid.clone(),
+                event: Some(session_message::Event::StreamDelta(StreamDeltaPayload {
+                    session_id: sid.clone(),
+                    lines,
+                })),
+            };
+            let envelope = DataEnvelope {
+                version: 1,
+                payload: Some(data_envelope::Payload::SessionMessage(event)),
+            };
+            let bytes = prost::Message::encode_to_vec(&envelope);
+            publisher.publish(&sid, "stream_delta", &bytes).await;
+        });
+    }
+
+    /// Publish a `record_complete` event via MQTT (QoS 1, ADR-035 C1/O2).
+    ///
+    /// Carries the COMPLETE finalized record. The frontend freezes the
+    /// active stream buffer into `messages[]` on receipt and clears
+    /// `activeStream`. Published at QoS 1 (AtLeastOnce) because this is
+    /// the authoritative terminal event — losing it leaves the message
+    /// stuck in the streaming state (ADR-035 O2).
+    ///
+    /// ADR-035 D9.2: `tool_result` content is truncated to the first 5
+    /// lines before publishing. The full content stays in JSONL for LLM
+    /// context. No exception — the frontend never receives full tool_result.
+    pub(crate) fn publish_record_complete(
+        &self,
+        session_id: &str,
+        role: &str,
+        message_id: &str,
+        content: &str,
+    ) {
+        // ADR-035 D9.2: truncate tool_result to first 5 lines for display.
+        // Full content stays in JSONL for LLM context. No exception.
+        let final_content = if role == "tool_result" {
+            truncate_tool_result_lines(content)
+        } else {
+            content.to_string()
+        };
+        let publisher = self.clone();
+        let sid = session_id.to_string();
+        let agent_id = self.agent_id.clone();
+        let role = role.to_string();
+        let mid = message_id.to_string();
+        tokio::spawn(async move {
+            let event = SessionMessage {
+                agent_id,
+                session_id: sid.clone(),
+                event: Some(session_message::Event::RecordComplete(RecordCompletePayload {
+                    session_id: sid.clone(),
+                    role,
+                    message_id: mid,
+                    content: final_content,
+                })),
+            };
+            let envelope = DataEnvelope {
+                version: 1,
+                payload: Some(data_envelope::Payload::SessionMessage(event)),
+            };
+            let bytes = prost::Message::encode_to_vec(&envelope);
+            // ADR-035 O2: QoS 1 — record_complete is the authoritative
+            // terminal event; losing it leaves the message stuck.
+            publisher.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce).await;
+        });
+    }
+}
+
+/// ADR-035 D9.2: truncate tool_result to first 5 lines for frontend display.
+/// Full content stays in JSONL. No exception.
+fn truncate_tool_result_lines(result_json: &str) -> String {
+    let lines: Vec<&str> = result_json.lines().collect();
+    if lines.len() <= 5 {
+        return result_json.to_string();
+    }
+    let mut truncated = lines.into_iter().take(5).collect::<Vec<_>>().join("\n");
+    truncated.push_str("\n...(truncated)");
+    truncated
 }
 
 #[cfg(test)]
