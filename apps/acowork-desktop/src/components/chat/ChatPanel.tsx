@@ -16,7 +16,56 @@ import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, Alert
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
-import { VirtualMessageList } from "./VirtualMessageList";
+import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
+
+/**
+ * `MessageBlock` — strict intermediate representation between the data layer
+ * (raw `ChatMessage[]` in the chatStore) and the rendering layer
+ * (`VirtualMessageList`).
+ *
+ * Why this exists:
+ *  - The chatStore stores raw messages in chronological order. A single
+ *    "display group" (think + tool_call + tool_result folded into one chip)
+ *    can span multiple raw messages.
+ *  - The rendering layer needs a stable unit keyed by a single `blockId` so
+ *    React's diff and TanStack's virtualizer can identify it cleanly.
+ *  - Several display decisions that used to live in the rendering layer as
+ *    *estimated* visual state (sticky-bottom, scroll restoration on prepend)
+ *    are derivable purely from properties carried on the block itself.
+ *
+ * Every property on this interface is data-defined, not visually estimated:
+ *
+ * - `type`           drives the component choice (MessageBubble vs ExploreBlock).
+ * - `items`          the raw messages the block contains; for non-group blocks
+ *                    `items.length === 1`. This is the single source of truth
+ *                    for "what raw entries does this block render".
+ * - `rawCount`       `items.length` cached for cheap arithmetic in pagination.
+ * - `anchorToLatest` true iff this block contains the **last raw entry** in
+ *                    the current messages array. Pure data semantics — the
+ *                    rendering layer derives "user is at the bottom" from
+ *                    "the viewport contains an anchorToLatest block".
+ * - `anchorToUser`   transient: true on exactly one block immediately after
+ *                    a "load older" trigger, so the rendering layer knows
+ *                    which block to keep visually stable when older messages
+ *                    are prepended. Cleared after the renderer scrolls to it.
+ */
+export interface MessageBlock {
+  blockId: string;
+  type: ChatMessage["type"] | "explore_group";
+  items: ChatMessage[];
+  rawCount: number;
+  anchorToLatest: boolean;
+  anchorToUser: boolean;
+  /**
+   * True iff an `assistant` (or other non-explore) message follows this
+   * explore block in display order.  Drives ExploreBlock's auto-collapse
+   * and the virtualizer's exact-height estimator (collapsed = ~32px header
+   * only, expanded = header + content up to 240px cap).  Pre-computed here
+   * so the rendering layer doesn't have to walk the array a second time.
+   * Only meaningful for `type === "explore_group"`; false for all others.
+   */
+  hasFollowUpReply: boolean;
+}
 
 /**
  * Merge an internal ref (used for click-outside detection) with an external
@@ -71,7 +120,23 @@ interface ChatScrollSnapshot {
   pinnedToBottom: boolean;
 }
 
+// Bounded LRU: cap snapshot entries to MAX_SCROLL_SNAPSHOTS so a long-lived
+// session that toggles Settings/Harness/Docs many times can't grow this Map
+// without bound.  Each snapshot is ~50 bytes; 64 entries ≈ 3.2 KB, negligible.
+// Eviction uses Map insertion order (JS Map preserves insertion order), so
+// the OLDEST snapshot is dropped when the cap is exceeded — fine because
+// the user just toggled away from the settings nav-back use case which is
+// the only consumer of these snapshots.
+const MAX_SCROLL_SNAPSHOTS = 64;
 const chatScrollSnapshots = new Map<string, ChatScrollSnapshot>();
+
+function setScrollSnapshot(key: string, snapshot: ChatScrollSnapshot): void {
+  chatScrollSnapshots.set(key, snapshot);
+  if (chatScrollSnapshots.size > MAX_SCROLL_SNAPSHOTS) {
+    const oldestKey = chatScrollSnapshots.keys().next().value;
+    if (oldestKey !== undefined) chatScrollSnapshots.delete(oldestKey);
+  }
+}
 
 function getDistanceFromBottom(container: HTMLElement): number {
   return container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -358,6 +423,15 @@ export function ChatPanel() {
    */
   const pinnedToBottomRef = useRef(false);
 
+  /**
+   * Imperative handle to VirtualMessageList. Exposes data-derived queries
+   * about the rendered MessageBlock layout. Used here by handleScroll to pick
+   * the "anchorToUser" block (the first visible block at the moment the
+   * user scrolls near the top) BEFORE triggering loadMoreOlderMessages.
+   * No pixel math, no estimateSize-based heuristic — a pure data lookup.
+   */
+  const vmlRef = useRef<VirtualMessageListHandle | null>(null);
+
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
 
   // Read saved scroll snapshot for nav-back restoration.
@@ -398,56 +472,97 @@ export function ChatPanel() {
     });
   }
 
-  // Group consecutive messages for display
-  // - Consecutive think + tool_call + tool_result → explore_group (aggregated)
-  // - assistant reply (non-think) → display as-is
-  // - Everything else → display as-is
-  const displayMessages = useMemo(() => {
-    const grouped: Array<
-      | ChatMessage
-      | { type: 'explore_group'; items: ChatMessage[] }
-    > = [];
-
+  // ── Strict intermediate layer: raw `messages` → `MessageBlock[]` ──────────
+  //
+  // This is the ONLY place that knows about the relationship between raw
+  // entries (chatStore.messages, one ChatMessage per JSONL line) and the
+  // visual blocks the renderer draws. After this useMemo runs, every
+  // downstream consumer (virtualCount, sticky-bottom logic, scroll
+  // restoration, Agent-header detection, hasFollowUpReply) reads from
+  // `messageBlocks` and never from `messages` directly.
+  //
+  // Two derived properties on every block are critical and must not be
+  // guessed at by the rendering layer:
+  //
+  //  - `anchorToLatest` — set iff the block contains the **last raw entry**
+  //    in `messages`. Pure data: derived from the loop's cursor index
+  //    versus `lastIdx`. The rendering layer derives "user is at the
+  //    bottom" by asking "is any visible block anchorToLatest?", with no
+  //    scrollTop or estimateSize involvement.
+  //
+  //  - `anchorToUser` — transient: set on exactly one block per "load
+  //    older" cycle, read from `scope.current.anchorToUserBlockId` which
+  //    ChatPanel.handleScroll writes right before triggering
+  //    loadMoreOlderMessages. The rendering layer scrolls to the
+  //    anchorToUser block after the prepend lands, then clears the flag
+  //    (also via the scope ref) so it doesn't fire twice.
+  const messageBlocks = useMemo<MessageBlock[]>(() => {
+    const blocks: MessageBlock[] = [];
+    const lastIdx = messages.length - 1;
+    const anchorToUserBlockId = session.scope.current.anchorToUserBlockId;
+    let exploreStart = -1;
     let exploreBuffer: ChatMessage[] = [];
 
     const flushExplore = () => {
-      if (exploreBuffer.length > 0) {
-        grouped.push({ type: 'explore_group', items: [...exploreBuffer] });
-        exploreBuffer = [];
-      }
+      if (exploreBuffer.length === 0) return;
+      const startCursor = exploreStart;
+      const items = exploreBuffer;
+      const exploreBlockId = `block-${startCursor}`;
+      blocks.push({
+        blockId: exploreBlockId,
+        type: "explore_group",
+        items,
+        rawCount: items.length,
+        anchorToLatest: startCursor + items.length - 1 === lastIdx,
+        anchorToUser: anchorToUserBlockId === exploreBlockId,
+        // Backfilled in the second pass below (needs lookahead at the next
+        // block to decide).  Default false here so the type checker is happy.
+        hasFollowUpReply: false,
+      });
+      exploreBuffer = [];
+      exploreStart = -1;
     };
 
-    for (const msg of messages) {
-      if (msg.type === 'tool_call' || msg.type === 'tool_result') {
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      const blockId = `block-${i}`;
+
+      if (msg.type === "tool_call" || msg.type === "tool_result" || msg.type === "thought") {
+        if (exploreStart < 0) exploreStart = i;
         exploreBuffer.push(msg);
-      } else if (msg.type === 'thought') {
-        // ADR-022: No tag stripping needed — the provider layer already
-        // split think tags, and the runtime flushes on role change.
-        // Each JSONL row has a single, clean role.
-        exploreBuffer.push(msg);
-      } else if (msg.type === 'document_upload' || msg.type === 'system' || msg.type === 'compaction') {
-        // Document upload, system messages, and compaction summary cards:
-        // flush explore, pass through as-is. compaction must NOT be merged
-        // into a tool/explore group — it is a standalone visual unit and
-        // also a logical "context boundary" between rounds.
-        flushExplore();
-        grouped.push(msg);
-      } else if (msg.type === 'assistant') {
-        // ADR-022: No think tag parsing needed. The provider layer split
-        // think content into separate ReasoningContent events, and the
-        // runtime flushed each role change to JSONL. Each row is clean.
-        flushExplore();
-        grouped.push(msg);
       } else {
-        // user message or other
         flushExplore();
-        grouped.push(msg);
+        blocks.push({
+          blockId,
+          type: msg.type,
+          items: [msg],
+          rawCount: 1,
+          anchorToLatest: i === lastIdx,
+          anchorToUser: anchorToUserBlockId === blockId,
+          // Only meaningful for explore_group; false for everyone else.
+          hasFollowUpReply: false,
+        });
+      }
+    }
+    flushExplore();
+
+    // Second pass: an explore_group has a follow-up reply iff the next block
+    // in display order is NOT itself an explore_group (the original rule,
+    // now hoisted into the block shape so the height estimator and the
+    // renderer agree without re-walking the array).
+    for (let i = 0; i < blocks.length - 1; i++) {
+      const cur = blocks[i];
+      if (cur.type === "explore_group" && blocks[i + 1].type !== "explore_group") {
+        blocks[i] = { ...cur, hasFollowUpReply: true };
       }
     }
 
-    flushExplore();
-    return grouped;
-  }, [messages]);
+    return blocks;
+    // session.scope is a stable ref object — its `.current` is read for the
+    // latest anchorToUserBlockId without re-creating the memo. The parent
+    // re-renders after the scope ref is mutated, picking up the new flag on
+    // the next paint.
+  }, [messages, session.scope]);
 
   // Show compacting indicator below messages when compaction is in progress
   const isCompacting = sessionState?.isCompacting ?? false;
@@ -460,17 +575,9 @@ export function ChatPanel() {
   //
   // ADR-027: Streaming messages are now regular messages with isStreaming=true,
   // not prefixed placeholders.  Check via the flag instead of id prefix.
-  const hasStreamingPlaceholder = displayMessages.some((m) => {
-    if ('isStreaming' in m && (m as ChatMessage).isStreaming) {
-      return true;
-    }
-    if ('items' in m && Array.isArray(m.items)) {
-      return (m.items as ChatMessage[]).some(
-        (item) => item.isStreaming === true,
-      );
-    }
-    return false;
-  });
+  const hasStreamingPlaceholder = messageBlocks.some((b) =>
+    b.items.some((item) => item.isStreaming === true),
+  );
   const showWorkingItem = sending && !hasStreamingPlaceholder;
 
   // The agent header (avatar + name) above the working status should ONLY
@@ -486,16 +593,13 @@ export function ChatPanel() {
   // optimistically added).
   const showWorkingItemHeader = (() => {
     if (!showWorkingItem) return false;
-    for (let i = displayMessages.length - 1; i >= 0; i--) {
-      const item = displayMessages[i];
-      const itemType = 'type' in item
-        ? (item as ChatMessage).type
-        : 'explore_group';
-      if (itemType === 'user') return true;
+    for (let i = messageBlocks.length - 1; i >= 0; i--) {
+      const block = messageBlocks[i];
+      if (block.type === "user") return true;
       if (
-        itemType === 'compaction' ||
-        itemType === 'system' ||
-        itemType === 'document_upload'
+        block.type === "compaction" ||
+        block.type === "system" ||
+        block.type === "document_upload"
       ) {
         continue;
       }
@@ -509,7 +613,7 @@ export function ChatPanel() {
   // virtualCount and causing other messages to disappear when working is shown.
   let extraItems = 0;
   if (showCompactingItem) extraItems++;
-  const virtualCount = displayMessages.length + extraItems;
+  const virtualCount = messageBlocks.length + extraItems;
 
   // Load available models: configured providers (from vault) + capabilities (from models API)
   const loadModels = useCallback(async () => {
@@ -580,7 +684,7 @@ export function ChatPanel() {
 
       const distFromBottom = getDistanceFromBottom(container);
       console.log("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottomRef: pinnedToBottomRef.current, distFromBottom });
-      chatScrollSnapshots.set(key, {
+      setScrollSnapshot(key, {
         scrollOffset: container.scrollTop,
         // Use a generous threshold (120px) for snapshot: if the user was only
         // slightly scrolled up, treat it as pinned so nav-back re-pins to bottom.
@@ -633,8 +737,14 @@ export function ChatPanel() {
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
     if (!hasMessages) {
       // 2a. No messages in store — load from backend (first mount or new session).
+      // Use ensureLatestInCache to fetch the LAST MESSAGE_CACHE_WINDOW raw
+      // entries in one request.  The rendering layer's ensureRenderable
+      // effect then decides if more prepended data is needed to fill the
+      // viewport (the loop fires loadMoreOlderMessages one page at a time
+      // until virtualizer.getTotalSize() >= clientHeight, or we hit the
+      // top of the conversation).
       session.scope.current.isInitialLoad = currentSessId;
-      chatStore.loadSessionMessages(selectedAgentId, currentSessId)
+      chatStore.ensureLatestInCache(selectedAgentId, currentSessId)
         .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessId))
         .finally(() => {
           session.scope.current.isInitialLoad = null;
@@ -684,7 +794,7 @@ export function ChatPanel() {
     });
 
     session.scope.current.isInitialLoad = currentSessionId;
-    chatStore.loadSessionMessages(selectedAgentId, currentSessionId)
+    chatStore.ensureLatestInCache(selectedAgentId, currentSessionId)
       .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessionId))
       .finally(() => {
         session.scope.current.isInitialLoad = null;
@@ -722,19 +832,66 @@ export function ChatPanel() {
   // Called from VirtualMessageList when user clicks retry on load error.
   const handleRetryLoadSession = useCallback(() => {
     if (!selectedAgentId || !currentSessionId) return;
-    useChatStore.getState().loadSessionMessages(selectedAgentId, currentSessionId);
+    useChatStore.getState().ensureLatestInCache(selectedAgentId, currentSessionId);
   }, [selectedAgentId, currentSessionId]);
 
-  // ── Scroll-to-bottom (smooth) ─────────────────────────────────────
-  // Stable across renders: session.scope is a MutableRefObject,
-  // messagesContainerRef is a RefObject — neither changes identity.
-  const scrollToBottom = useCallback(() => {
+  // ── Page-cursor derived predicates ──
+  // "hasOlder" is the rendering layer's gate for "is there more data the user
+  // can scroll back to?".  Used by VirtualMessageList's ensureRenderable
+  // effect to decide whether to invoke onNeedMore.  Derived from the same
+  // raw-entry cursor as the pagination logic (loadMoreOlderMessages), so the
+  // two paths can't drift out of sync.
+  //
+  // MUST use three independent primitive selectors (NOT a single selector
+  // returning a fresh `{ ... }` object).  Returning a new object literal
+  // each call defeats zustand's default Object.is shallow comparison and
+  // causes ChatPanel to re-render on every store update — combined with
+  // effects that mutate the store, this triggers the
+  // "Maximum update depth exceeded" infinite loop.
+  const messageOffset = useChatStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return 0;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageOffset ?? 0;
+  });
+  const messageLimit = useChatStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return 0;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageLimit ?? 0;
+  });
+  const messageTotal = useChatStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return 0;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageTotal ?? 0;
+  });
+  const hasOlder =
+    messageOffset + messageLimit < messageTotal && messageLimit > 0;
+
+  // ── onNeedMore: load one older page when ensureRenderable asks for it ──
+  // Single-page load; the VirtualMessageList effect keeps firing until the
+  // viewport is full (or we hit the top).  Internally guarded by
+  // `isLoadingMore` so this is safe to call repeatedly.
+  const handleNeedMore = useCallback(() => {
+    if (!selectedAgentId || !currentSessionId) return;
+    void useChatStore.getState().loadMoreOlderMessages(selectedAgentId, currentSessionId);
+  }, [selectedAgentId, currentSessionId]);
+
+  // ── Scroll-to-bottom ─────────────────────────────────────────
+  // Data-driven two-phase jump:
+  //   Phase 1 — await ensureLatestInCache: fetches the LAST
+  //             MESSAGE_CACHE_WINDOW raw entries.  MUST complete
+  //             before phase 2, otherwise scrollToIndex fires with
+  //             stale virtualCount and the position ends up in the
+  //             middle after the cache refresh changes totalSize.
+  //   Phase 2 — vmlRef.scrollToBottom(): delegates to virtualizer.scrollToIndex
+  //             using measurementsCache.  Since phase 1 just refreshed the
+  //             cache with the most recent entries, those items are guaranteed
+  //             to be in the measurement cache (they're the items the user
+  //             was just looking at OR are about to look at), so scrollToIndex
+  //             lands on the exact real bottom — no estimation, no force-overscan
+  //             hack, no rAF retry needed.
+  const scrollToBottom = useCallback(async () => {
+    if (!selectedAgentId || !currentSessionId) return;
     pinnedToBottomRef.current = true;
-    const container = messagesContainerRef.current;
-    if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    await useChatStore.getState().ensureLatestInCache(selectedAgentId, currentSessionId);
+    vmlRef.current?.scrollToBottom();
+  }, [selectedAgentId, currentSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Scroll handler ────────────────────────────────────────────────
   const handleScroll = useCallback(() => {
@@ -756,21 +913,55 @@ export function ChatPanel() {
     // across navigation; the live handler should be sensitive to user intent.
     pinnedToBottomRef.current = distFromBottom <= 5;
 
-    // Load more when scrolled to top
+    // ── Pagination trigger ──
+    // One-way detection: near top → load older.  Loading newer is NOT
+    // triggered here — under the unified data-window model:
+    //   - Initial mount / session switch calls ensureLatestInCache (cache
+    //     lands at offset=0 immediately).
+    //   - The scroll-to-bottom button calls ensureLatestInCache before
+    //     scrolling (so the cache is guaranteed at the tail).
+    //   - VirtualMessageList's ensureRenderable effect handles "cache
+    //     doesn't yet fill the viewport" by looping loadMoreOlderMessages
+    //     one page at a time until getTotalSize() >= clientHeight.
+    //
+    // The only direction the user can pull data by scrolling is OLDER
+    // (scrolling up).  Scrolling DOWN through the latest content is just
+    // a forward browse — no fetch needed because the cache already holds
+    // the most recent MESSAGE_CACHE_WINDOW entries.
     const { isLoadingMore } = useChatStore.getState();
+    if (isLoadingMore) return;
     const agent = useChatStore.getState().agentStates[selectedAgentId];
     const activeSessId = agent?.activeSessionId;
     const sessState = activeSessId ? agent?.sessionStates[activeSessId] : undefined;
-    const hasMoreMessages = sessState?.hasMoreMessages ?? false;
+    if (!sessState) return;
+    const messageOffset = sessState.messageOffset ?? 0;
+    const messageLimit = sessState.messageLimit ?? 0;
+    const messageTotal = sessState.messageTotal ?? 0;
     const currentSessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
-    if (isLoadingMore || !hasMoreMessages || !currentSessionId) return;
+    if (!currentSessionId) return;
 
-    if (container.scrollTop < 50) {
-      session.scope.current.prevScrollHeight = container.scrollTop;
-      session.scope.current.isLoadingMore = true;
+    const hasOlder = messageOffset + messageLimit < messageTotal && messageLimit > 0;
+    if (hasOlder && container.scrollTop < 50) {
+      // Record the "anchorToUser" blockId BEFORE the load fires.  After older
+      // messages are prepended upstream, the messageBlocks useMemo will mark
+      // exactly one block with anchorToUser=true (the one whose blockId
+      // matches); the load-older effect inside VirtualMessageList will then
+      // scrollToIndex to that block, putting the user back at the same
+      // visual position they were reading at.
+      //
+      // Data-driven: the anchor blockId is read directly from the strict
+      // intermediate layer (messageBlocks[firstVisibleIdx].blockId). No
+      // pixel math, no scrollHeight-delta estimation.
+      const firstVisibleIdx = vmlRef.current?.getFirstVisibleBlockIndex() ?? null;
+      if (firstVisibleIdx !== null) {
+        const anchorBlock = messageBlocks[firstVisibleIdx];
+        if (anchorBlock) {
+          session.scope.current.anchorToUserBlockId = anchorBlock.blockId;
+        }
+      }
       void useChatStore
         .getState()
-        .loadMoreMessages(selectedAgentId, currentSessionId);
+        .loadMoreOlderMessages(selectedAgentId, currentSessionId);
     }
   }, [selectedAgentId, session]);
 
@@ -1129,6 +1320,26 @@ export function ChatPanel() {
     );
   }
 
+  // ── Initializing session ──
+  // The window between MQTT pushing `running` → true and `startAgentAndSyncUI`
+  // finishing its atomic initSessionForAgent chain (fetchLatestSession +
+  // fetchSessions + activateSession + fetchSessionState + ensureLatestInCache).
+  // During this brief window activeSessionId is still null, so without this
+  // gate the chat view would mount with no session and surface the
+  // "Start a conversation" placeholder for a few hundred ms — a misleading
+  // "blank session" bug.  Showing a spinner here keeps the contract honest:
+  // when the chat view finally mounts, the session is fully bootstrapped.
+  if (!currentSessionId) {
+    return (
+      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+        <div className="text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading session...</p>
+        </div>
+      </div>
+    );
+  }
+
   // ── Chat view ──
   const inputDisabled = gatewayStatus !== "connected";
 
@@ -1167,9 +1378,10 @@ export function ChatPanel() {
                 getVirtualItems() to return an empty array. */}
             <VirtualMessageList
               key={currentScrollKey ?? "__no_session__"}
+              ref={vmlRef}
               initialScrollOffset={initialScrollOffset}
               onRetryLoadSession={handleRetryLoadSession}
-              displayMessages={displayMessages}
+              messageBlocks={messageBlocks}
               virtualCount={virtualCount}
               showCompactingItem={showCompactingItem}
               sending={sending}
@@ -1187,6 +1399,8 @@ export function ChatPanel() {
               scope={session.scope}
               pinnedToBottomRef={pinnedToBottomRef}
               isLoadingMore={isLoadingMore}
+              hasOlder={hasOlder}
+              onNeedMore={handleNeedMore}
               isLoadingSession={isLoadingSession}
               loadError={loadError}
               messages={messages}
