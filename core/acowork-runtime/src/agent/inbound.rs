@@ -148,6 +148,10 @@ pub enum InboundMessage {
     UserOperation(UserOp),
     /// ADR-034 Phase 7: Create a new session (system-level, session_id empty).
     CreateSession,
+    /// ADR-038: Explicit session activation (transitions Closed/NotFound → Active).
+    /// Frontend sends this when the user opens a session from the history list
+    /// or when restoring a session on app startup. Idempotent for Active sessions.
+    OpenSession { session_id: String },
     /// ADR-034 Phase 7: Delete a session by ID.
     DeleteSession {
         session_id: String,
@@ -260,6 +264,7 @@ impl InboundMessage {
             InboundMessage::UpdateSessionTitle { .. } => {}
             InboundMessage::CompressAction { .. } => {}
             InboundMessage::CreateSession => {}
+            InboundMessage::OpenSession { .. } => {}
             InboundMessage::DeleteSession { .. } => {}
             InboundMessage::ChatMessage { .. } => {}
             InboundMessage::ModelSwitchAction { .. } => {}

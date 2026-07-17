@@ -62,7 +62,8 @@ pub(crate) async fn phase_c_spawn_subsystems(
                         &agent_id_for_relay,
                         &session_event.session_id,
                         session_event.event,
-                    );
+                    )
+                    .await;
                 }
                 tracing::debug!("MQTT chunk relay task ended");
             }))
@@ -387,7 +388,13 @@ async fn relay_chunk_event(
 /// All events are encoded as `DataEnvelope { payload: SessionMessage }`
 /// protobuf and published to `acowork/agents/{id}/sessions/{sid}/messages/{event_type}`.
 /// Desktop subscribes to these topics directly on the broker.
-fn relay_chunk_event_mqtt(
+///
+/// **Ordering invariant**: each publish is awaited before the next
+/// ChunkEvent is consumed. This makes the relay's call order the same as
+/// the broker's enqueue order, eliminating the previous `tokio::spawn` race
+/// between events of asymmetric payload size (notably
+/// `session_state_changed(idle)` racing the last `record_complete`).
+async fn relay_chunk_event_mqtt(
     publisher: &crate::mqtt::MqttChunkPublisher,
     _agent_id: &str,
     sid: &str,
@@ -400,22 +407,24 @@ fn relay_chunk_event_mqtt(
             // Publish the full ContextUsageInfo so the StatusBar can render
             // total_tokens / context_window / usage_percent, not just the
             // last-turn input/output tokens.
-            publisher.publish_context_usage(sid, &ctx_info);
+            publisher.publish_context_usage(sid, &ctx_info).await;
         }
 
         ChunkEvent::CompactingStarted => {
-            publisher.publish_compacting(sid, true);
+            publisher.publish_compacting(sid, true).await;
         }
 
         ChunkEvent::CompactingEnded => {
-            publisher.publish_compacting(sid, false);
+            publisher.publish_compacting(sid, false).await;
         }
 
         ChunkEvent::IterationLimitPaused {
             iteration,
             max_iterations,
         } => {
-            publisher.publish_iteration_limit_paused(sid, iteration, max_iterations);
+            publisher
+                .publish_iteration_limit_paused(sid, iteration, max_iterations)
+                .await;
         }
 
         ChunkEvent::ToolApprovalNeeded {
@@ -427,24 +436,26 @@ fn relay_chunk_event_mqtt(
             tool_call_id,
             approval_timeout_secs,
         } => {
-            publisher.publish_tool_approval_needed(
-                crate::mqtt::client::ToolApprovalNeededEvent {
-                    session_id: sid,
-                    request_id: &request_id,
-                    tool_name: &tool_name,
-                    action: &action,
-                    risk_level: &risk_level,
-                    reason: &reason,
-                    tool_call_id: &tool_call_id,
-                    approval_timeout_secs,
-                },
-            );
+            publisher
+                .publish_tool_approval_needed(
+                    crate::mqtt::client::ToolApprovalNeededEvent {
+                        session_id: sid,
+                        request_id: &request_id,
+                        tool_name: &tool_name,
+                        action: &action,
+                        risk_level: &risk_level,
+                        reason: &reason,
+                        tool_call_id: &tool_call_id,
+                        approval_timeout_secs,
+                    },
+                )
+                .await;
         }
 
         ChunkEvent::Done {
             message_id, ..
         } => {
-            publisher.publish_done(sid, &message_id);
+            publisher.publish_done(sid, &message_id).await;
         }
 
         ChunkEvent::Error {
@@ -453,12 +464,12 @@ fn relay_chunk_event_mqtt(
             error_type: _,
             message_id,
         } => {
-            publisher.publish_error(sid, &message_id, &user_message);
+            publisher.publish_error(sid, &message_id, &user_message).await;
         }
 
         ChunkEvent::Stopped { .. } => {
             // Use empty message_id for stopped — the event itself is the signal.
-            publisher.publish_stopped(sid, "");
+            publisher.publish_stopped(sid, "").await;
         }
 
         ChunkEvent::SessionStateChanged {
@@ -472,24 +483,26 @@ fn relay_chunk_event_mqtt(
             context_usage,
         } => {
             let status_json = serde_json::to_string(&status).unwrap_or_default();
-            publisher.publish_session_state_changed(
-                crate::mqtt::client::SessionStateChangeEvent {
-                    session_id: sid,
-                    status_json: &status_json,
-                    model: model.as_deref(),
-                    provider: provider.as_deref(),
-                    workspace_id: workspace_id.as_deref(),
-                    ratio,
-                    reasoning_effort: reasoning_effort.as_deref(),
-                    temperature,
-                    context_usage_json: context_usage.as_deref(),
-                },
-            );
+            publisher
+                .publish_session_state_changed(
+                    crate::mqtt::client::SessionStateChangeEvent {
+                        session_id: sid,
+                        status_json: &status_json,
+                        model: model.as_deref(),
+                        provider: provider.as_deref(),
+                        workspace_id: workspace_id.as_deref(),
+                        ratio,
+                        reasoning_effort: reasoning_effort.as_deref(),
+                        temperature,
+                        context_usage_json: context_usage.as_deref(),
+                    },
+                )
+                .await;
         }
 
         ChunkEvent::TodoListUpdated { todos } => {
             let todos_json = serde_json::to_string(&todos).unwrap_or_default();
-            publisher.publish_todo_updated(sid, &todos_json);
+            publisher.publish_todo_updated(sid, &todos_json).await;
         }
 
         ChunkEvent::NewDataAvailable {
@@ -497,11 +510,13 @@ fn relay_chunk_event_mqtt(
             interval_ms,
             title,
         } => {
-            publisher.publish_new_data_available(
-                &session_id,
-                interval_ms as u32,
-                title.as_deref(),
-            );
+            publisher
+                .publish_new_data_available(
+                    &session_id,
+                    interval_ms as u32,
+                    title.as_deref(),
+                )
+                .await;
         }
 
         ChunkEvent::StreamDelta {
@@ -528,7 +543,9 @@ fn relay_chunk_event_mqtt(
                     content,
                 })
                 .collect();
-            publisher.publish_stream_delta(&session_id, &lines_proto, seq);
+            publisher
+                .publish_stream_delta(&session_id, &lines_proto, seq)
+                .await;
         }
 
         // ADR-035 C1: publish record_complete at QoS 1 (authoritative
@@ -548,16 +565,18 @@ fn relay_chunk_event_mqtt(
             is_error,
             seq,
         } => {
-            publisher.publish_record_complete(
-                &session_id,
-                &role,
-                &message_id,
-                &content,
-                &tool_name,
-                &tool_call_id,
-                is_error,
-                seq,
-            );
+            publisher
+                .publish_record_complete(
+                    &session_id,
+                    &role,
+                    &message_id,
+                    &content,
+                    &tool_name,
+                    &tool_call_id,
+                    is_error,
+                    seq,
+                )
+                .await;
         }
 
         ChunkEvent::AskQuestion {
@@ -575,7 +594,9 @@ fn relay_chunk_event_mqtt(
                 "timeout_seconds": timeout_seconds,
             });
             let question_json = qjson.to_string();
-            publisher.publish_ask_question(sid, &request_id, &question_json);
+            publisher
+                .publish_ask_question(sid, &request_id, &question_json)
+                .await;
         }
     }
 }

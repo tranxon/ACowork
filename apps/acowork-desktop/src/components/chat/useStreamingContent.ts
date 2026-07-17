@@ -32,6 +32,9 @@ interface StreamingContent {
   content: string;
   /** Whether the message is still being streamed (controls pulse cursor). */
   isStreaming: boolean;
+  /** Number of streaming lines accumulated so far. Drives the "replying"
+   *  indicator on long assistant streams (see MessageBubble). */
+  lineCount: number;
 }
 
 /**

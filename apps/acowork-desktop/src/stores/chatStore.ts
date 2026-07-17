@@ -8,6 +8,7 @@ import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
 import i18n from "../i18n";
+import { showToast } from "../components/common/ToastProvider";
 
 // ---------------------------------------------------------------------------
 // ADR-035: per-session active stream buffer (replaces ADR-027 multi-buffer).
@@ -17,6 +18,10 @@ import i18n from "../i18n";
 interface StreamingEntry {
   content: string;
   isStreaming: boolean;
+  /** Number of streaming lines accumulated so far (assistant or thought).
+   *  Drives the "replying" indicator on long assistant streams
+   *  (see MessageBubble.ASSISTANT_REPLYING_THRESHOLD). */
+  lineCount: number;
 }
 
 // ADR-035 D3: StreamLine / ActiveStream types now live in lib/types.ts.
@@ -56,6 +61,7 @@ export function getStreamingContent(sessionId: string, messageId: string): Strea
       entry = {
         content: as.lines.map(l => l.content).join("\n"),
         isStreaming: true,
+        lineCount: as.lines.length,
       };
       streamingSnapshots.set(sessionId, entry);
     }
@@ -125,6 +131,13 @@ function trimOldest(messages: ChatMessage[]): ChatMessage[] {
 // end of the reply is preserved; the oldest lines are dropped as they are
 // the least likely to be the user's focus.
 const ASSISTANT_LINE_SAFETY_CAP = 10_000;
+
+/** Minimum number of accumulated streaming lines before the per-session
+ *  `isAssistantReplying` flag flips true. Mirrors
+ *  `MessageBubble.ASSISTANT_REPLYING_THRESHOLD`; kept here as a chatStore
+ *  constant so the streaming pipeline can flip the flag without round-
+ *  tripping through the React layer. The two values must stay in sync. */
+const ASSISTANT_REPLYING_LINE_THRESHOLD = 3;
 
 // ── Sender info helpers ────────────────────────────────────────────────
 
@@ -230,6 +243,27 @@ interface SessionChatState {
   abortController: AbortController | null;
   /** ADR-021: Per-session load sequence number to prevent race conditions */
   loadSequence: number;
+  /**
+   * True while the assistant is actively streaming AND has already
+   * accumulated more than `ASSISTANT_REPLYING_THRESHOLD` lines. Drives the
+   * standalone "replying" indicator rendered OUTSIDE the message list by
+   * ChatPanel — kept as a session-level flag (rather than derived from the
+   * per-message `useStreamingContent` hook) so the indicator is independent
+   * of any single MessageBubble's render lifecycle and can never get stuck
+   * "on" after record_complete.
+   */
+  isAssistantReplying: boolean;
+  /** Whether the agent is currently in reasoning/thinking phase */
+  isReasoning: boolean;
+  /**
+   * ADR-038: Session lifecycle readiness. Set true when the Runtime
+   * publishes `session_opened` (the session is confirmed Active in memory).
+   * Set false initially and on `session_not_opened`. Input box / send button
+   * gate on `isSessionReady` so the user can never send a `chat_message`
+   * to a Closed or NotFound session — the gate is enforced client-side
+   * and the Runtime also enforces it server-side via state guard.
+   */
+  isSessionReady: boolean;
 }
 
 const DEFAULT_SESSION_STATE: SessionChatState = {
@@ -260,6 +294,9 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   hasMoreIncremental: false,
   abortController: null,
   loadSequence: 0,
+  isAssistantReplying: false,
+  isReasoning: false,
+  isSessionReady: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -274,10 +311,6 @@ interface AgentState {
   activeSessionId: string | null;
   /** ADR-015: All session IDs that are open as tabs (ordered, max 32) */
   openSessionIds: string[];
-  /** Reconnect attempts counter */
-  reconnectAttempts: number;
-  /** Reconnect timer reference */
-  reconnectTimer: ReturnType<typeof setTimeout> | null;
   /** Last loaded session ID — prevents redundant reload */
   lastLoadedSessionId: string | null;
   /** Session init in progress */
@@ -292,8 +325,6 @@ const DEFAULT_AGENT_STATE: AgentState = {
   sessionStates: {},
   activeSessionId: null,
   openSessionIds: [],
-  reconnectAttempts: 0,
-  reconnectTimer: null,
   lastLoadedSessionId: null,
   isSessionInitLoading: false,
   preferredModel: null,
@@ -364,8 +395,16 @@ function updateSessionState(
   };
 }
 
-/** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS */
-function evictStaleSessions(
+/** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS.
+// NOTE: kept as a reference implementation for future eviction needs;
+// currently dead because (a) caches are agent-scoped and capped at
+// MAX_OPEN_TABS = 32 by `openSession`, and (b) `closeTab` reuses the
+// `sessionStates[id]` slot by flipping `isSessionReady = false` rather
+// than deleting it (preserves scroll position on re-open).  If a caller
+// ever needs to bound memory growth from huge history loads, call this
+// from the appropriate action — its semantics have not changed.
+*/
+export function _evictStaleSessions(
   state: ChatStore,
   agentId: string,
   protectSessionId?: string,
@@ -416,8 +455,22 @@ interface ChatStore {
   agentStates: Record<string, AgentState>;
 
   // ---- Global fields (not per-agent) ----
-  /** Whether the MQTT connection to the Gateway broker is established (ADR-033) */
+  /**
+   * Whether the MQTT connection to the Gateway broker is currently healthy.
+   *
+   * ADR-036: this field is the *consumer* output of the Rust
+   * `mqtt-status` event.  The Rust eventloop is the source-of-truth;
+   * the frontend never writes to this flag except for the initial
+   * `false` default and the cleanup-on-dispose.
+   */
   mqttConnected: boolean;
+  /**
+   * Most recent disconnect reason reported by the Rust eventloop, or
+   * `null` while connected / before the first connection.  Surfaced in
+   * the UI status bar so the user can tell *why* the input box went
+   * disabled.  See ADR-036.
+   */
+  lastMqttError: string | null;
   availableModels: ModelEntry[];
   /** Whether more messages are being loaded */
   isLoadingMore: boolean;
@@ -490,22 +543,64 @@ interface ChatStore {
    * to fill the viewport (same loop as load-older).
    */
   ensureLatestInCache: (agentId: string, sessionId: string) => Promise<void>;
-  /** Activate a session — sets activeSessionId and triggers cleanup */
-  activateSession: (agentId: string, sessionId: string) => void;
-  /** Apply session metadata (model/provider/workspace_id) from activate_session response */
+  /**
+   * ADR-038: Strict UI-only switch — set which session is in the foreground.
+   *
+   * Contract: does NOT modify `openSessionIds` and does NOT communicate with
+   * the backend. Used when the user toggles between already-open tabs. The
+   * caller MUST have already ensured the session is in `openSessionIds`
+   * (typically via `openSession`). If the session is not in `openSessionIds`
+   * we log a warning and no-op — the caller should be calling `openSession`.
+   */
+  setActiveTab: (agentId: string, sessionId: string) => void;
+  /**
+   * Apply session metadata (model/provider/workspace_id) from activate_session response.
+   * Sets the session's model/provider and agent's preferredModel, plus syncs workspaceStore.
+   */
   applySessionMeta: (agentId: string, sessionId: string, meta: { model?: string | null; provider?: string | null; workspace_id?: string | null }) => void;
-  /** Get the active session ID for an agent */
+  /**
+   * Get the active session ID for an agent */
   getActiveSessionId: (agentId: string) => string | null;
-  /** ADR-014: Get session state for reading from external stores */
+  /**
+   * ADR-014: Get session state for reading from external stores */
   getSessionState: (agentId: string, sessionId: string) => SessionChatState;
-  /** ADR-014: Update session status from backend (Pull repair) */
+  /**
+   * ADR-014: Update session status from backend (Pull repair) */
   updateSessionStatus: (agentId: string, sessionId: string, status: SessionStatus) => void;
-  /** ADR-014: Batch update session statuses — single set() call to avoid O(n) re-renders */
+  /**
+   * ADR-014: Batch update session statuses — single set() call to avoid O(n) re-renders */
   batchUpdateSessionStatuses: (agentId: string, statuses: Map<string, SessionStatus>) => void;
-  /** ADR-015: Open a session tab (append to openSessionIds) */
+  /**
+   * ADR-038: Open a session — full UI + backend activation.
+   *
+   * Three side effects, all idempotent:
+   *  1. UI: add to `openSessionIds` (cap MAX_OPEN_TABS) and set as `activeSessionId`.
+   *  2. Backend: send MQTT `open_session` — Runtime transitions Closed/NotFound → Active
+   *     and acks via `session_opened` (or errors via `session_not_opened`).
+   *  3. Local cache: HTTP-load conversation history for the session.
+   *
+   * After this returns, the UI shows the session and the user can interact,
+   * but `isSessionReady` flips true only when `session_opened` arrives.
+   * The input box should remain disabled until that event lands (or fire a
+   * `session_not_opened` toast with a reopen affordance).
+   */
+  openSession: (agentId: string, sessionId: string) => Promise<void>;
+  /** ADR-015: Open a session tab (append to openSessionIds).
+   *  @deprecated since ADR-038 — use `openSession` (which combines UI +
+   *  backend activation). Kept for any caller that only wants the UI half
+   *  of `openSession` without sending an MQTT message. */
   openTab: (agentId: string, sessionId: string) => void;
-  /** ADR-015: Close a session tab (remove from openSessionIds, activate neighbor) */
-  closeTab: (agentId: string, sessionId: string) => string | null;
+  /** ADR-038: Close a session tab AND notify the backend.
+   *
+   * Three side effects:
+   *  1. UI: remove from `openSessionIds`, activate a neighbor tab.
+   *  2. Backend: send MQTT `close_session` so Runtime drops the in-memory
+   *     session task. The JSONL + meta stay on disk; reopen is via
+   *     `openSession`.
+   *
+   * Returns the new active sessionId (or null when no tabs remain).
+   */
+  closeTab: (agentId: string, sessionId: string) => Promise<string | null>;
   /** ADR-015: Get open session IDs for an agent */
   getOpenSessionIds: (agentId: string) => string[];
   /** Trigger context compaction for the current session */
@@ -539,19 +634,40 @@ interface ChatStore {
   fetchSessionState: (agentId: string, sessionId: string) => Promise<void>;
 }
 
-// ADR-033: Initialize MQTT event listener.
-// Called once after MQTT connection is established.
-// Routes structured agent-event JSON from the Rust backend to handleMessageEvent.
-let _mqttUnlisten: (() => void) | null = null;
+// ADR-033 / ADR-036: Initialize MQTT event listeners.
+//
+// We register TWO separate Tauri-event subscriptions:
+//   - `agent-event`:  business message stream (status, chunks, sessions, ...)
+//                     routed to `handleMessageEvent`.  This was the only
+//                     listener before ADR-036 and is unchanged.
+//   - `mqtt-status`:  connection liveness (`{connected: bool, reason?: str}`)
+//                     emitted by the Rust eventloop on every CONNACK /
+//                     DISCONNECT.  This is the *source-of-truth* path for
+//                     `chatStore.mqttConnected`; we DO NOT set the flag in
+//                     `initMqttListener` itself any more.
+//
+// Additionally we synchronously query `get_mqtt_status` after the listeners
+// are registered.  That command returns the Rust-side last observed
+// status, which lets us recover the initial state without racing the
+// Tauri event between `connect_mqtt` returning and `listen` resolving.
+//
+// Both unlisten handles must be cleaned up together in
+// `disposeMqttListener`.
+let _mqttAgentEventUnlisten: (() => void) | null = null;
+let _mqttStatusUnlisten: (() => void) | null = null;
 
 export async function initMqttListener(): Promise<void> {
-  // Unregister previous listener if any
-  if (_mqttUnlisten) {
-    _mqttUnlisten();
-    _mqttUnlisten = null;
+  // Unregister previous listeners if any (idempotent re-init).
+  if (_mqttAgentEventUnlisten) {
+    _mqttAgentEventUnlisten();
+    _mqttAgentEventUnlisten = null;
+  }
+  if (_mqttStatusUnlisten) {
+    _mqttStatusUnlisten();
+    _mqttStatusUnlisten = null;
   }
 
-  _mqttUnlisten = await listen("agent-event", (event) => {
+  _mqttAgentEventUnlisten = await listen("agent-event", (event) => {
     const data = event.payload as Record<string, unknown>;
     const agentId = data.agent_id as string;
     if (!agentId) {
@@ -563,21 +679,67 @@ export async function initMqttListener(): Promise<void> {
     handleMessageEvent(data, store.setState, store.getState, agentId);
   });
 
-  // Mark MQTT as connected
-  useChatStore.setState({ mqttConnected: true });
+  // ADR-036: connection liveness is owned by the Rust eventloop.  We only
+  // consume.  The Tauri side always includes `connected` (and optionally
+  // `reason` when disconnected); we mirror the value verbatim onto the
+  // store.  We DO NOT optimistically set `mqttConnected: true` here —
+  // the very first `mqtt-status` event with `connected: true` will set it.
+  _mqttStatusUnlisten = await listen<{ connected: boolean; reason?: string }>(
+    "mqtt-status",
+    (event) => {
+      const { connected, reason } = event.payload;
+      useChatStore.setState({
+        mqttConnected: connected,
+        lastMqttError: connected ? null : reason ?? null,
+      });
+    },
+  );
+
+  // Pull the *current* status from the Rust side so we don't miss the
+  // initial state.  The poll task has been running since `connect_mqtt`
+  // returned, and any transition that happened before this listener
+  // registered is reflected in the shared `last_mqtt_status` slot.
+  //
+  // `known: false` means the poll task hasn't observed any transition
+  // yet (e.g. broker is reachable but ConnAck hasn't arrived).  We
+  // treat that exactly like "unknown" — neither flip mqttConnected to
+  // true nor populate lastMqttError.  The first `mqtt-status` event
+  // will fill in the real state.
+  try {
+    const snapshot = await invoke<{
+      known: boolean;
+      connected: boolean;
+      reason?: string | null;
+    }>("get_mqtt_status");
+    if (snapshot.known) {
+      useChatStore.setState({
+        mqttConnected: snapshot.connected,
+        lastMqttError: snapshot.connected ? null : snapshot.reason ?? null,
+      });
+    }
+  } catch (err) {
+    // Tauri command not registered (older binary) or other transient
+    // failure — fall back to the event stream alone.
+    console.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
+  }
 }
 
 export function disposeMqttListener(): void {
-  if (_mqttUnlisten) {
-    _mqttUnlisten();
-    _mqttUnlisten = null;
+  if (_mqttAgentEventUnlisten) {
+    _mqttAgentEventUnlisten();
+    _mqttAgentEventUnlisten = null;
   }
-  useChatStore.setState({ mqttConnected: false });
+  if (_mqttStatusUnlisten) {
+    _mqttStatusUnlisten();
+    _mqttStatusUnlisten = null;
+  }
+  useChatStore.setState({ mqttConnected: false, lastMqttError: null });
 }
 
 export const useChatStore = create<ChatStore>((set, get) => ({
   agentStates: {},
   mqttConnected: false,
+  lastMqttError: null,
   availableModels: [],
   isLoadingMore: false,
 
@@ -631,7 +793,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  // ADR-015: Open a session as a tab
+  // ADR-038 @deprecated: Pure UI tab-open without backend activation.
+  // Most callers should use `openSession` instead, which sends the MQTT
+  // `open_session` ack to the Runtime and hydrates local message cache.
   openTab: (agentId: string, sessionId: string) => {
     set((state) => {
       const agent = getAgentState(state, agentId);
@@ -645,13 +809,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  // ADR-015: Close a session tab, returns the new active sessionId (or null)
-  closeTab: (agentId: string, sessionId: string): string | null => {
+  // ADR-038: Close a session tab AND notify the backend.
+  //
+  // Three side effects (all best-effort — MQTT publish errors are logged
+  // but do not block UI cleanup, which is the source of truth for the
+  // frontend tab strip):
+  //  1. UI: remove from `openSessionIds`, activate a neighbor tab.
+  //  2. Backend: send MQTT `close_session` so Runtime drops the in-memory
+  //     session task. The JSONL + meta stay on disk; reopen is via
+  //     `openSession`.
+  //  3. Reset `isSessionReady` on the evicted session so a later switch
+  //     back must wait for a fresh `session_opened` ack.
+  closeTab: async (agentId: string, sessionId: string): Promise<string | null> => {
     let newActiveId: string | null = null;
     set((state) => {
       const agent = getAgentState(state, agentId);
       const idx = agent.openSessionIds.indexOf(sessionId);
-      if (idx === -1) return {}; // Not open
+      if (idx === -1) return {}; // Not open — nothing to do
 
       const newOpenIds = agent.openSessionIds.filter((id) => id !== sessionId);
 
@@ -664,11 +838,34 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         newActiveId = agent.activeSessionId;
       }
 
+      // ADR-038: drop readiness for the evicted session so a later switch
+      // must wait for a fresh `session_opened` ack from the Runtime.
+      const newSessionStates = { ...agent.sessionStates };
+      const evictedState = newSessionStates[sessionId];
+      if (evictedState) {
+        newSessionStates[sessionId] = { ...evictedState, isSessionReady: false };
+      }
+
       return updateAgentState(state, agentId, {
         openSessionIds: newOpenIds,
         activeSessionId: newActiveId,
+        sessionStates: newSessionStates,
       });
     });
+
+    // 2. Backend: tell Runtime to release the session task.  `close_session`
+    // is idempotent on the Runtime side (Closed → closed no-op), so it is
+    // safe to fire even if the backend has already dropped the session.
+    try {
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "close_session",
+        payloadJson: { session_id: sessionId },
+      });
+    } catch (err) {
+      console.warn("[chatStore] close_session MQTT failed (UI already cleaned up):", err);
+    }
+
     return newActiveId;
   },
 
@@ -702,53 +899,104 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }).catch((err: unknown) => console.warn("[ChatStore] compress_action via MQTT failed:", err));
   },
 
-  activateSession: (agentId: string, sessionId: string) => {
+  /**
+   * ADR-038: Strict UI-only switch — set which session is in the foreground.
+   *
+   * Contract: does NOT modify `openSessionIds` and does NOT communicate with
+   * the backend. Used when the user toggles between already-open tabs.
+   *
+   * Behaviour:
+   *  - If the session is not in `openSessionIds`, we warn and no-op:
+   *    the caller should be using `openSession` for first-open semantics.
+   *  - If the session is already `activeSessionId`, no-op (idempotent).
+   *  - Otherwise: flip `activeSessionId` to the target session.
+   *
+   * We do NOT touch per-session state here — `openSession` owns session-state
+   * creation, and `session_created` / `session_opened` events refresh fields
+   * like `model` / `provider`. `setActiveTab` is purely "which tab is shown".
+   */
+  setActiveTab: (agentId: string, sessionId: string) => {
     set((state) => {
       const agent = getAgentState(state, agentId);
-      // No-op if already active
+      if (!agent.openSessionIds.includes(sessionId)) {
+        console.warn(
+          `[chatStore] setActiveTab: ${sessionId} not in openSessionIds — ` +
+          `call openSession(agentId, sessionId) first`,
+        );
+        return {};
+      }
       if (agent.activeSessionId === sessionId) return {};
+      return updateAgentState(state, agentId, { activeSessionId: sessionId });
+    });
+  },
 
+  /**
+   * ADR-038: Open a session with full UI + backend activation.
+   *
+   * Three side effects (idempotent, best-effort):
+   *  1. UI: append to `openSessionIds` if not already present (cap MAX_OPEN_TABS),
+   *     set as `activeSessionId`, ensure `sessionStates[sessionId]` exists.
+   *  2. Backend: send MQTT `open_session`. Runtime will ack via `session_opened`
+   *     (flipping `isSessionReady`) or `session_not_opened` (triggering toast).
+   *  3. Local cache: HTTP-load conversation history for the session.
+   *
+   * The MQTT send is fire-and-forget: errors are logged but don't reject the
+   * UI transition. If the user just stopped / restarted the agent, MQTT may
+   * not be connected yet — the publish fails, but the UI is already correct.
+   * The Runtime will publish `session_opened` once the connection is healthy.
+   */
+  openSession: async (agentId: string, sessionId: string) => {
+    // 1. UI: open the tab + activate + ensure session cache slot.
+    set((state) => {
+      const agent = getAgentState(state, agentId);
       const patches: Partial<AgentState> = { activeSessionId: sessionId };
 
-      // ADR-015: Ensure session is in openSessionIds (open tab)
       if (!agent.openSessionIds.includes(sessionId)) {
         const newOpenIds = [...agent.openSessionIds, sessionId].slice(-MAX_OPEN_TABS);
         patches.openSessionIds = newOpenIds;
       }
 
-      let newSessionStates = { ...agent.sessionStates };
-
-      // NOTE: We do NOT clear the old session's transient state (streaming, thinking, etc.)
-      // because the agent may still be writing WS events to it. Clearing would orphan
-      // in-flight messages — the next chunk would create a new message instead of appending.
-      // Transient state is cleared only by explicit actions: clearMessages, clearSessionState,
-      // or when the "done"/"error" event naturally concludes the stream.
-
-      // Ensure the new session has a state entry
+      // Lazy-create the session state entry so downstream consumers
+      // (loadSessionMessages / fetchSessionState / etc.) don't have to
+      // handle a missing entry.
+      const newSessionStates = { ...agent.sessionStates };
       if (!newSessionStates[sessionId]) {
-        newSessionStates[sessionId] = { ...makeInitialSessionState(agent), lastAccessed: Date.now() };
+        newSessionStates[sessionId] = {
+          ...makeInitialSessionState({ ...agent, ...patches }),
+          lastAccessed: Date.now(),
+        };
       } else {
         newSessionStates[sessionId] = {
           ...newSessionStates[sessionId],
           lastAccessed: Date.now(),
         };
       }
-
       patches.sessionStates = newSessionStates;
 
-      // Evict stale sessions
-      const evictResult = evictStaleSessions(
-        { ...state, agentStates: { ...state.agentStates, [agentId]: { ...agent, ...patches } } },
-        agentId,
-        sessionId,
-      );
-
-
-
-      return {
-        ...evictResult,
-      };
+      return updateAgentState(state, agentId, patches);
     });
+
+    // 2. Backend: tell Runtime to transition Closed → Active (or Active no-op).
+    // Best-effort — MQTT may be temporarily disconnected; the Runtime will
+    // still ack correctly when the broker reconnects.
+    try {
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "open_session",
+        payloadJson: { session_id: sessionId },
+      });
+    } catch (err) {
+      console.warn("[chatStore] open_session MQTT failed:", err);
+    }
+
+    // 3. Local cache: load conversation history (initial-load semantics).
+    // Failures are non-fatal; the user can retry or wait for incremental
+    // MQTT patches.
+    try {
+      await get().loadSessionMessages(agentId, sessionId);
+    } catch (err) {
+      console.warn("[chatStore] loadSessionMessages after openSession failed:", err);
+    }
   },
 
   /** Apply session metadata (model/provider/workspace_id) from activate_session response.
@@ -1737,6 +1985,9 @@ const CONTENT_EVENT_TYPES = new Set([
   "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
   "context_usage", "session_state_changed", "stopped", "todo_list_updated",
   "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
+  "reasoning_started", "reasoning_ended",
+  "memory_updated", "skill_executed",
+  "session_meta", "session_config",
   "stream_delta", "record_complete",
 ]);
 
@@ -1948,7 +2199,23 @@ function handleMessageEvent(
       streamingSnapshots.set(sid, {
         content: as.lines.map(l => l.content).join("\n"),
         isStreaming: true,
+        lineCount: as.lines.length,
       });
+      // Flip the per-session `isAssistantReplying` flag once the line count
+      // crosses the threshold. Done OUTSIDE the per-message bubble render
+      // path so the indicator is a stable session-level signal that cannot
+      // be left stuck "on" after record_complete (cleared in that handler).
+      // Edge-triggered: only update when the boolean actually changes,
+      // otherwise every stream_delta would re-render the entire ChatPanel.
+      if (as.role === 'assistant') {
+        const shouldBeReplying = as.lines.length > ASSISTANT_REPLYING_LINE_THRESHOLD;
+        const isCurrentlyReplying = getSessionState(get(), agentId, sid).isAssistantReplying;
+        if (shouldBeReplying !== isCurrentlyReplying) {
+          set((state) => updateSessionState(state, agentId, sid, {
+            isAssistantReplying: shouldBeReplying,
+          }));
+        }
+      }
       notifyActiveStreamSubscribers(sid, msgId);
       break;
     }
@@ -1975,6 +2242,17 @@ function handleMessageEvent(
       const toolCallId = (data.tool_call_id as string | undefined) ?? '';
       const isError = data.is_error === true;
       const toolStatus: "success" | "error" = isError ? "error" : "success";
+      // The terminal event for any streaming assistant message has arrived
+      // (or this record is for a non-streamed role like tool_call).  Either
+      // way, the standalone "replying" indicator is no longer warranted —
+      // clear it unconditionally so the flag can never stay stuck "on".
+      // Edge-triggered: skip the set if it's already false (idempotent
+      // record_complete for tool_call/tool_result without a prior stream).
+      if (getSessionState(get(), agentId, sid).isAssistantReplying) {
+        set((state) => updateSessionState(state, agentId, sid, {
+          isAssistantReplying: false,
+        }));
+      }
       const as = activeStreams.get(sid);
       if (as && as.messageId === msgId) {
         // Stream completed. Check whether the physical predecessor
@@ -2111,6 +2389,18 @@ function handleMessageEvent(
           reasoningEffort: confirmedEffort,
         }));
       }
+      break;
+    }
+
+    case "reasoning_started": {
+      if (!sid) break;
+      set((state) => updateSessionState(state, agentId, sid!, { isReasoning: true }));
+      break;
+    }
+
+    case "reasoning_ended": {
+      if (!sid) break;
+      set((state) => updateSessionState(state, agentId, sid!, { isReasoning: false }));
       break;
     }
 
@@ -2314,6 +2604,7 @@ function handleMessageEvent(
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestion = null;
               sessionPatch.iterationLimitPaused = null;
+              sessionPatch.isAssistantReplying = false;
 
               // ADR-035 C2/O2: if activeStream still has unfrozen content at
               // idle, record_complete was lost (QoS edge case). Trigger HTTP
@@ -2400,9 +2691,96 @@ function handleMessageEvent(
       agentStore.fetchSessions(agentId).catch((e) => {
         console.warn("[ChatStore] fetchSessions after session_created failed:", e);
       });
-      // Auto-activate the new session — matches the "+" button UX where the
-      // user expects to land on the empty new chat immediately.
-      agentStore.switchSession(newSessionId, agentId);
+      // ADR-038: a freshly-created session is Active by definition (the
+      // backend has just spawned the session task), so we use strict
+      // `setActiveTab` (no openSessionIds mutation, no MQTT round-trip)
+      // to flip the foreground tab.  Any caller that initiated the
+      // creation must have already called `createSession`, which itself
+      // routes through the same MQ-backed lifecycle — so the session is
+      // guaranteed to be in `openSessionIds` and Active by the time
+      // this event lands.
+      agentStore.activateNewlyCreatedSession(newSessionId, agentId);
+      break;
+    }
+
+    // ADR-038: Runtime ack that an OpenSession command succeeded.
+    // Topic: acowork/agents/{id}/sessions/{sid}/opened (Retained).
+    // Flips `isSessionReady` so the UI unlocks the input box and
+    // applies the runtime's authoritative model/provider/last_active_at
+    // (defensive — applySessionMeta already covers most of this from
+    // session_state_changed events, but having both paths makes the
+    // contract observable in the store alone).
+    case "session_opened": {
+      const sid = data.session_id as string | undefined;
+      if (!sid) break;
+      const status = data.status as string | undefined;
+      const model = typeof data.model === "string" && data.model ? data.model : null;
+      const provider = typeof data.provider === "string" && data.provider ? data.provider : null;
+      const lastActiveAt =
+        typeof data.last_active_at === "string" && data.last_active_at ? data.last_active_at : null;
+      console.log(
+        `[ChatStore] session_opened for ${agentId}/${sid}: status=${status ?? "?"}, ` +
+        `model=${model ?? "?"}, provider=${provider ?? "?"}, last_active_at=${lastActiveAt ?? "?"}`,
+      );
+      set((state) => {
+        const agent = getAgentState(state, agentId);
+        const newSessionStates = { ...agent.sessionStates };
+        const existing = newSessionStates[sid] ?? {
+          ...makeInitialSessionState(agent),
+          lastAccessed: Date.now(),
+        };
+        newSessionStates[sid] = {
+          ...existing,
+          isSessionReady: true,
+          ...(model ? { model } : {}),
+          ...(provider ? { provider } : {}),
+          lastAccessed: Date.now(),
+        };
+        return updateAgentState(state, agentId, { sessionStates: newSessionStates });
+      });
+      break;
+    }
+
+    // ADR-038: Runtime error when the session is not Active.
+    // Topic: acowork/agents/{id}/sessions/{sid}/not_opened.
+    // We surface this to the UI as a warning toast with a one-click
+    // "reopen" affordance so the user can recover from the rare case
+    // where the frontend issued chat_message / model_switch without a
+    // preceding open_session (e.g. an older client, or a bug elsewhere
+    // in the lifecycle). The backend stays the source of truth — when
+    // the contract is violated, we make it visible.
+    case "session_not_opened": {
+      const sid = data.session_id as string | undefined;
+      if (!sid) break;
+      const reason = (data.reason as string | undefined) ?? "session_closed";
+      const attempted = (data.attempted_command as string | undefined) ?? "?";
+      console.warn(
+        `[ChatStore] session_not_opened for ${agentId}/${sid}: ` +
+        `attempted=${attempted}, reason=${reason}`,
+      );
+      set((state) => {
+        const agent = getAgentState(state, agentId);
+        const existing = agent.sessionStates[sid];
+        if (!existing) return {};
+        return updateSessionState(state, agentId, sid, {
+          isSessionReady: false,
+        });
+      });
+      // Only toast if this is the active session — background tabs
+      // hitting a state error don't deserve a modal callout.
+      const activeSid = getAgentState(get(), agentId).activeSessionId;
+      if (activeSid === sid) {
+        showToast({
+          type: "warning",
+          message: `Session is not open (${reason}). Reopen it to continue.`,
+          action: {
+            label: "Reopen",
+            onClick: () => {
+              void useChatStore.getState().openSession(agentId, sid);
+            },
+          },
+        });
+      }
       break;
     }
 
@@ -2413,6 +2791,86 @@ function handleMessageEvent(
       const agentStore = useAgentStore.getState();
       agentStore.fetchSessions(agentId).catch((e) => {
         console.warn("[ChatStore] fetchSessions after session_deleted failed:", e);
+      });
+      break;
+    }
+
+    // ── Session meta (model_id, provider_id, tokens, title, message_count) ──
+    case "session_meta": {
+      if (!sid) break;
+      const patch: Partial<SessionChatState> = {};
+      if (typeof data.model_id === "string") patch.model = data.model_id;
+      if (typeof data.provider_id === "string") patch.provider = data.provider_id;
+      if (typeof data.message_count === "number") patch.messageTotal = data.message_count;
+      if (typeof data.title === "string" && data.title) {
+        useAgentStore.getState().updateSessionTitle(sid, data.title);
+      }
+      if (Object.keys(patch).length > 0) {
+        set((state) => updateSessionState(state, agentId, sid!, patch));
+      }
+      break;
+    }
+
+    // ── Agent lifecycle: status, meta, config ──
+    case "agent_status": {
+      const aid = data.agent_id as string | undefined;
+      const online = data.online as boolean | undefined;
+      if (aid && online !== undefined) {
+        useAgentStore.getState().updateAgentOnlineStatus(aid, online);
+      }
+      break;
+    }
+
+    case "agent_meta": {
+      const aid = data.agent_id as string | undefined;
+      if (aid) {
+        useAgentStore.getState().patchAgentMeta(aid, {
+          name: data.name as string | undefined,
+          version: data.version as string | undefined,
+          avatar: data.avatar as string | undefined,
+          builtin_avatar: data.builtin_avatar as string | undefined,
+        });
+      }
+      break;
+    }
+
+    case "agent_config": {
+      const aid = data.agent_id as string | undefined;
+      if (aid && typeof data.config_json === "string") {
+        try {
+          const config = JSON.parse(data.config_json);
+          console.log("[ChatStore] Agent config updated:", aid, config);
+          // Config changes trigger agent settings panel refresh via React subscription
+        } catch (e) {
+          console.warn("[ChatStore] Failed to parse agent_config JSON:", e);
+        }
+      }
+      break;
+    }
+
+    case "sidecar_status": {
+      // Sidecar status is currently a debug feature without agent_id routing.
+      // The listener at line 609 filters out events without agent_id, so this
+      // branch is reached only if agent_id is added to the Rust forwarding.
+      console.log("[ChatStore] Sidecar status:", {
+        kind: data.kind,
+        endpoint: data.endpoint,
+        ready: data.ready,
+      });
+      break;
+    }
+
+    case "session_config": {
+      if (sid && typeof data.config_json === "string") {
+        console.log("[ChatStore] Session config updated:", sid, data.config_json.slice(0, 120));
+      }
+      break;
+    }
+
+    case "memory_node_update": {
+      console.log("[ChatStore] Memory node update:", {
+        node_id: data.node_id,
+        agent_id: data.agent_id,
       });
       break;
     }

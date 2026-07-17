@@ -158,6 +158,7 @@
     "selectReasoningEffort": "思考深度",
     "llmNotConfigured": "LLM 공급자가 설정되지 않았습니다. Harness → Providers에서 API 키를 추가하세요.",
     "thinking": "생각 중...",
+    "replying": "답장 중...",
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
     "inputMessage": "메시지 입력...（Enter로 전송, Shift+Enter로 줄바꿈）",
@@ -740,7 +741,8 @@
   "statusBar": {
     "agent": "agent",
     "sessions": "sessions",
-    "context": "context"
+    "context": "context",
+    "mqttDisconnected": "실시간 연결이 끊겼습니다{{reason}}. 자동 재연결 중…"
   },
   "debugPanel": {
     "editSection": "Edit section",

@@ -46,6 +46,8 @@ message DataEnvelope {
     SessionMeta              session_meta              = 32;
     SessionConfig            session_config            = 33;
     SessionMessage           session_message           = 34;
+    SessionOpened            session_opened            = 35;
+    SessionNotOpened         session_not_opened        = 36;
 
     // ── Control commands (Desktop → Runtime) ──
     ControlCommand           control_command           = 40;
@@ -535,6 +537,9 @@ message ControlCommand {
 
     // ── System (1) ──
     Intent              intent                = 17;
+
+    // ── Session lifecycle (1) — ADR-038 ──
+    OpenSession         open_session          = 29;
   }
 }
 
@@ -548,6 +553,16 @@ message DeleteSession {
 /// Graceful close: triggers distillation, preserves JSONL history.
 /// Use Delete to also remove the file.
 message CloseSession {
+  string session_id = 2;
+}
+
+/// Explicit session activation (transitions Closed/NotFound → Active).
+///
+/// Idempotent for already-Active sessions. Triggers lazy-resume from disk for
+/// Closed sessions. New semantic in v3.x (ADR-038) — NOT the legacy
+/// "subscribe push" `activate_session` which was renamed `enable_notify` in
+/// ADR-034 and removed in ADR-035 Phase 3.
+message OpenSession {
   string session_id = 2;
 }
 
@@ -690,4 +705,37 @@ message SidecarStatus {
   string endpoint = 2;
   bool ready = 3;
   string spec_json = 4;  // sidecar-specific metadata
+}
+
+// ── Session lifecycle events (ADR-038) ────────────────────────────────────
+
+/// Server-pushed acknowledgment of an OpenSession control command.
+///
+/// Published by Runtime after it has successfully transitioned the session
+/// to the Active state (either by idempotent no-op or by lazy-resume from
+/// disk). Desktop uses this to unlock the input area and to populate the
+/// session header (model, provider, last_active_at).
+///
+/// Topic: acowork/agents/{id}/sessions/{sid}/opened (Retained)
+message SessionOpened {
+  string session_id = 1;
+  /// "already_active" | "resumed_from_disk"
+  string status = 2;
+  string model = 3;
+  string provider = 4;
+  /// ISO-8601 timestamp from the session meta file, if available.
+  string last_active_at = 5;
+}
+
+/// Server-pushed error when a session-level command targets a non-Active
+/// session. Published by Runtime when ChatMessage / ModelSwitch / etc.
+/// arrives for a session that has been closed or never existed.
+///
+/// Topic: acowork/agents/{id}/sessions/{sid}/not_opened
+message SessionNotOpened {
+  string session_id = 1;
+  /// Name of the attempted command (e.g. "chat_message", "model_switch").
+  string attempted_command = 2;
+  /// "session_not_found" | "session_closed"
+  string reason = 3;
 }

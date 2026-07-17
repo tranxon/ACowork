@@ -173,6 +173,8 @@ export interface AgentStorage {
    *  not yet active). Refreshed on every successful session-list fetch.
    *  `null` = not yet fetched / older Runtime without ADR-028. */
   agentTokenTotals: { input: number; output: number } | null;
+  /** Agent online/offline status — updated by agent_status MQTT event */
+  online: boolean;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -186,6 +188,7 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     pagination: { ...DEFAULT_PAGINATION },
     isLoading: false,
     agentTokenTotals: null,
+    online: true,
   };
 }
 
@@ -252,8 +255,15 @@ interface AgentStoreState {
    *  sessions, is not connected, or the Runtime HTTP server is not yet
    *  listening. */
   fetchLatestSession: (agentId: string) => Promise<{ session_id: string; title: string | null } | null>;
-  /** Activate a session on the backend and update frontend state. */
-  switchSession: (sessionId: string, agentId?: string) => Promise<void>;
+  /**
+   * Activate a session that has just been created (Runtime has already
+   * confirmed via `session_created` event that the session exists and is
+   * Active). This is "fast-path" activation: open the UI tab + send the
+   * open_session MQTT message + load messages, atomically. Used by the
+   * `session_created` event handler so the user's "+ button" lands them on
+   * the fresh chat without an intermediate click.
+   */
+  activateNewlyCreatedSession: (sessionId: string, agentId: string) => Promise<void>;
   /** Remember the last selected session for an agent (survives remount). */
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
   createSession: (agentId: string) => Promise<void>;
@@ -261,6 +271,13 @@ interface AgentStoreState {
   closeSession: (agentId: string, sessionId: string) => Promise<void>;
   /** Update a session's title locally (no API call). */
   updateSessionTitle: (sessionId: string, title: string) => void;
+
+  // ── Agent lifecycle (MQTT-driven) ──
+
+  /** Update agent's online/offline status (from MQTT agent_status event). */
+  updateAgentOnlineStatus: (agentId: string, online: boolean) => void;
+  /** Patch specific meta fields without a full state reload. */
+  patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "display_name" | "role">>) => void;
 
   // ── Profile actions ──
 
@@ -366,12 +383,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (!id) return;
     set({ selectedAgentId: id });
 
-    // Guard: business endpoints (fetchLatestSession → switchSession →
-    // fetchSessionState) all 503 against an unregistered Runtime.  Unstarted
-    // agents are a legitimate UI state — the user picks the Start button (or
-    // double-clicks the list item) to launch them, and startAgentAndSyncUI
-    // atomically bootstraps the session there.  Probing here would only
-    // produce a 503 + console error for an expected, user-driven transition.
+    // Guard: business endpoints (fetchLatestSession → openSession →
+    // fetchSessionState) all 503 against an unregistered Runtime.
+    // Unstarted agents are a legitimate UI state — the user picks the
+    // Start button (or double-clicks the list item) to launch them, and
+    // `startAgentAndSyncUI` atomically bootstraps the session there.
+    // Probing here would only produce a 503 + console error for an
+    // expected, user-driven transition.
+    //
+    // ADR-038: `switchSession` was removed; UI-bound session activation
+    // now flows through `chatStore.openSession`, which sends the
+    // `open_session` MQTT command and reloads messages atomically.
     //
     // Same gate used by ChatPanel's mount effect ("if (!running || !ready)
     // return") so the two paths can never drift out of sync.
@@ -379,17 +401,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     if (!meta?.running || !meta?.ready) return;
 
     // 原子化：选 agent 时加载 latest session 并激活。
-    // switchSession 内部会调后端 /activate（拿到 model/provider/workspace）、
+    // openSession 内部会调后端 open_session (拉起 Closed 状态到 Active)、
     // 写入 session 元数据、拉取 session 列表。fetchSessionState 补上 context
     // usage / todos。loadModels 由 ChatPanel 的 useEffect
     // 在 selectedAgentId 变化 + running && ready 时自动触发。
     const chat = useChatStore.getState();
     if (!chat.agentStates[id]?.activeSessionId) {
-      get().fetchLatestSession(id).then((latest) => {
+      get().fetchLatestSession(id).then(async (latest) => {
         if (!latest?.session_id) return;
-        get().switchSession(latest.session_id, id).then(() => {
-          useChatStore.getState().fetchSessionState(id, latest.session_id);
-        });
+        // ADR-038: opening from the agent sidebar is a "first-open" scenario,
+        // so we use the full openSession (UI + MQTT + load) instead of the
+        // strict setActiveTab.
+        await chat.openSession(id, latest.session_id);
+        await useChatStore.getState().fetchSessionState(id, latest.session_id);
       });
     }
   },
@@ -629,21 +653,18 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }
   },
 
-  switchSession: async (sessionId: string, agentId?: string) => {
-    if (!agentId) return;
-    if (sessionId === useChatStore.getState().getActiveSessionId(agentId)) return;
-
-    // ADR-035: runtime pushes stream_delta to ALL subscribed sessions
-    // uniformly — there is no foreground/background suppression anymore, so
-    // the old enable_notify/disable_notify control calls are removed. The
-    // desktop keeps its MQTT subscription to every opened session; switching
-    // only flips which session is rendered (chatStore foreground flag).
-    useChatStore.getState().activateSession(agentId, sessionId);
-    useChatStore.getState().abortSessionLoad(agentId, sessionId);
-
-    get().saveSessionForAgent(agentId, sessionId);
-
-    // ADR-014: Pull repair — refresh session statuses on switch
+  // ADR-038: Activate a session that the Runtime has just confirmed via
+  // `session_created`. We delegate to `chatStore.openSession` which owns
+  // the full UI+backend+lifecycle transition (UI tab open + MQTT open_session
+  // + HTTP messages reload). Idempotent: re-invocations on an already-open
+  // session no-op the MQTT side and only refresh the message cache.
+  activateNewlyCreatedSession: async (sessionId: string, agentId: string) => {
+    await useChatStore.getState().openSession(agentId, sessionId);
+    // Refresh status pull so the fresh session's backend `idle` state
+    // is reflected in the UI before the user types anything.
+    useChatStore.getState().fetchSessionState(agentId, sessionId);
+    // ADR-014: Refresh the session list so the freshly-created entry is
+    // visible in the sidebar/session dropdown.
     get().fetchSessions(agentId);
   },
 
@@ -688,12 +709,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   closeSession: async (agentId: string, sessionId: string) => {
     try {
-      await invoke("mqtt_publish_control", {
-        agentId,
-        command: "close_session",
-        payloadJson: { session_id: sessionId },
-      });
-
+      // Close session list entry first; the MQTT `close_session` is fired
+      // by `chatStore.closeTab` (which we call below for UI cleanup) — no
+      // double-firing.
       const storage = get().agents[agentId];
       if (!storage) return;
       const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
@@ -719,15 +737,33 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       set((state) => patchAgent(state, agentId, { sessions: remaining }));
 
       if (openIds.includes(sessionId)) {
-        useChatStore.getState().closeTab(agentId, sessionId);
+        // chatStore.closeTab fires MQTT close_session internally and
+        // activates the neighbor tab. await it so the new active session
+        // is visible before we re-open via openSession below.
+        const afterClose = await useChatStore.getState().closeTab(agentId, sessionId);
+        if (afterClose && afterClose !== sessionId) {
+          newCurrentId = afterClose;
+        }
+      } else {
+        // Session was not in the open-tab strip (probably a closed-background
+        // session). Still tell the backend to release its task.
+        try {
+          await invoke("mqtt_publish_control", {
+            agentId,
+            command: "close_session",
+            payloadJson: { session_id: sessionId },
+          });
+        } catch (err) {
+          console.warn("[AgentStore] close_session MQTT failed:", err);
+        }
       }
 
       if (isCurrent) {
         if (newCurrentId) {
-          // Use switchSession for full activate/deactivate lifecycle.
-          // Runtime close already sent DisablePush for the closed session;
-          // switchSession handles the activate for the new one.
-          get().switchSession(newCurrentId, agentId);
+          // ADR-038: re-open the new active tab. openSession is idempotent
+          // and ensures the backend has the session Active (it might be
+          // a session that was previously closed but never re-opened).
+          await useChatStore.getState().openSession(agentId, newCurrentId);
         } else {
           useChatStore.getState().clearMessages(agentId);
         }
@@ -750,7 +786,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (!storage) return;
       const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = storage.sessions.filter((s) => s.session_id !== sessionId);
-      const newCurrentId = isCurrent
+      let newCurrentId: string | null = isCurrent
         ? (remaining.length > 0 ? remaining[0].session_id : null)
         : useChatStore.getState().getActiveSessionId(agentId);
 
@@ -758,15 +794,19 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
       const openIds = useChatStore.getState().getOpenSessionIds(agentId);
       if (openIds.includes(sessionId)) {
-        useChatStore.getState().closeTab(agentId, sessionId);
+        const afterClose = await useChatStore.getState().closeTab(agentId, sessionId);
+        if (afterClose && afterClose !== sessionId) {
+          newCurrentId = afterClose;
+        }
       }
 
       if (isCurrent) {
         if (newCurrentId) {
-          // Use switchSession for full activate/deactivate lifecycle.
-          // Runtime delete already sent DisablePush for the deleted session;
-          // switchSession handles the activate for the new one.
-          get().switchSession(newCurrentId, agentId);
+          // ADR-038: re-open the new active tab. openSession is idempotent
+          // and ensures the backend has the session Active (deleting the
+          // current session is destructive — the new current may be a
+          // Closed session that needs lazy resume).
+          await useChatStore.getState().openSession(agentId, newCurrentId);
         } else {
           useChatStore.getState().clearMessages(agentId);
         }
@@ -801,6 +841,22 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
       }
       return state;
+    });
+  },
+
+  // ── Agent lifecycle (MQTT-driven) ──
+
+  updateAgentOnlineStatus: (agentId: string, online: boolean) => {
+    set((state) => patchAgent(state, agentId, { online }));
+  },
+
+  patchAgentMeta: (agentId: string, meta) => {
+    set((state) => {
+      const existing = state.agents[agentId];
+      if (!existing) return state;
+      return patchAgent(state, agentId, {
+        meta: { ...existing.meta, ...meta },
+      });
     });
   },
 

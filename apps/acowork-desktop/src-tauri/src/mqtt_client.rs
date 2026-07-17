@@ -53,20 +53,56 @@ pub struct MqttMessage {
     pub payload: Vec<u8>,
 }
 
+/// MQTT connection status observed from the broker eventloop.
+///
+/// Per ADR-036 the Rust side is the source-of-truth for connection state:
+/// the Desktop `chatStore` only consumes these transitions via the
+/// `mqtt-status` Tauri event and never attempts to mutate the underlying
+/// `rumqttc::AsyncClient` itself.  Reconnection is owned by `rumqttc`'s
+/// built-in retry; this enum only reports the externally-observable state
+/// changes (broker confirmed connection / broker sent disconnect / network
+/// error).
+#[derive(Debug, Clone)]
+pub enum MqttStatus {
+    /// Broker confirmed the connection (CONNACK received).  Also fired
+    /// after a successful automatic reconnect following a disconnect.
+    Connected,
+    /// Connection is no longer usable.  `reason` is a human-readable
+    /// explanation suitable for surfacing in the UI status bar.
+    Disconnected { reason: String },
+}
+
 impl DesktopMqttClient {
     /// Connect to the MQTT broker and start the event loop.
     ///
-    /// The `on_message` callback is called for every received MQTT message.
-    /// In the Tauri context, this callback forwards messages to
-    /// `app_handle.emit("mqtt-message", payload)` to reach the React frontend.
-    pub async fn connect<F>(
+    /// Returns IMMEDIATELY after spawning the polling task — does NOT wait
+    /// for the initial CONNACK.  Connection status (Connected / Disconnected)
+    /// is delivered through the `on_status` callback asynchronously as the
+    /// broker eventloop observes CONNACK / DISCONNECT / network errors.
+    ///
+    /// This is the correct shape for an event-driven MQTT client: the
+    /// caller doesn't block, doesn't need to manage a "still connecting"
+    /// intermediate state, and the consumer (Tauri layer) is expected to
+    /// expose a synchronous `get_mqtt_status` query alongside the
+    /// `mqtt-status` event so the frontend can fetch the current state on
+    /// startup without racing the listener registration.
+    ///
+    /// `on_message` — called for every received MQTT Publish.
+    /// `on_status`  — ADR-036: called on every state transition
+    ///                 (CONNACK → Connected; DISCONNECT / eventloop error →
+    ///                 Disconnected).  May fire multiple times over the
+    ///                 lifetime of the client (initial connect, reconnects,
+    ///                 outages); the consumer treats it as idempotent.
+    pub async fn connect<F, G>(
         host: &str,
         port: u16,
         user_id: &str,
         on_message: F,
+        on_status: G,
     ) -> Result<Self, String>
     where
         F: Fn(MqttMessage) + Send + Sync + 'static,
+        G: Fn(MqttStatus) + Send + Sync + 'static,
     {
         let pid = std::process::id();
         let client_id = format!("user:{}:desktop:{}", user_id, pid);
@@ -77,20 +113,22 @@ impl DesktopMqttClient {
 
         let (client, mut eventloop) = AsyncClient::new(options, 100);
 
-        // Wait for connection
-        Self::wait_for_connection(&client, 20).await;
-
         tracing::info!(
             host,
             port,
             client_id = %client_id,
-            "Desktop MQTT client connected"
+            "Desktop MQTT client created (poll task spawning)"
         );
 
         let on_msg = Arc::new(on_message);
+        let on_status = Arc::new(on_status);
 
-        // Spawn event loop poller
+        // Spawn the eventloop poller.  This task owns `eventloop` for the
+        // lifetime of the DesktopMqttClient.  All status transitions
+        // (initial CONNACK, automatic reconnects, DISCONNECT, network
+        // errors) flow through this single loop and into `on_status`.
         let on_msg_clone = on_msg.clone();
+        let on_status_clone = on_status.clone();
         let poll_task = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -100,9 +138,28 @@ impl DesktopMqttClient {
                             payload: publish.payload.to_vec(),
                         });
                     }
+                    // Broker confirmed (re)connection.
+                    Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
+                        on_status_clone(MqttStatus::Connected);
+                    }
+                    // Broker initiated a disconnect (e.g. admin shutdown,
+                    // client_id collision).  `rumqttc` will retry; we just
+                    // surface the transition.
+                    Ok(Event::Incoming(rumqttc::Incoming::Disconnect)) => {
+                        on_status_clone(MqttStatus::Disconnected {
+                            reason: "broker sent DISCONNECT".into(),
+                        });
+                    }
                     Ok(_) => continue,
                     Err(e) => {
+                        // Network-level failure (TCP reset, DNS, broker
+                        // gone).  Surface as disconnect and let `rumqttc`'s
+                        // internal retry recover.  The next successful
+                        // `poll()` will deliver ConnAck automatically.
                         tracing::warn!(error = %e, "Desktop MQTT event loop error, retrying");
+                        on_status_clone(MqttStatus::Disconnected {
+                            reason: format!("eventloop error: {e}"),
+                        });
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -116,29 +173,16 @@ impl DesktopMqttClient {
     }
 
     /// Connect with default localhost and port.
-    pub async fn connect_default<F>(user_id: &str, on_message: F) -> Result<Self, String>
+    pub async fn connect_default<F, G>(
+        user_id: &str,
+        on_message: F,
+        on_status: G,
+    ) -> Result<Self, String>
     where
         F: Fn(MqttMessage) + Send + Sync + 'static,
+        G: Fn(MqttStatus) + Send + Sync + 'static,
     {
-        Self::connect("127.0.0.1", 19875, user_id, on_message).await
-    }
-
-    /// Wait for the MQTT connection by attempting a lightweight subscribe.
-    async fn wait_for_connection(client: &AsyncClient, max_attempts: usize) {
-        for _ in 0..max_attempts {
-            match client
-                .subscribe("_acowork/desktop_health", QoS::AtMostOnce)
-                .await
-            {
-                Ok(_) => {
-                    let _ = client.unsubscribe("_acowork/desktop_health").await;
-                    return;
-                }
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
+        Self::connect("127.0.0.1", 19875, user_id, on_message, on_status).await
     }
 
     /// Subscribe to a topic filter.
@@ -269,6 +313,10 @@ impl DesktopMqttClient {
                     Some(mqtt_proto::control_command::Command::CreateSession(_)) => "create_session",
                     Some(mqtt_proto::control_command::Command::DeleteSession(_)) => "delete_session",
                     Some(mqtt_proto::control_command::Command::CloseSession(_)) => "close_session",
+                    // ADR-038: explicit session activation. Runtime ack
+                    // (or error) comes via `SessionOpened` /
+                    // `SessionNotOpened` events.
+                    Some(mqtt_proto::control_command::Command::OpenSession(_)) => "open_session",
                     Some(mqtt_proto::control_command::Command::UpdateSessionTitle(_)) => "update_session_title",
                     Some(mqtt_proto::control_command::Command::ChatMessage(_)) => "chat_message",
                     Some(mqtt_proto::control_command::Command::Stop(_)) => "stop",
@@ -332,6 +380,9 @@ mod tests {
             "test-user",
             |_msg| {
                 // no-op callback
+            },
+            |_status| {
+                // no-op status callback (ADR-036)
             },
         )
         .await;

@@ -162,6 +162,11 @@ export function AppLayout() {
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.contextUsage ?? null;
   });
+  // ADR-036: MQTT connection liveness is pushed from Rust via the
+  // `mqtt-status` Tauri event.  The Rust eventloop owns reconnection —
+  // we just reflect state into the UI.
+  const mqttConnected = useChatStore((s) => s.mqttConnected);
+  const lastMqttError = useChatStore((s) => s.lastMqttError);
   const { t } = useTranslation();
 
   // ── Glass tint color ──────────────────────────────────────────────
@@ -349,6 +354,38 @@ export function AppLayout() {
     }
   }, [gatewayStatus, setStatus, clearStatus]);
 
+  // ADR-036: surface MQTT connection liveness in the status bar.
+  //
+  // The Rust eventloop is the source-of-truth (it observes CONNACK /
+  // DISCONNECT on `rumqttc`'s eventloop and emits `mqtt-status` events
+  // to the frontend).  We do NOT trigger any reconnect from here —
+  // reconnect is owned by `rumqttc`'s built-in retry; we only reflect
+  // the state so the user sees when input has gone disabled.
+  //
+  // Status priority: a Gateway-level warning/error takes precedence over
+  // a transient MQTT disconnect, so we only update if Gateway is healthy.
+  //
+  // **Distinguishing "never connected" from "lost connection"**: the
+  // store starts with `lastMqttError === null`, so we use it as the
+  // "have we ever observed a disconnect?" flag.  Without this guard the
+  // banner flashes for ~1s on every cold start (between Rust spawn and
+  // the first mqtt-status event reaching the frontend).
+  useEffect(() => {
+    if (gatewayStatus !== "connected") return;
+    if (!mqttConnected && lastMqttError !== null) {
+      const reason = lastMqttError ? `: ${lastMqttError}` : "";
+      setStatus(t("statusBar.mqttDisconnected", { reason }), "warning");
+    } else if (mqttConnected) {
+      // MQTT just reconnected — clear any leftover MQTT status message
+      // (but only if the status bar is currently showing an MQTT message;
+      // a generic warning should not be cleared).
+      const currentMsg = useStatusBarStore.getState().message;
+      if (currentMsg && currentMsg.startsWith(t("statusBar.mqttDisconnected", { reason: "" }).slice(0, 12))) {
+        clearStatus();
+      }
+    }
+  }, [mqttConnected, lastMqttError, gatewayStatus, setStatus, clearStatus, t]);
+
   // Detect wake from sleep via visibility change and reconnect
   useEffect(() => {
     const handleVisibility = () => {
@@ -364,7 +401,12 @@ export function AppLayout() {
         sessionsForSelected: a.selectedAgentId ? (a.agents[a.selectedAgentId]?.sessions ?? []).map((s) => s.session_id) : null,
       });
       checkHealth();
-      // ADR-033: MQTT connection is managed by Rust backend — no reconnect needed.
+      // ADR-036: reconnection is owned by the Rust `rumqttc` eventloop
+      // (it polls and retries internally).  On visibility-change we only
+      // poke the Gateway health check; if MQTT is down the next
+      // `mqtt-status` event from Rust will flip `mqttConnected` and the
+      // status bar effect above will display the warning.  We do NOT
+      // touch the MQTT client here.
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);

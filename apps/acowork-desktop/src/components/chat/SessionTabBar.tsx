@@ -46,7 +46,6 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
   const totalPages = agentStorage?.pagination.totalPages ?? 1;
   const pageSize = agentStorage?.pagination.pageSize ?? 20;
   const fetchSessions = useAgentStore((s) => s.fetchSessions);
-  const switchSession = useAgentStore((s) => s.switchSession);
   const deleteSession = useAgentStore((s) => s.deleteSession);
   const openSessionIds = useChatStore((s) => s.agentStates[agentId]?.openSessionIds ?? EMPTY_ARRAY);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -67,11 +66,12 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
+  // ADR-038: selecting a session from the history dropdown is a "first-open"
+  // event from the user's POV — it may or may not be in `openSessionIds`.
+  // We delegate to `chatStore.openSession`, which combines the UI half
+  // (open tab) with the backend half (MQTT open_session + HTTP reload).
   const handleSelect = async (sessionId: string) => {
-    await switchSession(sessionId, agentId);
-    useAgentStore.getState().saveSessionForAgent(agentId, sessionId);
-    // Ensure tab is opened
-    useChatStore.getState().openTab(agentId, sessionId);
+    await useChatStore.getState().openSession(agentId, sessionId);
     onClose();
   };
 
@@ -244,7 +244,9 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const openSessionIds = agent?.openSessionIds ?? [];
   const activeSessionId = agent?.activeSessionId;
   const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? []);
-  const { switchSession, createSession, saveSessionForAgent, closeSession } = useAgentStore();
+  const { createSession, closeSession } = useAgentStore();
+  const setActiveTab = useChatStore((s) => s.setActiveTab);
+  const openSession = useChatStore((s) => s.openSession);
 
   const [listOpen, setListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
@@ -264,12 +266,14 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     return state?.sessionStatus;
   };
 
-  const handleTabClick = async (sessionId: string) => {
+  // ADR-038: clicking on a tab in the strip is "切换前台" (switching foreground)
+  // — the session is *already* in `openSessionIds` and has been confirmed
+  // Active on the backend. We use the strict no-side-effect `setActiveTab`.
+  const handleTabClick = (sessionId: string) => {
     // Ignore clicks that ended a drag
     if (scrollableRef.current?.hasMoved.current) return;
     if (sessionId === activeSessionId) return;
-    await switchSession(sessionId, agentId);
-    saveSessionForAgent(agentId, sessionId);
+    setActiveTab(agentId, sessionId);
   };
 
   const handleClose = async (e: React.MouseEvent, sessionId: string) => {
@@ -295,30 +299,34 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   };
 
   const finishCloseTab = (sessionId: string) => {
-    const newActiveId = useChatStore.getState().closeTab(agentId, sessionId);
-
-    // If the closed tab was active, switch to the new active
-    if (sessionId === activeSessionId && newActiveId) {
-      switchSession(newActiveId, agentId);
-      saveSessionForAgent(agentId, newActiveId);
-    }
-
-    // If no tabs remain, reuse an existing session from the session list
-    // instead of unconditionally creating a new one.  Creating always would
-    // trigger an infinite loop: close last tab → auto-create 1-tab session →
-    // close it → auto-create again.  Switching to a real session breaks the
-    // cycle while still guaranteeing the chat area is never blank.
-    const remaining = useChatStore.getState().getOpenSessionIds(agentId);
-    if (remaining.length === 0) {
-      const sessions = useAgentStore.getState().agents[agentId]?.sessions;
-      const otherSession = sessions?.find((s: { session_id: string }) => s.session_id !== sessionId);
-      if (otherSession) {
-        switchSession(otherSession.session_id, agentId);
-        saveSessionForAgent(agentId, otherSession.session_id);
-      } else {
-        createSession(agentId);
+    void useChatStore.getState().closeTab(agentId, sessionId).then((newActiveId) => {
+      // If the closed tab was active, switch to the new active
+      if (sessionId === activeSessionId && newActiveId) {
+        // ADR-038: the new active session is now in openSessionIds (the
+        // neighbor was the immediate right-or-left sibling). It is the
+        // "still open" case, so `setActiveTab` is the right verb.
+        useChatStore.getState().setActiveTab(agentId, newActiveId);
       }
-    }
+
+      // If no tabs remain, reopen an existing session from the session list
+      // instead of unconditionally creating a new one.  Creating always would
+      // trigger an infinite loop: close last tab → auto-create 1-tab session →
+      // close it → auto-create again.  Switching to a real session breaks the
+      // cycle while still guaranteeing the chat area is never blank.
+      const remaining = useChatStore.getState().getOpenSessionIds(agentId);
+      if (remaining.length === 0) {
+        const sessions = useAgentStore.getState().agents[agentId]?.sessions;
+        const otherSession = sessions?.find((s: { session_id: string }) => s.session_id !== sessionId);
+        if (otherSession) {
+          // ADR-038: this session is not yet in openSessionIds (it was a
+          // background session from the sidebar), so we need the full
+          // openSession path (UI + backend).
+          void openSession(agentId, otherSession.session_id);
+        } else {
+          createSession(agentId);
+        }
+      }
+    });
   };
 
   const handleNew = () => {

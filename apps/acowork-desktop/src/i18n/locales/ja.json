@@ -160,6 +160,7 @@
     "startAgent": "Start Agent",
     "llmNotConfigured": "LLM プロバイダーが設定されていません。Harness → Providers で API キーを追加してください。",
     "thinking": "思考中...",
+    "replying": "返信中...",
     "working": "処理中...",
     "compacting": "コンテキスト圧縮中...",
     "inputMessage": "メッセージを入力...（Enterで送信、Shift+Enterで改行）",
@@ -742,7 +743,8 @@
   "statusBar": {
     "agent": "agent",
     "sessions": "sessions",
-    "context": "context"
+    "context": "context",
+    "mqttDisconnected": "リアルタイム接続が切断されました{{reason}}。再接続中…"
   },
   "debugPanel": {
     "editSection": "Edit section",

@@ -158,6 +158,7 @@
     "selectReasoningEffort": "思考深度",
     "llmNotConfigured": "未設定 LLM 服務商。請在 Harness → 模型服務商 中新增 API 金鑰。",
     "thinking": "正在思考...",
+    "replying": "正在回覆...",
     "working": "正在處理...",
     "compacting": "上下文壓縮中...",
     "inputMessage": "輸入訊息...（Enter 傳送，Shift+Enter 換行）",
@@ -740,7 +741,8 @@
   "statusBar": {
     "agent": "agent",
     "sessions": "sessions",
-    "context": "context"
+    "context": "context",
+    "mqttDisconnected": "實時連線已中斷{{reason}}，正在自動重新連線…"
   },
   "debugPanel": {
     "editSection": "Edit section",

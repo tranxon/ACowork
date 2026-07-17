@@ -14,7 +14,7 @@ use acowork_core::mqtt_proto::{
     self, ControlCommand, DataEnvelope,
     control_command, data_envelope, session_message,
 };
-use crate::mqtt_client::{DesktopMqttClient, MqttMessage};
+use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
 use crate::state::AppState;
 
 /// Connect to the MQTT broker and start receiving events.
@@ -22,6 +22,11 @@ use crate::state::AppState;
 /// Called by the frontend after the Gateway is confirmed healthy.
 /// Subscribes to agent lifecycle topics and starts forwarding events
 /// to the frontend via `app.emit("mqtt-event", payload)`.
+///
+/// ADR-036: also wires the broker eventloop's CONNACK / DISCONNECT
+/// transitions to a dedicated `mqtt-status` Tauri event so the React
+/// `chatStore` can keep `mqttConnected` truthful after a Desktop
+/// restart or Runtime process recycling.
 #[tauri::command]
 pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.mqtt_client.lock().await;
@@ -30,6 +35,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     }
 
     let user_id = "default"; // Single-user phase; multi-user will use actual user_id
+
+    // ADR-036: clone the shared status slot so the `'static` on_status
+    // callback (which outlives this command) can keep it in sync.  The
+    // `get_mqtt_status` command reads the same slot synchronously so
+    // the frontend never races the listener registration.
+    let last_mqtt_status = state.last_mqtt_status.clone();
 
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
@@ -78,6 +89,50 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "agent_id": deleted.agent_id,
                     "session_id": deleted.session_id,
                     "deleted_at": deleted.deleted_at,
+                });
+                let _ = app_handle.emit("agent-event", event);
+            }
+
+            // ── ADR-038: explicit lifecycle acks ──
+            //
+            // The Runtime publishes these after handling an `open_session`
+            // MQTT control command (Success) or after rejecting any
+            // session-level command for a non-Active session (Error).
+            // The Desktop uses them to flip `isSessionReady` and
+            // surface a toast with a reopen affordance respectively — see
+            // `chatStore.case "session_opened"` and
+            // `chatStore.case "session_not_opened"`.
+            //
+            // SessionOpened / SessionNotOpened proto messages do not
+            // carry `agent_id` (it's encoded in the topic path
+            // `acowork/agents/{id}/sessions/{sid}/opened` /
+            // `…/not_opened`); we parse it out of the topic so the
+            // flat-JSON payload stays self-describing for the Desktop,
+            // matching the shape of `session_created` / `session_meta`
+            // siblings that DO include `agent_id` inline.
+            data_envelope::Payload::SessionOpened(opened) => {
+                let agent_id = extract_agent_id_from_topic(&msg.topic)
+                    .unwrap_or_default();
+                let event = serde_json::json!({
+                    "type": "session_opened",
+                    "agent_id": agent_id,
+                    "session_id": opened.session_id,
+                    "status": opened.status,
+                    "model": opened.model,
+                    "provider": opened.provider,
+                    "last_active_at": opened.last_active_at,
+                });
+                let _ = app_handle.emit("agent-event", event);
+            }
+            data_envelope::Payload::SessionNotOpened(not_opened) => {
+                let agent_id = extract_agent_id_from_topic(&msg.topic)
+                    .unwrap_or_default();
+                let event = serde_json::json!({
+                    "type": "session_not_opened",
+                    "agent_id": agent_id,
+                    "session_id": not_opened.session_id,
+                    "attempted_command": not_opened.attempted_command,
+                    "reason": not_opened.reason,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }
@@ -141,12 +196,74 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("agent-event", event);
             }
 
+            // ── Session config ──
+            data_envelope::Payload::SessionConfig(config) => {
+                let event = serde_json::json!({
+                    "type": "session_config",
+                    "agent_id": config.agent_id,
+                    "session_id": config.session_id,
+                    "config_json": config.config_json,
+                });
+                let _ = app_handle.emit("agent-event", event);
+            }
+
+            // ── Memory node update ──
+            data_envelope::Payload::MemoryNodeUpdate(update) => {
+                let event = serde_json::json!({
+                    "type": "memory_node_update",
+                    "agent_id": update.agent_id,
+                    "node_id": update.node_id,
+                    "node_json": update.node_json,
+                });
+                let _ = app_handle.emit("agent-event", event);
+            }
+
             // ── Global resources & control commands: ignore (Gateway handles these) ──
             _ => {}
         }
     };
 
-    let client = DesktopMqttClient::connect_default(user_id, on_message).await?;
+    // Mirror into the shared status slot so `get_mqtt_status` can
+    // return the current value synchronously.  Cloned here (instead of
+    // moving the outer one) so we keep the original binding for any
+    // potential future use in this function body.
+    let on_status_last_mqtt_status = last_mqtt_status.clone();
+
+    let client = DesktopMqttClient::connect_default(
+        user_id,
+        on_message,
+        // ADR-036: bridge `rumqttc` eventloop status → Tauri event so the
+        // React `chatStore` can keep `mqttConnected` truthful.  We emit a
+        // dedicated `mqtt-status` event (NOT `agent-event`/`mqtt-event`)
+        // because connection liveness is a different concern from the
+        // business message stream and must remain easy to filter on.
+        //
+        // We also mirror every transition into `last_mqtt_status`
+        // (shared with the `get_mqtt_status` command) so the
+        // frontend can fetch the current state synchronously after
+        // listener registration — no race with the first event.
+        move |status| {
+            let payload = match &status {
+                MqttStatus::Connected => serde_json::json!({
+                    "connected": true,
+                }),
+                MqttStatus::Disconnected { reason } => serde_json::json!({
+                    "connected": false,
+                    "reason": reason,
+                }),
+            };
+            if let Err(e) = app.emit("mqtt-status", payload) {
+                tracing::warn!(error = %e, "failed to emit mqtt-status");
+            }
+            // Mirror into shared state so `get_mqtt_status` returns
+            // the latest value.  We wrap the actual write in a tiny
+            // `tokio::spawn` to keep this callback non-async-friendly.
+            let slot = on_status_last_mqtt_status.clone();
+            tokio::spawn(async move {
+                *slot.write().await = Some(status);
+            });
+        },
+    ).await?;
 
     // Subscribe to agent lifecycle topics
     client.subscribe_agent_lifecycle().await?;
@@ -154,9 +271,17 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     // ADR-033: Subscribe to all session message topics (streaming chunks,
     // context_usage, session_state_changed, etc.) so the frontend receives
     // real-time session events across all sessions.
+    //
+    // ADR-035 O2: **QoS 1 is mandatory**. The Runtime publishes
+    // `stream_delta` and `record_complete` at QoS 1; if we subscribe at
+    // QoS 0 the broker downgrades delivery to fire-and-forget, losing the
+    // end-to-end ordering guarantee (and any QoS 1 retry semantics on the
+    // `record_complete` authoritative terminal event). See
+    // `subscribe_agent_session` for the per-session twin that already
+    // uses QoS 1.
     client.subscribe(
         "acowork/agents/+/sessions/+/messages/#",
-        crate::mqtt_client::MqttQoS::AtMostOnce,
+        crate::mqtt_client::MqttQoS::AtLeastOnce,
     ).await?;
 
     let shared = Arc::new(tokio::sync::Mutex::new(client));
@@ -173,6 +298,41 @@ pub async fn disconnect_mqtt(state: tauri::State<'_, AppState>) -> Result<(), St
     *guard = None;
     tracing::info!("Desktop MQTT client disconnected");
     Ok(())
+}
+
+/// Snapshot of the current MQTT connection status, returned to the frontend.
+///
+/// ADR-036: this synchronous query complements the `mqtt-status` Tauri event.
+/// The frontend's `initMqttListener` first registers the event listener
+/// (asynchronous, events between `connect_mqtt` return and `listen` resolving
+/// would otherwise be lost) and then calls this command to pull the current
+/// state from the Rust-side source-of-truth.
+///
+/// `known: false` means the poll task has not yet observed any transition
+/// (initial state, before the first ConnAck or Disconnect).  The frontend
+/// uses this to avoid flashing the disconnected banner on cold start.
+#[tauri::command]
+pub async fn get_mqtt_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let snapshot = state.last_mqtt_status.read().await.clone();
+    let payload = match &snapshot {
+        None => serde_json::json!({
+            "known": false,
+            "connected": false,
+            "reason": null,
+        }),
+        Some(MqttStatus::Connected) => serde_json::json!({
+            "known": true,
+            "connected": true,
+        }),
+        Some(MqttStatus::Disconnected { reason }) => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "reason": reason,
+        }),
+    };
+    Ok(payload)
 }
 
 /// Subscribe to session events for a specific agent session.
@@ -225,6 +385,7 @@ pub async fn mqtt_unsubscribe_agent_session(
 /// - "create_session": {}
 /// - "delete_session": { "session_id" }
 /// - "close_session": { "session_id" }
+/// - "open_session": { "session_id" }    // ADR-038
 /// - "update_session_title": { "session_id", "title" }
 /// - "continue_execution": { "session_id", "reason" }
 /// - "enable_notify": { "session_id" }
@@ -289,6 +450,15 @@ fn build_control_command(
         ),
         "close_session" => control_command::Command::CloseSession(
             mqtt_proto::CloseSession {
+                session_id,
+            },
+        ),
+        // ADR-038: explicit session activation. Runtime transitions
+        // Closed/NotFound → Active and acks via `SessionOpened`
+        // (or errors via `SessionNotOpened`). Idempotent for
+        // already-Active sessions.
+        "open_session" => control_command::Command::OpenSession(
+            mqtt_proto::OpenSession {
                 session_id,
             },
         ),
@@ -742,4 +912,49 @@ fn base64_encode(data: &[u8]) -> String {
         result.push(if chunk.len() > 2 { CHARS[(triple & 0x3f) as usize] } else { b'=' } as char);
     }
     result
+}
+
+/// Extract the `agent_id` segment from a session-scoped MQTT topic.
+///
+/// All session topics share the prefix `acowork/agents/{id}/sessions/{sid}/...`.
+/// Returns `None` for topics that don't match this shape (which should
+/// only happen on malformed/misconfigured topics).
+fn extract_agent_id_from_topic(topic: &str) -> Option<String> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    // acowork / agents / {id} / sessions / ...  (>=3rd segment, 0-indexed)
+    if parts.len() >= 3 && parts[0] == "acowork" && parts[1] == "agents" {
+        let agent_id = parts[2];
+        if !agent_id.is_empty() {
+            return Some(agent_id.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_agent_id_from_opened_topic() {
+        assert_eq!(
+            extract_agent_id_from_topic("acowork/agents/com.acowork.pm/sessions/sess-1/opened"),
+            Some("com.acowork.pm".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_agent_id_from_not_opened_topic() {
+        assert_eq!(
+            extract_agent_id_from_topic("acowork/agents/agent_x/sessions/sess-9/not_opened"),
+            Some("agent_x".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_agent_id_missing_returns_none() {
+        assert_eq!(extract_agent_id_from_topic(""), None);
+        assert_eq!(extract_agent_id_from_topic("not/the/expected/topic"), None);
+        assert_eq!(extract_agent_id_from_topic("acowork/agents//sessions/x/opened"), None);
+    }
 }

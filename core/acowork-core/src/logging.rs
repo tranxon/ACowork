@@ -54,16 +54,30 @@ impl SizeRollingFileAppender {
     /// `max_mb` — max file size in MB before rolling to a new file.
     /// `max_count` — maximum number of log files to keep (0 = unlimited).
     /// The initial file is named `YYYYMMDD_HHMMSS.log` based on current time.
-    pub fn new(dir: std::path::PathBuf, max_mb: u64, max_count: usize) -> Self {
+    ///
+    /// Returns `Err(io::Error)` if neither `OpenOptions::create+append` nor
+    /// `File::create` can produce the initial log file. Callers are expected
+    /// to fall back to a stderr-only subscriber rather than panic, so that
+    /// transient filesystem failures (e.g. sandbox EPERM, full disk, missing
+    /// parent directory) do not abort process startup.
+    pub fn new(
+        dir: std::path::PathBuf,
+        max_mb: u64,
+        max_count: usize,
+    ) -> std::io::Result<Self> {
         let max_bytes = max_mb * 1024 * 1024;
         let now = chrono::Local::now();
         let filename = format!("{}.log", now.format("%Y%m%d_%H%M%S"));
         let path = dir.join(&filename);
+        // First try create+append (preserves prior content); if the open fails
+        // (e.g. file is exclusively locked or append-only flag set), fall back
+        // to File::create which truncates. Both errors propagate so the caller
+        // can switch to a stderr-only subscriber instead of crashing.
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .unwrap_or_else(|_| std::fs::File::create(&path).unwrap());
+            .or_else(|_| std::fs::File::create(&path))?;
         let current_size = file.metadata().map(|m| m.len()).unwrap_or(0);
 
         let appender = Self {
@@ -77,7 +91,7 @@ impl SizeRollingFileAppender {
             }),
         };
         appender.enforce_max_file_count();
-        appender
+        Ok(appender)
     }
 
     /// Create a new log file with a fresh timestamp name.

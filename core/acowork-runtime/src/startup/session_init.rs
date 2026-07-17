@@ -52,11 +52,24 @@ pub(crate) async fn phase_b_init_session(
     let conversation_session =
         if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
             tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
-            Some(crate::conversation::ConversationSession::resume(
+            match crate::conversation::ConversationSession::resume(
                 work_dir_path,
                 &latest_id,
                 committed_lines.clone(),
-            )?)
+            ) {
+                Ok(conv) => Some(conv),
+                Err(e) => {
+                    let msg = format!(
+                        "session_persistence_unavailable: cannot resume session \"{}\" in {:?}: {}",
+                        latest_id, conversations_dir, e
+                    );
+                    eprintln!("⚠️ {}; runtime will run with an in-memory session (history will be lost on restart)", msg);
+                    if let Ok(mut reasons) = ctx.degraded_reasons.write() {
+                        reasons.push(msg);
+                    }
+                    None
+                }
+            }
         } else {
             let new_id = crate::conversation::generate_session_id();
             tracing::info!(session_id = %new_id, "Creating new conversation session");

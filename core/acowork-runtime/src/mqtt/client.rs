@@ -423,6 +423,68 @@ impl MqttChunkPublisher {
             .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))
     }
 
+    /// ADR-038: Publish a `SessionOpened` ack to
+    /// `acowork/agents/{id}/sessions/{sid}/opened` (QoS 1, non-retained).
+    pub async fn publish_session_opened(
+        &self,
+        session_id: &str,
+        status: &str,
+        model: Option<String>,
+        provider: Option<String>,
+        last_active_at: Option<String>,
+    ) -> Result<(), RuntimeMqttClientError> {
+        let payload = acowork_core::mqtt_proto::SessionOpened {
+            session_id: session_id.to_string(),
+            status: status.to_string(),
+            model: model.unwrap_or_default(),
+            provider: provider.unwrap_or_default(),
+            last_active_at: last_active_at.unwrap_or_default(),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionOpened(payload)),
+        };
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/opened",
+            self.agent_id, session_id
+        );
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.client
+            .publish(topic, QoS::AtLeastOnce, false, bytes)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("session_opened: {}", e)))
+    }
+
+    /// ADR-038: Publish a `SessionNotOpened` error to
+    /// `acowork/agents/{id}/sessions/{sid}/not_opened` (QoS 0).
+    pub async fn publish_session_not_opened(
+        &self,
+        session_id: &str,
+        attempted_command: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeMqttClientError> {
+        let payload = acowork_core::mqtt_proto::SessionNotOpened {
+            session_id: session_id.to_string(),
+            attempted_command: attempted_command.to_string(),
+            reason: reason.to_string(),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::SessionNotOpened(payload),
+            ),
+        };
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/not_opened",
+            self.agent_id, session_id
+        );
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.client
+            .publish(topic, QoS::AtMostOnce, false, bytes)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("session_not_opened: {}", e)))
+    }
+
     /// Publish a session event envelope to the broker at QoS 0 (default for
     /// `messages/*` streaming events per ADR-035 D1 / `mqtt.md` §8.3).
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {
@@ -431,11 +493,13 @@ impl MqttChunkPublisher {
 
     /// Publish a session event envelope at the given QoS.
     ///
-    /// ADR-035 O2: `record_complete` is published at QoS 1 (AtLeastOnce)
+    /// ADR-035 O2/D1: `record_complete` is published at QoS 1 (AtLeastOnce)
     /// because it is the authoritative terminal event — losing it leaves
-    /// the message stuck in the streaming state with no fallback. All other
-    /// `messages/*` events stay at QoS 0 (a lost `stream_delta` frame is
-    /// covered by the next frame or the final `record_complete`).
+    /// the message stuck in the streaming state with no fallback.
+    /// `tool_approval_needed` and `session_state_changed` are also QoS 1
+    /// (AtLeastOnce) because losing them breaks the approval flow and
+    /// leaves the frontend with a stale session state.
+    /// All other `messages/*` events stay at QoS 0.
     async fn publish_with_qos(
         &self,
         session_id: &str,
@@ -458,51 +522,50 @@ impl MqttChunkPublisher {
 
     /// Publish a chunk event via MQTT (QoS 0, protobuf DataEnvelope).
     #[allow(dead_code)]
-    pub(crate) fn publish_chunk(&self, session_id: &str, message_id: &str, delta: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_chunk(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        delta: &str,
+    ) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let d = delta.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::Chunk(ChunkPayload {
-                    message_id: mid,
-                    delta: d,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "chunk", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::Chunk(ChunkPayload {
+                message_id: mid,
+                delta: d,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "chunk", &bytes).await;
     }
 
     /// Publish a done event via MQTT (QoS 0, protobuf DataEnvelope).
-    pub(crate) fn publish_done(&self, session_id: &str, message_id: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_done(&self, session_id: &str, message_id: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::Done(DonePayload {
-                    message_id: mid,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "done", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::Done(DonePayload {
+                message_id: mid,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "done", &bytes).await;
     }
 
     // ADR-035 C1: publish_tool_call / publish_tool_result removed — tool_call
@@ -512,61 +575,54 @@ impl MqttChunkPublisher {
     // tool_result at the publish layer.
 
     /// Publish an error event via MQTT (QoS 1, protobuf DataEnvelope).
-    pub(crate) fn publish_error(&self, session_id: &str, message_id: &str, error_msg: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_error(&self, session_id: &str, message_id: &str, error_msg: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let err = error_msg.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::Error(ErrorPayload {
-                    message_id: mid,
-                    error: err,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "error", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::Error(ErrorPayload {
+                message_id: mid,
+                error: err,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "error", &bytes).await;
     }
 
     /// Publish a stopped event via MQTT (QoS 1, protobuf DataEnvelope).
-    pub(crate) fn publish_stopped(&self, session_id: &str, message_id: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_stopped(&self, session_id: &str, message_id: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::Stopped(StoppedPayload {
-                    message_id: mid,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "stopped", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::Stopped(StoppedPayload {
+                message_id: mid,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "stopped", &bytes).await;
     }
 
     /// Publish a session_state_changed event via MQTT (QoS 1).
     ///
     /// ADR-034 Phase 8: takes a single `SessionStateChangeEvent` struct.
-    pub(crate) fn publish_session_state_changed(
+    pub(crate) async fn publish_session_state_changed(
         &self,
         ev: SessionStateChangeEvent<'_>,
     ) {
-        let publisher = self.clone();
         let sid = ev.session_id.to_string();
         let sjson = ev.status_json.to_string();
         let m = ev.model.map(|s| s.to_string()).unwrap_or_default();
@@ -577,31 +633,29 @@ impl MqttChunkPublisher {
         let t = ev.temperature.unwrap_or(0.0);
         let cu = ev.context_usage_json.map(|s| s.to_string()).unwrap_or_default();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::SessionStateChanged(
-                    SessionStateChangedPayload {
-                        session_id: sid.clone(),
-                        status_json: sjson,
-                        model: m,
-                        provider: p,
-                        workspace_id: w,
-                        ratio: r,
-                        reasoning_effort: re,
-                        temperature: t,
-                        context_usage_json: cu,
-                    },
-                )),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "session_state_changed", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::SessionStateChanged(
+                SessionStateChangedPayload {
+                    session_id: sid.clone(),
+                    status_json: sjson,
+                    model: m,
+                    provider: p,
+                    workspace_id: w,
+                    ratio: r,
+                    reasoning_effort: re,
+                    temperature: t,
+                    context_usage_json: cu,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish_with_qos(&sid, "session_state_changed", &bytes, QoS::AtLeastOnce).await;
     }
 
     /// Publish a context_usage event via MQTT (QoS 0).
@@ -610,12 +664,11 @@ impl MqttChunkPublisher {
     /// as JSON in `context_usage_json`. The Desktop Rust subscriber expands it
     /// into the same shape it emits for `SessionStateChanged`, so the frontend
     /// can render the StatusBar from either source without special-casing.
-    pub(crate) fn publish_context_usage(
+    pub(crate) async fn publish_context_usage(
         &self,
         session_id: &str,
         ctx_info: &acowork_core::protocol::ContextUsageInfo,
     ) {
-        let publisher = self.clone();
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
         // Backwards-compat: keep the legacy individual token fields populated
@@ -626,143 +679,128 @@ impl MqttChunkPublisher {
         let total_input_tokens = ctx_info.total_input_tokens.unwrap_or(0);
         let total_output_tokens = ctx_info.total_output_tokens.unwrap_or(0);
         let cu_json = serde_json::to_string(ctx_info).unwrap_or_default();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::ContextUsage(ContextUsagePayload {
                 session_id: sid.clone(),
-                event: Some(session_message::Event::ContextUsage(ContextUsagePayload {
-                    session_id: sid.clone(),
-                    input_tokens,
-                    output_tokens,
-                    total_input_tokens,
-                    total_output_tokens,
-                    context_usage_json: cu_json,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "context_usage", &bytes).await;
-        });
+                input_tokens,
+                output_tokens,
+                total_input_tokens,
+                total_output_tokens,
+                context_usage_json: cu_json,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "context_usage", &bytes).await;
     }
 
     /// Publish a compacting_started/compacting_ended event via MQTT (QoS 1).
-    pub(crate) fn publish_compacting(&self, session_id: &str, started: bool) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_compacting(&self, session_id: &str, started: bool) {
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
         let event_type = if started { "compacting_started" } else { "compacting_ended" };
-        tokio::spawn(async move {
-            let payload = CompactingPayload {
+        let payload = CompactingPayload {
+            session_id: sid.clone(),
+        };
+        let event = if started {
+            session_message::Event::CompactingStarted(payload)
+        } else {
+            session_message::Event::CompactingEnded(payload)
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(SessionMessage {
+                agent_id,
                 session_id: sid.clone(),
-            };
-            let event = if started {
-                session_message::Event::CompactingStarted(payload)
-            } else {
-                session_message::Event::CompactingEnded(payload)
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(SessionMessage {
-                    agent_id,
-                    session_id: sid.clone(),
-                    event: Some(event),
-                })),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, event_type, &bytes).await;
-        });
+                event: Some(event),
+            })),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, event_type, &bytes).await;
     }
 
     /// Publish an ask_question event via MQTT (QoS 1).
-    pub(crate) fn publish_ask_question(&self, session_id: &str, message_id: &str, question_json: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_ask_question(&self, session_id: &str, message_id: &str, question_json: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
         let qj = question_json.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::AskQuestion(AskQuestionPayload {
-                    message_id: mid,
-                    question_json: qj,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "ask_question", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::AskQuestion(AskQuestionPayload {
+                message_id: mid,
+                question_json: qj,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "ask_question", &bytes).await;
     }
 
     /// Publish a todo_updated event via MQTT (QoS 0).
-    pub(crate) fn publish_todo_updated(&self, session_id: &str, todos_json: &str) {
-        let publisher = self.clone();
+    pub(crate) async fn publish_todo_updated(&self, session_id: &str, todos_json: &str) {
         let sid = session_id.to_string();
         let tj = todos_json.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::TodoUpdated(TodoUpdatedPayload {
-                    todos_json: tj,
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "todo_updated", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::TodoUpdated(TodoUpdatedPayload {
+                todos_json: tj,
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "todo_updated", &bytes).await;
     }
 
     /// Publish an iteration_limit_paused event via MQTT (QoS 1).
-    pub(crate) fn publish_iteration_limit_paused(
+    pub(crate) async fn publish_iteration_limit_paused(
         &self,
         session_id: &str,
         iteration: u32,
         max_iterations: u32,
     ) {
-        let publisher = self.clone();
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::IterationLimitPaused(
-                    IterationLimitPausedPayload {
-                        session_id: sid.clone(),
-                        iteration,
-                        max_iterations,
-                    },
-                )),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "iteration_limit_paused", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::IterationLimitPaused(
+                IterationLimitPausedPayload {
+                    session_id: sid.clone(),
+                    iteration,
+                    max_iterations,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "iteration_limit_paused", &bytes).await;
     }
 
     /// Publish a tool_approval_needed event via MQTT (QoS 1).
     ///
     /// ADR-034 Phase 8: takes a single `ToolApprovalNeededEvent` struct.
-    pub(crate) fn publish_tool_approval_needed(
+    pub(crate) async fn publish_tool_approval_needed(
         &self,
         ev: ToolApprovalNeededEvent<'_>,
     ) {
-        let publisher = self.clone();
         let sid = ev.session_id.to_string();
         let rid = ev.request_id.to_string();
         let tn = ev.tool_name.to_string();
@@ -771,62 +809,57 @@ impl MqttChunkPublisher {
         let rsn = ev.reason.to_string();
         let tcid = ev.tool_call_id.to_string();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::ToolApprovalNeeded(
-                    ToolApprovalNeededPayload {
-                        session_id: sid.clone(),
-                        request_id: rid,
-                        tool_name: tn,
-                        action: act,
-                        risk_level: rl,
-                        reason: rsn,
-                        tool_call_id: tcid,
-                        approval_timeout_secs: ev.approval_timeout_secs,
-                    },
-                )),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "tool_approval_needed", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::ToolApprovalNeeded(
+                ToolApprovalNeededPayload {
+                    session_id: sid.clone(),
+                    request_id: rid,
+                    tool_name: tn,
+                    action: act,
+                    risk_level: rl,
+                    reason: rsn,
+                    tool_call_id: tcid,
+                    approval_timeout_secs: ev.approval_timeout_secs,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish_with_qos(&sid, "tool_approval_needed", &bytes, QoS::AtLeastOnce).await;
     }
 
     /// Publish a new_data_available event via MQTT (QoS 0).
-    pub(crate) fn publish_new_data_available(
+    pub(crate) async fn publish_new_data_available(
         &self,
         session_id: &str,
         interval_ms: u32,
         title: Option<&str>,
     ) {
-        let publisher = self.clone();
         let sid = session_id.to_string();
         let t = title.map(|s| s.to_string()).unwrap_or_default();
         let agent_id = self.agent_id.clone();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
-                session_id: sid.clone(),
-                event: Some(session_message::Event::NewDataAvailable(
-                    NewDataAvailablePayload {
-                        session_id: sid.clone(),
-                        interval_ms,
-                        title: t,
-                    },
-                )),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "new_data_available", &bytes).await;
-        });
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::NewDataAvailable(
+                NewDataAvailablePayload {
+                    session_id: sid.clone(),
+                    interval_ms,
+                    title: t,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "new_data_available", &bytes).await;
     }
 
     /// Publish a `stream_delta` event via MQTT (QoS 1, ADR-035 + reorder fix).
@@ -841,7 +874,7 @@ impl MqttChunkPublisher {
     /// `messages[]` even if the broker delivers frames in a different order.
     /// See `mqtt_payload.proto::StreamDeltaPayload.seq` for the receiving
     /// contract.
-    pub(crate) fn publish_stream_delta(
+    pub(crate) async fn publish_stream_delta(
         &self,
         session_id: &str,
         lines: &[StreamLine],
@@ -850,33 +883,30 @@ impl MqttChunkPublisher {
         if lines.is_empty() {
             return;
         }
-        let publisher = self.clone();
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
         let lines = lines.to_vec();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::StreamDelta(StreamDeltaPayload {
                 session_id: sid.clone(),
-                event: Some(session_message::Event::StreamDelta(StreamDeltaPayload {
-                    session_id: sid.clone(),
-                    lines,
-                    seq: Some(seq),
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            // QoS 1 — `stream_delta` was QoS 0 in ADR-035 initial cut, but
-            // a fire-and-forget channel cannot guarantee order against
-            // QoS 1 `record_complete` events arriving in parallel. With QoS
-            // 1 on both endpoints the broker preserves relative order
-            // end-to-end; combined with the `seq` payload the Desktop is
-            // also robust to any rare reorder.
-            publisher.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce).await;
-        });
+                lines,
+                seq: Some(seq),
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        // QoS 1 — `stream_delta` was QoS 0 in ADR-035 initial cut, but
+        // a fire-and-forget channel cannot guarantee order against
+        // QoS 1 `record_complete` events arriving in parallel. With QoS
+        // 1 on both endpoints the broker preserves relative order
+        // end-to-end; combined with the `seq` payload the Desktop is
+        // also robust to any rare reorder.
+        self.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce).await;
     }
 
     /// Publish a `record_complete` event via MQTT (QoS 1, ADR-035 C1/O2).
@@ -902,7 +932,7 @@ impl MqttChunkPublisher {
     // would just shuffle the same fields around without reducing the
     // surface area, so we keep it inline and silence the lint.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn publish_record_complete(
+    pub(crate) async fn publish_record_complete(
         &self,
         session_id: &str,
         role: &str,
@@ -920,39 +950,36 @@ impl MqttChunkPublisher {
         } else {
             content.to_string()
         };
-        let publisher = self.clone();
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
         let role = role.to_string();
         let mid = message_id.to_string();
         let tool_name = tool_name.to_string();
         let tool_call_id = tool_call_id.to_string();
-        tokio::spawn(async move {
-            let event = SessionMessage {
-                agent_id,
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::RecordComplete(RecordCompletePayload {
                 session_id: sid.clone(),
-                event: Some(session_message::Event::RecordComplete(RecordCompletePayload {
-                    session_id: sid.clone(),
-                    role,
-                    message_id: mid,
-                    content: final_content,
-                    tool_name,
-                    tool_call_id,
-                    is_error,
-                    seq: Some(seq),
-                })),
-            };
-            let envelope = DataEnvelope {
-                version: 1,
-                payload: Some(data_envelope::Payload::SessionMessage(event)),
-            };
-            let bytes = prost::Message::encode_to_vec(&envelope);
-            // ADR-035 O2: QoS 1 — record_complete is the authoritative
-            // terminal event; losing it leaves the message stuck. The
-            // per-session `seq` makes the frame position self-healing on
-            // the Desktop (see `insertBySeq`).
-            publisher.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce).await;
-        });
+                role,
+                message_id: mid,
+                content: final_content,
+                tool_name,
+                tool_call_id,
+                is_error,
+                seq: Some(seq),
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        // ADR-035 O2: QoS 1 — record_complete is the authoritative
+        // terminal event; losing it leaves the message stuck. The
+        // per-session `seq` makes the frame position self-healing on
+        // the Desktop (see `insertBySeq`).
+        self.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce).await;
     }
 }
 

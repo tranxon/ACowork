@@ -444,7 +444,7 @@ impl ConversationSession {
 
         // Initialize committed_lines to the actual number of existing lines in
         // the JSONL file. Without this, the counter stays at 0 (the value
-        // passed by callers like ensure_session_in_memory), which causes the
+        // passed by callers like `SessionManager::open`), which causes the
         // delivery cursor (ADR-025) to be reset to {0, 0} during full-load —
         // and the first incremental poll re-delivers all historical messages.
         let existing_lines = count_jsonl_lines(&file_path).unwrap_or(0);

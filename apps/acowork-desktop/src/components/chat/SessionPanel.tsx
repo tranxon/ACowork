@@ -34,7 +34,6 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
   const sessions = agentStorage?.sessions ?? [];
   const isLoading = agentStorage?.isLoading ?? false;
   const fetchSessions = useAgentStore((s) => s.fetchSessions);
-  const switchSession = useAgentStore((s) => s.switchSession);
   const createSession = useAgentStore((s) => s.createSession);
   const deleteSession = useAgentStore((s) => s.deleteSession);
 
@@ -76,9 +75,12 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
     }
   }, [sessions]);
 
+  // ADR-038: opening a session from the history list is a "first-open"
+  // scenario (or a re-open after close), so we delegate to
+  // `chatStore.openSession` which combines the UI tab + MQTT open_session
+  // + HTTP message reload into one atomic transition.
   const handleSwitchSession = async (sessionId: string) => {
-    await switchSession(sessionId, agentId);
-    useAgentStore.getState().saveSessionForAgent(agentId, sessionId);
+    await useChatStore.getState().openSession(agentId, sessionId);
     setOpen(false);
   };
 

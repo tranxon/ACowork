@@ -285,15 +285,26 @@ export function AgentList({ width }: AgentListProps) {
                 position="right"
                 delayMs={0}
               >
-                <AgentAvatar
-                  agentId={agent.agent_id}
-                  displayName={agent.display_name ?? agent.name}
-                  avatarUrl={agent.avatar}
-                  version={agent.version}
-                  builtinAvatarId={agent.builtin_avatar}
-                  size={40}
-                  className={isCollapsed ? "mx-auto" : ""}
-                />
+                <div className="relative inline-flex">
+                  <AgentAvatar
+                    agentId={agent.agent_id}
+                    displayName={agent.display_name ?? agent.name}
+                    avatarUrl={agent.avatar}
+                    version={agent.version}
+                    builtinAvatarId={agent.builtin_avatar}
+                    size={40}
+                    className={isCollapsed ? "mx-auto" : ""}
+                  />
+                  {/* Online status indicator dot */}
+                  {agent.running && (
+                    <span
+                      className={cn(
+                        "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white dark:border-zinc-900",
+                        agentsMap[agent.agent_id]?.online !== false ? "bg-green-500" : "bg-zinc-400"
+                      )}
+                    />
+                  )}
+                </div>
               </Tooltip>
 
               {/* Content area — width-collapsed when sidebar is collapsed to preserve item height */}

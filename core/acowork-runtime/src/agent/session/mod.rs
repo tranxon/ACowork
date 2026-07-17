@@ -9,5 +9,7 @@ pub mod session_manager;
 pub mod session_task;
 pub mod restorer;
 
-pub use session_manager::{SessionManager, SessionManagerConfig};
+pub use session_manager::{
+    SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,
+};
 pub use session_task::SessionMessage;

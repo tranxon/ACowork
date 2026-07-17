@@ -105,6 +105,14 @@ pub type SharedMemoryStore = Arc<std::sync::RwLock<Option<Arc<acowork_grafeo::gr
 /// can detect dimension mismatches with the persisted HNSW index.
 pub type SharedEmbedDimension = Arc<std::sync::RwLock<u64>>;
 
+/// Shared degradation reasons — startup-phase failures that are not
+/// fatal enough to abort the runtime but degrade functionality.
+///
+/// Populated during Phase B when session persistence is unavailable
+/// (e.g. sandbox EPERM on the conversations directory) and read by
+/// the `/health` endpoint so the frontend can surface a warning.
+pub type SharedDegradation = Arc<std::sync::RwLock<Vec<String>>>;
+
 /// State shared with HTTP handlers.
 #[derive(Clone)]
 struct HttpState {
@@ -128,6 +136,9 @@ struct HttpState {
     /// Active embedding provider dimension. Set once at Phase A
     /// (from AgentHelloConfig) and read by the stats endpoint.
     embed_provider_dim: SharedEmbedDimension,
+    /// Startup degradation reasons surfaced via `/health`.
+    /// Populated by Phase B when non-fatal errors occur.
+    degraded_reasons: SharedDegradation,
 }
 
 /// Handle to the running HTTP server.
@@ -145,6 +156,12 @@ impl RuntimeHttpServer {
     ///
     /// Returns the server handle with the assigned port. The Gateway
     /// uses this port to reverse-proxy large data queries.
+    ///
+    /// Note: `start` intentionally takes each shared resource individually
+    /// (rather than bundling everything in a single config struct) to keep
+    /// resource lifetimes explicit at the call site and to avoid coupling
+    /// the HTTP module to startup-phase internals.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         work_dir: PathBuf,
         agent_id: String,
@@ -153,6 +170,7 @@ impl RuntimeHttpServer {
         dispatch_tx: SharedDispatchSender,
         memory_store: SharedMemoryStore,
         embed_provider_dim: SharedEmbedDimension,
+        degraded_reasons: SharedDegradation,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -162,6 +180,7 @@ impl RuntimeHttpServer {
             dispatch_tx,
             memory_store,
             embed_provider_dim,
+            degraded_reasons,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -246,12 +265,15 @@ impl RuntimeHttpServer {
 struct HealthResponse {
     status: &'static str,
     agent_id: String,
+    degraded_reasons: Vec<String>,
 }
 
 async fn health(State(state): State<HttpState>) -> Json<HealthResponse> {
+    let degraded = state.degraded_reasons.read().unwrap_or_else(|e| e.into_inner()).clone();
     Json(HealthResponse {
         status: "ok",
         agent_id: state.agent_id,
+        degraded_reasons: degraded,
     })
 }
 
@@ -1660,6 +1682,7 @@ mod tests {
         let memory_store: SharedMemoryStore =
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1669,6 +1692,7 @@ mod tests {
             dispatch_tx,
             memory_store,
             embed_dim,
+            degraded_reasons,
         )
         .await
         .expect("server should start");
@@ -1680,6 +1704,8 @@ mod tests {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["status"], "ok");
         assert_eq!(body["agent_id"], "com.test.agent");
+        // degraded_reasons should be empty for a clean test start
+        assert!(body["degraded_reasons"].as_array().unwrap().is_empty(), "expected empty degraded_reasons");
 
         // Sessions (empty)
         let url = format!("http://127.0.0.1:{}/sessions", server.port);
@@ -1745,6 +1771,7 @@ mod tests {
         let memory_store: SharedMemoryStore =
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1754,6 +1781,7 @@ mod tests {
             dispatch_tx,
             memory_store,
             embed_dim,
+            degraded_reasons,
         )
         .await
         .unwrap();
@@ -1802,6 +1830,7 @@ mod tests {
         let memory_store: SharedMemoryStore =
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(512));
+        let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1811,6 +1840,7 @@ mod tests {
             dispatch_tx,
             memory_store,
             embed_dim,
+            degraded_reasons,
         )
         .await
         .expect("server should start");

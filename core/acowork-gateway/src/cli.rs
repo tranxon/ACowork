@@ -267,28 +267,28 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
             "WARN: failed to create log directory {:?}: {}; falling back to stderr-only",
             log_dir, e
         );
-        // Fallback: stderr-only with reload support
-        let (filter, handle) = reload::Layer::new(env_filter);
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(CrlfStderr)
-                    .with_target(false)
-                    .with_timer(ChronoLocalTimer)
-                    .compact()
-            )
-            .init();
-        return Some(handle);
+        return init_stderr_only(env_filter);
     }
 
     // Size-based rolling file appender: splits when file exceeds log_file_size_mb
     let max_file_count = if log_file_count > 0 { log_file_count as usize } else { 0 };
-    let file_appender = Arc::new(acowork_core::logging::SizeRollingFileAppender::new(
-        log_dir,
+    // File appender creation may fail (e.g. macOS sandbox EPERM on $HOME paths,
+    // full disk, missing perms). Fall back to stderr-only rather than panicking,
+    // so a transient filesystem error does not abort gateway startup.
+    let file_appender = match acowork_core::logging::SizeRollingFileAppender::new(
+        log_dir.clone(),
         if log_file_size_mb > 0 { log_file_size_mb } else { 10 },
         max_file_count,
-    ));
+    ) {
+        Ok(appender) => Arc::new(appender),
+        Err(e) => {
+            eprintln!(
+                "WARN: failed to open log file in {:?}: {}; falling back to stderr-only",
+                log_dir, e
+            );
+            return init_stderr_only(env_filter);
+        }
+    };
     // Store for dynamic log file count updates
     let _ = FILE_APPENDER.set(file_appender.clone());
     let (filter, handle) = reload::Layer::new(env_filter);
@@ -319,6 +319,29 @@ fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Opti
         .with(file_layer)
         .init();
 
+    Some(handle)
+}
+
+/// Initialize a stderr-only tracing subscriber with reload support.
+///
+/// Used as the fallback when the rolling file appender cannot be opened
+/// (sandbox EPERM, missing parent dir, full disk). Keeping the reload
+/// handle means the gateway can still push dynamic log-level updates
+/// even when the file writer is unavailable.
+fn init_stderr_only(env_filter: tracing_subscriber::EnvFilter) -> Option<crate::LogReloadHandle> {
+    use tracing_subscriber::{reload, layer::SubscriberExt, util::SubscriberInitExt};
+    use acowork_core::logging::ChronoLocalTimer;
+    let (filter, handle) = reload::Layer::new(env_filter);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(CrlfStderr)
+                .with_target(false)
+                .with_timer(ChronoLocalTimer)
+                .compact(),
+        )
+        .init();
     Some(handle)
 }
 

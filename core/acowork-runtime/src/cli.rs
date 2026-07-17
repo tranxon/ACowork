@@ -143,23 +143,7 @@ impl Cli {
                 "WARN: failed to create log directory {:?}: {}; falling back to stderr-only",
                 log_dir, e
             );
-
-            // Fallback: use reload::Layer even for stderr-only so we can
-
-            // still dynamically adjust log level at runtime.
-            let (filter, reload_handle) = reload::Layer::new(env_filter);
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(false)
-                        .with_thread_ids(false)
-                        .with_file(false)
-                        .with_timer(ChronoLocalTimer)
-                        .compact(),
-                )
-                .init();
-            return Some(reload_handle);
+            return init_stderr_only(env_filter);
         }
 
         let max_mb = if self.log_file_size_mb > 0 {
@@ -172,11 +156,24 @@ impl Cli {
         } else {
             0
         };
-        let file_appender = Arc::new(acowork_core::logging::SizeRollingFileAppender::new(
-            log_dir,
+        // File appender creation may fail (e.g. macOS sandbox EPERM on
+        // $HOME paths, missing parent dir, full disk). Fall back to
+        // stderr-only rather than panicking, otherwise the entire runtime
+        // dies before any subsystem (HTTP, MQTT) can start.
+        let file_appender = match acowork_core::logging::SizeRollingFileAppender::new(
+            log_dir.clone(),
             max_mb,
             max_file_count,
-        ));
+        ) {
+            Ok(appender) => Arc::new(appender),
+            Err(e) => {
+                eprintln!(
+                    "WARN: failed to open log file in {:?}: {}; falling back to stderr-only",
+                    log_dir, e
+                );
+                return init_stderr_only(env_filter);
+            }
+        };
 
         // Store for LogRotate gRPC handler
         let _ = FILE_APPENDER.set(file_appender.clone());
@@ -202,6 +199,28 @@ impl Cli {
             .init();
         Some(reload_handle)
     }
+}
+
+/// Initialize a stderr-only tracing subscriber with reload support.
+///
+/// Used as the fallback when the rolling file appender cannot be opened
+/// (sandbox EPERM, missing parent dir, full disk). Keeping the reload
+/// handle means the gateway can still push dynamic log-level updates
+/// even when the file writer is unavailable.
+fn init_stderr_only(env_filter: EnvFilter) -> Option<LogReloadHandle> {
+    let (filter, reload_handle) = reload::Layer::new(env_filter);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_file(false)
+                .with_timer(ChronoLocalTimer)
+                .compact(),
+        )
+        .init();
+    Some(reload_handle)
 }
 
 // ── Resource cache (version-driven diff sync) ─────────────────────────
@@ -995,76 +1014,15 @@ async fn process_gateway_recv(
                         return LoopAction::Continue;
                     }
 
-                    if action == "activate_session" {
-                        let request_id = params
-                            .get("request_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
-                            Some(sid) if !sid.is_empty() => sid.to_string(),
-
-                            _ => {
-                                let data = serde_json::json!({ "error": "Missing or empty session_id parameter" });
-                                send_session_response(grpc_client, &request_id, data).await;
-                                return LoopAction::Continue;
-                            }
-                        };
-
-                        // Ensure session is in memory — lazy-resume from disk if needed.
-                        // Uses the unified session recovery path (same as chat_message,
-                        // model_switch, etc.) to avoid duplicated resume logic.
-                        if let Err(e) = session_manager
-                            .ensure_session_in_memory(&session_id, std::path::Path::new(work_dir))
-                            .await
-                        {
-                            tracing::warn!(session_id = %session_id, error = %e, "Cannot activate session");
-                            let data = serde_json::json!({ "error": format!("Session not found: {}", session_id) });
-                            send_session_response(grpc_client, &request_id, data).await;
-                            return LoopAction::Continue;
-                        }
-
-                        // ADR-035 Phase 3: EnableNotify removed — push drives
-                        // all streaming, no activation-time notify needed.
-
-                        // Read session metadata from JSONL to return model/provider/workspace_id
-                        // to the frontend in the activation response, so it can populate the UI
-                        // immediately without waiting for a WS event.
-                        let (session_model, session_provider, session_workspace_id) = {
-                            let conversations_dir =
-                                std::path::Path::new(work_dir).join("conversations");
-                            // ADR-024: read from per-session meta file.
-                            match crate::conversation::read_session_meta(&conversations_dir, &session_id)
-                            {
-                                Ok(meta) => (meta.model, meta.provider, meta.workspace_id),
-                                Err(_) => (None, None, None),
-                            }
-                        };
-
-                        let data = serde_json::json!({
-                            "session_id": session_id,
-                            "activated": true,
-                            "model": session_model,
-                            "provider": session_provider,
-                            "workspace_id": session_workspace_id,
-                        });
-                        send_session_response(grpc_client, &request_id, data).await;
-                        return LoopAction::Continue;
-                    }
-
-                    if action == "deactivate_session" {
-                        // ADR-035 Phase 3: deactivate_session is now a no-op —
-                        // EnableNotify/DisableNotify removed, push drives all
-                        // streaming uniformly. Validate session_id for logging.
-                        let _session_id = match params.get("session_id").and_then(|v| v.as_str()) {
-                            Some(sid) if !sid.is_empty() => sid.to_string(),
-                            _ => {
-                                tracing::warn!("deactivate_session: missing or empty session_id");
-                                return LoopAction::Continue;
-                            }
-                        };
-                        return LoopAction::Continue;
-                    }
+                    // ADR-038: `activate_session` / `deactivate_session`
+                    // HTTP actions have been removed. Sessions are now
+                    // activated explicitly over MQTT via the
+                    // `OpenSession` control command (field 29) — see
+                    // `gateway_loop::handle_open_session` and the
+                    // `SessionOpened` / `SessionNotOpened` event
+                    // contract. Desktop never calls these; any
+                    // remaining in-flight gRPC/REST client should
+                    // migrate to MQTT `open_session` instead.
 
                     if action == "close_session" {
                         let request_id = params
@@ -1144,13 +1102,20 @@ async fn process_gateway_recv(
                                 return LoopAction::Continue;
                             }
                         };
-                        // Ensure session is in memory (may have been evicted or Runtime restarted).
-                        if let Err(e) = session_manager
-                            .ensure_session_in_memory(&target_sid, std::path::Path::new(work_dir))
-                            .await
-                        {
-                            tracing::warn!(session_id = %target_sid, error = %e, "Cannot update session title");
-                            let data = serde_json::json!({ "error": format!("Session not found: {}", target_sid) });
+                        // ADR-038: state guard. Frontend MUST have sent MQTT
+                        // `open_session` before any session-level command;
+                        // we no longer trigger lazy-resume from HTTP. If the
+                        // session is not in memory, return early with a
+                        // warning so the upstream layer (Desktop's
+                        // SessionNotOpened handler) can surface a reopen
+                        // affordance.
+                        if session_manager.get_session(&target_sid).is_none() {
+                            tracing::warn!(
+                                session_id = %target_sid,
+                                action = %action,
+                                "session not Active: open_session not received before update_session_title",
+                            );
+                            let data = serde_json::json!({ "error": format!("Session not open: {}", target_sid) });
                             send_session_response(grpc_client, &request_id, data).await;
                             return LoopAction::Continue;
                         }
@@ -1203,12 +1168,16 @@ async fn process_gateway_recv(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or(&target_session_id);
 
-                            // Ensure session is in memory after potential Runtime restart.
-                            if let Err(e) = session_manager
-                                .ensure_session_in_memory(switch_session_id, std::path::Path::new(work_dir))
-                                .await
-                            {
-                                tracing::warn!(session_id = %switch_session_id, error = %e, "Cannot route model_switch");
+                            // ADR-038: state guard. Frontend MUST have sent MQTT
+                            // `open_session` before model_switch; we no longer
+                            // trigger lazy-resume from HTTP. Return early if
+                            // the session is not in memory.
+                            if session_manager.get_session(switch_session_id).is_none() {
+                                tracing::warn!(
+                                    session_id = %switch_session_id,
+                                    action = "model_switch",
+                                    "session not Active: open_session not received before model_switch",
+                                );
                                 return LoopAction::Continue;
                             }
 
@@ -1247,12 +1216,16 @@ async fn process_gateway_recv(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or(&target_session_id);
 
-                            // Ensure session is in memory after potential Runtime restart.
-                            if let Err(e) = session_manager
-                                .ensure_session_in_memory(effort_session_id, std::path::Path::new(work_dir))
-                                .await
-                            {
-                                tracing::warn!(session_id = %effort_session_id, error = %e, "Cannot route reasoning_effort");
+                            // ADR-038: state guard. Frontend MUST have sent MQTT
+                            // `open_session` before reasoning_effort; we no
+                            // longer trigger lazy-resume from HTTP. Return
+                            // early if the session is not in memory.
+                            if session_manager.get_session(effort_session_id).is_none() {
+                                tracing::warn!(
+                                    session_id = %effort_session_id,
+                                    action = "reasoning_effort",
+                                    "session not Active: open_session not received before reasoning_effort",
+                                );
                                 return LoopAction::Continue;
                             }
 
@@ -1433,12 +1406,16 @@ async fn process_gateway_recv(
 
                         // Route directly to AgentLoop's inbound channel to
                         // unblock `await_question_answer()` immediately.
-                        // Ensure session is in memory after potential Runtime restart.
-                        if let Err(e) = session_manager
-                            .ensure_session_in_memory(&target_session_id, std::path::Path::new(work_dir))
-                            .await
-                        {
-                            tracing::warn!(session_id = %target_session_id, error = %e, "Cannot route question_answer");
+                        // ADR-038: state guard. Frontend MUST have sent MQTT
+                        // `open_session` before question_answer; we no longer
+                        // trigger lazy-resume from HTTP. Return early if the
+                        // session is not in memory.
+                        if session_manager.get_session(&target_session_id).is_none() {
+                            tracing::warn!(
+                                session_id = %target_session_id,
+                                action = "question_answer",
+                                "session not Active: open_session not received before question_answer",
+                            );
                             return LoopAction::Continue;
                         }
 
@@ -1474,12 +1451,15 @@ async fn process_gateway_recv(
                             "Routing compact_context to session"
                         );
 
-                        // Ensure session is in memory after potential Runtime restart.
-                        if let Err(e) = session_manager
-                            .ensure_session_in_memory(&target_session_id, std::path::Path::new(work_dir))
-                            .await
-                        {
-                            tracing::warn!(session_id = %target_session_id, error = %e, "Cannot route compact_context");
+                        // ADR-038: state guard. Frontend MUST have sent MQTT
+                        // `open_session` before compact_context; we no longer
+                        // trigger lazy-resume from HTTP.
+                        if session_manager.get_session(&target_session_id).is_none() {
+                            tracing::warn!(
+                                session_id = %target_session_id,
+                                action = "compact_context",
+                                "session not Active: open_session not received before compact_context",
+                            );
                             return LoopAction::Continue;
                         }
 
@@ -1501,12 +1481,15 @@ async fn process_gateway_recv(
                             "Routing compress_action to session"
                         );
 
-                        // Ensure session is in memory after potential Runtime restart.
-                        if let Err(e) = session_manager
-                            .ensure_session_in_memory(&target_session_id, std::path::Path::new(work_dir))
-                            .await
-                        {
-                            tracing::warn!(session_id = %target_session_id, error = %e, "Cannot route compress_action");
+                        // ADR-038: state guard. Frontend MUST have sent MQTT
+                        // `open_session` before compress_action; we no longer
+                        // trigger lazy-resume from HTTP.
+                        if session_manager.get_session(&target_session_id).is_none() {
+                            tracing::warn!(
+                                session_id = %target_session_id,
+                                action = "compress_action",
+                                "session not Active: open_session not received before compress_action",
+                            );
                             return LoopAction::Continue;
                         }
 
@@ -1603,21 +1586,20 @@ async fn process_gateway_recv(
                             .get("attached_context")
                             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-                    // Ensure session is in memory after potential Runtime restart.
-                    // This is the unified lazy-resume path — if the Runtime crashed and
-                    // was restarted, or the session was evicted due to idle timeout,
-                    // this call restores the session from its JSONL file on disk.
-                    if let Err(e) = session_manager
-                        .ensure_session_in_memory(&target_session_id, std::path::Path::new(work_dir))
-                        .await
-                    {
-                        tracing::error!(
+                    // ADR-038: state guard. Frontend MUST have sent MQTT
+                    // `open_session` before chat_message; we no longer
+                    // trigger lazy-resume from HTTP. If the session is
+                    // not in memory, surface a clear agent_error so the
+                    // Desktop's SessionNotOpened handler can show a
+                    // reopen affordance.
+                    if session_manager.get_session(&target_session_id).is_none() {
+                        tracing::warn!(
                             session_id = %target_session_id,
-                            error = %e,
-                            "Failed to ensure session in memory for chat_message"
+                            action = "chat_message",
+                            "session not Active: open_session not received before chat_message",
                         );
                         let error_params = serde_json::json!({
-                            "content": format!("Session not found: {}", target_session_id),
+                            "content": format!("Session not open: {}", target_session_id),
                             "message_id": message_id,
                         });
                         let _ = grpc_client

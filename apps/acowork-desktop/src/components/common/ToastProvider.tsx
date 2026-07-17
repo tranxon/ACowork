@@ -14,6 +14,20 @@ interface ToastContextValue {
   addToast: (toast: Omit<Toast, "id">) => void;
 }
 
+/**
+ * ADR-038: imperative-toast bridge for non-React callers (e.g. zustand stores,
+ * Tauri command handlers). Fires a CustomEvent on `window`; `ToastProvider`
+ * listens and pipes it back through the same `addToast` used by `useToast`.
+ *
+ * Detail shape mirrors `Omit<Toast, "id">` — `action.onClick` is a function
+ * reference (CustomEvent detail is by-reference, not serialized).
+ */
+export const TOAST_EVENT = "acowork:toast";
+
+export function showToast(toast: Omit<Toast, "id">): void {
+  window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: toast }));
+}
+
 const ToastContext = createContext<ToastContextValue>({ addToast: () => { } });
 
 export function useToast() {
@@ -33,6 +47,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const removeToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // ADR-038: forward window-dispatched toasts (from stores / event-loop
+  // handlers) into the same UI pipeline. Listener is the only effect;
+  // dismissal stays local to React state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<Omit<Toast, "id">>).detail;
+      if (detail) addToast(detail);
+    };
+    window.addEventListener(TOAST_EVENT, handler);
+    return () => window.removeEventListener(TOAST_EVENT, handler);
+  }, [addToast]);
 
   return (
     <ToastContext.Provider value={{ addToast }}>

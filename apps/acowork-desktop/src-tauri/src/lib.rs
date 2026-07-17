@@ -369,6 +369,7 @@ pub fn run() {
             // ADR-033 Phase 3: MQTT real-time event commands
             commands::chat_mqtt::connect_mqtt,
             commands::chat_mqtt::disconnect_mqtt,
+            commands::chat_mqtt::get_mqtt_status,
             commands::chat_mqtt::mqtt_publish_control,
         ])
         .setup(|app| {

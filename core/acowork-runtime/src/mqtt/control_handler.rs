@@ -66,6 +66,11 @@ pub enum ControlAction {
     CloseSession {
         session_id: String,
     },
+    /// ADR-038: User wants to explicitly activate a session
+    /// (transitions Closed/NotFound → Active; idempotent for Active).
+    OpenSession {
+        session_id: String,
+    },
     /// User wants to update the session title.
     UpdateSessionTitle {
         session_id: String,
@@ -171,6 +176,9 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
         },
         mqtt_proto::control_command::Command::CloseSession(cs) => ControlAction::CloseSession {
             session_id: cs.session_id,
+        },
+        mqtt_proto::control_command::Command::OpenSession(os) => ControlAction::OpenSession {
+            session_id: os.session_id,
         },
         mqtt_proto::control_command::Command::UpdateSessionTitle(ust) => ControlAction::UpdateSessionTitle {
             session_id: ust.session_id,

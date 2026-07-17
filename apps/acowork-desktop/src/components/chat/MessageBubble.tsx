@@ -277,25 +277,6 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "assistant") {
-    // ADR-035 D5: assistant is NOT streamed. While the record is still
-    // accumulating (isStreaming), show only a "processing" animation and no
-    // text; render the full message once record_complete freezes it. This
-    // guarantees the last assistant reply always renders (no idle-poll race).
-    if (isStreaming) {
-      return (
-        <MessageContentWrapper>
-          <div className="min-w-0 flex flex-col ml-12">
-            <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                <span className="text-zinc-400">{t("chatPanel.thinking")}</span>
-              </span>
-            </div>
-          </div>
-        </MessageContentWrapper>
-      );
-    }
-
     const showPlaceholder = !displayContent;
 
     return (

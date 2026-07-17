@@ -155,6 +155,13 @@ fn control_action_to_inbound(
         ControlAction::CloseSession { session_id } => {
             Some((session_id.clone(), InboundMessage::CloseSession { session_id }))
         }
+        // ADR-038: explicit session activation. Routes through the system-level
+        // dispatcher (empty session_id) because the OpenSession handler needs
+        // to call `session_manager.open()` directly, not a specific SessionTask.
+        ControlAction::OpenSession { session_id } => Some((
+            String::new(),
+            InboundMessage::OpenSession { session_id },
+        )),
         ControlAction::UpdateSessionTitle { session_id, title } => Some((
             session_id.clone(),
             InboundMessage::UpdateSessionTitle { session_id, title },
@@ -312,7 +319,7 @@ async fn mqtt_only_loop(
     work_dir: &str,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
-    let work_dir = work_dir.to_string();
+    let work_dir = std::path::PathBuf::from(work_dir);
 
     loop {
         tokio::select! {
@@ -325,6 +332,7 @@ async fn mqtt_only_loop(
                             lifecycle_publisher,
                             session_id,
                             msg,
+                            &work_dir,
                         ).await {
                             tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
@@ -419,6 +427,7 @@ async fn dispatch_inbound(
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: String,
     msg: crate::agent::inbound::InboundMessage,
+    work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::InboundMessage;
     use crate::agent::loop_::CompressionAction;
@@ -480,6 +489,17 @@ async fn dispatch_inbound(
                     "IntentMessage without target session".to_string(),
                 ))
             }
+            // ADR-038: explicit session activation. Routed through the
+            // system-level branch because `session_manager.open()` is a
+            // manager-level operation, not a session-task-level one.
+            InboundMessage::OpenSession { session_id } => {
+                if session_id.is_empty() {
+                    return Err(RuntimeError::Config(
+                        "OpenSession requires non-empty session_id".to_string(),
+                    ));
+                }
+                handle_open_session(session_manager, lifecycle_publisher, &session_id, work_dir).await
+            }
             other => Err(RuntimeError::Config(format!(
                 "system-level dispatch: unsupported variant {:?}",
                 std::mem::discriminant(&other)
@@ -492,21 +512,30 @@ async fn dispatch_inbound(
         // ① User chat message → session task inbox
         InboundMessage::UserMessage(text) => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "user_message",
+            work_dir,
             InboundMessage::UserMessage(text),
         ),
 
         // ② Stop signal → session task inbox
         InboundMessage::Stop { reason } => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "stop",
+            work_dir,
             InboundMessage::Stop { reason },
         ),
 
         // ③ Continue execution → session task inbox
         InboundMessage::ContinueExecution { reason, .. } => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "continue_execution",
+            work_dir,
             InboundMessage::ContinueExecution {
                 session_id: session_id.clone(),
                 reason,
@@ -522,7 +551,10 @@ async fn dispatch_inbound(
             ..
         } => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "approval_decision",
+            work_dir,
             InboundMessage::ApprovalDecision {
                 session_id: session_id.clone(),
                 request_id,
@@ -537,7 +569,10 @@ async fn dispatch_inbound(
             request_id, answer, ..
         } => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "question_answer",
+            work_dir,
             InboundMessage::QuestionAnswer {
                 session_id: session_id.clone(),
                 request_id,
@@ -548,7 +583,10 @@ async fn dispatch_inbound(
         // ⑥ UserOperation (StopLoop, ContinueLoop, ApprovalDecision, QuestionAnswer, UpdateRuntimeConfig)
         InboundMessage::UserOperation(op) => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "user_operation",
+            work_dir,
             InboundMessage::UserOperation(op),
         ),
 
@@ -559,7 +597,10 @@ async fn dispatch_inbound(
             params,
         } => forward_to_session_inbound(
             session_manager,
+            lifecycle_publisher,
             &session_id,
+            "intent",
+            work_dir,
             InboundMessage::IntentMessage { from, action, params },
         ),
 
@@ -729,20 +770,143 @@ async fn dispatch_inbound(
             );
             Ok(())
         }
+
+        // ADR-038: OpenSession is a system-level command (handled by
+        // `handle_open_session` above). Reaching here means a non-empty
+        // session_id was carried through control_action_to_inbound with
+        // empty session_id, which is a routing bug. Log loudly and no-op.
+        InboundMessage::OpenSession { session_id } => {
+            tracing::error!(
+                session_id = %session_id,
+                "OpenSession reached session-level dispatch — routing bug, ignored"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// ADR-038: Handle `InboundMessage::OpenSession`.
+///
+/// Transitions Closed/NotFound → Active (idempotent for Active). Always
+/// publishes a `SessionOpened` ack on success. On failure publishes
+/// `SessionNotOpened` (instead of returning an error) so the frontend gets
+/// a structured event it can react to.
+async fn handle_open_session(
+    session_manager: &mut crate::agent::session::SessionManager,
+    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
+    session_id: &str,
+    work_dir: &std::path::Path,
+) -> crate::error::Result<()> {
+    use crate::agent::session::{SessionLifecycleState, SessionOpenOutcome};
+
+    let state = session_manager.get_lifecycle_state(session_id, work_dir);
+    let result = match state {
+        SessionLifecycleState::NotFound => {
+            // Surface as a structured event so the frontend can react.
+            let _ = lifecycle_publisher
+                .publish_session_not_opened(session_id, "open_session", "session_not_found")
+                .await;
+            tracing::info!(
+                session_id = %session_id,
+                "OpenSession: session not found on disk"
+            );
+            return Ok(());
+        }
+        SessionLifecycleState::Active => {
+            // Already in memory; idempotent success.
+            Ok(SessionOpenOutcome::AlreadyActive)
+        }
+        SessionLifecycleState::Closed => session_manager.open(session_id, work_dir).await,
+    };
+
+    match result {
+        Ok(outcome) => {
+            let status = match outcome {
+                SessionOpenOutcome::AlreadyActive => "already_active",
+                SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
+            };
+            let (model, provider, last_active_at) =
+                session_manager.session_metadata_summary(session_id, work_dir);
+            if let Err(e) = lifecycle_publisher
+                .publish_session_opened(session_id, status, model, provider, last_active_at)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    status = %status,
+                    error = %e,
+                    "OpenSession: failed to publish SessionOpened ack"
+                );
+            }
+            tracing::info!(
+                session_id = %session_id,
+                status = %status,
+                "OpenSession: success"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let _ = lifecycle_publisher
+                .publish_session_not_opened(session_id, "open_session", "session_closed")
+                .await;
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "OpenSession: failed to resume session"
+            );
+            Ok(())
+        }
     }
 }
 
 /// Forward an `InboundMessage` to the session task's `agent_inbound_tx`.
-/// Returns `Ok(())` on success or an error message describing the failure.
+///
+/// ADR-038: when the target session is not Active (Closed or NotFound
+/// in `SessionManager`), we return an error AND publish a structured
+/// `SessionNotOpened` event so the Desktop can surface a reopen
+/// affordance. Without this, a frontend that forgot to send
+/// `open_session` first would silently drop the message — the bug we
+/// are fixing here.
 fn forward_to_session_inbound(
     session_manager: &mut crate::agent::session::SessionManager,
+    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: &str,
+    attempted_command: &str,
+    work_dir: &std::path::Path,
     msg: crate::agent::inbound::InboundMessage,
 ) -> crate::error::Result<()> {
     use crate::error::RuntimeError;
-    let handle = session_manager
-        .get_session(session_id)
-        .ok_or_else(|| RuntimeError::Config(format!("session not found: {}", session_id)))?;
+    let handle = match session_manager.get_session(session_id) {
+        Some(h) => h,
+        None => {
+            // Determine reason: Closed (file exists on disk) vs NotFound
+            // (no file) — the Desktop uses this to render the right toast.
+            let reason = match session_manager.get_lifecycle_state(session_id, work_dir) {
+                crate::agent::session::SessionLifecycleState::Closed => "session_closed",
+                _ => "session_not_found",
+            };
+            tracing::warn!(
+                session_id = %session_id,
+                attempted_command = %attempted_command,
+                reason = %reason,
+                "session not Active: forwarding SessionNotOpened",
+            );
+            // Best-effort publish — never block on the broker.
+            let publisher = lifecycle_publisher.clone();
+            let sid = session_id.to_string();
+            let cmd = attempted_command.to_string();
+            let reason_owned = reason.to_string();
+            tokio::spawn(async move {
+                let _ = publisher
+                    .publish_session_not_opened(&sid, &cmd, &reason_owned)
+                    .await;
+            });
+            return Err(RuntimeError::Config(format!(
+                "session not Active ({}): {}",
+                reason, session_id,
+            )));
+        }
+    };
     handle
         .send_inbound(msg)
         .map_err(|e| RuntimeError::Config(format!("send_inbound failed: {}", e)))

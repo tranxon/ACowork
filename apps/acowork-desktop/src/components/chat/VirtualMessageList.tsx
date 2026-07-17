@@ -20,10 +20,19 @@ interface VirtualMessageListProps {
    * messages — to keep the data/UI boundary strict.
    */
   messageBlocks: MessageBlock[];
-  /** Total virtual item count (messages + extra items like compacting indicator). */
+  /**
+   * Total virtual item count, owned by ChatPanel — already includes the
+   * trailing extras (compacting indicator and/or replying indicator).
+   * VirtualMessageList only reads it; the slot mapping for extra items is
+   * fixed and described on `estimateBlockHeight` (blockHeightEstimator.ts).
+   */
   virtualCount: number;
-  /** Whether to show the compacting indicator as an extra virtual item. */
+  /** Whether to show the compacting indicator as an extra virtual item
+   *  (always the LAST trailing slot when present). */
   showCompactingItem: boolean;
+  /** Whether to show the replying indicator as an extra virtual item
+   *  (always sits immediately after messageBlocks when present). */
+  showReplyingItem: boolean;
   /** Whether the session is currently streaming. */
   sending: boolean;
   /** Pending tool approvals keyed by tool_call_id. */
@@ -155,6 +164,7 @@ export const VirtualMessageList = React.forwardRef<
     messageBlocks,
     virtualCount,
     showCompactingItem,
+    showReplyingItem,
     sending,
     pendingApproval,
     currentSessionId,
@@ -237,8 +247,14 @@ export const VirtualMessageList = React.forwardRef<
   // change and force a full re-layout.
   const estimateSize = React.useCallback(
     (index: number) =>
-      estimateBlockHeight(index, messageBlocks, containerWidth, showCompactingItem),
-    [messageBlocks, containerWidth, showCompactingItem],
+      estimateBlockHeight(
+        index,
+        messageBlocks,
+        containerWidth,
+        showCompactingItem,
+        showReplyingItem,
+      ),
+    [messageBlocks, containerWidth, showCompactingItem, showReplyingItem],
   );
 
   const virtualizer = useVirtualizer({
@@ -528,11 +544,58 @@ export const VirtualMessageList = React.forwardRef<
           }}
         >
           {virtualizer.getVirtualItems().map((virtualRow) => {
-            // Compacting indicator is the only extra virtual item.
-            const compactingIdx = messageBlocks.length;
+            // Trailing extra-item slot indices.  These match the slot
+            // mapping in `estimateBlockHeight` (blockHeightEstimator.ts)
+            // and the `virtualCount` math in ChatPanel: replying (when
+            // shown) sits IMMEDIATELY after messageBlocks, compacting
+            // (when shown) sits LAST.  Keeping these computations local to
+            // the renderer means the renderer is self-sufficient and the
+            // estimator and virtualCount math don't have to align via
+            // ChatPanel.
+            //
+            // Both branches share identical chrome (`ml-12 py-1.5` + dot
+            // + shimmer label) so the upcoming reply lands in the same
+            // visual region as the previous placeholder, with no jump.
+            const extraCount =
+              (showReplyingItem ? 1 : 0) + (showCompactingItem ? 1 : 0);
+            const replyingIdx = showReplyingItem ? messageBlocks.length : -1;
+            const compactingIdx = showCompactingItem
+              ? messageBlocks.length + extraCount - 1
+              : -1;
 
-            // --- Compacting indicator (extra virtual item) ---
-            if (showCompactingItem && virtualRow.index === compactingIdx) {
+            // --- Replying indicator (extra virtual item, slot 0) ---
+            if (virtualRow.index === replyingIdx) {
+              return (
+                <div
+                  key={virtualRow.key}
+                  ref={virtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  <div
+                    className="flex items-center gap-1.5 ml-12 py-1.5 select-none"
+                    aria-label={t("chatPanel.replying")}
+                  >
+                    <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                    <span
+                      className="thinking-shimmer"
+                      style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                    >
+                      {t("chatPanel.replying")}
+                    </span>
+                  </div>
+                </div>
+              );
+            }
+
+            // --- Compacting indicator (extra virtual item, last slot) ---
+            if (virtualRow.index === compactingIdx) {
               return (
                 <div
                   key={virtualRow.key}

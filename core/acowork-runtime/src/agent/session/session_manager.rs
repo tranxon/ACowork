@@ -25,7 +25,7 @@ use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots};
 use crate::config::DEFAULT_TEMPERATURE;
-use crate::conversation::ConversationSession;
+use crate::conversation::{ConversationSession, read_session_meta};
 use crate::debug::controller::DebugController;
 use crate::error::{Result, RuntimeError};
 use crate::agent_config::AgentConfig;
@@ -34,6 +34,28 @@ use crate::tools::mcp_manager::McpManager;
 use crate::tools::workspace_resolver::{WorkspaceResolver, format_workspace_context_for_session};
 use acowork_mcp::client::McpRegistry;
 use acowork_mcp::wrapper::McpToolWrapper;
+
+/// Session lifecycle state observable from outside the manager (ADR-038).
+///
+/// Source of truth:
+/// - `Active`: session is currently loaded in the in-memory `sessions` map.
+/// - `Closed`: JSONL + meta files exist on disk, but the session is not in memory.
+/// - `NotFound`: neither in memory nor on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLifecycleState {
+    NotFound,
+    Closed,
+    Active,
+}
+
+/// Outcome of an explicit `open()` call (ADR-038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOpenOutcome {
+    /// Session was already in memory; this call was a no-op.
+    AlreadyActive,
+    /// Session was on disk (Closed); we just resumed it into memory.
+    ResumedFromDisk,
+}
 
 /// Configuration for SessionManager.
 #[derive(Debug, Clone)]
@@ -707,8 +729,10 @@ impl SessionManager {
         if initial_model.is_none() || initial_provider.is_none() {
             let (fallback_model, fallback_provider) = self.current_model_and_provider();
 
-            // Persist the fallback to JSONL so activate_session returns
-            // consistent metadata to the frontend on subsequent requests.
+            // Persist the fallback to JSONL so the session carries
+            // consistent (model, provider) metadata into the next
+            // `OpenSession` activation — the proto `SessionOpened` event
+            // reports these fields directly to the frontend.
             if let (Some(conv), Some(model)) = (&conversation, &fallback_model)
                 && conv.model().is_none()
             {
@@ -1114,34 +1138,70 @@ impl SessionManager {
         }
     }
 
-    /// Ensure a session is loaded in memory, resuming it from disk if needed.
+    /// ADR-038: Observe the lifecycle state of a session.
     ///
-    /// This is the **single entry point** for lazy session recovery. Every
-    /// handler that needs to interact with a session by ID should call this
-    /// before [`send_to_session`] or any other session-scoped method.
+    /// - `Active` if a session handle exists in the in-memory map.
+    /// - `Closed` if a meta file exists on disk but no handle is loaded.
+    /// - `NotFound` if neither exists.
     ///
-    /// When the session is already in memory, this returns immediately.
-    /// Otherwise, it reads the JSONL file from `work_dir/conversations/`,
-    /// creates a new `SessionTask`, and inserts the handle into the active
-    /// sessions map — exactly as `activate_session` does on first access.
+    /// Lifecycle is now explicit (ADR-038 §3): there is no lazy-resume
+    /// helper anymore — the `open_session` MQTT control command is the
+    /// single entry point for transitioning Closed/NotFound → Active, and
+    /// other handlers route through `dispatch_inbound` (which publishes
+    /// `SessionNotOpened` when missing) or call [`Self::open`] directly.
+    pub fn get_lifecycle_state(
+        &self,
+        session_id: &str,
+        work_dir: &Path,
+    ) -> SessionLifecycleState {
+        if self.sessions.contains_key(session_id) {
+            return SessionLifecycleState::Active;
+        }
+        let meta_dir = work_dir.join("conversations").join("meta");
+        let meta_path = meta_dir.join(format!("{}.json", session_id));
+        if meta_path.exists() {
+            return SessionLifecycleState::Closed;
+        }
+        SessionLifecycleState::NotFound
+    }
+
+    /// ADR-038: Explicit session activation (transitions Closed/NotFound → Active).
     ///
-    /// Returns `Ok(())` if the session is now in memory (either was already,
-    /// or was just resumed). Returns an error if the JSONL file does not
-    /// exist or cannot be read (session truly does not exist on disk).
-    pub async fn ensure_session_in_memory(
+    /// Idempotent: an already-Active session returns
+    /// [`SessionOpenOutcome::AlreadyActive`] without touching disk. A Closed
+    /// session is lazy-resumed from JSONL into memory, returning
+    /// [`SessionOpenOutcome::ResumedFromDisk`]. A NotFound session returns an
+    /// error (no meta file on disk).
+    ///
+    /// This replaces the implicit "lazy resume before every command" pattern.
+    /// Frontend should call this explicitly via the MQTT `open_session`
+    /// command; runtime dispatch paths should rely on the explicit lifecycle
+    /// contract and remove their own lazy-resume fallbacks.
+    pub async fn open(
         &mut self,
         session_id: &str,
         work_dir: &Path,
-    ) -> Result<()> {
+    ) -> Result<SessionOpenOutcome> {
         if self.sessions.contains_key(session_id) {
-            return Ok(());
+            return Ok(SessionOpenOutcome::AlreadyActive);
+        }
+
+        // Validate disk presence up-front so callers get a clear error
+        // instead of a generic "Session not found on disk" buried inside the
+        // resume path. ADR-024: meta file is the canonical "session exists" marker.
+        let meta_dir = work_dir.join("conversations").join("meta");
+        if !meta_dir.join(format!("{}.json", session_id)).exists() {
+            return Err(RuntimeError::Config(format!(
+                "Session not found on disk: {}",
+                session_id
+            )));
         }
 
         // Each resumed session gets its own committed_lines counter.
         // The writer thread (inside ConversationSession) increments it;
         // the session's AgentCore reads it via clone_for_session.
         let committed_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let conv = crate::conversation::ConversationSession::resume(work_dir, session_id, committed_lines.clone())
+        let conv = ConversationSession::resume(work_dir, session_id, committed_lines.clone())
             .map_err(|e| {
                 RuntimeError::Config(format!(
                     "Session not found on disk: {} ({})",
@@ -1161,9 +1221,28 @@ impl SessionManager {
 
         tracing::info!(
             session_id = %session_id,
-            "SessionManager: lazy-resumed session from disk"
+            "SessionManager::open: lazy-resumed session from disk"
         );
-        Ok(())
+        Ok(SessionOpenOutcome::ResumedFromDisk)
+    }
+
+    /// Read `(model, provider, last_active_at_iso)` for a session from its meta file.
+    ///
+    /// `last_active_at_iso` is the raw ISO-8601 string from the meta file (the
+    /// Runtime does not parse it to epoch seconds). Returns `(None, None, None)`
+    /// when the meta file is missing or unreadable.
+    /// Used by the `open_session` handler to populate the
+    /// [`crate::acowork_core::mqtt_proto::SessionOpened`] ack payload.
+    pub fn session_metadata_summary(
+        &self,
+        session_id: &str,
+        work_dir: &Path,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let meta_dir = work_dir.join("conversations");
+        match read_session_meta(&meta_dir, session_id) {
+            Ok(meta) => (meta.model, meta.provider, Some(meta.last_active_at)),
+            Err(_) => (None, None, None),
+        }
     }
 
     /// Broadcast a message to all active sessions.
@@ -1993,8 +2072,10 @@ After installation, ask the user to re-enable the MCP server.",
     /// 2. It has been idle for longer than `idle_timeout`
     ///
     /// Eviction destroys the in-memory SessionTask but leaves the JSONL
-    /// file on disk. The session can be re-activated later via lazy resume
-    /// in the `activate_session` handler.
+    /// file on disk. The session can be re-activated later via lazy
+    /// resume: the frontend must explicitly send the `open_session`
+    /// MQTT command (ADR-038), which routes through
+    /// `gateway_loop::handle_open_session` → `SessionManager::open`.
     pub async fn evict_idle_sessions(&mut self, idle_timeout: std::time::Duration) {
         let mut to_evict = Vec::new();
 

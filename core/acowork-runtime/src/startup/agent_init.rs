@@ -155,6 +155,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let embed_dim_shared: crate::http::SharedEmbedDimension =
         Arc::new(std::sync::RwLock::new(0));
 
+    // Shared degradation reasons. Created empty here and populated by
+    // Phase B if session persistence fails. The same Arc is passed to
+    // the HTTP server so `/health` can surface non-fatal startup errors.
+    let degraded_reasons: crate::http::SharedDegradation =
+        Arc::new(std::sync::RwLock::new(Vec::new()));
+
     if let Some(_http_port) = config.http_port {
         match crate::http::RuntimeHttpServer::start(
             std::path::PathBuf::from(&config.work_dir),
@@ -164,6 +170,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             http_dispatch_shared,
             memory_store_shared.clone(),
             embed_dim_shared.clone(),
+            degraded_reasons.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -717,6 +724,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // already given clones of these Arcs in the `start(...)` call above.
         memory_store_shared,
         embed_dim_shared,
+        degraded_reasons,
     })
 }
 

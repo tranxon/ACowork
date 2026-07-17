@@ -350,6 +350,14 @@ export function ChatPanel() {
   const todos = sessionState?.todos ?? [];
   /** Per-session queued messages — persisted in chatStore across agent switches */
   const queuedMessages = sessionState?.queuedMessages ?? [];
+  /** True while an assistant stream has accumulated more than the line
+   *  threshold (see chatStore.ASSISTANT_REPLYING_LINE_THRESHOLD) and is
+   *  still streaming.  Cleared by the record_complete handler.  Drives
+   *  the trailing "replying" indicator virtual item rendered INSIDE
+   *  VirtualMessageList (see `extraItems` math below), so the indicator
+   *  physically anchors to the last message bubble — the same slot the
+   *  final reply will occupy once it lands. */
+  const isAssistantReplying = sessionState?.isAssistantReplying ?? false;
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state_changed within ~50ms.
@@ -568,50 +576,83 @@ export function ChatPanel() {
   const isCompacting = sessionState?.isCompacting ?? false;
   const showCompactingItem = isCompacting;
 
-  // Working indicator — shown when the session is "streaming" but no
-  // streaming placeholder message exists yet in the rendered messages.
-  // This covers the gap between session_status→streaming and the first
-  // poll response (~500-2000ms, LLM call startup).
+  // Working indicator — shown ONLY when the agent has not yet produced any
+  // visible reply (streaming delta OR frozen record_complete) to the most
+  // recent user turn.  Once the agent has produced any visible content
+  // (placeholder isStreaming=true OR frozen isStreaming=false), the working
+  // indicator must NOT reappear.
   //
-  // ADR-027: Streaming messages are now regular messages with isStreaming=true,
-  // not prefixed placeholders.  Check via the flag instead of id prefix.
-  const hasStreamingPlaceholder = messageBlocks.some((b) =>
-    b.items.some((item) => item.isStreaming === true),
-  );
-  const showWorkingItem = sending && !hasStreamingPlaceholder;
+  // ADR-035 D5/Race: the previous gate `sending && !hasStreamingPlaceholder`
+  // flickered between `record_complete` (assistant.isStreaming: true→false)
+  // and the follow-up `session_state_changed(idle)` (sending: true→false),
+  // because the backend emits them in order on the same chunk channel
+  // (`poll_stop()` → `transition_status(Idle)` at loop_.rs:912-914).  In
+  // that ~tens-of-ms window the working indicator reappeared above the
+  // just-rendered final assistant reply.
+  //
+  // Anchoring on "the last visible message is a user message" makes the
+  // gate independent of that race.  This also naturally suppresses the
+  // working indicator during inter-tool iterations (after tool_result) and
+  // during continuation thinking — both of which legitimately have
+  // `sending=true` without needing a working indicator.
+  const canShowWorkingItemAfterUser = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.type === "user") return true;
+      // Skip non-message items that may be interleaved between the user
+      // message and the working indicator (e.g., a compaction event loaded
+      // via poll after the user message was optimistically added, or a
+      // document_upload that arrived concurrently with the user send).
+      if (
+        msg.type === "compaction" ||
+        msg.type === "system" ||
+        msg.type === "document_upload"
+      ) {
+        continue;
+      }
+      // assistant / thought / tool_call / tool_result / error — agent has
+      // produced a visible reply; working indicator is forbidden.
+      return false;
+    }
+    return false;
+  })();
+  const showWorkingItem = sending && canShowWorkingItemAfterUser;
 
-  // The agent header (avatar + name) above the working status should ONLY
-  // appear when the working indicator follows a user message — i.e., the
-  // agent is about to respond to a NEW user turn.  For intermediate streaming
-  // gaps (e.g., a fresh thinking turn after a tool result), the last item in
-  // the chat is an agent-side message (thought/explore), not a user message,
-  // and repeating the avatar+name would feel noisy.
+  // The agent header (avatar + name + role) above the working status should
+  // ONLY appear when the working indicator follows a user message — i.e.,
+  // the agent is about to respond to a NEW user turn.  For intermediate
+  // streaming gaps (e.g., a fresh thinking turn after a tool result), the
+  // last item in the chat is an agent-side message (thought/explore), not
+  // a user message, and repeating the avatar+name would feel noisy.
   //
   // Scan backwards past compaction/system/document_upload messages that may
   // be interleaved between the user message and the working indicator (e.g.,
   // when a compaction event is loaded via poll after the user message was
   // optimistically added).
-  const showWorkingItemHeader = (() => {
-    if (!showWorkingItem) return false;
-    for (let i = messageBlocks.length - 1; i >= 0; i--) {
-      const block = messageBlocks[i];
-      if (block.type === "user") return true;
-      if (
-        block.type === "compaction" ||
-        block.type === "system" ||
-        block.type === "document_upload"
-      ) {
-        continue;
-      }
-      return false;
-    }
-    return false;
-  })();
+  const showWorkingItemHeader = canShowWorkingItemAfterUser;
 
-  // Virtual scrolling: only render visible items (messages + optional compacting indicator).
-  // Working indicator is rendered OUTSIDE the virtual list (below it) to avoid messing up
-  // virtualCount and causing other messages to disappear when working is shown.
+  // Virtual scrolling: only render visible items (messages + trailing extra
+  // items).  Both extras sit AFTER messageBlocks so the sticky-bottom effect
+  // can keep the user's reading position stable as they flip on and off:
+  //
+  //   - showReplyingItem: trailing "replying" indicator on long assistant
+  //     streams (line count > chatStore.ASSISTANT_REPLYING_LINE_THRESHOLD).
+  //     Lives at `index === messageBlocks.length`.  When record_complete
+  //     freezes the message and isAssistantReplying clears, this slot
+  //     collapses onto the just-rendered bubble content — the visual frame
+  //     the user was waiting on becomes the frame the reply fills.
+  //     See blockHeightEstimator.ts and VirtualMessageList.tsx for the
+  //     matching slot rendering and height math.
+  //
+  //   - showCompactingItem: trailing "compacting" indicator during a
+  //     session-wide compaction.  Always at the LAST slot (after replying)
+  //     if both are present.
+  //
+  // (The Working indicator renders OUTSIDE the virtual list on purpose —
+  // see below — so it does NOT contribute to virtualCount.)
+  const showReplyingItem = isAssistantReplying;
   let extraItems = 0;
+  if (showReplyingItem) extraItems++;
   if (showCompactingItem) extraItems++;
   const virtualCount = messageBlocks.length + extraItems;
 
@@ -1323,7 +1364,9 @@ export function ChatPanel() {
   // ── Initializing session ──
   // The window between MQTT pushing `running` → true and `startAgentAndSyncUI`
   // finishing its atomic initSessionForAgent chain (fetchLatestSession +
-  // fetchSessions + activateSession + fetchSessionState + ensureLatestInCache).
+  // fetchSessions + openSession (ADR-038: was `activateSession`, now
+  // `chatStore.openSession` which fires MQTT `open_session` + HTTP reload)
+  // + fetchSessionState + ensureLatestInCache).
   // During this brief window activeSessionId is still null, so without this
   // gate the chat view would mount with no session and surface the
   // "Start a conversation" placeholder for a few hundred ms — a misleading
@@ -1341,7 +1384,14 @@ export function ChatPanel() {
   }
 
   // ── Chat view ──
-  const inputDisabled = gatewayStatus !== "connected";
+  // ADR-036: input gating must reflect BOTH the Gateway HTTP health AND
+  // the MQTT realtime connection.  Before ADR-036 this only checked
+  // gateway, leaving the textarea enabled while MQTT was silently
+  // disconnected — the user could type and click send, but the message
+  // would never reach the Runtime, producing a "ghost input" state.
+  // `mqttConnected` is now driven by the Rust `mqtt-status` Tauri event
+  // so this check reflects real broker liveness.
+  const inputDisabled = gatewayStatus !== "connected" || !mqttConnected;
 
   return (
     <>
@@ -1384,6 +1434,7 @@ export function ChatPanel() {
               messageBlocks={messageBlocks}
               virtualCount={virtualCount}
               showCompactingItem={showCompactingItem}
+              showReplyingItem={showReplyingItem}
               sending={sending}
               pendingApproval={pendingApproval}
               currentSessionId={currentSessionId}
@@ -1449,6 +1500,13 @@ export function ChatPanel() {
                 </div>
               </div>
             )}
+            {/* Replying indicator is rendered INSIDE VirtualMessageList as
+                a trailing extra virtual item (see showReplyingItem prop
+                above), so it physically anchors to the last message bubble
+                — same conversation slot the final reply will occupy.
+                When record_complete freezes the message and
+                isAssistantReplying clears, the virtual slot collapses onto
+                the just-rendered bubble content without a jump. */}
             {/* Debug paused banner — shown when the agent is in dev_mode and
                 the debugger is currently in Stepping/Paused state. Provides
                 F5 (resume) and F10 (step) actions directly from the chat. */}

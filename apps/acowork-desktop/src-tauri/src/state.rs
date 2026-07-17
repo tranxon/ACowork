@@ -1,11 +1,13 @@
 //! Application state shared across Tauri commands
+//!
+//! Holds shared, mutable application state accessible from any Tauri command.
 
 use std::process::Child;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::gateway_client::GatewayClient;
-use crate::mqtt_client::SharedDesktopMqttClient;
+use crate::mqtt_client::{MqttStatus, SharedDesktopMqttClient};
 
 #[cfg(target_os = "windows")]
 use crate::win_job::JobHandle;
@@ -58,6 +60,17 @@ pub struct AppState {
     /// Connected after the Gateway is confirmed healthy. None until
     /// `connect_mqtt` is called from the frontend.
     pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
+
+    /// ADR-036: last observed MQTT broker connection status.
+    ///
+    /// `None`  — the poll task has not yet observed any state transition
+    ///           (initial state, before first ConnAck / Disconnect).
+    /// `Some`  — the most recent transition observed by the poll task.
+    ///
+    /// This three-valued slot is the source of truth.  `get_mqtt_status`
+    /// returns it synchronously so the frontend can recover the initial
+    /// state without racing the `mqtt-status` Tauri event.
+    pub last_mqtt_status: Arc<RwLock<Option<MqttStatus>>>,
 }
 
 impl AppState {
@@ -74,6 +87,12 @@ impl AppState {
             #[cfg(target_os = "windows")]
             gateway_job: Arc::new(Mutex::new(None)),
             mqtt_client: Arc::new(Mutex::new(None)),
+            // ADR-036: starts as `None` (= "unknown / not yet observed").
+            // The poll task will overwrite this with the first ConnAck
+            // (or the first failed poll → Disconnected).  Distinguishing
+            // "unknown" from "disconnected" lets the frontend avoid
+            // flashing the disconnected banner on cold start.
+            last_mqtt_status: Arc::new(RwLock::new(None)),
         }
     }
 }

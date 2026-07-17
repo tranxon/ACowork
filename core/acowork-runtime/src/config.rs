@@ -144,7 +144,10 @@ pub struct DataFlowConfig {
 }
 
 fn default_chunk_capacity() -> usize {
-    64
+    // Matches `outbound_ctrl_capacity` for headroom during cold-start bursts
+    // (relay drains serial publish tasks one at a time). The chunk channel
+    // only fills under abnormal backpressure — see ADR-035 ordering notes.
+    256
 }
 fn default_outbound_ctrl_capacity() -> usize {
     256

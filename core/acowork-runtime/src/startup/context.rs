@@ -127,6 +127,13 @@ pub(crate) struct AgentBootContext {
     /// loop). Phase B does not currently read it.
     #[allow(dead_code)]
     pub embed_dim_shared: crate::http::SharedEmbedDimension,
+
+    /// Startup-phase degradation reasons — non-fatal errors that
+    /// degrade runtime capabilities (e.g. session persistence
+    /// unavailable due to filesystem sandbox). Read by `/health`.
+    /// Populated during Phase B; passed to the HTTP server in
+    /// Phase A via the same `Arc`.
+    pub degraded_reasons: crate::http::SharedDegradation,
 }
 
 /// Context produced by Phase B (per-session initialization).

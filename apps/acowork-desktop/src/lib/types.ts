@@ -689,6 +689,83 @@ export function getStreamingMessageId(s: SessionStatus | undefined | null): stri
   return s.detail?.message_id ?? null;
 }
 
+// ── ADR-038: lifecycle event payload types ──────────────────────────
+//
+// These are the *flat JSON* shapes the Tauri bridge emits on the
+// `agent-event` Tauri channel after decoding the corresponding
+// `SessionOpened` / `SessionNotOpened` MQTT envelopes
+// (`apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs`).
+//
+// The fields are camelCase_titles_to_underscore except where the Runtime
+// carries an existing schema — `status`, `reason` etc. are status strings
+// that the Desktop renders / branches on verbatim (see chatStore
+// `case "session_opened"` / `case "session_not_opened"`).
+//
+// The `type` discriminator field is always `"session_opened"` or
+// `"session_not_opened"`. `agent_id` is not on the wire (the topic path
+// carries it) but the bridge forwards it for parity with sibling events.
+/**
+ * Flat JSON payload for `SessionOpened` (ADR-038, proto field 35).
+ *
+ * Published by the Runtime on the agent-scoped
+ * `acowork/agents/{id}/sessions/{sid}/opened` retained topic after the
+ * Runtime transitions a session into the **Active** state (idempotent
+ * no-op when already Active, lazy-resume from JSONL when Closed, hard
+ * load when NotFound).
+ *
+ * The Desktop uses this event to (a) flip `isSessionReady = true` so
+ * the input area / send button unlock, (b) seed the session header
+ * metadata (model, provider, last_active_at) so the user can see which
+ * model was used before they type a word.
+ */
+export interface SessionOpenedEvent {
+  type: "session_opened";
+  agent_id: string;
+  session_id: string;
+  /**
+   * Outcome discriminator.
+   *   - `"already_active"`     — idempotent no-op (already in memory)
+   *   - `"resumed_from_disk"`  — lazy-loaded from JSONL+meta into memory
+   * Legacy Runtimes pre-ADR-038 may publish `"created"` (no
+   * distinguishing semantics for the Desktop).
+   */
+  status: "already_active" | "resumed_from_disk" | "created" | string;
+  model?: string;
+  provider?: string;
+  /** ISO-8601 timestamp from the session meta file, when available. */
+  last_active_at?: string;
+}
+
+/**
+ * Flat JSON payload for `SessionNotOpened` (ADR-038, proto field 36).
+ *
+ * Published by the Runtime whenever a session-level control command
+ * (e.g. `chat_message`, `model_switch`, `stop`) is rejected because the
+ * target session is **Closed** or **NotFound**. The Desktop listens for
+ * this event to (a) flip `isSessionReady = false`, (b) surface a toast
+ * with a one-click reopen affordance so the contract violation is
+ * observable to the user instead of silently dropping the message.
+ */
+export interface SessionNotOpenedEvent {
+  type: "session_not_opened";
+  agent_id: string;
+  session_id: string;
+  /**
+   * The control command that was rejected (e.g. `"chat_message"`,
+   * `"model_switch"`, `"stop"`). Used only for diagnostic / logging —
+   * the Desktop doesn't branch on this when deciding to surface a toast
+   * (the rejection itself is the signal).
+   */
+  attempted_command: string;
+  /**
+   * Why the session is not Active. The Desktop treats both values as
+   * the same surface-level affordance (a reopen button). Reviewers can
+   * spot a `"session_not_found"` event as a sign the user is typing
+   * into a session that was deleted while the tab was open.
+   */
+  reason: "session_not_found" | "session_closed" | string;
+}
+
 /** A single conversation entry as stored in JSONL */
 export interface ConversationEntry {
   id: string;

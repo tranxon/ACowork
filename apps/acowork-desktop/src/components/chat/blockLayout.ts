@@ -107,6 +107,22 @@ export const SYSTEM_BUBBLE_HEIGHT = 26;
 /** Compacting indicator virtual item (`ml-12 py-1.5 + dot + label`). */
 export const COMPACTING_INDICATOR_HEIGHT = 26;
 
+/**
+ * Replying indicator virtual item — same visual chrome as the compacting
+ * indicator (`ml-12 py-1.5 + pulse-dot + shimmer label`) but rendered when
+ * the assistant has streamed past `ASSISTANT_REPLYING_LINE_THRESHOLD` and
+ * the user is staring at a placeholder bubble waiting for record_complete.
+ *
+ * Sits in VirtualMessageList as an extra virtual item at `index ===
+ * messageBlocks.length`, physically pinned to the last message bubble —
+ * the same conversation slot the reply will occupy once it lands.  This
+ * is what makes the indicator double as a layout-stable placeholder: when
+ * record_complete freezes the message and `isAssistantReplying` clears,
+ * the virtualCount shrinks by 1 and the indicator's slot collapses onto
+ * the now-real bubble content without any jump.
+ */
+export const REPLYING_INDICATOR_HEIGHT = 26;
+
 // ── Agent header (rendered in VirtualMessageList above agent block) ──
 /** Avatar rendered at size=40 + `mb-2 mt-1` between header and bubble. */
 export const AGENT_HEADER_AVATAR_PX = 40;

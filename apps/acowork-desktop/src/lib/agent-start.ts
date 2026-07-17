@@ -58,24 +58,18 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     //   3. ensureLatestInCache   — loads the latest message window into the
     //                              cache so messages are available when
     //                              ChatPanel first renders.
-    //   4. activateSession       — atomically write activeSessionId (LAST).
-    //                              We MUST call this AFTER messages are in
-    //                              the cache because writing activeSessionId
-    //                              causes ChatPanel to re-render with
-    //                              `key={currentScrollKey}` →
-    //                              VirtualMessageList mounts → the mount
-    //                              effect runs `virtualizer.scrollToIndex(end)`.
-    //                              If messages haven't loaded yet (virtualCount
-    //                              == 0) the effect sets didInitialScrollRef
-    //                              and returns early, permanently missing the
-    //                              scroll-to-bottom.  Calling activateSession
-    //                              last guarantees virtualCount > 0 on mount.
+    // ADR-038: opening a freshly-resolved session on first agent start is
+    // a "first-open" scenario, so we use `openSession` (UI + MQTT
+    // open_session + HTTP messages reload) instead of the strict
+    // `setActiveTab`.  `openSession` sets both `openSessionIds` (so the
+    // tab renders without a follow-up remount) and `activeSessionId`
+    // (so ChatPanel mounts with the right key from the very first render
+    // → no flicker).
     //
-    // We deliberately do NOT call switchSession here: that path is for the
-    // user manually clicking a different session tab, and it aborts in-flight
-    // loads, persists the user's "preferred session" choice, and re-runs
-    // fetchSessions — all of which are either no-ops or double-work on first
-    // launch.
+    // We deliberately do NOT use the legacy `switchSession` helper here
+    // (already removed in ADR-038): it aborted in-flight loads and
+    // re-ran fetchSessions — both are either no-ops or double-work on
+    // first launch.
     await useAgentStore.getState().fetchSessions(agentId);
     await useChatStore
         .getState()
@@ -83,7 +77,7 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     await useChatStore
         .getState()
         .ensureLatestInCache(agentId, targetSessionId);
-    useChatStore.getState().activateSession(agentId, targetSessionId);
+    await useChatStore.getState().openSession(agentId, targetSessionId);
 }
 
 /**
