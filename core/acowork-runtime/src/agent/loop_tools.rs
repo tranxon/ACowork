@@ -744,12 +744,24 @@ impl AgentLoop {
                 );
                 // ADR-035 C1: emit record_complete so the frontend inserts
                 // the tool_call directly into messages[] (no streaming phase).
+                // Tool metadata is forwarded here so the frontend can pair
+                // the eventual tool_result without an extra HTTP fetch.
+                //
+                // `seq` is the per-session monotonic counter from
+                // `SessionCore::next_seq()`. Each tool_call gets its own seq
+                // so the four parallel reads are ordered correctly even under
+                // cross-publisher reorder; the Desktop inserts them at the
+                // correct position in `messages[]` via `insertBySeq`.
                 let _ = self.session_core.try_send_chunk(
                     crate::agent::loop_::ChunkEvent::RecordComplete {
                         session_id: self.session_core.session_id.clone().unwrap_or_default(),
                         role: "tool_call".to_string(),
                         message_id,
                         content: tc.function.arguments.clone(),
+                        tool_name: tc.function.name.clone(),
+                        tool_call_id: tc.id.clone(),
+                        is_error: false,
+                        seq: self.session_core.next_seq(),
                     },
                 );
             }
@@ -891,6 +903,16 @@ impl AgentLoop {
     }
 
     /// Persist tool results to JSONL and emit ToolResult chunk events.
+    ///
+    /// ADR-035 D9.2: tool_result content is truncated to first 5 lines at
+    /// the MQTT publish layer (full content stays in JSONL).
+    ///
+    /// `is_error` is derived heuristically from the result content. The
+    /// runtime's error paths produce results starting with `"Error"` or
+    /// `"Loop detected"` (see `execute_single_tool` and the blocked-info
+    /// branch in `dispatch_and_merge_tools`). The frontend uses this flag
+    /// to color the tool_result bubble red and to compute the success/
+    /// failure counter on the tool_call pairing header.
     pub(crate) fn persist_and_emit_tool_results(
         &mut self,
         deduped_calls: &[ToolCall],
@@ -918,12 +940,22 @@ impl AgentLoop {
                 // content; the MQTT publish layer truncates tool_result to
                 // the first 5 lines for frontend display. JSONL keeps the
                 // full content for LLM context.
+                let is_error = looks_like_tool_error(result_content);
+                // Each tool_result gets a fresh seq that fits after its
+                // corresponding tool_call's seq. Both source-of-truth
+                // ordering (JSONL append order) and the chunk_relay FIFO
+                // guarantee the relative order here; the seq just makes the
+                // Desktop's reorder-defensive `insertBySeq` self-healing.
                 let _ = self.session_core.try_send_chunk(
                     crate::agent::loop_::ChunkEvent::RecordComplete {
                         session_id: self.session_core.session_id.clone().unwrap_or_default(),
                         role: "tool_result".to_string(),
                         message_id,
                         content: result_content.clone(),
+                        tool_name: tc.function.name.clone(),
+                        tool_call_id: tc.id.clone(),
+                        is_error,
+                        seq: self.session_core.next_seq(),
                     },
                 );
             }
@@ -1013,4 +1045,21 @@ impl AgentLoop {
 
         Ok(())
     }
+}
+
+/// Heuristic detection of a tool error from its result content.
+///
+/// The runtime's error paths produce results that begin with one of the
+/// well-known prefixes below. We use this so the MQTT `record_complete`
+/// payload can carry `is_error = true` without restructuring
+/// `execute_tools_parallel`'s return type. The frontend treats the flag
+/// as best-effort: any result that renders the tool_call as failed will
+/// be styled accordingly, and a `false` here just means we have no
+/// positive signal (tool may still have failed in ways we did not tag).
+fn looks_like_tool_error(result_content: &str) -> bool {
+    let trimmed = result_content.trim_start();
+    trimmed.starts_with("Error")
+        || trimmed.starts_with("error:")
+        || trimmed.starts_with("Loop detected")
+        || trimmed.starts_with("Tool call")
 }

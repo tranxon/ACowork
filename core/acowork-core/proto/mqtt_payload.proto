@@ -460,22 +460,44 @@ message StreamLine {
 }
 
 /// Incremental streaming delta — whole new lines since the last push.
-/// Topic: acowork/agents/{id}/sessions/{sid}/messages/stream_delta (QoS 0).
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/stream_delta (QoS 1).
 /// Pushed every `notify_interval_ms` (default 500); an empty push (no new
 /// complete line) is never sent.
+///
+/// `seq` is a per-session monotonically-increasing counter assigned by the
+/// Runtime's chunk_relay (single-threaded `fetch_add(1, SeqCst)`). The
+/// Desktop uses it to insert this frame at the correct position in the
+/// per-session messages[] even under rare cross-publisher reorder. When
+/// missing (older Runtime), the Desktop falls back to "append to end".
 message StreamDeltaPayload {
   string session_id = 1;
   repeated StreamLine lines = 2;
+  optional uint64 seq = 3;
 }
 
 /// A record finalized (committed to JSONL). Carries the COMPLETE content.
-/// Topic: acowork/agents/{id}/sessions/{sid}/messages/record_complete (QoS 0).
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/record_complete (QoS 1).
 /// Wired in Phase 2 of ADR-035; Phase 1 keeps HTTP record delivery in parallel.
+///
+/// `tool_name` / `tool_call_id` / `is_error` are populated only when
+/// `role` is `"tool_call"` or `"tool_result"`. For `"assistant"` and
+/// `"thought"` they are empty strings. This mirrors the JSONL metadata
+/// persisted alongside the record and lets the frontend reconstruct the
+/// tool_call ↔ tool_result pairing without an extra HTTP round-trip.
+///
+/// `seq` is the per-session monotonic counter (see StreamDeltaPayload for
+/// rationale). When present, it MUST match the seq of the matching
+/// stream_delta placeholder for the same record; the Desktop uses it to
+/// place this frame at the correct position.
 message RecordCompletePayload {
   string session_id = 1;
   string role = 2;        // "assistant" | "thought" | "tool_call" | "tool_result"
   string message_id = 3;
   string content = 4;
+  string tool_name = 5;    // empty unless role is tool_call / tool_result
+  string tool_call_id = 6; // empty unless role is tool_call / tool_result
+  bool is_error = 7;       // only meaningful when role is tool_result
+  optional uint64 seq = 8;
 }
 
 // ── Control commands (§9) — Desktop → Runtime ─────────────────────────

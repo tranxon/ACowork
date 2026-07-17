@@ -1614,6 +1614,11 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
 
   if (entry.role === "tool_call" || entry.role === "tool_result") {
     base.toolName = meta.tool_name as string | undefined;
+    // ADR-035: tool_call_id is the backend's authoritative pairing key
+    // (see ExploreBlock.buildPairedItems). It MUST be loaded from JSONL so
+    // that historical sessions pair tool_call ↔ tool_result correctly even
+    // before any live MQTT events arrive.
+    base.toolCallId = meta.tool_call_id as string | undefined;
     base.toolData = meta as Record<string, unknown>;
     if (entry.role === "tool_result") {
       base.toolStatus = meta.success === false ? "error" : "success";
@@ -1750,6 +1755,80 @@ function upsertMessageInSession(state: ChatStore, agentId: string, sid: string, 
   return updateSessionState(state, agentId, sid, { messages: trimOldest([...ss.messages, msg]) });
 }
 
+// ── Per-session seq-ordered insert (root fix for reorder) ──
+//
+// Live entries (`stream_delta` / `record_complete`) carry a per-session
+// monotonic `seq` produced by the Runtime's `next_seq()` counter at the
+// chunk_relay (single-threaded). The Desktop MUST respect that order when
+// placing entries in `messages[]`, otherwise an out-of-order delivery
+// from the broker would shove a fresh round's streaming placeholder into
+// the middle of the previous round's tool_call / tool_result block,
+// breaking the tool_call ↔ tool_result pairing in `ExploreBlock`.
+//
+// Algorithm:
+//   1. If `msg.seq` is `undefined`, fall back to `upsertMessageInSession`
+//      — covers history-loaded JSONL entries (which never carry `seq`).
+//   2. Else, look up an existing entry by id (placeholder ↔ freeze share
+//      a message_id; replacing freezes the placeholder) and if found,
+//      update in place but PRESERVE `seq` from the EXISTING entry.  This
+//      keeps a streaming record's frozen seq equal to the first
+//      stream_delta placeholder seq, which is what the seq sort order
+//      expects.
+//   3. Else, binary-search the first index whose `seq > msg.seq` and
+//      insert there. History entries (no seq) sort after all live
+//      entries because `undefined ?? -Infinity` is smaller than any
+//      real seq — wait, that's wrong: messages[] already has live
+//      entries appended (we sort live ones among themselves) and any
+//      JSONL entry loaded later has undefined seq, which should sit at
+//      the tail (newest in user view). Per-id replace handles JSONL
+//      late-arrival; new JSONL entries (which lack seq) deliberately
+//      keep the legacy append-to-end semantics for backward compat.
+function insertBySeq(state: ChatStore, agentId: string, sid: string, msg: ChatMessage): Partial<ChatStore> {
+  const ss = getSessionState(state, agentId, sid);
+  // Backward compat: history / pre-seq Runtime → legacy append/replace
+  if (msg.seq == null) {
+    return upsertMessageInSession(state, agentId, sid, msg);
+  }
+  const arr = ss.messages.slice();
+  // Same id → freeze / update in place (placeholder ↔ record_complete
+  // share the runtime-assigned message_id; tool_call / tool_result
+  // records don't have a placeholder but a duplicate id is still safe).
+  const byIdIdx = arr.findIndex(m => m.id === msg.id);
+  if (byIdIdx >= 0) {
+    const existing = arr[byIdIdx];
+    // Preserve existing seq on the in-place update: stream_delta
+    // pushes use the same seq as the placeholder; record_complete
+    // carries that same seq back, so the array sort order is invariant.
+    arr[byIdIdx] = { ...existing, ...msg, seq: existing.seq ?? msg.seq };
+    return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+  }
+  // New entry: binary search the insertion point by seq ascending.
+  // Live entries are strictly increasing in seq, so binary search is
+  // O(log n).
+  //
+  // History entries (seq undefined) are loaded via HTTP from on-disk
+  // JSONL. They were persisted BEFORE the current session started, so
+  // they are always OLDER than any live entry. Using `-Infinity` for
+  // undefined seq ensures they sort BEFORE all live entries, which
+  // matches the chronological timeline: history (oldest, lower index)
+  // → live (newest, higher index).
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    // History entries have no seq → treat as infinitely small so they
+    // sit before (to the left of) any seq-carrying live entry.
+    const midSeq = arr[mid].seq ?? Number.NEGATIVE_INFINITY;
+    if (midSeq <= msg.seq) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  arr.splice(lo, 0, msg);
+  return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+}
+
 function handleMessageEvent(
   data: Record<string, unknown>,
   set: (fn: Partial<ChatStore> | ((state: ChatStore) => Partial<ChatStore>)) => void,
@@ -1811,6 +1890,12 @@ function handleMessageEvent(
       if (!lines.length) break;
       const role = lines[0].role === 'assistant' ? 'assistant' as const : 'thought' as const;
       const msgId = lines[0].message_id;
+      // Per-session monotonic seq from the Runtime's chunk_relay. Carried
+      // through into the placeholder so record_complete (which also carries
+      // the same seq) lands at the same position on freeze, and so the
+      // binary-search insert in `insertBySeq` slots this placeholder at
+      // the correct position in `messages[]` even under broker reorder.
+      const incomingSeq = typeof data.seq === 'number' ? (data.seq as number) : undefined;
       let as = activeStreams.get(sid);
       const prevMsgId = as?.messageId;
       if (!as || as.messageId !== msgId) {
@@ -1819,12 +1904,22 @@ function handleMessageEvent(
         // linearly ordered — this relationship is immutable. When
         // record_complete arrives, checking whether prevMessageId is still
         // in the cache window determines whether to freeze or discard.
+        // (Kept as a legacy safety net; under seq ordering the freeze is
+        // anchored by id + seq anyway.)
         const state = get();
         const msgs = getSessionState(state, agentId, sid!).messages;
         const prevMessageId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
-        as = { messageId: msgId, role, lines: [], prevMessageId };
+        as = { messageId: msgId, role, lines: [], prevMessageId, seq: incomingSeq };
         activeStreams.set(sid, as);
-        set(state => upsertMessageInSession(state, agentId, sid!, { id: msgId, type: role, content: '', isStreaming: true, timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+        set(state => insertBySeq(state, agentId, sid!, {
+          id: msgId,
+          type: role,
+          content: '',
+          isStreaming: true,
+          timestamp: Date.now(),
+          ...(incomingSeq != null ? { seq: incomingSeq } : {}),
+          ...getAgentSenderInfo(agentId),
+        }));
         if (prevMsgId) notifyActiveStreamSubscribers(sid, prevMsgId);
       }
       if (!as) break;
@@ -1866,6 +1961,20 @@ function handleMessageEvent(
         : 'assistant';
       const msgId = data.message_id as string;
       const payloadContent = (data.content as string) ?? '';
+      // Per-session seq from the Runtime; matches the seq used by the
+      // matching stream_delta placeholder. Required for `insertBySeq` to
+      // land the freeze at the right slot, and lets direct tool_call /
+      // tool_result records (no streaming phase) slot in alongside their
+      // sibling entries.
+      const incomingSeq = typeof data.seq === 'number' ? (data.seq as number) : undefined;
+      // ADR-035: backend now forwards tool metadata in record_complete for
+      // tool_call / tool_result records. We pull it here so ExploreBlock's
+      // buildPairedItems can match tool_call ↔ tool_result by toolCallId
+      // and render the right tool label without an HTTP refresh.
+      const toolName = (data.tool_name as string | undefined) ?? '';
+      const toolCallId = (data.tool_call_id as string | undefined) ?? '';
+      const isError = data.is_error === true;
+      const toolStatus: "success" | "error" = isError ? "error" : "success";
       const as = activeStreams.get(sid);
       if (as && as.messageId === msgId) {
         // Stream completed. Check whether the physical predecessor
@@ -1882,13 +1991,56 @@ function handleMessageEvent(
           || msgs.some(m => m.id === as.prevMessageId);
         if (prevInWindow) {
           const fc = role === 'thought' ? as.lines.map(l => l.content).join('\n') : payloadContent;
-          set(s => upsertMessageInSession(s, agentId, sid, { id: msgId, type: role, content: fc, isStreaming: false, endTime: Date.now(), timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+          // `insertBySeq` replaces the placeholder in-place (same id) and
+          // preserves the original seq (via the by-id branch). This keeps
+          // the frozen record at the same position the placeholder
+          // occupied, invariant across the stream_delta → record_complete
+          // pair.
+          set(s => insertBySeq(s, agentId, sid, {
+            id: msgId,
+            type: role,
+            content: fc,
+            isStreaming: false,
+            endTime: Date.now(),
+            timestamp: Date.now(),
+            ...(incomingSeq != null ? { seq: incomingSeq } : {}),
+            ...getAgentSenderInfo(agentId),
+          }));
         }
         // else: predecessor evicted → user scrolled away → discard.
         // HTTP scroll-back will load the complete record from JSONL.
       } else {
-        // tool_call / tool_result (no activeStream) — insert directly.
-        set(state => upsertMessageInSession(state, agentId, sid!, { id: msgId, type: role, content: payloadContent, isStreaming: false, endTime: Date.now(), timestamp: Date.now(), ...getAgentSenderInfo(agentId) }));
+        // tool_call / tool_result (no activeStream) — insert via seq.
+        // Populate tool metadata so downstream pairing/rendering can work.
+        const extraFields: Partial<ChatMessage> = {};
+        if (role === 'tool_call' || role === 'tool_result') {
+          if (toolName) extraFields.toolName = toolName;
+          if (toolCallId) extraFields.toolCallId = toolCallId;
+          extraFields.toolStatus = toolStatus;
+          // tool_result content is JSON-stringified; surface it as toolData
+          // so the bubble renderer can pretty-print it.
+          if (role === 'tool_result') {
+            try {
+              const parsed = JSON.parse(payloadContent);
+              if (parsed && typeof parsed === 'object') {
+                extraFields.toolData = parsed as Record<string, unknown>;
+              }
+            } catch {
+              // Not JSON — keep raw in `content`, do not set toolData.
+            }
+          }
+        }
+        set(state => insertBySeq(state, agentId, sid!, {
+          id: msgId,
+          type: role,
+          content: payloadContent,
+          isStreaming: false,
+          endTime: Date.now(),
+          timestamp: Date.now(),
+          ...(incomingSeq != null ? { seq: incomingSeq } : {}),
+          ...getAgentSenderInfo(agentId),
+          ...extraFields,
+        }));
       }
       notifyActiveStreamSubscribers(sid, msgId);
       break;

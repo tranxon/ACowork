@@ -688,17 +688,40 @@ fn session_message_to_flat(
                 })
                 .collect();
             m.insert("lines".into(), serde_json::Value::Array(lines));
+            // Per-session monotonic seq (ADR-035). The frontend's
+            // `insertBySeq` needs it to place the streaming placeholder at
+            // the correct position in messages[] under broker reorder.
+            // Omitted (None) only for pre-seq Runtimes — frontend then
+            // falls back to append-to-end.
+            if let Some(seq) = p.seq {
+                m.insert("seq".into(), serde_json::json!(seq));
+            }
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::RecordComplete(p) => {
             // ADR-035: a record finalized (committed to JSONL), carrying the
             // COMPLETE content. Frontend freezes the active stream into
             // messages[] on receipt.
+            //
+            // For tool_call / tool_result records the backend now forwards
+            // tool_name / tool_call_id / is_error so the frontend can
+            // reconstruct the pairing without an HTTP round-trip. For
+            // assistant / thought these fields are empty / false; we still
+            // emit them so the frontend's switch statement stays uniform.
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("record_complete".into()));
             m.insert("role".into(), serde_json::Value::String(p.role.clone()));
             m.insert("message_id".into(), serde_json::Value::String(p.message_id.clone()));
             m.insert("content".into(), serde_json::Value::String(p.content.clone()));
+            m.insert("tool_name".into(), serde_json::Value::String(p.tool_name.clone()));
+            m.insert("tool_call_id".into(), serde_json::Value::String(p.tool_call_id.clone()));
+            m.insert("is_error".into(), serde_json::Value::Bool(p.is_error));
+            // Per-session monotonic seq — MUST match the seq of the matching
+            // stream_delta placeholder so the frontend freeze lands at the
+            // same slot; also orders direct tool_call / tool_result records.
+            if let Some(seq) = p.seq {
+                m.insert("seq".into(), serde_json::json!(seq));
+            }
             Some(serde_json::Value::Object(m))
         }
     }

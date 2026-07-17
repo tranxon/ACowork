@@ -361,47 +361,80 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     && prev.hasFollowUpReply === next.hasFollowUpReply;
 });
 
-/** Pair tool_call with its corresponding tool_result by toolName */
+/** Pair tool_call with its corresponding tool_result.
+ *
+ * Pairing is keyed EXCLUSIVELY on `toolCallId`. The backend assigns a
+ * unique `tool_call_id` per LLM-issued tool invocation at tool-dispatch
+ * time (see `acowork-runtime` builtin tools) and stamps the SAME id on
+ * the emitted `tool_call` record AND its `tool_result` record. This id
+ * is stable across transport (MQTT live, JSONL history), across order
+ * (parallel calls may arrive in any order), and across reconnection
+ * (replay emits records with the same id). Using `toolName` for pairing
+ * is unsafe: many calls share a name (`file_read`, `content_search`,
+ * `shell`, `bash`) and out-of-order delivery then mismatches them, which
+ * is what produced the "tool_call split into two" rendering bug.
+ *
+ * Fallback policy:
+ *  - tool_call without toolCallId → rendered as a standalone call;
+ *    any result with the same absent id cannot be matched — we leave
+ *    both as visible siblings rather than silently mispair.
+ *  - tool_result without toolCallId → orphan; rendered standalone.
+ *
+ * The pair loop walks items in order so that streaming pendings appear
+ * in the natural arrival sequence; the matching itself is id-based, so
+ * the result may legitimately appear AFTER its call (e.g. MQTT
+ * reordering, slow tool execution).
+ */
 type PairedItem =
   | { kind: "thought"; msg: ChatMessage }
   | { kind: "tool"; call: ChatMessage; result?: ChatMessage }
   | { kind: "other"; msg: ChatMessage };
 
 function buildPairedItems(items: ChatMessage[]): PairedItem[] {
-  const paired: PairedItem[] = [];
-  // Collect all tool_results indexed by toolName for matching
-  const resultsByName = new Map<string, ChatMessage[]>();
+  // Index all tool_results by toolCallId for O(1) lookup. Results with
+  // no toolCallId cannot be paired and are kept as standalone orphans.
+  const resultsById = new Map<string, ChatMessage>();
+  const orphanResults: ChatMessage[] = [];
   for (const msg of items) {
-    if (msg.type === "tool_result" && msg.toolName) {
-      const list = resultsByName.get(msg.toolName) || [];
-      list.push(msg);
-      resultsByName.set(msg.toolName, list);
+    if (msg.type === "tool_result") {
+      if (msg.toolCallId) resultsById.set(msg.toolCallId, msg);
+      else orphanResults.push(msg);
     }
   }
 
-  // Track which results have been consumed
   const consumedResults = new Set<string>();
+  const paired: PairedItem[] = [];
 
   for (const msg of items) {
     if (msg.type === "thought") {
       paired.push({ kind: "thought", msg });
     } else if (msg.type === "tool_call") {
-      // Find matching result by toolName (consume in order)
-      const candidates = resultsByName.get(msg.toolName ?? "") || [];
-      const result = candidates.find((r) => !consumedResults.has(r.id));
-      if (result) {
-        consumedResults.add(result.id);
+      let result: ChatMessage | undefined;
+      if (msg.toolCallId) {
+        const candidate = resultsById.get(msg.toolCallId);
+        if (candidate && !consumedResults.has(candidate.id)) {
+          consumedResults.add(candidate.id);
+          result = candidate;
+        }
       }
       paired.push({ kind: "tool", call: msg, result });
     } else if (msg.type === "tool_result") {
-      // Skip if already consumed by a tool_call pairing
-      if (consumedResults.has(msg.id)) continue;
-      // Orphan result — show standalone
+      // Skip if already consumed by a tool_call pairing via id.
+      if (msg.toolCallId && consumedResults.has(msg.id)) continue;
+      // Orphan (no toolCallId or duplicate id) — show standalone.
       paired.push({ kind: "tool", call: msg });
     } else {
       paired.push({ kind: "other", msg });
     }
   }
+
+  // Tool_results with no toolCallId never landed in resultsById, so the
+  // main loop above never consumed them. Append them at the end so the
+  // order stays roughly sequential.
+  for (const orphan of orphanResults) {
+    paired.push({ kind: "tool", call: orphan });
+  }
+
   return paired;
 }
 

@@ -504,8 +504,21 @@ fn relay_chunk_event_mqtt(
             );
         }
 
-        ChunkEvent::StreamDelta { session_id, lines } => {
+        ChunkEvent::StreamDelta {
+            session_id,
+            lines,
+            seq,
+        } => {
             // ADR-035 M2: lines is Vec<(role, message_id, content)>.
+            //
+            // `seq` was assigned by `SessionCore::next_seq` at the emit
+            // site and shipped through the chunk event unchanged. The
+            // chunk_relay loop is single-threaded, so the seq here is
+            // guaranteed to match the order in which this frame should
+            // reach the Desktop — that is what makes the backend the
+            // single source of truth for ordering, and lets the Desktop's
+            // `insertBySeq` re-derive the right position even on rare
+            // reorder.
             let lines_proto: Vec<StreamLine> = lines
                 .into_iter()
                 .map(|(role, message_id, content)| StreamLine {
@@ -515,14 +528,36 @@ fn relay_chunk_event_mqtt(
                     content,
                 })
                 .collect();
-            publisher.publish_stream_delta(&session_id, &lines_proto);
+            publisher.publish_stream_delta(&session_id, &lines_proto, seq);
         }
 
         // ADR-035 C1: publish record_complete at QoS 1 (authoritative
         // terminal event). tool_result content is truncated to first 5
         // lines inside publish_record_complete (D9.2).
-        ChunkEvent::RecordComplete { session_id, role, message_id, content } => {
-            publisher.publish_record_complete(&session_id, &role, &message_id, &content);
+        //
+        // `seq` travels with the ChunkEvent exactly as it was assigned at
+        // the emit site (`SessionCore::next_seq`) — see the StreamDelta
+        // branch above for the full ordering rationale.
+        ChunkEvent::RecordComplete {
+            session_id,
+            role,
+            message_id,
+            content,
+            tool_name,
+            tool_call_id,
+            is_error,
+            seq,
+        } => {
+            publisher.publish_record_complete(
+                &session_id,
+                &role,
+                &message_id,
+                &content,
+                &tool_name,
+                &tool_call_id,
+                is_error,
+                seq,
+            );
         }
 
         ChunkEvent::AskQuestion {

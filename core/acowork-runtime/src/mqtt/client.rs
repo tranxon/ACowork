@@ -829,14 +829,23 @@ impl MqttChunkPublisher {
         });
     }
 
-    /// Publish a `stream_delta` event via MQTT (QoS 0, ADR-035).
+    /// Publish a `stream_delta` event via MQTT (QoS 1, ADR-035 + reorder fix).
     ///
     /// Carries the new COMPLETE streaming lines since the last push. Each
     /// `StreamLine.content` is a whole line — never a partial line or token.
+    ///
+    /// `seq` is the per-session monotonic counter assigned at the emit site
+    /// (`SessionCore::next_seq`); the chunk_relay is single-threaded so the
+    /// value matches the order in which the relay enqueued this frame. The
+    /// Desktop uses it to place this frame at the correct position in
+    /// `messages[]` even if the broker delivers frames in a different order.
+    /// See `mqtt_payload.proto::StreamDeltaPayload.seq` for the receiving
+    /// contract.
     pub(crate) fn publish_stream_delta(
         &self,
         session_id: &str,
         lines: &[StreamLine],
+        seq: u64,
     ) {
         if lines.is_empty() {
             return;
@@ -852,6 +861,7 @@ impl MqttChunkPublisher {
                 event: Some(session_message::Event::StreamDelta(StreamDeltaPayload {
                     session_id: sid.clone(),
                     lines,
+                    seq: Some(seq),
                 })),
             };
             let envelope = DataEnvelope {
@@ -859,7 +869,13 @@ impl MqttChunkPublisher {
                 payload: Some(data_envelope::Payload::SessionMessage(event)),
             };
             let bytes = prost::Message::encode_to_vec(&envelope);
-            publisher.publish(&sid, "stream_delta", &bytes).await;
+            // QoS 1 — `stream_delta` was QoS 0 in ADR-035 initial cut, but
+            // a fire-and-forget channel cannot guarantee order against
+            // QoS 1 `record_complete` events arriving in parallel. With QoS
+            // 1 on both endpoints the broker preserves relative order
+            // end-to-end; combined with the `seq` payload the Desktop is
+            // also robust to any rare reorder.
+            publisher.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce).await;
         });
     }
 
@@ -871,15 +887,31 @@ impl MqttChunkPublisher {
     /// the authoritative terminal event — losing it leaves the message
     /// stuck in the streaming state (ADR-035 O2).
     ///
+    /// `tool_name` / `tool_call_id` / `is_error` are populated for
+    /// `tool_call` and `tool_result` roles; otherwise empty / false. They
+    /// mirror the JSONL metadata so the frontend can pair tool_call with
+    /// tool_result and render correct labels without an extra HTTP fetch.
+    ///
     /// ADR-035 D9.2: `tool_result` content is truncated to the first 5
     /// lines before publishing. The full content stays in JSONL for LLM
     /// context. No exception — the frontend never receives full tool_result.
+    //
+    // The 8 arguments (self + 7 fields) are intentional: the struct
+    // form (`RecordCompletePayload`) is the protobuf DTO and we want
+    // this publisher wrapper to look the same. A dedicated builder
+    // would just shuffle the same fields around without reducing the
+    // surface area, so we keep it inline and silence the lint.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish_record_complete(
         &self,
         session_id: &str,
         role: &str,
         message_id: &str,
         content: &str,
+        tool_name: &str,
+        tool_call_id: &str,
+        is_error: bool,
+        seq: u64,
     ) {
         // ADR-035 D9.2: truncate tool_result to first 5 lines for display.
         // Full content stays in JSONL for LLM context. No exception.
@@ -893,6 +925,8 @@ impl MqttChunkPublisher {
         let agent_id = self.agent_id.clone();
         let role = role.to_string();
         let mid = message_id.to_string();
+        let tool_name = tool_name.to_string();
+        let tool_call_id = tool_call_id.to_string();
         tokio::spawn(async move {
             let event = SessionMessage {
                 agent_id,
@@ -902,6 +936,10 @@ impl MqttChunkPublisher {
                     role,
                     message_id: mid,
                     content: final_content,
+                    tool_name,
+                    tool_call_id,
+                    is_error,
+                    seq: Some(seq),
                 })),
             };
             let envelope = DataEnvelope {
@@ -910,7 +948,9 @@ impl MqttChunkPublisher {
             };
             let bytes = prost::Message::encode_to_vec(&envelope);
             // ADR-035 O2: QoS 1 — record_complete is the authoritative
-            // terminal event; losing it leaves the message stuck.
+            // terminal event; losing it leaves the message stuck. The
+            // per-session `seq` makes the frame position self-healing on
+            // the Desktop (see `insertBySeq`).
             publisher.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce).await;
         });
     }

@@ -204,6 +204,12 @@ pub enum ChunkEvent {
         /// (role, message_id, content) triples. `role` ∈ {"thought", "assistant"};
         /// `content` is a complete line of text.
         lines: Vec<(String, String, String)>,
+        /// Per-session monotonic seq assigned by `SessionCore::next_seq`
+        /// at emit time. The chunk_relay (single-threaded FIFO) forwards it
+        /// into the MQTT `StreamDeltaPayload.seq` field; the Desktop uses
+        /// it to insert this frame at the right position in `messages[]`
+        /// independent of arrival order.
+        seq: u64,
     },
     /// ADR-035 C1: a record finalized (committed to JSONL). Carries the
     /// COMPLETE content. The frontend freezes the active stream buffer into
@@ -217,12 +223,27 @@ pub enum ChunkEvent {
     /// Published at QoS 1 (ADR-035 O2) — `record_complete` is the
     /// authoritative terminal event; losing it leaves the message stuck
     /// in the streaming state.
+    ///
+    /// `tool_name` / `tool_call_id` / `is_error` are populated only for
+    /// `tool_call` / `tool_result` records (mirrors the JSONL metadata).
+    /// They are forwarded into the MQTT payload so the frontend can pair
+    /// tool_call with tool_result without an extra HTTP round-trip.
     RecordComplete {
         session_id: String,
         /// "assistant" | "thought" | "tool_call" | "tool_result"
         role: String,
         message_id: String,
         content: String,
+        tool_name: String,
+        tool_call_id: String,
+        is_error: bool,
+        /// Per-session monotonic seq assigned by `SessionCore::next_seq`
+        /// at emit time. For streaming records this matches the seq of the
+        /// preceding `stream_delta` placeholder (same message_id); for
+        /// tool_call / tool_result records emitted by
+        /// `persist_and_emit_tool_results` it's a fresh seq that fits
+        /// between the assistant that owned them and the next round.
+        seq: u64,
     },
 }
 

@@ -166,6 +166,12 @@ impl DesktopMqttClient {
     /// Use this when the Desktop only displays one active session at a time
     /// to avoid receiving events from other sessions and wasting
     /// bandwidth/CPU.
+    ///
+    /// **QoS 1 is mandatory for the messages/# tree** (stream_delta and
+    /// record_complete topics). A subscriber QoS 0 forces the broker to
+    /// downgrade delivery of the publishers' QoS 1 frames to QoS 0, opening
+    /// the door to reorder and loss — exactly the symptom that motivated
+    /// the per-session `seq` counter and end-to-end QoS 1 stream.
     #[allow(dead_code)]
     pub async fn subscribe_agent_session(
         &self,
@@ -173,7 +179,7 @@ impl DesktopMqttClient {
         session_id: &str,
     ) -> Result<(), String> {
         let filter = format!("acowork/agents/{}/sessions/{}/messages/#", agent_id, session_id);
-        self.subscribe(&filter, MqttQoS::AtMostOnce).await?;
+        self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;
 
         let filter = format!("acowork/agents/{}/sessions/{}/meta", agent_id, session_id);
         self.subscribe(&filter, MqttQoS::AtLeastOnce).await?;

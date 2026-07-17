@@ -64,6 +64,17 @@ pub(crate) struct SessionCore {
     /// the new line starts with empty `accumulated_content`.
     pub(crate) stream_push_offset: Arc<AtomicUsize>,
 
+    /// Per-session monotonic sequence counter for live messages
+    /// (`stream_delta` / `record_complete` only). Single source of truth
+    /// for the order of MQTT frames reaching the Desktop. The chunk_relay
+    /// loops are single-threaded (`while let Some(event) = chunk_rx.recv()`),
+    /// so `fetch_add(1, SeqCst)` is the only safe and authoritative site
+    /// for assigning these numbers; emit sites call [`SessionCore::next_seq`]
+    /// before sending each chunk event. Not persisted — session resume
+    /// restarts at 0 because the Desktop loads history via HTTP and any
+    /// subsequent live frame is naturally "newer than any history entry".
+    pub(crate) seq_counter: Arc<AtomicU64>,
+
     /// Urgent stop notify — fired by Gateway to cancel tool execution
     /// immediately.  Each session gets its own independent Notify.
     pub(crate) urgent_stop: Option<Arc<Notify>>,
@@ -136,6 +147,10 @@ impl SessionCore {
             streaming_flush_count: Arc::new(AtomicU64::new(0)),
             streaming_lines,
             stream_push_offset,
+            // Per-session live-only seq counter. Always starts at 0; never
+            // persisted to JSONL (history is loaded via HTTP and doesn't
+            // carry `seq`). See field doc above.
+            seq_counter: Arc::new(AtomicU64::new(0)),
             urgent_stop: Some(Arc::new(Notify::new())),
             status_tx: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
@@ -147,6 +162,16 @@ impl SessionCore {
             approval_handle: None,
             title: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Atomically reserve the next per-session sequence number. Called from
+    /// `flush_streaming_line` (record_complete) and `try_send_stream_delta`
+    /// (stream_delta) so every emitted `ChunkEvent` that the chunk_relay
+    /// will turn into an MQTT frame carries a unique, strictly increasing
+    /// `seq`. The Desktop uses it to insert frames at the correct position
+    /// in `messages[]` even if MQTT happens to deliver them out of order.
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.seq_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     // ── Chunk event helpers ──────────────────────────────────────────
@@ -314,11 +339,24 @@ impl SessionCore {
             // QoS 1 (see publish_record_complete) — record_complete is the
             // authoritative terminal event; losing it leaves the message
             // stuck in the streaming state (ADR-035 O2).
+            //
+            // `seq` is the per-session monotonic counter produced by
+            // `next_seq()` — the chunk_relay forwards it into the MQTT
+            // payload so the Desktop can place this freeze at the right
+            // position even if a stray reorder happens.
             let _ = self.try_send_chunk(ChunkEvent::RecordComplete {
                 session_id: sid.clone(),
                 role: role.clone(),
                 message_id: message_id.clone(),
                 content: content.clone(),
+                // assistant / thought records carry no tool metadata; the
+                // empty string defaults round-trip cleanly through MQTT
+                // and the frontend ignores the fields when role !=
+                // tool_call / tool_result.
+                tool_name: String::new(),
+                tool_call_id: String::new(),
+                is_error: false,
+                seq: self.next_seq(),
             });
         } else if content.trim().is_empty() {
             tracing::warn!(
@@ -470,9 +508,16 @@ impl SessionCore {
         };
 
         if !new_lines.is_empty() {
+            // Reserve a per-session seq BEFORE the chunk event is enqueued.
+            // The chunk_relay is single-threaded, so the seq we pick here is
+            // the same one the MQTT publish layer will write into the
+            // payload — making the backend the single source of truth for
+            // frame order.
+            let seq = self.next_seq();
             let _ = self.try_send_chunk(ChunkEvent::StreamDelta {
                 session_id: sid,
                 lines: new_lines,
+                seq,
             });
         }
     }
@@ -659,8 +704,16 @@ mod tests {
         core.try_send_stream_delta();
         let evt = rx.try_recv().unwrap();
         match evt.event {
-            ChunkEvent::StreamDelta { session_id, lines } => {
+            ChunkEvent::StreamDelta { session_id, lines, seq } => {
                 assert_eq!(session_id, "s1");
+                // Per-session seq must be monotonically increasing across
+                // emits. `next_seq` uses `fetch_add(1)` which returns the
+                // PRE-increment value, so the very first emitted seq in a
+                // fresh session is 0, the second is 1, etc. The numeric
+                // value is opaque to the wire — the Desktop only cares
+                // about relative order — so we assert the pattern
+                // (first < second) rather than specific values.
+                let first_seq = seq;
                 // ADR-035 M2: lines is Vec<(role, message_id, content)>;
                 // project to (role, content) for the assertion.
                 let projected: Vec<(String, String)> = lines
@@ -674,6 +727,8 @@ mod tests {
                         ("assistant".to_string(), "second line".to_string()),
                     ]
                 );
+                // Keep `first_seq` for the monotonicity check below.
+                let _ = first_seq;
             }
             _other => panic!("expected StreamDelta, got non-stream_delta event"),
         }
@@ -689,7 +744,16 @@ mod tests {
         core.try_send_stream_delta();
         let evt = rx.try_recv().unwrap();
         match evt.event {
-            ChunkEvent::StreamDelta { lines, .. } => {
+            ChunkEvent::StreamDelta { lines, seq, .. } => {
+                // Second emit must carry a strictly greater seq than the
+                // first — the monotonicity guarantee the Desktop relies on
+                // for `insertBySeq` ordering.
+                let second_seq = seq;
+                assert!(
+                    second_seq > 0,
+                    "second stream_delta should carry a positive seq (got {})",
+                    second_seq,
+                );
                 // ADR-035 M2: lines is Vec<(role, message_id, content)>;
                 // project to (role, content) for the assertion.
                 let projected: Vec<(String, String)> = lines

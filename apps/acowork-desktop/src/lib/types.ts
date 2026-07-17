@@ -261,6 +261,14 @@ export interface ChatMessage {
   type: MessageType;
   content: string;
   timestamp: number;
+  /** Per-session monotonic seq assigned by the Runtime's `next_seq()`
+   *  counter. Set on entries received live via `stream_delta` /
+   *  `record_complete`; absent on entries loaded from JSONL history. The
+   *  Desktop uses it to place live frames at the correct position in
+   *  `messages[]` (`insertBySeq`) even if MQTT delivers them out of
+   *  order. See `acowork_data.proto::StreamDeltaPayload.seq` and
+   *  `RecordCompletePayload.seq`. */
+  seq?: number;
   /** Sender display name for chat bubble (e.g. "PM", "我") */
   senderDisplayName?: string;
   /** Sender avatar URL or data URI */
@@ -758,6 +766,11 @@ export interface StreamLine {
  *      predecessor, which HTTP will reach linearly). */
 export interface ActiveStream {
   messageId: string;
+  /** Per-session seq assigned to the first stream_delta frame this stream
+   *  emits. All stream_deltas for this stream use the same seq; the
+   *  matching `record_complete` carries the same value so the Desktop
+   *  can recognise the freeze as belonging to this placeholder. */
+  seq?: number;
   role: "thought" | "assistant";
   lines: StreamLine[];
   prevMessageId: string | null;
