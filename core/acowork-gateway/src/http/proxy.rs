@@ -1,7 +1,7 @@
 //! Gateway HTTP reverse proxy (ADR-033 Phase 2).
 //!
 //! For specific large-data query paths, the Gateway does not handle the
-//! request itself — instead it reverse-proxies to the Runtime's localhost
+//! request itself - instead it reverse-proxies to the Runtime's localhost
 //! HTTP server. The Gateway looks up the Runtime's HTTP port from a
 //! registry (populated during Runtime registration) and forwards the
 //! request. If the Runtime is not registered or has exited, returns 503.
@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use crate::http::routes::AppState;
 
-/// Registry mapping id → Runtime HTTP port.
+/// Registry mapping id -> Runtime HTTP port.
 ///
 /// Populated by [`crate::mqtt::dispatch::handle_plaintext_message`] when the
 /// Gateway receives a **retained** `acowork/agents/{id}/http_port` payload
@@ -38,7 +38,7 @@ use crate::http::routes::AppState;
 /// data queries without waiting for the next Runtime-side publish.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeHttpRegistry {
-    /// id → (http_port, registered_at)
+    /// id -> (http_port, registered_at)
     ports: HashMap<String, u16>,
 }
 
@@ -140,6 +140,13 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}",
             get(proxy_get_session),
         )
+        // Legacy /state suffix - Runtime absorbed it into /sessions/{sid};
+        // kept as a separate route so old callers still get a sensible
+        // (verbatim-proxied) response instead of 404.
+        .route(
+            "/api/agents/{id}/sessions/{sid}/state",
+            get(proxy_get_session_state),
+        )
         // Routes 2-5: Session documents proxy
         .route(
             "/api/agents/{id}/sessions/{sid}/documents",
@@ -161,7 +168,7 @@ pub fn proxy_routes() -> Router<AppState> {
         // Routes 11-13: Agent config / tools / status
         .route(
             "/api/agents/{id}/config",
-            get(proxy_get_config),
+            get(proxy_get_config).put(proxy_put_config),
         )
         .route(
             "/api/agents/{id}/tools",
@@ -173,12 +180,27 @@ pub fn proxy_routes() -> Router<AppState> {
         )
 }
 
+// ── Proxy handlers ────────────────────────────────────────────────────
+//
+// All handlers follow the same pattern: extract axum parameters (State,
+// Path, Query, HeaderMap, Bytes body), then delegate to
+// `proxy_to_runtime` or `proxy_to_runtime_with_method`.
+//
+// `HeaderMap` is extracted by axum as a "catch-all" extractor (it must
+// come after other extractors that consume the request body). The full
+// header map is forwarded to the Runtime via the core proxy function,
+// which strips hop-by-hop headers per RFC 7230 §6.1 and forwards the
+// rest verbatim. This is the standard reverse-proxy behaviour: the
+// proxy does not pick-and-choose which headers to forward — it forwards
+// all of them except those explicitly forbidden by the HTTP spec.
+
 /// Reverse-proxy `GET /api/agents/{id}/workspaces` to Runtime's `GET /workspaces`.
 async fn proxy_list_workspaces(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    proxy_to_runtime(&state, &id, "/workspaces", "").await
+    proxy_to_runtime(&state, &id, "/workspaces", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/workspaces/tree` to Runtime's `GET /workspaces/tree`.
@@ -186,9 +208,10 @@ async fn proxy_list_tree(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &id, "/workspaces/tree", &query).await
+    proxy_to_runtime(&state, &id, "/workspaces/tree", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
@@ -196,17 +219,19 @@ async fn proxy_list_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &id, "/sessions", &query).await
+    proxy_to_runtime(&state, &id, "/sessions", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/latest-session` to Runtime's `GET /sessions/latest`.
 async fn proxy_latest_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    proxy_to_runtime(&state, &id, "/sessions/latest", "").await
+    proxy_to_runtime(&state, &id, "/sessions/latest", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/messages` to Runtime's `GET /sessions/{sid}/messages`.
@@ -214,18 +239,35 @@ async fn proxy_get_messages(
     State(state): State<AppState>,
     Path((id, sid)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}/messages", sid);
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &id, &path, &query).await
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/state` to
+/// Runtime's `GET /sessions/{sid}` (the legacy `/state` suffix was
+/// absorbed into `/sessions/{sid}` per the Runtime server's
+/// `get_session` doc-comment).  Kept as a separate path so callers
+/// that still use the `/state` suffix don't 404; the body is
+/// forwarded verbatim either way.
+async fn proxy_get_session_state(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}", sid);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/graph` to Runtime's `GET /memory/graph`.
 async fn proxy_get_memory_graph(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    proxy_to_runtime(&state, &id, "/memory/graph", "").await
+    proxy_to_runtime(&state, &id, "/memory/graph", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes` to Runtime's `GET /memory/nodes`.
@@ -233,23 +275,26 @@ async fn proxy_memory_nodes(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Response {
     let query = build_query_string(&params);
-    proxy_to_runtime(&state, &id, "/memory/nodes", &query).await
+    proxy_to_runtime(&state, &id, "/memory/nodes", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/stats` to Runtime's `GET /memory/stats`.
 async fn proxy_memory_stats(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    proxy_to_runtime(&state, &id, "/memory/stats", "").await
+    proxy_to_runtime(&state, &id, "/memory/stats", "", &headers).await
 }
 
 /// Reverse-proxy `DELETE /api/agents/{id}/memory/nodes/{nid}` to Runtime's `DELETE /memory/nodes/{nid}`.
 async fn proxy_memory_delete_node(
     State(state): State<AppState>,
     Path((id, nid)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/memory/nodes/{}", nid);
     proxy_to_runtime_with_method(
@@ -259,6 +304,7 @@ async fn proxy_memory_delete_node(
         "",
         reqwest::Method::DELETE,
         None,
+        &headers,
     )
     .await
 }
@@ -267,27 +313,16 @@ async fn proxy_memory_delete_node(
 ///
 /// Forwards the inbound request body verbatim so the Desktop's `force` /
 /// `retention_days` parameters reach the Runtime. When the client sends
-/// no body we forward an empty payload — the Runtime's `trigger_consolidate`
+/// no body we forward an empty payload - the Runtime's `trigger_consolidate`
 /// handler treats this as "use defaults".
 async fn proxy_memory_consolidate(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() {
-        None
-    } else {
-        Some(body.to_vec())
-    };
-    proxy_to_runtime_with_method(
-        &state,
-        &id,
-        "/memory/consolidate",
-        "",
-        reqwest::Method::POST,
-        payload,
-    )
-    .await
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, "/memory/consolidate", "", reqwest::Method::POST, payload, &headers).await
 }
 
 // ── New Phase 4 proxy handlers ─────────────────────────────────────────
@@ -297,11 +332,12 @@ async fn proxy_memory_consolidate(
 async fn proxy_upload_document(
     State(state): State<AppState>,
     Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/documents", sid);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload).await
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents`
@@ -309,9 +345,10 @@ async fn proxy_upload_document(
 async fn proxy_list_documents(
     State(state): State<AppState>,
     Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}/documents", sid);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
@@ -319,9 +356,10 @@ async fn proxy_list_documents(
 async fn proxy_read_document(
     State(state): State<AppState>,
     Path((id, sid, doc_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}/documents/{}", sid, doc_id);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `DELETE /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
@@ -329,9 +367,10 @@ async fn proxy_read_document(
 async fn proxy_delete_document(
     State(state): State<AppState>,
     Path((id, sid, doc_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}/documents/{}", sid, doc_id);
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None).await
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}`
@@ -339,9 +378,10 @@ async fn proxy_delete_document(
 async fn proxy_get_session(
     State(state): State<AppState>,
     Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/sessions/{}", sid);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `POST /api/agents/{id}/workspaces`
@@ -349,10 +389,11 @@ async fn proxy_get_session(
 async fn proxy_add_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, "/workspaces", "", reqwest::Method::POST, payload).await
+    proxy_to_runtime_with_method(&state, &id, "/workspaces", "", reqwest::Method::POST, payload, &headers).await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}`
@@ -360,11 +401,12 @@ async fn proxy_add_workspace(
 async fn proxy_update_workspace(
     State(state): State<AppState>,
     Path((id, ws_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}", ws_id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload).await
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/prompt-file`
@@ -372,11 +414,12 @@ async fn proxy_update_workspace(
 async fn proxy_set_prompt_file(
     State(state): State<AppState>,
     Path((id, ws_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}/prompt-file", ws_id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload).await
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }
 
 /// Reverse-proxy `DELETE /api/agents/{id}/workspaces/{ws_id}`
@@ -384,9 +427,10 @@ async fn proxy_set_prompt_file(
 async fn proxy_delete_workspace(
     State(state): State<AppState>,
     Path((id, ws_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/workspaces/{}", ws_id);
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None).await
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes/{nid}`
@@ -394,9 +438,10 @@ async fn proxy_delete_workspace(
 async fn proxy_get_memory_node(
     State(state): State<AppState>,
     Path((id, nid)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/memory/nodes/{}", nid);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/config`
@@ -404,9 +449,52 @@ async fn proxy_get_memory_node(
 async fn proxy_get_config(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/agents/{}/config", id);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/config`
+/// to Runtime's `PUT /agents/{id}/config`.
+///
+/// **Gateway is a pure reverse proxy here** - the inbound JSON body is
+/// forwarded verbatim to the Runtime, which is the single owner of the
+/// read-modify-write persistence path (`agent_tools.json` +
+/// `agent_config.json` + live broadcast). The previous implementation
+/// re-parsed the body, forwarded only the `builtin_tools` slice, and
+/// echoed the other 8 fields back - that left fields like `temperature`
+/// and `max_output_tokens` invisible to the Runtime and silently dropped
+/// the Setup panel edits (user-visible as "改动不生效").
+///
+/// The 503/404 fallback paths in `proxy_to_runtime_with_method` cover
+/// the same startup-race semantics that the old implementation
+/// checked inline (`running_agents[id].ready`); the Gateway simply
+/// bubbles up the Runtime's own error envelope instead of duplicating
+/// it. This is the same pattern used by `proxy_update_workspace` /
+/// `proxy_set_prompt_file`.
+async fn proxy_put_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/config", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/tools`
@@ -414,9 +502,10 @@ async fn proxy_get_config(
 async fn proxy_get_tools(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/agents/{}/tools", id);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/status`
@@ -424,9 +513,10 @@ async fn proxy_get_tools(
 async fn proxy_get_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     let path = format!("/agents/{}/status", id);
-    proxy_to_runtime(&state, &id, &path, "").await
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Build a query string from a HashMap of params.
@@ -453,27 +543,63 @@ fn urlencoding(s: &str) -> String {
         .collect()
 }
 
+/// Check if a header is hop-by-hop (RFC 7230 §6.1) or should otherwise
+/// not be forwarded by a reverse proxy.
+///
+/// Hop-by-hop headers are specific to a single transport-level connection
+/// and must not be forwarded by proxies. Additionally, `host` is excluded
+/// because the proxy targets a different upstream host, and
+/// `content-length` is excluded because reqwest recalculates it from the
+/// actual body bytes.
+fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
+    // HeaderName stores names in lowercase, so comparison is safe.
+    matches!(
+        name.as_str(),
+        "connection"
+        | "keep-alive"
+        | "proxy-authenticate"
+        | "proxy-authorization"
+        | "te"
+        | "trailer"
+        | "transfer-encoding"
+        | "upgrade"
+        | "host"
+        | "content-length"
+    )
+}
+
 /// Core reverse-proxy logic: look up the Runtime's HTTP port and forward a GET request.
+///
+/// Delegates to [`proxy_to_runtime_with_method`] with `GET` and no body.
 async fn proxy_to_runtime(
     state: &AppState,
     id: &str,
     path: &str,
     query: &str,
+    headers: &HeaderMap,
 ) -> Response {
-    proxy_to_runtime_with_method(state, id, path, query, reqwest::Method::GET, None).await
+    proxy_to_runtime_with_method(state, id, path, query, reqwest::Method::GET, None, headers).await
 }
 
-/// Core reverse-proxy logic with configurable HTTP method and optional body.
+/// Core reverse-proxy logic with configurable HTTP method, optional body,
+/// and full header forwarding.
 ///
-/// Supports GET, DELETE, POST etc. for endpoints that aren't pure reads.
+/// # Proxy contract
+///
+/// This function is a **transparent reverse proxy** (RFC 7230 §2.3). It
+/// forwards the inbound request's method, path, query string, body, and
+/// **all headers** to the Runtime's localhost HTTP server. Only hop-by-hop
+/// headers (RFC 7230 §6.1) are stripped — every other header (including
+/// `Content-Type`, `Accept`, `Authorization`, custom headers, etc.) is
+/// forwarded verbatim.
+///
+/// This is the standard reverse-proxy behaviour: the proxy does not
+/// pick-and-choose which headers to forward, nor does it assume or
+/// default any header values. Callers must extract the full `HeaderMap`
+/// from the inbound request and pass it in.
+///
 /// `body` is forwarded verbatim as the request payload when set
 /// (POST/PUT/PATCH). Endpoints with no incoming body should pass `None`.
-///
-/// Content-Type is intentionally NOT copied from the inbound request — most
-/// Runtime memory endpoints currently accept/ignore the body, and reqwest's
-/// `body(Vec<u8>)` builder emits the default `application/octet-stream`.
-/// Endpoints that require a specific content-type should use
-/// [`send_runtime_json`] instead (which builds the body from a typed value).
 async fn proxy_to_runtime_with_method(
     state: &AppState,
     id: &str,
@@ -481,6 +607,7 @@ async fn proxy_to_runtime_with_method(
     query: &str,
     method: reqwest::Method,
     body: Option<Vec<u8>>,
+    headers: &HeaderMap,
 ) -> Response {
     // Look up the Runtime's HTTP port from the registry.
     let registry = match &state.runtime_http_registry {
@@ -534,6 +661,16 @@ async fn proxy_to_runtime_with_method(
     // Forward the request
     let client = runtime_http_client();
     let mut request = client.request(method.clone(), &target_url);
+
+    // Forward all non-hop-by-hop headers from the inbound request (RFC 7230 §6.1).
+    // This ensures Content-Type, Accept, Authorization, and any custom headers
+    // reach the Runtime unchanged.
+    for (name, value) in headers {
+        if !is_hop_by_hop_header(name) {
+            request = request.header(name, value);
+        }
+    }
+
     if let Some(ref payload) = body {
         request = request.body(payload.clone());
     }
@@ -541,11 +678,11 @@ async fn proxy_to_runtime_with_method(
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let headers = response.headers().clone();
+            let resp_headers = response.headers().clone();
             let body = response.bytes().await.unwrap_or_default();
 
             let mut response_builder = Response::builder().status(status);
-            *response_builder.headers_mut().unwrap() = headers;
+            *response_builder.headers_mut().unwrap() = resp_headers;
             response_builder
                 .body(axum::body::Body::from(body))
                 .unwrap_or_else(|_| {
@@ -645,7 +782,7 @@ pub(crate) async fn send_runtime_json(
 /// HTTP client for making proxy requests to Runtime.
 ///
 /// Uses a static `reqwest::Client` (built once, reused) for connection
-/// pooling — reqwest strongly recommends reusing a single client instance.
+/// pooling - reqwest strongly recommends reusing a single client instance.
 pub(crate) fn runtime_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -676,23 +813,22 @@ async fn forward_to_runtime(
     let client = runtime_http_client();
     let mut req = client.request(method, &url);
 
-    // Forward relevant headers
+    // Forward all non-hop-by-hop headers (RFC 7230 §6.1)
     for (key, value) in headers.iter() {
-        if key == "host" || key == "content-length" {
-            continue;
+        if !is_hop_by_hop_header(key) {
+            req = req.header(key, value);
         }
-        req = req.header(key, value);
     }
 
     match req.send().await {
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let headers = response.headers().clone();
+            let resp_headers = response.headers().clone();
             let body = response.bytes().await.unwrap_or_default();
 
             let mut response_builder = Response::builder().status(status);
-            *response_builder.headers_mut().unwrap() = headers;
+            *response_builder.headers_mut().unwrap() = resp_headers;
             response_builder
                 .body(axum::body::Body::from(body))
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -721,5 +857,32 @@ mod tests {
         registry.unregister("com.test.agent");
         assert!(registry.is_empty());
         assert_eq!(registry.get_port("com.test.agent"), None);
+    }
+
+    #[test]
+    fn test_is_hop_by_hop_header() {
+        use axum::http::HeaderName;
+
+        // RFC 7230 §6.1 hop-by-hop headers
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("connection")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("keep-alive")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("proxy-authenticate")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("proxy-authorization")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("te")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("trailer")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("transfer-encoding")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("upgrade")));
+
+        // Proxy-specific exclusions
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("host")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static("content-length")));
+
+        // Standard headers that MUST be forwarded
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("content-type")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("accept")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("authorization")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("user-agent")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("x-request-id")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static("x-custom-header")));
     }
 }
