@@ -163,11 +163,15 @@ pub struct AgentConfig {
     /// Resolution chain:
     /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
     /// 2. `RuntimeConfigOverrides::tool_result_compression_mode` — runtime push
-    /// 3. `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE` — hardcoded (Auto)
+    /// 3. `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE` — hardcoded (Manual)
     ///
     /// `None` falls through to the next level. `Some("auto")` enables automatic
     /// compress_tool_results on events. `Some("manual")` disables event triggers;
     /// user invokes via Gateway API / CLI.
+    ///
+    /// ADR-032 (revised): the hardcoded default is `Manual` (was `Auto`).
+    /// Auto mode is an opt-in shortcut; Manual is the safe default. See the
+    /// doc on `DEFAULT_COMPRESSION_MODE` in `loop_context.rs` for rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_compression_mode: Option<String>,
 

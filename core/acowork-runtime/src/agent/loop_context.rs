@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
-use acowork_core::providers::traits::MessageRole;
 
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
@@ -41,7 +40,13 @@ impl std::fmt::Display for CompressionMode {
 }
 
 /// Default compression mode.
-pub const DEFAULT_COMPRESSION_MODE: CompressionMode = CompressionMode::Auto;
+///
+/// ADR-032 (revised): default is `Manual` so that the assistant-long-text
+/// trigger and the todo_write completion trigger do **not** fire unless
+/// the user explicitly opts into `Auto`. Manual mode is the safe default
+/// — the user can still trigger compression through the Gateway API or
+/// CLI on demand. Auto mode is an opt-in productivity shortcut.
+pub const DEFAULT_COMPRESSION_MODE: CompressionMode = CompressionMode::Manual;
 
 // ── Context compression thresholds ─────────────────────────────────────
 // All percentages are relative to the **effective usable input budget**
@@ -235,6 +240,17 @@ impl AgentLoop {
     /// reserves output space (capped at `max_output_tokens_limit`, default 32K).
     /// No additional margin is applied here — [`compact_history_if_needed`]
     /// provides early warning at 80% usage.
+    ///
+    /// **ADR-032 (revised)**: this budget-fallback path is intentionally a
+    /// **token-only** fallback. It performs FIFO trim + emergency trim only;
+    /// it does NOT call `compress_tool_results`. Placeholder compression is
+    /// triggered by event-style signals (assistant long message / todo_write
+    /// completion in Auto mode, or explicit user commands in Manual mode) —
+    /// see ADR-032 for the full trigger matrix. Mixing budget-fallback into
+    /// the event-driven trigger path causes the
+    /// recall → compress → recall loop (the budget fall-back fires after
+    /// every tool result append, re-compressing any content that `context_recall`
+    /// just restored, forcing the LLM to recall again).
     pub(crate) fn trim_history_to_budget(&mut self, model_name: &str) {
         let budget = self.context_trim_budget(model_name);
 
@@ -252,30 +268,8 @@ impl AgentLoop {
             self.session.history.emergency_trim();
         }
 
-        // Stage 3 (ADR-032): ADR-032 placeholder compression — replace any
-        // remaining oversized tool result with a ~120-char placeholder so a
-        // single huge tool output can't blow the budget on its own. The most
-        // recent N tool results are preserved raw to keep LLM's
-        // current-reasoning context intact (uniform N rule across all
-        // trigger points; see ADR-032 core principle #7).
-        //
-        // N resolves from agent_config.json via `AgentCore::tool_result_keep_recent_n`
-        // (Layer 1), falling back to `DEFAULT_KEEP_RECENT_N` (Layer 2, ADR-032
-        // hardcoded default). Configured via the Agent Setup panel.
-        //
-        // The soft-threshold `soft_threshold_chars` likewise resolves via
-        // `AgentCore::tool_result_soft_threshold_chars` (Layer 1 = user
-        // setting, Layer 2 = `DEFAULT_SOFT_THRESHOLD_CHARS` = 2048).
-        // Configured via the Agent Setup panel.
-        let n = self.core.tool_result_keep_recent_n();
-        let soft_threshold = self.core.tool_result_soft_threshold_chars();
-        let compressed = self
-            .session
-            .history
-            .compress_tool_results(soft_threshold, n as usize);
-        if compressed > 0 {
-            self.session.history.recalibrate_tokens();
-        }
+        // NOTE: placeholder compression is intentionally NOT performed here.
+        // See method-level doc above.
     }
 
     /// Resolve the model to use for session distillation or compaction.
@@ -502,22 +496,10 @@ impl AgentLoop {
                     if self.session.history.token_count() > budget {
                         self.session.history.emergency_trim();
                     }
-                    // Same per-message cap as the successful `trim_history_to_budget`
-                    // path — without this, a single oversized tool result could
-                    // survive the fallback and still block the next LLM call.
-                    //
-                    // ADR-032: replaced with `compress_tool_results` (placeholder
-                    // path — preserves recall-ability via tool_call_id; see history.rs
-                    // for the unified N-rule rationale).
-                    let n = self.core.tool_result_keep_recent_n();
-                    let soft_threshold = self.core.tool_result_soft_threshold_chars();
-                    let compressed = self
-                        .session
-                        .history
-                        .compress_tool_results(soft_threshold, n as usize);
-                    if compressed > 0 {
-                        self.session.history.recalibrate_tokens();
-                    }
+                    // ADR-032 (revised): placeholder compression is intentionally
+                    // NOT performed here either. The fallback path is token-only,
+                    // matching the behavior of `trim_history_to_budget`. See the
+                    // docstring on that method for the full rationale.
                 }
             }
 
@@ -712,35 +694,6 @@ impl AgentLoop {
                 let val = serde_json::to_value(&spec).unwrap_or_default();
                 tools.push(val);
             }
-        }
-
-        // Replace compressed placeholders with full content from context_recall
-        // (ADR-032). context_recall splits its result: history gets a short
-        // placeholder, and the full content is stored in placeholder_replacements
-        // keyed by the TARGET tool_call_id. Here we scan the assembled messages
-        // and perform the actual substitution before the chat request is sent.
-        if !self.placeholder_replacements.is_empty() {
-            let mut replaced = 0usize;
-            for msg in &mut chat_request.messages {
-                if msg.role == MessageRole::Tool
-                    && let Some(tool_id) =
-                        extract_placeholder_tool_call_id(&msg.content)
-                    && let Some(full_content) =
-                        self.placeholder_replacements.remove(&tool_id)
-                {
-                    msg.content = full_content;
-                    replaced += 1;
-                }
-            }
-            if replaced > 0 {
-                tracing::debug!(
-                    count = replaced,
-                    "Replaced compressed placeholders with full content from context_recall"
-                );
-            }
-            // Clear any remaining unused replacements (they'll be re-fetched
-            // in a subsequent iteration if needed).
-            self.placeholder_replacements.clear();
         }
 
         // Compute total input chars for next round's token ratio calibration.
@@ -1104,18 +1057,4 @@ impl AgentLoop {
 
         truncated
     }
-}
-
-/// Extract the **target** tool_call_id from a compressed placeholder string.
-///
-/// The placeholder format is:
-/// `[Tool result compressed. Call context_recall(id="TOOL_CALL_ID") to retrieve the full content.]`
-///
-/// Returns `None` if the content doesn't match the expected pattern.
-fn extract_placeholder_tool_call_id(content: &str) -> Option<String> {
-    const MARKER: &str = "context_recall(id=\"";
-    let start = content.find(MARKER)?;
-    let start = start + MARKER.len();
-    let end = content[start..].find('"')?;
-    Some(content[start..start + end].to_string())
 }

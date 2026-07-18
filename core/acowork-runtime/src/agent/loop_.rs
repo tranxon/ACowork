@@ -10,7 +10,6 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::collections::HashMap;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
@@ -335,15 +334,6 @@ pub struct AgentLoop {
     /// retained across iterations).
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
 
-    /// Placeholder replacement cache: target tool_call_id → full original content.
-    ///
-    /// When `context_recall` retrieves compressed content, the full text is stored
-    /// here keyed by the *target* tool_call_id (not context_recall's own id).
-    /// Before each LLM request, compressed placeholders in the message list are
-    /// replaced with the cached content, and context_recall's own tool result
-    /// in history contains a short placeholder so the tool_call/tool_result
-    /// pair remains valid.
-    pub(crate) placeholder_replacements: HashMap<String, String>,
     /// ADR-032 C4b: Compression action receiver.
     ///
     /// Set by the creator (SessionTask / Gateway wiring) to enable
@@ -415,7 +405,6 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
-            placeholder_replacements: HashMap::new(),
             compress_action_rx: None,
         };
         // Initialize persistent model ratio store from agent config dir.
@@ -484,7 +473,6 @@ impl AgentLoop {
             last_thinking_mode: None,
             pending_interrupt: None,
             pending_transient_tool_msgs: Vec::new(),
-            placeholder_replacements: HashMap::new(),
             compress_action_rx: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -1261,52 +1249,27 @@ impl AgentLoop {
 
         // ── ⑧.75 Append tool results to history ──
         //
-        // context_recall (ADR-032) splits its result into two parts:
-        //   - History: short placeholder → LLM knows the call succeeded
-        //   - placeholder_replacements: full content keyed by target tool_call_id
-        //     → replaces the compressed placeholder in the target tool result
-        //     before the next LLM request (see build_chat_request).
+        // `is_transient` results are queued for the next LLM request but
+        // never permanently stored in history. The current set of transient
+        // tools is: `context_recall`. The transient flag is set in
+        // `execute_single_tool` (loop_tools.rs) — see ADR-032 C3a.
+        //
+        // This is what breaks the
+        // recall → compress → recall loop: the recalled content is visible
+        // to the LLM exactly once (in the next chat request) and then
+        // discarded. The compressed placeholder in history is never
+        // overwritten with the recalled content, so future
+        // `compress_tool_results` calls cannot re-trigger on the same data.
         for (tc, (result_content, &is_transient)) in
             deduped_calls.iter().zip(tool_contents.iter().zip(transient_flags.iter()))
         {
-            if tc.function.name == "context_recall" {
-                // History: short placeholder so tool_call/tool_result pair stays valid
-                let history_placeholder = String::from(
-                    "[Context recall successful. The requested content has been restored \
-                     to the target message below.]",
-                );
-                let msg = ChatMessage {
-                    name: Some(tc.function.name.clone()),
-                    ..ChatMessage::tool(tc.id.clone(), history_placeholder)
-                };
-                self.session.history.append(msg);
-
-                // Transient: full content keyed by the TARGET tool_call_id (NOT
-                // context_recall's own id). Used to replace the compressed
-                // placeholder in the target tool result.
-                if let Ok(args) =
-                    serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    && let Some(target_id) =
-                        args.get("tool_call_id").and_then(|v| v.as_str())
-                {
-                    self.placeholder_replacements.insert(
-                        target_id.to_string(),
-                        result_content.to_string(),
-                    );
-                }
-            } else if is_transient {
-                // Transient results are queued for the next LLM request
-                // but not permanently stored in history (ADR-032 C3a).
-                let msg = ChatMessage {
-                    name: Some(tc.function.name.clone()),
-                    ..ChatMessage::tool(tc.id.clone(), result_content.to_string())
-                };
+            let msg = ChatMessage {
+                name: Some(tc.function.name.clone()),
+                ..ChatMessage::tool(tc.id.clone(), result_content.to_string())
+            };
+            if is_transient {
                 self.pending_transient_tool_msgs.push(msg);
             } else {
-                let msg = ChatMessage {
-                    name: Some(tc.function.name.clone()),
-                    ..ChatMessage::tool(tc.id.clone(), result_content.to_string())
-                };
                 self.session.history.append(msg);
             }
         }

@@ -635,6 +635,61 @@ impl HistoryManager {
         compressed
     }
 
+    /// ADR-032 (revised): Auto-mode trigger — compress tool results **only if**
+    /// the most recent Assistant message in history exceeds `soft_threshold_chars`.
+    ///
+    /// This is the Auto-mode `compress_tool_results` entry point used by the
+    /// agent loop after an Assistant turn commits to history (see
+    /// `loop_session.rs`). It guards the compression call with a guard that
+    /// matches the design rule:
+    ///
+    /// > Auto mode: compression fires only when the latest Assistant message
+    /// > is longer than `soft_threshold_chars`. If the latest message is
+    /// > short, no compression runs even if there are oversized tool results
+    /// > deeper in history.
+    ///
+    /// Manual mode never enters this method; the loop only calls it after
+    /// checking `event_compression_enabled()`.
+    ///
+    /// If the guard fails, the function is a **no-op** and returns `0`. When
+    /// the guard passes, the function delegates to [`Self::compress_tool_results`]
+    /// and reports the count.
+    ///
+    /// Returns the number of tool messages replaced with placeholders.
+    pub fn compress_tool_results_for_long_assistant(
+        &mut self,
+        soft_threshold_chars: usize,
+        keep_recent_n: usize,
+    ) -> usize {
+        // Find the latest Assistant message in history. If none exists, bail.
+        let last_assistant_content_len = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, MessageRole::Assistant))
+            .map(|m| m.content.len());
+
+        match last_assistant_content_len {
+            Some(len) if len > soft_threshold_chars => {
+                tracing::debug!(
+                    last_assistant_len = len,
+                    soft_threshold_chars,
+                    "ADR-032: assistant-long-text trigger fired; compressing tool results"
+                );
+                self.compress_tool_results(soft_threshold_chars, keep_recent_n)
+            }
+            Some(len) => {
+                tracing::trace!(
+                    last_assistant_len = len,
+                    soft_threshold_chars,
+                    "ADR-032: assistant-long-text trigger skipped (latest assistant below threshold)"
+                );
+                0
+            }
+            None => 0,
+        }
+    }
+
     /// ADR-032: Recompute `current_tokens` from scratch.
     ///
     /// Must be called after `compress_tool_results` (which mutates content in
@@ -1442,6 +1497,114 @@ mod tests {
         hm.append(make_tool_message("only", "toolu_one", Some("content_search")));
         let older = hm.tool_results_excluding_recent(100);
         assert!(older.is_empty());
+    }
+
+    // ── compress_tool_results_for_long_assistant tests (ADR-032 fix #3) ──
+
+    /// Helper: make an Assistant-role message (no tool_calls, plain text content).
+    fn make_assistant_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            tool_calls: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_compress_tool_results_for_long_assistant_no_assistant_message_returns_zero() {
+        // ADR-032 fix #3: if there is no Assistant message in history,
+        // the guard must short-circuit and return 0 (no-op).
+        let mut hm = HistoryManager::new(100_000);
+        let big = "x".repeat(5000);
+        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
+        hm.append(make_tool_message(&big, "toolu_2", Some("content_search")));
+
+        let n = hm.compress_tool_results_for_long_assistant(2048, 0);
+        assert_eq!(n, 0, "no Assistant message in history -> guard short-circuits");
+        for m in hm.messages() {
+            assert_eq!(m.content, big, "raw tool result content must be preserved");
+        }
+    }
+
+    #[test]
+    fn test_compress_tool_results_for_long_assistant_short_assistant_skips() {
+        // ADR-032 fix #3: when the latest Assistant message is shorter than or
+        // equal to soft_threshold_chars, the guard must skip the call entirely.
+        let mut hm = HistoryManager::new(100_000);
+        let big = "x".repeat(5000);
+        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
+        hm.append(make_assistant_message("short answer"));
+
+        let n = hm.compress_tool_results_for_long_assistant(2048, 0);
+        assert_eq!(
+            n, 0,
+            "Assistant message below threshold -> compress_tool_results must NOT be invoked"
+        );
+        assert_eq!(
+            hm.messages()[0].content, big,
+            "Tool message must remain raw when guard blocks"
+        );
+        assert_eq!(hm.messages()[1].content, "short answer");
+    }
+
+    #[test]
+    fn test_compress_tool_results_for_long_assistant_long_assistant_compresses() {
+        // ADR-032 fix #3: when the latest Assistant message exceeds threshold,
+        // the guard passes and compress_tool_results is invoked.
+        // We expect: older tool results become placeholders, recent N stay raw.
+        let mut hm = HistoryManager::new(100_000);
+        let big = "x".repeat(5000);
+        // Add 4 tool results, then a long assistant message
+        for i in 1..=4 {
+            hm.append(make_tool_message(
+                &big,
+                &format!("toolu_{i}"),
+                Some("content_search"),
+            ));
+        }
+        let long_assistant = "y".repeat(3000);
+        hm.append(make_assistant_message(&long_assistant));
+
+        // soft_threshold=2048, keep_recent_n=1
+        // Guard: last Assistant (3000 > 2048) passes -> compress invoked.
+        // compress_tool_results compresses older 3 (indices 0..3) preserving the 4th (recent N=1).
+        let n = hm.compress_tool_results_for_long_assistant(2048, 1);
+        assert_eq!(
+            n, 3,
+            "long Assistant (>threshold) must trigger compress_tool_results, compressing 3 older tool results"
+        );
+        // First 3 tool messages: placeholder
+        for i in 0..3 {
+            assert!(
+                hm.messages()[i].content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
+                "older tool result {i} must be placeholder"
+            );
+        }
+        // 4th tool message: still raw
+        assert_eq!(
+            hm.messages()[3].content, big,
+            "most recent tool result must remain raw (keep_recent_n=1)"
+        );
+        // Assistant message: untouched
+        assert_eq!(hm.messages()[4].content, long_assistant);
+    }
+
+    #[test]
+    fn test_compress_tool_results_for_long_assistant_boundary_equal_skips() {
+        // Edge case: Assistant message length == threshold must skip (per
+        // guard semantics: > threshold, not >=).
+        let mut hm = HistoryManager::new(100_000);
+        let big = "x".repeat(5000);
+        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
+        let threshold = 100usize;
+        let exact = "y".repeat(threshold);
+        assert_eq!(exact.len(), threshold);
+        hm.append(make_assistant_message(&exact));
+
+        let n = hm.compress_tool_results_for_long_assistant(threshold, 0);
+        assert_eq!(n, 0, "Assistant message exactly equal to threshold must skip");
+        assert_eq!(hm.messages()[0].content, big);
     }
 
     // ── sanitize_messages tests ─────────────────────────────────────────

@@ -399,10 +399,14 @@ pub(crate) async fn execute_single_tool(
     match tool {
             Some(tool) => match tool.execute(params, work_dir).await {
                 Ok(result) => {
-        // ADR-032: context_recall results are no longer transient — instead,
-        // they're split: history gets a placeholder, the full content goes
-        // into placeholder_replacements for target placeholder substitution.
-        let transient = false;
+        // ADR-032: `context_recall` returns transient tool results — the
+        // full recalled content is injected into the next LLM request only
+        // (via `pending_transient_tool_msgs`) and is NEVER appended to
+        // permanent history. This breaks the
+        // recall → compress → recall loop that would otherwise form when
+        // the recalled content exceeds `soft_threshold_chars` again on the
+        // following iteration.
+        let transient = tool_name == "context_recall";
                     let content = if result.ok {
                     result.content
                 } else {

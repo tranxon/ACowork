@@ -468,27 +468,24 @@ impl super::loop_::AgentLoop {
             ..ChatMessage::assistant(content.clone())
         });
 
-        // ADR-032 C4b: auto-compress after long assistant text responses.
-        // In auto mode, long assistant text (no tool calls) triggers
-        // compress_tool_results to free context for the next iteration.
+        // ADR-032 (revised): auto-compress after long assistant text responses.
         //
-        // Both the trigger threshold and the compression threshold use the
-        // same configurable value `tool_result_soft_threshold_chars()`, so
-        // assistant messages are compressed only when the message is long
-        // enough to warrant it, and tool results are sized against the same
-        // bar.
-        if self.event_compression_enabled()
-            && content.len() > self.core.tool_result_soft_threshold_chars()
-        {
+        // In Auto mode, the assistant-long-text trigger fires only when the latest
+        // Assistant message (now committed to history) exceeds
+        // `tool_result_soft_threshold_chars()`. The guard lives inside
+        // `HistoryManager::compress_tool_results_for_long_assistant`, so this call
+        // site is just the trigger wiring.
+        //
+        // In Manual mode this branch is skipped entirely: the user invokes
+        // compression through the Gateway API or CLI. The budget-fallback path
+        // (`trim_history_to_budget`) intentionally does NOT compress either.
+        if self.event_compression_enabled() {
             let n = self.core.tool_result_keep_recent_n();
             let soft_threshold = self.core.tool_result_soft_threshold_chars();
             let compressed = self
                 .session
                 .history
-                .compress_tool_results(
-                    soft_threshold,
-                    n as usize,
-                );
+                .compress_tool_results_for_long_assistant(soft_threshold, n as usize);
             if compressed > 0 {
                 self.session.history.recalibrate_tokens();
                 tracing::info!(
