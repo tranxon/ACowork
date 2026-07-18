@@ -15,20 +15,18 @@ use axum::{
     body::Body,
     extract::{Multipart, Path, Query, State},
     http::{Response, StatusCode, header},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
 use crate::http::agent_config::{
-    self, AgentConfigResponse, UpdateAgentConfigRequest, AvatarAssetEntry, AvatarAssetsResponse,
-    AvatarConfigResponse, UpdateAvatarConfigRequest,
+    self, AvatarAssetEntry, AvatarAssetsResponse, AvatarConfigResponse, UpdateAvatarConfigRequest,
 };
 use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
 use crate::lifecycle::manager::SYSTEM_AGENT_ID;
 use acowork_core::AgentManifest;
-use acowork_core::protocol::{AgentSearchConfig, McpServerConfigDef};
 
 /// Build the agent management router
 pub fn agent_routes() -> Router<AppState> {
@@ -56,10 +54,17 @@ pub fn agent_routes() -> Router<AppState> {
             post(restart_agent_in_debug),
         )
         .route("/api/agents/{id}/model", get(get_agent_model))
-        .route(
-            "/api/agents/{id}/config",
-            put(update_agent_config),
-        )
+        // ADR-034: `PUT /api/agents/{id}/config` is a pure reverse-proxy to
+        // Runtime's `PUT /agents/{id}/config`.  The route itself is
+        // registered in `proxy::proxy_routes` so all Runtime endpoints
+        // stay co-located; this comment is the trace for code review.
+        // The Gateway used to re-parse the body, forward only
+        // `builtin_tools`, and echo the rest of the fields back — that
+        // left per-agent fields like `temperature` / `max_output_tokens`
+        // invisible to the Runtime (user-visible as "改动不生效").  All
+        // persistence + live-broadcast now lives in the Runtime, so the
+        // Gateway just forwards the body unchanged.
+        // (intentionally NOT calling `put(...)` here — see proxy.rs.)
         .route(
             "/api/agents/{id}/mcp-servers",
             get(get_agent_mcp_servers).put(update_agent_mcp_servers),
@@ -72,10 +77,14 @@ pub fn agent_routes() -> Router<AppState> {
             "/api/agents/{id}/search-config",
             get(get_agent_search_config).put(update_agent_search_config),
         )
-        .route(
-            "/api/agents/{id}/sessions/{session_id}/state",
-            get(get_session_state),
-        )
+        // ADR-034: All Runtime endpoints live as pure reverse-proxy routes in
+        // `proxy::proxy_routes`.  The routes that previously had bespoke
+        // handlers here (`PUT /api/agents/{id}/config`,
+        // `GET /api/agents/{id}/sessions/{session_id}/state`) used to
+        // re-parse the body and re-emit a Gateway-side DTO — that was
+        // the source of the "改动不生效" bug because the Gateway
+        // dropped per-agent fields like `temperature` and
+        // `max_output_tokens` instead of forwarding them to the Runtime.
         // ADR-017: Avatar runtime config endpoints (work when agent is stopped)
         .route(
             "/api/agents/{id}/avatar-config",
@@ -1760,210 +1769,6 @@ fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
     }
 }
 
-/// `GET /api/agents/{id}/config` — get agent runtime config
-///
-/// Queries the connected Runtime via QueryConfig gRPC for per-agent config
-/// (Phase 5 refactor: per-agent config is now owned by Runtime workspace).
-/// Merges with Gateway global defaults for the response.
-pub async fn get_agent_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
-    let (global_max_output_tokens, manifest_context_window) = {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        // Guard: agent must be running and ready.
-        if let Some(info) = gw.running_agents.get(&agent_id) {
-            if !info.ready {
-                return Err(ApiError::service_unavailable(&format!(
-                    "Agent '{}' is starting up, please wait",
-                    agent_id
-                )));
-            }
-        } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent '{}' is not started",
-                agent_id
-            )));
-        }
-        let global_limit = gw
-            .config
-            .as_ref()
-            .map(|c| c.max_output_tokens_limit)
-            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS);
-        let manifest_cw = gw
-            .installed_agents
-            .get(&agent_id)
-            .and_then(|info| info.manifest.llm.context_window);
-        (global_limit, manifest_cw)
-    };
-
-    // ADR-033: gRPC removed — config queries are no longer supported.
-    // Runtime publishes agent_config via MQTT AgentConfig message;
-    // Gateway reads config from persisted agent_config.json on startup.
-    // Return empty defaults for all Runtime-managed fields.
-    let _ = (&state, &agent_id);
-    let model: Option<String> = None;
-    let provider: Option<String> = None;
-    let max_output_tokens: Option<u64> = None;
-    let max_iterations: Option<u32> = None;
-    let temperature: Option<f32> = None;
-    let system_prompt_override: Option<String> = None;
-    let shell_approval_threshold: Option<String> = None;
-    let mcp_servers: Vec<String> = vec![];
-    let search_config_json: Option<String> = None;
-    let max_sessions: Option<usize> = None;
-    let agent_cfg_context_window: Option<u64> = None;
-    let agent_cfg_approval_timeout: Option<u64> = None;
-    let builtin_tools_enabled_json: Option<String> = None;
-    let builtin_tools_all_json: Option<String> = None;
-    let tool_result_compression_mode: Option<String> = None;
-    let tool_result_soft_threshold_chars: Option<u64> = None;
-
-    // Build the effective config from ConfigSnapshot data
-    let active_mcp_servers: Vec<String> = mcp_servers
-        .iter()
-        .filter_map(|j| serde_json::from_str::<McpServerConfigDef>(j).ok())
-        .map(|s| s.name)
-        .collect();
-    let search_config: Option<AgentSearchConfig> = search_config_json
-        .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
-
-    // Compute context window effective value and source.
-    // Resolution chain: agent_config.json → manifest → DEFAULT_CONTEXT_WINDOW.
-    let (context_window, context_window_source) =
-        if let Some(cw) = agent_cfg_context_window {
-            (Some(cw), Some("config".to_string()))
-        } else if let Some(mcw) = manifest_context_window.filter(|&v| v > 0) {
-            (Some(mcw), Some("manifest".to_string()))
-        } else {
-            (Some(agent_config::DEFAULT_CONTEXT_WINDOW), Some("default".to_string()))
-        };
-
-    let effective = AgentConfigResponse {
-        agent_id,
-        max_output_tokens,
-        max_iterations,
-        temperature,
-        temperature_source: None,
-        manifest_temperature: None,
-        system_prompt: None,
-        // Use model snap fields for active model/provider in response
-        model,
-        provider,
-        system_prompt_override,
-        shell_approval_threshold,
-        active_mcp_servers,
-        search_config,
-        global_max_output_tokens,
-        max_sessions,
-        context_window,
-        context_window_source,
-        manifest_context_window,
-        approval_timeout_secs: agent_cfg_approval_timeout,
-        builtin_tools: builtin_tools_enabled_json
-            .as_deref()
-            .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
-            .unwrap_or_default(),
-        builtin_tools_all: builtin_tools_all_json
-            .as_deref()
-            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()),
-        tool_result_compression_mode,
-        tool_result_soft_threshold_chars: tool_result_soft_threshold_chars.map(|v| v as usize),
-    };
-
-    Ok(Json(effective))
-}
-
-/// `PUT /api/agents/{id}/config` — update agent runtime config
-///
-/// Accepts partial updates. Forwards to Runtime via RuntimeConfigUpdate push.
-/// (Phase 5 refactor): Gateway no longer persists per-agent config locally.
-/// The Runtime is the authoritative owner and persists to workspace/config/.
-pub async fn update_agent_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<UpdateAgentConfigRequest>,
-) -> Result<Json<AgentConfigResponse>, (StatusCode, Json<ApiError>)> {
-    let global_max_output_tokens = {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        // Guard: agent must be running and ready.
-        if let Some(info) = gw.running_agents.get(&agent_id) {
-            if !info.ready {
-                return Err(ApiError::service_unavailable(&format!(
-                    "Agent '{}' is starting up, please wait",
-                    agent_id
-                )));
-            }
-        } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent '{}' is not started",
-                agent_id
-            )));
-        }
-        gw.config
-            .as_ref()
-            .map(|c| c.max_output_tokens_limit)
-            .unwrap_or(agent_config::DEFAULT_MAX_OUTPUT_TOKENS)
-    };
-
-    let _req_system_prompt_override = req.system_prompt_override.clone();
-    let req_shell_approval_threshold = req.shell_approval_threshold;
-    let _req_mcp_servers = req.mcp_servers.clone();
-
-    // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
-    // Runtime reads config from agent_config.json on startup. The Gateway
-    // persists config to the per-agent config file for Runtime to pick up.
-    let _ = (&state, &agent_id);
-    tracing::info!(
-        agent_id = %agent_id,
-        "Agent config update persisted (Runtime will pick up on restart)"
-    );
-
-    // Return echo of submitted config (the actual persisted values will be
-    // available on next GET, which queries the Runtime via ConfigSnapshot).
-    let effective = AgentConfigResponse {
-        agent_id,
-        max_output_tokens: req.max_output_tokens,
-        max_iterations: req.max_iterations,
-        temperature: req.temperature,
-        temperature_source: None,
-        manifest_temperature: None,
-        system_prompt: None,
-        system_prompt_override: req.system_prompt_override,
-        shell_approval_threshold: req_shell_approval_threshold
-            .map(|t| format!("{:?}", t).to_lowercase()),
-        model: None,
-        provider: None,
-        active_mcp_servers: vec![],
-        search_config: None,
-        global_max_output_tokens,
-        max_sessions: req.max_sessions,
-        context_window: req.context_window,
-        context_window_source: req.context_window.map(|_| "config".to_string()),
-        manifest_context_window: None,
-        approval_timeout_secs: req.approval_timeout_secs,
-        builtin_tools: req.builtin_tools.clone().unwrap_or_default(),
-        builtin_tools_all: None,
-        tool_result_compression_mode: req.tool_result_compression_mode.clone(),
-        tool_result_soft_threshold_chars: req.tool_result_soft_threshold_chars,
-    };
-
-    Ok(Json(effective))
-}
-
 // ── Agent MCP server activation handlers ─────────────────────────────
 
 /// MCP server activation response (per-agent)
@@ -2227,76 +2032,7 @@ pub async fn update_agent_search_config(
     }))
 }
 
-// ── Session State Pull API ────────────────────────────────────────────
-
-/// Response body for `GET /api/agents/{id}/sessions/{session_id}/state`.
-#[derive(Serialize)]
-pub struct SessionStateResponse {
-    pub session_id: String,
-    pub status: serde_json::Value,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub workspace_id: Option<String>,
-    pub ratio: Option<f64>,
-    pub reasoning_effort: Option<String>,
-    pub temperature: Option<f32>,
-    /// Current todo list (parsed from JSON, None if empty or unset)
-    pub todos: Option<serde_json::Value>,
-    /// Current context usage info (parsed from JSON, None if empty or unset)
-    pub context_usage: Option<serde_json::Value>,
-}
-
-/// `GET /api/agents/{id}/sessions/{session_id}/state`
-///
-/// Proxies to the Runtime's `GET /sessions/{sid}/state` endpoint.
-/// Returns 404 if the agent is not found or the session does not exist.
-pub async fn get_session_state(
-    State(state): State<AppState>,
-    Path((agent_id, session_id)): Path<(String, String)>,
-) -> Result<Json<SessionStateResponse>, (StatusCode, Json<ApiError>)> {
-    tracing::info!(
-        agent_id = %agent_id,
-        session_id = %session_id,
-        "Session state pull: GET /api/agents/{}/sessions/{}/state",
-        agent_id,
-        session_id
-    );
-
-    // Verify agent is installed
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.is_installed(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-    }
-
-    // ADR-033: Proxy to Runtime's /sessions/{sid}/state endpoint.
-    let path = format!("/sessions/{}/state", session_id);
-    let data = crate::http::proxy::fetch_runtime_json(&state, &agent_id, &path).await?;
-
-    let status: serde_json::Value = data
-        .get("status")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let todos: Option<serde_json::Value> = data.get("todos").cloned();
-    let context_usage: Option<serde_json::Value> = data.get("context_usage").cloned();
-
-    Ok(Json(SessionStateResponse {
-        session_id: data["session_id"].as_str().unwrap_or_default().to_string(),
-        status,
-        model: data["model"].as_str().map(|s| s.to_string()),
-        provider: data["provider"].as_str().map(|s| s.to_string()),
-        workspace_id: data["workspace_id"].as_str().map(|s| s.to_string()),
-        ratio: data["ratio"].as_f64(),
-        reasoning_effort: data["reasoning_effort"].as_str().map(|s| s.to_string()),
-        temperature: data["temperature"].as_f64().map(|t| t as f32),
-        todos,
-        context_usage,
-    }))
-}
+// ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
