@@ -2,16 +2,26 @@
 
 > Gateway 内嵌 MQTT Broker（[`rumqttd`](https://github.com/bytebeamio/rumqtt)），承担 **实时事件总线 + 轻量级状态同步** 职责。Topic 树遵循 **"按数据源 pub/sub"** 原则：每个主题代表一份数据资源，发布者 = 数据源权威，订阅者按需订阅。
 >
-> - 设计依据：[`docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md`](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)
-> - Broker 实现（Gateway 嵌入）：`core/acowork-gateway/src/mqtt/broker.rs`（规划）
-> - Gateway 全局资源 HTTP 接口：`core/acowork-gateway/src/http/global.rs`（规划）
+> **设计依据（按依赖顺序）**：
+>
+> - [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — 用 MQTT 替换 gRPC + WebSocket（传输层基础）
+> - [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md) — MQTT / HTTP 职责边界
+> - [ADR-035](../../adr/zh/ADR-035-mqtt-streaming-push-refactor.md) — MQTT 流式传输重构（QoS 1 强制）
+> - [ADR-036](../../adr/zh/ADR-036-mqtt-status-push.md) — MQTT 连接状态由后端主动推送
+> - [ADR-038](../../adr/zh/ADR-038-session-lifecycle-explicit-model.md) — Session 生命周期显式化模型
+> - [ADR-039](../../adr/zh/ADR-039-mqtt-client-lifecycle.md) — **MQTT Client 生命周期框架**（状态机 + 异常分类 + Bootstrap 五步合约 + 对称设计 — 本文件 §5.1.1、§5.1.2、§8.6、§12、§14.5 沉淀）
+>
+> **核心源码**：
+>
+> - Broker（Gateway 嵌入）：`core/acowork-gateway/src/mqtt/broker.rs`
+> - Gateway 全局资源 HTTP 接口（全量 CRUD）：`core/acowork-gateway/src/http/global.rs`（规划）
 > - Gateway 全局资源可用状态发布器：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`（规划）
-> - Runtime MQTT 客户端：`core/acowork-runtime/src/mqtt/client.rs`（规划）
-> - Desktop（Tauri Rust）MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`（规划）
-> - Protobuf 消息定义（独立文件 `mqtt_payload.proto`）：[`core/acowork-core/proto/mqtt_payload.proto`](../../../../core/acowork-core/proto/mqtt_payload.proto)
+> - Runtime MQTT 客户端：`core/acowork-runtime/src/mqtt/client.rs`
+> - Desktop（Tauri Rust）MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
+> - Protobuf 消息定义：`core/acowork-core/proto/mqtt_payload.proto`
 > - ACL 配置：`core/acowork-gateway/configs/rumqttd.toml`（规划）
 
-> **状态**：本文档对应 ADR-033 提案。实施前 broker / client / publisher 等模块尚不存在。
+> **状态**：ADR-033 / 034 / 035 / 036 已落地；ADR-038 已落地；ADR-039 §5.1 Bootstrap 五步合约与 §14.5 set_max_packet_size + ConnAck 重做 已落地（Phase 1 完成）。
 
 ---
 
@@ -436,6 +446,50 @@ sequenceDiagram
 
 **说明**：全局资源全量列表（provider/mcp/lsp/search/embedding）**不在此启动序列中**——它们是静态全量数据，Desktop 在 Settings 页加载时通过 `GET /api/global/{kind}` HTTP 一次性拉取，不需要 MQTT 启动同步。全局资源**可用状态**则在 Runtime 启动后由 Retained 快照推送，无需额外 HTTP 初始化。
 
+#### 5.1.1 Bootstrap 五步合约（ADR-039）
+
+Runtime 与 Desktop 两个 MQTT client 在到达 `ConnAck`（含 reconnect）后，必须按以下顺序重做这五步，作为"在线宣告"的标准契约：
+
+| # | 步骤 | Runtime 实体 | Desktop 实体 |
+|---|------|--------------|--------------|
+| 1 | PUBLISH `status = online` (Retained, QoS 1) | `acowork/agents/{id}/status` | `acowork/users/{uid}/status` |
+| 2 | PUBLISH `meta` (Retained, QoS 1) | `acowork/agents/{id}/meta` (AgentMeta) | `acowork/users/{uid}/meta` (ClientSession) |
+| 3 | PUBLISH `config` (Retained, QoS 1) | `acowork/agents/{id}/config` (AgentConfig) | `acowork/users/{uid}/config` (ClientConfig) |
+| 4 | SUBSCRIBE `acowork/global/#` (QoS 1) | 同左 | 同左 + `acowork/agents/+/status` |
+| 5 | SUBSCRIBE 业务控制树 (QoS 1) | `acowork/agents/{id}/sessions/control/#` | `acowork/agents/+/sessions/{sid}/messages/#` + 当前 session 的 `meta` / `config` |
+
+**关键约束**：
+
+- 五步必须按序执行；步骤 1 取消 Last Will 让对面看到"在线"，步骤 2-3 复盘 retained 元信息，步骤 4-5 打开接收通道。
+- 五步**幂等**：status / meta / config 是 retained 同值覆盖，subscribe 重复订阅是 broker 端集合操作，重复执行不影响语义。
+- Broker 配置 `max_payload_size = GATEWAY_MQTT_MAX_PACKET_SIZE`（10 MB），**Client 端必须调用 `options.set_max_packet_size(... , ...)` 对齐**，否则 rumqttc 默认 10 KB 限制会让长 `thought` 内容（≥ 10 KB）触发 `OutgoingPacketTooLarge`，broker 会主动 close。
+- Broker 主动 close 后，rumqttc 内置 retry 自动重连，到达 `ConnAck` 后必须**重做**这五步——`clean_start = true` 意味着 broker 不持久化任何订阅。漏做会让 Runtime 看起来"在线"但收不到任何消息。
+
+#### 5.1.2 Runtime 重连 Bootstrap 必须重做
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Broker
+    participant RT as Runtime
+
+    Note over RT,B: keep-alive 超时 / broker 重启 / 网络中断
+    RT-xB: TCP 断开
+    B->>B: timeout → publish LWT (status=offline)
+    Note over RT: rumqttc 内置退避 retry（默认 1s，client 内置）
+    RT->>B: CONNECT (client_id: agent:{id}) -- 用原 client_id 重新连
+    B-->>RT: CONNACK (Success)
+    Note over RT,B: 到达 ConnAck 后启动 Bootstrap 五步合约（ADR-039 §4）：
+    RT->>B: PUBLISH acowork/agents/{id}/status = online (Retained, QoS 1)
+    RT->>B: PUBLISH acowork/agents/{id}/meta (Retained, QoS 1)
+    RT->>B: PUBLISH acowork/agents/{id}/config (Retained, QoS 1)
+    RT->>B: SUBSCRIBE acowork/global/# (QoS 1)
+    RT->>B: SUBSCRIBE acowork/agents/{id}/sessions/control/# (QoS 1)
+    Note over RT: 业务 publish / receive 恢复
+```
+
+⚠️ **常见误区**：只判断客户端"是否连接"是不够的——重连后必须**重做 Bootstrap**（§5.1.1）才能恢复 retained 状态和持久订阅。漏做时客户端对外表现为"在线"但收不到任何业务消息，且日志看不到错误（broker 不会替你找出"我应该重订哪些 topic"）。本工作发生在 `core/acowork-runtime/src/mqtt/client.rs::Self::run_bootstrap`，由事件循环匹配 `Incoming::ConnAck(_)` 自动触发。
+
 ### 5.2 正常通信：用户发消息（直连，无 gateway 转发）
 
 ```mermaid
@@ -832,6 +886,8 @@ client.publish(
 
 > MQTT 3.1.1 不支持 Session Expiry。会话状态完全依赖 retained message + LWT；不建议通过 MQTT 持久化事件。
 
+⚠️ **clean_start = true 的副作用**：broker **不持久化任何订阅或 in-flight 消息**。一次网络抖动或 broker 重启，客户端的 `control/#`、`global/#` 订阅会被全数丢弃。Runtime 和 Desktop 必须在 `ConnAck` 到达后**重做 §5.1.1 的 Bootstrap 五步**，把 retained 状态与持久订阅一并恢复。这条规则在 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §3.1 + §4 沉淀为强制合约。
+
 ---
 
 ## 9. Control 指令路径
@@ -1008,22 +1064,26 @@ graph TB
 8. **envelope 模式扩展**：新增数据资源时，扩展 `DataEnvelope.payload` oneof 即可，不破坏已有消息。主题路径与 oneof 字段一一对应。
 9. **session list 不放 retained**：避免每次 list 变化都更新 retained（性能差、并发写），改为 `created` / `deleted` 增量事件 + HTTP 全量兜底。
 10. **session 进入时动态订阅**：Desktop 不要一次性 SUBSCRIBE 所有 session 的所有主题（主题数量爆炸）。仅在用户进入具体 session 时动态 SUBSCRIBE 该 sid 的 `meta/...` / `config/...` / `messages/...` / `control/...`，离开时 UNSUBSCRIBE。
+11. **max_packet_size 必须对齐**：rumqttc 客户端的 `MqttOptions::max_outgoing_packet_size` 默认是 `10 * 1024 = 10 KB`。Runtime 发 stream_delta 或大型 meta/config 时（含 LLM 长 thought 内容，protobuf 编码后常 ≥ 21 KB），**必须**显式调用 `options.set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, GATEWAY_MQTT_MAX_PACKET_SIZE)`（10 MB，对齐 broker 端 `max_payload_size`），否则 broker 会主动 close 并触发 `OutgoingPacketTooLarge` 错误。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §6。
+12. **重连后必须重做 Bootstrap**：Runtime 在 keep-alive 超时或 broker 重启后，**不能**只判断"已 connected"就认为业务可用。每次到达 `ConnAck` 必须按 §5.1.1 重做 status + meta + config + global/# + control/# 五步；漏做会让"在线但永远收不到消息"的故障静默出现。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §4 与 §5.1.2。
 
 ---
 
 ## 13. 相关源码索引
 
-- Broker 嵌入（规划）：`core/acowork-gateway/src/mqtt/broker.rs`
+- Broker 嵌入：`core/acowork-gateway/src/mqtt/broker.rs`
 - Gateway 全局资源 HTTP 端点（全量 CRUD）（规划）：`core/acowork-gateway/src/http/global.rs`
 - Gateway 全局资源 health-check + Publisher（规划）：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`
-- Runtime 全局资源可用状态内存缓存（规划）：`core/acowork-runtime/src/resources/available_cache.rs`
+- Runtime 全局资源可用状态内存缓存：`core/acowork-runtime/src/mqtt/available_cache.rs`
 - Runtime localhost HTTP server（规划）：`core/acowork-runtime/src/http/server.rs`
 - Gateway HTTP 反向代理（规划）：`core/acowork-gateway/src/http/proxy.rs`
 - ACL 加载与动态更新（规划）：`core/acowork-gateway/src/mqtt/acl.rs`
-- Runtime MQTT 客户端（规划）：`core/acowork-runtime/src/mqtt/client.rs`
-- Desktop Tauri MQTT 客户端（规划）：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
+- Runtime MQTT 客户端：`core/acowork-runtime/src/mqtt/client.rs`
+- Desktop Tauri MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
 - Protobuf 消息定义（独立文件 `mqtt_payload.proto`）：[`core/acowork-core/proto/mqtt_payload.proto`](../../../../core/acowork-core/proto/mqtt_payload.proto)
-- 默认端口（规划新增 MQTT 端口 19875）：`core/acowork-core/src/defaults.rs`
+- 默认端口（MQTT 端口 19875，broker / 客户端单一来源）：`core/acowork-core/src/defaults.rs`
+
+**生命周期框架**：两个 MQTT client 的状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。Runtime 与 Desktop 必须共用同一份 `MqttSession` 抽象、同一份 `ErrClass` 分类器、同一份 Bootstrap 五步合约；Phase 1 已落地 set_max_packet_size + 显式 ConnAck 重做（ADR-039 §6），Phase 2 计划抽共用 crate（ADR-039 §1.2）。
 
 ---
 
@@ -1071,3 +1131,13 @@ MQTT 替换 gRPC + WebSocket 分阶段推进，每个阶段独立 buildable，�
 | 预估删除量 | ~5,900 行 |
 
 > 业务逻辑 handler 函数（Gateway handlers + Runtime 各 handler）**不需要改**——输入输出类型不变（仍是 `GatewayRequest` / `GatewayResponse` 或 proto message），只换传输层。
+
+### 14.5 阶段 5：MQTT Client 生命周期框架（ADR-039，Phase 1 已完成，Phase 2 待续）
+
+| 范围 | 说明 |
+|------|------|
+| Runtime `mqtt/client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker；事件循环捕获 `Incoming::ConnAck` 后调用 `Self::run_bootstrap()` 重做 status + meta + config + global/# + control/#；抽出 `BootstrapData` 缓存供多次 re-bootstrap 复用 |
+| Desktop `mqtt_client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker |
+| Phase 2 抽 `acowork-mqtt-session` 共用 crate | Runtime 与 Desktop 共用 `MqttSession<S>` / `SessionState` / `ErrClass` / `BootstrapAction` / `reconnect_policy()` |
+
+详细设计、Phase 1 落地、Phase 2 演进路径、验收标准、回滚策略：见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。

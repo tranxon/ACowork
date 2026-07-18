@@ -712,10 +712,30 @@ fn session_message_to_flat(
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("ask_question".into()));
             m.insert("message_id".into(), serde_json::Value::String(p.message_id.clone()));
-            // Parse question_json into object if possible
+            // Runtime serializes the whole ChunkEvent::AskQuestion
+            // ({request_id, question, options, title, timeout_seconds}) as a
+            // single JSON string in `question_json`.  The frontend's
+            // `AskQuestionEvent` type expects those fields at the top level
+            // (so e.g. `event.options.map(...)` works in AskQuestionCard),
+            // so we MUST flatten the parsed object into `m` rather than
+            // nesting it under a single key.
             match serde_json::from_str::<serde_json::Value>(&p.question_json) {
-                Ok(val) => { m.insert("question".into(), val); }
-                Err(_) => { m.insert("question_json".into(), serde_json::Value::String(p.question_json.clone())); }
+                Ok(serde_json::Value::Object(qm)) => {
+                    for (k, v) in qm {
+                        m.insert(k, v);
+                    }
+                }
+                Ok(other) => {
+                    // Unexpected shape (e.g. array) — surface raw so the
+                    // frontend can still inspect it under `question_json`.
+                    m.insert("question_json".into(), other);
+                }
+                Err(_) => {
+                    m.insert(
+                        "question_json".into(),
+                        serde_json::Value::String(p.question_json.clone()),
+                    );
+                }
             }
             Some(serde_json::Value::Object(m))
         }

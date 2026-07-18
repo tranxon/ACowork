@@ -14,6 +14,7 @@ use std::time::Duration;
 use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use tokio::sync::Mutex;
 
+use acowork_core::defaults;
 use acowork_core::mqtt_proto::{self, ControlCommand, DataEnvelope, data_envelope};
 
 /// MQTT QoS level (mirrors the Gateway's).
@@ -110,6 +111,16 @@ impl DesktopMqttClient {
         let mut options = MqttOptions::new(client_id.clone(), host, port);
         options.set_keep_alive(Duration::from_secs(30));
         options.set_clean_session(true);
+
+        // ADR-039: align outgoing packet size with the broker's
+        // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`). Without
+        // this, large Desktop publish packets (e.g. protobuf-wrapped
+        // ControlCommand payloads with embedded `config_json`) would hit
+        // rumqttc's default 10 KB outgoing limit and trigger
+        // `OutgoingPacketTooLarge`, which the broker translates into
+        // `connection closed by peer`.
+        let pkt_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
+        options.set_max_packet_size(pkt_size, pkt_size);
 
         let (client, mut eventloop) = AsyncClient::new(options, 100);
 
