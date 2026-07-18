@@ -64,7 +64,7 @@ impl Gateway {
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
-        Ok(Self {
+        let mut gateway = Self {
             config,
             state,
             lifecycle: LifecycleManager::new(
@@ -74,7 +74,13 @@ impl Gateway {
                 log_file_count,
                 lifecycle_mqtt_port,
             ),
-        })
+        };
+
+        // Restore installed agents from disk so CLI commands (list, start, etc.)
+        // can see agents without the daemon running.
+        gateway.restore_installed_agents();
+
+        Ok(gateway)
     }
 
     /// Auto-install bundled agents (System Agent, etc.) if not already installed.

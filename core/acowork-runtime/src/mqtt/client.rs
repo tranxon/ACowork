@@ -19,16 +19,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, QoS};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
+    data_envelope, session_message,
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
     IterationLimitPausedPayload, NewDataAvailablePayload, RecordCompletePayload,
     SessionMessage, SessionStateChangedPayload, StoppedPayload, StreamDeltaPayload,
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
-    data_envelope, session_message,
+};
+use acowork_mqtt_session::{
+    classify as classify_err, ErrorDescriptor, ReconnectPolicy, SessionState, SessionStateRx,
+    SessionStateTx,
 };
 
 use crate::mqtt::available_cache::SharedAvailableCache;
@@ -121,6 +125,9 @@ pub struct RuntimeMqttClient {
     bootstrap_data: Arc<BootstrapData>,
     /// Keep the event loop polling task alive.
     _eventloop_guard: Arc<EventLoopGuard>,
+    /// ADR-039 Phase 2: session state broadcast channel.
+    /// External consumers can subscribe to state transitions.
+    state_tx: SessionStateTx,
 }
 
 // `Clone` lets the same underlying MQTT client be shared between
@@ -136,6 +143,7 @@ impl Clone for RuntimeMqttClient {
             agent_id: self.agent_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
             _eventloop_guard: Arc::clone(&self._eventloop_guard),
+            state_tx: self.state_tx.clone(),
         }
     }
 }
@@ -234,7 +242,23 @@ impl RuntimeMqttClient {
         let poll_control_tx = cfg.control_tx.clone();
         let poll_bootstrap = bootstrap_data.clone();
         let poll_client = client.clone();
+        // ADR-039 §5.2.1: use a oneshot channel to synchronise
+        // connect() with the first ConnAck instead of the old
+        // wait_for_connection() anti-pattern (subscribe to a dummy
+        // topic as a readiness probe). The sender is consumed on
+        // the first ConnAck only; subsequent reconnects just
+        // re-run bootstrap and log.
+        let (first_conn_tx, first_conn_rx) =
+            oneshot::channel::<Result<(), RuntimeMqttClientError>>();
+        let mut first_conn_tx = Some(first_conn_tx);
+
+        // ADR-039 Phase 2: session state broadcast + reconnect policy.
+        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
+        let poll_state_tx = state_tx.clone();
+        let reconnect_policy = ReconnectPolicy::default();
+
         let poll_task = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
@@ -257,32 +281,104 @@ impl RuntimeMqttClient {
                             agent_id = %poll_agent_id,
                             "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
                         );
-                        if let Err(e) = Self::run_bootstrap(&poll_client, &poll_bootstrap).await {
+                        let result =
+                            Self::run_bootstrap(&poll_client, &poll_bootstrap).await;
+                        if let Err(ref e) = result {
+                            // ADR-039 P3: best-effort publish degraded
+                            // status so the Gateway can surface the
+                            // failure rather than the agent silently
+                            // appearing "online" with no subscriptions.
+                            let _ = poll_client
+                                .publish(
+                                    &poll_bootstrap.status_topic,
+                                    QoS::AtLeastOnce,
+                                    true,
+                                    "degraded",
+                                )
+                                .await;
                             tracing::error!(
                                 agent_id = %poll_agent_id,
                                 error = %e,
-                                "Runtime MQTT bootstrap after (re)connect failed"
+                                "Runtime MQTT bootstrap after (re)connect failed \
+                                 - agent is degraded"
                             );
+                            poll_state_tx.set(SessionState::Disconnected {
+                                reason: format!("bootstrap failed: {e}"),
+                            });
+                        } else {
+                            // Bootstrap succeeded - reset failure counter
+                            // and mark as connected.
+                            consecutive_failures = 0;
+                            poll_state_tx.set(SessionState::Connected);
+                        }
+                        // Signal connect() on the first ConnAck only.
+                        // Subsequent reconnects just log - rumqttc
+                        // keeps the event loop alive and retries
+                        // automatically.
+                        if let Some(tx) = first_conn_tx.take() {
+                            let _ = tx.send(result);
                         }
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        tracing::warn!(error = %e, "Runtime MQTT event loop error, will retry");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        // ADR-039 Phase 2: classify the error and
+                        // apply the appropriate recovery strategy.
+                        let class = classify_err(&ErrorDescriptor::from(&e));
+                        tracing::warn!(
+                            agent_id = %poll_agent_id,
+                            error = %e,
+                            err_class = class.label(),
+                            consecutive_failures,
+                            "Runtime MQTT event loop error"
+                        );
+
+                        if class.is_fatal() {
+                            // E2/E3/E4/E6: do not retry. Set terminal
+                            // state and break out of the event loop.
+                            poll_state_tx.set(SessionState::Disconnected {
+                                reason: format!("{}: {}", class.label(), e),
+                            });
+                            break;
+                        }
+
+                        // E1/E5: retryable. Apply exponential backoff.
+                        poll_state_tx.set(SessionState::Reconnecting);
+                        consecutive_failures += 1;
+                        if let Some(backoff) =
+                            reconnect_policy.backoff(class, consecutive_failures - 1)
+                        {
+                            tracing::info!(
+                                agent_id = %poll_agent_id,
+                                attempt = backoff.attempt,
+                                sleep_ms = backoff.duration.as_millis(),
+                                "Backing off before reconnect attempt"
+                            );
+                            tokio::time::sleep(backoff.duration).await;
+                        }
                     }
                 }
             }
         });
 
-        // Wait for connection to be established
-        Self::wait_for_connection(&client, 20).await;
+        // ADR-039 §5.2.1: wait for the first ConnAck bootstrap to
+        // complete via a oneshot channel instead of the old
+        // wait_for_connection() anti-pattern. The event loop's
+        // ConnAck handler runs run_bootstrap() and signals us here -
+        // no double bootstrap, no dummy subscribe probe.
+        let bootstrap_result = first_conn_rx.await.map_err(|_| {
+            RuntimeMqttClientError::Connection(
+                "bootstrap signal channel closed (event loop dropped)".into(),
+            )
+        })?;
+        bootstrap_result?;
 
         tracing::info!(
             host = %cfg.host,
             port = %cfg.port,
             client_id = %client_id,
             agent_id = %cfg.agent_id,
-            "Runtime MQTT client connected to broker"
+            "Runtime MQTT client connected and bootstrapped \
+             (status/meta/config + global/control)"
         );
 
         let mqtt_client = Self {
@@ -290,19 +386,8 @@ impl RuntimeMqttClient {
             agent_id: cfg.agent_id.to_string(),
             bootstrap_data: bootstrap_data.clone(),
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
+            state_tx,
         };
-
-        // Initial bootstrap after the first CONNACK. Steps 2-6 are
-        // now centralised in `run_bootstrap` so the same five steps
-        // (status + meta + config + global/# + control/#) are
-        // idempotent and re-runnable on every broker (re)connect -
-        // see ADR-039.
-        Self::run_bootstrap(&client, &bootstrap_data).await?;
-
-        tracing::info!(
-            agent_id = %cfg.agent_id,
-            "Runtime MQTT client: bootstrap completed (status/meta/config + global/control)"
-        );
 
         Ok(mqtt_client)
     }
@@ -381,22 +466,21 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
-    /// Wait for the MQTT connection by attempting a lightweight subscribe.
-    async fn wait_for_connection(client: &AsyncClient, max_attempts: usize) {
-        for _ in 0..max_attempts {
-            match client
-                .subscribe("_acowork/health_check", QoS::AtMostOnce)
-                .await
-            {
-                Ok(_) => {
-                    let _ = client.unsubscribe("_acowork/health_check").await;
-                    return;
-                }
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
+    /// ADR-039 Phase 2: returns the current MQTT session state.
+    ///
+    /// External consumers (health checks, DevMode) can poll this to
+    /// see if the agent is connected, reconnecting, or permanently
+    /// disconnected.
+    pub fn session_state(&self) -> SessionState {
+        self.state_tx.current()
+    }
+
+    /// ADR-039 Phase 2: subscribe to session state changes.
+    pub fn session_state_rx(&self) -> SessionStateRx {
+        // Create a receiver from the existing watch sender.
+        // SessionStateTx wraps watch::Sender, and we can get a new
+        // receiver via subscribe().
+        self.state_tx.subscribe()
     }
 
     /// Publish a `DataEnvelope` payload to a topic.
@@ -1205,6 +1289,92 @@ mod tests {
                 .contains(&"acowork/agents/com.test.agent/config".to_string()),
             "should receive config: {:?}",
             received_topics
+        );
+
+        drop(sub_client);
+        drop(client);
+        drop(broker);
+    }
+
+    /// ADR-039 Phase 2: verify that `run_bootstrap` is idempotent —
+    /// calling it multiple times does not error, and retained messages
+    /// are still present (overwritten, not duplicated).
+    #[tokio::test]
+    async fn test_bootstrap_idempotency() {
+        let port = 18981;
+        let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port)
+            .expect("broker should start");
+
+        let cache = crate::mqtt::available_cache::new_shared_cache();
+        let (control_tx, _control_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+
+        let client = RuntimeMqttClient::connect(
+            MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.bootstrap",
+                agent_name: "Bootstrap Test",
+                agent_version: "1.0.0",
+                avatar: None,
+                builtin_avatar: None,
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+            },
+        )
+        .await
+        .expect("Runtime MQTT client should connect");
+
+        // Get the bootstrap data from the client and call run_bootstrap
+        // a second and third time to verify idempotency.
+        let data = &client.bootstrap_data;
+
+        // Second bootstrap (first was done by connect()).
+        RuntimeMqttClient::run_bootstrap(&client.client, data)
+            .await
+            .expect("second bootstrap should succeed (idempotent)");
+
+        // Third bootstrap.
+        RuntimeMqttClient::run_bootstrap(&client.client, data)
+            .await
+            .expect("third bootstrap should succeed (idempotent)");
+
+        // Verify retained messages are still present.
+        use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
+        let mut sub_opts = SubOpts::new("test:bootstrap:sub", "127.0.0.1", port);
+        sub_opts.set_keep_alive(Duration::from_secs(5));
+        let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
+        sub_client
+            .subscribe("acowork/agents/com.test.bootstrap/#", QoS::AtLeastOnce)
+            .await
+            .unwrap();
+
+        let mut received = Vec::new();
+        for _ in 0..100 {
+            match sub_loop.poll().await {
+                Ok(Event::Incoming(rumqttc::Incoming::Publish(p))) => {
+                    received.push(p.topic);
+                    if received.len() >= 3 {
+                        break;
+                    }
+                }
+                Ok(_) => continue,
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+
+        assert!(
+            received.contains(&"acowork/agents/com.test.bootstrap/status".to_string()),
+            "should receive status after multiple bootstraps"
+        );
+        assert!(
+            received.contains(&"acowork/agents/com.test.bootstrap/meta".to_string()),
+            "should receive meta after multiple bootstraps"
+        );
+        assert!(
+            received.contains(&"acowork/agents/com.test.bootstrap/config".to_string()),
+            "should receive config after multiple bootstraps"
         );
 
         drop(sub_client);

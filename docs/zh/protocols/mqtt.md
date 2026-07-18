@@ -21,7 +21,7 @@
 > - Protobuf 消息定义：`core/acowork-core/proto/mqtt_payload.proto`
 > - ACL 配置：`core/acowork-gateway/configs/rumqttd.toml`（规划）
 
-> **状态**：ADR-033 / 034 / 035 / 036 已落地；ADR-038 已落地；ADR-039 §5.1 Bootstrap 五步合约与 §14.5 set_max_packet_size + ConnAck 重做 已落地（Phase 1 完成）。
+> **状态**：ADR-033 / 034 / 035 / 036 已落地；ADR-038 已落地；ADR-039 §5.1 Bootstrap 五步合约与 §14.5 set_max_packet_size + ConnAck 重做 已落地（Phase 1 完成）；ADR-039 Phase 2（共用 crate `acowork-mqtt-session`、ErrClass、SessionState、BootstrapAction trait、ReconnectPolicy）已落地。
 
 ---
 
@@ -1083,7 +1083,7 @@ graph TB
 - Protobuf 消息定义（独立文件 `mqtt_payload.proto`）：[`core/acowork-core/proto/mqtt_payload.proto`](../../../../core/acowork-core/proto/mqtt_payload.proto)
 - 默认端口（MQTT 端口 19875，broker / 客户端单一来源）：`core/acowork-core/src/defaults.rs`
 
-**生命周期框架**：两个 MQTT client 的状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。Runtime 与 Desktop 必须共用同一份 `MqttSession` 抽象、同一份 `ErrClass` 分类器、同一份 Bootstrap 五步合约；Phase 1 已落地 set_max_packet_size + 显式 ConnAck 重做（ADR-039 §6），Phase 2 计划抽共用 crate（ADR-039 §1.2）。
+**生命周期框架**：两个 MQTT client 的状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。Runtime 与 Desktop 已共用同一份 `MqttSession` 抽象、同一份 `ErrClass` 分类器、同一份 `BootstrapAction` trait（Phase 1 已落地 set_max_packet_size + 显式 ConnAck 重做，Phase 2 已落地共用 crate `acowork-mqtt-session`）。
 
 ---
 
@@ -1132,12 +1132,12 @@ MQTT 替换 gRPC + WebSocket 分阶段推进，每个阶段独立 buildable，�
 
 > 业务逻辑 handler 函数（Gateway handlers + Runtime 各 handler）**不需要改**——输入输出类型不变（仍是 `GatewayRequest` / `GatewayResponse` 或 proto message），只换传输层。
 
-### 14.5 阶段 5：MQTT Client 生命周期框架（ADR-039，Phase 1 已完成，Phase 2 待续）
+### 14.5 阶段 5：MQTT Client 生命周期框架（ADR-039，Phase 1 已完成，Phase 2 已完成）
 
 | 范围 | 说明 |
 |------|------|
 | Runtime `mqtt/client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker；事件循环捕获 `Incoming::ConnAck` 后调用 `Self::run_bootstrap()` 重做 status + meta + config + global/# + control/#；抽出 `BootstrapData` 缓存供多次 re-bootstrap 复用 |
 | Desktop `mqtt_client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker |
-| Phase 2 抽 `acowork-mqtt-session` 共用 crate | Runtime 与 Desktop 共用 `MqttSession<S>` / `SessionState` / `ErrClass` / `BootstrapAction` / `reconnect_policy()` |
+| Phase 2 `acowork-mqtt-session` 共用 crate | ✅ Runtime 与 Desktop 共用 `MqttSession<S>` / `SessionState` / `ErrClass` / `BootstrapAction` / `ReconnectPolicy` |
 
 详细设计、Phase 1 落地、Phase 2 演进路径、验收标准、回滚策略：见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。

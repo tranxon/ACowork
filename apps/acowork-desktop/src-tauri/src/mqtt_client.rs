@@ -16,6 +16,10 @@ use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::{self, ControlCommand, DataEnvelope, data_envelope};
+use acowork_mqtt_session::{
+    classify as classify_err, ErrorDescriptor, ErrorKind, RefusedReason, ReconnectPolicy,
+    SessionState, SessionStateTx,
+};
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +45,15 @@ pub struct DesktopMqttClient {
     client: AsyncClient,
     /// Keep the event loop polling task alive.
     _eventloop_guard: Arc<EventLoopGuard>,
+    /// ADR-039 Phase 2: session state broadcast.
+    ///
+    /// Held in the struct purely to keep the original `watch::Sender` alive
+    /// for the lifetime of the client. All status transitions are driven
+    /// through the `poll_state_tx` clone captured by the eventloop task;
+    /// `self.state_tx` is read by the public `session_state()` accessor so
+    /// external consumers can poll the current state.
+    #[allow(dead_code)]
+    state_tx: SessionStateTx,
 }
 
 struct EventLoopGuard {
@@ -71,6 +84,88 @@ pub enum MqttStatus {
     /// Connection is no longer usable.  `reason` is a human-readable
     /// explanation suitable for surfacing in the UI status bar.
     Disconnected { reason: String },
+}
+
+/// Build an [`ErrorDescriptor`] from rumqttc 0.25's `ConnectionError`.
+///
+/// This is the Desktop-side adapter that bridges the rumqttc 0.25
+/// error type to the version-agnostic `ErrorDescriptor` used by
+/// the shared `acowork-mqtt-session` crate.
+///
+/// ADR-039 Phase 2.
+fn error_descriptor_from_rumqttc_025(err: &rumqttc::ConnectionError) -> ErrorDescriptor {
+    use rumqttc::{ConnectionError, ConnectReturnCode};
+
+    match err {
+        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => ErrorDescriptor {
+            kind: ErrorKind::Timeout,
+            io_kind: None,
+        },
+        ConnectionError::Io(io_err) => ErrorDescriptor {
+            kind: ErrorKind::Io,
+            io_kind: Some(io_err.kind()),
+        },
+        ConnectionError::ConnectionRefused(code) => ErrorDescriptor {
+            kind: ErrorKind::ConnectionRefused(match code {
+                ConnectReturnCode::BadUserNamePassword => RefusedReason::BadUserNamePassword,
+                ConnectReturnCode::NotAuthorized => RefusedReason::NotAuthorized,
+                ConnectReturnCode::RefusedProtocolVersion => RefusedReason::RefusedProtocolVersion,
+                ConnectReturnCode::BadClientId => RefusedReason::BadClientId,
+                ConnectReturnCode::ServiceUnavailable => RefusedReason::ServiceUnavailable,
+                _ => RefusedReason::Unknown,
+            }),
+            io_kind: None,
+        },
+        ConnectionError::MqttState(_) => ErrorDescriptor {
+            kind: ErrorKind::MqttState,
+            io_kind: None,
+        },
+        ConnectionError::NotConnAck(_) => ErrorDescriptor {
+            kind: ErrorKind::NotConnAck,
+            io_kind: None,
+        },
+        ConnectionError::RequestsDone => ErrorDescriptor {
+            kind: ErrorKind::RequestsDone,
+            io_kind: None,
+        },
+        _ => ErrorDescriptor {
+            kind: ErrorKind::Other,
+            io_kind: None,
+        },
+    }
+}
+
+/// Lifecycle topic filters that must be re-subscribed on every
+/// ConnAck (initial connect + automatic reconnects). With
+/// `clean_session = true` the broker drops all subscriptions on
+/// disconnect, so omitting this step makes the Desktop silently
+/// lose agent status/meta/config events after a broker restart.
+///
+/// ADR-039 P2: mirrors the Runtime's `run_bootstrap` subscribe steps.
+const LIFECYCLE_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
+    ("acowork/agents/+/status", MqttQoS::AtLeastOnce),
+    ("acowork/agents/+/meta", MqttQoS::AtLeastOnce),
+    ("acowork/agents/+/config", MqttQoS::AtLeastOnce),
+    ("acowork/agents/+/sessions/created", MqttQoS::AtLeastOnce),
+    ("acowork/agents/+/sessions/deleted", MqttQoS::AtLeastOnce),
+    ("acowork/sidecar/+/status", MqttQoS::AtLeastOnce),
+];
+
+/// Re-subscribe to all lifecycle topics after a (re)connect.
+///
+/// Called from the event loop's `ConnAck` handler. With
+/// `clean_session = true` the broker drops subscriptions on
+/// disconnect, so this is essential to avoid silently losing
+/// agent lifecycle events after a broker restart.
+///
+/// ADR-039 P2.
+async fn resubscribe_lifecycle(client: &AsyncClient) {
+    for (filter, qos) in LIFECYCLE_TOPIC_FILTERS {
+        if let Err(e) = client.subscribe(*filter, (*qos).into()).await {
+            tracing::warn!(filter, error = %e, "Desktop MQTT resubscribe failed");
+        }
+    }
+    tracing::info!("Desktop MQTT lifecycle topics re-subscribed");
 }
 
 impl DesktopMqttClient {
@@ -134,13 +229,20 @@ impl DesktopMqttClient {
         let on_msg = Arc::new(on_message);
         let on_status = Arc::new(on_status);
 
+        // ADR-039 Phase 2: session state broadcast + reconnect policy.
+        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
+        let poll_state_tx = state_tx.clone();
+        let reconnect_policy = ReconnectPolicy::default();
+
         // Spawn the eventloop poller.  This task owns `eventloop` for the
         // lifetime of the DesktopMqttClient.  All status transitions
         // (initial CONNACK, automatic reconnects, DISCONNECT, network
         // errors) flow through this single loop and into `on_status`.
         let on_msg_clone = on_msg.clone();
         let on_status_clone = on_status.clone();
+        let poll_client = client.clone();
         let poll_task = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
@@ -152,6 +254,15 @@ impl DesktopMqttClient {
                     // Broker confirmed (re)connection.
                     Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
                         on_status_clone(MqttStatus::Connected);
+                        poll_state_tx.set(SessionState::Connected);
+                        consecutive_failures = 0;
+                        // ADR-039 P2: re-subscribe lifecycle topics on
+                        // every (re)connect. With clean_session = true
+                        // the broker drops all subscriptions on
+                        // disconnect, so without this the Desktop would
+                        // silently lose agent status/meta/config events
+                        // after a broker restart.
+                        resubscribe_lifecycle(&poll_client).await;
                     }
                     // Broker initiated a disconnect (e.g. admin shutdown,
                     // client_id collision).  `rumqttc` will retry; we just
@@ -160,18 +271,48 @@ impl DesktopMqttClient {
                         on_status_clone(MqttStatus::Disconnected {
                             reason: "broker sent DISCONNECT".into(),
                         });
+                        poll_state_tx.set(SessionState::Reconnecting);
                     }
                     Ok(_) => continue,
                     Err(e) => {
-                        // Network-level failure (TCP reset, DNS, broker
-                        // gone).  Surface as disconnect and let `rumqttc`'s
-                        // internal retry recover.  The next successful
-                        // `poll()` will deliver ConnAck automatically.
-                        tracing::warn!(error = %e, "Desktop MQTT event loop error, retrying");
+                        // ADR-039 Phase 2: classify the error and apply
+                        // the appropriate recovery strategy. Build
+                        // ErrorDescriptor from rumqttc 0.25's
+                        // ConnectionError manually (version-agnostic).
+                        let desc = error_descriptor_from_rumqttc_025(&e);
+                        let class = classify_err(&desc);
+                        tracing::warn!(
+                            error = %e,
+                            err_class = class.label(),
+                            consecutive_failures,
+                            "Desktop MQTT event loop error"
+                        );
+
                         on_status_clone(MqttStatus::Disconnected {
                             reason: format!("eventloop error: {e}"),
                         });
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+
+                        if class.is_fatal() {
+                            // E2/E3/E4/E6: do not retry.
+                            poll_state_tx.set(SessionState::Disconnected {
+                                reason: format!("{}: {}", class.label(), e),
+                            });
+                            break;
+                        }
+
+                        // E1/E5: retryable. Apply exponential backoff.
+                        poll_state_tx.set(SessionState::Reconnecting);
+                        consecutive_failures += 1;
+                        if let Some(backoff) =
+                            reconnect_policy.backoff(class, consecutive_failures - 1)
+                        {
+                            tracing::info!(
+                                attempt = backoff.attempt,
+                                sleep_ms = backoff.duration.as_millis(),
+                                "Desktop backing off before reconnect attempt"
+                            );
+                            tokio::time::sleep(backoff.duration).await;
+                        }
                     }
                 }
             }
@@ -180,6 +321,7 @@ impl DesktopMqttClient {
         Ok(Self {
             client,
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
+            state_tx,
         })
     }
 
@@ -196,6 +338,18 @@ impl DesktopMqttClient {
         Self::connect("127.0.0.1", 19875, user_id, on_message, on_status).await
     }
 
+    /// ADR-039 Phase 2: returns the current MQTT session state.
+    ///
+    /// Reserved public accessor intended for Tauri commands / DevMode that
+    /// need to read the current session state on demand. Currently no
+    /// caller exists; suppress the dead-code warning until the integration
+    /// lands (the underlying `state_tx` field is still required to keep the
+    /// broadcast channel alive for the lifetime of the client).
+    #[allow(dead_code)]
+    pub fn session_state(&self) -> SessionState {
+        self.state_tx.current()
+    }
+
     /// Subscribe to a topic filter.
     pub async fn subscribe(&self, filter: &str, qos: MqttQoS) -> Result<(), String> {
         self.client
@@ -206,12 +360,9 @@ impl DesktopMqttClient {
 
     /// Subscribe to all agent lifecycle topics (status, meta, config).
     pub async fn subscribe_agent_lifecycle(&self) -> Result<(), String> {
-        self.subscribe("acowork/agents/+/status", MqttQoS::AtLeastOnce).await?;
-        self.subscribe("acowork/agents/+/meta", MqttQoS::AtLeastOnce).await?;
-        self.subscribe("acowork/agents/+/config", MqttQoS::AtLeastOnce).await?;
-        self.subscribe("acowork/agents/+/sessions/created", MqttQoS::AtLeastOnce).await?;
-        self.subscribe("acowork/agents/+/sessions/deleted", MqttQoS::AtLeastOnce).await?;
-        self.subscribe("acowork/sidecar/+/status", MqttQoS::AtLeastOnce).await?;
+        for (filter, qos) in LIFECYCLE_TOPIC_FILTERS {
+            self.subscribe(filter, *qos).await?;
+        }
         tracing::info!("Subscribed to agent lifecycle topics");
         Ok(())
     }
