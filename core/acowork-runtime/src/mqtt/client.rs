@@ -21,6 +21,7 @@ use std::time::Duration;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, QoS};
 use tokio::sync::Mutex;
 
+use acowork_core::defaults;
 use acowork_core::mqtt_proto::{
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
@@ -115,12 +116,55 @@ pub struct RuntimeMqttClient {
     client: AsyncClient,
     /// The agent_id this client represents.
     agent_id: String,
+    /// Cached inputs needed to re-run `run_bootstrap` on every
+    /// (re)connect. See `docs/adr/zh/ADR-039-mqtt-client-lifecycle.md`.
+    bootstrap_data: Arc<BootstrapData>,
     /// Keep the event loop polling task alive.
     _eventloop_guard: Arc<EventLoopGuard>,
 }
 
+// `Clone` lets the same underlying MQTT client be shared between
+// `AgentBootContext::mqtt_client` (consumed by Phase C/D's chunk relay
+// and gateway loop) and the HTTP server's late-bind slot (consumed by
+// `PUT /agents/{id}/config`). All fields are cheap-to-clone handles —
+// the AsyncClient is internally reference-counted by rumqttc and the
+// event-loop guard holds a JoinHandle, not owned state.
+impl Clone for RuntimeMqttClient {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            agent_id: self.agent_id.clone(),
+            bootstrap_data: Arc::clone(&self.bootstrap_data),
+            _eventloop_guard: Arc::clone(&self._eventloop_guard),
+        }
+    }
+}
+
 struct EventLoopGuard {
     _task: tokio::task::JoinHandle<()>,
+}
+
+/// Cached inputs needed to re-run bootstrap on every (re)connect.
+///
+/// Built once in `RuntimeMqttClient::connect` and shared (via
+/// `Arc<BootstrapData>`) between the initial bootstrap call inside
+/// `connect` and the event-loop task that re-runs bootstrap on every
+/// subsequent `ConnAck`. See ADR-039.
+struct BootstrapData {
+    agent_id: String,
+    agent_name: String,
+    agent_version: String,
+    avatar: String,
+    builtin_avatar: String,
+    config_json: String,
+    status_topic: String,
+    meta_topic: String,
+    config_topic: String,
+    /// Filter passed to `AsyncClient::subscribe` (ends with `#`).
+    control_filter: String,
+    /// Prefix used to route incoming `control/#` publishes to
+    /// `control_tx` (ends with `/`, **no** `#`).
+    control_filter_prefix: String,
 }
 
 impl RuntimeMqttClient {
@@ -131,46 +175,94 @@ impl RuntimeMqttClient {
         cfg: MqttConnectConfig<'_>,
     ) -> Result<Self, RuntimeMqttClientError> {
         let client_id = format!("agent:{}", cfg.agent_id);
-        let status_topic = format!("acowork/agents/{}/status", cfg.agent_id);
-        let meta_topic = format!("acowork/agents/{}/meta", cfg.agent_id);
-        let config_topic = format!("acowork/agents/{}/config", cfg.agent_id);
-        let control_filter = format!("acowork/agents/{}/sessions/control/#", cfg.agent_id);
 
-        // Configure MQTT options with Last Will
+        // ADR-039: cache every input needed to re-run bootstrap on every
+        // (re)connect (status/meta/config publish + persistent subscriptions).
+        let bootstrap_data = Arc::new(BootstrapData {
+            agent_id: cfg.agent_id.to_string(),
+            agent_name: cfg.agent_name.to_string(),
+            agent_version: cfg.agent_version.to_string(),
+            avatar: cfg.avatar.unwrap_or("").to_string(),
+            builtin_avatar: cfg.builtin_avatar.unwrap_or("").to_string(),
+            config_json: cfg.config_json.to_string(),
+            status_topic: format!("acowork/agents/{}/status", cfg.agent_id),
+            meta_topic: format!("acowork/agents/{}/meta", cfg.agent_id),
+            config_topic: format!("acowork/agents/{}/config", cfg.agent_id),
+            control_filter: format!(
+                "acowork/agents/{}/sessions/control/#",
+                cfg.agent_id
+            ),
+            control_filter_prefix: format!(
+                "acowork/agents/{}/sessions/control/",
+                cfg.agent_id
+            ),
+        });
+
+        // Configure MQTT options with Last Will.
         let mut options = MqttOptions::new(client_id.clone(), cfg.host, cfg.port);
         options.set_keep_alive(Duration::from_secs(30));
         options.set_clean_session(true);
 
-        // Last Will: if Runtime crashes/disconnects, broker publishes "offline" retained
-        let will = LastWill::new(&status_topic, "offline", QoS::AtLeastOnce, true);
+        // ADR-039: align outgoing packet size with the broker's
+        // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`). Without
+        // this, large stream_delta packets (e.g. long thought content)
+        // hit rumqttc's default 10 KB outgoing limit and trigger
+        // `OutgoingPacketTooLarge`, which the broker translates into a
+        // `connection closed by peer`.
+        let pkt_size = defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
+        options.set_max_packet_size(pkt_size, pkt_size);
+
+        // Last Will: if Runtime crashes/disconnects, broker publishes
+        // "offline" retained.
+        let will = LastWill::new(&bootstrap_data.status_topic, "offline", QoS::AtLeastOnce, true);
         options.set_last_will(will);
 
         let (client, mut eventloop) = AsyncClient::new(options, 100);
 
-        // Spawn event loop poller that:
-        // - Updates available_cache from acowork/global/# messages
-        // - Forwards control commands to control_tx
+        // Spawn the event-loop poller. It owns `eventloop` for the
+        // lifetime of the client. In addition to per-publish routing
+        // it now observes `ConnAck` and re-runs `run_bootstrap` after
+        // every (re)connect so that:
+        //   - the Last Will cancellation (`status=online`) is re-asserted
+        //   - retained meta/config are republished
+        //   - the persistent `control/#` subscription is rebuilt
+        // With `clean_session = true` the broker does NOT persist
+        // subscriptions, so omitting this step makes the agent look
+        // online but unresponsive - the exact symptom captured by ADR-039.
         let poll_agent_id = cfg.agent_id.to_string();
         let poll_cache = cfg.available_cache.clone();
         let poll_control_tx = cfg.control_tx.clone();
+        let poll_bootstrap = bootstrap_data.clone();
+        let poll_client = client.clone();
         let poll_task = tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
                         let topic = &publish.topic;
 
-                        // Route global resource updates to the available cache
+                        // Route global resource updates to the available cache.
                         if topic.starts_with("acowork/global/") {
                             let mut cache_write = poll_cache.write().await;
                             cache_write.update_from_mqtt(topic, &publish.payload);
                         }
 
-                        // Route control commands to the control channel
-                        if topic.starts_with(&format!(
-                            "acowork/agents/{}/sessions/control/",
-                            poll_agent_id
-                        )) {
+                        // Route control commands to the control channel.
+                        if topic.starts_with(&poll_bootstrap.control_filter_prefix) {
                             let _ = poll_control_tx.send((topic.clone(), publish.payload.to_vec()));
+                        }
+                    }
+                    // ADR-039: re-run bootstrap on every (re)connect.
+                    Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
+                        tracing::info!(
+                            agent_id = %poll_agent_id,
+                            "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
+                        );
+                        if let Err(e) = Self::run_bootstrap(&poll_client, &poll_bootstrap).await {
+                            tracing::error!(
+                                agent_id = %poll_agent_id,
+                                error = %e,
+                                "Runtime MQTT bootstrap after (re)connect failed"
+                            );
                         }
                     }
                     Ok(_) => continue,
@@ -196,54 +288,97 @@ impl RuntimeMqttClient {
         let mqtt_client = Self {
             client: client.clone(),
             agent_id: cfg.agent_id.to_string(),
+            bootstrap_data: bootstrap_data.clone(),
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
         };
 
-        // ── Step 2: PUBLISH status = "online" (Retained) ──
-        mqtt_client
-            .publish_status(true)
-            .await?;
+        // Initial bootstrap after the first CONNACK. Steps 2-6 are
+        // now centralised in `run_bootstrap` so the same five steps
+        // (status + meta + config + global/# + control/#) are
+        // idempotent and re-runnable on every broker (re)connect -
+        // see ADR-039.
+        Self::run_bootstrap(&client, &bootstrap_data).await?;
 
-        // ── Step 3: PUBLISH meta (Retained) ──
-        let meta = AgentMeta {
-            agent_id: cfg.agent_id.to_string(),
-            name: cfg.agent_name.to_string(),
-            version: cfg.agent_version.to_string(),
-            avatar: cfg.avatar.unwrap_or("").to_string(),
-            builtin_avatar: cfg.builtin_avatar.unwrap_or("").to_string(),
-        };
-        mqtt_client
-            .publish_envelope(&meta_topic, &DataEnvelope {
-                version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentMeta(meta)),
-            }, MqttQoS::AtLeastOnce, true)
-            .await?;
-
-        // ── Step 4: PUBLISH config (Retained) ──
-        let config = AgentConfig {
-            agent_id: cfg.agent_id.to_string(),
-            config_json: cfg.config_json.to_string(),
-        };
-        mqtt_client
-            .publish_envelope(&config_topic, &DataEnvelope {
-                version: 1,
-                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(config)),
-            }, MqttQoS::AtLeastOnce, true)
-            .await?;
-
-        // ── Step 5: SUBSCRIBE acowork/global/# ──
-        mqtt_client
-            .subscribe("acowork/global/#", MqttQoS::AtLeastOnce)
-            .await?;
-
-        // ── Step 6: SUBSCRIBE agents/{id}/sessions/control/# ──
-        mqtt_client
-            .subscribe(&control_filter, MqttQoS::AtLeastOnce)
-            .await?;
-
-        tracing::info!(agent_id = %cfg.agent_id, "Runtime MQTT client: published status/meta/config + subscribed to global + control");
+        tracing::info!(
+            agent_id = %cfg.agent_id,
+            "Runtime MQTT client: bootstrap completed (status/meta/config + global/control)"
+        );
 
         Ok(mqtt_client)
+    }
+
+    /// Publish agent status (`online`, retained), agent meta, agent
+    /// config (both retained), and subscribe to the global resource
+    /// tree plus the per-agent control tree. Idempotent; safe to
+    /// invoke on every (re)connect to restore both retained state
+    /// and persistent subscriptions.
+    ///
+    /// Implements the "Bootstrap five-step contract" of ADR-039:
+    /// 1. PUBLISH `status = online` (Retained) - overrides the Last
+    ///    Will payload (`offline`) set during `connect()`.
+    /// 2. PUBLISH `meta` (Retained) - agent capability descriptor.
+    /// 3. PUBLISH `config` (Retained) - agent runtime configuration.
+    /// 4. SUBSCRIBE `acowork/global/#` - global resources.
+    /// 5. SUBSCRIBE `acowork/agents/{id}/sessions/control/#` - Desktop
+    ///    control commands. Without this step, a `clean_session =
+    ///    true` broker silently drops the subscription on the next
+    ///    (re)connect - the symptom that prompted ADR-039.
+    async fn run_bootstrap(
+        client: &AsyncClient,
+        data: &BootstrapData,
+    ) -> Result<(), RuntimeMqttClientError> {
+        // Step 1: PUBLISH status = "online" (Retained).
+        client
+            .publish(&data.status_topic, QoS::AtLeastOnce, true, "online")
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("status: {}", e)))?;
+
+        // Step 2: PUBLISH meta (Retained).
+        let meta = AgentMeta {
+            agent_id: data.agent_id.clone(),
+            name: data.agent_name.clone(),
+            version: data.agent_version.clone(),
+            avatar: data.avatar.clone(),
+            builtin_avatar: data.builtin_avatar.clone(),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentMeta(meta)),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        client
+            .publish(&data.meta_topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("meta: {}", e)))?;
+
+        // Step 3: PUBLISH config (Retained).
+        let config = AgentConfig {
+            agent_id: data.agent_id.clone(),
+            config_json: data.config_json.clone(),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentConfig(config)),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        client
+            .publish(&data.config_topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("config: {}", e)))?;
+
+        // Step 4: SUBSCRIBE acowork/global/#.
+        client
+            .subscribe("acowork/global/#", QoS::AtLeastOnce)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Subscribe(format!("global: {}", e)))?;
+
+        // Step 5: SUBSCRIBE agents/{id}/sessions/control/#.
+        client
+            .subscribe(&data.control_filter, QoS::AtLeastOnce)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Subscribe(format!("control: {}", e)))?;
+
+        Ok(())
     }
 
     /// Wait for the MQTT connection by attempting a lightweight subscribe.

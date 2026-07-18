@@ -161,6 +161,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let degraded_reasons: crate::http::SharedDegradation =
         Arc::new(std::sync::RwLock::new(Vec::new()));
 
+    // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
+    // server starts here in Phase A before `mqtt_client` is connected, so
+    // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
+    // once the broker connection succeeds. The `PUT /agents/{id}/config`
+    // handler uses it to re-PUBLISH the retained AgentConfig snapshot.
+    let mqtt_client_slot: crate::http::server::SharedMqttClientSlot =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     if let Some(_http_port) = config.http_port {
         match crate::http::RuntimeHttpServer::start(
             std::path::PathBuf::from(&config.work_dir),
@@ -171,6 +179,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             memory_store_shared.clone(),
             embed_dim_shared.clone(),
             degraded_reasons.clone(),
+            mqtt_client_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -202,7 +211,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         ).await {
             Ok(client) => {
                 tracing::info!(agent_id=%loaded.manifest.agent_id, "Runtime MQTT client connected");
-                // ADR-033: Publish HTTP port (Retained) so Gateway can proxy session queries.
+                // Publish HTTP port (Retained) so Gateway can proxy session queries.
                 // Surface publish errors instead of silently swallowing them — a failed publish
                 // is the most likely cause of the Gateway returning 503 with latency=0ms
                 // (the Gateway subscribes to this retained topic on startup; if the publish
@@ -228,7 +237,19 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         ),
                     }
                 }
-                mqtt_client = Some(client); available_cache = Some(cache); control_rx = Some(ctrl_rx);
+                // ADR-038-style: fill the late-bind slot so the HTTP
+                // server's `PUT /agents/{id}/config` handler can re-PUBLISH
+                // the retained AgentConfig snapshot when the Desktop flips a
+                // builtin tool. `RuntimeMqttClient` is `Clone` (cheap Arc
+                // handles for AsyncClient + event-loop guard — see
+                // `mqtt/client.rs`), so we hand a clone to the slot and
+                // keep the original for `AgentBootContext::mqtt_client`,
+                // which downstream sites (`subsystems.rs` / `gateway_loop.rs`)
+                // still consume by `&RuntimeMqttClient` reference.
+                *mqtt_client_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(client.clone())));
+                mqtt_client = Some(client);
+                available_cache = Some(cache);
+                control_rx = Some(ctrl_rx);
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
         }
