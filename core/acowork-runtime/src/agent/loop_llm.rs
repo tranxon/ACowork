@@ -275,6 +275,31 @@ impl AgentLoop {
                         }
                     }
                     usage = resp.usage;
+
+                    // Stream end semantics: deliver the trailing partial line
+                    // (if any) as a final stream_delta, then freeze the
+                    // streaming line as record_complete. Both events are
+                    // needed for the frontend to render the complete reply:
+                    //
+                    //   - `force_flush_stream_delta` bypasses the 500ms
+                    //     notify throttle that would otherwise drop short,
+                    //     fast streams before record_complete lands. It
+                    //     pushes the trailing partial line (no terminating
+                    //     '\n') as a final stream_delta line so the last
+                    //     line of the reply is not held back forever.
+                    //   - `flush_streaming_line` writes the JSONL record
+                    //     and emits the terminal `record_complete` event so
+                    //     the frontend freezes its active stream buffer
+                    //     into `messages[]`.
+                    //
+                    // The downstream `handle_text_response` will take Path 1
+                    // (streaming_flush_count > 0), where its own call to
+                    // `flush_streaming_line` is a no-op because
+                    // `streaming_lines` is already empty — no duplicate
+                    // JSONL write and no duplicate record_complete push.
+                    self.session_core.force_flush_stream_delta();
+                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+
                     // Diagnostic: log stream completion summary
                     tracing::info!(
                         finish_reason = ?finish_reason,

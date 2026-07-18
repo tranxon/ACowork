@@ -71,10 +71,13 @@ use tokio::sync::mpsc;
 
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
+use crate::agent::session::session_manager::RuntimeConfigOverrides;
+use crate::agent::inbound::UserOp;
 use crate::conversation::{
     read_messages_paginated, scan_sessions_from_meta, ConversationEntry,
 };
 use crate::http::memory_query;
+use crate::mqtt::client::SharedRuntimeMqttClient;
 
 /// Error type for Runtime HTTP server operations.
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +116,16 @@ pub type SharedEmbedDimension = Arc<std::sync::RwLock<u64>>;
 /// the `/health` endpoint so the frontend can surface a warning.
 pub type SharedDegradation = Arc<std::sync::RwLock<Vec<String>>>;
 
+/// Late-bind slot for the Runtime's MQTT client.
+///
+/// The HTTP server starts in Phase A before the MQTT client is
+/// connected, so we hand it an `Option`-wrapped `SharedRuntimeMqttClient`
+/// and populate it once Phase A finishes wiring up the broker
+/// connection. Handlers treat `None` as "no MQTT available yet" and
+/// silently skip the retained PUBLISH — the persisted on-disk file is
+/// still authoritative for the next GET.
+pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttClient>>>;
+
 /// State shared with HTTP handlers.
 #[derive(Clone)]
 struct HttpState {
@@ -139,6 +152,11 @@ struct HttpState {
     /// Startup degradation reasons surfaced via `/health`.
     /// Populated by Phase B when non-fatal errors occur.
     degraded_reasons: SharedDegradation,
+    /// Late-bind slot for the MQTT client. Populated by Phase A after
+    /// the broker connection is established. The `PUT /agents/{id}/config`
+    /// handler uses this to re-PUBLISH the retained config snapshot so
+    /// other Desktop subscribers see the new values without a restart.
+    mqtt_client: SharedMqttClientSlot,
 }
 
 /// Handle to the running HTTP server.
@@ -171,6 +189,7 @@ impl RuntimeHttpServer {
         memory_store: SharedMemoryStore,
         embed_provider_dim: SharedEmbedDimension,
         degraded_reasons: SharedDegradation,
+        mqtt_client: SharedMqttClientSlot,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -181,6 +200,7 @@ impl RuntimeHttpServer {
             memory_store,
             embed_provider_dim,
             degraded_reasons,
+            mqtt_client,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -223,7 +243,14 @@ impl RuntimeHttpServer {
             )
             .route("/workspaces/tree", get(list_tree))
             // 3 NEW agent panel endpoints (panels 1/3/5).
-            .route("/agents/{id}/config", get(get_agent_config))
+            // `/agents/{id}/config` carries both GET (Setup panel) and
+            // PUT (live-edit builtin_tools / temperature / etc., mqtt.md
+            // §3.5 §7). The PUT handler persists to agent_tools.json +
+            // re-PUBLISHes the retained AgentConfig snapshot.
+            .route(
+                "/agents/{id}/config",
+                get(get_agent_config).put(put_agent_config),
+            )
             .route("/agents/{id}/tools", get(get_agent_tools))
             .route("/agents/{id}/status", get(get_agent_status))
             .with_state(state);
@@ -1509,6 +1536,674 @@ async fn get_agent_config(
     }))
 }
 
+/// `PUT /agents/{id}/config` — live-edit agent runtime config (mqtt.md §7).
+///
+/// Currently supports the `builtin_tools` field (ADR-029 — the only
+/// field the Tools panel mutates today). Future per-agent fields
+/// (temperature, context_window, etc.) can be added to the request
+/// struct without changing the wire path: each optional field is
+/// applied via the same read-modify-write cycle that `RuntimeConfigUpdate`
+/// uses in `cli.rs`, and the on-disk file is always the source of truth.
+///
+/// On success the handler:
+///   1. Loads the current `agent_tools.json`, applies the patch via
+///      [`crate::agent_config::apply_builtin_tools_patch`] (which honours
+///      `PLATFORM_TOOLS` and silently ignores unknown tool names — same
+///      semantics as the gRPC `RuntimeConfigUpdate` path).
+///   2. Persists the merged config via
+///      [`crate::agent_config::save_agent_tools_config`] (atomic
+///      write-tmp-rename).
+///   3. Re-PUBLISHes the retained `acowork/agents/{id}/config` snapshot
+///      so any other Desktop subscriber (and the Desktop's own
+///      ConfigSnapshot listener) sees the new values immediately,
+///      without waiting for the next Gateway poll cycle.
+///
+/// Active sessions are NOT force-reloaded here. New sessions created
+/// after this call pick up the new enabled flags naturally because
+/// Phase A re-reads `agent_tools.json` at startup; existing in-flight
+/// sessions already pinned their tool list when they were spawned.
+/// This matches the contract documented in `mqtt.md` §3.5: Desktop
+/// edits are "next-session effective" for tool registry shape.
+async fn put_agent_config(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAgentConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // ADR-034: path `id` must match this Runtime's agent_id. A mismatch
+    // is a caller bug — 404 makes the misrouting loud instead of
+    // silently writing to the wrong agent's directory.
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+
+    let work_path = state.work_dir.as_path();
+
+    // ── 1. builtin_tools: read-modify-write via the shared patch helper ──
+    if let Some(ref enabled_names) = req.builtin_tools {
+        // ADR-029 §7 + mqtt.md §7.1 semantics: the wire shape
+        // `builtin_tools: Vec<String>` is the **complete enabled set** —
+        // any tool currently in `agent_tools.json` but absent from this
+        // list must be flipped to `enabled = false`. This is the same
+        // patch construction used by `RuntimeConfigUpdate` in `cli.rs`
+        // (~L2017) and `tools/builtin/mod.rs`. Forgetting this loop
+        // (i.e. mapping `enabled_names -> enabled=true` directly) makes
+        // every unchecked checkbox silently re-enable on the next PUT,
+        // because `apply_builtin_tools_patch` only overrides tools
+        // present in the patch and leaves everything else untouched.
+        //
+        // We rebuild the patch by iterating the **current** entries
+        // (so PLATFORM_TOOLS force-enable logic in
+        // `apply_builtin_tools_patch` still applies) and setting each
+        // entry's `enabled` based on membership in `enabled_names`.
+        let current = crate::agent_config::load_agent_tools_config(work_path)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("failed to load agent_tools.json: {}", e),
+                    })),
+                )
+            })?
+            .map(|cfg| cfg.tools)
+            .unwrap_or_default();
+        let patch: Vec<crate::agent_config::AgentToolEntry> = current
+            .iter()
+            .map(|entry| {
+                let enabled = enabled_names.iter().any(|n| n == &entry.name);
+                crate::agent_config::AgentToolEntry::new(&entry.name, enabled)
+            })
+            .collect();
+
+        let updated = crate::agent_config::apply_builtin_tools_patch(&current, &patch);
+        crate::agent_config::save_agent_tools_config(
+            work_path,
+            &crate::agent_config::AgentToolsConfig {
+                tools: updated.clone(),
+            },
+        )
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to persist agent_tools.json: {}", e),
+                })),
+            )
+        })?;
+        tracing::info!(
+            agent_id = %state.agent_id,
+            enabled_count = updated.iter().filter(|e| e.enabled).count(),
+            total = updated.len(),
+            "PUT /agents/{id}/config: builtin_tools persisted"
+        );
+    }
+
+    // ── 1b. Per-agent config fields: load-merge-save `agent_config.json` ──
+    //
+    // The Desktop `AgentSetupTab.handleApply` always issues a single PUT
+    // that may carry up to 9 optional per-agent fields (temperature,
+    // context_window, max_output_tokens, ...). Prior to this block the
+    // handler silently dropped them all because the request struct only
+    // declared `builtin_tools`, leaving the Setup panel edits to appear
+    // saved while `agent_config.json` stayed untouched. That meant the
+    // Setup panel's optimistic UI was always overwritten on the next
+    // refresh — user-visible as "改动不生效".
+    //
+    // We follow the same read-modify-write cycle that `cli.rs`
+    // (~L2147) uses for the MQTT `RuntimeConfigUpdate` path, so both
+    // write paths land in `agent_config.json` with identical semantics
+    // and a single source of truth on disk.
+    //
+    // Wire shape: `Option<serde_json::Value>` lets the panel
+    // distinguish three states (see `UpdateAgentConfigRequest`):
+    //   - field absent (e.g. `{"builtin_tools": [...]}`) -> leave on-disk value alone
+    //   - field present with a value (e.g. `"temperature": 0.7`) -> overwrite
+    //   - field present with JSON `null` (e.g. `"temperature": null`)
+    //     -> explicitly clear (matches the "fall through to manifest
+    //     default" path documented on `AgentConfig::temperature`)
+    let (patches, runtime_overrides) = req.project();
+    if !patches.is_empty() {
+        let mut agent_cfg = crate::agent_config::load_agent_config(work_path)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("failed to load agent_config.json: {}", e),
+                    })),
+                )
+            })?
+            .unwrap_or_default();
+        for (field, patch) in &patches {
+            // Centralized dispatch keeps the wire-shape -> AgentConfig
+            // mapping in one place; adding a new field here is the
+            // only edit needed to plumb it through.  Each arm
+            // deserializes the raw `serde_json::Value` into the
+            // concrete `AgentConfig` field type via
+            // `serde_json::from_value`; mismatches log a warning and
+            // leave the on-disk value untouched (matches the
+            // `expect_*` extractors in `project()`).
+            match *field {
+                "max_output_tokens" => {
+                    agent_cfg.max_output_tokens =
+                        patch_typed::<u64>(field, patch);
+                }
+                "max_iterations" => {
+                    agent_cfg.max_iterations =
+                        patch_typed::<u32>(field, patch);
+                }
+                "max_sessions" => {
+                    agent_cfg.max_sessions =
+                        patch_typed::<u64>(field, patch).map(|v| v as usize);
+                }
+                "temperature" => {
+                    agent_cfg.temperature =
+                        patch_typed::<f32>(field, patch);
+                }
+                "context_window" => {
+                    agent_cfg.context_window =
+                        patch_typed::<u64>(field, patch);
+                }
+                "shell_approval_threshold" => {
+                    agent_cfg.shell_approval_threshold =
+                        patch_typed::<String>(field, patch);
+                }
+                "approval_timeout_secs" => {
+                    agent_cfg.approval_timeout_secs =
+                        patch_typed::<u64>(field, patch);
+                }
+                "tool_result_compression_mode" => {
+                    agent_cfg.tool_result_compression_mode =
+                        patch_typed::<String>(field, patch);
+                }
+                "tool_result_soft_threshold_chars" => {
+                    agent_cfg.tool_result_soft_threshold_chars =
+                        patch_typed::<u64>(field, patch).map(|v| v as usize);
+                }
+                _ => unreachable!("unknown patch field {field}"),
+            }
+        }
+        crate::agent_config::save_agent_config(work_path, &agent_cfg).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to persist agent_config.json: {}", e),
+                })),
+            )
+        })?;
+        tracing::info!(
+            agent_id = %state.agent_id,
+            field_count = patches.len(),
+            "PUT /agents/{id}/config: agent_config.json fields persisted"
+        );
+
+        // ── 1c. Live-broadcast to active sessions ─────────────────────
+        //
+        // Persisting to `agent_config.json` only takes effect on the
+        // next session restore / process restart. To match the
+        // `RuntimeConfigUpdate` semantics that `cli.rs` enforces
+        // (temperature / context_window / max_iterations are
+        // "live-editable"), we also push the new values into every
+        // running `AgentLoop` so the next LLM iteration uses them.
+        //
+        // We use the same dispatch channel that the existing
+        // /sessions/{sid} write paths (approval, continue, title,
+        // question) use, with the same `UserOp::UpdateRuntimeConfig`
+        // variant that `SessionManager::apply_runtime_config_override`
+        // sends internally. The push is best-effort: a missing
+        // dispatch_tx (agent not yet ready) or empty session map
+        // (no live sessions) means "live-effective" simply doesn't
+        // apply yet, but the on-disk file is still authoritative.
+        //
+        // We deliberately do **not** mutate `SessionManager.runtime_overrides`
+        // from here (it lives outside `HttpState`). New sessions
+        // spawned before the next `RuntimeConfigUpdate` push from
+        // Gateway will use the cached (stale) value, but any
+        // subsequent Setup panel edit refreshes the cache. This is
+        // the same trade-off that `tools/builtin` already accepts
+        // (tool list shape is next-session effective by design).
+        broadcast_runtime_overrides(&state, &runtime_overrides).await;
+    }
+
+    // ── 2. Re-PUBLISH retained config so other Desktop subscribers ──
+    //    see the new values immediately. Best-effort: if the broker
+    //    isn't reachable yet, the on-disk file is still authoritative.
+    if let Some(mqtt) = state.mqtt_client.lock().await.clone() {
+        let cfg_path = work_path.join("config").join("agent_config.json");
+        let config_json = std::fs::read_to_string(&cfg_path).unwrap_or_else(|_| "{}".to_string());
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::AgentConfig(
+                    acowork_core::mqtt_proto::AgentConfig {
+                        agent_id: state.agent_id.clone(),
+                        config_json,
+                    },
+                ),
+            ),
+        };
+        let topic = format!("acowork/agents/{}/config", state.agent_id);
+        if let Err(e) = mqtt
+            .lock()
+            .await
+            .publish_envelope(
+                &topic,
+                &envelope,
+                crate::mqtt::client::MqttQoS::AtLeastOnce,
+                true, // Retained — `mqtt.md` §3.5 contract
+            )
+            .await
+        {
+            tracing::warn!(
+                agent_id = %state.agent_id,
+                error = %e,
+                "PUT /agents/{id}/config: failed to re-PUBLISH retained config snapshot"
+            );
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "agent_id": state.agent_id,
+        "accepted": true,
+        "builtin_tools": req.builtin_tools,
+    })))
+}
+
+/// Request body for `PUT /agents/{id}/config` (mqtt.md §7).
+///
+/// Each field is **optional** and matches the wire shape that the
+/// Desktop `AgentSetupTab.handleApply` builds from `AgentProfileSettings`.
+/// The handler applies a read-modify-write cycle so partial updates
+/// don't clobber unrelated on-disk values (e.g. touching
+/// `temperature` must not erase an existing `tool_result_keep_recent_n`).
+///
+/// Semantics notes:
+///   - Every field here uses the same `"Some(...)" -> overwrite,
+///     "None" -> leave alone` rule, so the wire shape is partial.
+///   - `builtin_tools` is intentionally kept on the **same** struct
+///     even though it persists to a different file
+///     (`agent_tools.json`) — the Setup panel issues a single PUT
+///     that may mutate both, and the frontend doesn't have to split
+///     the request by destination file.
+///   - Fields that have no analogue on the wire (e.g.
+///     `tool_result_keep_recent_n`, `avatar`, `builtin_avatar`,
+///     `system_prompt_override`) are deliberately omitted from this
+///     struct: they aren't exposed in the Setup panel today, so
+///     accepting them on the wire would silently no-op and confuse
+///     callers. They keep flowing through `RuntimeConfigUpdate` over
+///     MQTT the same as before.
+#[derive(Debug, Deserialize)]
+struct UpdateAgentConfigRequest {
+    /// Names of builtin tools to enable. The handler treats listed
+    /// names as `enabled = true` and applies the patch via
+    /// [`crate::agent_config::apply_builtin_tools_patch`], which
+    /// preserves the previous enabled flag for any tool not in this
+    /// list (and force-enables platform-protected tools like
+    /// `context_recall`).
+    #[serde(default)]
+    builtin_tools: Option<Vec<String>>,
+
+    // ── Per-agent config (`agent_config.json`) ──
+    //
+    // We use `Option<serde_json::Value>` as the wire carrier for each
+    // per-agent field.  Note this cannot distinguish three wire
+    // states — serde collapses JSON `null` and absent-field into the
+    // same `None` (the same is true of `Option<T>`).  In practice
+    // this is fine: the Desktop `AgentSetupTab.handleApply` never
+    // sends JSON `null`, only concrete values or omits the field,
+    // so:
+    //
+    //   1. Field absent in the JSON payload -> `None` outer ->
+    //      leave the on-disk value alone (partial PUT semantics).
+    //   2. Field present with a value       -> `Some(Value::...)`  ->
+    //      overwrite with the deserialized value.
+    //
+    // If a future caller ever needs explicit-clearing semantics
+    // (e.g. a CLI that wants to send `"temperature": null` to fall
+    // through to the manifest default), the cleanest path is to
+    // introduce an `OptionalField<T>` presence-tracking wrapper
+    // around the inner `Value`.  See the test doc-comment for
+    // `test_put_agent_config_persists_per_agent_fields`.
+    //
+    // Mirrors `AgentConfig` one-for-one; keep the two in lockstep
+    // when adding new fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_iterations: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_sessions: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temperature: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shell_approval_threshold: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_timeout_secs: Option<serde_json::Value>,
+    /// ADR-032 C4b: compression trigger mode (`"auto" | "manual"`).
+    /// Field-absent leaves on-disk value alone (see struct-level note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_result_compression_mode: Option<serde_json::Value>,
+    /// ADR-032 C4a: tool-result soft compression threshold (chars).
+    /// Field-absent leaves on-disk value alone. Boot-only: takes
+    /// effect on next session restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_result_soft_threshold_chars: Option<serde_json::Value>,
+}
+
+impl UpdateAgentConfigRequest {
+    /// Project the request onto `AgentConfig` and return the matching
+    /// in-memory `RuntimeConfigOverrides` for live broadcast.
+    ///
+    /// Returns `(agent_cfg_patch, runtime_overrides)`:
+    ///   - `agent_cfg_patch` is the list of (`field_name`, `new_value`)
+    ///     tuples the persistence block should apply (every `Some`
+    ///     outer request field contributes one).
+    ///   - `runtime_overrides` carries the **live-editable** subset
+    ///     (temperature / context_window / max_output_tokens /
+    ///     max_iterations / shell_approval_threshold /
+    ///     approval_timeout_secs / tool_result_compression_mode),
+    ///     projecting `Some(Value::Null)` -> `None` for the inner
+    ///     field. Boot-only fields (`tool_result_keep_recent_n`,
+    ///     `tool_result_soft_threshold_chars`) are intentionally
+    ///     forced to `None` here so the live broadcast never carries
+    ///     them — see the field-level comments above.
+    fn project(&self) -> (
+        Vec<(&'static str, FieldPatch<serde_json::Value>)>,
+        RuntimeConfigOverrides,
+    ) {
+        // `FieldPatch::Clear` is what `Some(Value::Null)` projects to
+        // for the `AgentConfig` patch side.  We use a custom enum so
+        // the persistence loop doesn't have to compare against
+        // `Value::Null` everywhere.
+        //
+        // The patches Vec holds `FieldPatch<serde_json::Value>` (rather
+        // than a per-field typed variant) so a single Vec can carry
+        // mixed numeric/string fields.  The persistence loop
+        // deserializes per field via `serde_json::from_value::<T>()`,
+        // while `RuntimeConfigOverrides` is filled via the typed
+        // `expect_*` extractors below.
+        let mut patches: Vec<(&'static str, FieldPatch<serde_json::Value>)> = Vec::new();
+        let mut overrides = RuntimeConfigOverrides::default();
+
+        if let Some(v) = &self.max_output_tokens {
+            let patch = value_to_patch(v);
+            overrides.max_output_tokens = patch.clone().expect_number("max_output_tokens").as_opt();
+            patches.push(("max_output_tokens", patch));
+        }
+        if let Some(v) = &self.max_iterations {
+            let patch = value_to_patch(v);
+            overrides.max_iterations = patch.clone().expect_number("max_iterations").as_u32_opt();
+            patches.push(("max_iterations", patch));
+        }
+        if let Some(v) = &self.max_sessions {
+            let patch = value_to_patch(v);
+            // No live override for max_sessions today — it's a
+            // boot-only field (see `cli.rs` runtime_overrides flow).
+            patches.push(("max_sessions", patch));
+        }
+        if let Some(v) = &self.temperature {
+            let patch = value_to_patch(v);
+            overrides.temperature = patch.clone().expect_number_f32("temperature").as_opt();
+            patches.push(("temperature", patch));
+        }
+        if let Some(v) = &self.context_window {
+            let patch = value_to_patch(v);
+            overrides.context_window = patch.clone().expect_number("context_window").as_opt();
+            patches.push(("context_window", patch));
+        }
+        if let Some(v) = &self.shell_approval_threshold {
+            let patch = value_to_patch(v);
+            overrides.shell_approval_threshold = patch
+                .clone()
+                .expect_string("shell_approval_threshold")
+                .as_string_opt();
+            patches.push(("shell_approval_threshold", patch));
+        }
+        if let Some(v) = &self.approval_timeout_secs {
+            let patch = value_to_patch(v);
+            overrides.approval_timeout_secs =
+                patch.clone().expect_number("approval_timeout_secs").as_opt();
+            patches.push(("approval_timeout_secs", patch));
+        }
+        if let Some(v) = &self.tool_result_compression_mode {
+            let patch = value_to_patch(v);
+            overrides.tool_result_compression_mode = patch
+                .clone()
+                .expect_string("tool_result_compression_mode")
+                .as_string_opt();
+            patches.push(("tool_result_compression_mode", patch));
+        }
+        if let Some(v) = &self.tool_result_soft_threshold_chars {
+            let patch = value_to_patch(v);
+            // Boot-only — override is intentionally left at None.
+            patches.push(("tool_result_soft_threshold_chars", patch));
+        }
+
+        (patches, overrides)
+    }
+}
+
+/// Per-field patch op. `Set(T)` writes a concrete value; `Clear`
+/// writes `None` so `skip_serializing_if = Option::is_none` removes
+/// the key from `agent_config.json`.
+#[derive(Debug, Clone, Copy)]
+enum FieldPatch<T> {
+    Set(T),
+    Clear,
+}
+
+impl<T> FieldPatch<T> {
+    /// Convert `Set(T)` -> `Some(t)` and `Clear` -> `None`.
+    /// Requires `T: Copy`; use [`Self::as_string_opt`] for owned strings.
+    fn as_opt(&self) -> Option<T>
+    where
+        T: Copy,
+    {
+        match self {
+            FieldPatch::Set(v) => Some(*v),
+            FieldPatch::Clear => None,
+        }
+    }
+}
+
+impl FieldPatch<u64> {
+    /// Narrow `FieldPatch<u64>` to `Option<u32>` for fields whose runtime
+    /// override is `u32` (e.g. `max_iterations`).  Values that don't fit
+    /// in `u32` collapse to `None` and a warning is logged upstream.
+    fn as_u32_opt(&self) -> Option<u32> {
+        match self {
+            FieldPatch::Set(v) => u32::try_from(*v).ok(),
+            FieldPatch::Clear => None,
+        }
+    }
+}
+
+impl FieldPatch<String> {
+    /// Owned conversion: `Set(s)` -> `Some(s.clone())`, `Clear` -> `None`.
+    fn as_string_opt(&self) -> Option<String> {
+        match self {
+            FieldPatch::Set(v) => Some(v.clone()),
+            FieldPatch::Clear => None,
+        }
+    }
+}
+
+/// Decode the wire-side `serde_json::Value` into a typed patch.
+///
+/// `Value::Null` becomes `FieldPatch::Clear`; everything else becomes
+/// `FieldPatch::Set` and is left to the typed `expect_*` helpers below
+/// (which reject wrong-typed JSON so the persistence loop doesn't
+/// silently miswrite a string into a numeric field).
+fn value_to_patch(v: &serde_json::Value) -> FieldPatch<serde_json::Value> {
+    match v {
+        serde_json::Value::Null => FieldPatch::Clear,
+        other => FieldPatch::Set(other.clone()),
+    }
+}
+
+/// Type-erase a `FieldPatch<serde_json::Value>` into the
+/// persistence-loop-friendly `Option<T>` shape (`Set(v)` -> `Some(T)`,
+/// `Clear` -> `None`).  A wrong-typed JSON value (e.g. `Set("foo")` for
+/// a `u64` field) collapses to `None` and emits a `tracing::warn!`,
+/// matching the `expect_*` extractors in `project()` so the two
+/// write paths can never disagree about what landed on disk.
+fn patch_typed<T>(
+    field: &'static str,
+    patch: &FieldPatch<serde_json::Value>,
+) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match patch {
+        FieldPatch::Clear => None,
+        FieldPatch::Set(v) => match serde_json::from_value::<T>(v.clone()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(
+                    field,
+                    value = ?v,
+                    error = %e,
+                    "PUT /agents/{{id}}/config: type mismatch — leaving on-disk value"
+                );
+                None
+            }
+        },
+    }
+}
+
+trait FieldPatchExt {
+    fn expect_number(self, field: &'static str) -> FieldPatch<u64>;
+    fn expect_number_f32(self, field: &'static str) -> FieldPatch<f32>;
+    fn expect_string(self, field: &'static str) -> FieldPatch<String>;
+}
+
+impl FieldPatchExt for FieldPatch<serde_json::Value> {
+    fn expect_number(self, field: &'static str) -> FieldPatch<u64> {
+        match self {
+            FieldPatch::Clear => FieldPatch::Clear,
+            FieldPatch::Set(serde_json::Value::Number(n)) => match n.as_u64() {
+                Some(v) => FieldPatch::Set(v),
+                None => {
+                    tracing::warn!(field, value = ?n, "PUT /agents/{{id}}/config: non-u64 number — skipping");
+                    FieldPatch::Clear
+                }
+            },
+            FieldPatch::Set(other) => {
+                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected number — skipping");
+                FieldPatch::Clear
+            }
+        }
+    }
+    fn expect_number_f32(self, field: &'static str) -> FieldPatch<f32> {
+        match self {
+            FieldPatch::Clear => FieldPatch::Clear,
+            FieldPatch::Set(serde_json::Value::Number(n)) => match n.as_f64() {
+                Some(v) => FieldPatch::Set(v as f32),
+                None => {
+                    tracing::warn!(field, value = ?n, "PUT /agents/{{id}}/config: non-f64 number — skipping");
+                    FieldPatch::Clear
+                }
+            },
+            FieldPatch::Set(other) => {
+                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected number — skipping");
+                FieldPatch::Clear
+            }
+        }
+    }
+    fn expect_string(self, field: &'static str) -> FieldPatch<String> {
+        match self {
+            FieldPatch::Clear => FieldPatch::Clear,
+            FieldPatch::Set(serde_json::Value::String(s)) => FieldPatch::Set(s),
+            FieldPatch::Set(other) => {
+                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected string — skipping");
+                FieldPatch::Clear
+            }
+        }
+    }
+}
+
+/// Broadcast a `RuntimeConfigOverrides` push to every live session.
+///
+/// The overrides are produced by `UpdateAgentConfigRequest::project`
+/// above, which already projects the wire shape onto the in-process
+/// struct (and forces boot-only fields to `None` so we never
+/// invalidate in-flight conversation history pointers — see
+/// `RuntimeConfigOverrides::tool_result_soft_threshold_chars` docs).
+///
+/// The push goes through `dispatch_tx` (per-session `(String,
+/// InboundMessage)` channel), reusing the exact same routing that
+/// `dispatch_inbound` uses for `UserOp::UpdateRuntimeConfig` today.
+/// `gateway_loop` forwards those messages through
+/// `forward_to_session_inbound`, which lands in `AgentLoop`'s
+/// `drain_inbound_queue` → `apply_user_op` → `apply_runtime_config`,
+/// so the next LLM iteration picks up the new temperature /
+/// context_window / etc. without restarting the session.
+async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfigOverrides) {
+    if overrides.is_empty() {
+        // No live-editable fields were pushed (e.g. user only touched
+        // tool_result_soft_threshold_chars). Skip the broadcast entirely
+        // so we don't broadcast a no-op UpdateRuntimeConfig that would
+        // still trigger `emit_session_state` on every active session.
+        return;
+    }
+
+    // Enumerate active session IDs. `session_snapshots` is the same
+    // authoritative map that `SessionManager` owns; cloning is cheap
+    // because each value is `Arc<RwLock<...>>`.
+    let session_ids: Vec<String> = state
+        .session_snapshots
+        .read()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+
+    if session_ids.is_empty() {
+        // No live sessions to push to — the on-disk save above is still
+        // authoritative and will be re-loaded on the next session.
+        return;
+    }
+
+    // Snapshot dispatch_tx once. The slot itself is locked briefly to
+    // clone the inner sender; clones of `UnboundedSender` are cheap.
+    let tx_opt = state.dispatch_tx.lock().await.clone();
+    let Some(tx) = tx_opt else {
+        // Agent not yet ready (Phase A pre-Phase D). Same fallback as
+        // empty session_ids above — file is authoritative.
+        return;
+    };
+
+    let user_op = UserOp::UpdateRuntimeConfig(overrides.clone());
+    let mut sent = 0usize;
+    let mut skipped = 0usize;
+    for sid in session_ids {
+        let msg = InboundMessage::UserOperation(user_op.clone());
+        match tx.send((sid.clone(), msg)) {
+            Ok(()) => sent += 1,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "broadcast_runtime_overrides: dispatch_tx send failed (session likely closed)"
+                );
+                skipped += 1;
+            }
+        }
+    }
+    tracing::info!(
+        agent_id = %state.agent_id,
+        sent,
+        skipped,
+        "PUT /agents/{{id}}/config: live-broadcast RuntimeConfigOverrides dispatched"
+    );
+}
+
 /// `GET /agents/{id}/tools` — Tools panel (merged: builtin + mcp + search).
 ///
 /// ADR-034 §7.6.5 defines the merged response schema:
@@ -1683,6 +2378,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1693,6 +2389,7 @@ mod tests {
             memory_store,
             embed_dim,
             degraded_reasons,
+            mqtt_client,
         )
         .await
         .expect("server should start");
@@ -1772,6 +2469,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1782,6 +2480,7 @@ mod tests {
             memory_store,
             embed_dim,
             degraded_reasons,
+            mqtt_client,
         )
         .await
         .unwrap();
@@ -1831,6 +2530,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(512));
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -1841,6 +2541,7 @@ mod tests {
             memory_store,
             embed_dim,
             degraded_reasons,
+            mqtt_client,
         )
         .await
         .expect("server should start");
@@ -1887,6 +2588,322 @@ mod tests {
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["started"], false);
         assert_eq!(body["message"], "Memory store not available");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-029 §7 wire-semantics regression test.
+    ///
+    /// `PUT /api/agents/{id}/config` with `builtin_tools` is the
+    /// **complete enabled set**: any tool currently in `agent_tools.json`
+    /// but absent from the request body MUST be flipped to
+    /// `enabled = false`. The previous implementation built the patch
+    /// directly from the request body (everything listed → enabled=true),
+    /// which made every unchecked checkbox silently re-enable on the
+    /// next PUT — the bug only became user-visible when
+    /// `chatStore::case "agent_config"` started emitting
+    /// `acowork:refresh-agent-config`, at which point the ToolsTab
+    /// listener overwrote the optimistic UI with the server's stale
+    /// `enabled=true` value.
+    ///
+    /// This test seeds `agent_tools.json` with three tools, sends a
+    /// PUT listing only one of them as enabled, and asserts that:
+    ///   - the listed tool stays `enabled=true`
+    ///   - the two **unlisted** tools flip to `enabled=false`
+    ///   - PLATFORM_TOOLS (e.g. `context_recall`) are still force-enabled
+    ///     even when omitted from the PUT body
+    #[tokio::test]
+    async fn test_put_agent_config_disables_unlisted_builtin_tools() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-put-config");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        // Seed agent_tools.json: 3 enabled tools, one of which is a
+        // platform tool.  Reproduces the user-visible "uncheck a tool,
+        // then a refresh re-checks it" scenario after the Setup/Tools
+        // refresh wiring was completed.
+        let initial = crate::agent_config::AgentToolsConfig {
+            tools: vec![
+                crate::agent_config::AgentToolEntry::new("context_recall", true),
+                crate::agent_config::AgentToolEntry::new("http_request", true),
+                crate::agent_config::AgentToolEntry::new("shell", true),
+            ],
+        };
+        crate::agent_config::save_agent_tools_config(
+            std::path::Path::new(&temp_dir),
+            &initial,
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let memory_store: SharedMemoryStore =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            memory_store,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+        )
+        .await
+        .expect("server should start");
+
+        // PUT with only `http_request` enabled — the other two
+        // (including the platform tool, which must still stay enabled)
+        // must reflect the new state on the next GET /tools.
+        let url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            server.port
+        );
+        let client = reqwest::Client::new();
+        let response = client
+            .put(&url)
+            .json(&serde_json::json!({"builtin_tools": ["http_request"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "PUT /agents/{{id}}/config should accept builtin_tools, got {}",
+            response.status()
+        );
+
+        // Verify on-disk agent_tools.json has the right enabled flags.
+        let reloaded = crate::agent_config::load_agent_tools_config(
+            std::path::Path::new(&temp_dir),
+        )
+        .unwrap()
+        .expect("agent_tools.json should exist after PUT");
+        let map: std::collections::HashMap<String, bool> = reloaded
+            .tools
+            .iter()
+            .map(|e| (e.name.clone(), e.enabled))
+            .collect();
+        assert!(map["http_request"], "listed tool stays enabled");
+        assert!(
+            !map["shell"],
+            "unlisted tool must be disabled — this is the bug regression"
+        );
+        assert!(
+            map["context_recall"],
+            "PLATFORM_TOOLS are force-enabled regardless of PUT body"
+        );
+
+        // Verify the GET /tools endpoint also returns the new state —
+        // this is what the ToolsTab listener reads, so the optimistic
+        // update overwrite would surface the bug here.
+        let tools_url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/tools",
+            server.port
+        );
+        let tools_resp: serde_json::Value =
+            reqwest::get(&tools_url).await.unwrap().json().await.unwrap();
+        let tools_arr = tools_resp["tools"].as_array().unwrap();
+        let tool_flags: std::collections::HashMap<String, bool> = tools_arr
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_string(),
+                    e["enabled"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert!(tool_flags["http_request"]);
+        assert!(!tool_flags["shell"]);
+        assert!(tool_flags["context_recall"]);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// AgentSetup panel edit-effective regression test.
+    ///
+    /// Before the per-agent-config block was added, `PUT
+    /// /agents/{id}/config` silently dropped everything except
+    /// `builtin_tools` because the request struct only declared that
+    /// one field. The Setup panel would optimistically apply the new
+    /// temperature / context_window / etc. to its local store, the
+    /// refresh listener would fetch the (unchanged) server values,
+    /// and the user-visible result was "改动不生效". This test
+    /// exercises the full read-modify-write cycle to make sure the
+    /// handler now lands each supported field on disk.
+    ///
+    /// We cover the four wire-format scenarios the AgentSetupTab
+    /// actually uses (per `handleApply` in
+    /// `apps/acowork-desktop/src/components/results/AgentSetupTab.tsx`):
+    ///
+    ///   1. **Change** an existing numeric field (`temperature` 0.3 → 0.7).
+    ///   2. **Add** a field that was previously absent (`max_output_tokens`,
+    ///      `approval_timeout_secs`).
+    ///   3. **Change** an existing string field (`shell_approval_threshold`
+    ///      `"medium"` → `"high"`).
+    ///   4. **Preserve** an untouched field (`max_iterations` stays at 50).
+    ///
+    /// We intentionally do **not** exercise JSON `null` clearing here:
+    /// the frontend never sends `null` (it either sends the value or
+    /// omits the field), and `Option<serde_json::Value>` cannot
+    /// distinguish "field absent" from "field is JSON null" without a
+    /// presence-tracking wrapper. If a future CLI / tool needs
+    /// explicit-clearing semantics, the cleanest path is to introduce
+    /// an `OptionalField<T>` presence-tracking wrapper — see the
+    /// design notes on `UpdateAgentConfigRequest`.
+    #[tokio::test]
+    async fn test_put_agent_config_persists_per_agent_fields() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-put-config-fields");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        // Seed agent_config.json with three pre-existing values:
+        // `temperature` and `shell_approval_threshold` will be
+        // overwritten by the PUT; `max_iterations` will be preserved
+        // because the PUT doesn't mention it.
+        let initial = crate::agent_config::AgentConfig {
+            temperature: Some(0.3),
+            max_iterations: Some(50),
+            shell_approval_threshold: Some("medium".to_string()),
+            ..Default::default()
+        };
+        crate::agent_config::save_agent_config(
+            std::path::Path::new(&temp_dir),
+            &initial,
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let memory_store: SharedMemoryStore =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            memory_store,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+        )
+        .await
+        .expect("server should start");
+
+        // Partial PUT — note the absence of `max_iterations` is
+        // load-bearing: it exercises the "untouched field is preserved"
+        // path of the read-modify-write cycle.
+        let url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            server.port
+        );
+        let client = reqwest::Client::new();
+        let response = client
+            .put(&url)
+            .json(&serde_json::json!({
+                "temperature": 0.7,
+                "max_output_tokens": 4096,
+                "approval_timeout_secs": 120,
+                "shell_approval_threshold": "high",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "PUT /agents/{{id}}/config should accept per-agent fields, got {}",
+            response.status()
+        );
+
+        // Verify the on-disk file carries every pushed field and that
+        // the untouched field is still there.
+        let reloaded = crate::agent_config::load_agent_config(
+            std::path::Path::new(&temp_dir),
+        )
+        .unwrap()
+        .expect("agent_config.json should exist after PUT");
+
+        assert!(
+            (reloaded.temperature.unwrap_or(0.0) - 0.7).abs() < f32::EPSILON,
+            "temperature should be updated to 0.7, got {:?}",
+            reloaded.temperature
+        );
+        assert_eq!(reloaded.max_output_tokens, Some(4096));
+        assert_eq!(reloaded.approval_timeout_secs, Some(120));
+        assert_eq!(
+            reloaded.shell_approval_threshold,
+            Some("high".to_string()),
+            "shell_approval_threshold should be overwritten with the new string value"
+        );
+        assert_eq!(
+            reloaded.max_iterations,
+            Some(50),
+            "untouched field must be preserved across partial PUT"
+        );
+
+        // Also verify the raw JSON shape on disk: every newly-set
+        // field must show up in the serialized output (and
+        // `skip_serializing_if = Option::is_none` on the struct
+        // means default fields like `system_prompt_override` stay
+        // out of the file).
+        let raw = std::fs::read_to_string(temp_dir.join("config").join("agent_config.json"))
+            .unwrap();
+        assert!(
+            raw.contains("\"max_output_tokens\""),
+            "newly-added field must be present in the serialized JSON; raw body was: {}",
+            raw
+        );
+        assert!(
+            raw.contains("\"approval_timeout_secs\""),
+            "newly-added field must be present in the serialized JSON; raw body was: {}",
+            raw
+        );
+        assert!(
+            raw.contains("\"high\""),
+            "updated string field must round-trip its value; raw body was: {}",
+            raw
+        );
+
+        // GET /agents/{id}/config must surface the new state too —
+        // this is the path the SetupTab refresh listener reads.
+        let get_url = format!(
+            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            server.port
+        );
+        let get_resp: serde_json::Value =
+            reqwest::get(&get_url).await.unwrap().json().await.unwrap();
+        let cfg = get_resp["config"].as_object().expect("config envelope");
+        assert_eq!(cfg["max_output_tokens"], serde_json::json!(4096));
+        assert_eq!(cfg["max_iterations"], serde_json::json!(50));
+        assert_eq!(
+            cfg["shell_approval_threshold"],
+            serde_json::json!("high"),
+            "GET /config must surface the updated string value"
+        );
+        assert_eq!(
+            cfg["approval_timeout_secs"],
+            serde_json::json!(120),
+            "GET /config must surface the newly-added field"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

@@ -451,7 +451,12 @@ impl SessionCore {
         }
 
         // ADR-035: push new whole streaming lines via MQTT (all sessions).
-        self.try_send_stream_delta();
+        // Throttled calls (via notify_new_data_available) only emit complete
+        // `\n`-terminated lines; the trailing partial line is held for the
+        // next tick. The StreamEvent::Finished path uses
+        // force_flush_stream_delta to push the trailing partial line as a
+        // final stream_delta before record_complete lands.
+        self.try_send_stream_delta(false);
     }
 
     /// ADR-035: compute and emit a `stream_delta` carrying the new COMPLETE
@@ -466,7 +471,14 @@ impl SessionCore {
     /// ADR-035 M2: each emitted line carries the streaming line's stable
     /// `message_id` so the frontend can match `stream_delta` lines to the
     /// eventual `record_complete` event for the same record.
-    fn try_send_stream_delta(&self) {
+    ///
+    /// When `force` is true, any trailing partial line (no terminating '\n')
+    /// is also emitted as a final line and the push cursor advances past it.
+    /// This is the canonical "stream end" behavior used at
+    /// `StreamEvent::Finished` so the frontend sees the full reply via
+    /// `stream_delta` even for short, fast responses that would otherwise be
+    /// swallowed by the 500ms notify throttle before `record_complete` lands.
+    fn try_send_stream_delta(&self, force: bool) {
         let sid = match &self.session_id {
             Some(s) => s.clone(),
             None => return,
@@ -497,8 +509,26 @@ impl SessionCore {
                             line_start = ci + 1;
                         }
                     }
-                    // Advance the cursor past the complete lines only; the
-                    // trailing partial line is re-examined next tick.
+
+                    if force {
+                        // Force-finalize: also emit any trailing partial line
+                        // (no terminating '\n') so the last line of the
+                        // stream reaches the frontend before
+                        // `record_complete` freezes the buffer. The cursor
+                        // advances past the partial bytes too so a follow-up
+                        // `try_send_stream_delta(false)` does not re-emit
+                        // them.
+                        let trailing: String = new_chars[line_start..].iter().collect();
+                        if !trailing.is_empty() {
+                            lines.push((role.clone(), message_id.clone(), trailing));
+                            consumed = new_chars.len();
+                        }
+                    }
+
+                    // Advance the cursor past what we emitted. When `force`
+                    // is false, the trailing partial line stays in the
+                    // buffer for re-examination on the next tick; when
+                    // `force` is true, the cursor consumes it as well.
                     if consumed > 0 {
                         self.stream_push_offset.fetch_add(consumed, Ordering::Relaxed);
                     }
@@ -520,6 +550,20 @@ impl SessionCore {
                 seq,
             });
         }
+    }
+
+    /// Force-finalize the pending streaming line: emit a `stream_delta`
+    /// carrying the trailing partial line (no terminating `\n`) in addition
+    /// to any already-pending complete lines, bypassing the 500ms
+    /// `notify_new_data_available` throttle.
+    ///
+    /// This is the canonical "stream end" push used at
+    /// `StreamEvent::Finished`. It is paired with `flush_streaming_line`
+    /// (which emits `record_complete`) so the frontend receives both the
+    /// final delta and the terminal freeze for short, fast streams that
+    /// would otherwise be dropped before record_complete lands.
+    pub(crate) fn force_flush_stream_delta(&self) {
+        self.try_send_stream_delta(true);
     }
 
     // ── Provider builder (retry UX) ──────────────────────────────────
@@ -701,7 +745,7 @@ mod tests {
         );
 
         // First push: only the two COMPLETE lines; "partial" is held back.
-        core.try_send_stream_delta();
+        core.try_send_stream_delta(false);
         let evt = rx.try_recv().unwrap();
         match evt.event {
             ChunkEvent::StreamDelta { session_id, lines, seq } => {
@@ -741,7 +785,7 @@ mod tests {
             let sl = map.get_mut("s1").unwrap();
             sl.accumulated_content.push('\n');
         }
-        core.try_send_stream_delta();
+        core.try_send_stream_delta(false);
         let evt = rx.try_recv().unwrap();
         match evt.event {
             ChunkEvent::StreamDelta { lines, seq, .. } => {
@@ -782,7 +826,7 @@ mod tests {
                 started_at_ms: 0,
             },
         );
-        core.try_send_stream_delta();
+        core.try_send_stream_delta(false);
         // Drain the thought line.
         assert!(matches!(rx.try_recv().unwrap().event, ChunkEvent::StreamDelta { .. }));
 
@@ -792,7 +836,7 @@ mod tests {
             .accumulated_content
             .push_str("assistant line\n");
 
-        core.try_send_stream_delta();
+        core.try_send_stream_delta(false);
         let evt = rx.try_recv().unwrap();
         match evt.event {
             ChunkEvent::StreamDelta { lines, .. } => {
@@ -808,6 +852,62 @@ mod tests {
             }
             _other => panic!("expected StreamDelta, got non-stream_delta event"),
         }
+    }
+
+    // ── StreamEvent::Finished finalization tests ────────────────────
+
+    #[test]
+    fn test_stream_delta_force_pushes_trailing_partial_line() {
+        // StreamEvent::Finished path: force_flush_stream_delta must push
+        // the trailing partial line (no '\n') along with any complete
+        // lines, bypassing the 500ms notify throttle. This guarantees the
+        // frontend sees the last line of the reply via stream_delta even
+        // when the throttle would otherwise have suppressed it.
+        let (core, mut rx) = make_core();
+        core.streaming_lines.write().unwrap().insert(
+            "s1".to_string(),
+            crate::conversation::StreamingLine {
+                line_number: 1,
+                message_id: "test-mid-force".to_string(),
+                accumulated_content: "first line\nsecond line\npartial".to_string(),
+                role: "assistant".to_string(),
+                started_at: String::new(),
+                started_at_ms: 0,
+            },
+        );
+
+        // Force-finalize: all three lines (including trailing partial).
+        core.force_flush_stream_delta();
+        let evt = rx.try_recv().unwrap();
+        match evt.event {
+            ChunkEvent::StreamDelta { session_id, lines, .. } => {
+                assert_eq!(session_id, "s1");
+                let projected: Vec<(String, String)> = lines
+                    .into_iter()
+                    .map(|(role, _mid, content)| (role, content))
+                    .collect();
+                assert_eq!(
+                    projected,
+                    vec![
+                        ("assistant".to_string(), "first line".to_string()),
+                        ("assistant".to_string(), "second line".to_string()),
+                        ("assistant".to_string(), "partial".to_string()),
+                    ]
+                );
+            }
+            _other => panic!("expected StreamDelta, got non-stream_delta event"),
+        }
+        // Only one event emitted — the trailing partial was included.
+        assert!(rx.try_recv().is_err());
+
+        // A follow-up force push must not re-emit anything (cursor consumed
+        // the trailing partial already).
+        core.force_flush_stream_delta();
+        assert!(rx.try_recv().is_err());
+
+        // Likewise a throttled push must not re-emit.
+        core.try_send_stream_delta(false);
+        assert!(rx.try_recv().is_err());
     }
 
     // ── 429 retry UX initialization tests ─────────────────────────────
