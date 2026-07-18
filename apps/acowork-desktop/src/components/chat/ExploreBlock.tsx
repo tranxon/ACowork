@@ -254,10 +254,17 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   const pairedItems = buildPairedItems(items);
   const stepCount = pairedItems.length;
 
-  // Still have tool_calls without results
-  const hasPendingTools = pairedItems.some(
+  // Count tool_calls that have NOT yet been paired with a tool_result.
+  // Derived once here so both `hasPendingTools` (drives isExploring /
+  // auto-expand) and the collapsed-header "M running" badge can share
+  // the same source of truth instead of recomputing over `pairedItems`
+  // a second time.
+  const pendingToolsCount = pairedItems.filter(
     (item) => item.kind === "tool" && !item.result
-  );
+  ).length;
+
+  // Still have tool_calls without results
+  const hasPendingTools = pendingToolsCount > 0;
 
   const isExploring = isStreaming || hasPendingTools;
 
@@ -327,7 +334,19 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           {hasFollowUpReply ? t("exploreBlock.explored") : t("exploreBlock.exploring")}
         </span>
         <span className="text-zinc-400 dark:text-zinc-500">
-          ({t("exploreBlock.step", { count: stepCount })})
+          ({t("exploreBlock.step", { count: stepCount })}
+          {/* When collapsed and at least one tool is still awaiting its
+              result, append a "· M running" suffix so the user can see
+              progress without expanding the block. Suppressed when expanded
+              (the per-row status icons already convey the same info) and
+              when the block has a follow-up reply (no work in flight). */}
+          {!expanded && !hasFollowUpReply && hasPendingTools && (
+            <>
+              {" · "}
+              {t("exploreBlock.running", { count: pendingToolsCount })}
+            </>
+          )}
+          )
         </span>
         {expanded ? (
           <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-zinc-400" />

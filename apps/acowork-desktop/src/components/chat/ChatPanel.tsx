@@ -595,6 +595,25 @@ export function ChatPanel() {
   // working indicator during inter-tool iterations (after tool_result) and
   // during continuation thinking — both of which legitimately have
   // `sending=true` without needing a working indicator.
+  // Working indicator has two trigger conditions, but renders through ONE
+  // shared visual block (AgentAvatar header gated separately, then the
+  // single "正在处理..." line). Both cases share the same chrome
+  // (`flex items-center gap-1.5 ml-12 py-1.5` + pulse + `thinking-shimmer`)
+  // so the transition between after-user and inter-step phases is
+  // visually seamless.
+  //
+  //   - showWorkingItemAfterUser: classic case — last visible raw entry is a
+  //     user message, agent hasn't produced any visible reply yet.
+  //   - showInterStepProcessing: inter-tool / inter-thought gap — agent
+  //     already has explore_block visible (last raw entry is an agent-side
+  //     message), `sending=true`, but no new thought/assistant stream_delta
+  //     has landed yet (e.g. just after tool_result, before the next LLM
+  //     response starts). Without this branch the user sees a static
+  //     "finished" explore_block during the LLM round-trip window.
+  //
+  // Both branches are mutually exclusive with `showReplyingItem` (assistant
+  // streaming has crossed the threshold) and `showCompactingItem` (session
+  // compacting), so the four indicators cannot overlap.
   const canShowWorkingItemAfterUser = (() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
@@ -611,25 +630,15 @@ export function ChatPanel() {
         continue;
       }
       // assistant / thought / tool_call / tool_result / error — agent has
-      // produced a visible reply; working indicator is forbidden.
+      // produced a visible reply; working indicator is forbidden here, but
+      // the inter-step branch (see showInterStepProcessing) may still apply
+      // if sending remains true and no fresh streaming has started.
       return false;
     }
     return false;
   })();
-  const showWorkingItem = sending && canShowWorkingItemAfterUser;
-
-  // The agent header (avatar + name + role) above the working status should
-  // ONLY appear when the working indicator follows a user message — i.e.,
-  // the agent is about to respond to a NEW user turn.  For intermediate
-  // streaming gaps (e.g., a fresh thinking turn after a tool result), the
-  // last item in the chat is an agent-side message (thought/explore), not
-  // a user message, and repeating the avatar+name would feel noisy.
-  //
-  // Scan backwards past compaction/system/document_upload messages that may
-  // be interleaved between the user message and the working indicator (e.g.,
-  // when a compaction event is loaded via poll after the user message was
-  // optimistically added).
-  const showWorkingItemHeader = canShowWorkingItemAfterUser;
+  const showWorkingItemAfterUser = sending && canShowWorkingItemAfterUser;
+  const showWorkingItemHeader = showWorkingItemAfterUser;
 
   // Virtual scrolling: only render visible items (messages + trailing extra
   // items).  Both extras sit AFTER messageBlocks so the sticky-bottom effect
@@ -651,6 +660,21 @@ export function ChatPanel() {
   // (The Working indicator renders OUTSIDE the virtual list on purpose —
   // see below — so it does NOT contribute to virtualCount.)
   const showReplyingItem = isAssistantReplying;
+  // Inter-step processing indicator — fires when the agent already has an
+  // explore_block visible (last raw entry is agent-side, so
+  // canShowWorkingItemAfterUser=false), `sending=true` is still on, but no
+  // fresh thought/assistant stream_delta has landed yet (e.g. just after
+  // tool_result, before the next LLM round-trip). Mutually exclusive with
+  // `showReplyingItem` (assistant crossed threshold) and
+  // `showCompactingItem` (session compacting). Both branches of
+  // `showWorkingItem` share the same visual chrome; only the AgentAvatar
+  // header is gated to the after-user branch (see `showWorkingItemHeader`).
+  const showInterStepProcessing =
+    sending
+    && !canShowWorkingItemAfterUser
+    && !showReplyingItem
+    && !showCompactingItem;
+  const showWorkingItem = showWorkingItemAfterUser || showInterStepProcessing;
   let extraItems = 0;
   if (showReplyingItem) extraItems++;
   if (showCompactingItem) extraItems++;

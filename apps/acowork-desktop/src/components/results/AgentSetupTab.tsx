@@ -86,24 +86,41 @@ export function AgentSetupTab() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
+        // Runtime's `GET /agents/{id}/config` returns a nested envelope
+        // `{ agent_id, matches, config: <AgentConfig>, manifest_path, work_dir }`
+        // (see acowork-runtime/src/http/server.rs::get_agent_config). The
+        // Setup panel cares about the **flattened** config fields, so we
+        // unwrap `data.config` here. Tolerating a missing/empty `config`
+        // (e.g. agent_id mismatch) keeps the rest of the panel usable —
+        // it just renders the localStorage fallback values.
+        const cfg = (data.config ?? {}) as {
+          max_output_tokens?: number;
+          max_iterations?: number;
+          max_sessions?: number;
+          temperature?: number | null;
+          context_window?: number | null;
+          shell_approval_threshold?: string | null;
+          approval_timeout_secs?: number | null;
+          tool_result_compression_mode?: string | null;
+          tool_result_soft_threshold_chars?: number | null;
+        };
         setProfile(selectedAgentId, {
-          maxTokens: data.max_output_tokens,
-          maxIterations: data.max_iterations,
-          maxSessions: data.max_sessions,
-          temperature: data.temperature ?? undefined,
-          contextWindow: data.context_window ?? undefined,
-          shellApprovalThreshold: data.shell_approval_threshold,
-          approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
-          globalMaxTokens: data.global_max_output_tokens,
+          maxTokens: cfg.max_output_tokens,
+          maxIterations: cfg.max_iterations,
+          maxSessions: cfg.max_sessions,
+          temperature: cfg.temperature ?? undefined,
+          contextWindow: cfg.context_window ?? undefined,
+          shellApprovalThreshold: cfg.shell_approval_threshold ?? undefined,
+          approvalTimeoutSecs: cfg.approval_timeout_secs ?? 300,
+          // `global_max_output_tokens` lives on the Gateway
+          // AgentConfigResponse (not on Runtime AgentConfig), so the
+          // proxy response doesn't carry it. We leave the previously
+          // cached value alone if it's already set; the panel reads
+          // `globalMaxTokens` as a "fallback limit" hint.
           activeModel: data.model,
           activeProvider: data.provider,
-          toolResultCompressionMode: data.tool_result_compression_mode,
-          // ADR-032 C4a: tool-result soft compression threshold.
-          // `data.tool_result_soft_threshold_chars` is `Option<usize>`
-          // from the runtime; a JSON `null` arrives as `undefined`,
-          // which the store normalize helper converts to `undefined`
-          // (= use DEFAULT_SOFT_THRESHOLD_CHARS = 2048).
-          toolResultSoftThresholdChars: data.tool_result_soft_threshold_chars ?? undefined,
+          toolResultCompressionMode: cfg.tool_result_compression_mode ?? undefined,
+          toolResultSoftThresholdChars: cfg.tool_result_soft_threshold_chars ?? undefined,
         });
       })
       .catch((err) => {
@@ -123,19 +140,33 @@ export function AgentSetupTab() {
           .then((res) => (res.ok ? res.json() : null))
           .then((data) => {
             if (!data) return;
+            // Same nested-envelope unwrap as the mount effect above
+            // (see comment there for the rationale). Keep the two paths
+            // in lockstep so a refresh event doesn't silently lose the
+            // flattening logic.
+            const cfg = (data.config ?? {}) as {
+              max_output_tokens?: number;
+              max_iterations?: number;
+              max_sessions?: number;
+              temperature?: number | null;
+              context_window?: number | null;
+              shell_approval_threshold?: string | null;
+              approval_timeout_secs?: number | null;
+              tool_result_compression_mode?: string | null;
+              tool_result_soft_threshold_chars?: number | null;
+            };
             setProfile(selectedAgentId, {
-              maxTokens: data.max_output_tokens,
-              maxIterations: data.max_iterations,
-              maxSessions: data.max_sessions,
-              temperature: data.temperature ?? undefined,
-              contextWindow: data.context_window ?? undefined,
-              shellApprovalThreshold: data.shell_approval_threshold,
-              approvalTimeoutSecs: data.approval_timeout_secs ?? 300,
-              globalMaxTokens: data.global_max_output_tokens,
+              maxTokens: cfg.max_output_tokens,
+              maxIterations: cfg.max_iterations,
+              maxSessions: cfg.max_sessions,
+              temperature: cfg.temperature ?? undefined,
+              contextWindow: cfg.context_window ?? undefined,
+              shellApprovalThreshold: cfg.shell_approval_threshold ?? undefined,
+              approvalTimeoutSecs: cfg.approval_timeout_secs ?? 300,
               activeModel: data.model,
               activeProvider: data.provider,
-              toolResultCompressionMode: data.tool_result_compression_mode,
-              toolResultSoftThresholdChars: data.tool_result_soft_threshold_chars ?? undefined,
+              toolResultCompressionMode: cfg.tool_result_compression_mode ?? undefined,
+              toolResultSoftThresholdChars: cfg.tool_result_soft_threshold_chars ?? undefined,
             });
           })
           .catch(() => { });

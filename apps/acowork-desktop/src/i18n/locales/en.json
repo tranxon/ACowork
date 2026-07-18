@@ -839,7 +839,9 @@
     "exploring": "Exploring...",
     "explored": "Explored",
     "step_one": "{{count}} step",
-    "step_other": "{{count}} steps"
+    "step_other": "{{count}} steps",
+    "running_one": "{{count}} running",
+    "running_other": "{{count}} running"
   },
   "thinkBlock": {
     "thinking": "Thinking",

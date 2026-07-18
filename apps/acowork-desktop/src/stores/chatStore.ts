@@ -7,6 +7,7 @@ import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
+import { emitAgentConfigRefresh } from "../lib/refresh";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 
@@ -1152,7 +1153,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: [...getSessionState(state, agentId, sessionId).messages, userMsg],
                 }),
       }));
-
+      // ── DIAG: verify optimistic user message insert ──
+      console.log("[ChatStore:DEBUG] sendMessage optimistic insert", {
+        sid: sessionId,
+        userMsgId,
+        messagesLenAfter: getSessionState(get(), agentId, sessionId).messages.length,
+      });
     }
 
     // Build multimodal content_parts when images are attached
@@ -2138,6 +2144,17 @@ function handleMessageEvent(
     case "stream_delta": {
       if (!sid) break;
       const lines = (data.lines as Array<{role:string;message_id:string;line_no:number;content:string}>) ?? [];
+      // ── DIAG: log every incoming stream_delta ──
+      console.log("[ChatStore:DEBUG] stream_delta RECEIVED", {
+        sid,
+        eventSessionId: data.session_id,
+        msgId: lines[0]?.message_id,
+        role: lines[0]?.role,
+        lineCount: lines.length,
+        seq: data.seq,
+        activeStreamMessageId: activeStreams.get(sid)?.messageId,
+        messagesLenBefore: getSessionState(get(), agentId, sid).messages.length,
+      });
       if (!lines.length) break;
       const role = lines[0].role === 'assistant' ? 'assistant' as const : 'thought' as const;
       const msgId = lines[0].message_id;
@@ -2171,6 +2188,14 @@ function handleMessageEvent(
           ...(incomingSeq != null ? { seq: incomingSeq } : {}),
           ...getAgentSenderInfo(agentId),
         }));
+        // ── DIAG: verify placeholder actually inserted ──
+        console.log("[ChatStore:DEBUG] stream_delta PLACEHOLDER CREATED", {
+          sid,
+          msgId,
+          role,
+          seq: incomingSeq,
+          messagesLenAfter: getSessionState(get(), agentId, sid!).messages.length,
+        });
         if (prevMsgId) notifyActiveStreamSubscribers(sid, prevMsgId);
       }
       if (!as) break;
@@ -2222,6 +2247,17 @@ function handleMessageEvent(
 
     case "record_complete": {
       if (!sid) break;
+      // ── DIAG: log every incoming record_complete ──
+      console.log("[ChatStore:DEBUG] record_complete RECEIVED", {
+        sid,
+        eventSessionId: data.session_id,
+        msgId: data.message_id,
+        role: data.role,
+        seq: data.seq,
+        contentLen: typeof data.content === 'string' ? data.content.length : 0,
+        activeStreamMessageId: activeStreams.get(sid)?.messageId,
+        messagesLenBefore: getSessionState(get(), agentId, sid).messages.length,
+      });
       const rawRole = data.role as string;
       const role = (rawRole === 'assistant' || rawRole === 'thought' || rawRole === 'tool_call' || rawRole === 'tool_result')
         ? rawRole as 'assistant' | 'thought' | 'tool_call' | 'tool_result'
@@ -2840,7 +2876,15 @@ function handleMessageEvent(
         try {
           const config = JSON.parse(data.config_json);
           console.log("[ChatStore] Agent config updated:", aid, config);
-          // Config changes trigger agent settings panel refresh via React subscription
+          // ADR-034 §7.6.4: Runtime republishes its merged AgentConfig
+          // (manifest defaults + agent_config.json) as a retained MQTT
+          // message on startup and after each PUT /api/agents/{id}/config.
+          // The desktop Setup / Tools panels listen to
+          // `acowork:refresh-agent-config` to re-fetch via the HTTP
+          // reverse proxy. Without this emit, a Runtime-initiated
+          // change (e.g. workspace_switch side effects) would silently
+          // leave the Setup panel showing stale localStorage values.
+          emitAgentConfigRefresh(aid);
         } catch (e) {
           console.warn("[ChatStore] Failed to parse agent_config JSON:", e);
         }

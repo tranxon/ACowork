@@ -102,7 +102,7 @@ export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
 
       {/* Options */}
       <div className="ml-5 space-y-0.5">
-        {event.options.map((opt, idx) => (
+        {(event.options ?? []).map((opt, idx) => (
           <label
             key={idx}
             className={`flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors cursor-pointer

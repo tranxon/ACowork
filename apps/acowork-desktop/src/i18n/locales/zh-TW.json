@@ -763,7 +763,9 @@
     "exploring": "正在探索...",
     "explored": "已探索",
     "step_one": "{{count}} 步",
-    "step_other": "{{count}} 步"
+    "step_other": "{{count}} 步",
+    "running_one": "{{count}} 個執行中",
+    "running_other": "{{count}} 個執行中"
   },
   "thinkBlock": {
     "thinking": "正在思考",
