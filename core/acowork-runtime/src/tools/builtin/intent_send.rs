@@ -5,18 +5,30 @@
 //! - Requires intent:send:<target> permission
 //! - Phase 1 uses synchronous Intent routing; Phase 2+ supports async Intent
 
+use acowork_core::mqtt_proto::{self, DataEnvelope, data_envelope::Payload};
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 
-/// Intent send tool — send an Intent to another Agent through the Gateway
+use crate::mqtt::client::MqttQoS;
+
+/// Intent send tool - send an Intent to another Agent through the Gateway.
+///
+/// ADR-040 / ADR-033: publishes the Intent as an MQTT `ControlCommand`
+/// to the target agent's control topic. The Gateway's broker routes the
+/// message directly — the target agent's `control_handler` dispatches it
+/// as an `IntentReceived` inbound event.
 pub struct IntentSendTool {
-    // Phase 2+: will hold GatewayGrpcClient reference
+    agent_id: String,
+    mqtt_slot: crate::http::server::SharedMqttClientSlot,
 }
 
 impl IntentSendTool {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(
+        agent_id: String,
+        mqtt_slot: crate::http::server::SharedMqttClientSlot,
+    ) -> Self {
+        Self { agent_id, mqtt_slot }
     }
 
     fn spec_value() -> ToolSpec {
@@ -47,12 +59,6 @@ impl IntentSendTool {
                 "required": ["target", "action"]
             }),
         }
-    }
-}
-
-impl Default for IntentSendTool {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -113,28 +119,76 @@ impl Tool for IntentSendTool {
             });
         }
 
-        // Phase 1: Return placeholder confirmation
-        // Phase 2+: Send via GatewayGrpcClient gRPC
-        let mode = if async_ { "async" } else { "sync" };
-        Ok(ToolResult {
-            ok: true,
-            content: format!(
-                "Intent sent to '{}' action='{}' mode={}\nParams: {}",
-                target,
-                action,
-                mode,
-                serde_json::to_string_pretty(&intent_params)
-                    .unwrap_or_else(|_| intent_params.to_string())
-            ),
-            error: None,
-            token_usage: None,
-        })
+        // ADR-040 / ADR-033: publish Intent via MQTT to the target agent's
+        // control topic. The Gateway broker routes the message; the target
+        // agent's control_handler dispatches it as IntentReceived.
+        let slot = self.mqtt_slot.lock().await;
+        match slot.as_ref() {
+            Some(mqtt_shared) => {
+                let mqtt = mqtt_shared.lock().await;
+                let intent = mqtt_proto::Intent {
+                    from: self.agent_id.clone(),
+                    action: action.clone(),
+                    params_json: serde_json::to_string(&intent_params)
+                        .unwrap_or_else(|_| "{}".to_string()),
+                };
+                let control_cmd = mqtt_proto::ControlCommand {
+                    agent_id: target.clone(),
+                    command: Some(mqtt_proto::control_command::Command::Intent(intent)),
+                };
+                let envelope = DataEnvelope {
+                    version: 1,
+                    payload: Some(Payload::ControlCommand(control_cmd)),
+                };
+                let topic = format!("acowork/agents/{}/sessions/control/intent", target);
+                match mqtt
+                    .publish_envelope(&topic, &envelope, MqttQoS::AtLeastOnce, false)
+                    .await
+                {
+                    Ok(()) => {
+                        let mode = if async_ { "async" } else { "sync" };
+                        Ok(ToolResult {
+                            ok: true,
+                            content: format!(
+                                "Intent sent to '{}' action='{}' mode={} via MQTT",
+                                target, action, mode,
+                            ),
+                            error: None,
+                            token_usage: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        ok: false,
+                        content: String::new(),
+                        error: Some(format!("Failed to publish intent via MQTT: {}", e)),
+                        token_usage: None,
+                    }),
+                }
+            }
+            None => Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some(
+                    "MQTT client not connected. intent_send requires Gateway mode (MQTT transport)."
+                        .to_string(),
+                ),
+                token_usage: None,
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn test_tool() -> IntentSendTool {
+        IntentSendTool::new(
+            "com.test.agent".to_string(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+    }
 
     #[test]
     fn test_intent_send_spec() {
@@ -146,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_intent_send_missing_target() {
-        let tool = IntentSendTool::new();
+        let tool = test_tool();
         let result = tool
             .execute(serde_json::json!({ "action": "schedule" }), None)
             .await
@@ -162,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_intent_send_missing_action() {
-        let tool = IntentSendTool::new();
+        let tool = test_tool();
         let result = tool
             .execute(
                 serde_json::json!({ "target": "com.example.calendar" }),
@@ -181,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_intent_send_invalid_target() {
-        let tool = IntentSendTool::new();
+        let tool = test_tool();
         let result = tool
             .execute(
                 serde_json::json!({ "target": "calendar", "action": "schedule" }),
@@ -193,9 +247,12 @@ mod tests {
         assert!(result.error.unwrap().contains("reverse-domain"));
     }
 
+    /// Without MQTT, a valid intent call returns an error explaining the
+    /// requirement. This replaces the old placeholder that silently returned
+    /// ok: true without actually dispatching anything.
     #[tokio::test]
-    async fn test_intent_send_basic() {
-        let tool = IntentSendTool::new();
+    async fn test_intent_send_requires_mqtt() {
+        let tool = test_tool();
         let result = tool
             .execute(
                 serde_json::json!({
@@ -207,43 +264,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.ok);
-        assert!(result.content.contains("com.example.calendar"));
-        assert!(result.content.contains("schedule"));
-        assert!(result.content.contains("sync")); // default mode
-    }
-
-    #[tokio::test]
-    async fn test_intent_send_async_mode() {
-        let tool = IntentSendTool::new();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "target": "com.example.weather",
-                    "action": "query",
-                    "async": true
-                }),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(result.ok);
-        assert!(result.content.contains("async"));
-    }
-
-    #[tokio::test]
-    async fn test_intent_send_empty_params() {
-        let tool = IntentSendTool::new();
-        let result = tool
-            .execute(
-                serde_json::json!({
-                    "target": "com.example.agent",
-                    "action": "ping"
-                }),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(result.ok);
+        assert!(!result.ok, "intent_send without MQTT should return ok: false");
+        let err = result.error.expect("should have error message");
+        assert!(
+            err.contains("MQTT client not connected"),
+            "error should explain MQTT requirement, got: {}",
+            err
+        );
     }
 }

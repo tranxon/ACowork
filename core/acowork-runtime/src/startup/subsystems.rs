@@ -8,9 +8,11 @@
 //!   - Send workspace config snapshot to Gateway
 
 use crate::config::RuntimeConfig;
+use crate::conversation::{ConversationSession, MetaChangeKind};
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
 use acowork_core::mqtt_proto::StreamLine;
+use std::time::Duration;
 
 /// Resources produced by Phase C, needed by Phase D.
 pub(crate) struct SubsystemHandles {
@@ -67,24 +69,6 @@ pub(crate) async fn phase_c_spawn_subsystems(
                 }
                 tracing::debug!("MQTT chunk relay task ended");
             }))
-        } else if let Some(grpc_client) = ctx.grpc_client.as_ref() {
-            // Legacy gRPC chunk relay.
-            let chunk_rx = ctx.chunk_rx.take().unwrap();
-            let outbound_ctrl_tx = grpc_client.outbound_ctrl_sender();
-            Some(tokio::spawn(async move {
-                tracing::info!("Chunk relay started (single channel)");
-                let mut chunk_rx = chunk_rx;
-                while let Some(session_event) = chunk_rx.recv().await {
-                    relay_chunk_event(
-                        &outbound_ctrl_tx,
-                        &agent_id_for_relay,
-                        &session_event.session_id,
-                        session_event.event,
-                    )
-                    .await;
-                }
-                tracing::debug!("Chunk relay task ended");
-            }))
         } else {
             None
         }
@@ -102,39 +86,8 @@ pub(crate) async fn phase_c_spawn_subsystems(
         session_ctx.session_manager.enable_debug_mode(debug_port).await;
     }
 
-    // ── Sync agent_mcp.json catalog from Gateway hello ───────────────
-    if let Some(ref cfg) = ctx.hello_config
-        && let Some(ref mcp_list) = cfg.mcp_list
-    {
-        use acowork_core::protocol::McpServerConfigDef;
-        let catalog: Vec<McpServerConfigDef> = mcp_list
-            .iter()
-            .map(|item| McpServerConfigDef {
-                name: item.id.clone(),
-                transport: item.transport.clone(),
-                url: item.url.clone(),
-                command: item.command.clone(),
-                args: item.args.clone(),
-                env: item.env.clone(),
-                headers: item.headers.clone(),
-                tool_timeout_secs: item.tool_timeout_secs,
-            })
-            .collect();
-        if let Err(e) = crate::agent_config::save_agent_mcp_config_catalog(
-            work_dir_path,
-            &catalog,
-        ) {
-            tracing::warn!(
-                error = %e,
-                "Failed to sync agent_mcp.json catalog from AgentHello mcp_list"
-            );
-        } else {
-            tracing::info!(
-                catalog_count = catalog.len(),
-                "Synced agent_mcp.json catalog from AgentHello mcp_list"
-            );
-        }
-    }
+    // ADR-040: gRPC hello_config MCP catalog sync removed.
+    // MCP servers are loaded from the on-disk agent_mcp.json config.
 
     // ── MCP auto-connect at startup (background, non-blocking) ───────
     let mcp_startup_rx: Option<
@@ -189,201 +142,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
     })
 }
 
-/// Dispatch a single `ChunkEvent` to the Gateway outbound control channel.
-///
-/// ADR-021: All events go through the single outbound control channel.
-/// Data events (Delta, ReasoningDelta, ReasoningStarted, ToolCall, ToolResult)
-/// are no longer sent via channel — the frontend polls them via HTTP.
-async fn relay_chunk_event(
-    outbound_ctrl_tx: &tokio::sync::mpsc::Sender<acowork_core::proto::ClientMessage>,
-    agent_id: &str,
-    sid: &str,
-    event: crate::agent::loop_::ChunkEvent,
-) {
-    use crate::agent::loop_::ChunkEvent;
-    use crate::cli::relay_intent;
-
-    match event {
-        // ── Control events (blocking, must deliver) ─────────────────────
-
-        ChunkEvent::ContextUsage(ctx_info) => {
-            let msg = acowork_core::proto::ClientMessage {
-                request_id: 0,
-                payload: Some(
-                    acowork_core::proto::client_message::Payload::ContextUsageReport(
-                        acowork_core::proto::ContextUsageReportRequest {
-                            agent_id: agent_id.to_string(),
-                            context: Some((&ctx_info).into()),
-                            session_id: sid.to_string(),
-                        },
-                    ),
-                ),
-            };
-            if outbound_ctrl_tx.send(msg).await.is_err() {
-                tracing::debug!(
-                    "Context usage report send failed — main connection may be closed"
-                );
-            }
-        }
-
-        ChunkEvent::CompactingStarted => {
-            let params = serde_json::json!({ "session_id": sid });
-            relay_intent(outbound_ctrl_tx, "compacting_started", &params).await;
-        }
-
-        ChunkEvent::CompactingEnded => {
-            let params = serde_json::json!({ "session_id": sid });
-            relay_intent(outbound_ctrl_tx, "compacting_ended", &params).await;
-        }
-
-        ChunkEvent::IterationLimitPaused { iteration, max_iterations } => {
-            let params = serde_json::json!({
-                "iteration": iteration,
-                "max_iterations": max_iterations,
-                "message": format!(
-                    "Iteration limit reached ({}/{}). Click Continue to keep going.",
-                    iteration, max_iterations
-                ),
-                "session_id": sid,
-            });
-            relay_intent(outbound_ctrl_tx, "iteration_limit_paused", &params).await;
-        }
-
-        ChunkEvent::ToolApprovalNeeded {
-            request_id,
-            tool_name,
-            action,
-            risk_level,
-            reason,
-            tool_call_id,
-            approval_timeout_secs,
-        } => {
-            let params = serde_json::json!({
-                "request_id": request_id,
-                "agent_id": agent_id,
-                "tool_name": tool_name,
-                "action": action,
-                "risk_level": risk_level,
-                "reason": reason,
-                "session_id": sid,
-                "tool_call_id": tool_call_id,
-                "approval_timeout_secs": approval_timeout_secs,
-            });
-            relay_intent(outbound_ctrl_tx, "tool_approval_needed", &params).await;
-        }
-
-        ChunkEvent::Done { content, message_id } => {
-            let params = serde_json::json!({
-                "content": content, "message_id": message_id, "session_id": sid,
-            });
-            relay_intent(outbound_ctrl_tx, "agent_response", &params).await;
-        }
-
-        ChunkEvent::Error { user_message, detail, error_type, message_id } => {
-            let params = serde_json::json!({
-                "content": user_message,
-                "detail": detail,
-                "error_type": error_type,
-                "message_id": message_id,
-                "session_id": sid,
-            });
-            relay_intent(outbound_ctrl_tx, "agent_error", &params).await;
-        }
-
-        ChunkEvent::Stopped { content } => {
-            let params = serde_json::json!({ "content": content, "session_id": sid });
-            relay_intent(outbound_ctrl_tx, "agent_stopped", &params).await;
-        }
-
-        ChunkEvent::SessionStateChanged {
-            status,
-            model,
-            provider,
-            workspace_id,
-            ratio,
-            reasoning_effort,
-            temperature,
-            context_usage,
-        } => {
-            let mut params = serde_json::json!({ "status": status, "session_id": sid });
-            if let Some(ref m) = model {
-                params["model"] = serde_json::json!(m);
-            }
-            if let Some(ref p) = provider {
-                params["provider"] = serde_json::json!(p);
-            }
-            if let Some(ref w) = workspace_id {
-                params["workspace_id"] = serde_json::json!(w);
-            }
-            if let Some(r) = ratio {
-                params["ratio"] = serde_json::json!(r);
-            }
-            if let Some(ref re) = reasoning_effort {
-                params["reasoning_effort"] = serde_json::json!(re);
-            }
-            if let Some(t) = temperature {
-                params["temperature"] = serde_json::json!(t);
-            }
-            if let Some(ref cu) = context_usage
-                && let Ok(v) = serde_json::from_str::<serde_json::Value>(cu)
-            {
-                params["context_usage"] = v;
-            }
-            relay_intent(outbound_ctrl_tx, "session_state_changed", &params).await;
-        }
-
-        ChunkEvent::TodoListUpdated { todos } => {
-            let params = serde_json::json!({ "todos": todos, "session_id": sid });
-            relay_intent(outbound_ctrl_tx, "todo_list_updated", &params).await;
-        }
-
-        ChunkEvent::NewDataAvailable {
-            session_id,
-            interval_ms,
-            title,
-        } => {
-            let params = serde_json::json!({
-                "session_id": session_id,
-                "interval_ms": interval_ms,
-                "title": title,
-            });
-            relay_intent(outbound_ctrl_tx, "new_data_available", &params).await;
-        }
-
-        // ADR-035: StreamDelta is MQTT-only in Phase 1. The legacy gRPC path
-        // does not carry streaming data, so it is dropped here (MQTT relay
-        // handles it).
-        ChunkEvent::StreamDelta { .. } => {}
-
-        // ADR-035 C1: RecordComplete is MQTT-only — the legacy gRPC path
-        // does not carry finalized record data. Dropped here; MQTT relay
-        // publishes it at QoS 1.
-        ChunkEvent::RecordComplete { .. } => {}
-
-        ChunkEvent::AskQuestion {
-            request_id,
-            question,
-            options,
-            title,
-            timeout_seconds,
-        } => {
-            let params = serde_json::json!({
-                "request_id": request_id,
-                "question": question,
-                "options": options,
-                "title": title,
-                "timeout_seconds": timeout_seconds,
-                "agent_id": agent_id,
-                "session_id": sid,
-            });
-            relay_intent(outbound_ctrl_tx, "ask_question", &params).await;
-        }
-    }
-}
-
-// ── ADR-033: MQTT chunk relay ─────────────────────────────────────────
-
-/// Relay a `ChunkEvent` to the MQTT broker via `MqttChunkPublisher`.
+/// MQTT-based chunk relay — publishes each ChunkEvent to the broker.
 ///
 /// All events are encoded as `DataEnvelope { payload: SessionMessage }`
 /// protobuf and published to `acowork/agents/{id}/sessions/{sid}/messages/{event_type}`.
@@ -598,5 +357,96 @@ async fn relay_chunk_event_mqtt(
                 .publish_ask_question(sid, &request_id, &question_json)
                 .await;
         }
+
+        // ADR-XXX: per-session persisted metadata changed. Published
+        // with Retained=true so a (re)connecting Desktop immediately
+        // receives the current state via the broker's retained store.
+        ChunkEvent::SessionMetaChanged { meta, fields_changed } => {
+            tracing::debug!(
+                sid = %sid,
+                fields = ?fields_changed,
+                title = %meta.title,
+                message_count = meta.message_count,
+                "Publishing session_meta (retained)"
+            );
+            publisher.publish_session_meta(sid, &meta).await;
+        }
     }
+}
+
+/// Minimum interval between MQTT publishes for hot meta fields (tokens,
+/// message_count). Matches `ConversationSession::META_WRITE_COOLDOWN_MS`
+/// so we never publish more often than we persist.
+const META_HOT_PUBLISH_COOLDOWN_MS: u64 = 3000;
+
+/// Spawn the per-session meta-change relay.
+///
+/// `ConversationSession` notifies `meta_rx` on every `write_meta()` with
+/// either `Cold(field)` (publish immediately) or `Hot(field)` (coalesce
+/// behind `META_HOT_PUBLISH_COOLDOWN_MS`).  This task converts each
+/// notification into a `ChunkEvent::SessionMetaChanged` on the shared
+/// chunk channel, where `relay_chunk_event_mqtt` picks it up and
+/// publishes to MQTT via `MqttChunkPublisher::publish_session_meta`
+/// (Retained, QoS 1).
+///
+/// The relay terminates when `meta_rx` closes (i.e. when the last
+/// `ConversationSession` clone is dropped — which happens when the
+/// session_task shuts down and SessionManager drops its conv clone).
+pub(crate) fn spawn_meta_change_relay(
+    mut meta_rx: tokio::sync::mpsc::UnboundedReceiver<MetaChangeKind>,
+    chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
+    conv: ConversationSession,
+    session_id: String,
+) {
+    tokio::spawn(async move {
+        use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
+        use std::time::Instant;
+
+        let mut last_hot_publish: Option<Instant> = None;
+        let cooldown = Duration::from_millis(META_HOT_PUBLISH_COOLDOWN_MS);
+
+        while let Some(kind) = meta_rx.recv().await {
+            let should_publish = match kind {
+                MetaChangeKind::Cold(_) => true,
+                MetaChangeKind::Hot(_) => match last_hot_publish {
+                    None => true,
+                    Some(t) if t.elapsed() >= cooldown => true,
+                    Some(_) => false,
+                },
+            };
+            if !should_publish {
+                continue;
+            }
+            if matches!(kind, MetaChangeKind::Hot(_)) {
+                last_hot_publish = Some(Instant::now());
+            }
+
+            let field = match kind {
+                MetaChangeKind::Cold(f) | MetaChangeKind::Hot(f) => f,
+            };
+            let meta = conv.build_session_meta_snapshot();
+
+            let event = SessionChunkEvent {
+                session_id: session_id.clone(),
+                event: ChunkEvent::SessionMetaChanged {
+                    meta,
+                    fields_changed: vec![field],
+                },
+            };
+            if chunk_tx.try_send(event).is_err() {
+                // Channel full or closed — drop. The retained MQTT message
+                // already holds the previous snapshot, so a missed push is
+                // self-healing on the next successful one.
+                tracing::debug!(
+                    session_id = %session_id,
+                    field = %field,
+                    "meta relay: chunk channel full/closed, dropping notification"
+                );
+            }
+        }
+        tracing::debug!(
+            session_id = %session_id,
+            "meta relay: meta_rx closed, exiting"
+        );
+    });
 }

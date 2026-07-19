@@ -144,7 +144,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "agent_id": meta.agent_id,
                     "session_id": meta.session_id,
                     "title": meta.title,
-                    "state": meta.state,
                     "message_count": meta.message_count,
                     "provider_id": meta.provider_id,
                     "model_id": meta.model_id,
@@ -152,6 +151,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "output_tokens": meta.output_tokens,
                     "total_input_tokens": meta.total_input_tokens,
                     "total_output_tokens": meta.total_output_tokens,
+                    "reasoning_effort": meta.reasoning_effort,
+                    "temperature": meta.temperature,
+                    "workspace_id": meta.workspace_id,
+                    "updated_at": meta.updated_at,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }

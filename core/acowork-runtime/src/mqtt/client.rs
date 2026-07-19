@@ -704,6 +704,56 @@ impl MqttChunkPublisher {
             .map_err(|e| RuntimeMqttClientError::Publish(format!("session_not_opened: {}", e)))
     }
 
+    /// Publish per-session persisted metadata to
+    /// `acowork/agents/{id}/sessions/{sid}/meta` with **Retained=true,
+    /// QoS=1**.
+    ///
+    /// Invariant: payload is the *latest complete value*, never a diff.
+    /// The broker retains the last value per session, so a Desktop that
+    /// (re)connects mid-conversation immediately receives the current
+    /// title/model/provider/etc. without an HTTP fetch.
+    ///
+    /// Distinction from `publish_session_state_changed`:
+    ///   - `session_meta`    → persisted per-session config (title, model,
+    ///     provider, reasoning_effort, temperature, workspace_id,
+    ///     message_count, cumulative tokens)
+    ///   - `session_state_changed` → runtime state (status, current
+    ///     context_usage, embedding_provider)
+    ///
+    /// Retained semantics: the broker overwrites the previous retained
+    /// message, so hot-field flooding (tokens / message_count changing on
+    /// every LLM round-trip) cannot leak stale snapshots — the Desktop
+    /// always sees the latest one on (re)connect.
+    pub async fn publish_session_meta(
+        &self,
+        session_id: &str,
+        meta: &acowork_core::mqtt_proto::SessionMeta,
+    ) {
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/meta",
+            self.agent_id, session_id
+        );
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionMeta(
+                meta.clone(),
+            )),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        if let Err(e) = self
+            .client
+            .publish(topic, QoS::AtLeastOnce, /* retain */ true, bytes)
+            .await
+        {
+            tracing::warn!(
+                agent_id = %self.agent_id,
+                session_id = %session_id,
+                error = %e,
+                "Failed to publish session_meta"
+            );
+        }
+    }
+
     /// Publish a session event envelope to the broker at QoS 0 (default for
     /// `messages/*` streaming events per ADR-035 D1 / `mqtt.md` §8.3).
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {

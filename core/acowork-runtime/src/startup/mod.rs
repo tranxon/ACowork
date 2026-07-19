@@ -28,9 +28,10 @@ pub(crate) use subsystems::phase_c_spawn_subsystems;
 // Re-export helpers from `cli.rs` that Phase A needs.
 // These are free functions defined at the crate root of `cli.rs` and are
 // not part of any `impl` block, so we alias them here for clarity.
+//
+// ADR-040: `connect_gateway_client` removed — gRPC path is dead.
 pub(crate) mod super_mod {
     pub(crate) use crate::cli::{
-        connect_gateway_client, read_resource_cache, resolve_skill_mode, save_resource_cache,
-        RuntimeResourceCache,
+        read_resource_cache, resolve_skill_mode,
     };
 }

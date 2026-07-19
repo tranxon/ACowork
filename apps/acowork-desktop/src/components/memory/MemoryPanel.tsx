@@ -213,8 +213,12 @@ export function MemoryPanel() {
       {stats && (
         <div className="grid grid-cols-2 gap-2 border-b border-zinc-200 px-3 py-2 sm:grid-cols-4 dark:border-zinc-800">
           <StatCard label={t("memoryPanel.totalNodes")} value={stats.total_nodes} />
-          <StatCard label={t("memoryPanel.active")} value={stats.by_status["Active"] ?? 0} />
-          <StatCard label={t("memoryPanel.dormant")} value={stats.by_status["Dormant"] ?? 0} />
+          {/* Optional chain on by_status defends against any future wire-format
+              drift on the stats endpoint — the panel must render zeros rather
+              than crash the entire panel tree if a contract field is missing
+              (see MemoryStatsResponse in acowork-gateway). */}
+          <StatCard label={t("memoryPanel.active")} value={stats.by_status?.["Active"] ?? 0} />
+          <StatCard label={t("memoryPanel.dormant")} value={stats.by_status?.["Dormant"] ?? 0} />
           <StatCard
             label={t("memoryPanel.health")}
             value={stats.index_health}

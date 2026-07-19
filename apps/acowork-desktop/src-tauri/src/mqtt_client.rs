@@ -148,6 +148,11 @@ const LIFECYCLE_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     ("acowork/agents/+/config", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/created", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/deleted", MqttQoS::AtLeastOnce),
+    // Retained per-session meta: Runtime publishes the latest complete
+    // title/model/provider/etc. snapshot on every meta-file write. Broker
+    // stores the last value, so (re)connect immediately receives the
+    // current state for any session the Desktop cares about.
+    ("acowork/agents/+/sessions/+/meta", MqttQoS::AtLeastOnce),
     ("acowork/sidecar/+/status", MqttQoS::AtLeastOnce),
 ];
 

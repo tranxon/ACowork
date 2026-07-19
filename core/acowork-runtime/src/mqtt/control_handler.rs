@@ -2,7 +2,7 @@
 //!
 //! Receives ControlCommand protobuf messages from the MQTT `control_rx`
 //! channel and dispatches to the Runtime agent loop, following the same
-//! business logic as the gRPC `process_gateway_recv()` in cli.rs.
+//! business logic as `gateway_loop::dispatch_inbound()` (ADR-040).
 //!
 //! Protocol: `docs/zh/protocols/mqtt.md` §3.2, §5.2
 //!
@@ -88,12 +88,9 @@ pub enum ControlAction {
     ///
     /// `provider_id` is `Some(non_empty_string)` when the frontend wants the
     /// Runtime to rebuild the per-session Provider instance for a model
-    /// hosted by a different provider (ADR-012). This mirrors the gRPC/
-    /// WebSocket-era `params["provider"]` field extracted by
-    /// `cli.rs::process_gateway_recv` and forwarded as
-    /// `SessionManager::route_model_switch(_, _, Some(provider))`. Empty
-    /// strings (and missing fields) are normalized to `None` to preserve
-    /// the "model-only switch" semantics of the legacy code path.
+    /// hosted by a different provider (ADR-012). This mirrors the legacy
+    /// `params["provider"]` field forwarded as
+    /// `SessionManager::route_model_switch(_, _, Some(provider))`.
     ModelSwitch {
         session_id: String,
         model_id: String,

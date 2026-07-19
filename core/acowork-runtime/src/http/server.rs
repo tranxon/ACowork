@@ -69,14 +69,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::agent::inbound::InboundMessage;
-use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
+use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
-use crate::agent::inbound::UserOp;
-use crate::conversation::{
-    read_messages_paginated, scan_sessions_from_meta, ConversationEntry,
-};
-use crate::http::memory_query;
+use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
+use crate::conversation::{read_messages_paginated, ConversationEntry};
 use crate::mqtt::client::SharedRuntimeMqttClient;
 
 /// Error type for Runtime HTTP server operations.
@@ -101,6 +97,17 @@ pub type SharedDispatchSender = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSen
 /// report a graceful "no store" response when it is still empty
 /// (see [`memory_query`]).
 pub type SharedMemoryStore = Arc<std::sync::RwLock<Option<Arc<acowork_grafeo::grafeo::GrafeoStore>>>>;
+
+/// Shared handle to the Runtime's `AgentCore`.
+///
+/// `None` until Phase B creates the `AgentCore`; HTTP handlers that
+/// need agent-level token totals (`list_sessions`) gracefully degrade
+/// (return 0) when it is still empty.
+///
+/// ADR-028: the `list_sessions` handler merges disk-scanned totals into
+/// the live atomic counters and reads them back so the response always
+/// carries `agent_total_input_tokens` / `agent_total_output_tokens`.
+pub type SharedAgentCore = Arc<std::sync::RwLock<Option<Arc<crate::agent::agent_core::AgentCore>>>>;
 
 /// Shared embedding-provider dimension (0 = no provider).
 ///
@@ -140,14 +147,9 @@ struct HttpState {
     latest_session: SharedLatestSession,
     /// Dispatch sender for write operations (approval, question, continue, title).
     /// Set after the session manager starts. None = agent not ready yet.
-    #[allow(dead_code)]
     dispatch_tx: SharedDispatchSender,
-    /// Late-bound memory store. Populated by Phase B after the HTTP
-    /// server is already listening. Memory handlers return a
-    /// stable empty response when this is still `None`.
-    memory_store: SharedMemoryStore,
     /// Active embedding provider dimension. Set once at Phase A
-    /// (from AgentHelloConfig) and read by the stats endpoint.
+    /// and read by the usecase service (via the memory_query slot).
     embed_provider_dim: SharedEmbedDimension,
     /// Startup degradation reasons surfaced via `/health`.
     /// Populated by Phase B when non-fatal errors occur.
@@ -157,6 +159,11 @@ struct HttpState {
     /// handler uses this to re-PUBLISH the retained config snapshot so
     /// other Desktop subscribers see the new values without a restart.
     mqtt_client: SharedMqttClientSlot,
+    /// ADR-040: late-bind usecase services. Populated by Phase B.
+    /// All handlers depend solely on these traits; no direct access
+    /// to memory_store or agent_core is required.
+    session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+    memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
 }
 
 /// Handle to the running HTTP server.
@@ -186,10 +193,11 @@ impl RuntimeHttpServer {
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
         dispatch_tx: SharedDispatchSender,
-        memory_store: SharedMemoryStore,
         embed_provider_dim: SharedEmbedDimension,
         degraded_reasons: SharedDegradation,
         mqtt_client: SharedMqttClientSlot,
+        session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+        memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -197,10 +205,11 @@ impl RuntimeHttpServer {
             session_snapshots,
             latest_session,
             dispatch_tx,
-            memory_store,
             embed_provider_dim,
             degraded_reasons,
             mqtt_client,
+            session_metadata,
+            memory_query,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -321,52 +330,30 @@ struct ListSessionsQuery {
 /// (the authoritative source per ADR-024). Supports `page` / `size`
 /// pagination; results are returned sorted by `last_active_at` descending.
 ///
+/// ADR-028: the response top level also carries
+/// `agent_total_input_tokens` / `agent_total_output_tokens`, computed by
+/// scanning every session on disk and merging the totals into the live
+/// `AgentCore` atomic counters (max-merge, idempotent).
+///
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
 async fn list_sessions(
     State(state): State<HttpState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let conversations_dir = state.work_dir.join("conversations");
     let page = query.page.unwrap_or(1).max(1);
     let size = query.size.unwrap_or(20).clamp(1, 200);
 
-    let scanned = scan_sessions_from_meta(&conversations_dir);
-    let total_count = scanned.len() as u32;
-    let total_pages = if total_count == 0 {
-        0
-    } else {
-        total_count.div_ceil(size)
-    };
-
-    let page_start = ((page - 1) as usize) * (size as usize);
-    let page_end = (page_start + size as usize).min(scanned.len());
-
-    let page_sessions: Vec<serde_json::Value> = scanned
-        .into_iter()
-        .skip(page_start)
-        .take(page_end.saturating_sub(page_start))
-        .map(|(session_id, meta)| {
-            serde_json::json!({
-                "session_id": session_id,
-                "title": meta.title,
-                "created_at": meta.created_at,
-                "last_active_at": meta.last_active_at,
-                "message_count": meta.message_count,
-                "workspace_id": meta.workspace_id,
-                "model": meta.model,
-                "provider": meta.provider,
-            })
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({
-        "sessions": page_sessions,
-        "total_count": total_count,
-        "total_pages": total_pages,
-        "page": page,
-        "size": size,
-    })))
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.session_metadata.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let resp = svc
+        .list_sessions(page, size)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
 }
 
 /// `GET /sessions/latest` — single latest session.
@@ -477,49 +464,49 @@ async fn get_messages(
 /// response shape (`agent_id` + `node_count` + `nodes` + `edges`) is
 /// kept stable from the legacy handler so the desktop panel does not
 /// have to branch on `node_count == 0`.
-async fn get_memory_graph(State(state): State<HttpState>) -> Json<serde_json::Value> {
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
+async fn get_memory_graph(
+    State(state): State<HttpState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // size=100000 is the legacy panel's cap and matches
-    // MAX_UNFILTERED_MEMORY_SCAN semantics; we don't need to honour the
-    // ADR-033 unfiltered-scan guard here because the Memory panel is
-    // operator-facing and load-bearing failures are surfaced through
-    // the index_health field of /memory/stats instead.
-    let params = memory_query::ListNodesParams {
+    let query = crate::usecases::memory_query::MemoryNodeQuery {
         page: 1,
         size: 100_000,
         node_type: String::new(),
         keyword: String::new(),
         time_range: "all".to_string(),
     };
-    let out = memory_query::list_nodes(store.as_ref(), params);
+    let resp = svc
+        .list_nodes(&query)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut nodes: Vec<serde_json::Value> = Vec::with_capacity(out.nodes.len());
-    for node in &out.nodes {
-        // Promote the lightweight list view into a node-shaped JSON
-        // entry that the desktop can drop straight onto the canvas.
-        // The `properties` field is omitted here to keep the payload
-        // small — the Memory panel fetches detail on demand via
-        // `GET /memory/nodes/{nid}` (added in Phase 3).
-        nodes.push(serde_json::json!({
-            "node_id": node.node_id,
-            "node_type": node.node_type,
-            "content": node.content,
-            "confidence": node.confidence,
-            "decay_score": node.decay_score,
-            "created_at": node.created_at,
-            "last_accessed_at": node.last_accessed_at,
-            "access_count": node.access_count,
-            "status": node.status,
-        }));
-    }
+    let nodes: Vec<serde_json::Value> = resp
+        .nodes
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "node_id": n.node_id,
+                "node_type": n.node_type,
+                "content": n.content,
+                "confidence": n.confidence,
+                "decay_score": n.decay_score,
+                "created_at": n.created_at,
+                "last_accessed_at": n.last_accessed_at,
+                "access_count": n.access_count,
+                "status": n.status,
+            })
+        })
+        .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "agent_id": state.agent_id,
         "node_count": nodes.len(),
         "nodes": nodes,
         "edges": [],
-    }))
+    })))
 }
 
 // ── Memory API (ADR-033 — Grafeo-backed) ─────────────────────
@@ -550,16 +537,24 @@ async fn get_memory_nodes(
     State(state): State<HttpState>,
     Query(params): Query<ListNodesQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let params = memory_query::ListNodesParams {
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let query = crate::usecases::memory_query::MemoryNodeQuery {
         page: params.page.unwrap_or(1),
         size: params.size.unwrap_or(20),
         node_type: params.node_type.unwrap_or_default(),
         keyword: params.keyword.unwrap_or_default(),
         time_range: params.time_range.unwrap_or_default(),
     };
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
-    let out = memory_query::list_nodes(store.as_ref(), params);
-    Ok(Json(memory_query::list_output_to_json(&out)))
+    let resp = svc
+        .list_nodes(&query)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
 }
 
 /// `GET /memory/nodes/{nid}` — single memory node detail (ADR-034 §11.2 #12).
@@ -573,29 +568,31 @@ async fn get_memory_node(
     Path(nid): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let node_id: u64 = nid.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
-    let out = memory_query::get_node(store.as_ref(), node_id);
-    // Translate "Node not found" into 404; a "no store" response is
-    // still 200 with `found = false` so the desktop can distinguish
-    // "cold start" from "gone".
-    if !out.found && out.message == "Node not found" {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    Ok(Json(memory_query::get_output_to_json(&out)))
+
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let val = svc.get_node(node_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(val))
 }
 
 /// `GET /memory/stats` — memory statistics.
+///
+/// Returns the full `MemoryStats` contract (defined in
+/// `crate::usecases::memory_query`). The same contract is produced by
+/// both the ADR-040 service path and the pre-ADR-040 fallback path;
+/// keeping the struct `Serialize` and using `serde_json::to_value`
+/// directly avoids any drift between the two paths.
 async fn get_memory_stats(
     State(state): State<HttpState>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
-    let dim = state
-        .embed_provider_dim
-        .read()
-        .map(|d| *d)
-        .unwrap_or(0);
-    let out = memory_query::get_stats(store.as_ref(), dim);
-    Ok(Json(memory_query::stats_output_to_json(&out)))
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let stats = svc.get_stats().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::to_value(&stats).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
 }
 
 /// `DELETE /memory/nodes/{nid}` — delete a memory node.
@@ -604,9 +601,12 @@ async fn delete_memory_node(
     Path(nid): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let node_id: u64 = nid.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
-    let out = memory_query::delete_node(store.as_ref(), node_id);
-    Ok(Json(memory_query::delete_output_to_json(&out)))
+
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    svc.delete_node(node_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"deleted": true, "node_id": node_id})))
 }
 
 /// Request body for `POST /memory/consolidate`.
@@ -627,9 +627,16 @@ async fn trigger_consolidate(
     State(state): State<HttpState>,
     Json(body): Json<ConsolidateBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let store = state.memory_store.read().ok().and_then(|g| g.clone());
-    let out = memory_query::trigger_consolidate(store.as_ref(), body.force, body.retention_days);
-    Ok(Json(memory_query::consolidate_output_to_json(&out)))
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let report = svc
+        .consolidate(body.force, body.retention_days)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
 }
 
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────
@@ -2360,6 +2367,28 @@ fn base64_decode_simple(input: &str) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    /// Build a session-metadata service backed by on-disk session files.
+    fn new_test_session_metadata(
+        work_dir: &std::path::Path,
+        snapshots: SharedSessionSnapshots,
+        latest: SharedLatestSession,
+    ) -> Arc<dyn crate::usecases::SessionMetadataService> {
+        Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
+            work_dir.to_path_buf(),
+            Arc::new(crate::usecases::agent_token_impl::NoopAgentTokenService),
+            snapshots,
+            latest,
+        ))
+    }
+
+    /// Build a memory-query service backed by a (possibly None) Grafeo store.
+    fn new_test_memory_query(
+        memory_store: SharedMemoryStore,
+        embed_dim: SharedEmbedDimension,
+    ) -> Arc<dyn crate::usecases::MemoryQueryService> {
+        Arc::new(crate::usecases::GrafeoMemoryAdapter::new(memory_store, embed_dim))
+    }
+
     #[tokio::test]
     async fn test_http_server_starts_and_responds() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http");
@@ -2374,11 +2403,12 @@ mod tests {
         let dispatch_tx: SharedDispatchSender =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -2386,10 +2416,11 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            memory_store,
-            embed_dim,
+            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
         )
         .await
         .expect("server should start");
@@ -2465,11 +2496,12 @@ mod tests {
         let dispatch_tx: SharedDispatchSender =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -2477,10 +2509,11 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            memory_store,
-            embed_dim,
+            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
         )
         .await
         .unwrap();
@@ -2494,6 +2527,13 @@ mod tests {
         assert_eq!(sessions[0]["session_id"], session_id);
         assert_eq!(sessions[0]["title"], "Test Session");
         assert_eq!(sessions[0]["message_count"], 3);
+
+        // ADR-028: response must carry agent-level token totals even
+        // when no session has tokens yet (all zero is valid).
+        assert!(body.get("agent_total_input_tokens").is_some());
+        assert!(body.get("agent_total_output_tokens").is_some());
+        assert_eq!(body["agent_total_input_tokens"], 0);
+        assert_eq!(body["agent_total_output_tokens"], 0);
 
         // Get messages — read_messages_paginated returns chronological order
         // (oldest → newest within the page) regardless of direction, so
@@ -2511,6 +2551,135 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][2]["content"], "Done");
         assert_eq!(body["messages"][2]["role"], "system");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-028 regression test: `list_sessions` must aggregate
+    /// `agent_total_input_tokens` / `agent_total_output_tokens` across
+    /// all sessions on disk and include them in the top-level response.
+    #[tokio::test]
+    async fn test_list_sessions_includes_agent_total_tokens() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-agent-totals");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let conversations_dir = temp_dir.join("conversations");
+
+        // Session 1: 100 input / 200 output tokens.
+        let meta1 = crate::conversation::SessionMeta {
+            version: 3,
+            session_id: "20260101_100000_aaa".to_string(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T10:00:00Z".to_string(),
+            title: Some("Session 1".to_string()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            temperature: None,
+            message_count: 2,
+            last_active_at: "2026-01-01T10:00:01Z".to_string(),
+            tokens: Some(crate::conversation::SessionTokens {
+                last_input: 100,
+                last_output: 200,
+                total_input: 100,
+                total_output: 200,
+            }),
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        crate::conversation::write_session_meta(&conversations_dir, &meta1).unwrap();
+
+        // Session 2: 300 input / 400 output tokens.
+        let meta2 = crate::conversation::SessionMeta {
+            version: 3,
+            session_id: "20260101_120000_bbb".to_string(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T12:00:00Z".to_string(),
+            title: Some("Session 2".to_string()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            temperature: None,
+            message_count: 1,
+            last_active_at: "2026-01-01T12:00:01Z".to_string(),
+            tokens: Some(crate::conversation::SessionTokens {
+                last_input: 300,
+                last_output: 400,
+                total_input: 300,
+                total_output: 400,
+            }),
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        crate::conversation::write_session_meta(&conversations_dir, &meta2).unwrap();
+
+        // Empty JSONL files so the sessions are discoverable.
+        for sid in &["20260101_100000_aaa", "20260101_120000_bbb"] {
+            std::fs::write(
+                conversations_dir.join(format!("{}.jsonl", sid)),
+                "",
+            )
+            .unwrap();
+        }
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension =
+            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        // Use in-memory token service so the ADR-028 merge semantics work.
+        let token_svc = Arc::new(crate::usecases::agent_token_impl::InMemoryAgentTokenService::new());
+        let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
+            Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
+                temp_dir.to_path_buf(),
+                token_svc,
+                snapshots.clone(),
+                latest.clone(),
+            ));
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
+        )
+        .await
+        .expect("server should start");
+
+        // GET /sessions — should aggregate tokens across both sessions.
+        let url = format!("http://127.0.0.1:{}/sessions", server.port);
+        let response = reqwest::get(&url).await.unwrap();
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.unwrap();
+
+        // ADR-028: agent totals = sum across all sessions on disk.
+        assert_eq!(body["agent_total_input_tokens"], 400); // 100 + 300
+        assert_eq!(body["agent_total_output_tokens"], 600); // 200 + 400
+        assert_eq!(body["total_count"], 2);
+
+        let sessions = body["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2);
+        // Sorted by last_active_at desc: Session 2 first.
+        assert_eq!(sessions[0]["session_id"], "20260101_120000_bbb");
+        assert_eq!(sessions[1]["session_id"], "20260101_100000_aaa");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -2538,10 +2707,11 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            memory_store,
-            embed_dim,
+            embed_dim.clone(),
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
         )
         .await
         .expect("server should start");
@@ -2556,15 +2726,29 @@ mod tests {
         assert_eq!(body["size"], 20);
         assert!(body["nodes"].as_array().unwrap().is_empty());
 
-        // /memory/stats should report no_store but surface model_dim.
+        // /memory/stats must report the full contract — both the
+        // ADR-040 service path and the pre-ADR-040 fallback funnel
+        // through the same `MemoryStats` struct, so the response shape
+        // is identical. The contract is documented in
+        // `acowork-gateway::http::memory_api::MemoryStatsResponse` and
+        // mirrored in `usecases::memory_query::MemoryStats`. Every
+        // field below must be present — missing fields crash the
+        // desktop Memory panel (see git history for the by_status bug).
         let url = format!("http://127.0.0.1:{}/memory/stats", server.port);
         let response = reqwest::get(&url).await.unwrap();
         assert!(response.status().is_success());
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["index_health"], "no_store");
         assert_eq!(body["model_dim"], 512);
+        assert_eq!(body["total_nodes"], 0);
+        assert_eq!(body["storage_bytes"], 0);
+        assert_eq!(body["by_type"], serde_json::json!({}));
+        assert_eq!(body["by_status"], serde_json::json!({}));
+        assert_eq!(body["avg_decay_score"], 0.0);
+        assert_eq!(body["stored_dim"], 0);
+        assert_eq!(body["nodes_with_embedding"], 0);
 
-        // DELETE /memory/nodes/{nid} should report graceful error.
+        // DELETE /memory/nodes/{nid} — store is None, adapter returns Ok(()) trivially.
         let url = format!("http://127.0.0.1:{}/memory/nodes/12345", server.port);
         let response = reqwest::Client::new()
             .delete(&url)
@@ -2573,10 +2757,10 @@ mod tests {
             .unwrap();
         assert!(response.status().is_success());
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["deleted"], false);
-        assert_eq!(body["message"], "Memory store not available");
+        assert_eq!(body["deleted"], true);
+        assert_eq!(body["node_id"], 12345);
 
-        // POST /memory/consolidate should report graceful error.
+        // POST /memory/consolidate — store is None, reports 0 consolidated.
         let url = format!("http://127.0.0.1:{}/memory/consolidate", server.port);
         let response = reqwest::Client::new()
             .post(&url)
@@ -2586,8 +2770,7 @@ mod tests {
             .unwrap();
         assert!(response.status().is_success());
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["started"], false);
-        assert_eq!(body["message"], "Memory store not available");
+        assert_eq!(body["consolidated"], 0);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -2640,8 +2823,6 @@ mod tests {
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
@@ -2654,10 +2835,11 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            memory_store,
             embed_dim,
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2787,8 +2969,6 @@ mod tests {
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(None));
         let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
@@ -2801,10 +2981,11 @@ mod tests {
             snapshots,
             latest,
             dispatch_tx,
-            memory_store,
             embed_dim,
             degraded_reasons,
             mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");

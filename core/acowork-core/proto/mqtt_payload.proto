@@ -275,17 +275,19 @@ message SessionMeta {
   string agent_id = 1;
   string session_id = 2;
   string title = 3;
-  string state = 4;         // "idle" | "running" | "error" | ...
   uint64 message_count = 5;
   string provider_id = 6;
   string model_id = 7;
-  string embedding_model_id = 8;
   // Usage fields
   uint64 input_tokens = 10;
   uint64 output_tokens = 11;
   uint64 total_input_tokens = 12;
   uint64 total_output_tokens = 13;
-  string updated_at = 14;  // ISO 8601
+  string updated_at = 14;  // ISO 8601 (mirrors SessionMeta.last_active_at)
+  // Per-session overrides (persisted in JSONL meta, republished on change).
+  string reasoning_effort = 15;  // "" = no override
+  float  temperature     = 16;   // NaN-sentinel where prost encodes 0; client treats 0 as "no override"
+  string workspace_id    = 17;
 }
 
 /// Session config (always latest complete value).

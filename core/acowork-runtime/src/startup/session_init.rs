@@ -57,7 +57,23 @@ pub(crate) async fn phase_b_init_session(
                 &latest_id,
                 committed_lines.clone(),
             ) {
-                Ok(conv) => Some(conv),
+                Ok((conv, meta_rx)) => {
+                    // Spawn the meta-change relay so persisted-session updates
+                    // (title / model / tokens / etc.) flow through MQTT to the
+                    // Desktop. See subsystems::spawn_meta_change_relay.
+                    // We pass an Arc-cloneable `ConvSession` clone to the
+                    // relay; the canonical session is moved into the
+                    // SessionState below.
+                    if let Some(chunk_tx) = ctx.chunk_tx.clone() {
+                        crate::startup::subsystems::spawn_meta_change_relay(
+                            meta_rx,
+                            chunk_tx,
+                            conv.clone(),
+                            latest_id.clone(),
+                        );
+                    }
+                    Some(conv)
+                }
                 Err(e) => {
                     let msg = format!(
                         "session_persistence_unavailable: cannot resume session \"{}\" in {:?}: {}",
@@ -73,7 +89,7 @@ pub(crate) async fn phase_b_init_session(
         } else {
             let new_id = crate::conversation::generate_session_id();
             tracing::info!(session_id = %new_id, "Creating new conversation session");
-            Some(crate::conversation::ConversationSession::new(
+            let (conv, meta_rx) = crate::conversation::ConversationSession::new(
                 work_dir_path,
                 &new_id,
                 crate::conversation::SessionConfig {
@@ -84,18 +100,21 @@ pub(crate) async fn phase_b_init_session(
                 },
                 agent_cfg.max_sessions.unwrap_or(config.max_sessions),
                 committed_lines.clone(),
-            )?)
+            )?;
+            // Drop the meta-change receiver — new-session creation writes
+            // the initial meta file, but no subscriber cares about it yet
+            // (the session_task spawns its own relay after this returns to
+            // the SessionManager path). Leaving the receiver unhandled
+            // here would silently buffer `UnboundedSender`s and prevent
+            // Drop-time notifications from being observed. Dropping is
+            // the explicit "I don't care" signal.
+            drop(meta_rx);
+            Some(conv)
         };
 
     // ADR-033 (MQTT path): pre-compute the set of provider IDs that have a
     // decrypted API key in the cached `AvailableProviders` payload. This is
-    // the MQTT-path counterpart of `hello_config.provider_key_vault` from
-    // gRPC. Without this, the Phase B is_valid check below used to only
-    // consider `hello_config` — so any provider other than the Phase A
-    // default (`gateway_current_provider_id`, taken from the first entry in
-    // the MQTT available cache) was always treated as invalid and silently
-    // overwritten back to the default model, destroying per-session
-    // model/provider choices on every restart.
+    // the MQTT-path counterpart of the legacy gRPC `provider_key_vault`.
     let available_cache_provider_ids: std::collections::HashSet<String> =
         if let Some(ref cache) = ctx.available_cache {
             let cache_read = cache.read().await;
@@ -134,18 +153,12 @@ pub(crate) async fn phase_b_init_session(
                 if !in_cache {
                     false
                 } else {
-                    // Three independent sources can authorize a provider_id:
+                    // Two independent sources can authorize a provider_id:
                     //   1. Phase A default (`gateway_current_provider_id`) —
                     //      the first provider with a key in the MQTT cache.
-                    //   2. gRPC `hello_config.provider_key_vault` (legacy).
-                    //   3. MQTT `available_cache` (ADR-033 Phase 2) — keys
+                    //   2. MQTT `available_cache` (ADR-033) — keys
                     //      are shipped inline per `mqtt.md` §3.1.1.
                     ctx.gateway_current_provider_id.as_deref() == Some(provider_id.as_str())
-                        || ctx.hello_config.as_ref().is_some_and(|cfg| {
-                            cfg.provider_key_vault
-                                .iter()
-                                .any(|k| k.provider_id == *provider_id)
-                        })
                         || available_cache_provider_ids.contains(provider_id)
                 }
             }
@@ -205,11 +218,9 @@ pub(crate) async fn phase_b_init_session(
 
     // Inject global provider list, key vault, and memory into AgentCore.
     if let Some(c) = Arc::get_mut(&mut core) {
-        let providers_for_init: Option<&Vec<acowork_core::protocol::ProviderListItem>> =
-            ctx.hello_config
-                .as_ref()
-                .and_then(|cfg| cfg.provider_list.as_ref())
-                .or(ctx.resource_cache.providers.as_ref());
+        // ADR-040: gRPC hello_config path removed. Provider list is loaded
+        // from the on-disk resource cache (written by a previous Gateway run).
+        let providers_for_init = ctx.resource_cache.providers.as_ref();
 
         if let Some(providers) = providers_for_init {
             for p in providers {
@@ -223,28 +234,17 @@ pub(crate) async fn phase_b_init_session(
             tracing::info!(
                 provider_count = providers.len(),
                 compact_count = c.provider_compact_models.len(),
-                "Populated AgentCore.global_provider_list from hello_config / resource cache"
+                "Populated AgentCore.global_provider_list from resource cache"
             );
         }
 
-        if let Some(ref cfg) = ctx.hello_config {
-            c.provider_list_version = cfg.provider_list_version;
-            let mut vault = c.provider_key_vault.write().unwrap();
-            vault.clear();
-            for entry in &cfg.provider_key_vault {
-                vault.insert(entry.provider_id.clone(), entry.api_key.clone());
-            }
-            tracing::info!(
-                version = c.provider_list_version,
-                key_count = vault.len(),
-                "Populated AgentCore provider_key_vault from hello_config"
-            );
-        } else if let Some(ref cache) = ctx.available_cache {
-            // ADR-033 (Phase 2): MQTT path. The available cache is updated
-            // by the Runtime MQTT event loop whenever the Gateway publishes
-            // `acowork/global/providers` (retained). Each `ProviderRef`
-            // carries the decrypted API key inline (see mqtt.md §3.1.1) so
-            // the model_switch path can look up the key by provider_id.
+        // ADR-033: MQTT available_cache is the only source of provider API keys
+        // (gRPC hello_config path removed per ADR-040). The available cache
+        // is updated by the Runtime MQTT event loop whenever the Gateway
+        // publishes `acowork/global/providers` (retained). Each `ProviderRef`
+        // carries the decrypted API key inline (see mqtt.md §3.1.1) so the
+        // model_switch path can look up the key by provider_id.
+        if let Some(ref cache) = ctx.available_cache {
             let cache_read = cache.read().await;
             if let Some(available) = cache_read.providers.as_ref() {
                 let mut vault = c.provider_key_vault.write().unwrap();
@@ -288,6 +288,18 @@ pub(crate) async fn phase_b_init_session(
             }
         } else {
             tracing::warn!("init_memory_store completed but no store was assigned — HTTP memory endpoints will report 'no store'");
+        }
+
+        // ADR-040: Publish GrafeoMemoryAdapter to the HTTP server's
+        // late-bind slot so memory handlers can use the trait path.
+        {
+            let adapter: Arc<dyn crate::usecases::MemoryQueryService> =
+                Arc::new(crate::usecases::memory_query_impl::GrafeoMemoryAdapter::new(
+                    ctx.memory_store_shared.clone(),
+                    ctx.embed_dim_shared.clone(),
+                ));
+            let mut slot = ctx.memory_query_slot.lock().await;
+            *slot = Some(adapter);
         }
 
         // ── Resolve & persist agent_config.json defaults ─────────────
@@ -398,6 +410,37 @@ pub(crate) async fn phase_b_init_session(
 
     // ── Step 9: Create SessionManager ───────────────────────────────
     let session_manager_config: SessionManagerConfig = build_session_manager_config(ctx, config);
+
+    // ADR-040: Construct usecase services before `core` is moved
+    // into SessionManager.
+    {
+        let core_clone = Arc::clone(&core);
+        if let Ok(mut slot) = ctx.agent_core_shared.write() {
+            *slot = Some(core_clone.clone());
+        } else {
+            tracing::warn!("Failed to publish AgentCore to shared slot");
+        }
+
+        // Build the AgentTokenService (thin wrapper around AgentCore).
+        let agent_token: Arc<dyn crate::usecases::AgentTokenService> =
+            Arc::new(crate::usecases::RuntimeAgentTokenService::new(core_clone));
+
+        // Build the SessionMetadataService.
+        let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
+            Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
+                work_dir_path.to_path_buf(),
+                agent_token,
+                ctx.session_snapshots.clone(),
+                ctx.latest_session.clone(),
+            ));
+
+        // Publish to the HTTP server's late-bind slot.
+        {
+            let mut slot = ctx.session_metadata_slot.lock().await;
+            *slot = Some(session_metadata);
+        }
+    }
+
     let mut session_manager = SessionManager::new(core, session_manager_config);
 
     session_manager.set_resolver(ctx.workspace_resolver.clone());
@@ -455,33 +498,33 @@ pub(crate) async fn phase_b_init_session(
     // create_session_with_id_and_conversation (single source of truth from
     // the shared WorkspaceResolver). No follow-up step required here.
 
-    if ctx.hello_config.is_some() {
-        // agent_config.json defaults are resolved & persisted above
-        // (Step 9 — AgentCore init).  Apply any remaining overrides
-        // from the loaded config to the session manager so new
-        // sessions pick them up via runtime_overrides.
+    // ADR-040: gRPC hello_config path removed. Runtime config overrides
+    // from agent_config.json are always applied (all paths are Gateway mode).
+    // agent_config.json defaults are resolved & persisted above
+    // (Step 9 — AgentCore init). Apply any remaining overrides
+    // from the loaded config to the session manager so new
+    // sessions pick them up via runtime_overrides.
 
-        let has_overrides = agent_cfg.max_output_tokens.is_some()
-            || agent_cfg.max_iterations.is_some()
-            || agent_cfg.temperature.is_some()
-            || agent_cfg.context_window.is_some()
-            || agent_cfg.system_prompt_override.is_some()
-            || agent_cfg.shell_approval_threshold.is_some()
-            || agent_cfg.approval_timeout_secs.is_some()
-            // ADR-032: include the tool-result compression N in the override
-            // detection so a user-set value in agent_config.json is applied
-            // to the SessionManager override cache at boot.
-            || agent_cfg.tool_result_keep_recent_n.is_some();
-        if has_overrides {
-            tracing::info!(
-                max_output_tokens = ?agent_cfg.max_output_tokens,
-                max_iterations = ?agent_cfg.max_iterations,
-                temperature = ?agent_cfg.temperature,
-                "Applying runtime config overrides from workspace agent_config.json"
-            );
-            session_manager
-                .apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
-        }
+    let has_overrides = agent_cfg.max_output_tokens.is_some()
+        || agent_cfg.max_iterations.is_some()
+        || agent_cfg.temperature.is_some()
+        || agent_cfg.context_window.is_some()
+        || agent_cfg.system_prompt_override.is_some()
+        || agent_cfg.shell_approval_threshold.is_some()
+        || agent_cfg.approval_timeout_secs.is_some()
+        // ADR-032: include the tool-result compression N in the override
+        // detection so a user-set value in agent_config.json is applied
+        // to the SessionManager override cache at boot.
+        || agent_cfg.tool_result_keep_recent_n.is_some();
+    if has_overrides {
+        tracing::info!(
+            max_output_tokens = ?agent_cfg.max_output_tokens,
+            max_iterations = ?agent_cfg.max_iterations,
+            temperature = ?agent_cfg.temperature,
+            "Applying runtime config overrides from workspace agent_config.json"
+        );
+        session_manager
+            .apply_runtime_config_override(&RuntimeConfigOverrides::from(&agent_cfg));
     }
 
     Ok(SessionBootContext {

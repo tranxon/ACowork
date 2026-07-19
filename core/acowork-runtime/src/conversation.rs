@@ -318,6 +318,31 @@ pub struct ConversationSession {
     session_file_path: PathBuf,
     /// Path to the conversations directory (for meta file writes).
     conversations_dir: PathBuf,
+    /// Channel for emitting `MetaChangeKind` notifications after each
+    /// `write_meta()`. The session_task clones the receiver and runs a
+    /// background relay task that forwards `ChunkEvent::SessionMetaChanged`
+    /// to the MQTT chunk publisher.
+    ///
+    /// This is the **only** path that triggers SessionMeta publish — every
+    /// update_* method calls `write_meta()` and then notifies this channel.
+    /// Cold fields publish immediately; hot fields (tokens, message_count)
+    /// are coalesced by the relay task with a cooldown so we don't flood
+    /// MQTT on every LLM round-trip / message append.
+    meta_change_tx: mpsc::UnboundedSender<MetaChangeKind>,
+}
+
+/// Which field group just got persisted to the meta file.
+///
+/// The session_task's meta relay decides whether to publish immediately
+/// (`Cold`) or coalesce behind a cooldown (`Hot`). See
+/// `crate::agent::session::session_task` for the receiver side.
+#[derive(Debug, Clone, Copy)]
+pub enum MetaChangeKind {
+    /// Persisted per-session config field (title, model, provider,
+    /// reasoning_effort, temperature, workspace_id).
+    Cold(&'static str),
+    /// Persisted runtime statistics (tokens, message_count).
+    Hot(&'static str),
 }
 
 /// Minimum interval between meta file writes triggered by `append_message`.
@@ -351,6 +376,39 @@ impl ConversationSession {
         }
     }
 
+    /// Build the on-the-wire `acowork_core::mqtt_proto::SessionMeta` snapshot
+    /// for MQTT publish.
+    ///
+    /// Differs from the disk-side `SessionMeta` (built by `build_meta`) by:
+    ///   - flattening `Option<String>` to `""` for empty values
+    ///   - flattening `Option<f32>` (temperature) to `f32::NAN` for the
+    ///     "no override" sentinel (prost encodes `float` without an Option;
+    ///     NaN lets the client distinguish "missing" from "0.0")
+    ///   - flattening `Option<SessionTokens>` to the four scalar token fields
+    ///   - dropping disk-only fields (version, created_at, last_compaction_offset,
+    ///     corrupted)
+    pub fn build_session_meta_snapshot(&self) -> acowork_core::mqtt_proto::SessionMeta {
+        // Reuse build_meta so the on-disk file and the MQTT payload cannot drift.
+        let full = self.build_meta();
+        let tokens = full.tokens.clone();
+        acowork_core::mqtt_proto::SessionMeta {
+            agent_id: full.agent_id,
+            session_id: full.session_id,
+            title: full.title.unwrap_or_default(),
+            message_count: full.message_count,
+            provider_id: full.provider.unwrap_or_default(),
+            model_id: full.model.unwrap_or_default(),
+            input_tokens: tokens.as_ref().map(|t| t.last_input).unwrap_or(0),
+            output_tokens: tokens.as_ref().map(|t| t.last_output).unwrap_or(0),
+            total_input_tokens: tokens.as_ref().map(|t| t.total_input).unwrap_or(0),
+            total_output_tokens: tokens.as_ref().map(|t| t.total_output).unwrap_or(0),
+            updated_at: full.last_active_at,
+            reasoning_effort: full.reasoning_effort.unwrap_or_default(),
+            temperature: full.temperature.unwrap_or(f32::NAN),
+            workspace_id: full.workspace_id.unwrap_or_default(),
+        }
+    }
+
     /// Write the current in-memory state to the per-session meta file.
     ///
     /// Also updates `last_meta_write` timestamp for cooldown tracking.
@@ -372,7 +430,19 @@ impl ConversationSession {
     ///
     /// Creates a pure JSONL file (no metadata header — see ADR-024) and
     /// writes session metadata to `conversations/meta/{session_id}.json`.
-    pub fn new(work_dir: &Path, session_id: &str, config: SessionConfig, max_sessions: usize, committed_lines: Arc<AtomicUsize>) -> Result<Self> {
+    ///
+    /// Returns `(session, meta_change_rx)` where `meta_change_rx` is the
+    /// receiver side of the meta-change notification channel — the caller
+    /// (typically the session_task) consumes it to forward
+    /// `ChunkEvent::SessionMetaChanged` events to MQTT. If the caller does
+    /// not need meta-change notifications, drop the receiver.
+    pub fn new(
+        work_dir: &Path,
+        session_id: &str,
+        config: SessionConfig,
+        max_sessions: usize,
+        committed_lines: Arc<AtomicUsize>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<MetaChangeKind>)> {
         let conversations_dir = work_dir.join("conversations");
         std::fs::create_dir_all(&conversations_dir)?;
 
@@ -391,6 +461,12 @@ impl ConversationSession {
         let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
 
+        // Meta-change notification channel. The receiver is consumed by the
+        // session_task's relay task (see `session_task.rs::spawn_meta_relay`).
+        // We create it here so callers of `ConversationSession::new` can
+        // extract it before handing ownership to the session_task.
+        let (meta_tx, meta_rx) = mpsc::unbounded_channel::<MetaChangeKind>();
+
         let session = Self {
             session_id: session_id.to_string(),
             agent_id: config.agent_id,
@@ -408,6 +484,7 @@ impl ConversationSession {
             sender: tx,
             session_file_path: file_path,
             conversations_dir: conversations_dir.clone(),
+            meta_change_tx: meta_tx,
         };
 
         // ADR-024: write per-session meta file (replaces index.json update).
@@ -419,7 +496,7 @@ impl ConversationSession {
             prune_excess_sessions(&conversations_dir, max_sessions);
         }
 
-        Ok(session)
+        Ok((session, meta_rx))
     }
 
     /// Resume an existing session.
@@ -427,7 +504,14 @@ impl ConversationSession {
     /// Opens the existing JSONL file in append mode, reads metadata from
     /// `conversations/meta/{session_id}.json`, and starts the background
     /// writer thread.
-    pub fn resume(work_dir: &Path, session_id: &str, committed_lines: Arc<AtomicUsize>) -> Result<Self> {
+    ///
+    /// Returns `(session, meta_change_rx)` — see [`Self::new`] for the
+    /// semantics of the meta-change receiver.
+    pub fn resume(
+        work_dir: &Path,
+        session_id: &str,
+        committed_lines: Arc<AtomicUsize>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<MetaChangeKind>)> {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
@@ -454,24 +538,30 @@ impl ConversationSession {
         let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
 
-        Ok(Self {
-            session_id: session_id.to_string(),
-            agent_id: meta.agent_id,
-            created_at: meta.created_at,
-            title_set: AtomicBool::new(meta.title.is_some()),
-            current_title: std::sync::Mutex::new(meta.title.clone()),
-            workspace_id: std::sync::Mutex::new(meta.workspace_id),
-            model: std::sync::Mutex::new(meta.model),
-            provider: std::sync::Mutex::new(meta.provider),
-            reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
-            temperature: std::sync::Mutex::new(meta.temperature),
-            tokens: std::sync::Mutex::new(meta.tokens.clone()),
-            message_count: AtomicU64::new(meta.message_count),
-            last_meta_write: std::sync::Mutex::new(Instant::now()),
-            sender: tx,
-            session_file_path: file_path,
-            conversations_dir,
-        })
+        let (meta_tx, meta_rx) = mpsc::unbounded_channel::<MetaChangeKind>();
+
+        Ok((
+            Self {
+                session_id: session_id.to_string(),
+                agent_id: meta.agent_id,
+                created_at: meta.created_at,
+                title_set: AtomicBool::new(meta.title.is_some()),
+                current_title: std::sync::Mutex::new(meta.title.clone()),
+                workspace_id: std::sync::Mutex::new(meta.workspace_id),
+                model: std::sync::Mutex::new(meta.model),
+                provider: std::sync::Mutex::new(meta.provider),
+                reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
+                temperature: std::sync::Mutex::new(meta.temperature),
+                tokens: std::sync::Mutex::new(meta.tokens.clone()),
+                message_count: AtomicU64::new(meta.message_count),
+                last_meta_write: std::sync::Mutex::new(Instant::now()),
+                sender: tx,
+                session_file_path: file_path,
+                conversations_dir,
+                meta_change_tx: meta_tx,
+            },
+            meta_rx,
+        ))
     }
 
     /// Append a message to the conversation.
@@ -517,6 +607,10 @@ impl ConversationSession {
             return; // skip — in-memory counters are already up to date
         }
         self.write_meta();
+        // Hot field — the relay task coalesces these behind a 3 s cooldown
+        // (same cadence as the meta write itself, so we never publish more
+        // often than we persist).
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("message_count"));
     }
 
     /// Append a compaction event to the JSONL.
@@ -615,6 +709,7 @@ impl ConversationSession {
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("title"));
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
 
@@ -645,6 +740,7 @@ impl ConversationSession {
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("title"));
         tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
         true
     }
@@ -660,6 +756,7 @@ impl ConversationSession {
             *w = Some(workspace_id.to_string());
         }
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("workspace_id"));
         tracing::info!(
             session_id = %self.session_id,
             workspace_id = %workspace_id,
@@ -696,6 +793,8 @@ impl ConversationSession {
             *p = provider.map(|s| s.to_string());
         }
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("model"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("provider"));
         tracing::info!(
             session_id = %self.session_id,
             model = %model,
@@ -717,6 +816,7 @@ impl ConversationSession {
             *r = effort;
         }
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("reasoning_effort"));
         tracing::info!(
             session_id = %self.session_id,
             "Session reasoning_effort persisted to meta file"
@@ -734,6 +834,7 @@ impl ConversationSession {
             *t = temperature;
         }
         self.write_meta();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("temperature"));
         tracing::info!(
             session_id = %self.session_id,
             "Session temperature persisted to meta file"
@@ -795,6 +896,8 @@ impl ConversationSession {
             });
         }
         self.write_meta();
+        // Hot field — the relay task coalesces these behind a 3 s cooldown.
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("tokens"));
     }
 }
 
@@ -845,6 +948,7 @@ impl Clone for ConversationSession {
             sender: self.sender.clone(),
             session_file_path: self.session_file_path.clone(),
             conversations_dir: self.conversations_dir.clone(),
+            meta_change_tx: self.meta_change_tx.clone(),
         }
     }
 }
@@ -855,6 +959,10 @@ impl Drop for ConversationSession {
         // the correct message_count and last_active_at even if the last
         // `append_message` fell within the cooldown window.
         self.write_meta();
+        // Notify the relay task so the final snapshot is published before
+        // the channel is dropped. Best-effort — the receiver may already
+        // be gone, in which case `send` is a silent no-op.
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("drop"));
     }
 }
 
@@ -877,6 +985,8 @@ pub struct SessionInfo {
     pub session_id: String,
     /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// ISO 8601 timestamp of the most recent activity
+    pub last_active_at: String,
     /// Number of messages in the session
     pub message_count: u32,
     /// Optional session title
@@ -1247,6 +1357,7 @@ pub fn scan_sessions_async(
             .map(|(sid, meta)| SessionInfo {
                 session_id: sid.clone(),
                 created_at: meta.created_at.clone(),
+                last_active_at: meta.last_active_at.clone(),
                 message_count: meta.message_count as u32,
                 title: meta.title.clone(),
                 corrupted: meta.corrupted,
@@ -1655,7 +1766,7 @@ mod tests {
         let agent_id = "com.test.agent";
 
         // Create session and write messages
-        let session = ConversationSession::new(
+        let (session, _meta_rx) = ConversationSession::new(
             work_dir,
             &session_id,
             SessionConfig {
@@ -1879,7 +1990,7 @@ mod tests {
         let agent_id = "com.test.resume";
 
         // Create initial session
-        let session = ConversationSession::new(
+        let (session, _meta_rx) = ConversationSession::new(
             work_dir,
             session_id,
             SessionConfig {
@@ -1900,7 +2011,7 @@ mod tests {
         });
 
         // Resume session
-        let resumed = ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0))).unwrap();
+        let (resumed, _meta_rx2) = ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0))).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(resumed.agent_id(), agent_id);
 
@@ -2018,7 +2129,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let session =
+            let (session, _meta_rx) =
                 ConversationSession::new(&dir, "tok_acc_basic", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {
@@ -2055,7 +2166,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let session =
+            let (session, _meta_rx) =
                 ConversationSession::new(&dir, "tok_acc_zero", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {
@@ -2104,7 +2215,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let session =
+            let (session, _meta_rx) =
                 ConversationSession::new(&dir, "tok_acc_overflow", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {

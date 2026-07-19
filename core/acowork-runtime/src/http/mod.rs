@@ -11,7 +11,7 @@ pub mod memory_query;
 pub mod server;
 
 pub use server::{
-    RuntimeHttpServer, RuntimeHttpServerError, SharedDegradation, SharedDispatchSender,
-    SharedEmbedDimension,
-    SharedMemoryStore,
+    RuntimeHttpServer, RuntimeHttpServerError, SharedAgentCore, SharedDegradation,
+    SharedDispatchSender, SharedEmbedDimension,
+    SharedMemoryStore, SharedMqttClientSlot,
 };

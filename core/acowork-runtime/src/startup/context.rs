@@ -21,9 +21,7 @@ pub(crate) struct AgentBootContext {
     // Package & manifest
     pub loaded: crate::package::loader::LoadedPackage,
 
-    // Gateway connection (None in standalone mode)
-    pub grpc_client: Option<crate::grpc::client::GatewayGrpcClient>,
-    pub hello_config: Option<crate::grpc::client::AgentHelloConfig>,
+    // ── ADR-040: gRPC path removed. Only MQTT transport remains. ───
 
     // ADR-033: MQTT client (None when MQTT not available).
     // These are populated during startup and will be consumed when
@@ -134,6 +132,17 @@ pub(crate) struct AgentBootContext {
     /// Populated during Phase B; passed to the HTTP server in
     /// Phase A via the same `Arc`.
     pub degraded_reasons: crate::http::SharedDegradation,
+
+    /// Late-bind slot for the `AgentCore`. Created empty in Phase A and
+    /// passed to the Runtime HTTP server; populated by Phase B once
+    /// `AgentCore::new` completes. The `list_sessions` handler uses it
+    /// for ADR-028 agent-level token totals.
+    pub agent_core_shared: crate::http::SharedAgentCore,
+
+    /// ADR-040: Late-bind slot for session metadata service.
+    pub session_metadata_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+    /// ADR-040: Late-bind slot for memory query service.
+    pub memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
 }
 
 /// Context produced by Phase B (per-session initialization).

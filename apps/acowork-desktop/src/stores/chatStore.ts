@@ -604,10 +604,10 @@ interface ChatStore {
   closeTab: (agentId: string, sessionId: string) => Promise<string | null>;
   /** ADR-015: Get open session IDs for an agent */
   getOpenSessionIds: (agentId: string) => string[];
-  /** Trigger context compaction for the current session */
-  compactContext: (agentId: string, sessionId: string) => void;
-  /** ADR-032 C4c: Send a user-initiated compression action (tool results or summary). */
-  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => void;
+  /** ADR-032 C4c: Send a user-initiated compression action (tool results or summary).
+   *  `compressType` is the proto `CompressType` enum value:
+   *    1 = SUMMARY, 2 = TOOL_RESULTS. */
+  sendCompressAction: (agentId: string, sessionId: string, compressType: number) => void;
   /** Toggle a file tree directory expansion (per-session) */
   toggleTreeExpandedPath: (agentId: string, sessionId: string, relPath: string) => void;
   /**
@@ -875,24 +875,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return getAgentState(get(), agentId).openSessionIds;
   },
 
-  /** Trigger context compaction for the current session (manual trigger).
-   *  Sends compact_context WS message and sets optimistic isCompacting flag.
-   *  The backend emits CompactingStarted → compacting_started → isCompacting = true
-   *  When compaction completes, context_usage event clears isCompacting. */
-  compactContext: (agentId: string, sessionId: string) => {
-    set((state) => updateSessionState(state, agentId, sessionId, { isCompacting: true }));
-    // ADR-033: Send via MQTT; silently ignore if MQTT is not connected
-    invoke("mqtt_publish_control", {
-      agentId,
-      command: "compact_context",
-      payloadJson: { session_id: sessionId },
-    }).catch((err: unknown) => console.warn("[ChatStore] compact_context via MQTT failed:", err));
-  },
-
   /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
-   *  ADR-033: Sent via MQTT compact_context (no dedicated compress_action in MQTT proto). */
-  sendCompressAction: (agentId: string, sessionId: string, compressType: string) => {
-    // ADR-034 Phase 5: Use dedicated compress_action command with compress_type
+   *  ADR-034 Phase 5: dedicated compress_action command with compress_type. */
+  sendCompressAction: (agentId: string, sessionId: string, compressType: number) => {
     invoke("mqtt_publish_control", {
       agentId,
       command: "compress_action",
@@ -2834,15 +2819,29 @@ function handleMessageEvent(
     // ── Session meta (model_id, provider_id, tokens, title, message_count) ──
     case "session_meta": {
       if (!sid) break;
-      const patch: Partial<SessionChatState> = {};
-      if (typeof data.model_id === "string") patch.model = data.model_id;
-      if (typeof data.provider_id === "string") patch.provider = data.provider_id;
-      if (typeof data.message_count === "number") patch.messageTotal = data.message_count;
+      // Title goes into the agent-level sessions[] list (used by the
+      // sidebar) so it shows up the moment the retained MQTT message arrives,
+      // not only after a manual fetchSessions.
       if (typeof data.title === "string" && data.title) {
         useAgentStore.getState().updateSessionTitle(sid, data.title);
       }
+      const patch: Partial<SessionChatState> = {};
+      if (typeof data.model_id === "string" && data.model_id) patch.model = data.model_id;
+      if (typeof data.provider_id === "string" && data.provider_id) patch.provider = data.provider_id;
+      if (typeof data.message_count === "number") patch.messageTotal = data.message_count;
+      if (typeof data.reasoning_effort === "string" && data.reasoning_effort) {
+        patch.reasoningEffort = data.reasoning_effort;
+      }
+      // NaN is the Runtime "no override" sentinel for temperature.
+      if (typeof data.temperature === "number" && !Number.isNaN(data.temperature)) {
+        patch.temperature = data.temperature;
+      }
       if (Object.keys(patch).length > 0) {
         set((state) => updateSessionState(state, agentId, sid!, patch));
+      }
+      // Workspace selection is owned by workspaceStore, not SessionChatState.
+      if (typeof data.workspace_id === "string" && data.workspace_id) {
+        useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id);
       }
       break;
     }

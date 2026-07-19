@@ -30,6 +30,8 @@ use acowork_grafeo::stats;
 use grafeo_core::graph::lpg::Node;
 use serde::Serialize;
 
+use crate::usecases::memory_query::MemoryStats;
+
 /// Maximum number of nodes to scan without any filter (keyword or type).
 ///
 /// Queries exceeding this limit are rejected to prevent unbounded memory
@@ -78,35 +80,22 @@ pub(crate) struct ListNodesOutput {
 }
 
 /// Result of a stats query.
-#[derive(Debug, Clone)]
-pub(crate) struct StatsOutput {
-    pub total_nodes: u64,
-    pub storage_bytes: u64,
-    pub by_type: HashMap<String, u64>,
-    pub by_status: HashMap<String, u64>,
-    pub avg_decay_score: f64,
-    pub index_health: String,
-    pub stored_dim: u64,
-    pub nodes_with_embedding: u64,
-    pub model_dim: u64,
-}
-
-/// Result of a delete query.
-#[derive(Debug, Clone)]
-pub(crate) struct DeleteOutput {
-    pub node_id: u64,
-    pub deleted: bool,
-    pub message: String,
-}
+///
+/// Re-exports [`crate::usecases::memory_query::MemoryStats`] as the
+/// single return type shared by the pre-ADR-040 business-logic path
+/// here and the ADR-040 service trait in `usecases::memory_query`.
+/// The HTTP handler ferries it straight into the wire format via
+/// `serde_json::to_value`; keeping a single definition prevents the
+/// field drift that previously broke the desktop Memory panel when
+/// `by_status` / `stored_dim` / `nodes_with_embedding` disappeared
+/// from the service-layer response.
+pub(crate) type StatsOutput = MemoryStats;
 
 /// Result of a consolidation query.
 #[derive(Debug, Clone)]
 pub(crate) struct ConsolidateOutput {
-    pub started: bool,
-    pub duration_ms: u64,
+    /// Number of episodes consolidated into knowledge nodes.
     pub episodes_consolidated: u64,
-    pub knowledge_nodes_generated: u64,
-    pub message: String,
 }
 
 /// Result of a single-node GET query (`GET /memory/nodes/{nid}`).
@@ -151,53 +140,6 @@ pub(crate) struct ListNodesParams {
 }
 
 // ── Conversion helpers (intermediate → wire format) ────────────────────
-
-/// Convert a [`ListNodesOutput`] to a JSON-friendly [`serde_json::Value`]
-/// matching the response shape documented in
-/// `docs/zh/protocols/http.md` §7.7.
-pub(crate) fn list_output_to_json(out: &ListNodesOutput) -> serde_json::Value {
-    serde_json::json!({
-        "total": out.total,
-        "page": out.page,
-        "size": out.size,
-        "nodes": out.nodes,
-    })
-}
-
-/// Convert a [`StatsOutput`] to JSON.
-pub(crate) fn stats_output_to_json(out: &StatsOutput) -> serde_json::Value {
-    serde_json::json!({
-        "total_nodes": out.total_nodes,
-        "storage_bytes": out.storage_bytes,
-        "by_type": out.by_type,
-        "by_status": out.by_status,
-        "avg_decay_score": out.avg_decay_score,
-        "index_health": out.index_health,
-        "stored_dim": out.stored_dim,
-        "nodes_with_embedding": out.nodes_with_embedding,
-        "model_dim": out.model_dim,
-    })
-}
-
-/// Convert a [`DeleteOutput`] to JSON.
-pub(crate) fn delete_output_to_json(out: &DeleteOutput) -> serde_json::Value {
-    serde_json::json!({
-        "node_id": out.node_id,
-        "deleted": out.deleted,
-        "message": out.message,
-    })
-}
-
-/// Convert a [`ConsolidateOutput`] to JSON.
-pub(crate) fn consolidate_output_to_json(out: &ConsolidateOutput) -> serde_json::Value {
-    serde_json::json!({
-        "started": out.started,
-        "duration_ms": out.duration_ms,
-        "episodes_consolidated": out.episodes_consolidated,
-        "knowledge_nodes_generated": out.knowledge_nodes_generated,
-        "message": out.message,
-    })
-}
 
 /// Convert a [`GetNodeOutput`] to JSON.
 ///
@@ -671,36 +613,21 @@ pub(crate) fn get_node(
     }
 }
 
-/// Delete a memory node by ID.
+/// Delete a memory node by ID. Returns true if the node was found and deleted.
 pub(crate) fn delete_node(
     memory_store: Option<&Arc<GrafeoStore>>,
     node_id: u64,
-) -> DeleteOutput {
+) -> bool {
     let store = match memory_store {
         Some(s) => s,
-        None => {
-            return DeleteOutput {
-                node_id,
-                deleted: false,
-                message: "Memory store not available".to_string(),
-            };
-        }
+        None => return false,
     };
     let id = grafeo_common::types::NodeId(node_id);
     match store.delete_node(id) {
-        Ok(deleted) => DeleteOutput {
-            node_id,
-            deleted,
-            message: if deleted {
-                "Node deleted".to_string()
-            } else {
-                "Node not found".to_string()
-            },
-        },
-        Err(e) => DeleteOutput {
-            node_id,
-            deleted: false,
-            message: format!("Error: {}", e),
+        Ok(deleted) => deleted,
+        Err(e) => {
+            tracing::warn!(node_id = node_id, error = %e, "Failed to delete memory node");
+            false
         },
     }
 }
@@ -721,11 +648,7 @@ pub(crate) fn trigger_consolidate(
         Some(s) => s,
         None => {
             return ConsolidateOutput {
-                started: false,
-                duration_ms: 0,
                 episodes_consolidated: 0,
-                knowledge_nodes_generated: 0,
-                message: "Memory store not available".to_string(),
             };
         }
     };
@@ -733,28 +656,16 @@ pub(crate) fn trigger_consolidate(
         batch_size: 50,
         min_pending_age_hours: if force { 0 } else { 1 },
     };
-    let start = std::time::Instant::now();
     match store.run_offline_consolidation(&config) {
-        Ok(result) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
+        Ok(result) => ConsolidateOutput {
+            episodes_consolidated: result.upgraded as u64,
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Consolidation failed");
             ConsolidateOutput {
-                started: true,
-                duration_ms,
-                episodes_consolidated: result.upgraded as u64,
-                knowledge_nodes_generated: 0, // Phase 2 doesn't generate new nodes
-                message: format!(
-                    "Upgraded: {}, Kept pending: {}, Marked dormant: {}",
-                    result.upgraded, result.kept_pending, result.marked_dormant
-                ),
+                episodes_consolidated: 0,
             }
         }
-        Err(e) => ConsolidateOutput {
-            started: false,
-            duration_ms: 0,
-            episodes_consolidated: 0,
-            knowledge_nodes_generated: 0,
-            message: format!("Consolidation error: {}", e),
-        },
     }
 }
 
@@ -778,33 +689,59 @@ mod tests {
     #[test]
     fn get_stats_returns_zero_when_no_store() {
         let out = get_stats(None, 512);
+        // The response struct must carry the full wire-format contract;
+        // a missing field silently breaks the desktop Memory panel
+        // (see git history for the by_status regression). Pin every
+        // field here so the type itself cannot drift again.
         assert_eq!(out.total_nodes, 0);
-        assert_eq!(out.model_dim, 512);
+        assert_eq!(out.storage_bytes, 0);
+        assert!(out.by_type.is_empty());
+        assert!(out.by_status.is_empty());
+        assert_eq!(out.avg_decay_score, 0.0);
         assert_eq!(out.index_health, "no_store");
+        assert_eq!(out.stored_dim, 0);
+        assert_eq!(out.nodes_with_embedding, 0);
+        assert_eq!(out.model_dim, 512);
+    }
+
+    #[test]
+    fn get_stats_serializes_to_full_contract() {
+        // Guards against any future field omission — the struct is
+        // serialized straight into the HTTP wire format, so a missing
+        // JSON key here would also be missing on the wire.
+        let out = get_stats(None, 384);
+        let value = serde_json::to_value(&out).expect("serialize");
+        let obj = value.as_object().expect("object");
+        for key in [
+            "total_nodes",
+            "storage_bytes",
+            "by_type",
+            "by_status",
+            "avg_decay_score",
+            "index_health",
+            "stored_dim",
+            "nodes_with_embedding",
+            "model_dim",
+        ] {
+            assert!(obj.contains_key(key), "stats JSON missing field: {}", key);
+        }
     }
 
     #[test]
     fn delete_node_reports_unavailable_without_store() {
-        let out = delete_node(None, 42);
-        assert_eq!(out.node_id, 42);
-        assert!(!out.deleted);
-        assert_eq!(out.message, "Memory store not available");
+        assert!(!delete_node(None, 42));
     }
 
     #[test]
     fn trigger_consolidate_reports_unavailable_without_store() {
         let out = trigger_consolidate(None, true, 30);
-        assert!(!out.started);
         assert_eq!(out.episodes_consolidated, 0);
     }
 
     #[test]
     fn delete_node_reports_not_found_for_missing_id() {
         let store = Arc::new(make_store());
-        let out = delete_node(Some(&store), 9_999_999);
-        assert_eq!(out.node_id, 9_999_999);
-        assert!(!out.deleted);
-        assert_eq!(out.message, "Node not found");
+        assert!(!delete_node(Some(&store), 9_999_999));
     }
 
     #[test]
@@ -866,32 +803,5 @@ mod tests {
         assert_eq!(out.total_nodes, 0);
         assert_eq!(out.model_dim, 384);
         assert_eq!(out.index_health, "healthy");
-    }
-
-    #[test]
-    fn list_output_to_json_serialises_pagination() {
-        let out = ListNodesOutput {
-            total: 1,
-            page: 1,
-            size: 20,
-            nodes: vec![MemoryNodeRecord {
-                node_id: 7,
-                node_type: "Episodic".to_string(),
-                content: "[user] hi".to_string(),
-                confidence: 0.5,
-                decay_score: 0.9,
-                created_at: 100,
-                last_accessed_at: 100,
-                access_count: 0,
-                status: "Active".to_string(),
-            }],
-            rejected_unfiltered: None,
-        };
-        let v = list_output_to_json(&out);
-        assert_eq!(v["total"], 1);
-        assert_eq!(v["page"], 1);
-        assert_eq!(v["size"], 20);
-        assert_eq!(v["nodes"][0]["node_id"], 7);
-        assert_eq!(v["nodes"][0]["node_type"], "Episodic");
     }
 }

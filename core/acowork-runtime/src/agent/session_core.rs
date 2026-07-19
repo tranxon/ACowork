@@ -693,7 +693,7 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         );
 
-        let session = ConversationSession::new(
+        let (session, _meta_rx) = ConversationSession::new(
             &work_dir,
             session_id,
             SessionConfig {

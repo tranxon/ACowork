@@ -100,13 +100,15 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
 
   const handleCompressTools = () => {
     if (!canAct) return;
-    sendCompressAction(agentId, sessionId, "compress_tool_results");
+    // 2 = CompressType::TOOL_RESULTS (see core/acowork-core/proto/mqtt_payload.proto).
+    sendCompressAction(agentId, sessionId, 2);
     setOpen(false);
   };
 
   const handleCompressSummary = () => {
     if (!canAct) return;
-    sendCompressAction(agentId, sessionId, "compress_summary");
+    // 1 = CompressType::SUMMARY (see core/acowork-core/proto/mqtt_payload.proto).
+    sendCompressAction(agentId, sessionId, 1);
     setOpen(false);
   };
 

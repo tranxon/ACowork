@@ -32,7 +32,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt_with_mode;
     use crate::startup::super_mod::{
-        RuntimeResourceCache, connect_gateway_client, read_resource_cache, save_resource_cache,
+        read_resource_cache,
     };
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
@@ -46,76 +46,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         "Package loaded successfully"
     );
 
-    // ── Step 2: Connect to Gateway gRPC ─────────────────────────────
-    // ADR-033: When MQTT is configured, skip gRPC entirely.
-    // gRPC connect retries for up to 300s, which blocks MQTT status publish.
-    let mut grpc_client: Option<crate::grpc::client::GatewayGrpcClient> = None;
-    let mut hello_config: Option<crate::grpc::client::AgentHelloConfig> = None;
-    if config.mqtt_port.is_none()
-        && let Some(endpoint) = config.get_gateway_address()
-        && let Some((client, cfg)) = connect_gateway_client(
-            endpoint,
-            &loaded.manifest.agent_id,
-            &loaded.manifest.version,
-            &config.work_dir,
-            config.data_flow.outbound_ctrl_capacity,
-        )
-        .await
-    {
-        // Persist resource versions + lists for next startup's diff sync.
-        let prov_list = cfg.provider_list.clone();
-        let mcp_list_data = cfg.mcp_list.clone();
-        let prov_ver = cfg.provider_list_version;
-        let mcp_ver = cfg.mcp_list_version;
-        let search_ver = cfg.search_list_version;
-        let old_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
-        let new_cache = RuntimeResourceCache {
-            provider_list_version: prov_ver,
-            mcp_list_version: mcp_ver,
-            search_list_version: search_ver,
-            user_profile_version: cfg.user_profile_version,
-            providers: prov_list.or(old_cache.providers),
-            mcps: mcp_list_data.or(old_cache.mcps),
-        };
-        grpc_client = Some(client);
-        hello_config = Some(cfg);
-        save_resource_cache(std::path::Path::new(&config.work_dir), &new_cache);
-    }
-    if grpc_client.is_some() {
-        tracing::info!("Gateway gRPC client initialized");
-
-        // ── Send workspace config snapshot immediately after AgentHello ──
-        // Sending here (Phase A) instead of Phase C ensures the Gateway's
-        // in-memory cache is populated before any frontend workspace-list
-        // queries. Previously the window between AgentHello (Phase A) and
-        // UpdateWorkspaceConfig (Phase C) caused a race: the frontend could
-        // query GET /workspaces and receive an empty list.
-        if let Some(ref mut client) = grpc_client {
-            let work_dir_path = std::path::Path::new(&config.work_dir);
-            let ws_config_path = work_dir_path.join("config").join("agent_workspaces.json");
-            let ws_config_json = if ws_config_path.exists() {
-                std::fs::read_to_string(&ws_config_path)
-                    .unwrap_or_else(|_| r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string())
-            } else {
-                r#"{"version":"1.0.0","additional_dirs":[]}"#.to_string()
-            };
-            let msg = acowork_core::proto::ClientMessage {
-                request_id: 0,
-                payload: Some(
-                    acowork_core::proto::client_message::Payload::UpdateWorkspaceConfig(
-                        acowork_core::proto::UpdateWorkspaceConfig { config_json: ws_config_json },
-                    ),
-                ),
-            };
-            if client.outbound_ctrl_sender().send(msg).await.is_err() {
-                tracing::warn!("Failed to send UpdateWorkspaceConfig snapshot to Gateway (Phase A)");
-            } else {
-                tracing::info!("Workspace config snapshot sent to Gateway (Phase A)");
-            }
-        }
-    } else {
-        tracing::info!("Running in standalone mode (no Gateway)");
-    }
+    // ── ADR-040: gRPC path removed. Only MQTT transport remains. ─────
 
     // ── ADR-033: Start MQTT client + HTTP server ─────────────────────
     let mut mqtt_client: Option<crate::mqtt::RuntimeMqttClient> = None;
@@ -161,6 +92,23 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let degraded_reasons: crate::http::SharedDegradation =
         Arc::new(std::sync::RwLock::new(Vec::new()));
 
+    // ADR-028: Late-bind slot for the AgentCore. Created empty in Phase A
+    // and populated by Phase B once `AgentCore::new` completes. The
+    // `list_sessions` HTTP handler uses it to merge disk-scanned token
+    // totals and report `agent_total_input_tokens` / `agent_total_output_tokens`.
+    let agent_core_shared: crate::http::SharedAgentCore =
+        Arc::new(std::sync::RwLock::new(None));
+
+    // ADR-040: Late-bind slot for session metadata service. Populated
+    // by Phase B. The `list_sessions` handler falls back to direct
+    // implementation when this is still None.
+    let session_metadata_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    // ADR-040: Late-bind slot for memory query service.
+    let memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -176,10 +124,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             session_snapshots.clone(),
             latest_session.clone(),
             http_dispatch_shared,
-            memory_store_shared.clone(),
             embed_dim_shared.clone(),
             degraded_reasons.clone(),
             mqtt_client_slot.clone(),
+            session_metadata_slot.clone(),
+            memory_query_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -278,36 +227,48 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let resource_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
 
     let (provider, resolved_model, available_models, protocol_type) = {
-        if let Some(ref cfg) = hello_config {
-            let provider_list = cfg
-                .provider_list
-                .as_ref()
-                .or(resource_cache.providers.as_ref());
-            if let Some(providers) = provider_list {
-                let has_api_key = |prov_id: &str| -> bool {
-                    cfg.provider_key_vault
-                        .iter()
-                        .any(|k| k.provider_id == prov_id)
-                };
-                let chosen_prov = providers.iter().find(|p| has_api_key(&p.id));
-                if let Some(prov) = chosen_prov {
+        // ADR-033: MQTT available_cache is the only provider source (gRPC path removed per ADR-040).
+        if let Some(ref cache) = available_cache {
+            // Wait up to 10s for the first acowork/global/providers to arrive.
+            // The Gateway publishes every 5s (non-retained due to rumqttd 0.14).
+            let mut waited = 0;
+            loop {
+                let cache_read = cache.read().await;
+                if cache_read.providers.is_some() || waited >= 20 {
+                    break;
+                }
+                drop(cache_read);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                waited += 1;
+            }
+            let cache_read = cache.read().await;
+            if let Some(ref available_providers) = cache_read.providers {
+                // Use MQTT provider info. API key resolution now happens
+                // via the `api_key` field embedded in the
+                // `acowork/global/providers` payload itself — see
+                // [global_resources_publisher] and mqtt.md §3.1.1. The
+                // legacy `ACOWORK_PROVIDER_<ID>_KEY` env var is no longer
+                // used because the Gateway does not inject keys into the
+                // Runtime process environment (bug 1 of the
+                // senior-engineer startup log).
+                let chosen = available_providers.providers.first();
+
+                if let Some(prov) = chosen {
                     gateway_current_provider_id = Some(prov.id.clone());
-                    let api_key = cfg
-                        .provider_key_vault
-                        .iter()
-                        .find(|k| k.provider_id == prov.id)
-                        .map(|k| k.api_key.as_str());
+                    let api_key = prov.api_key.clone();
+                    // Empty string means "no key configured" (e.g. local
+                    // Ollama). Convert to Option<&str> for the provider
+                    // factory, which treats None as "no auth header".
+                    let api_key_opt: Option<&str> =
+                        if api_key.is_empty() { None } else { Some(api_key.as_str()) };
                     let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let model_id = prov
-                        .models
-                        .first()
-                        .map(|m| m.id.clone())
-                        .unwrap_or_else(|| "default".to_string());
+                    let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
+                    let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
                     let provider = crate::providers::router::create_provider(
                         &prov.id,
-                        &prov.protocol_type,
-                        api_key,
+                        &proto_str,
+                        api_key_opt,
                         Some(&prov.base_url),
                         timeouts,
                     );
@@ -315,126 +276,44 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         provider = %prov.id,
                         model = %model_id,
                         num_models = available.len(),
-                        has_api_key = api_key.is_some(),
-                        source = "manifest",
-                        "Provider initialized from AgentHelloConfig"
+                        has_api_key = api_key_opt.is_some(),
+                        source = "mqtt_available_cache",
+                        "Provider initialized from MQTT available cache"
                     );
-                    (provider, model_id, available, prov.protocol_type.clone())
+                    (provider, model_id, available, proto_str)
                 } else {
-                    tracing::warn!(
-                        available = ?providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-                        "No provider with API key found, using noop"
-                    );
+                    tracing::warn!("MQTT providers available but none selected, using noop");
                     noop_provider_tuple()
                 }
             } else {
-                tracing::warn!("No provider list available from Gateway or cache, using noop");
+                tracing::warn!("MQTT connected but no providers in cache yet, using noop");
                 noop_provider_tuple()
             }
         } else {
-            // ADR-033: Try MQTT available_cache when gRPC hello_config is unavailable.
-            if let Some(ref cache) = available_cache {
-                // Wait up to 10s for the first acowork/global/providers to arrive.
-                // The Gateway publishes every 5s (non-retained due to rumqttd 0.14).
-                let mut waited = 0;
-                loop {
-                    let cache_read = cache.read().await;
-                    if cache_read.providers.is_some() || waited >= 20 {
-                        break;
-                    }
-                    drop(cache_read);
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    waited += 1;
-                }
-                let cache_read = cache.read().await;
-                if let Some(ref available_providers) = cache_read.providers {
-                    // Use MQTT provider info. API key resolution now happens
-                    // via the `api_key` field embedded in the
-                    // `acowork/global/providers` payload itself — see
-                    // [global_resources_publisher] and mqtt.md §3.1.1. The
-                    // legacy `ACOWORK_PROVIDER_<ID>_KEY` env var is no longer
-                    // used because the Gateway does not inject keys into the
-                    // Runtime process environment (bug 1 of the
-                    // senior-engineer startup log).
-                    let chosen = available_providers.providers.first();
-
-                    if let Some(prov) = chosen {
-                        gateway_current_provider_id = Some(prov.id.clone());
-                        let api_key = prov.api_key.clone();
-                        // Empty string means "no key configured" (e.g. local
-                        // Ollama). Convert to Option<&str> for the provider
-                        // factory, which treats None as "no auth header".
-                        let api_key_opt: Option<&str> =
-                            if api_key.is_empty() { None } else { Some(api_key.as_str()) };
-                        let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                        let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
-                        let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
-                        let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
-                        let provider = crate::providers::router::create_provider(
-                            &prov.id,
-                            &proto_str,
-                            api_key_opt,
-                            Some(&prov.base_url),
-                            timeouts,
-                        );
-                        tracing::info!(
-                            provider = %prov.id,
-                            model = %model_id,
-                            num_models = available.len(),
-                            has_api_key = api_key_opt.is_some(),
-                            source = "mqtt_available_cache",
-                            "Provider initialized from MQTT available cache"
-                        );
-                        (provider, model_id, available, proto_str)
-                    } else {
-                        tracing::warn!("MQTT providers available but none selected, using noop");
-                        noop_provider_tuple()
-                    }
-                } else {
-                    tracing::warn!("MQTT connected but no providers in cache yet, using noop");
-                    noop_provider_tuple()
-                }
-            } else {
-                noop_provider_tuple()
-            }
+            noop_provider_tuple()
         }
     };
 
     // ── Step 3.5: Build Embedding Provider (single-tier, no fallback) ──
     //
-    // ADR: 移除 FallbackEmbeddingProvider 三层链。
+    // Single source: env var ACOWORK_EMBED_ENDPOINT (Gateway embed_supervisor
+    // port 18080). ADR-040: gRPC hello_config path removed.
     //
-    // 唯一来源：Gateway AgentHelloConfig.embed_endpoint/model_id/dimension
-    // （即 embed_supervisor 管理的本地 ONNX 服务，端口 18080）。
+    // Failure semantics:
+    //   - endpoint set + provider ok → INFO ✅
+    //   - endpoint set + provider fail → ERROR ❌, emb_provider = None
+    //   - endpoint not set → ERROR ❌, emb_provider = None
     //
-    // 失败语义：
-    //   - endpoint 存在 + provider 构造成功 → 打印 INFO ✅ 继续
-    //   - endpoint 存在 + provider 构造失败 → 打印 ERROR ❌ + emb_provider = None
-    //   - endpoint 不存在（standalone / Gateway embed_supervisor 未启动）
-    //     → 打印 ERROR ❌ + emb_provider = None
-    //
-    // 失败时 emb_provider = None，runtime 继续启动。
-    // memory::manager 会在 query.embedding.is_none() 时自动 fallback 到
-    // text_search_with_filter（manager.rs L270-280），不会让 memory 静默失效。
-    // 用户重启 runtime 时从启动日志就能立刻判断第 1 层 ONNX 是否通。
+    // emb_provider = None means memory::manager auto-falls back to
+    // text_search_with_filter (manager.rs L270-280).
 
-    let embed_endpoint = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_endpoint.clone())
-        .or_else(|| std::env::var("ACOWORK_EMBED_ENDPOINT").ok());
-    let embed_model_id = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_model_id.clone())
-        .or_else(|| std::env::var("ACOWORK_EMBED_MODEL").ok())
+    let embed_endpoint = std::env::var("ACOWORK_EMBED_ENDPOINT").ok();
+    let embed_model_id = std::env::var("ACOWORK_EMBED_MODEL")
+        .ok()
         .unwrap_or_else(|| "bge-small-zh-v1.5".to_string());
-    let embed_dimension = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.embed_dimension)
-        .or_else(|| {
-            std::env::var("ACOWORK_EMBED_DIMENSION")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
+    let embed_dimension = std::env::var("ACOWORK_EMBED_DIMENSION")
+        .ok()
+        .and_then(|s| s.parse().ok())
         .unwrap_or(512);
 
     let emb_provider: Option<Arc<dyn EmbeddingProvider>> = match embed_endpoint.as_deref() {
@@ -463,9 +342,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         provider_name = %name,
                         "✅ Embedding provider initialized successfully (Tier 1: local ONNX)"
                     );
-                    // Publish the resolved dimension to the HTTP server so the
-                    // memory-stats endpoint can report `model_dim` for
-                    // dimension-mismatch detection on the very next request.
                     if let Ok(mut slot) = embed_dim_shared.write() {
                         *slot = dim as u64;
                     }
@@ -488,7 +364,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         }
         None => {
             tracing::error!(
-                "❌ No embed_endpoint in AgentHelloConfig and ACOWORK_EMBED_ENDPOINT not set. \
+                "❌ ACOWORK_EMBED_ENDPOINT not set. \
                  Gateway embed_supervisor must be running before runtime starts. \
                  Memory will degrade to text-only search."
             );
@@ -501,14 +377,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(std::sync::RwLock::new(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
-    let has_search_providers = hello_config
-        .as_ref()
-        .map(|c| !c.search_key_vault.is_empty())
-        .unwrap_or(false);
-
-    let lsp_relay_endpoint = hello_config
-        .as_ref()
-        .and_then(|c| c.lsp_relay_endpoint.clone());
+    let has_search_providers = false;
+    // ADR-040: gRPC hello_config path removed. search providers + LSP relay
+    // are always unavailable; both features depend on future MQTT-side delivery.
+    let lsp_relay_endpoint: Option<String> = None;
 
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
         emb_provider.clone(),
@@ -526,6 +398,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
         lsp_relay_endpoint,
+        mqtt_client_slot.clone(),
     ) {
         registry.register(tool);
     }
@@ -667,10 +540,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     );
 
     // ── Step 6: Build context builder ───────────────────────────────
-    let identity_context: Option<String> = hello_config
-        .as_ref()
-        .and_then(|cfg| cfg.user_identity.as_ref())
-        .map(crate::agent::session::session_manager::format_user_profile_context);
+    // ADR-040: gRPC hello_config path removed. User identity is not yet
+    // available via MQTT; context builder is created without identity.
+    let identity_context: Option<String> = None;
 
     let mut context_builder = ContextBuilder::new(system_prompt.clone())
         .with_identity(identity_context.clone())
@@ -697,7 +569,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ADR-021: Single channel for control events only.
     // Data events (Delta, ReasoningDelta, ToolCall, ToolResult) are no longer
     // pushed via channel — the frontend polls them via HTTP.
-    let (chunk_tx, chunk_rx) = if grpc_client.is_some() || mqtt_client.is_some() {
+    let (chunk_tx, chunk_rx) = if mqtt_client.is_some() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::agent::loop_::SessionChunkEvent>(
             config.data_flow.chunk_capacity,
         );
@@ -711,8 +583,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     Ok(AgentBootContext {
         loaded,
-        grpc_client,
-        hello_config,
         mqtt_client,
         available_cache,
         control_rx,
@@ -746,6 +616,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_store_shared,
         embed_dim_shared,
         degraded_reasons,
+        agent_core_shared,
+        session_metadata_slot,
+        memory_query_slot,
     })
 }
 

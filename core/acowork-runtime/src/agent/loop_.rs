@@ -239,10 +239,31 @@ pub enum ChunkEvent {
         /// Per-session monotonic seq assigned by `SessionCore::next_seq`
         /// at emit time. For streaming records this matches the seq of the
         /// preceding `stream_delta` placeholder (same message_id); for
-        /// tool_call / tool_result records emitted by
+        /// tool_call / `tool_result` records emitted by
         /// `persist_and_emit_tool_results` it's a fresh seq that fits
         /// between the assistant that owned them and the next round.
         seq: u64,
+    },
+
+    /// Per-session persisted metadata changed (title, model, provider,
+    /// reasoning_effort, temperature, workspace_id, message_count, tokens).
+    ///
+    /// Triggered by `ConversationSession::write_meta()` — every code path
+    /// that persists the per-session meta file ends up here. The payload
+    /// is always the **latest complete** `SessionMeta` snapshot, never a
+    /// diff; the MQTT broker retains it so a (re)connecting Desktop sees
+    /// the current state without an HTTP fetch.
+    ///
+    /// Distinction from `SessionStateChanged`:
+    ///   - `SessionMetaChanged`  → persisted per-session config
+    ///   - `SessionStateChanged` → runtime state (status, context_usage)
+    SessionMetaChanged {
+        /// Snapshot of the just-written ConversationSession state, already
+        /// flattened into the on-the-wire `mqtt_proto::SessionMeta` shape.
+        meta: acowork_core::mqtt_proto::SessionMeta,
+        /// Human-readable field names that triggered this emit (used for
+        /// relay-side debug logging only — payload is the full snapshot).
+        fields_changed: Vec<&'static str>,
     },
 }
 

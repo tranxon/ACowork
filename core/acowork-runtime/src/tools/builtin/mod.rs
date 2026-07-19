@@ -83,6 +83,7 @@ pub fn all_builtin_tools(
     mcp_notifier: McpNotifyRef,
     agent_home: String,
     lsp_relay_endpoint: Option<String>,
+    mqtt_slot: crate::http::server::SharedMqttClientSlot,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -114,7 +115,7 @@ pub fn all_builtin_tools(
         Arc::new(doc_reader::DocReaderTool::new()),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
-        Arc::new(intent_send::IntentSendTool::new()),
+        Arc::new(intent_send::IntentSendTool::new(agent_id.to_string(), mqtt_slot.clone())),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
         Arc::new(mcp_install::McpInstallTool::new(
