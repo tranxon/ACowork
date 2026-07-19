@@ -85,34 +85,6 @@ function hashStr(s: string): number {
   return h;
 }
 
-const wrapperClass =
-  "my-2 w-full overflow-hidden rounded-md border border-chat-border bg-chat-body";
-
-/**
- * Panzoom is bound to the inner div (HTML element). The inner div is
- * `width: 100%` (matches container width) with `min-height` set to
- * the SVG's natural height (so the div has a stable vertical extent).
- *
- * The SVG inside is absolutely positioned with `left: 50% /
- * translateX(-50%)`, so it is visually centered within the div
- * regardless of its own width vs. the container width. This means:
- *
- *   - Panzoom's `transform-origin: 50% 50%` (browser HTML default)
- *     scales the div from its own center — which matches the
- *     container's horizontal center.
- *   - The SVG sits centered inside the div, so `transform: scale(fit)`
- *     on the div zooms the SVG toward/from the panel's horizontal
- *     center, not its own center.
- *
- * Without this the SVG's own `width="1200"` HTML attribute would
- * either push the div out to 1200px (overflowing the panel) or, with
- * `w-full`, force the SVG into `width: 100%` (= container width) and
- * silently squish the diagram — losing the natural-size rendering we
- * want so pan/zoom can work in pixel units.
- */
-const svgContainerClass =
-  "relative w-full [&>svg]:absolute [&>svg]:left-1/2 [&>svg]:top-0 [&>svg]:-translate-x-1/2";
-
 export function isPlausibleMermaid(code: string): boolean {
   const trimmed = code.trim();
   if (!trimmed) return false;
@@ -169,13 +141,11 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   const [svgContent, setSvgContent] = useState<string | null>(null);
   const [renderFailed, setRenderFailed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  /**
-   * Inner div that wraps the rendered SVG. Panzoom is bound to THIS
-   * div (an HTML element), not the SVG itself. SVG elements default
-   * to `pointer-events: visiblePainted` which makes blank areas
-   * unclickable — pan would never start. An HTML div receives
-   * pointer events everywhere.
-   */
+  /** Content area wrapper — has overflow:hidden + bg-chat-body.
+   *  Its height is set to match the SVG's aspect ratio scaled to fit width.
+   *  Panzoom target lives inside this, so panned content is clipped here. */
+  const contentAreaRef = useRef<HTMLDivElement>(null);
+  /** The div that wraps the SVG. Panzoom is bound to this. */
   const panzoomTargetRef = useRef<HTMLDivElement>(null);
   const lastLoggedFailRef = useRef<number | null>(null);
 
@@ -184,13 +154,9 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   const svgNaturalSizeRef = useRef<{ width: number; height: number } | null>(null);
   const containerWidthRef = useRef(0);
   const [transformVersion, setTransformVersion] = useState(0);
-  /**
-   * Mirrors the current scale so we can keep the inner div's layout
-   * height in sync with its visual height. Without this the div's
-   * `minHeight` (set to the natural SVG height) would be larger than
-   * the scaled visual height, leaving empty space around the diagram.
-   */
   const [currentScale, setCurrentScale] = useState(1);
+  /** The height of the content area (px), derived from SVG aspect ratio + container width. */
+  const [contentHeight, setContentHeight] = useState<number | null>(null);
 
   const clampScale = (s: number) =>
     Math.max(SCALE_MIN, Math.min(SCALE_MAX, s));
@@ -216,24 +182,8 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     const pz = panzoomRef.current;
     const fit = computeFitScale();
     if (!pz || fit == null) return;
-    // With the inner div at width:100% and the SVG centered inside it,
-    // pan (0, 0) + zoom(fit) centers the diagram correctly because the
-    // div's center matches the container's center.
     pz.zoom(fit, { animate: false, force: true });
     pz.pan(0, 0, { animate: false, force: true });
-  };
-
-  /**
-   * Keeps the inner div's layout height in sync with its visual height
-   * after `transform: scale()`. Without this the div's height would
-   * stay at the SVG's natural pixel height, producing empty space
-   * above and below the scaled diagram.
-   */
-  const syncLayoutHeight = (target: HTMLDivElement) => {
-    const size = svgNaturalSizeRef.current;
-    const scale = panzoomRef.current?.getScale() ?? 1;
-    if (!size) return;
-    target.style.minHeight = `${size.height * scale}px`;
   };
 
   // Debounced mermaid render
@@ -267,62 +217,82 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     return () => { clearTimeout(timer); };
   }, [chart]);
 
-  // Measure SVG natural size once rendered
+  // Measure SVG, set content area height, create panzoom, fit to container
   useLayoutEffect(() => {
-    if (!containerRef.current || !svgContent) return;
-    const svg = containerRef.current.querySelector("svg") as SVGSVGElement | null;
+    if (!containerRef.current || !contentAreaRef.current || !panzoomTargetRef.current || !svgContent) {
+      setContentHeight(null);
+      return;
+    }
+
+    const target = panzoomTargetRef.current;
+    const contentArea = contentAreaRef.current;
+    const wrap = containerRef.current;
+
+    // Fix the SVG: make it a block element with explicit dimensions
+    // so it sits properly at (0,0) inside the panzoom target div.
+    const svg = target.querySelector("svg") as SVGSVGElement | null;
     if (!svg) return;
 
-    let naturalW = parseFloat(svg.getAttribute("width") || "");
-    let naturalH = parseFloat(svg.getAttribute("height") || "");
-    if (!Number.isFinite(naturalW) || !Number.isFinite(naturalH)) {
-      const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
-      if (vb.length === 4 && vb.every(Number.isFinite)) {
-        naturalW = vb[2];
-        naturalH = vb[3];
-      }
+    // Remove max-width constraint that mermaid injects (e.g. style="max-width: 1235px")
+    svg.style.maxWidth = "none";
+    // Block layout eliminates inline vertical-align gaps
+    svg.style.display = "block";
+
+    // Read natural size from viewBox (mermaid SVGs typically don't have width/height attrs)
+    const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
+    let naturalW: number;
+    let naturalH: number;
+    if (vb.length === 4 && vb.every(Number.isFinite)) {
+      naturalW = vb[2];
+      naturalH = vb[3];
+      // Set explicit dimensions so the SVG has a well-defined layout box
+      svg.setAttribute("width", String(naturalW));
+      svg.setAttribute("height", String(naturalH));
+    } else {
+      naturalW = parseFloat(svg.getAttribute("width") || "");
+      naturalH = parseFloat(svg.getAttribute("height") || "");
+      if (!Number.isFinite(naturalW) || !Number.isFinite(naturalH)) return;
     }
-    if (!Number.isFinite(naturalW) || !Number.isFinite(naturalH)) return;
+
+    // Make the panzoom target div match the SVG's natural size.
+    // Without this, the div is constrained by the content area width (~600px),
+    // but the SVG is 1235px wide — the SVG overflows and positioning breaks.
+    target.style.width = `${naturalW}px`;
 
     svgNaturalSizeRef.current = { width: naturalW, height: naturalH };
-    containerWidthRef.current = containerRef.current.clientWidth;
-  }, [svgContent]);
+    const containerW = wrap.clientWidth;
+    containerWidthRef.current = containerW;
 
-  // Wire up @panzoom/panzoom on the inner wrapper DIV (not the SVG).
-  // This is the critical fix: SVG's `pointer-events: visiblePainted`
-  // makes blank areas unclickable, so pan never started. Binding to
-  // the HTML div wrapper fixes both pan and the visual transform.
-  useEffect(() => {
-    if (!svgContent) return;
-    const wrap = containerRef.current;
-    const target = panzoomTargetRef.current;
-    if (!wrap || !target) return;
+    // Set content area height to maintain aspect ratio at current container width
+    const h = (naturalH / naturalW) * containerW;
+    setContentHeight(h);
 
+    // Panzoom 4.x sets transform-origin to 50% 50% for non-SVG elements (DIVs),
+    // which causes the element to shift right and down when scaled.
+    // Passing origin: '0 0' keeps the top-left corner anchored.
     const pz = Panzoom(target, {
       animate: false,
       cursor: "grab",
       maxScale: SCALE_MAX,
       minScale: SCALE_MIN,
+      startScale: 1,
+      startX: 0,
+      startY: 0,
+      origin: "0 0",
     });
     panzoomRef.current = pz;
 
-    // Fit to container width on load, then sync the inner div's layout
-    // height to the scaled visual height so there's no empty space.
-    const fit = computeFitScale();
-    if (fit != null) {
-      pz.zoom(fit, { animate: false, force: true });
-      pz.pan(0, 0, { animate: false, force: true });
-    }
+    // Fit to container width before paint
+    const fit = clampScale(containerW / naturalW);
+    pz.zoom(fit, { animate: false, force: true });
+    pz.pan(0, 0, { animate: false, force: true });
     setCurrentScale(pz.getScale());
-    syncLayoutHeight(target);
 
-    // Sync React state from library events for toolbar disabled state.
-    // Also update the inner div's layout height on every scale change.
+    // Sync React state on pan/zoom changes
     const onPanzoomChange = (e: Event) => {
       const s = (e as CustomEvent<{ scale: number }>).detail.scale;
       setCurrentScale((prev) => (Math.abs(prev - s) < 1e-3 ? prev : s));
       setTransformVersion((v) => v + 1);
-      syncLayoutHeight(target);
     };
     target.addEventListener("panzoomchange", onPanzoomChange);
 
@@ -331,20 +301,16 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     target.addEventListener("panzoomstart", onPanzoomStart);
     target.addEventListener("panzoomend", onPanzoomEnd);
 
-    // Crisp text under non-integer scales (lib FAQ #4)
-    const svg = target.querySelector("svg") as SVGSVGElement | null;
-    if (svg) {
-      svg.querySelectorAll("text").forEach((t) => {
-        t.setAttribute("text-rendering", "geometricPrecision");
-      });
-    }
+    // Crisp text under non-integer scales
+    svg.querySelectorAll("text").forEach((t) => {
+      t.setAttribute("text-rendering", "geometricPrecision");
+    });
 
-    // Custom wheel zoom: linear deltaY scaling (not the library's
-    // fixed-step zoomWithWheel which snaps on trackpad swipes).
-    // Uses pz.zoomToPoint so the library handles the focal-point
-    // math correctly (including the HTML transform-origin adjustment).
+    // Custom wheel zoom — only when Ctrl/Cmd is held (like browser zoom),
+    // so normal wheel scrolls the page instead of zooming the diagram.
     const WHEEL_DENOMINATOR = 100;
     const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       const oldScale = pz.getScale();
       const factor = Math.pow(SCALE_STEP, -e.deltaY / WHEEL_DENOMINATOR);
@@ -352,17 +318,26 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
       if (newScale === oldScale) return;
       pz.zoomToPoint(newScale, e, { animate: false });
     };
-    wrap.addEventListener("wheel", onWheel, { passive: false });
+    contentArea.addEventListener("wheel", onWheel, { passive: false });
 
+    // Resize observer: update container width and re-zoom
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        containerWidthRef.current = entry.contentRect.width;
+        const newW = entry.contentRect.width;
+        containerWidthRef.current = newW;
+        // Re-zoom to fit + update content area height
+        const newFit = clampScale(newW / naturalW);
+        const newH = (naturalH / naturalW) * newW;
+        setContentHeight(newH);
+        pz.zoom(newFit, { animate: false, force: true });
+        pz.pan(0, 0, { animate: false, force: true });
+        setCurrentScale(pz.getScale());
       }
     });
     ro.observe(wrap);
 
     return () => {
-      wrap.removeEventListener("wheel", onWheel);
+      contentArea.removeEventListener("wheel", onWheel);
       target.removeEventListener("panzoomchange", onPanzoomChange);
       target.removeEventListener("panzoomstart", onPanzoomStart);
       target.removeEventListener("panzoomend", onPanzoomEnd);
@@ -375,75 +350,70 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   return (
     <div
       ref={containerRef}
-      className={`${wrapperClass} relative ${svgContent ? "[&_.label]:text-zinc-600" : ""} p-3`}
+      className="my-2 w-full rounded-md border border-chat-border"
     >
+      {/* Title bar — matches CodeBlock pattern */}
+      <div className="flex items-center justify-between border-b border-chat-border bg-chat-title px-3 py-1.5">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+            mermaid
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={zoomOut}
+            disabled={currentScale <= SCALE_MIN + 1e-6}
+            aria-label="缩小"
+            title="缩小"
+            data-version={transformVersion}
+            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={resetZoom}
+            aria-label="重置缩放（撑满显示区域）"
+            title="重置缩放（撑满显示区域）"
+            data-version={transformVersion}
+            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={zoomIn}
+            disabled={currentScale >= SCALE_MAX - 1e-6}
+            aria-label="放大"
+            title="放大"
+            data-version={transformVersion}
+            className="flex items-center justify-center rounded p-0.5 text-zinc-500 hover:text-zinc-700 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+
+      {/* Content area — clips panned SVG content, never overlaps title bar */}
       {svgContent ? (
-        <>
+        <div
+          ref={contentAreaRef}
+          className="relative overflow-hidden bg-chat-body"
+          style={{ height: contentHeight ?? undefined }}
+        >
           <div
             ref={panzoomTargetRef}
-            className={svgContainerClass}
             dangerouslySetInnerHTML={{ __html: svgContent }}
           />
-
-          <div
-            className="absolute top-2 right-2 flex items-center gap-0.5 rounded-md
-                       border border-chat-border bg-white/90 p-0.5
-                       shadow-sm backdrop-blur-sm
-                       dark:bg-zinc-800/90"
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-            }}
-          >
-            <button
-              type="button"
-              onClick={zoomOut}
-              disabled={currentScale <= SCALE_MIN + 1e-6}
-              aria-label="缩小"
-              title="缩小"
-              data-version={transformVersion}
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded
-                         text-zinc-600 hover:bg-zinc-200
-                         disabled:cursor-not-allowed disabled:opacity-40
-                         dark:text-zinc-400 dark:hover:bg-zinc-700"
-            >
-              <ZoomOut className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={resetZoom}
-              aria-label="重置缩放（撑满显示区域）"
-              title="重置缩放（撑满显示区域）"
-              data-version={transformVersion}
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded
-                         text-zinc-600 hover:bg-zinc-200
-                         dark:text-zinc-400 dark:hover:bg-zinc-700"
-            >
-              <Maximize2 className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={zoomIn}
-              disabled={currentScale >= SCALE_MAX - 1e-6}
-              aria-label="放大"
-              title="放大"
-              data-version={transformVersion}
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded
-                         text-zinc-600 hover:bg-zinc-200
-                         disabled:cursor-not-allowed disabled:opacity-40
-                         dark:text-zinc-400 dark:hover:bg-zinc-700"
-            >
-              <ZoomIn className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        </>
+        </div>
       ) : renderFailed ? (
-        <pre className="m-0 whitespace-pre-wrap font-mono text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+        <pre className="m-0 whitespace-pre-wrap bg-chat-body p-3 font-mono text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
           {chart}
         </pre>
       ) : (
-        <div className="min-h-[140px] flex items-center justify-center">
-          <div className="flex items-center gap-2 text-zinc-300 dark:text-zinc-500 select-none">
+        <div className="flex min-h-[140px] items-center justify-center bg-chat-body">
+          <div className="flex items-center gap-2 text-zinc-300 select-none dark:text-zinc-500">
             <svg
               className="h-4 w-4 animate-spin"
               xmlns="http://www.w3.org/2000/svg"
