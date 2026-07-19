@@ -160,25 +160,6 @@ export function isPlausibleMermaid(code: string): boolean {
   return true;
 }
 
-const heightCache = {
-  prefix: "mermaid-h:",
-  get(key: string): number | undefined {
-    try {
-      const v = sessionStorage.getItem(`${this.prefix}${key}`);
-      return v ? Number(v) : undefined;
-    } catch {
-      return undefined;
-    }
-  },
-  set(key: string, h: number) {
-    try {
-      sessionStorage.setItem(`${this.prefix}${key}`, String(h));
-    } catch {
-      // sessionStorage full or unavailable
-    }
-  },
-};
-
 interface MermaidBlockProps {
   chart: string;
 }
@@ -198,14 +179,17 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   const panzoomTargetRef = useRef<HTMLDivElement>(null);
   const lastLoggedFailRef = useRef<number | null>(null);
 
-  const cacheKey = `h-${hashStr(chart)}`;
-  const cachedHeight = heightCache.get(cacheKey);
-
   // ---- Pan & zoom ----
   const panzoomRef = useRef<PanzoomObject | null>(null);
   const svgNaturalSizeRef = useRef<{ width: number; height: number } | null>(null);
   const containerWidthRef = useRef(0);
   const [transformVersion, setTransformVersion] = useState(0);
+  /**
+   * Mirrors the current scale so we can keep the inner div's layout
+   * height in sync with its visual height. Without this the div's
+   * `minHeight` (set to the natural SVG height) would be larger than
+   * the scaled visual height, leaving empty space around the diagram.
+   */
   const [currentScale, setCurrentScale] = useState(1);
 
   const clampScale = (s: number) =>
@@ -237,6 +221,19 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     // div's center matches the container's center.
     pz.zoom(fit, { animate: false, force: true });
     pz.pan(0, 0, { animate: false, force: true });
+  };
+
+  /**
+   * Keeps the inner div's layout height in sync with its visual height
+   * after `transform: scale()`. Without this the div's height would
+   * stay at the SVG's natural pixel height, producing empty space
+   * above and below the scaled diagram.
+   */
+  const syncLayoutHeight = (target: HTMLDivElement) => {
+    const size = svgNaturalSizeRef.current;
+    const scale = panzoomRef.current?.getScale() ?? 1;
+    if (!size) return;
+    target.style.minHeight = `${size.height * scale}px`;
   };
 
   // Debounced mermaid render
@@ -309,21 +306,23 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     });
     panzoomRef.current = pz;
 
-    // Fit to container width on load. With the inner div at width:100%
-    // and SVG centered, pan(0,0) + zoom(fit) puts the diagram dead
-    // center.
+    // Fit to container width on load, then sync the inner div's layout
+    // height to the scaled visual height so there's no empty space.
     const fit = computeFitScale();
     if (fit != null) {
       pz.zoom(fit, { animate: false, force: true });
       pz.pan(0, 0, { animate: false, force: true });
     }
     setCurrentScale(pz.getScale());
+    syncLayoutHeight(target);
 
-    // Sync React state from library events for toolbar disabled state
+    // Sync React state from library events for toolbar disabled state.
+    // Also update the inner div's layout height on every scale change.
     const onPanzoomChange = (e: Event) => {
       const s = (e as CustomEvent<{ scale: number }>).detail.scale;
       setCurrentScale((prev) => (Math.abs(prev - s) < 1e-3 ? prev : s));
       setTransformVersion((v) => v + 1);
+      syncLayoutHeight(target);
     };
     target.addEventListener("panzoomchange", onPanzoomChange);
 
@@ -373,38 +372,16 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     };
   }, [svgContent]);
 
-  // Lock container height to prevent layout jumps
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => {
-      if (!el) return;
-      const h = el.offsetHeight;
-      if (h > 0) {
-        el.style.minHeight = `${h}px`;
-        if (svgContent || renderFailed) {
-          heightCache.set(cacheKey, h);
-        }
-      }
-    });
-  }, [svgContent, renderFailed, cacheKey]);
-
   return (
     <div
       ref={containerRef}
       className={`${wrapperClass} relative ${svgContent ? "[&_.label]:text-zinc-600" : ""} p-3`}
-      style={cachedHeight ? { minHeight: `${cachedHeight}px` } : undefined}
     >
       {svgContent ? (
         <>
           <div
             ref={panzoomTargetRef}
             className={svgContainerClass}
-            style={
-              svgNaturalSizeRef.current
-                ? { minHeight: svgNaturalSizeRef.current.height }
-                : undefined
-            }
             dangerouslySetInnerHTML={{ __html: svgContent }}
           />
 
