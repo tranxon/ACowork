@@ -605,10 +605,21 @@ impl ConversationSession {
         // active-at timestamp without a directory scan.
         self.message_count.fetch_add(1, Ordering::Relaxed);
         // ADR-024: throttle meta writes on the high-frequency append path.
+        // ADR-039+FIX: Always send MetaChangeKind::Hot even when the meta
+        // file write is skipped, so the relay always has the latest in-memory
+        // snapshot. This ensures that a workspace_id / reasoning_effort /
+        // temperature change made during streaming (via update_workspace_id /
+        // update_reasoning_effort / update_temperature) is reflected in the
+        // next MQTT publish even if the caller's write_meta() reset the
+        // cooldown timer, without having to wait for the cooldown to fully
+        // elapse.
         if let Ok(last) = self.last_meta_write.lock()
             && last.elapsed().as_millis() < META_WRITE_COOLDOWN_MS as u128
         {
-            return; // skip — in-memory counters are already up to date
+            // Meta file write skipped (cooldown active), but still notify
+            // the relay with the latest in-memory snapshot.
+            let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
+            return;
         }
         self.write_meta();
         // Hot field — the relay task coalesces these behind a 3 s cooldown

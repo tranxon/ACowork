@@ -2196,6 +2196,7 @@ function handleMessageEvent(
           type: role,
           content: '',
           isStreaming: true,
+          startTime: Date.now(),
           timestamp: Date.now(),
           ...(incomingSeq != null ? { seq: incomingSeq } : {}),
           ...getAgentSenderInfo(agentId),
