@@ -1599,7 +1599,7 @@ export function ChatPanel() {
               ) : (
                 <ChevronDown className="h-3 w-3 mr-1 text-zinc-400 dark:text-zinc-500 shrink-0" />
               )}
-              <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
+              <span className="min-w-0 truncate text-[10px] font-medium text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">
                 {(() => {
                   const completed = todos.filter(t => t.status === "completed").length;
                   const total = todos.length;
@@ -1607,11 +1607,11 @@ export function ChatPanel() {
                   const isAllCompleted = completed === total && total > 0;
                   return (
                     <>
-                      {t("chatPanel.taskList", { completed, total })}
+                      <span className="inline whitespace-nowrap">{t("chatPanel.taskList", { completed, total })}</span>
                       {!isAllCompleted && currentTodo && (
                         <>
                           <span className="inline-block w-8"/>
-                          <span className="normal-case text-zinc-500 dark:text-zinc-400">
+                          <span className="normal-case text-zinc-500 dark:text-zinc-400 truncate">
                             {t("chatPanel.currentTask", { current: currentTodo.content })}
                           </span>
                         </>
@@ -1648,7 +1648,7 @@ export function ChatPanel() {
                         )}
                       </span>
                       <span className={cn(
-                        "flex-1 min-w-0 text-xs leading-relaxed",
+                        "flex-1 min-w-0 text-xs leading-relaxed truncate",
                         isCompleted
                           ? "text-zinc-400 dark:text-zinc-500 line-through"
                           : isInProgress
