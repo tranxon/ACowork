@@ -172,19 +172,22 @@ fn control_action_to_inbound(
             session_id,
             message_id,
             content,
-            ..
+            command: _,
+            params_json,
         } => Some((
             session_id,
             InboundMessage::ChatMessage {
                 content,
                 message_id,
+                params_json,
             },
         )),
-        ControlAction::StopGeneration { session_id, .. } => Some((
+        ControlAction::StopGeneration {
             session_id,
-            InboundMessage::Stop {
-                reason: "MQTT stop".to_string(),
-            },
+            reason,
+        } => Some((
+            session_id,
+            InboundMessage::Stop { reason },
         )),
         ControlAction::ContinueExecution { session_id, reason } => Some((
             session_id.clone(),
@@ -711,17 +714,66 @@ async fn dispatch_inbound(
         }
 
         // ⑭ ChatMessage → SessionMessage::ChatMessage (from MQTT SendMessage)
-        InboundMessage::ChatMessage { content, message_id } => {
+        InboundMessage::ChatMessage {
+            content,
+            message_id,
+            params_json,
+        } => {
+            // Parse params_json to extract skill_instructions, documents,
+            // content_parts, and attached_context.
+            let mut skill_instructions: Option<String> = None;
+            let mut documents: Option<Vec<serde_json::Value>> = None;
+            let mut content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> = None;
+            let mut attached_context: Option<Vec<acowork_core::protocol::AttachedContextItem>> = None;
+
+            if !params_json.is_empty()
+                && let Ok(params) = serde_json::from_str::<serde_json::Value>(&params_json)
+            {
+                    if let Some(si) = params.get("skill_instructions").and_then(|v| v.as_str())
+                        && !si.is_empty()
+                    {
+                        skill_instructions = Some(si.to_string());
+                    }
+                    if let Some(docs) = params.get("document_ids").and_then(|v| v.as_array()) {
+                        let parsed: Vec<serde_json::Value> = docs
+                            .iter()
+                            .filter_map(|d| d.as_str())
+                            .map(|id| serde_json::json!({ "id": id }))
+                            .collect();
+                        if !parsed.is_empty() {
+                            documents = Some(parsed);
+                        }
+                    }
+                    if let Some(parts) = params.get("content_parts").and_then(|v| v.as_array()) {
+                        let parsed: Vec<acowork_core::providers::traits::ContentPart> = parts
+                            .iter()
+                            .filter_map(|p| serde_json::from_value(p.clone()).ok())
+                            .collect();
+                        if !parsed.is_empty() {
+                            content_parts = Some(parsed);
+                        }
+                    }
+                    if let Some(ctx) = params.get("attached_context").and_then(|v| v.as_array()) {
+                        let parsed: Vec<acowork_core::protocol::AttachedContextItem> = ctx
+                            .iter()
+                            .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                            .collect();
+                        if !parsed.is_empty() {
+                            attached_context = Some(parsed);
+                        }
+                    }
+            }
+
             session_manager
                 .send_to_session(
                     &session_id,
                     SessionMessage::ChatMessage {
                         content,
                         message_id,
-                        skill_instructions: None,
-                        documents: None,
-                        content_parts: None,
-                        attached_context: None,
+                        skill_instructions,
+                        documents,
+                        content_parts,
+                        attached_context,
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))

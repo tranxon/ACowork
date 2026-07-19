@@ -156,6 +156,14 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "workspace_id": meta.workspace_id,
                     "updated_at": meta.updated_at,
                 });
+                tracing::info!(
+                    agent_id = %meta.agent_id,
+                    session_id = %meta.session_id,
+                    model_id = %meta.model_id,
+                    provider_id = %meta.provider_id,
+                    workspace_id = %meta.workspace_id,
+                    "DESKTOP: emitting session_meta agent-event"
+                );
                 let _ = app_handle.emit("agent-event", event);
             }
 
@@ -595,6 +603,13 @@ fn build_control_command(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            tracing::info!(
+                agent_id = %agent_id,
+                session_id = %session_id,
+                model_id = %model_id,
+                provider_id = %provider_id,
+                "BUILDING ModelSwitch control command"
+            );
             control_command::Command::ModelSwitch(
                 mqtt_proto::ModelSwitch {
                     session_id,
@@ -814,12 +829,11 @@ fn session_message_to_flat(
         session_message::Event::SessionStateChanged(p) => {
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("session_state_changed".into()));
-            m.insert("model".into(), serde_json::Value::String(p.model.clone()));
-            m.insert("provider".into(), serde_json::Value::String(p.provider.clone()));
-            m.insert("workspace_id".into(), serde_json::Value::String(p.workspace_id.clone()));
+            // ADR-039: persistent fields (model, provider, workspace_id,
+            // reasoning_effort, temperature) are delivered through the
+            // `session_meta` MQTT channel, not here. Only runtime fields
+            // (ratio, status, context_usage) are included.
             m.insert("ratio".into(), serde_json::json!(p.ratio));
-            m.insert("reasoning_effort".into(), serde_json::Value::String(p.reasoning_effort.clone()));
-            m.insert("temperature".into(), serde_json::json!(p.temperature));
             if !p.status_json.is_empty() {
                 match serde_json::from_str::<serde_json::Value>(&p.status_json) {
                     Ok(val) => { m.insert("status".into(), val); }

@@ -102,13 +102,15 @@ pub(crate) struct SessionCore {
     pub(crate) retry_wait_handle:
         Option<crate::providers::reliable::RetryWaitHandle>,
 
-    /// Per-session workspace ID. Single source of truth for workspace selection.
+    /// Per-session workspace ID, held by `SessionHandle`.
     /// Defaults to `"__agent_home__"`. Updated synchronously by SessionManager
     /// when the user switches workspace — no channel delay.
     ///
-    /// Shared with [`SessionHandle`] so that `list_sessions` and
-    /// `emit_session_state` always see the latest value.
-    pub(crate) workspace_id: Arc<RwLock<String>>,
+    /// ADR-039: this field is no longer stored on `SessionCore` — it lives on
+    /// `SessionHandle.workspace_id` (the single source of truth). The
+    /// `SessionCore` constructor still accepts the parameter so `SessionTask`
+    /// can pass it through to `SessionHandle`; the field is consumed by the
+    /// `SessionHandle` builder, not stored here.
 
     /// Current workspace directory for tool execution.
     /// Resolved from `workspace_id` via WorkspaceResolver.
@@ -133,7 +135,6 @@ impl SessionCore {
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         committed_lines: Arc<AtomicUsize>,
         notify_interval_ms: u64,
-        workspace_id: Arc<RwLock<String>>,
         current_work_dir: Arc<RwLock<Option<String>>>,
         streaming_lines: StreamingStateMap,
         stream_push_offset: Arc<AtomicUsize>,
@@ -157,7 +158,6 @@ impl SessionCore {
                 SessionStatus::Streaming { message_id: None },
             ))),
             retry_wait_handle: Some(RetryWaitHandle::new()),
-            workspace_id,
             current_work_dir,
             approval_handle: None,
             title: Arc::new(RwLock::new(None)),
@@ -648,14 +648,12 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let streaming_lines: StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let workspace_id = Arc::new(RwLock::new("__agent_home__".to_string()));
         let current_work_dir = Arc::new(RwLock::new(None));
         let core = SessionCore::new(
             "s1".to_string(),
             Some(tx),
             Arc::new(AtomicUsize::new(0)),
             500,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(AtomicUsize::new(0)),
@@ -677,7 +675,6 @@ mod tests {
         let streaming_lines: StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let committed_lines = Arc::new(AtomicUsize::new(0));
-        let workspace_id = Arc::new(RwLock::new("__agent_home__".to_string()));
         let current_work_dir = Arc::new(RwLock::new(Some(
             work_dir.to_string_lossy().to_string(),
         )));
@@ -687,7 +684,6 @@ mod tests {
             Some(tx),
             committed_lines.clone(),
             500,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(AtomicUsize::new(0)),

@@ -204,6 +204,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   setSessionWorkspace: async (agentId: string, sessionId: string, workspaceId: string) => {
+    console.log("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });
     const seq = ++requestSeq;
     const prevWorkspaces = get().workspaces;
     const prevMap = { ...get().sessionWorkspaceMap };

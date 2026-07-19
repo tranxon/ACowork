@@ -106,20 +106,23 @@ impl AgentLoop {
                             request_id: rid,
                             approved,
                             allow_all_session,
+                            reason,
                             ..
                         }) if rid == request_id => {
                             tracing::info!(
                                 request_id = %request_id,
                                 approved,
                                 allow_all_session,
+                                ?reason,
                                 "Approval decision received"
                             );
-                            return ApprovalDecision { approved, allow_all_session, reason: None };
+                            return ApprovalDecision { approved, allow_all_session, reason };
                         }
                         Some(InboundMessage::ApprovalDecision {
                             request_id: rid,
                             approved,
                             allow_all_session,
+                            reason,
                             ..
                         }) => {
                             // Approval decision for a DIFFERENT request — buffer it.
@@ -134,7 +137,7 @@ impl AgentLoop {
                                 request_id: rid,
                                 approved,
                                 allow_all_session,
-                                reason: None,
+                                reason,
                                 // ADR-034: populate session_id for Phase 2 routing.
                                 // At this point, the buffer is local to this session's
                                 // AgentLoop — session_id is for telemetry/Phase 2 dispatch.

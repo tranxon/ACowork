@@ -82,16 +82,15 @@ pub struct MqttConnectConfig<'a> {
 
 /// Event payload for `publish_session_state_changed`.
 ///
-/// ADR-034 Phase 8: replaces 8 individual `Option<&str>` arguments.
+/// ADR-034 Phase 8: replaces the legacy positional `Option<&str>` arguments.
+/// ADR-039: persistent fields (model, provider, workspace_id, reasoning_effort,
+/// temperature) are broadcast through the `session_meta` MQTT channel sourced
+/// from `data/meta/{session_id}.json`. This struct therefore only carries
+/// *runtime* state.
 pub struct SessionStateChangeEvent<'a> {
     pub session_id: &'a str,
     pub status_json: &'a str,
-    pub model: Option<&'a str>,
-    pub provider: Option<&'a str>,
-    pub workspace_id: Option<&'a str>,
     pub ratio: Option<f64>,
-    pub reasoning_effort: Option<&'a str>,
-    pub temperature: Option<f32>,
     pub context_usage_json: Option<&'a str>,
 }
 
@@ -888,18 +887,17 @@ impl MqttChunkPublisher {
     /// Publish a session_state_changed event via MQTT (QoS 1).
     ///
     /// ADR-034 Phase 8: takes a single `SessionStateChangeEvent` struct.
+    ///
+    /// ADR-039: only runtime fields (status, ratio, context_usage) are
+    /// transmitted here. Persistent per-session fields are broadcast through
+    /// the `session_meta` channel.
     pub(crate) async fn publish_session_state_changed(
         &self,
         ev: SessionStateChangeEvent<'_>,
     ) {
         let sid = ev.session_id.to_string();
         let sjson = ev.status_json.to_string();
-        let m = ev.model.map(|s| s.to_string()).unwrap_or_default();
-        let p = ev.provider.map(|s| s.to_string()).unwrap_or_default();
-        let w = ev.workspace_id.map(|s| s.to_string()).unwrap_or_default();
         let r = ev.ratio.unwrap_or(0.0);
-        let re = ev.reasoning_effort.map(|s| s.to_string()).unwrap_or_default();
-        let t = ev.temperature.unwrap_or(0.0);
         let cu = ev.context_usage_json.map(|s| s.to_string()).unwrap_or_default();
         let agent_id = self.agent_id.clone();
         let event = SessionMessage {
@@ -909,12 +907,7 @@ impl MqttChunkPublisher {
                 SessionStateChangedPayload {
                     session_id: sid.clone(),
                     status_json: sjson,
-                    model: m,
-                    provider: p,
-                    workspace_id: w,
                     ratio: r,
-                    reasoning_effort: re,
-                    temperature: t,
                     context_usage_json: cu,
                 },
             )),

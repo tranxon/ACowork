@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 
 use super::session_task::SessionMessage;
 use crate::agent::inbound::InboundMessage;
-use crate::agent::session_state::{SessionStateSnapshot, SessionStatus};
+use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
 use crate::debug::DebugHandles;
 
 /// External handle for interacting with a running SessionTask.
@@ -56,7 +56,7 @@ pub struct SessionHandle {
     /// [`SessionManager::snapshot_session_state`] can read it directly.
     /// Written by [`AgentLoop::emit_session_state`] on every status transition.
     pub(crate) snapshot:
-        Arc<std::sync::RwLock<SessionStateSnapshot>>,
+        Arc<std::sync::RwLock<SessionRuntimeSnapshot>>,
     /// Per-session workspace ID. Single source of truth, shared with [`SessionCore`].
     /// Written synchronously by [`SessionManager::set_session_workspace`],
     /// read by `list_sessions` and `session_workspace_id`.
@@ -133,22 +133,19 @@ impl SessionHandle {
     /// Always returns a value — the snapshot is initialized with defaults
     /// in [`SessionState::new`] and populated with persistent data during
     /// [`build_initial_session_state`].
-    pub fn snapshot(&self) -> SessionStateSnapshot {
+    pub fn snapshot(&self) -> SessionRuntimeSnapshot {
         self.snapshot
             .read()
             .ok()
             .map(|guard| guard.clone())
             .unwrap_or_else(|| {
                 // Fallback: return a minimal snapshot if the lock is poisoned.
-                SessionStateSnapshot {
+                SessionRuntimeSnapshot {
                     session_id: self.session_id.clone(),
                     status_json: r#""idle""#.to_string(),
                     model: None,
                     provider: None,
-                    workspace_id: None,
                     ratio: None,
-                    reasoning_effort: None,
-                    temperature: None,
                     todos_json: None,
                     context_usage_json: None,
                 }

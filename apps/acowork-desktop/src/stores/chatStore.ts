@@ -1280,6 +1280,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setCurrentModel: (model: string, provider: string, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
+    console.log("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, sessionId });
     if (!sessionId) return;
 
     // Resolve new model's default reasoning effort from availableModels
@@ -1735,7 +1736,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // ADR-015 Phase 5: Pull initial session state from backend.
-  // Maps the /api/agents/{id}/sessions/{sid}/state response to SessionChatState fields.
+  // Maps the /api/agents/{id}/sessions/{sid} response to SessionChatState fields.
+  //
+  // ADR-039: The Runtime returns `{ session_id, meta, live_state }` where:
+  //   - `meta` = authoritative per-session config from data/meta/{session_id}.json
+  //     (model, provider, workspace_id, reasoning_effort, temperature, tokens, etc.)
+  //   - `live_state` = runtime snapshot (status, ratio, todos, context_usage)
+  //     or `null` when no live session is running.
   // Errors are non-fatal — warns and returns without blocking startup.
   fetchSessionState: async (agentId: string, sessionId: string) => {
     try {
@@ -1748,34 +1755,54 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       const data = await resp.json() as {
         session_id: string;
-        status?: string;
-        model?: string | null;
-        provider?: string | null;
-        workspace_id?: string | null;
-        ratio?: number | null;
-        reasoning_effort?: string | null;
-        temperature?: number | null;
-        todos?: TodoItem[] | null;
-        context_usage?: ContextUsageInfo | null;
+        meta: Record<string, unknown>;
+        live_state: Record<string, unknown> | null;
       };
+      const { meta, live_state: liveState } = data;
+      if (!meta && !liveState) return;
+
       const sessionPatch: Partial<SessionChatState> = {};
-      if (typeof data.model === "string" && data.model) sessionPatch.model = data.model;
-      if (typeof data.provider === "string" && data.provider) sessionPatch.provider = data.provider;
-      if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio;
-      if (typeof data.reasoning_effort === "string" && data.reasoning_effort) sessionPatch.reasoningEffort = data.reasoning_effort;
-      if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature;
-      if (data.todos && Array.isArray(data.todos)) {
-        sessionPatch.todos = data.todos as TodoItem[];
+
+      // ── From meta.json (authoritative persistent fields) ──
+      if (meta) {
+        if (typeof meta.model === "string" && meta.model) sessionPatch.model = meta.model as string;
+        if (typeof meta.provider === "string" && meta.provider) sessionPatch.provider = meta.provider as string;
+        if (typeof meta.reasoning_effort === "string" && meta.reasoning_effort) {
+          sessionPatch.reasoningEffort = meta.reasoning_effort as string;
+        }
+        // NaN is the Runtime "no override" sentinel for temperature.
+        if (typeof meta.temperature === "number" && !Number.isNaN(meta.temperature)) {
+          sessionPatch.temperature = meta.temperature as number;
+        }
+        if (typeof meta.message_count === "number") {
+          sessionPatch.messageTotal = meta.message_count as number;
+        }
       }
-      if (data.context_usage && typeof data.context_usage === "object") {
-        sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
+
+      // ── From live_state (runtime fields) ──
+      if (liveState) {
+        // Status: parse from JSON
+        if (liveState.status && typeof liveState.status === "object") {
+          sessionPatch.sessionStatus = liveState.status as SessionStatus;
+        }
+        // Model chars/token ratio from API calibration.
+        if (typeof liveState.ratio === "number") sessionPatch.ratio = liveState.ratio as number;
+        // Todo list
+        if (liveState.todos && Array.isArray(liveState.todos)) {
+          sessionPatch.todos = liveState.todos as TodoItem[];
+        }
+        // Context usage (token counts, window, percentage)
+        if (liveState.context_usage && typeof liveState.context_usage === "object") {
+          sessionPatch.contextUsage = liveState.context_usage as ContextUsageInfo;
+        }
       }
+
       if (Object.keys(sessionPatch).length > 0) {
         set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
       }
-      // Sync workspace to workspaceStore if present
-      if (typeof data.workspace_id === "string" && data.workspace_id) {
-        useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, data.workspace_id);
+      // Workspace selection is owned by workspaceStore, not SessionChatState.
+      if (meta && typeof meta.workspace_id === "string" && meta.workspace_id) {
+        useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, meta.workspace_id as string);
       }
     } catch (e) {
       console.warn("[ChatStore] fetchSessionState failed:", e);
@@ -2596,15 +2623,12 @@ function handleMessageEvent(
           set((state) => {
             const sessionPatch: Partial<SessionChatState> = { sessionStatus: status };
 
-            // ADR-012: Backend includes per-session model/provider (from JSONL metadata).
-            if (typeof data.model === "string") sessionPatch.model = data.model as string;
-            if (typeof data.provider === "string") sessionPatch.provider = data.provider as string;
+            // ADR-039: persistent fields (model, provider, reasoning_effort,
+            // temperature, workspace_id) are delivered through the
+            // `session_meta` MQTT channel, not here. Only runtime fields
+            // (ratio, context_usage) are included in this event.
             // Model chars/token ratio from API calibration (for status panel display).
             if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
-            // Reasoning effort level (thinking level) from Runtime session state.
-            if (typeof data.reasoning_effort === "string") sessionPatch.reasoningEffort = data.reasoning_effort as string;
-            // Temperature override from Runtime session state.
-            if (typeof data.temperature === "number") sessionPatch.temperature = data.temperature as number;
             // ADR-028: Context usage snapshot from persisted session tokens.
             // The backend includes this on session activation/resume so the
             // frontend can show token counts before the first LLM call
@@ -2663,23 +2687,12 @@ function handleMessageEvent(
               sessionPatch.retryWaitInfo = null;
             }
 
-            // Update session state (model/provider/status) then agent-level defaults
+            // Update session state (status) then agent-level defaults
             const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
             let agentStates = sessionResult.agentStates;
 
-            if (typeof data.model === "string" && data.model) {
-              agentStates = updateAgentState(
-                { ...state, agentStates },
-                agentId,
-                { preferredModel: data.model as string },
-              ).agentStates;
-            }
-
-            // Sync per-session workspace from session_state_changed event.
-            // Workspace can change during session lifetime (just like model can be switched).
-            if (typeof data.workspace_id === "string" && data.workspace_id) {
-              useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id as string);
-            }
+            // ADR-039: model, provider, workspace_id are delivered through
+            // the `session_meta` MQTT channel, not here.
             return { agentStates };
           });
         }
@@ -2818,6 +2831,17 @@ function handleMessageEvent(
 
     // ── Session meta (model_id, provider_id, tokens, title, message_count) ──
     case "session_meta": {
+      console.log("[ChatStore:DEBUG] session_meta RECEIVED", {
+        sid,
+        agentId,
+        model_id: data.model_id,
+        provider_id: data.provider_id,
+        workspace_id: data.workspace_id,
+        reasoning_effort: data.reasoning_effort,
+        temperature: data.temperature,
+        title: data.title,
+        hasSessionId: !!data.session_id,
+      });
       if (!sid) break;
       // Title goes into the agent-level sessions[] list (used by the
       // sidebar) so it shows up the moment the retained MQTT message arrives,
@@ -2837,10 +2861,12 @@ function handleMessageEvent(
         patch.temperature = data.temperature;
       }
       if (Object.keys(patch).length > 0) {
+        console.log("[ChatStore:DEBUG] session_meta applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof data.workspace_id === "string" && data.workspace_id) {
+        console.log("[ChatStore:DEBUG] session_meta setting workspace", { sid, workspace_id: data.workspace_id });
         useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id);
       }
       break;

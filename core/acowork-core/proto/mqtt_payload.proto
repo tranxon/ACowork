@@ -415,16 +415,17 @@ message SkillExecutedPayload {
   bool success = 3;
 }
 
+// SessionStateChangedPayload carries ONLY runtime state.
+// ADR-024/035: persistent fields (model, provider, workspace_id,
+// reasoning_effort, temperature) flow through `SessionMeta` (retained
+// MQTT) and `meta.json` (HTTP pull).  Mixing them here caused
+// stale-value races between emit_session_state() and meta_change_tx
+// relays.  See ADR-024 §session_meta_runtime_split for the full rationale.
 message SessionStateChangedPayload {
   string session_id = 1;
   string status_json = 2;
-  string model = 3;
-  string provider = 4;
-  string workspace_id = 5;
-  double ratio = 6;
-  string reasoning_effort = 7;
-  float temperature = 8;
-  string context_usage_json = 9;
+  double ratio = 3;
+  string context_usage_json = 4;
 }
 
 message IterationLimitPausedPayload {

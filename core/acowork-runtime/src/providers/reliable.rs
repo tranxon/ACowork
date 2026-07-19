@@ -214,12 +214,7 @@ impl ReliableProvider {
                 session_id: sid.clone(),
                 event: ChunkEvent::SessionStateChanged {
                     status,
-                    model: None,
-                    provider: None,
-                    workspace_id: None,
                     ratio: None,
-                    reasoning_effort: None,
-                    temperature: None,
                     context_usage: None,
                 },
             });
@@ -246,12 +241,7 @@ impl ReliableProvider {
                 session_id: sid.clone(),
                 event: ChunkEvent::SessionStateChanged {
                     status,
-                    model: None,
-                    provider: None,
-                    workspace_id: None,
                     ratio: None,
-                    reasoning_effort: None,
-                    temperature: None,
                     context_usage: None,
                 },
             });

@@ -336,13 +336,17 @@ pub struct ConversationSession {
 /// The session_task's meta relay decides whether to publish immediately
 /// (`Cold`) or coalesce behind a cooldown (`Hot`). See
 /// `crate::agent::session::session_task` for the receiver side.
-#[derive(Debug, Clone, Copy)]
+///
+/// ADR-039+FIX: The variant now carries the full `mqtt_proto::SessionMeta`
+/// snapshot so the relay does NOT need to call
+/// `conv.build_session_meta_snapshot()` on its own (potentially stale) clone.
+#[derive(Debug, Clone)]
 pub enum MetaChangeKind {
     /// Persisted per-session config field (title, model, provider,
     /// reasoning_effort, temperature, workspace_id).
-    Cold(&'static str),
+    Cold(acowork_core::mqtt_proto::SessionMeta),
     /// Persisted runtime statistics (tokens, message_count).
-    Hot(&'static str),
+    Hot(acowork_core::mqtt_proto::SessionMeta),
 }
 
 /// Minimum interval between meta file writes triggered by `append_message`.
@@ -610,7 +614,7 @@ impl ConversationSession {
         // Hot field — the relay task coalesces these behind a 3 s cooldown
         // (same cadence as the meta write itself, so we never publish more
         // often than we persist).
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("message_count"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
     }
 
     /// Append a compaction event to the JSONL.
@@ -709,7 +713,7 @@ impl ConversationSession {
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("title"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
 
@@ -740,7 +744,7 @@ impl ConversationSession {
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("title"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
         tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
         true
     }
@@ -756,11 +760,11 @@ impl ConversationSession {
             *w = Some(workspace_id.to_string());
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("workspace_id"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
         tracing::info!(
             session_id = %self.session_id,
             workspace_id = %workspace_id,
-            "Session workspace_id persisted to meta file"
+            "Session workspace_id persisted to meta file + meta_change_tx notified"
         );
     }
 
@@ -793,13 +797,14 @@ impl ConversationSession {
             *p = provider.map(|s| s.to_string());
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("model"));
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("provider"));
+        let snapshot = self.build_session_meta_snapshot();
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(snapshot.clone()));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(snapshot));
         tracing::info!(
             session_id = %self.session_id,
             model = %model,
             provider = ?provider,
-            "Session model/provider persisted to meta file"
+            "Session model/provider persisted to meta file + meta_change_tx notified"
         );
     }
 
@@ -816,7 +821,7 @@ impl ConversationSession {
             *r = effort;
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("reasoning_effort"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
         tracing::info!(
             session_id = %self.session_id,
             "Session reasoning_effort persisted to meta file"
@@ -834,7 +839,7 @@ impl ConversationSession {
             *t = temperature;
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold("temperature"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
         tracing::info!(
             session_id = %self.session_id,
             "Session temperature persisted to meta file"
@@ -897,7 +902,7 @@ impl ConversationSession {
         }
         self.write_meta();
         // Hot field — the relay task coalesces these behind a 3 s cooldown.
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("tokens"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
     }
 }
 
@@ -962,7 +967,9 @@ impl Drop for ConversationSession {
         // Notify the relay task so the final snapshot is published before
         // the channel is dropped. Best-effort — the receiver may already
         // be gone, in which case `send` is a silent no-op.
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot("drop"));
+        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(
+            acowork_core::mqtt_proto::SessionMeta::default(),
+        ));
     }
 }
 

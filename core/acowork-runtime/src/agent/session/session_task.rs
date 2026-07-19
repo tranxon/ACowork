@@ -452,8 +452,6 @@ impl SessionTask {
         // Applied directly to AgentCore during session init so the session
         // starts with correct values (not patched via message replay).
         runtime_overrides: RuntimeConfigOverrides,
-        // Per-session workspace ID. Single source of truth, shared with SessionManager.
-        workspace_id: Arc<std::sync::RwLock<String>>,
         // Resolved workspace directory for tool execution. Shared with SessionManager.
         current_work_dir: Arc<std::sync::RwLock<Option<String>>>,
         // Per-session committed_lines counter, shared with the writer thread.
@@ -468,7 +466,6 @@ impl SessionTask {
             chunk_tx.clone(),
             committed_lines,
             notify_interval_ms,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),

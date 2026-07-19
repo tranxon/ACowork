@@ -138,9 +138,13 @@ pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttC
 struct HttpState {
     work_dir: PathBuf,
     agent_id: String,
-    /// Shared map of per-session state snapshots, keyed by session_id.
-    /// Each value is the same `Arc<RwLock<SessionStateSnapshot>>` held
+    /// Shared map of per-session runtime snapshots, keyed by session_id.
+    /// Each value is the same `Arc<RwLock<SessionRuntimeSnapshot>>` held
     /// by `SessionHandle`, so reads are always up-to-date.
+    ///
+    /// ADR-039: persisted fields (model, provider, workspace_id, etc.) are
+    /// not duplicated here — see `data/meta/{session_id}.json` and the
+    /// `session_meta` MQTT channel.
     session_snapshots: SharedSessionSnapshots,
     /// Shared latest session info, updated by SessionManager on every
     /// session creation and startup scan.  Read by `get_latest_session`.
@@ -651,7 +655,7 @@ async fn trigger_consolidate(
 ///    — authoritative ADR-024 metadata (title, created_at,
 ///    last_active_at, message_count, model, provider, workspace_id,
 ///    reasoning_effort, temperature, etc.).
-/// 2. **`SharedSessionSnapshots`** — live `SessionStateSnapshot`
+/// 2. **`SharedSessionSnapshots`** — live `SessionRuntimeSnapshot`
 ///    populated by SessionManager as the agent loop runs (current
 ///    status, todos, context_usage ratio).
 ///
@@ -693,7 +697,12 @@ async fn get_session(
         })
     });
 
-    // ── 2. Read live snapshot (best-effort; `None` for cold sessions).
+    // ── 2. Read live runtime snapshot (best-effort; `None` for cold sessions).
+    //
+    // ADR-039: `live_state` carries only runtime fields (status, model,
+    // provider — the latter two as in-memory mirrors — ratio, todos,
+    // context_usage). Persistent fields (workspace_id, reasoning_effort,
+    // temperature) are read from `meta.json` above.
     let snapshots = state
         .session_snapshots
         .read()
@@ -714,10 +723,7 @@ async fn get_session(
                 "status": status,
                 "model": snap.model,
                 "provider": snap.provider,
-                "workspace_id": snap.workspace_id,
                 "ratio": snap.ratio,
-                "reasoning_effort": snap.reasoning_effort,
-                "temperature": snap.temperature,
                 "todos": todos,
                 "context_usage": context_usage,
             })

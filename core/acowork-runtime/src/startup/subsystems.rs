@@ -233,12 +233,7 @@ async fn relay_chunk_event_mqtt(
 
         ChunkEvent::SessionStateChanged {
             status,
-            model,
-            provider,
-            workspace_id,
             ratio,
-            reasoning_effort,
-            temperature,
             context_usage,
         } => {
             let status_json = serde_json::to_string(&status).unwrap_or_default();
@@ -247,12 +242,7 @@ async fn relay_chunk_event_mqtt(
                     crate::mqtt::client::SessionStateChangeEvent {
                         session_id: sid,
                         status_json: &status_json,
-                        model: model.as_deref(),
-                        provider: provider.as_deref(),
-                        workspace_id: workspace_id.as_deref(),
                         ratio,
-                        reasoning_effort: reasoning_effort.as_deref(),
-                        temperature,
                         context_usage_json: context_usage.as_deref(),
                     },
                 )
@@ -362,10 +352,13 @@ async fn relay_chunk_event_mqtt(
         // with Retained=true so a (re)connecting Desktop immediately
         // receives the current state via the broker's retained store.
         ChunkEvent::SessionMetaChanged { meta, fields_changed } => {
-            tracing::debug!(
+            tracing::info!(
                 sid = %sid,
                 fields = ?fields_changed,
                 title = %meta.title,
+                model_id = %meta.model_id,
+                provider_id = %meta.provider_id,
+                workspace_id = %meta.workspace_id,
                 message_count = meta.message_count,
                 "Publishing session_meta (retained)"
             );
@@ -406,31 +399,52 @@ pub(crate) fn spawn_meta_change_relay(
         let cooldown = Duration::from_millis(META_HOT_PUBLISH_COOLDOWN_MS);
 
         while let Some(kind) = meta_rx.recv().await {
-            let should_publish = match kind {
-                MetaChangeKind::Cold(_) => true,
-                MetaChangeKind::Hot(_) => match last_hot_publish {
-                    None => true,
-                    Some(t) if t.elapsed() >= cooldown => true,
-                    Some(_) => false,
-                },
+            let (should_publish, is_hot) = match kind {
+                MetaChangeKind::Cold(_) => (true, false),
+                MetaChangeKind::Hot(_) => {
+                    let ok = match last_hot_publish {
+                        None => true,
+                        Some(t) if t.elapsed() >= cooldown => true,
+                        Some(_) => false,
+                    };
+                    (ok, true)
+                }
             };
             if !should_publish {
                 continue;
             }
-            if matches!(kind, MetaChangeKind::Hot(_)) {
+            if is_hot {
                 last_hot_publish = Some(Instant::now());
             }
 
-            let field = match kind {
-                MetaChangeKind::Cold(f) | MetaChangeKind::Hot(f) => f,
+            // ADR-039+FIX: Use the snapshot from MetaChangeKind (built by
+            // the mutator on the ORIGINAL ConversationSession), so we always
+            // publish the latest values regardless of relay's own clone.
+            // If the proto is all-zeros (Drop signal), fall back to the
+            // relay's own (potentially stale) snapshot rather than publishing
+            // an empty message.
+            let meta = match kind {
+                MetaChangeKind::Cold(ref snapshot) | MetaChangeKind::Hot(ref snapshot) => {
+                    if snapshot.session_id.is_empty() && snapshot.agent_id.is_empty() {
+                        conv.build_session_meta_snapshot()
+                    } else {
+                        snapshot.clone()
+                    }
+                }
             };
-            let meta = conv.build_session_meta_snapshot();
+            tracing::info!(
+                session_id = %session_id,
+                model_id = %meta.model_id,
+                provider_id = %meta.provider_id,
+                workspace_id = %meta.workspace_id,
+                "meta relay: sending SessionMetaChanged to chunk channel"
+            );
 
             let event = SessionChunkEvent {
                 session_id: session_id.clone(),
                 event: ChunkEvent::SessionMetaChanged {
                     meta,
-                    fields_changed: vec![field],
+                    fields_changed: vec!["meta"],
                 },
             };
             if chunk_tx.try_send(event).is_err() {
@@ -439,7 +453,6 @@ pub(crate) fn spawn_meta_change_relay(
                 // self-healing on the next successful one.
                 tracing::debug!(
                     session_id = %session_id,
-                    field = %field,
                     "meta relay: chunk channel full/closed, dropping notification"
                 );
             }

@@ -524,17 +524,15 @@ impl SessionManager {
 
         // Extract the snapshot Arc before session_state is moved into SessionTask.
         // The snapshot is already populated with persistent data by
-        // build_initial_session_state; we just need to set session_id and workspace_id.
+        // build_initial_session_state; we just need to set session_id.
+        //
+        // ADR-039: workspace_id is no longer mirrored into the runtime
+        // snapshot — it lives in `data/meta/{session_id}.json` and is
+        // broadcast through the `session_meta` MQTT channel.
         let snapshot_arc = session_state.snapshot.clone();
         {
-            let ws_id_str = if initial_workspace == "__agent_home__" {
-                None
-            } else {
-                Some(initial_workspace.clone())
-            };
             if let Ok(mut snap) = snapshot_arc.write() {
                 snap.session_id = session_id.clone();
-                snap.workspace_id = ws_id_str;
             }
         }
 
@@ -553,7 +551,6 @@ impl SessionManager {
             per_session_debug,
             pending_debug_handles.clone(),
             self.runtime_overrides.clone(),
-            workspace_id.clone(),
             current_work_dir.clone(),
             session_committed_lines,
             self.streaming_lines.clone(),
@@ -923,14 +920,19 @@ impl SessionManager {
             }
         }
 
-        // Populate the shared snapshot with persistent data so the frontend
-        // can read it via fetchSessionState() immediately, without waiting
-        // for emit_session_state() to run.
+        // Populate the shared runtime snapshot with the initial context_usage
+        // (computed from persisted tokens) so the frontend can read it via
+        // fetchSessionState() immediately, without waiting for
+        // emit_session_state() to run.
+        //
+        // ADR-039: model + provider are mirrored here as runtime-cached
+        // values (not authoritative — see ADR-039 (revised)). reasoning_effort
+        // and temperature are NOT mirrored — they live in
+        // `data/meta/{session_id}.json` and are broadcast through the
+        // `session_meta` MQTT channel.
         {
             let model_name = session_state.model().map(|s| s.to_string());
             let provider_name = session_state.provider().map(|s| s.to_string());
-            let effort_str = session_state.reasoning_effort().map(|e| e.to_string());
-            let temp = session_state.temperature();
 
             // Build context_usage from persisted session tokens (if available).
             let context_usage_json = session_state.conversation().and_then(|conv| {
@@ -952,10 +954,8 @@ impl SessionManager {
             if let Ok(mut snap) = session_state.snapshot.write() {
                 snap.model = model_name;
                 snap.provider = provider_name;
-                snap.reasoning_effort = effort_str;
-                snap.temperature = temp;
                 snap.context_usage_json = context_usage_json;
-                // session_id and workspace_id are set by the caller after
+                // session_id is set by the caller after
                 // build_initial_session_state returns.
             }
         }
@@ -1320,23 +1320,12 @@ impl SessionManager {
             }
         }
 
-        // ── 3. Directly patch snapshot so the HTTP pull API returns
-        //    the new temperature immediately, even when the AgentLoop is
-        //    mid-streaming (the fast-path UserOp won't be consumed until
-        //    the next drain_inbound_queue checkpoint).
-        if let Some(temp) = overrides.temperature {
-            for (session_id, handle) in &self.sessions {
-                if let Ok(mut guard) = handle.snapshot.write() {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        old = ?guard.temperature,
-                        new = temp,
-                        "apply_runtime_config_override: patching snapshot temperature"
-                    );
-                    guard.temperature = Some(temp);
-                }
-            }
-        }
+        // ADR-039: temperature no longer mirrors into the runtime snapshot.
+        // The override propagates through UpdateRuntimeConfig → AgentLoop →
+        // SessionState.set_temperature → meta_change_tx → meta.json +
+        // session_meta MQTT channel. The Gateway pull API reads from
+        // data/meta/{session_id}.json so the new value is reflected on the
+        // next fetchSessionState (or immediately via the live MQTT message).
 
         sessions
     }
@@ -1844,16 +1833,16 @@ After installation, ask the user to re-enable the MCP server.",
         self.sessions.len()
     }
 
-    /// Get the session state snapshot for a specific session.
+    /// Get the session runtime snapshot for a specific session.
     ///
-    /// Returns the current `SessionStateSnapshot` shared with [`SessionState`].
-    /// The snapshot is initialized with persistent data during session creation
-    /// and updated at runtime by [`AgentLoop::emit_session_state`].
+    /// ADR-039: persisted fields (model, provider, workspace_id,
+    /// reasoning_effort, temperature) are no longer duplicated here — see
+    /// `data/meta/{session_id}.json` and the `session_meta` MQTT channel.
     /// Returns `None` only if the session is not found.
     pub fn snapshot_session_state(
         &self,
         session_id: &str,
-    ) -> Option<crate::agent::session_state::SessionStateSnapshot> {
+    ) -> Option<crate::agent::session_state::SessionRuntimeSnapshot> {
         self.sessions
             .get(session_id)
             .map(|handle| handle.snapshot())

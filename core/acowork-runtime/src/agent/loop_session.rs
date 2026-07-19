@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 
 use crate::agent::context::build_context_usage_from_persisted;
 use crate::agent::session_state::SessionStatus;
-use crate::config::DEFAULT_TEMPERATURE;
 use crate::error::Result;
 
 impl super::loop_::AgentLoop {
@@ -36,19 +35,14 @@ impl super::loop_::AgentLoop {
     ///
     /// Called on status transitions (via [`transition_status`]) and at the
     /// end of each iteration checkpoint in [`execute_single_iteration`], so
-    /// the frontend always sees the latest model, provider, status and ratio.
+    /// the frontend always sees the latest status, ratio and todos.
+    ///
+    /// ADR-039: persisted fields (model, provider, workspace_id,
+    /// reasoning_effort, temperature) are no longer emitted in this event —
+    /// they are broadcast through the `session_meta` MQTT channel which
+    /// carries the authoritative values from `data/meta/{session_id}.json`.
     pub(crate) fn emit_session_state(&mut self) {
         let status = self.session.status.clone();
-        // Effective temperature via the per-agent chain:
-        //   agent_config.json (Layer 1) → manifest default (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
-        // Always emit a concrete value so the frontend can display the actual setting
-        // in use, not the absence of an override.
-        let effective_temperature = self
-            .session
-            .temperature()
-            .or(self.core.temperature_override)
-            .or(self.core.manifest_temperature)
-            .unwrap_or(DEFAULT_TEMPERATURE);
         // Build context_usage from persisted session tokens (if available)
         // so the frontend can show token counts immediately on session state push,
         // without waiting for the first LLM call or a WebSocket context_usage event.
@@ -94,20 +88,15 @@ impl super::loop_::AgentLoop {
         }
 
         // Emit chunk event to Gateway → frontend
-        let workspace_id_str = {
-            let ws_id = self.session_core.workspace_id.read().unwrap().clone();
-            if ws_id == "__agent_home__" { None } else { Some(ws_id) }
-        };
+        //
+        // ADR-039: only runtime fields (status, ratio, context_usage) are
+        // included. Persistent fields are broadcast through the `session_meta`
+        // MQTT channel (see SessionManager::publish_session_meta).
         if !self
             .session_core
             .try_send_chunk(super::loop_::ChunkEvent::SessionStateChanged {
                 status: status.clone(),
-                model: self.session.model().map(|s| s.to_string()),
-                provider: self.session.provider().map(|s| s.to_string()),
-                workspace_id: workspace_id_str.clone(),
                 ratio: self.session.model_ratio(),
-                reasoning_effort: self.session.reasoning_effort().map(|e| e.to_string()),
-                temperature: Some(effective_temperature),
                 context_usage: context_usage_json.clone(),
             })
         {
@@ -147,12 +136,15 @@ impl super::loop_::AgentLoop {
             };
             if let Ok(mut guard) = self.session.snapshot.write() {
                 guard.status_json = status_json;
+                // ADR-039 (revised): mirror model + provider into the runtime
+                // snapshot so SessionManager::current_model_name and
+                // current_model_and_provider have sync access without
+                // hitting the meta file. The authoritative value still lives
+                // in data/meta/{session_id}.json; this mirror may briefly
+                // lag by one emit cycle.
                 guard.model = self.session.model().map(|s| s.to_string());
                 guard.provider = self.session.provider().map(|s| s.to_string());
-                guard.workspace_id = workspace_id_str;
                 guard.ratio = self.session.model_ratio();
-                guard.reasoning_effort = self.session.reasoning_effort().map(|e| e.to_string());
-                guard.temperature = Some(effective_temperature);
                 guard.todos_json = todos_json;
                 // Only overwrite context_usage_json if we successfully computed a
                 // new value.  Otherwise preserve the existing value set by

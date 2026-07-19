@@ -17,14 +17,14 @@ use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 use acowork_core::providers::traits::ReasoningEffort;
 
-/// Shared map of session snapshots, keyed by session_id.
+/// Shared map of session runtime snapshots, keyed by session_id.
 ///
-/// Used by the Runtime HTTP server to serve `GET /sessions/{sid}/state`.
-/// Each value is an `Arc<RwLock<SessionStateSnapshot>>` — the same Arc
-/// held by [`SessionHandle`], so reads are always up-to-date without
-/// explicit refresh.
+/// ADR-039: persisted per-session config (title/model/provider/etc.) now lives
+/// in `data/meta/{session_id}.json` and is broadcast through the `session_meta`
+/// MQTT channel. The Runtime HTTP `/sessions/{sid}/state` endpoint therefore
+/// only holds *runtime* state — no duplication of meta data.
 pub type SharedSessionSnapshots =
-    Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<SessionStateSnapshot>>>>>;
+    Arc<RwLock<std::collections::HashMap<String, Arc<RwLock<SessionRuntimeSnapshot>>>>>;
 
 /// Shared latest session info, updated by [`SessionManager`] and read by the
 /// Runtime HTTP server's `GET /sessions/latest` endpoint.
@@ -37,6 +37,18 @@ pub type SharedLatestSession = Arc<RwLock<Option<(String, Option<String>)>>>;
 
 /// Lightweight snapshot of per-session runtime state.
 ///
+/// ADR-039: persisted per-session config (model, provider, workspace_id,
+/// reasoning_effort, temperature) lives in `data/meta/{session_id}.json`
+/// and is broadcast through the `session_meta` MQTT channel; this struct
+/// therefore only carries *runtime* fields.
+///
+/// ADR-039 (revised): `model` and `provider` are still mirrored here as
+/// runtime-cached values, because `SessionManager::current_model_name` /
+/// `current_model_and_provider` need sync, in-process reads of the live
+/// model/provider without file I/O. The meta file remains the authoritative
+/// source for the HTTP pull API and MQTT broadcast; the snapshot mirror is
+/// best-effort and may briefly lag the meta file by one iteration.
+///
 /// Written by `AgentLoop::emit_session_state` on every status transition
 /// and at iteration checkpoints. Read by `SessionManager::snapshot_session_state`
 /// to serve the Gateway HTTP `GET /api/agents/{id}/sessions/{session_id}/state`
@@ -45,23 +57,21 @@ pub type SharedLatestSession = Arc<RwLock<Option<(String, Option<String>)>>>;
 /// Uses `Arc<std::sync::RwLock<...>>` so reads are lock-free on the happy path
 /// and writes are isolated to the emit call site.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionStateSnapshot {
+pub struct SessionRuntimeSnapshot {
     /// Session identifier.
     pub session_id: String,
     /// JSON-serialized `SessionStatus` (same format as `SessionStateChanged` event).
     pub status_json: String,
     /// Currently active model, if any.
+    /// **Runtime mirror of `SessionState::model`** — see ADR-039 (revised).
+    /// The authoritative value lives in `data/meta/{session_id}.json`.
     pub model: Option<String>,
     /// Currently active provider, if any.
+    /// **Runtime mirror of `SessionState::provider`** — see ADR-039 (revised).
+    /// The authoritative value lives in `data/meta/{session_id}.json`.
     pub provider: Option<String>,
-    /// Workspace ID associated with the session, if any.
-    pub workspace_id: Option<String>,
     /// Calibrated chars/token ratio, if available.
     pub ratio: Option<f64>,
-    /// Reasoning effort override string, if set.
-    pub reasoning_effort: Option<String>,
-    /// Temperature override, if set.
-    pub temperature: Option<f32>,
     /// Current todo list managed by the `todo_write` built-in tool.
     /// Serialized as JSON so the Gateway and frontend can consume it
     /// without additional protobuf message definitions.
@@ -226,7 +236,7 @@ pub struct SessionState {
     /// [`AgentLoop::emit_session_state`] on every status transition.
     /// Read by [`SessionManager::snapshot_session_state`] to serve
     /// `GET /api/agents/{id}/sessions/{sid}/state` without a gRPC round-trip.
-    pub(crate) snapshot: Arc<RwLock<SessionStateSnapshot>>,
+    pub(crate) snapshot: Arc<RwLock<SessionRuntimeSnapshot>>,
 }
 
 impl SessionState {
@@ -254,15 +264,12 @@ impl SessionState {
             reasoning_effort: None,
             temperature: None,
             identity_context: None,
-            snapshot: Arc::new(RwLock::new(SessionStateSnapshot {
+            snapshot: Arc::new(RwLock::new(SessionRuntimeSnapshot {
                 session_id: String::new(),
                 status_json,
                 model: None,
                 provider: None,
-                workspace_id: None,
                 ratio: None,
-                reasoning_effort: None,
-                temperature: None,
                 todos_json: None,
                 context_usage_json: None,
             })),
@@ -445,7 +452,7 @@ impl SessionState {
     }
 
     /// Access the shared snapshot Arc for external reads (SessionHandle).
-    pub fn snapshot_arc(&self) -> &Arc<RwLock<SessionStateSnapshot>> {
+    pub fn snapshot_arc(&self) -> &Arc<RwLock<SessionRuntimeSnapshot>> {
         &self.snapshot
     }
 }

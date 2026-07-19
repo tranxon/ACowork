@@ -138,22 +138,16 @@ pub enum ChunkEvent {
     /// Session lifecycle status changed (ADR-014).
     /// Emitted whenever SessionState::status transitions, so the frontend
     /// can stay in sync without optimistic local writes.
-    /// ADR-012: Also carries per-session model/provider so the frontend
-    /// can display the correct model after session activation/resume.
+    ///
+    /// ADR-039: persistent per-session fields (model, provider, workspace_id,
+    /// reasoning_effort, temperature) are no longer carried in this event.
+    /// They are broadcast through the `session_meta` MQTT channel which
+    /// sources them from `data/meta/{session_id}.json`.
     SessionStateChanged {
         status: SessionStatus,
-        model: Option<String>,
-        provider: Option<String>,
-        workspace_id: Option<String>,
         /// Current model chars/token ratio from API calibration.
         /// `None` before the first calibration.
         ratio: Option<f64>,
-        /// Current reasoning effort level for LLM inference.
-        /// `None` means use model default.
-        reasoning_effort: Option<String>,
-        /// Current temperature setting for LLM inference.
-        /// `None` means use agent config or global default (0.7).
-        temperature: Option<f32>,
         /// ADR-028: JSON-serialized ContextUsageInfo snapshot from persisted
         /// session tokens. Set on session activation/resume so the frontend
         /// can show token counts without waiting for the first LLM call.
@@ -400,7 +394,6 @@ impl AgentLoop {
         );
         let streaming_lines: crate::conversation::StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let workspace_id = Arc::new(std::sync::RwLock::new("__agent_home__".to_string()));
         let current_work_dir =
             Arc::new(std::sync::RwLock::new(Some(config.work_dir.clone())));
         let session_core = SessionCore::new(
@@ -408,7 +401,6 @@ impl AgentLoop {
             chunk_tx,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)), // committed_lines placeholder
             config.data_flow.notify_interval_ms,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2946,14 +2938,12 @@ mod tests {
 
         let streaming_lines: crate::conversation::StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let workspace_id = Arc::new(std::sync::RwLock::new("__agent_home__".to_string()));
         let current_work_dir = Arc::new(std::sync::RwLock::new(None));
         let session_core = SessionCore::new(
             "test-session".to_string(),
             Some(chunk_tx),
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             500,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -2979,14 +2969,12 @@ mod tests {
         // In standalone mode, chunk_tx is None → try_send_chunk returns false.
         let streaming_lines: crate::conversation::StreamingStateMap =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let workspace_id = Arc::new(std::sync::RwLock::new("__agent_home__".to_string()));
         let current_work_dir = Arc::new(std::sync::RwLock::new(None));
         let session_core = SessionCore::new(
             "test-session".to_string(),
             None,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             500,
-            workspace_id,
             current_work_dir,
             streaming_lines,
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
