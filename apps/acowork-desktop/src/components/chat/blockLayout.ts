@@ -155,6 +155,23 @@ export const PROSE_HEADING_LINE_BONUS_PX = 8;
 /** `prose-li` marker/list item vertical spacing. */
 export const PROSE_LIST_ITEM_BONUS_PX = 4;
 
+// ── Async-rendered code / Mermaid blocks ────────────────────────────
+//
+// Code-fence content height is data-unpredictable (depends on syntax
+// highlight + rendered SVG for Mermaid).  The estimator can't measure
+// actual rendered pixels from source text alone, so we use a generous
+// floor per code block.  This intentionally OVERESTIMATES for small
+// code blocks — overshoot just leaves a small blank gap, which is
+// harmless.  ResizeObserver + `measureElement` corrects the cache to
+// the true height once the block renders (cache only shrinks from
+// here, so no oscillation).
+//
+// Floor values tuned empirically:
+//   - Plain code block: 120px (header line + a few lines of code)
+//   - Mermaid diagram:  320px (typical graph diagram including title)
+export const CODE_BLOCK_MIN_HEIGHT_PX = 120;
+export const MERMAID_BLOCK_MIN_HEIGHT_PX = 320;
+
 // ── AskQuestionCard (tool approval card) ───────────────────────────
 /** Card uses `my-1.5 max-w-... px-3 py-2` plus a question + options. */
 export const ASK_QUESTION_CARD_MIN_HEIGHT = 80;

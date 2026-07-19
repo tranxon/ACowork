@@ -27,7 +27,7 @@
  *   `measureElement` only writes the cache for items currently in the DOM.
  *   `virtualizer.scrollToIndex(end)` runs immediately when called and
  *   depends on `measurementsCache` for every item along the way.  Until
- *   each item has been mounted at least once, scrollToIndex lands on the
+ *   each item has been mounted at least once, scrolltoIndex lands on the
  *   estimateSize-derived position.  With the estimator below, that
  *   position is within ±10% of the true bottom for typical content, so
  *   users see "scroll lands close to the bottom" rather than "scrolls to
@@ -36,6 +36,29 @@
  * The gap between items (`useVirtualizer({ gap: 4 })`) is added by the
  * virtualizer itself, NOT by this function.  estimateSize must return
  * the body height of a single item; adding gap here double-counts.
+ *
+ * ── Module-level measured-height cache ─────────────────────────────
+ *
+ * Once `measureElement` reports a real height for a given block, we stash
+ * it in `measuredHeightsByBlockId` keyed by MessageBlock.blockId (NOT by
+ * index).  blockId is index-derived today (`"block-${i}"`), so it changes
+ * for every block after the streaming tail — but that just means cache
+ * thrash for the last few items, which are exactly the ones being
+ * streamed and not-yet-stable.  Earlier blocks keep their ids and their
+ * cached heights across new-message appends, so the visible scroll
+ * position stays correct instead of jumping when the user is reading
+ * the middle of a long conversation.
+ *
+ * The cache is intentionally module-scoped (lives for the page
+ * lifetime), not per-component, so that switching between sessions and
+ * back reuses heights for blocks whose content is byte-identical (same
+ * blockId hash).  For sessions with very different content, the lookup
+ * misses and falls back to the data-driven estimator.
+ *
+ * The cache is NEVER cleared by this file — we have no signal that
+ * "this content has been removed from memory".  In practice this is fine
+ * because blockIds are content-derived and the footprint is bounded by
+ * the union of all sessions opened in the current window (~MB at worst).
  */
 
 import type { MessageBlock } from "./ChatPanel";
@@ -64,11 +87,43 @@ import {
   COMPACTING_INDICATOR_HEIGHT,
   REPLYING_INDICATOR_HEIGHT,
   SAFE_FALLBACK_HEIGHT,
+  CODE_BLOCK_MIN_HEIGHT_PX,
+  MERMAID_BLOCK_MIN_HEIGHT_PX,
   getContentMaxWidthPct,
   getFontSizePx,
 } from "./blockLayout";
 
 // ── Text-bubble content height ──────────────────────────────────────────
+
+// ── Measured-height cache (see file header) ────────────────────────
+//
+// Keyed by MessageBlock.blockId (content-derived).  Stays valid across
+// re-renders, session switches, and visible ResizeObserver fires.
+const measuredHeightsByBlockId = new Map<string, number>();
+
+/**
+ * Look up a previously-measured height for the given block.  Returns
+ * undefined when there's no entry (cache miss → fall back to estimator).
+ */
+export function getMeasuredHeight(blockId: string): number | undefined {
+  return measuredHeightsByBlockId.get(blockId);
+}
+
+/**
+ * Record a real measured height for a block.  Called from the
+ * virtualizer's measureElement callback (which runs every time an item
+ * enters the viewport or its size changes).
+ *
+ * Tiny drift (<2px) is ignored to avoid noisy log writes during browser
+ * zoom / DPR changes.  Larger deltas (including async content settling
+ * for code/Mermaid blocks) overwrite immediately.
+ */
+export function recordMeasuredHeight(blockId: string, height: number): void {
+  if (!Number.isFinite(height) || height <= 0) return;
+  const prev = measuredHeightsByBlockId.get(blockId);
+  if (prev !== undefined && Math.abs(prev - height) < 2) return;
+  measuredHeightsByBlockId.set(blockId, height);
+}
 
 /**
  * Estimate the rendered height of a plain text bubble (user / assistant /
@@ -152,6 +207,14 @@ export function estimateBlockHeight(
     ? messageBlocks.length + extraCount - 1
     : -1;
 
+  // Consult the module-level measured-height cache for real block indices.
+  // Extra slots (replying / compacting) are always pure chrome, so the
+  // data-driven return below is fine — no cache lookup needed there.
+  if (index >= 0 && index < messageBlocks.length) {
+    const cached = measuredHeightsByBlockId.get(messageBlocks[index].blockId);
+    if (cached !== undefined) return cached;
+  }
+
   if (index === replyingIdx) {
     return REPLYING_INDICATOR_HEIGHT;
   }
@@ -212,7 +275,25 @@ export function estimateBlockHeight(
       const logicalLines = content.split("\n");
       const nonEmpty = logicalLines.filter((l) => l.length > 0);
       let markdownBonus = 0;
-      for (const line of nonEmpty) {
+      // Code/Mermaid block height accumulator.  Each fenced ``` block's
+      // rendered height depends on its CONTENT (syntax highlight token
+      // count for code, graph node count for Mermaid), which we cannot
+      // measure from data alone.  Strategy:
+      //   1. Count lines inside the fence pair (open ``` → close ```).
+      //   2. Estimate = max(MIN_FLOOR, contentLines * LINE_HEIGHT_PX + chrome)
+      //      - Mermaid uses a larger per-line factor (40px) because the
+      //        rendered SVG has node padding + arrow spacing the syntax
+      //        source doesn't capture.
+      //   3. MIN_FLOOR guards tiny snippets (1-2 line code) from being
+      //      underestimated below the chrome of the code container.
+      //
+      // Critical bug being fixed: previously each ``` line added the floor
+      // (opening AND closing), doubling the contribution per code block
+      // and inflating totalSize by hundreds of pixels.
+      let codeHeight = 0;
+      const CHROME_PER_CODE_BLOCK = 20; // padding/border around the code element
+      for (let i = 0; i < nonEmpty.length; i++) {
+        const line = nonEmpty[i];
         // Markdown headings (`# `, `## `, `### `, `#### `) get an extra
         // ~8px line bonus for the larger font + line-height.
         if (/^#{1,6}\s/.test(line)) {
@@ -222,9 +303,36 @@ export function estimateBlockHeight(
         if (/^\s*([-*]|\d+\.)\s/.test(line)) {
           markdownBonus += PROSE_LIST_ITEM_BONUS_PX;
         }
-        // Code fences inflate by a full line (``` is a 22px block).
+        // Code fence — track open/close and count lines inside.
         if (/^```/.test(line)) {
           markdownBonus += LINE_HEIGHT_PX;
+          // Look at next line to detect Mermaid (info language tag).
+          const next = nonEmpty[i + 1] ?? "";
+          const isMermaid = /^mermaid\b/i.test(next);
+          // Count content lines until the closing fence.
+          let contentLines = 0;
+          let j = i + 1;
+          while (j < nonEmpty.length && !/^```/.test(nonEmpty[j])) {
+            contentLines++;
+            j++;
+          }
+          // Per-line factor: Mermaid rendered SVG is taller per syntax
+          // line than plain code (node boxes + arrows add vertical
+          // spacing that the source text doesn't show).
+          const perLine = isMermaid ? 40 : LINE_HEIGHT_PX;
+          const minFloor = isMermaid
+            ? MERMAID_BLOCK_MIN_HEIGHT_PX
+            : CODE_BLOCK_MIN_HEIGHT_PX;
+          const estimate = Math.max(
+            minFloor,
+            contentLines * perLine + CHROME_PER_CODE_BLOCK,
+          );
+          codeHeight += estimate;
+          // Skip past the closing fence (if present) so we don't
+          // re-enter the loop on it.
+          if (j < nonEmpty.length) {
+            i = j; // for-loop's i++ will move us past the closing fence
+          }
         }
       }
       // Paragraph gap: every consecutive non-empty line after the first
@@ -236,7 +344,7 @@ export function estimateBlockHeight(
       const proseBlockOverhead = nonEmpty.length > 1
         ? PROSE_PARAGRAPH_MARGIN_TOP_PX
         : 0;
-      return textHeight + markdownBonus + paragraphOverhead + proseBlockOverhead;
+      return textHeight + markdownBonus + paragraphOverhead + proseBlockOverhead + codeHeight;
     }
     case "explore_group": {
       // hasFollowUpReply is set by ChatPanel when it builds messageBlocks.

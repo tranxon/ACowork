@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
@@ -6,7 +6,11 @@ import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
 import type { SessionScope } from "./useSessionScope";
 import type { MessageBlock } from "./ChatPanel";
-import { estimateBlockHeight } from "./blockHeightEstimator";
+import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
+
+// ResizeObserver instances per element.  WeakMap so they're GC'd when the
+// element is removed from the DOM (virtual list recycling).
+const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -189,6 +193,8 @@ export const VirtualMessageList = React.forwardRef<
     onRetryLoadSession,
   } = props;
 
+  // ── Refs ────────────────────────────────────────────────────────
+
   // ── Container width (self-measured) ─────────────────────────────
   //
   // VirtualMessageList owns its own width measurement via
@@ -233,28 +239,29 @@ export const VirtualMessageList = React.forwardRef<
   // before any scroll event has fired.
   //
   // estimateSize delegates to the data-driven estimator in
-  // `blockHeightEstimator.ts`.  This eliminates the previous
-  // force-overscan / double-rAF hack that tried to compensate for a
-  // blanket 120px constant undershooting on long conversations.
-  //
-  // The estimator closes over `messageBlocks`, `containerWidth`, and
-  // `showCompactingItem` — all of which are stable references per render
-  // (messageBlocks is a memoized array, containerWidth is updated by a
-  // ResizeObserver only on resize, and showCompactingItem is a primitive).
-  // Because of this the estimator is a stable function reference; we
-  // intentionally do NOT recreate it on every render, otherwise the
-  // virtualizer's option-diffing would treat every render as a size
-  // change and force a full re-layout.
+  // `blockHeightEstimator.ts`.  ResizeObserver + module-level measurement
+  // cache (blockHeightEstimator.ts) feed real DOM heights back into the
+  // estimator, so after each block is in view once its height in the
+  // virtualizer's measurementsCache is exact.
+  const messageBlocksRef = useRef(messageBlocks);
+  messageBlocksRef.current = messageBlocks;
+  const containerWidthRef = useRef(containerWidth);
+  containerWidthRef.current = containerWidth;
+  const showCompactingItemRef = useRef(showCompactingItem);
+  showCompactingItemRef.current = showCompactingItem;
+  const showReplyingItemRef = useRef(showReplyingItem);
+  showReplyingItemRef.current = showReplyingItem;
+
   const estimateSize = React.useCallback(
     (index: number) =>
       estimateBlockHeight(
         index,
-        messageBlocks,
-        containerWidth,
-        showCompactingItem,
-        showReplyingItem,
+        messageBlocksRef.current,
+        containerWidthRef.current,
+        showCompactingItemRef.current,
+        showReplyingItemRef.current,
       ),
-    [messageBlocks, containerWidth, showCompactingItem, showReplyingItem],
+    [], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const virtualizer = useVirtualizer({
@@ -297,6 +304,65 @@ export const VirtualMessageList = React.forwardRef<
       }
     },
   });
+
+  // ── measureElement + ResizeObserver ──────────────────────────────
+  // virtualizer.measureElement fires on mount, but async content (Mermaid
+  // 200ms debounce, code highlighting) changes height AFTER mount.  The
+  // initial measurement is wrong; we need to re-measure when the element
+  // actually settles.
+  //
+  // Each item gets a ResizeObserver.  On any size change, debounce 300ms
+  // then re-call measureElement.  This gradually corrects totalSize toward
+  // the true value - the scrollbar "converges" rather than "jumps".
+  //
+  // Observers are tracked in a WeakMap so they're GC'd when the element is
+  // removed from the DOM (virtual list recycling).
+  const measureElementRef = useRef<((el: HTMLElement | null) => void) | null>(null);
+  measureElementRef.current = virtualizer.measureElement;
+
+  const measureRef = useCallback((el: HTMLElement | null) => {
+    // measureElement on mount: writes whatever height the item has at the
+    // moment of mount into the virtualizer cache.  ResizeObserver below
+    // then fires whenever the size changes (e.g. Mermaid SVG finishes
+    // rendering) and re-calls measureElement.
+    //
+    // We also write the observed height into a module-level cache keyed
+    // by MessageBlock.blockId (see blockHeightEstimator.ts).  estimateSize
+    // consults that cache on the next render, so once an item has been
+    // measured its real height is preserved across re-mounts (virtual
+    // list recycling) and across re-opens of the same session — fixing
+    // the "scroll back to top, scroll bar shrinks, can't reach bottom"
+    // cycle that happens when measurement-driven cache writes are lost.
+    const fn = measureElementRef.current;
+    if (fn) fn(el);
+    if (!el) return;
+    const idxAttr = el.dataset.index;
+    if (idxAttr !== undefined) {
+      const idx = parseInt(idxAttr, 10);
+      const block = messageBlocksRef.current[idx];
+      if (block && el.offsetHeight > 0) {
+        recordMeasuredHeight(block.blockId, el.offsetHeight);
+      }
+    }
+    if (resizeObservers.has(el)) return;
+    const ro = new ResizeObserver(() => {
+      const currentFn = measureElementRef.current;
+      if (currentFn) currentFn(el);
+      // Re-record on every async-render-driven size change.  recordMeasuredHeight
+      // no-ops on <2px drift and overwrites on larger drift (e.g. Mermaid SVG
+      // finishing its render, growing from ~140px → ~500px).
+      const idxAttr2 = el.dataset.index;
+      if (idxAttr2 !== undefined) {
+        const idx2 = parseInt(idxAttr2, 10);
+        const block2 = messageBlocksRef.current[idx2];
+        if (block2 && el.offsetHeight > 0) {
+          recordMeasuredHeight(block2.blockId, el.offsetHeight);
+        }
+      }
+    });
+    ro.observe(el);
+    resizeObservers.set(el, ro);
+  }, []);
 
   // ── Imperative handle ─────────────────────────────────────
   // Expose three data-derived queries to the parent. None of them rely on
@@ -568,7 +634,7 @@ export const VirtualMessageList = React.forwardRef<
               return (
                 <div
                   key={virtualRow.key}
-                  ref={virtualizer.measureElement}
+                  ref={measureRef}
                   data-index={virtualRow.index}
                   style={{
                     position: "absolute",
@@ -599,7 +665,7 @@ export const VirtualMessageList = React.forwardRef<
               return (
                 <div
                   key={virtualRow.key}
-                  ref={virtualizer.measureElement}
+                  ref={measureRef}
                   data-index={virtualRow.index}
                   style={{
                     position: "absolute",
@@ -623,7 +689,7 @@ export const VirtualMessageList = React.forwardRef<
             return (
               <div
                 key={virtualRow.key}
-                ref={virtualizer.measureElement}
+                ref={measureRef}
                 data-index={virtualRow.index}
                 style={{
                   position: "absolute",
