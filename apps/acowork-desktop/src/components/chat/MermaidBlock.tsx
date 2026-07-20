@@ -7,6 +7,14 @@ const SCALE_MIN = 0.2;
 const SCALE_MAX = 8;
 const SCALE_STEP = 1.2;
 
+/** Fit-to-container never scales the diagram UP beyond its rendered size.
+ *  Why: vertical flowcharts have a narrow viewBox (e.g. 100×800) so
+ *  `containerW / renderedW` evaluates to 6× — the diagram would be
+ *  blown up to 6× its intended size, including text. Capping at 1 means
+ *  wide charts shrink to fit; narrow charts display at 1:1 (still
+ *  inside the container, aligned to the left/top). */
+const FIT_MAX = 1;
+
 /** (Re-)initialize mermaid global config. Safe to call multiple times. */
 function ensureInit() {
   mermaid.initialize({
@@ -61,6 +69,10 @@ function ensureInit() {
       "  border-radius: 12px !important;",
       "}",
     ].join("\n"),
+    // useMaxWidth: false → mermaid outputs SVG with explicit width/height
+    // attrs (the viewBox pixel size), NOT width="100%" + max-width.
+    // We need real pixel dimensions so we can measure the rendered
+    // size reliably and compute the correct fit scale.
     flowchart: {
       useMaxWidth: false,
       htmlLabels: true,
@@ -155,17 +167,48 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   const containerWidthRef = useRef(0);
   const [transformVersion, setTransformVersion] = useState(0);
   const [currentScale, setCurrentScale] = useState(1);
-  /** The height of the content area (px), derived from SVG aspect ratio + container width. */
+  /** The height of the content area (px), set to naturalH × fit scale
+   *  (see applyFit). NOT an aspect-ratio projection — that's only
+   *  correct when the diagram actually fills the container width. */
   const [contentHeight, setContentHeight] = useState<number | null>(null);
 
   const clampScale = (s: number) =>
     Math.max(SCALE_MIN, Math.min(SCALE_MAX, s));
 
-  const computeFitScale = (): number | null => {
+  /** Compute fit scale + matching contentHeight from current refs, and
+   *  apply both to panzoom + React state. This is the SINGLE source of
+   *  truth for "fit the diagram to the container" — used by the
+   *  initial layout effect, the ResizeObserver, and the reset button,
+   *  so all three paths produce identical visuals (no empty space
+   *  below the diagram, no surprise scale change on reset).
+   *
+   *  With origin: '0 0', a scaled element stays at its top-left corner.
+   *  We compute panX to center the element horizontally inside the
+   *  container: panX = (containerW - naturalW * fit) / 2.
+   *  For wide charts (naturalW > container) this is ≈ 0 (no shift);
+   *  for narrow charts (vertical flowcharts) it pushes the element
+   *  to the visual center of the content area. */
+  const applyFit = () => {
+    const pz = panzoomRef.current;
     const size = svgNaturalSizeRef.current;
     const w = containerWidthRef.current;
-    if (!size || !size.width || w <= 0) return null;
-    return clampScale(w / size.width);
+    if (!pz || !size || !size.width || w <= 0) return;
+    // Never scale UP (FIT_MAX=1). Wide diagrams shrink to fit;
+    // narrow (vertical) diagrams stay at 1:1.
+    const fit = Math.max(SCALE_MIN, Math.min(FIT_MAX, w / size.width));
+    // [FIX] contentHeight must be the *actually rendered* height
+    // (= naturalH * scale), NOT the aspect-ratio-projected height
+    // (= naturalH * w / naturalW). The two are equal only when the
+    // diagram actually fills the container width; for vertical
+    // charts (fit=1) the projection over-estimates by 5–8×, leaving
+    // a large empty area below the diagram.
+    setContentHeight(size.height * fit);
+    // Center horizontally: panX shifts the element right so its
+    // scaled visual center aligns with the container center.
+    const panX = (w - size.width * fit) / 2;
+    pz.zoom(fit, { animate: false, force: true });
+    pz.pan(panX, 0, { animate: false, force: true });
+    setCurrentScale(pz.getScale());
   };
 
   const zoomIn = () => {
@@ -179,11 +222,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     pz.zoom(clampScale(pz.getScale() / SCALE_STEP), { animate: false });
   };
   const resetZoom = () => {
-    const pz = panzoomRef.current;
-    const fit = computeFitScale();
-    if (!pz || fit == null) return;
-    pz.zoom(fit, { animate: false, force: true });
-    pz.pan(0, 0, { animate: false, force: true });
+    applyFit();
   };
 
   // Debounced mermaid render
@@ -233,60 +272,63 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     const svg = target.querySelector("svg") as SVGSVGElement | null;
     if (!svg) return;
 
-    // Remove max-width constraint that mermaid injects (e.g. style="max-width: 1235px")
-    svg.style.maxWidth = "none";
-    // Block layout eliminates inline vertical-align gaps
-    svg.style.display = "block";
-
-    // Read natural size from viewBox (mermaid SVGs typically don't have width/height attrs)
-    const vb = (svg.getAttribute("viewBox") || "").split(/\s+/).map(Number);
-    let naturalW: number;
-    let naturalH: number;
-    if (vb.length === 4 && vb.every(Number.isFinite)) {
-      naturalW = vb[2];
-      naturalH = vb[3];
-      // Set explicit dimensions so the SVG has a well-defined layout box
-      svg.setAttribute("width", String(naturalW));
-      svg.setAttribute("height", String(naturalH));
-    } else {
+    // [FIX] Read the SVG's *rendered* pixel size (what mermaid itself
+    // produces when useMaxWidth: true), not the viewBox. viewBox width
+    // is the logical minimum column width — for a vertical flowchart
+    // (e.g. 100×800) using viewBox.width as the "natural width" makes
+    // the fit-scale formula amplify the diagram 5–8×. The rendered
+    // size is what the user actually sees and what mermaid's own
+    // fit-to-container logic uses internally.
+    const rect = svg.getBoundingClientRect();
+    let naturalW = rect.width;
+    let naturalH = rect.height;
+    if (!Number.isFinite(naturalW) || !Number.isFinite(naturalH) || naturalW <= 0 || naturalH <= 0) {
+      // Fallback: parse width/height attrs (some mermaid versions)
       naturalW = parseFloat(svg.getAttribute("width") || "");
       naturalH = parseFloat(svg.getAttribute("height") || "");
       if (!Number.isFinite(naturalW) || !Number.isFinite(naturalH)) return;
     }
 
-    // Make the panzoom target div match the SVG's natural size.
-    // Without this, the div is constrained by the content area width (~600px),
-    // but the SVG is 1235px wide — the SVG overflows and positioning breaks.
+    // Block layout eliminates inline vertical-align gaps
+    svg.style.display = "block";
+
+    // Make the panzoom target div match the SVG's rendered size so
+    // positioning math inside panzoom is correct.
     target.style.width = `${naturalW}px`;
 
     svgNaturalSizeRef.current = { width: naturalW, height: naturalH };
     const containerW = wrap.clientWidth;
     containerWidthRef.current = containerW;
 
-    // Set content area height to maintain aspect ratio at current container width
-    const h = (naturalH / naturalW) * containerW;
-    setContentHeight(h);
+    // Compute fit and centering offset BEFORE creating Panzoom, then
+    // pass them as startScale / startX so the constructor's internal
+    // rAF writes the correct CSS transform from the very first frame.
+    // This avoids the rAF race in setTransformWithEvent (L155) that
+    // occurs when zoom()/pan() are called separately — the rAFs from
+    // those calls may land in different frames, causing a flash of
+    // left-aligned content before the centering panX takes effect.
+    const fit = Math.max(SCALE_MIN, Math.min(FIT_MAX, containerW / naturalW));
+    const panX = (containerW - naturalW * fit) / 2;
+    setContentHeight(naturalH * fit);
+    setCurrentScale(fit);
 
-    // Panzoom 4.x sets transform-origin to 50% 50% for non-SVG elements (DIVs),
-    // which causes the element to shift right and down when scaled.
-    // Passing origin: '0 0' keeps the top-left corner anchored.
+    // Panzoom 4.x sets transform-origin to 50% 50% for non-SVG
+    // elements (DIVs) by default. This causes scaled-down elements
+    // (fit < 1) to visually shift toward their center — the top-left
+    // corner moves right and down, which looks like "bottom-right
+    // alignment". We use origin: '0 0' so the top-left corner stays
+    // fixed; centering is handled manually via startX (panX).
     const pz = Panzoom(target, {
       animate: false,
       cursor: "grab",
       maxScale: SCALE_MAX,
       minScale: SCALE_MIN,
-      startScale: 1,
-      startX: 0,
+      startScale: fit,
+      startX: panX,
       startY: 0,
       origin: "0 0",
     });
     panzoomRef.current = pz;
-
-    // Fit to container width before paint
-    const fit = clampScale(containerW / naturalW);
-    pz.zoom(fit, { animate: false, force: true });
-    pz.pan(0, 0, { animate: false, force: true });
-    setCurrentScale(pz.getScale());
 
     // Sync React state on pan/zoom changes
     const onPanzoomChange = (e: Event) => {
@@ -320,18 +362,13 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
     };
     contentArea.addEventListener("wheel", onWheel, { passive: false });
 
-    // Resize observer: update container width and re-zoom
+    // Resize observer: update container width and re-fit. Same path as
+    // initial layout and reset button — keeps diagram + container
+    // height consistent across all re-fit triggers.
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const newW = entry.contentRect.width;
-        containerWidthRef.current = newW;
-        // Re-zoom to fit + update content area height
-        const newFit = clampScale(newW / naturalW);
-        const newH = (naturalH / naturalW) * newW;
-        setContentHeight(newH);
-        pz.zoom(newFit, { animate: false, force: true });
-        pz.pan(0, 0, { animate: false, force: true });
-        setCurrentScale(pz.getScale());
+        containerWidthRef.current = entry.contentRect.width;
+        applyFit();
       }
     });
     ro.observe(wrap);
