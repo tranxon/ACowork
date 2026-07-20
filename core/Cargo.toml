@@ -90,7 +90,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Token counting
-tiktoken-rs = "0.6"
+tiktoken-rs = "0.12"
 
 # ZIP
 zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] }
@@ -99,10 +99,10 @@ zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] 
 base64 = "0.22"
 
 # Document parsing
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 calamine = "0.26"
 quick-xml = "0.37"
-lopdf = "0.38"
+lopdf = "0.44"
 
 # Concurrency primitives
 parking_lot = "0.12"
@@ -114,7 +114,7 @@ futures-util = "0.3"
 # Stream
 futures-core = "0.3"
 tokio-stream = "0.1"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 
 # Regex
 regex = "1.0"
@@ -149,15 +149,26 @@ dialoguer = "0.11"
 wasmtime = "29"
 wasmtime-wasi = "29"
 
-# gRPC
-tonic = "0.12"
+# Protobuf encoding for the MQTT payload wire format (ADR-033).
+#
+# `prost` is used at runtime (via `prost::Message::encode_to_vec` / `decode`) for
+# every PUBLISH payload exchanged over the local MQTT bus. `prost-build` is a
+# build-time dependency that compiles `mqtt_payload.proto` from `OUT_DIR`; it
+# runs from `core/acowork-core/build.rs`.
+#
+# `protoc-bin-vendored` is the protoc binary we ship on each platform, so
+# contributors and CI don't need a system-installed protoc.
+#
+# Note: the previous `tonic` / `tonic-build` entries lived here for the legacy
+# gRPC Gateway IPC. That protocol has been fully superseded by MQTT (ADR-033 +
+# ADR-034 Phase 6), so `tonic` and `tonic-build` are now removed from this
+# workspace.
 prost = "0.13"
 prost-build = "0.13"
-tonic-build = "0.12"
 protoc-bin-vendored = "3"
 
 # MQTT (ADR-033)
-rumqttc = "0.24"
+rumqttc = "0.25"
 rumqttd = { version = "0.20", default-features = false }
 
 # ONNX Runtime — static or dynamic linking.
@@ -178,7 +189,7 @@ rumqttd = { version = "0.20", default-features = false }
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "api-22"] }
 
 # Tokenizer (HuggingFace)
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # Signal handling (graceful shutdown)
 signal-hook = "0.3"

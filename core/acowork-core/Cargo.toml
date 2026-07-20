@@ -20,14 +20,12 @@ toml.workspace = true
 grafeo-common.workspace = true
 directories.workspace = true
 prost.workspace = true
-tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "sync", "process", "time"] }
 signal-hook.workspace = true
 
 [build-dependencies]
-tonic-build.workspace = true
 prost-build = { workspace = true }
 protoc-bin-vendored.workspace = true
 

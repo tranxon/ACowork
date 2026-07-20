@@ -23,7 +23,7 @@ acowork-core.workspace = true
 acowork-memory.workspace = true
 
 # ADR-039 Phase 2: shared MQTT session lifecycle
-acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-24"] }
+acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
 acowork-grafeo.workspace = true
 acowork-mcp.workspace = true
 grafeo-common.workspace = true
@@ -45,7 +45,7 @@ regex.workspace = true
 rusqlite.workspace = true
 futures = "0.3"
 futures-core.workspace = true
-futures-util = "0.3"
+futures-util = { workspace = true }
 tokio-stream.workspace = true
 rand.workspace = true
 sha2.workspace = true
@@ -57,7 +57,6 @@ quick-xml.workspace = true
 lopdf.workspace = true
 toml.workspace = true
 serde_yaml.workspace = true
-tonic.workspace = true
 prost.workspace = true
 rumqttc.workspace = true
 axum.workspace = true

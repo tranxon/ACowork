@@ -2,17 +2,10 @@
 //!
 //! This crate contains all types shared across the ACowork workspace:
 //! - Manifest structures (`.agent` package format)
-//! - Protocol messages (Gateway Service API)
+//! - Protocol messages (MQTT payload types, JSON DTOs)
 //! - Tool and Provider traits
 //! - Permission, Identity, Budget types
 //! - Unified error types
-
-pub mod proto_bridge;
-pub mod proto {
-    #![allow(clippy::large_enum_variant)]
-    #![allow(clippy::result_large_err)]
-    tonic::include_proto!("acowork.gateway.v1");
-}
 
 pub mod mqtt_proto {
     #![allow(clippy::large_enum_variant)]

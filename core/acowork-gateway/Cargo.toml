@@ -51,7 +51,6 @@ rand.workspace = true
 fs2 = "0.4"
 libc.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
-tonic.workspace = true
 rumqttc.workspace = true
 rumqttd.workspace = true
 prost.workspace = true
