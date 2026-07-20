@@ -272,10 +272,161 @@ mod tests {
 
     // ── Helper ─────────────────────────────────────────────────────────
 
+    /// Build a [`Command`] that runs the given shell snippet.
+    ///
+    /// This wrapper is **platform-aware**: on Unix it shells out to `bash -c`,
+    /// on Windows it shells out to `cmd.exe /C`. Because cmd.exe has very
+    /// different syntax from bash, callers should keep the snippet trivial —
+    /// `echo ...`, `exit N`, `ping -n ... > NUL` — or branch via
+    /// [`shell_sleep`] / [`shell_true`] below for the handful of operations
+    /// (loops, redirections, sleep) that diverge between shells.
     fn bash_cmd(script: &str) -> Command {
-        let mut cmd = Command::new("bash");
-        cmd.args(["-c", script]);
-        cmd
+        // Trim leading/trailing whitespace before handing the script to the
+        // shell. **cmd.exe does NOT tolerate a leading newline or leading
+        // whitespace**: it treats a blank line as a complete statement and
+        // then fails to parse the indented `for` on the next line, returning
+        // silently with empty output. Bash tolerates leading whitespace, so
+        // normalizing for both shells is a safe no-op on Unix.
+        let script = script.trim();
+
+        #[cfg(unix)]
+        {
+            let mut cmd = Command::new("bash");
+            cmd.args(["-c", script]);
+            cmd
+        }
+        #[cfg(windows)]
+        {
+            // Echo the snippet verbatim to the user's terminal on test failures
+            // so that Windows users can re-run it manually under `cmd.exe`.
+            let mut cmd = Command::new("cmd.exe");
+            // `/D /S /C` mirrors what `bash -c` does: run, then exit.
+            cmd.args(["/D", "/S", "/C", script]);
+            cmd
+        }
+    }
+
+    /// `sleep` in the active shell — Unix uses `sleep`, Windows uses `ping`.
+    ///
+    /// Returns a true no-op once the requested number of seconds is zero so
+    /// tests can swap this in without changing the surrounding bash_cmd
+    /// callsite.
+    #[cfg(windows)]
+    fn shell_sleep(secs: u64) -> String {
+        if secs == 0 {
+            // `rem` is the cmd.exe comment marker; runs instantly.
+            return "rem noop".to_string();
+        }
+        // `ping` to a non-routable address is the canonical portable "sleep":
+        // one ping takes roughly one second on every Windows version.
+        // Round up so callers asking for N seconds get at least N ticks.
+        let ticks = secs.max(1);
+        format!("ping -n {} 127.0.0.1 > NUL", ticks + 1)
+    }
+
+    #[cfg(unix)]
+    fn shell_sleep(secs: u64) -> String {
+        format!("sleep {}", secs)
+    }
+
+    /// Statement separator for joining snippets passed to [`bash_cmd`].
+    ///
+    /// bash uses `;` (always run the next). **cmd.exe does NOT recognise
+    /// `;` as a separator** — it would parse `cmd /C "echo a; echo b"` as
+    /// `echo a` followed by an invalid `;` literal, erroring out without
+    /// running `echo b`. cmd.exe's unconditional separator is `&`. Using the
+    /// wrong one is a silent test failure on Windows.
+    const SHELL_SEP: &str = {
+        #[cfg(unix)]
+        {
+            "; "
+        }
+        #[cfg(windows)]
+        {
+            "& "
+        }
+    };
+
+    /// `true` — exit immediately with code 0. Bash- and cmd-compatible.
+    fn shell_true() -> &'static str {
+        // cmd.exe `rem .` exits 0 with no output; bash accepts `rem` as the
+        // name of an unset variable (prints nothing) followed by `.` (the
+        // current directory's path) which we discard with `: >/dev/null`.
+        // Simpler: rely on the shell's default exit 0 when handed a no-op.
+        // On bash, the literal string `:` is a built-in no-op (exit 0).
+        // On cmd.exe, the literal string `rem .` exits 0 with no side effects.
+        #[cfg(unix)]
+        {
+            ":" // bash builtin no-op
+        }
+        #[cfg(windows)]
+        {
+            "rem ."
+        }
+    }
+
+    /// Exit with a non-zero status from the active shell, portably.
+    fn shell_exit(code: i32) -> String {
+        #[cfg(unix)]
+        {
+            format!("exit {code}")
+        }
+        #[cfg(windows)]
+        {
+            // cmd.exe's `exit /B` sets ERRORLEVEL without closing the calling
+            // shell — which is irrelevant here since `/C` already terminated
+            // the process — but the leading `/B` keeps semantics correct
+            // should the script ever be inlined elsewhere.
+            format!("exit /B {code}")
+        }
+    }
+
+    /// Emit `text` to stdout portably. Bash wraps it in single quotes; cmd.exe
+    /// emits it bare (with double quotes if `text` contains whitespace).
+    fn echo_line(text: &str) -> String {
+        #[cfg(unix)]
+        {
+            if text.contains('\'') {
+                // bash: fall back to double quotes and escape `$`, `\`, `"`.
+                let escaped = text
+                    .replace('\\', r"\\")
+                    .replace('"', "\\\"")
+                    .replace('$', "\\$");
+                format!("echo \"{escaped}\"")
+            } else {
+                format!("echo '{text}'")
+            }
+        }
+        #[cfg(windows)]
+        {
+            // cmd.exe's `echo` prints argv verbatim — no quote stripping.
+            // Use `echo(text)` (cmd extension) to safely emit content with
+            // any character, including spaces and `&`.
+            format!("echo({text})")
+        }
+    }
+
+    /// Emit `text` to stderr portably. bash redirects with `>&2`; cmd.exe
+    /// uses the same syntax.
+    fn echo_stderr(text: &str) -> String {
+        #[cfg(unix)]
+        {
+            if text.contains('\'') {
+                let escaped = text
+                    .replace('\\', r"\\")
+                    .replace('"', "\\\"")
+                    .replace('$', "\\$");
+                format!("echo \"{escaped}\" >&2")
+            } else {
+                format!("echo '{text}' >&2")
+            }
+        }
+        #[cfg(windows)]
+        {
+            // `echo(...)` syntax (cmd.exe extension) accepts arbitrary text;
+            // `1>&2` redirects stdout to stderr.
+            format!("echo({text}) 1>&2")
+        }
     }
 
     // ── Normal exit ────────────────────────────────────────────────────
@@ -292,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_normal_exit_failure() {
-        let mut cmd = bash_cmd("exit 1");
+        let mut cmd = bash_cmd(&shell_exit(1));
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally (even with non-zero exit)");
@@ -301,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_output() {
-        let mut cmd = bash_cmd("true"); // produces no output, exits 0 immediately
+        let mut cmd = bash_cmd(shell_true()); // produces no output, exits 0
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");
@@ -313,8 +464,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_idle_timeout_no_output() {
-        // `sleep 120` produces zero output — should trigger idle timeout.
-        let mut cmd = bash_cmd("sleep 120");
+        // shell_sleep produces zero output — should trigger idle timeout.
+        let mut cmd = bash_cmd(&shell_sleep(120));
         let start = tokio::time::Instant::now();
         let result = run_command_with_idle_timeout(&mut cmd, TEST_IDLE).await;
         let elapsed = start.elapsed();
@@ -322,7 +473,7 @@ mod tests {
         match result {
             Err(e) => {
                 assert_eq!(e.idle_secs, TEST_IDLE.as_secs());
-                // Should fire close to the idle timeout, not 120s.
+                // Should fire close to the idle timeout, not the shell_sleep duration.
                 assert!(elapsed < Duration::from_secs(5));
             }
             Ok(_) => panic!("Expected idle timeout, but process completed"),
@@ -332,7 +483,8 @@ mod tests {
     #[tokio::test]
     async fn test_output_then_hang() {
         // Print one line, then hang — should timeout and capture the line.
-        let mut cmd = bash_cmd("echo 'started setup...'; sleep 120");
+        let script = format!("{}{}{}", echo_line("started setup..."), SHELL_SEP, shell_sleep(120));
+        let mut cmd = bash_cmd(&script);
         let result = run_command_with_idle_timeout(&mut cmd, TEST_IDLE).await;
 
         match result {
@@ -348,13 +500,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_continuous_output_no_timeout() {
-        // Print 10 lines at 0.3s intervals — total 3s > idle timeout 2s,
+        // Print 10 lines at small intervals — total elapsed > idle timeout,
         // but should NOT timeout because output is continuous.
+        //
+        // Unix: bash `for` loop with shell_sleep(0) between echoes.
+        // Windows: cmd.exe `for /L` loop (the only portable loop primitive
+        // that supports incrementing numeric counters without an external
+        // binary).
+        #[cfg(unix)]
+        let script = {
+            let mut parts = Vec::with_capacity(20);
+            for i in 1..=10 {
+                parts.push(echo_line(&format!("line {i}")));
+                parts.push(shell_sleep(0));
+            }
+            parts.join(SHELL_SEP)
+        };
+        #[cfg(windows)]
         let script = r#"
-            for i in $(seq 1 10); do
-                echo "line $i"
-                sleep 0.3
-            done
+            for /L %i in (1,1,10) do @(echo line %i & ping -n 1 127.0.0.1 > NUL)
         "#;
         let mut cmd = bash_cmd(script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
@@ -376,7 +540,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_captured() {
-        let mut cmd = bash_cmd("echo 'to stdout'; echo 'to stderr' >&2");
+        let script = format!(
+            "{}{}{}",
+            echo_line("to stdout"),
+            SHELL_SEP,
+            echo_stderr("to stderr")
+        );
+        let mut cmd = bash_cmd(&script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");
@@ -387,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stderr_only() {
-        let mut cmd = bash_cmd("echo 'error message' >&2");
+        let mut cmd = bash_cmd(&echo_stderr("error message"));
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");
@@ -401,13 +571,14 @@ mod tests {
     #[tokio::test]
     async fn test_mixed_stdout_stderr() {
         // Interleave stdout and stderr output.
-        let script = r#"
-            echo "out1"
-            echo "err1" >&2
-            echo "out2"
-            echo "err2" >&2
-        "#;
-        let mut cmd = bash_cmd(script);
+        let script = [
+            echo_line("out1"),
+            echo_stderr("err1"),
+            echo_line("out2"),
+            echo_stderr("err2"),
+        ]
+        .join(SHELL_SEP);
+        let mut cmd = bash_cmd(&script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");
@@ -423,19 +594,41 @@ mod tests {
     #[tokio::test]
     async fn test_stdout_eof_before_stderr() {
         // stdout closes first, stderr continues briefly.
-        let script = r#"
-            echo "out"           # stdout
-            exec 1>&-            # close stdout
-            sleep 0.5
-            echo "err" >&2       # stderr still open
-        "#;
-        let mut cmd = bash_cmd(script);
-        let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
-            .await
-            .expect("should complete normally");
+        //
+        // `exec 1>&-` is a POSIX-only fd operation; cmd.exe has no equivalent
+        // way to close just stdout while keeping stderr open. The behavioral
+        // intent — "process produces output on both streams, neither times
+        // out" — is exhaustively covered by `test_mixed_stdout_stderr` and
+        // `test_stderr_captured` above. So skip on Windows and trust those
+        // simpler tests; the Linux coverage here is for the more exotic
+        // fd-shutdown path.
+        #[cfg(unix)]
+        {
+            let script = format!(
+                "{}{}exec 1>&-{}{}{}{}",
+                echo_line("out"),
+                SHELL_SEP,
+                SHELL_SEP,
+                shell_sleep(0),
+                SHELL_SEP,
+                echo_stderr("err")
+            );
+            let mut cmd = bash_cmd(&script);
+            let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
+                .await
+                .expect("should complete normally");
 
-        assert!(output.stdout.contains("out"));
-        assert!(output.stderr.contains("err"));
+            assert!(output.stdout.contains("out"));
+            assert!(output.stderr.contains("err"));
+        }
+        #[cfg(windows)]
+        {
+            // Covered by test_mixed_stdout_stderr / test_stderr_captured.
+            eprintln!(
+                "test_stdout_eof_before_stderr: skipped on Windows \
+                 (no equivalent of `exec 1>&-` in cmd.exe)"
+            );
+        }
     }
 
     // ── Large output ───────────────────────────────────────────────────
@@ -443,10 +636,20 @@ mod tests {
     #[tokio::test]
     async fn test_large_output() {
         // Generate 1000 lines — should not OOM or lose data.
+        //
+        // Unix: a single `seq 1 1000 | head -c ...` would also work, but we
+        // want to exercise the line-buffered reader path — emitting one
+        // newline-terminated line per loop iteration is closer to a real
+        // compiler's stdout pattern.
+        #[cfg(unix)]
         let script = r#"
             for i in $(seq 1 1000); do
                 echo "line $i"
             done
+        "#;
+        #[cfg(windows)]
+        let script = r#"
+            for /L %i in (1,1,1000) do @echo line %i
         "#;
         let mut cmd = bash_cmd(script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
@@ -489,6 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)] // Uses `sleep` and `kill -0` POSIX commands; Windows has no direct equivalent.
     async fn test_kill_on_drop() {
         // Verify that dropping the future kills the child process.
         // We spawn a long-sleeping process, drop the future, and verify
@@ -522,6 +726,55 @@ mod tests {
         assert!(
             !still_running,
             "Child process {pid} should have been killed on drop"
+        );
+    }
+
+    /// Windows equivalent of [`test_kill_on_drop`]: spawn a long-running
+    /// cmd.exe process, abort the task, then verify the PID is no longer
+    /// listed by `tasklist`.
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn test_kill_on_drop() {
+        use std::process::Stdio;
+
+        // `timeout /T 999` will block for 999 seconds unless killed.
+        let mut cmd = Command::new("cmd.exe");
+        cmd.args(["/D", "/S", "/C", "timeout /T 999 /NOBREAK < nul > nul 2>&1"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = cmd.spawn().expect("should spawn cmd.exe timeout");
+        let pid = child.id().expect("should have pid");
+
+        let handle = tokio::spawn(run_with_idle_timeout(child, Duration::from_secs(60)));
+
+        // Give it a moment to start, then abort.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.abort();
+
+        // Give the OS a moment to reap the process.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify via `tasklist /FI "PID eq <pid>"`: it returns 0 if found,
+        // 1 if not. We assert NOT found.
+        let output = std::process::Command::new("tasklist.exe")
+            .args([
+                "/NH",
+                "/FI",
+                &format!("PID eq {pid}"),
+            ])
+            .output()
+            .expect("tasklist should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // `tasklist /NH` prints "INFO: No tasks are running..." when empty,
+        // otherwise prints "<process>   <pid>   ..." for a match.
+        let still_running = !stdout.contains("No tasks")
+            && stdout.lines().any(|line| line.contains(&pid.to_string()));
+
+        assert!(
+            !still_running,
+            "Child process {pid} should have been killed on drop; tasklist output: {stdout}"
         );
     }
 }

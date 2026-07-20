@@ -496,22 +496,39 @@ mod tests {
 
     #[tokio::test]
     async fn connect_nonexistent_command_fails_cleanly() {
+        // Use a name that cannot resolve on any OS — `acowork_xyz_definitely_not_a_real_binary`
+        // is not a command on PATH (Unix) and has no `.exe` extension (Windows),
+        // so spawn will always fail with either "program not found" (Unix) or
+        // "MCP server closed stdout" (Windows after the wrapper exits 1).
         let config = McpServerConfig {
             name: "nonexistent".to_string(),
-            command: "/usr/bin/this_binary_does_not_exist_acowork_test".to_string(),
+            command: "acowork_xyz_definitely_not_a_real_binary".to_string(),
             ..Default::default()
         };
         let result = McpClient::connect(config).await;
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("failed to create transport"), "got: {msg}");
+        // The exact text differs across platforms — Unix says
+        // "failed to create transport" (a std::io::Error description), while
+        // Windows surfaces the process spawn error from the MCP stdio wrapper.
+        // Accept any of the known error shapes rather than over-specifying.
+        let accepted = [
+            "failed to create transport",
+            "MCP server closed stdout",
+            "program not found",
+            "No such file",
+        ];
+        assert!(
+            accepted.iter().any(|needle| msg.contains(needle)),
+            "expected a known spawn-failure message; got: {msg}"
+        );
     }
 
     #[tokio::test]
     async fn connect_all_nonfatal_on_single_failure() {
         let configs = vec![McpServerConfig {
             name: "bad".to_string(),
-            command: "/usr/bin/does_not_exist_rb_test".to_string(),
+            command: "acowork_xyz_definitely_not_a_real_binary".to_string(),
             ..Default::default()
         }];
         let (registry, failures) = McpRegistry::connect_all(&configs)
@@ -521,10 +538,17 @@ mod tests {
         assert_eq!(registry.tool_count(), 0);
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].server_name, "bad");
+        // Same cross-platform tolerance as the sibling test above.
+        let msg = &failures[0].error_message;
+        let accepted = [
+            "failed to create transport",
+            "MCP server closed stdout",
+            "program not found",
+            "No such file",
+        ];
         assert!(
-            failures[0]
-                .error_message
-                .contains("failed to create transport")
+            accepted.iter().any(|needle| msg.contains(needle)),
+            "expected a known spawn-failure message; got: {msg}"
         );
     }
 

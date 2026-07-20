@@ -107,11 +107,16 @@ mod tests {
         let b2 = policy.backoff(ErrClass::Transient, 2).unwrap().duration;
         // Without jitter the growth is 500ms, 1000ms, 2000ms.
         // With ±20% jitter the trend should still be increasing.
-        // Check that b2 > b0 in the vast majority of cases.
-        // (Jitter could cause edge cases but the gap is 4x so it holds.)
+        // Check that b1 > b0 AND b2 > b1 in the vast majority of cases.
+        // (Jitter could cause edge cases but the gap is 4x end-to-end and 2x
+        // per step so the monotonic trend holds.)
         assert!(
-            b2 > b0,
-            "backoff should grow: b0={b0:?} b2={b2:?}"
+            b1 > b0,
+            "backoff should grow between attempts 0 and 1: b0={b0:?} b1={b1:?}"
+        );
+        assert!(
+            b2 > b1,
+            "backoff should grow between attempts 1 and 2: b1={b1:?} b2={b2:?}"
         );
     }
 
