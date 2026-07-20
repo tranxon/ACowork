@@ -17,7 +17,6 @@ apps/acowork-desktop/src-tauri/gen/
 .vscode/
 .qoder/
 .idea/
-tests/
 *.swp
 *.swo
 *~
