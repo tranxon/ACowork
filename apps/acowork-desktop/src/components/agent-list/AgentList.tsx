@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useMemo } from "react";
 import { useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
@@ -13,7 +14,7 @@ import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { CloneResponse } from "../../lib/types";
+import { isSessionActive, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 
 interface AgentListProps {
@@ -23,9 +24,36 @@ interface AgentListProps {
 export function AgentList({ width }: AgentListProps) {
   const { t } = useTranslation();
   const isCollapsed = width !== undefined && width <= 80;
-  const { selectedAgentId, loading, fetchAgents, selectAgent, stopAgent, uninstallAgent, restartAgentInDebug } =
+  const { selectedAgentId, loading, fetchAgents, selectAgent, stopAgent, uninstallAgent, restartAgentInDebug, fetchLatestSession } =
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
+
+  // ADR-014 derived view for the sidebar status dot — an agent shows the
+  // dot when *any* of its cached sessions is not in `idle` (i.e. streaming,
+  // waiting_approval, or paused). This is the IM-style "needs attention"
+  // semantic: dot disappears when everything is idle, regardless of whether
+  // the agent process itself is running.
+  //
+  // Source: `chatStore.agentStates[aid].sessionStates[sid].sessionStatus`,
+  // kept up-to-date by `fetchSessions`'s ADR-014 Pull repair and by MQTT
+  // `session_status_changed` events. Agents that have never been opened
+  // have an empty sessionStates map — they show no dot until the user
+  // opens them, which is the correct IM semantic (red dot = something
+  // the user can act on).
+  const sessionStatesByAgent = useChatStore((s) => s.agentStates);
+  const activeAgentIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const [agentId, agentState] of Object.entries(sessionStatesByAgent)) {
+      const sessionStates = agentState.sessionStates ?? {};
+      for (const sess of Object.values(sessionStates)) {
+        if (isSessionActive(sess.sessionStatus)) {
+          ids.add(agentId);
+          break;
+        }
+      }
+    }
+    return ids;
+  }, [sessionStatesByAgent]);
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
@@ -73,6 +101,42 @@ export function AgentList({ width }: AgentListProps) {
     const interval = setInterval(fetchAgents, 30_000);
     return () => clearInterval(interval);
   }, [fetchAgents]);
+
+  // Ensure every ready agent's latest session title is loaded so the
+  // sidebar shows it without requiring the user to click the agent.
+  //
+  // Two scenarios produce a stuck "skeleton" placeholder otherwise:
+  //   1. System Agent (and other auto-started agents) whose lifecycle
+  //      never goes through `startAgentAndSyncUI` → `initSessionForAgent`,
+  //      so `sessionTitle` is never populated.
+  //   2. Agents whose startup scan outlasts the 10-retry budget inside
+  //      `initSessionForAgent`. The skeleton would otherwise persist until
+  //      the user happens to click the agent.
+  //
+  // We key the effect on the *set* of agents that still need a fetch
+  // (running && ready && sessionTitle === undefined), so unrelated store
+  // churn (sessions list updates, profile edits, MQTT online flips) does
+  // not re-fire the requests.
+  const agentsNeedingTitle = useMemo(() => {
+    const ids: string[] = [];
+    for (const [id, storage] of Object.entries(agentsMap)) {
+      if (
+        storage.meta.running &&
+        storage.meta.ready &&
+        storage.sessionTitle === undefined
+      ) {
+        ids.push(id);
+      }
+    }
+    return ids;
+  }, [agentsMap]);
+
+  useEffect(() => {
+    if (agentsNeedingTitle.length === 0) return;
+    for (const id of agentsNeedingTitle) {
+      void fetchLatestSession(id);
+    }
+  }, [agentsNeedingTitle, fetchLatestSession]);
 
   // Close context menu and add menu on click outside
   useEffect(() => {
@@ -295,15 +359,21 @@ export function AgentList({ width }: AgentListProps) {
                     size={40}
                     className={isCollapsed ? "mx-auto" : ""}
                   />
-                  {/* Online status indicator dot */}
-                  {agent.running && (
-                    <span
-                      className={cn(
-                        "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white dark:border-zinc-900",
-                        agentsMap[agent.agent_id]?.online !== false ? "bg-green-500" : "bg-zinc-400"
-                      )}
-                    />
-                  )}
+                  {/* IM-style "needs attention" indicator dot — solid accent color,
+                      * borderless. Shown when the agent is running AND has at
+                      * least one session in a non-idle status (streaming /
+                      * waiting_approval / paused), per ADR-014. Disappears
+                      * once every session returns to idle. Offline agents
+                      * (online === false) show no dot. */}
+                  {agent.running &&
+                    activeAgentIds.has(agent.agent_id) &&
+                    agentsMap[agent.agent_id]?.online !== false && (
+                      <span
+                        className={cn(
+                          "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]"
+                        )}
+                      />
+                    )}
                 </div>
               </Tooltip>
 
