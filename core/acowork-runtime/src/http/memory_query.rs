@@ -632,6 +632,80 @@ pub(crate) fn delete_node(
     }
 }
 
+/// Create a new memory node with the given label and property map.
+///
+/// Returns the new `node_id`. Returns `Err(Error::Memory("no store"))` when
+/// the store is not yet initialised — the HTTP layer maps that to a 503.
+pub(crate) fn create_node(
+    memory_store: Option<&Arc<GrafeoStore>>,
+    label: &str,
+    properties: &HashMap<String, serde_json::Value>,
+) -> crate::error::Result<u64> {
+    let store = memory_store.ok_or_else(|| {
+        crate::error::RuntimeError::Memory("memory store unavailable".into())
+    })?;
+    let props = properties.iter().map(|(k, v)| {
+        (k.as_str(), json_to_grafeo_value(v))
+    });
+    let id = store.store_node(label, props)?;
+    Ok(id.0)
+}
+
+/// Update (merge) properties on an existing memory node.
+///
+/// Returns `Err(RuntimeError::Memory("not found"))` if the node does not exist so
+/// the HTTP layer can map it to a 404.
+pub(crate) fn update_node(
+    memory_store: Option<&Arc<GrafeoStore>>,
+    node_id: u64,
+    properties: &HashMap<String, serde_json::Value>,
+) -> crate::error::Result<()> {
+    let store = memory_store.ok_or_else(|| {
+        crate::error::RuntimeError::Memory("memory store unavailable".into())
+    })?;
+    let id = grafeo_common::types::NodeId(node_id);
+    if store.get_node(id).is_none() {
+        return Err(crate::error::RuntimeError::Memory(format!("node {} not found", node_id)));
+    }
+    let props = properties.iter().map(|(k, v)| {
+        (k.as_str(), json_to_grafeo_value(v))
+    });
+    store.update_node(id, props)?;
+    Ok(())
+}
+
+/// Convert a `serde_json::Value` into the `grafeo_common::types::Value`
+/// representation Grafeo expects for property writes.
+///
+/// The graph store accepts a fixed set of primitive types; we map the
+/// common JSON shapes and fall back to `Value::String` (the JSON
+/// debug-rendering) for anything exotic so the operation never silently
+/// drops data.
+fn json_to_grafeo_value(v: &serde_json::Value) -> grafeo_common::types::Value {
+    use grafeo_common::types::Value;
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float64(f)
+            } else {
+                // Unsigned integers larger than i64::MAX, or other
+                // non-f64 / non-i64 numbers — fall back to the JSON
+                // string form so no data is silently lost.
+                Value::String(n.to_string().into())
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone().into()),
+        // Arrays / objects fall back to their JSON string form; the
+        // graph store stores scalars only, and serde_json::to_string is
+        // cheap and deterministic.
+        other => Value::String(other.to_string().into()),
+    }
+}
+
 /// Trigger offline memory consolidation.
 ///
 /// `force = true` short-circuits the `min_pending_age_hours` guard so
@@ -803,5 +877,142 @@ mod tests {
         assert_eq!(out.total_nodes, 0);
         assert_eq!(out.model_dim, 384);
         assert_eq!(out.index_health, "healthy");
+    }
+
+    #[test]
+    fn create_node_reports_unavailable_without_store() {
+        let props = HashMap::from([("name".to_string(), serde_json::json!("alpha"))]);
+        let err = create_node(None, "Knowledge", &props).unwrap_err();
+        assert!(
+            err.to_string().contains("memory store unavailable"),
+            "expected unavailable error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn create_node_round_trips_through_real_store() {
+        let store = Arc::new(make_store());
+        let props = HashMap::from([
+            (
+                "name".to_string(),
+                serde_json::Value::String("test-node".into()),
+            ),
+            ("count".to_string(), serde_json::json!(42)),
+        ]);
+        let id = create_node(Some(&store), "Knowledge", &props).expect("create_node");
+        // `id` is a freshly-allocated `u64` from the in-memory store; we
+        // assert it is a valid `NodeId` rather than the invalid sentinel.
+        let node_id = grafeo_common::types::NodeId(id);
+        assert!(
+            node_id.is_valid(),
+            "freshly-created node id must not be the invalid sentinel (got {})",
+            id
+        );
+
+        // Re-fetch via `get_node` to confirm the properties were persisted.
+        let out = get_node(Some(&store), id);
+        assert!(out.found, "freshly created node should be findable");
+        assert_eq!(out.node_type, "Knowledge");
+        // Properties should round-trip via the JSON wrapper.
+        let v = get_output_to_json(&out);
+        assert!(
+            v["properties"].get("name").is_some(),
+            "name property should be present, got: {}",
+            v["properties"]
+        );
+        assert!(
+            v["properties"].get("count").is_some(),
+            "count property should be present, got: {}",
+            v["properties"]
+        );
+    }
+
+    #[test]
+    fn update_node_reports_unavailable_without_store() {
+        let props = HashMap::from([("x".to_string(), serde_json::json!(1))]);
+        let err = update_node(None, 1, &props).unwrap_err();
+        assert!(err.to_string().contains("memory store unavailable"));
+    }
+
+    #[test]
+    fn update_node_reports_not_found_for_missing_id() {
+        let store = Arc::new(make_store());
+        let props = HashMap::from([("x".to_string(), serde_json::json!(1))]);
+        let err = update_node(Some(&store), 9_999_999, &props).unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "expected not-found error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn update_node_merges_existing_properties() {
+        let store = Arc::new(make_store());
+        let initial = HashMap::from([
+            ("a".to_string(), serde_json::json!("one")),
+            ("b".to_string(), serde_json::json!(2)),
+        ]);
+        let id = create_node(Some(&store), "Knowledge", &initial).expect("create_node");
+
+        // Update should overwrite `a` and leave `b` untouched (merge semantics).
+        let patch = HashMap::from([("a".to_string(), serde_json::json!("TWO"))]);
+        update_node(Some(&store), id, &patch).expect("update_node");
+
+        let out = get_node(Some(&store), id);
+        assert!(out.found);
+        let v = get_output_to_json(&out);
+        // Properties are persisted as grafeo_common::Value, whose serde
+        // shape is internally-tagged (`{"String": "TWO"}`). We only
+        // assert the **keys** are present — the value shape is exercised
+        // by the `json_to_grafeo_value_maps_all_primitives` test above.
+        assert!(
+            v["properties"].get("a").is_some(),
+            "patched key 'a' must remain after update"
+        );
+        assert!(
+            v["properties"].get("b").is_some(),
+            "untouched key 'b' must survive a merge update"
+        );
+    }
+
+    #[test]
+    fn json_to_grafeo_value_maps_all_primitives() {
+        use grafeo_common::types::Value;
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::Value::Null),
+            Value::Null
+        );
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::json!(true)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::json!(42)),
+            Value::Int64(42)
+        );
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::json!(-7)),
+            Value::Int64(-7)
+        );
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::json!(1.25)),
+            Value::Float64(1.25)
+        );
+        assert_eq!(
+            json_to_grafeo_value(&serde_json::json!("hello")),
+            Value::String("hello".into())
+        );
+        // Arrays / objects fall back to the JSON string form.
+        if let Value::String(s) =
+            json_to_grafeo_value(&serde_json::json!([1, 2, 3]))
+        {
+            assert!(s.contains("1"));
+            assert!(s.contains("2"));
+            assert!(s.contains("3"));
+        } else {
+            panic!("array should fall back to Value::String");
+        }
     }
 }

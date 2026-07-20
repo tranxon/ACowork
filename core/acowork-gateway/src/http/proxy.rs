@@ -117,7 +117,7 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route(
             "/api/agents/{id}/memory/nodes",
-            get(proxy_memory_nodes),
+            get(proxy_memory_nodes).post(proxy_create_memory_node),
         )
         .route(
             "/api/agents/{id}/memory/stats",
@@ -125,7 +125,9 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route(
             "/api/agents/{id}/memory/nodes/{nid}",
-            delete(proxy_memory_delete_node).get(proxy_get_memory_node),
+            delete(proxy_memory_delete_node)
+                .get(proxy_get_memory_node)
+                .put(proxy_update_memory_node),
         )
         .route(
             "/api/agents/{id}/memory/consolidate",
@@ -164,6 +166,27 @@ pub fn proxy_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/workspaces/{ws_id}/prompt-file",
             put(proxy_set_prompt_file),
+        )
+        // Routes 14-15: Workspace file & dir REST resources (Gateway is
+        // transparent — forwards verbatim to the Runtime's filesystem-aware
+        // HTTP server). The path-traversal guard lives on the Runtime
+        // side via `resolve_workspace_root` + canonicalize.
+        //   GET    /workspaces/file  → JSON {content, size, mimeType, …}
+        //   POST   /workspaces/file  → create  (409 on duplicate)
+        //   PUT    /workspaces/file  → write   (404 on missing)
+        //   DELETE /workspaces/file  → remove  (404 on missing)
+        //   POST   /workspaces/dir   → create  (recursive)
+        //   DELETE /workspaces/dir   → remove  (recursive)
+        .route(
+            "/api/agents/{id}/workspaces/file",
+            get(proxy_read_workspace_file)
+                .post(proxy_create_workspace_file)
+                .put(proxy_write_workspace_file)
+                .delete(proxy_delete_workspace_file),
+        )
+        .route(
+            "/api/agents/{id}/workspaces/dir",
+            post(proxy_create_workspace_dir).delete(proxy_delete_workspace_dir),
         )
         // Routes 11-13: Agent config / tools / status
         .route(
@@ -309,6 +332,53 @@ async fn proxy_memory_delete_node(
     .await
 }
 
+/// Reverse-proxy `POST /api/agents/{id}/memory/nodes` to Runtime's `POST /memory/nodes`.
+///
+/// Forwards the JSON body verbatim so the Runtime's ADR-040 usecase
+/// adapter sees exactly what the Desktop sent (label + flat property map).
+/// No validation here — that lives in the Runtime (which returns 4xx on
+/// bad input via the standard handler signature).
+async fn proxy_create_memory_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/memory/nodes",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/memory/nodes/{nid}`
+/// to Runtime's `PUT /memory/nodes/{nid}`.
+async fn proxy_update_memory_node(
+    State(state): State<AppState>,
+    Path((id, nid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/memory/nodes/{}", nid);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Reverse-proxy `POST /api/agents/{id}/memory/consolidate` to Runtime's `POST /memory/consolidate`.
 ///
 /// Forwards the inbound request body verbatim so the Desktop's `force` /
@@ -431,6 +501,153 @@ async fn proxy_delete_workspace(
 ) -> Response {
     let path = format!("/workspaces/{}", ws_id);
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None, &headers).await
+}
+
+// ── Workspace file & dir REST proxy (Gateway is transparent; see ADR-034 §11.2) ─
+//
+// Six small handlers that mirror the Runtime's `/workspaces/file` and
+// `/workspaces/dir` resources. The Gateway does **not** validate path,
+// body, or path-traversal concerns here — that is the Runtime's
+// responsibility via `resolve_workspace_root` and canonicalize-then-
+// `starts_with` check. The Gateway only:
+//
+//   1. Resolves the agent's Runtime HTTP port via `SharedRuntimeHttpRegistry`.
+//   2. Forwards the verbatim body (POST/PUT/DELETE) or querystring (GET).
+//   3. Surfaces Runtime-side status codes (200/404/409/500) directly to
+//      the desktop so the panel can render granular error states.
+
+/// Reverse-proxy `GET /api/agents/{id}/workspaces/file?path=…` →
+/// Runtime's `GET /workspaces/file`. Returns JSON
+/// `{content,size,mimeType,path,modified,is_file,is_dir}`.
+async fn proxy_read_workspace_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/workspaces/file", &query, &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/workspaces/file` → Runtime's
+/// `POST /workspaces/file`. The desktop puts `workspace_id` in the
+/// querystring and `{path, content?, overwrite?}` in the JSON body; we
+/// forward both verbatim.
+async fn proxy_create_workspace_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/file",
+        &query,
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/workspaces/file?path=…` →
+/// Runtime's `PUT /workspaces/file`. Body is `{content}` (path and
+/// workspace_id are in the querystring).
+async fn proxy_write_workspace_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/file",
+        &query,
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/workspaces/file` → Runtime's
+/// `DELETE /workspaces/file`. Body is `{path}`; `workspace_id` is in
+/// the querystring.
+async fn proxy_delete_workspace_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/file",
+        &query,
+        reqwest::Method::DELETE,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/workspaces/dir` → Runtime's
+/// `POST /workspaces/dir`. Body is `{path}`; `workspace_id` is in
+/// the querystring.
+async fn proxy_create_workspace_dir(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/dir",
+        &query,
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `DELETE /api/agents/{id}/workspaces/dir` → Runtime's
+/// `DELETE /workspaces/dir`. Body is `{path}`; `workspace_id` is in
+/// the querystring.
+async fn proxy_delete_workspace_dir(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/dir",
+        &query,
+        reqwest::Method::DELETE,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes/{nid}`

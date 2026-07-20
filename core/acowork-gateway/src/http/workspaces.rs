@@ -317,136 +317,31 @@ async fn resolve_workspace_root(
     }
 }
 
-/// `GET /api/agents/{id}/workspaces/file` — read a file's content
-pub async fn read_file(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-) -> Result<Json<FileResponse>, (StatusCode, Json<ApiError>)> {
-    let file_rel_path = query.path.as_deref().unwrap_or("");
-    if file_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("Failed to create destination directory: {}", e))?;
+
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("Failed to read source directory: {}", e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Failed to copy file: {}", e))?;
+        }
     }
 
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    // Verify it's a file
-    if !abs_path.is_file() {
-        return Err(ApiError::bad_request("Path is not a file"));
-    }
-
-    // Check file size
-    let metadata = std::fs::metadata(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Cannot read metadata: {}", e)))?;
-    if metadata.len() > MAX_FILE_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ApiError {
-                error: format!(
-                    "File too large ({} bytes, max {} bytes)",
-                    metadata.len(),
-                    MAX_FILE_SIZE
-                ),
-                code: 413,
-            }),
-        ));
-    }
-
-    // Detect MIME type
-    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let mime_type = detect_mime(ext).unwrap_or("text/plain").to_string();
-
-    // Read content: binary files (images, etc.) are base64-encoded;
-    // text files are read as UTF-8 strings.
-    let content = if mime_type.starts_with("image/") {
-        let abs_path_clone = abs_path.clone();
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(&abs_path_clone))
-            .await
-            .map_err(|e| ApiError::internal(&format!("Join error: {}", e)))?
-            .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.encode(&bytes)
-    } else {
-        let abs_path_clone = abs_path.clone();
-        tokio::task::spawn_blocking(move || std::fs::read_to_string(&abs_path_clone))
-            .await
-            .map_err(|e| ApiError::internal(&format!("Join error: {}", e)))?
-            .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?
-    };
-
-    Ok(Json(FileResponse {
-        content,
-        size: metadata.len(),
-        mime_type,
-    }))
+    Ok(())
 }
 
-/// `GET /api/agents/{id}/workspaces/file-raw` — read a file's raw bytes
-///
-/// Returns the file content directly (not wrapped in JSON) with the correct
-/// Content-Type header. This is used for iframe src URLs (HTML preview, etc.)
-/// where a proper HTTP origin is required for scripts to load without CORS issues.
-pub async fn read_raw_file(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-) -> Result<(StatusCode, [(String, String); 1], axum::body::Body), (StatusCode, Json<ApiError>)> {
-    let file_rel_path = query.path.as_deref().unwrap_or("");
-    if file_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    if !abs_path.is_file() {
-        return Err(ApiError::bad_request("Path is not a file"));
-    }
-
-    let metadata = std::fs::metadata(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Cannot read metadata: {}", e)))?;
-    if metadata.len() > MAX_FILE_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ApiError {
-                error: format!(
-                    "File too large ({} bytes, max {} bytes)",
-                    metadata.len(),
-                    MAX_FILE_SIZE
-                ),
-                code: 413,
-            }),
-        ));
-    }
-
-    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let mime_type = detect_mime(ext).unwrap_or("text/plain").to_string();
-
-    let abs_path_clone = abs_path.clone();
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&abs_path_clone))
-        .await
-        .map_err(|e| ApiError::internal(&format!("Join error: {}", e)))?
-        .map_err(|e| ApiError::internal(&format!("Failed to read file: {}", e)))?;
-
-    Ok((
-        StatusCode::OK,
-        [("Content-Type".to_string(), mime_type)],
-        axum::body::Body::from(bytes),
-    ))
-}
-
-/// Response type for streaming file responses.
-type StreamFileResponse =
-    Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)>;
-
-/// Serve a raw file from a resolved workspace root with MIME and containment checks.
 fn serve_workspace_file_from_root(
     workspace_root: String,
     file_rel_path: &str,
@@ -516,261 +411,9 @@ pub async fn serve_workspace_ws_file(
     serve_workspace_file_from_root(workspace_root, &file_rel_path)
 }
 
-/// `PUT /api/agents/{id}/workspaces/file` — write content to a file
-pub async fn write_file(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<WriteFileRequest>,
-) -> Result<Json<WriteFileResponse>, (StatusCode, Json<ApiError>)> {
-    let file_rel_path = query.path.as_deref().unwrap_or("");
-    if file_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    // Check content size
-    let content_bytes = req.content.len() as u64;
-    if content_bytes > MAX_FILE_SIZE {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ApiError {
-                error: format!(
-                    "Content too large ({} bytes, max {} bytes)",
-                    content_bytes, MAX_FILE_SIZE
-                ),
-                code: 413,
-            }),
-        ));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    // Verify parent directory exists (allow creating new files)
-    if let Some(parent) = abs_path.parent()
-        && !parent.is_dir() {
-            return Err(ApiError::bad_request(&format!(
-                "Parent directory does not exist: {}",
-                parent.display()
-            )));
-        }
-
-    // Check write access for read-only workspaces
-    {
-        let gw = state.gateway_state.read().await;
-        if let Some(info) = gw.running_agents.get(&id) {
-            let ws_id = query.workspace_id.as_deref().unwrap_or("");
-            if !ws_id.is_empty() && ws_id != "__agent_home__"
-                && let Some(config) = info
-                    .workspace_config_json
-                    .as_ref()
-                    .and_then(|json| serde_json::from_str::<WorkspaceConfig>(json).ok())
-                    && let Some(dir) = config.additional_dirs.iter().find(|d| d.id == ws_id)
-                        && dir.access == AccessLevel::ReadOnly {
-                            return Err(ApiError::bad_request(
-                                "Workspace is read-only, cannot write files",
-                            ));
-                        }
-        }
-    }
-
-    // Write content
-    std::fs::write(&abs_path, &req.content)
-        .map_err(|e| ApiError::internal(&format!("Failed to write file: {}", e)))?;
-
-    Ok(Json(WriteFileResponse {
-        ok: true,
-        size: content_bytes,
-    }))
-}
-
-/// `POST /api/agents/{id}/workspaces/file` — create an empty new file
-pub async fn create_file(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<CreateFileRequest>,
-) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
-    let file_rel_path = if !req.path.is_empty() {
-        req.path.as_str()
-    } else {
-        query.path.as_deref().unwrap_or("")
-    };
-    if file_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    // Create parent directories if needed
-    if let Some(parent) = abs_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            ApiError::internal(&format!("Failed to create parent directory: {}", e))
-        })?;
-    }
-
-    // Create empty file (error if already exists)
-    std::fs::File::create_new(&abs_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            ApiError::bad_request(&format!("File already exists: {}", file_rel_path))
-        } else {
-            ApiError::internal(&format!("Failed to create file: {}", e))
-        }
-    })?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateFileResponse {
-            ok: true,
-            path: file_rel_path.to_string(),
-        }),
-    ))
-}
-
-/// `POST /api/agents/{id}/workspaces/dir` — create a new directory
-pub async fn create_dir(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<CreateFileRequest>,
-) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
-    let dir_rel_path = if !req.path.is_empty() {
-        req.path.as_str()
-    } else {
-        query.path.as_deref().unwrap_or("")
-    };
-    if dir_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    std::fs::create_dir_all(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to create directory: {}", e)))?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateFileResponse {
-            ok: true,
-            path: dir_rel_path.to_string(),
-        }),
-    ))
-}
-
-// ─── Delete / Copy API ─────────────────────────────────────────────────
-
-/// `DELETE /api/agents/{id}/workspaces/file` — delete a file
-pub async fn delete_file(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<DeleteRequest>,
-) -> Result<Json<CreateFileResponse>, (StatusCode, Json<ApiError>)> {
-    let file_rel_path = if !req.path.is_empty() {
-        req.path.as_str()
-    } else {
-        query.path.as_deref().unwrap_or("")
-    };
-    if file_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, file_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    let metadata = std::fs::metadata(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to read file metadata: {}", e)))?;
-
-    if metadata.is_dir() {
-        return Err(ApiError::bad_request(
-            "Path is a directory, use /dir endpoint",
-        ));
-    }
-
-    std::fs::remove_file(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to delete file: {}", e)))?;
-
-    Ok(Json(CreateFileResponse {
-        ok: true,
-        path: file_rel_path.to_string(),
-    }))
-}
-
-/// `DELETE /api/agents/{id}/workspaces/dir` — delete a directory recursively
-pub async fn delete_dir(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<DeleteRequest>,
-) -> Result<Json<CreateFileResponse>, (StatusCode, Json<ApiError>)> {
-    let dir_rel_path = if !req.path.is_empty() {
-        req.path.as_str()
-    } else {
-        query.path.as_deref().unwrap_or("")
-    };
-    if dir_rel_path.is_empty() {
-        return Err(ApiError::bad_request("Missing required 'path' parameter"));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_path, _rel_path) =
-        resolve_tree_path(&workspace_root, dir_rel_path).map_err(|e| ApiError::bad_request(&e))?;
-
-    let metadata = std::fs::metadata(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to read directory metadata: {}", e)))?;
-
-    if !metadata.is_dir() {
-        return Err(ApiError::bad_request("Path is a file, use /file endpoint"));
-    }
-
-    std::fs::remove_dir_all(&abs_path)
-        .map_err(|e| ApiError::internal(&format!("Failed to delete directory: {}", e)))?;
-
-    Ok(Json(CreateFileResponse {
-        ok: true,
-        path: dir_rel_path.to_string(),
-    }))
-}
-
-/// Recursively copy a directory
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("Failed to create destination directory: {}", e))?;
-
-    let entries =
-        std::fs::read_dir(src).map_err(|e| format!("Failed to read source directory: {}", e))?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
-        }
-    }
-
-    Ok(())
-}
+/// Response type for streaming file responses.
+type StreamFileResponse =
+    Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)>;
 
 /// `POST /api/agents/{id}/workspaces/copy` — copy a file or directory
 pub async fn copy_item(
@@ -1337,23 +980,33 @@ fn match_word_boundary(name: &str, seg: &str) -> bool {
 // ─── Routes ─────────────────────────────────────────────────────────────
 
 /// Create workspace management routes
+///
+/// # Architecture note (ADR-009 v2)
+///
+/// Per ADR-009 v2 the Gateway is a **pure pass-through** for all
+/// filesystem operations — it does not touch disk. The actual file/dir
+/// CRUD is therefore exposed through [`crate::http::proxy::proxy_routes`]
+/// which forwards verbatim to the agent's Runtime HTTP server. The
+/// routes registered here are limited to:
+//
+///
+/// 1. **`/workspaces/find`** — filename fuzzy-search across the workspace.
+/// 2. **`/workspaces/copy`** — duplicate a file/dir (server-side, so it
+///    works for cross-volume copies and large files).
+/// 3. **`/workspaces/search`** — ripgrep-style content search across the
+///    workspace.
+/// 4. **`/workspace-files/{agent_id}/{workspace_id}/{*path}`** —
+///    pass-through for the HTML preview iframe.
+/// 5. **`/ws-files/{agent_id}/{*path}`** — alias of the above for
+///    legacy callers.
+///
+/// The previous direct-on-Gateway implementations of
+/// `/workspaces/file` and `/workspaces/dir` have been removed; those
+/// paths now resolve to the proxy in `proxy.rs` (which carries out the
+/// read/write/delete on the Runtime side per ADR-009 v2).
 pub fn workspace_routes() -> Router<AppState> {
     Router::new()
         .route("/api/agents/{id}/workspaces/find", get(find_files))
-        .route("/api/agents/{id}/workspaces/file",
-            get(read_file)
-                .put(write_file)
-                .post(create_file)
-                .delete(delete_file),
-        )
-        .route(
-            "/api/agents/{id}/workspaces/file-raw",
-            get(read_raw_file),
-        )
-        .route(
-            "/api/agents/{id}/workspaces/dir",
-            post(create_dir).delete(delete_dir),
-        )
         .route("/api/agents/{id}/workspaces/copy", post(copy_item))
         .route(
             "/api/agents/{id}/workspaces/search",

@@ -5,13 +5,15 @@
 //! store reference and dimension.
 
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::http::{memory_query, SharedEmbedDimension, SharedMemoryStore};
 use crate::usecases::memory_query::{
-    ConsolidationReport, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery, MemoryQueryService,
-    MemoryStats,
+    ConsolidationReport, CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse,
+    MemoryNodeQuery, MemoryQueryService, MemoryStats,
 };
 
 pub struct GrafeoMemoryAdapter {
@@ -119,5 +121,29 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             .and_then(|g| g.clone());
         memory_query::delete_node(store.as_ref(), node_id);
         Ok(())
+    }
+
+    async fn create_node(&self, input: &CreateMemoryNodeInput) -> Result<u64> {
+        let store = self
+            .memory_store
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
+        memory_query::create_node(Some(&store), &input.label, &input.properties)
+    }
+
+    async fn update_node(
+        &self,
+        node_id: u64,
+        properties: &HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        let store = self
+            .memory_store
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| crate::error::RuntimeError::Memory("memory store unavailable".into()))?;
+        memory_query::update_node(Some(&store), node_id, properties)
     }
 }

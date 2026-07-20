@@ -114,4 +114,27 @@ pub trait MemoryQueryService: Send + Sync {
 
     /// Delete a node by id.
     async fn delete_node(&self, node_id: u64) -> Result<()>;
+
+    /// Create a new memory node.
+    ///
+    /// `input.label` is the node label (e.g. `"Knowledge"`, `"Episodic"`).
+    /// `input.properties` is a flat key→JSON map; the implementation is
+    /// responsible for serialising values into the underlying store. Returns
+    /// the newly-assigned `node_id`.
+    async fn create_node(&self, input: &CreateMemoryNodeInput) -> Result<u64>;
+
+    /// Update (merge) properties on an existing node.
+    ///
+    /// Existing properties not listed in `properties` are left untouched.
+    /// Returns 404 (mapped from a dedicated error) if the node is absent.
+    async fn update_node(&self, node_id: u64, properties: &HashMap<String, serde_json::Value>) -> Result<()>;
+}
+
+/// Input for [`MemoryQueryService::create_node`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMemoryNodeInput {
+    /// Node label (e.g. `"Knowledge"`, `"Episodic"`).
+    pub label: String,
+    /// Flat key→JSON property map. Empty map is allowed.
+    pub properties: HashMap<String, serde_json::Value>,
 }

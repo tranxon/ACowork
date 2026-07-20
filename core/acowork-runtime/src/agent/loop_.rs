@@ -857,7 +857,9 @@ impl AgentLoop {
             // ①-⑧ Execute single iteration (shared with debug mode)
             // With iteration-level retry for retryable stream errors.
             const MAX_ITERATION_RETRIES: u32 = 3;
+            const MAX_LONG_RETRIES: u32 = 3;
             let mut iteration_retries = 0u32;
+            let mut long_retry_count = 0u32;
             let iteration_result = loop {
                 match self
                     .execute_single_iteration(
@@ -889,8 +891,120 @@ impl AgentLoop {
                         tokio::time::sleep(backoff).await;
                         continue;
                     }
+                    Err(RuntimeError::StreamError(ref err))
+                        if err.retryable && long_retry_count < MAX_LONG_RETRIES =>
+                    {
+                        long_retry_count += 1;
+                        // Enter paused state with 5-minute retry info.
+                        // The frontend RetryWaitBanner shows a countdown and
+                        // "Retry Now" button; the user can skip the wait or
+                        // let the timer expire for automatic retry.
+                        self.transition_status(SessionStatus::Paused {
+                            iteration: Some(iteration),
+                            max_iterations: Some(self.core.config.max_iterations),
+                            retry_info: Some(
+                                crate::agent::session_state::RetryPauseInfo {
+                                    wait_ms: 5 * 60 * 1000,
+                                    attempt: long_retry_count,
+                                    max_attempts: MAX_LONG_RETRIES,
+                                    provider: current_model.clone(),
+                                },
+                            ),
+                        });
+                        tracing::warn!(
+                            iteration,
+                            long_retry = long_retry_count,
+                            max_long_retries = MAX_LONG_RETRIES,
+                            error = %err.message,
+                            "Retryable stream error, entering long retry wait (5 min)"
+                        );
+
+                        // Wait for 5 minutes, ContinueExecution, or Stop.
+                        // Uses tokio::select! to await the first of:
+                        //   - 5-minute timeout (auto-retry)
+                        //   - inbound ContinueExecution (user clicked Retry Now)
+                        //   - inbound Stop (user stopped the session)
+                        let long_wait =
+                            tokio::time::sleep(std::time::Duration::from_secs(5 * 60));
+                        tokio::pin!(long_wait);
+
+                        loop {
+                            tokio::select! {
+                                _ = &mut long_wait => {
+                                    // Time's up — auto resume
+                                    tracing::info!(
+                                        "Long retry wait completed, auto-resuming"
+                                    );
+                                    self.transition_status(
+                                        SessionStatus::Streaming {
+                                            message_id: None,
+                                        },
+                                    );
+                                    break;
+                                }
+                                msg = self.inbound_rx.recv() => {
+                                    match msg {
+                                        Some(InboundMessage::ContinueExecution { .. }) => {
+                                            tracing::info!(
+                                                "User chose to retry immediately"
+                                            );
+                                            self.transition_status(
+                                                SessionStatus::Streaming {
+                                                    message_id: None,
+                                                },
+                                            );
+                                            break;
+                                        }
+                                        Some(InboundMessage::Stop { .. }) => {
+                                            tracing::info!(
+                                                "User stopped during retry wait"
+                                            );
+                                            self.transition_status(
+                                                SessionStatus::Idle,
+                                            );
+                                            return Err(
+                                                RuntimeError::StreamError(
+                                                    err.clone(),
+                                                ),
+                                            );
+                                        }
+                                        Some(InboundMessage::UserOperation(
+                                            user_op,
+                                        )) => {
+                                            self.apply_user_op(&user_op);
+                                        }
+                                        Some(other) => {
+                                            self.session
+                                                .deferred_inbound
+                                                .push(other);
+                                        }
+                                        None => {
+                                            // Channel closed — stop
+                                            tracing::info!(
+                                                "Inbound channel closed during \
+                                                 retry wait"
+                                            );
+                                            self.transition_status(
+                                                SessionStatus::Idle,
+                                            );
+                                            return Err(
+                                                RuntimeError::StreamError(
+                                                    err.clone(),
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Reset short retry counter and try again
+                        iteration_retries = 0;
+                        continue;
+                    }
                     Err(e) => {
                         // ADR-014: Streaming → Idle on non-retryable error
+                        // or all retry attempts exhausted
                         self.transition_status(SessionStatus::Idle);
                         return Err(e);
                     }

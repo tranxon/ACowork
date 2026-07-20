@@ -34,6 +34,14 @@
 //! PUT    /workspaces/{ws_id}/prompt-file         // NEW
 //! DELETE /workspaces/{ws_id}                     // NEW
 //! GET    /workspaces/tree                        // retained (panel 6)
+//! GET    /workspaces/file                        // NEW: read file  (panel 6)
+//! POST   /workspaces/file                        // NEW: create file
+//! PUT    /workspaces/file                        // NEW: overwrite file
+//! DELETE /workspaces/file                        // NEW: delete file
+//! POST   /workspaces/dir                         // NEW: create dir
+//! DELETE /workspaces/dir                         // NEW: delete dir
+//! POST   /memory/nodes                           // NEW: create memory node
+//! PUT    /memory/nodes/{nid}                     // NEW: update memory node
 //! GET    /agents/{id}/config                     // NEW: panel 1
 //! GET    /agents/{id}/tools                      // NEW: panel 3
 //! GET    /agents/{id}/status                     // NEW: panel 5
@@ -56,6 +64,7 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §7.5.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -235,11 +244,18 @@ impl RuntimeHttpServer {
                 get(read_document).delete(delete_document),
             )
             .route("/memory/graph", get(get_memory_graph))
-            .route("/memory/nodes", get(get_memory_nodes))
-            // New GET on the same path that already has DELETE.
+            .route(
+                "/memory/nodes",
+                get(get_memory_nodes).post(create_memory_node),
+            )
+            // GET + DELETE retained from Phase 3; PUT (update) added now
+            // so HTTP CRUD is complete and the gateway can proxy all 4 ops
+            // through the same path shape.
             .route(
                 "/memory/nodes/{nid}",
-                get(get_memory_node).delete(delete_memory_node),
+                get(get_memory_node)
+                    .delete(delete_memory_node)
+                    .put(update_memory_node),
             )
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/consolidate", post(trigger_consolidate))
@@ -255,6 +271,28 @@ impl RuntimeHttpServer {
                 put(set_workspace_prompt_file),
             )
             .route("/workspaces/tree", get(list_tree))
+            // 2 NEW workspace file/dir resources, REST-style (ADR-034 §11.2 #6-9).
+            // One path per resource; HTTP method dispatches the operation:
+            //   GET    /workspaces/file — read  → JSON {content,size,mimeType}
+            //   POST   /workspaces/file — create → body {path} (409 on dup)
+            //   PUT    /workspaces/file — write  → body {content} (404 on miss)
+            //   DELETE /workspaces/file — remove → body {path}
+            //   POST   /workspaces/dir  — create → body {path}
+            //   DELETE /workspaces/dir  — remove → body {path}
+            // All share the `resolve_workspace_root` + canonicalize path-
+            // traversal guard via `resolve_within_workspace` so the contract
+            // is uniform across reads and writes.
+            .route(
+                "/workspaces/file",
+                get(read_workspace_file_json)
+                    .post(create_workspace_file)
+                    .put(write_workspace_file)
+                    .delete(delete_workspace_file),
+            )
+            .route(
+                "/workspaces/dir",
+                post(create_workspace_dir).delete(delete_workspace_dir),
+            )
             // 3 NEW agent panel endpoints (panels 1/3/5).
             // `/agents/{id}/config` carries both GET (Setup panel) and
             // PUT (live-edit builtin_tools / temperature / etc., mqtt.md
@@ -611,6 +649,90 @@ async fn delete_memory_node(
     let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     svc.delete_node(node_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({"deleted": true, "node_id": node_id})))
+}
+
+/// Request body for `POST /memory/nodes`.
+///
+/// `properties` is a flat `key → JSON value` map. The implementation is
+/// responsible for serialising values into the underlying store (see
+/// [`crate::http::memory_query::json_to_grafeo_value`]).
+#[derive(Deserialize)]
+struct CreateMemoryNodeBody {
+    label: String,
+    #[serde(default)]
+    properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// `POST /memory/nodes` — create a new memory node.
+///
+/// Returns `{"node_id": <u64>, "label": "..."}` on success. The handler
+/// relies on the ADR-040 usecase trait so memory-store initialisation
+/// timing (the Runtime HTTP server starts before Phase B) reports a clean
+/// 503 instead of a panic.
+async fn create_memory_node(
+    State(state): State<HttpState>,
+    Json(body): Json<CreateMemoryNodeBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    use crate::usecases::memory_query::CreateMemoryNodeInput;
+    let input = CreateMemoryNodeInput {
+        label: body.label,
+        properties: body.properties,
+    };
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let node_id = svc
+        .create_node(&input)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({
+        "node_id": node_id,
+        "label": input.label,
+    })))
+}
+
+/// Request body for `PUT /memory/nodes/{nid}`.
+#[derive(Deserialize)]
+struct UpdateMemoryNodeBody {
+    #[serde(default)]
+    properties: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// `PUT /memory/nodes/{nid}` — update (merge) properties on an existing node.
+///
+/// Returns 404 if the node is missing (mapped from
+/// `RuntimeError::Memory("not found")`).
+async fn update_memory_node(
+    State(state): State<HttpState>,
+    Path(nid): Path<String>,
+    Json(body): Json<UpdateMemoryNodeBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let node_id: u64 = nid.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "node_id must be a non-negative integer"})),
+        )
+    })?;
+
+    let svc = state.memory_query.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "memory store not ready"})),
+    ))?;
+
+    match svc.update_node(node_id, &body.properties).await {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "updated": true,
+            "node_id": node_id,
+        }))),
+        Err(crate::error::RuntimeError::Memory(msg)) if msg.contains("not found") => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": msg, "node_id": node_id})),
+        )),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "failed to update memory node"})),
+        )),
+    }
 }
 
 /// Request body for `POST /memory/consolidate`.
@@ -1073,6 +1195,526 @@ async fn list_tree(
         path: rel_path,
         entries,
     }))
+}
+
+// ── Workspace file & directory REST resources ───────────────────────────
+//
+// Two endpoints that share the same `resolve_workspace_root` + canonicalize
+// path-traversal guard. The guard is centralised in
+// [`resolve_within_workspace`] so adding more endpoints (or extending
+// existing ones) cannot accidentally skip the check.
+//
+// Resource shape (mirrors the Tauri webview's `workspaceStore` + `fileEditorStore`):
+//
+//   GET    /workspaces/file?path=…  → JSON {content, size, mimeType, path, …}
+//   POST   /workspaces/file         body {path, content?, overwrite?} → create
+//   PUT    /workspaces/file         body {content}                    → write
+//   DELETE /workspaces/file         body {path}                       → remove
+//   POST   /workspaces/dir          body {path}                       → create
+//   DELETE /workspaces/dir          body {path}                       → remove
+//
+// Security note: every handler routes through `resolve_within_workspace`
+// which canonicalizes the **deepest existing ancestor** of the candidate
+// path before the `starts_with` check. Without this, (a) a symlink-based
+// traversal can escape the root even when the textual path stays inside
+// it, and (b) on Windows the canonicalized root carries the `\\?\` UNC
+// prefix while the unresolved candidate does not — the textual
+// `starts_with` would spuriously fail. Picking the deepest existing
+// ancestor fixes both.
+
+/// Resolve a workspace root + relative path tuple and verify the resolved
+/// absolute path stays inside the workspace root.
+///
+/// Returns `(canonical_root, abs_path, rel_path)` on success.
+fn resolve_within_workspace(
+    work_dir: &std::path::Path,
+    workspace_id: Option<&str>,
+    requested_path: &str,
+) -> Result<(PathBuf, PathBuf, String), (StatusCode, Json<serde_json::Value>)> {
+    let workspace_root = resolve_workspace_root(work_dir, workspace_id);
+
+    let abs_path = if requested_path.is_empty() {
+        workspace_root.clone()
+    } else {
+        workspace_root.join(requested_path)
+    };
+
+    let canonical_root = std::fs::canonicalize(&workspace_root).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("workspace root not accessible: {}", e),
+            })),
+        )
+    })?;
+
+    let check_path = deepest_existing_ancestor(&abs_path);
+    let canonical_check = std::fs::canonicalize(&check_path).unwrap_or(check_path);
+
+    if !canonical_check.starts_with(&canonical_root) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Path traversal detected"})),
+        ));
+    }
+
+    let rel_path = abs_path
+        .strip_prefix(&workspace_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    Ok((canonical_root, abs_path, rel_path))
+}
+
+/// Walk up `path` until we find an existing directory. Returns the input
+/// itself if it already exists.
+fn deepest_existing_ancestor(path: &std::path::Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    while !current.exists() {
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return path.to_path_buf(),
+        }
+    }
+    current
+}
+
+/// Best-effort MIME type from a file extension. Falls back to
+/// `application/octet-stream` for unknown extensions; the desktop only
+/// uses this as a hint for editor language detection.
+fn mime_type_for(rel_path: &str) -> &'static str {
+    let ext = std::path::Path::new(rel_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "txt" | "log" | "csv" | "tsv" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        "yml" | "yaml" => "application/yaml",
+        "xml" => "application/xml",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" | "cjs" => "application/javascript",
+        "ts" | "tsx" => "application/typescript",
+        "rs" => "text/x-rust",
+        "py" => "text/x-python",
+        "go" => "text/x-go",
+        "java" => "text/x-java",
+        "kt" | "kts" => "text/x-kotlin",
+        "swift" => "text/x-swift",
+        "c" | "h" => "text/x-c",
+        "cpp" | "cxx" | "cc" | "hpp" => "text/x-c++",
+        "sh" | "bash" => "application/x-sh",
+        "ps1" => "application/x-powershell",
+        "toml" => "application/toml",
+        "ini" => "text/plain",
+        "" => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Querystring for `GET /workspaces/file`.
+#[derive(Deserialize)]
+struct FilePathQuery {
+    workspace_id: Option<String>,
+    path: String,
+}
+
+/// Body for `POST /workspaces/file` (create). Path is in the body and
+/// also in the querystring; whichever is set wins (querystring takes
+/// precedence when both are present).
+/// `content` defaults to empty so the desktop can create a file and then
+/// open it in the editor (which will PUT the body on first save).
+#[derive(Deserialize)]
+struct CreateFileBody {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: Option<String>,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// Body for `PUT /workspaces/file` (overwrite). Only `content` is in the
+/// body — `path` and `workspace_id` are in the querystring, matching the
+/// desktop's `buildFileUrl` helper (HTTP RFC 7231 §4.3.4 "PUT with
+/// representation").
+#[derive(Deserialize)]
+struct WriteFileBody {
+    content: String,
+}
+
+/// Body for `DELETE /workspaces/file` and `POST/DELETE /workspaces/dir`.
+/// `path` and `workspace_id` may appear in either the body or the
+/// querystring; the handlers prefer querystring when both are present
+/// (matches the desktop's workspaceStore helper).
+#[derive(Deserialize, Default)]
+struct PathOnlyBody {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// Resolve `path` / `workspace_id` from whatever combination of
+/// querystring and body fields the client used. Returns
+/// `(workspace_id, path)` with `None`s filled in where the client omitted
+/// them; the caller is responsible for applying defaults
+/// (`__agent_home__` ⇒ None).
+///
+/// Rationale: the desktop workspace store puts `workspace_id` in the
+/// querystring and `path` in the JSON body for `DELETE /workspaces/file`
+/// and `POST /workspaces/dir` (HTTP bodies can't carry `path` for
+/// non-body methods, but for `DELETE` Axum supports both), so the
+/// handlers must accept either. Querystring wins over body when both are
+/// set, matching the desktop's own URL-builder semantics.
+fn resolve_path_workspace(
+    query_ws: Option<&str>,
+    query_path: Option<&str>,
+    body_ws: Option<&str>,
+    body_path: Option<&str>,
+) -> (Option<String>, String) {
+    let workspace_id = query_ws
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| body_ws.filter(|s| !s.is_empty()).map(|s| s.to_string()));
+    let path = query_path
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| body_path.filter(|s| !s.is_empty()).map(|s| s.to_string()))
+        .unwrap_or_default();
+    (workspace_id, path)
+}
+
+/// `GET /workspaces/file?path=…` — read a UTF-8 text file.
+///
+/// Returns the standard JSON envelope the desktop expects:
+///
+/// ```json
+/// {
+///   "content": "<file body as UTF-8>",
+///   "size": 1234,
+///   "mimeType": "text/plain",
+///   "is_file": true,
+///   "is_dir": false,
+///   "modified": "2025-…Z",
+///   "path": "relative/path"
+/// }
+/// ```
+///
+/// Binary file support is out of scope for the current desktop panel;
+/// future extension: add `?encoding=base64` and return
+/// `application/octet-stream`.
+async fn read_workspace_file_json(
+    State(state): State<HttpState>,
+    Query(params): Query<FilePathQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, params.workspace_id.as_deref(), &params.path)?;
+
+    let meta = std::fs::metadata(&abs_path).map_err(|e| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("failed to read file: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    let content = std::fs::read_to_string(&abs_path).map_err(|e| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!("file is not valid UTF-8: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
+        .map(|dt| dt.to_rfc3339());
+
+    Ok(Json(serde_json::json!({
+        "content": content,
+        "size": meta.len(),
+        "mimeType": mime_type_for(&rel_path),
+        "is_file": meta.is_file(),
+        "is_dir": meta.is_dir(),
+        "modified": modified,
+        "path": rel_path,
+    })))
+}
+
+/// `POST /workspaces/file` — create a new text file. Returns 409 if it
+/// already exists and `overwrite` is false (default).
+async fn create_workspace_file(
+    State(state): State<HttpState>,
+    Query(qparams): Query<HashMap<String, String>>,
+    Json(body): Json<CreateFileBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (workspace_id, path) = resolve_path_workspace(
+        qparams.get("workspace_id").map(|s| s.as_str()),
+        qparams.get("path").map(|s| s.as_str()),
+        body.workspace_id.as_deref(),
+        body.path.as_deref(),
+    );
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'path' in querystring or body"})),
+        ));
+    }
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, workspace_id.as_deref(), &path)?;
+
+    if abs_path.exists() && !body.overwrite {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "file already exists",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    if let Some(parent) = abs_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to create parent directory: {}", e),
+                })),
+            )
+        })?;
+    }
+
+    std::fs::write(&abs_path, body.content.as_bytes()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to write file: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "created": true,
+        "path": rel_path,
+    })))
+}
+
+/// `PUT /workspaces/file?path=…` — overwrite an existing text file
+/// (404 if missing). Path is in the querystring; only `content` is in
+/// the body.
+async fn write_workspace_file(
+    State(state): State<HttpState>,
+    Query(params): Query<FilePathQuery>,
+    Json(body): Json<WriteFileBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // `workspace_id` is in the querystring (alongside `path`); the body
+    // only carries the new `content`. Falling back to `body.workspace_id`
+    // would silently lose the workspace context for clients that omit it
+    // from the body — which would route to `agent_home` instead of the
+    // target workspace and 404 every time.
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, params.workspace_id.as_deref(), &params.path)?;
+
+    if !abs_path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "file does not exist",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    if abs_path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "path is a directory; use DELETE /workspaces/dir instead",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    std::fs::write(&abs_path, body.content.as_bytes()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to write file: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "written": true,
+        "path": rel_path,
+    })))
+}
+
+/// `DELETE /workspaces/file` — remove a file. Body is `{path}` so the
+/// call can be made from environments where the querystring would
+/// exceed URL length limits.
+async fn delete_workspace_file(
+    State(state): State<HttpState>,
+    Query(qparams): Query<HashMap<String, String>>,
+    Json(body): Json<PathOnlyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (workspace_id, path) = resolve_path_workspace(
+        qparams.get("workspace_id").map(|s| s.as_str()),
+        qparams.get("path").map(|s| s.as_str()),
+        body.workspace_id.as_deref(),
+        body.path.as_deref(),
+    );
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'path' in querystring or body"})),
+        ));
+    }
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, workspace_id.as_deref(), &path)?;
+
+    if !abs_path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "file does not exist",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    if abs_path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "path is a directory; use DELETE /workspaces/dir instead",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    std::fs::remove_file(&abs_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to delete file: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "deleted": true,
+        "path": rel_path,
+    })))
+}
+
+/// `POST /workspaces/dir` — create a directory (recursively).
+async fn create_workspace_dir(
+    State(state): State<HttpState>,
+    Query(qparams): Query<HashMap<String, String>>,
+    Json(body): Json<PathOnlyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (workspace_id, path) = resolve_path_workspace(
+        qparams.get("workspace_id").map(|s| s.as_str()),
+        qparams.get("path").map(|s| s.as_str()),
+        body.workspace_id.as_deref(),
+        body.path.as_deref(),
+    );
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'path' in querystring or body"})),
+        ));
+    }
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, workspace_id.as_deref(), &path)?;
+
+    std::fs::create_dir_all(&abs_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to create directory: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "created": true,
+        "path": rel_path,
+    })))
+}
+
+/// `DELETE /workspaces/dir` — remove a directory recursively.
+async fn delete_workspace_dir(
+    State(state): State<HttpState>,
+    Query(qparams): Query<HashMap<String, String>>,
+    Json(body): Json<PathOnlyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let (workspace_id, path) = resolve_path_workspace(
+        qparams.get("workspace_id").map(|s| s.as_str()),
+        qparams.get("path").map(|s| s.as_str()),
+        body.workspace_id.as_deref(),
+        body.path.as_deref(),
+    );
+    if path.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'path' in querystring or body"})),
+        ));
+    }
+    let (_root, abs_path, rel_path) =
+        resolve_within_workspace(&state.work_dir, workspace_id.as_deref(), &path)?;
+
+    if !abs_path.exists() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "directory does not exist",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    if !abs_path.is_dir() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "path is a file; use DELETE /workspaces/file instead",
+                "path": rel_path,
+            })),
+        ));
+    }
+
+    std::fs::remove_dir_all(&abs_path).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to delete directory: {}", e),
+                "path": rel_path,
+            })),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "deleted": true,
+        "path": rel_path,
+    })))
 }
 
 // ── Document storage handlers (ADR-034 §11.2 #6-9) ───────────────────────
@@ -3091,6 +3733,377 @@ mod tests {
             serde_json::json!(120),
             "GET /config must surface the newly-added field"
         );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// End-to-end smoke test for the new workspace file-operation REST
+    /// resources (`/workspaces/file` + `/workspaces/dir`, dispatched by
+    /// HTTP method). Spins up the real Runtime HTTP server on a random
+    /// port and walks each verb through a happy path **using the exact
+    /// URL / body shape the desktop's `workspaceStore` and
+    /// `fileEditorStore` use** so this test doubles as a contract check.
+    ///
+    /// Desktop call patterns verified here:
+    ///
+    /// - `GET   /workspaces/file?path=…&workspace_id=…`     → JSON envelope
+    /// - `POST  /workspaces/file?workspace_id=…`  body `{path, content?, overwrite?}`
+    /// - `PUT   /workspaces/file?path=…&workspace_id=…`     body `{content}`
+    /// - `DELETE /workspaces/file?workspace_id=…` body `{path}`
+    /// - `POST  /workspaces/dir?workspace_id=…`  body `{path}`
+    /// - `DELETE /workspaces/dir?workspace_id=…` body `{path}`
+    #[tokio::test]
+    async fn test_http_server_workspace_file_ops() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-file-ops");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Pre-create a workspace directory tree so the file-op
+        // endpoints have something to operate on.
+        let ws_dir = temp_dir.join("ws_alpha");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(ws_dir.join("readme.txt"), b"hello workspace\n").unwrap();
+
+        // Persist agent_workspaces.json so resolve_workspace_root can
+        // locate the `alpha` workspace by id.
+        let cfg_path = temp_dir.join("config").join("agent_workspaces.json");
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cfg_path,
+            serde_json::json!({
+                "additional_dirs": [
+                    { "id": "alpha", "path": ws_dir.to_string_lossy() }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension =
+            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // 1) GET /workspaces/tree — must list `readme.txt` under alpha.
+        let url = format!("{}/workspaces/tree?workspace_id=alpha", base);
+        let resp = client.get(&url).send().await.unwrap();
+        assert!(resp.status().is_success(), "tree should be 200");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let entries = body["entries"].as_array().expect("entries array");
+        assert!(
+            entries.iter().any(|e| e["name"] == "readme.txt"),
+            "tree must include readme.txt, got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+
+        // 2) GET /workspaces/file — read existing file as JSON
+        //    {content, size, mimeType, path, is_file, is_dir, modified}.
+        let url = format!(
+            "{}/workspaces/file?workspace_id=alpha&path=readme.txt",
+            base
+        );
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["content"], "hello workspace\n");
+        assert_eq!(body["size"], 16); // "hello workspace\n" is 16 bytes
+        assert_eq!(body["mimeType"], "text/plain");
+        assert_eq!(body["is_file"], true);
+        assert_eq!(body["is_dir"], false);
+        assert_eq!(body["path"], "readme.txt");
+        assert!(body["modified"].is_string());
+
+        // 3) POST /workspaces/dir?workspace_id=… — create a new subdirectory.
+        //    Desktop sends `workspace_id` in the querystring and `path`
+        //    in the body; the handler accepts both forms.
+        let resp = client
+            .post(format!("{}/workspaces/dir?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "subdir" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "create-dir should be 200");
+        assert!(ws_dir.join("subdir").is_dir(), "subdir must exist");
+
+        // 4) POST /workspaces/file?workspace_id=… — create a new file.
+        let resp = client
+            .post(format!("{}/workspaces/file?workspace_id=alpha", base))
+            .json(&serde_json::json!({
+                "path": "subdir/new.txt",
+                "content": "fresh\n",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "create-file should be 200");
+        assert_eq!(
+            std::fs::read_to_string(ws_dir.join("subdir/new.txt")).unwrap(),
+            "fresh\n"
+        );
+
+        // 5) POST /workspaces/file without overwrite — must 409.
+        let resp = client
+            .post(format!("{}/workspaces/file?workspace_id=alpha", base))
+            .json(&serde_json::json!({
+                "path": "subdir/new.txt",
+                "content": "ignored\n",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            409,
+            "second create-file on existing path must be 409"
+        );
+
+        // 6) PUT /workspaces/file?path=…&workspace_id=… — overwrite.
+        //    Body is `{content}` only (path & workspace_id in querystring).
+        let resp = client
+            .put(format!(
+                "{}/workspaces/file?workspace_id=alpha&path=subdir/new.txt",
+                base
+            ))
+            .json(&serde_json::json!({ "content": "rewritten\n" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(ws_dir.join("subdir/new.txt")).unwrap(),
+            "rewritten\n"
+        );
+
+        // 7) PUT /workspaces/file on a missing path — must 404.
+        let resp = client
+            .put(format!(
+                "{}/workspaces/file?workspace_id=alpha&path=subdir/missing.txt",
+                base
+            ))
+            .json(&serde_json::json!({ "content": "ignored\n" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "write-file on missing path must be 404"
+        );
+
+        // 8) GET /workspaces/file — JSON envelope with mime helper
+        //    exercised via a .md file.
+        let resp = client
+            .post(format!("{}/workspaces/file?workspace_id=alpha", base))
+            .json(&serde_json::json!({
+                "path": "subdir/notes.md",
+                "content": "# heading\n",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let url = format!(
+            "{}/workspaces/file?workspace_id=alpha&path=subdir/notes.md",
+            base
+        );
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["mimeType"], "text/markdown");
+        assert_eq!(body["size"], 10); // "# heading\n" is 10 bytes
+
+        // 9) DELETE /workspaces/file?workspace_id=… — body {path}.
+        let resp = client
+            .delete(format!("{}/workspaces/file?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "subdir/notes.md" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "delete-file should be 200");
+        assert!(!ws_dir.join("subdir/notes.md").exists());
+
+        // 10) DELETE /workspaces/file on missing — must 404.
+        let resp = client
+            .delete(format!("{}/workspaces/file?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "subdir/notes.md" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // 11) DELETE /workspaces/dir?workspace_id=… — body {path}.
+        let resp = client
+            .delete(format!("{}/workspaces/dir?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "subdir" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "delete-dir should be 200");
+        assert!(!ws_dir.join("subdir").exists());
+
+        // 12) DELETE on the wrong resource (file via /workspaces/dir) — must 400.
+        let resp = client
+            .delete(format!("{}/workspaces/dir?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "readme.txt" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "DELETE on a file via /workspaces/dir must be 400"
+        );
+
+        // 13) Path-traversal guard — `path=../agent_config.json` must 400.
+        let url = format!(
+            "{}/workspaces/file?workspace_id=alpha&path=../agent_config.json",
+            base
+        );
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "path-traversal escape must be rejected by the guard"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// End-to-end smoke test for the four memory-write endpoints
+    /// (POST /memory/nodes, GET /memory/nodes/{nid}, PUT
+    /// /memory/nodes/{nid}, DELETE /memory/nodes/{nid}) backed by a real
+    /// GrafeoStore.
+    #[tokio::test]
+    async fn test_http_server_memory_crud_endpoints() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-crud");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Build a real GrafeoStore — `new_in_memory` keeps the test
+        // hermetic and lets the adapter report `index_health = healthy`.
+        let store = std::sync::Arc::new(
+            acowork_grafeo::grafeo::GrafeoStore::new_in_memory()
+                .expect("in-memory store should open"),
+        );
+        let memory_store: SharedMemoryStore =
+            std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension =
+            std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // 1) POST /memory/nodes — create a new node.
+        let url = format!("{}/memory/nodes", base);
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "label": "Knowledge",
+                "properties": { "name": "alpha", "weight": 1 },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "create node should be 200");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let node_id = body["node_id"].as_u64().expect("node_id u64");
+        assert!(node_id < u64::MAX, "node_id must be a real id");
+        assert_eq!(body["label"], "Knowledge");
+
+        // 2) GET /memory/nodes/{nid} — must report `found: true`.
+        let url = format!("{}/memory/nodes/{}", base, node_id);
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["found"], true);
+        assert_eq!(body["node_type"], "Knowledge");
+
+        // 3) PUT /memory/nodes/{nid} — update must succeed.
+        let url = format!("{}/memory/nodes/{}", base, node_id);
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({
+                "properties": { "weight": 99, "extra": "added" },
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "update should be 200");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["updated"], true);
+
+        // 4) PUT on a missing node — must 404.
+        let url = format!("{}/memory/nodes/99999999", base);
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({ "properties": { "x": 1 } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "update of missing node must 404");
+
+        // 5) DELETE /memory/nodes/{nid} — must remove the node.
+        let url = format!("{}/memory/nodes/{}", base, node_id);
+        let resp = client.delete(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // 6) GET on the just-deleted node — must report `found: false`.
+        let resp = client.get(&url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["found"], false);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

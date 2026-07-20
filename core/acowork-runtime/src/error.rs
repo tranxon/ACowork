@@ -42,6 +42,9 @@ pub enum RuntimeError {
     #[error("Sign error: {0}")]
     Sign(String),
 
+    #[error("Memory error: {0}")]
+    Memory(String),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -59,6 +62,12 @@ pub enum RuntimeError {
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;
+
+impl From<acowork_grafeo::GrafeoError> for RuntimeError {
+    fn from(e: acowork_grafeo::GrafeoError) -> Self {
+        RuntimeError::Memory(e.to_string())
+    }
+}
 
 impl RuntimeError {
     /// Extract user-friendly error info as `(user_message, detail, error_type)`.
