@@ -12,11 +12,10 @@ default = []
 # Enable From<&rumqttc::ConnectionError> for ErrorDescriptor.
 # Runtime uses rumqttc 0.24, Desktop uses 0.25 – each consumer
 # builds ErrorDescriptor manually from their own error type.
-"rumqttc-0-24" = ["rumqttc"]
+"rumqttc-0-25" = ["rumqttc"]
 
 [dependencies]
-async-trait = "0.1"
-rumqttc = { version = "0.24", optional = true }
-tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
-tracing = "0.1"
-thiserror = "1"
+async-trait = { workspace = true }
+rumqttc = { version = "0.25", optional = true }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing = { workspace = true }

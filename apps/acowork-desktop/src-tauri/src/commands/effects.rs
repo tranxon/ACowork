@@ -9,6 +9,7 @@
 //! the theme changes, so light mode gets an always-light material and
 //! dark mode gets an always-dark material.
 
+#[cfg(target_os = "macos")]
 use tauri::Manager;
 
 /// Set the macOS NSVisualEffectView material based on the current theme.

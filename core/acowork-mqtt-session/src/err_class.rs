@@ -173,8 +173,8 @@ pub fn classify(desc: &ErrorDescriptor) -> ErrClass {
 // rumqttc if needed. Both Runtime (0.24) and Desktop (0.25) have
 // the same ConnectionError structure.
 
-#[cfg(feature = "rumqttc-0-24")]
-mod from_rumqttc_0_24 {
+#[cfg(feature = "rumqttc-0-25")]
+mod from_rumqttc_0_25 {
     use super::*;
     use rumqttc::ConnectionError;
 
