@@ -11,8 +11,48 @@ import "./styles/globals.css";
 // 2. Configure MonacoEnvironment.getWorker so that language-service workers
 //    (TypeScript, JSON, CSS, HTML, editor) are resolved through Vite's
 //    ?worker import pipeline rather than fetched as loose scripts.
+//
+// 3. Patch navigator.clipboard to suppress NotAllowedError in Tauri's WKWebView.
+//    Monaco's BrowserClipboardService calls navigator.clipboard.write() on every
+//    keydown/click event (WebKit workaround, clipboardService.js:81-87) and also
+//    calls writeText/readText during normal operation.  In WKWebView these throw
+//    NotAllowedError when not triggered by a user gesture, which Monaco logs via
+//    console.error (clipboardService.js:118, 157).  Swallowing the error is safe:
+//    Monaco's writeText falls back to execCommand("copy") on failure (line 121),
+//    and readText falls back to returning '' (line 159).
 import { loader } from "@monaco-editor/react";
 import * as monaco from "monaco-editor";
+
+// Patch navigator.clipboard *before* Monaco creates its BrowserClipboardService
+if (typeof navigator !== "undefined" && navigator.clipboard) {
+  const origWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+  const origReadText = navigator.clipboard.readText.bind(navigator.clipboard);
+  const origWriteClp = navigator.clipboard.write.bind(navigator.clipboard);
+  const origReadClp = navigator.clipboard.read.bind(navigator.clipboard);
+
+  /** Suppress NotAllowedError — safe to ignore in WKWebView */
+  function suppressNotAllowed(promise: Promise<any>): Promise<any> {
+    return promise.catch(function (err: unknown) {
+      if (err instanceof DOMException && err.name === "NotAllowedError") {
+        return undefined;
+      }
+      throw err;
+    });
+  }
+
+  navigator.clipboard.writeText = function (text) {
+    return suppressNotAllowed(origWriteText(text));
+  };
+  navigator.clipboard.readText = function () {
+    return suppressNotAllowed(origReadText());
+  };
+  navigator.clipboard.write = function (items) {
+    return suppressNotAllowed(origWriteClp(items));
+  };
+  navigator.clipboard.read = function () {
+    return suppressNotAllowed(origReadClp());
+  };
+}
 
 loader.config({ monaco });
 

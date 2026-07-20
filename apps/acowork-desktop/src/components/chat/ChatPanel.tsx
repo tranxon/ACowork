@@ -146,6 +146,7 @@ export function ChatPanel() {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
+  console.log("[ChatPanel:render]", { selectedAgentId: selectedAgentId, running: selectedAgent?.running, hasAgent: !!selectedAgent });
 
   // ── Toolbar responsive collapse ──────────────────────────────────
   // The bottom toolbar (model / think / workspace / skills + upload buttons)
@@ -175,21 +176,34 @@ export function ChatPanel() {
   // ResizeObserver callbacks (which can cause sibling layout shifts).
   const pendingHiddenRef = useRef<Record<string, boolean> | null>(null);
   const toolbarRafRef = useRef<number>(0);
-  useLayoutEffect(() => {
+  // ── WARNING: do NOT remove runningRef or change the useEffect deps ──
+  //
+  // This ResizeObserver must be mounted ONCE and stay alive.  Using
+  // `useLayoutEffect` or `useEffect` with `[selectedAgent?.running]` as
+  // dependency causes the callback to silently not fire in Tauri's
+  // WKWebView (React 18+ commit-phase issue).  The symptom: no `[toolbar]`
+  // logs, no button text collapse.
+  //
+  // Instead, we track the current running state in a ref (updated every
+  // render on line ~186) and use an empty dependency array so the effect
+  // mounts exactly once and never re-runs.  The ResizeObserver naturally
+  // reacts to width changes regardless of agent state.
+  //
+  // If you feel tempted to "fix" this by adding selectedAgent?.running
+  // to the deps array — DON'T.  It will break the toolbar collapse on
+  // some users' machines and you will waste hours debugging it.
+  const runningRef = useRef(selectedAgent?.running ?? false);
+  runningRef.current = selectedAgent?.running ?? false;
+
+  // ── Toolbar responsive collapse: ResizeObserver ────────────────
+  useEffect(() => {
     const container = toolbarRef.current;
     if (!container) return;
 
+    console.log("[toolbar:effect] running", { running: runningRef.current, hasRef: true });
+
     // Invalidate cache when the effect re-runs (agent changed).
     cachedWidthsRef.current = null;
-
-    // Importance ranking — higher number = kept visible longer.
-    // Fold starts from leftmost (model, lowest importance) → rightmost (sk, highest).
-    const BUTTON_IMPORTANCE: Record<string, number> = {
-      model: 1,
-      effort: 2,
-      ws: 3,
-      sk: 4,
-    };
 
     const measure = () => {
       const present: { id: string; el: HTMLElement }[] = [];
@@ -269,14 +283,12 @@ export function ChatPanel() {
       present.forEach((b) => (nextHidden[b.id] = false));
 
       if (currentTotal > available) {
-        const order = present
-          .map((b, i) => ({ id: b.id, fullW: fullWidths[i], iconW: iconWidths[i] }))
-          .sort((a, b) => BUTTON_IMPORTANCE[a.id] - BUTTON_IMPORTANCE[b.id]); // asc: fold low-importance first
-        for (const item of order) {
-          if (currentTotal <= available) break;
-          nextHidden[item.id] = true;
-          currentTotal -= item.fullW - item.iconW;
-        }
+        // Fold all buttons when space is insufficient.  This ensures a
+        // consistent look — either ALL labels are visible or ALL are hidden
+        // (icons only).  A greedy "fold until it fits" approach would leave
+        // the highest-importance button (sk) with text while the others are
+        // icon-only, which looks inconsistent.
+        present.forEach((b) => (nextHidden[b.id] = true));
       }
 
       console.log("[toolbar:calc]", JSON.stringify({
@@ -314,7 +326,7 @@ export function ChatPanel() {
         toolbarRafRef.current = 0;
       }
     };
-  }, [selectedAgent?.running]);
+  }, []); // empty deps: runs once on mount, uses runningRef for current state
 
   // Per-agent + per-session state selectors.
   // messages and sessionStatus are split into granular selectors because

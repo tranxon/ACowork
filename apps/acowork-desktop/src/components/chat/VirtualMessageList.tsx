@@ -320,6 +320,34 @@ export const VirtualMessageList = React.forwardRef<
   const measureElementRef = useRef<((el: HTMLElement | null) => void) | null>(null);
   measureElementRef.current = virtualizer.measureElement;
 
+  /**
+   * Wrapped version of virtualizer.measureElement that catches
+   * NotAllowedError from @tanstack/virtual-core's internal ResizeObserver.
+   *
+   * The virtual-core library calls `ResizeObserver.observe(target, { box: 'border-box' })`
+   * inside its ResizeObserver callback.  In WKWebView (Tauri), when the virtual
+   * list recycles a DOM element that is still being observed, the observe() call
+   * can throw a NotAllowedError.  This is harmless — the element is about to be
+   * recycled anyway — but the error propagates through the ResizeObserver, which
+   * logs it as "ERR – NotAllowedError" via console.error.  We swallow it here.
+   *
+   * See: @tanstack/virtual-core/dist/esm/index.js:238 (.observe(target, { box: "border-box" }))
+   */
+  const safeMeasureElement = useCallback((el: HTMLElement | null) => {
+    const fn = measureElementRef.current;
+    if (!fn) return;
+    try {
+      fn(el);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "NotAllowedError") {
+        // Swallow — element is being recycled, the measurement is moot.
+        return;
+      }
+      // Re-throw unexpected errors so they're not silently hidden.
+      throw e;
+    }
+  }, []);
+
   const measureRef = useCallback((el: HTMLElement | null) => {
     // measureElement on mount: writes whatever height the item has at the
     // moment of mount into the virtualizer cache.  ResizeObserver below
@@ -333,8 +361,7 @@ export const VirtualMessageList = React.forwardRef<
     // list recycling) and across re-opens of the same session — fixing
     // the "scroll back to top, scroll bar shrinks, can't reach bottom"
     // cycle that happens when measurement-driven cache writes are lost.
-    const fn = measureElementRef.current;
-    if (fn) fn(el);
+    safeMeasureElement(el);
     if (!el) return;
     const idxAttr = el.dataset.index;
     if (idxAttr !== undefined) {
@@ -346,8 +373,7 @@ export const VirtualMessageList = React.forwardRef<
     }
     if (resizeObservers.has(el)) return;
     const ro = new ResizeObserver(() => {
-      const currentFn = measureElementRef.current;
-      if (currentFn) currentFn(el);
+      safeMeasureElement(el);
       // Re-record on every async-render-driven size change.  recordMeasuredHeight
       // no-ops on <2px drift and overwrites on larger drift (e.g. Mermaid SVG
       // finishing its render, growing from ~140px → ~500px).
