@@ -180,6 +180,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}
         textHidden={textHidden}
+        btnId="ws"
       >
         {/* Dropdown menu */}
         {open && (

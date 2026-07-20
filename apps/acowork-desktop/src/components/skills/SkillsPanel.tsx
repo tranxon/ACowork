@@ -126,6 +126,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
         onToggle={() => setOpen(!open)}
         wrapperRef={ref}
         textHidden={textHidden}
+        btnId="sk"
       >
         {/* Dropdown menu */}
         {open && (

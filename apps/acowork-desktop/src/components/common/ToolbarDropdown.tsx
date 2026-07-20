@@ -26,6 +26,7 @@ export function ToolbarDropdownTrigger({
     children,
     tooltip,
     textHidden,
+    btnId,
 }: {
     icon: ReactNode;
     label: string;
@@ -42,9 +43,15 @@ export function ToolbarDropdownTrigger({
     tooltip?: string;
     /** When true, force-hide the label text and chevron (JS-driven collapse) */
     textHidden?: boolean;
+    /** Unique id used by ChatPanel's ResizeObserver to identify this button */
+    btnId?: string;
 }) {
     return (
-        <div ref={wrapperRef} className="relative inline-block min-w-0">
+        <div
+            ref={wrapperRef}
+            data-toolbar-btn={btnId}
+            className="relative inline-block min-w-0"
+        >
             <Tooltip content={tooltip ?? label} tipClass={tipClass}>
                 <button
                     type="button"

@@ -146,7 +146,6 @@ export function ChatPanel() {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
-  console.log("[ChatPanel:render]", { selectedAgentId: selectedAgentId, running: selectedAgent?.running, hasAgent: !!selectedAgent });
 
   // ── Toolbar responsive collapse ──────────────────────────────────
   // The bottom toolbar (model / think / workspace / skills + upload buttons)
@@ -155,6 +154,10 @@ export function ChatPanel() {
   // fold labels — starting from the leftmost button (model) and moving
   // rightward (effort → ws → sk) — until the row fits.
   const toolbarRef = useRef<HTMLDivElement>(null);
+  // Per-button refs kept ONLY for the inner Menu components' click-outside
+  // detection (ModelMenu/ReasoningEffortMenu use useMergedRef internally).
+  // The toolbar collapse measurement no longer reads these — it queries
+  // the DOM via [data-toolbar-btn] for a timing-independent answer.
   const modelBtnRef = useRef<HTMLDivElement>(null);
   const effortBtnRef = useRef<HTMLDivElement>(null);
   const wsBtnRef = useRef<HTMLDivElement>(null);
@@ -165,168 +168,187 @@ export function ChatPanel() {
     ws: false,
     sk: false,
   });
-  // Cache full / icon widths keyed by the set of present button IDs.
-  // Measuring requires temporary DOM style writes that force a
-  // synchronous layout — we do it only when the button-set changes,
-  // NOT on every resize, to avoid layout side-effects on siblings
-  // (e.g. the agent-list subtly changing width).
-  const cachedWidthsRef = useRef<{ key: string; full: number[]; icon: number[] } | null>(null);
-  // Deferred state update: store the latest desired textHidden here and
-  // flush it in a rAF to avoid synchronous React re-renders during
-  // ResizeObserver callbacks (which can cause sibling layout shifts).
-  const pendingHiddenRef = useRef<Record<string, boolean> | null>(null);
-  const toolbarRafRef = useRef<number>(0);
-  // ── WARNING: do NOT remove runningRef or change the useEffect deps ──
-  //
-  // This ResizeObserver must be mounted ONCE and stay alive.  Using
-  // `useLayoutEffect` or `useEffect` with `[selectedAgent?.running]` as
-  // dependency causes the callback to silently not fire in Tauri's
-  // WKWebView (React 18+ commit-phase issue).  The symptom: no `[toolbar]`
-  // logs, no button text collapse.
-  //
-  // Instead, we track the current running state in a ref (updated every
-  // render on line ~186) and use an empty dependency array so the effect
-  // mounts exactly once and never re-runs.  The ResizeObserver naturally
-  // reacts to width changes regardless of agent state.
-  //
-  // If you feel tempted to "fix" this by adding selectedAgent?.running
-  // to the deps array — DON'T.  It will break the toolbar collapse on
-  // some users' machines and you will waste hours debugging it.
-  const runningRef = useRef(selectedAgent?.running ?? false);
-  runningRef.current = selectedAgent?.running ?? false;
 
-  // ── Toolbar responsive collapse: ResizeObserver ────────────────
-  useEffect(() => {
-    const container = toolbarRef.current;
-    if (!container) return;
+  // ── Toolbar responsive collapse ───────────────────────────────
+  //
+  // IMPLEMENTATION: a `ref` callback (NOT a useEffect on toolbarRef).
+  //
+  // Why ref callback instead of useEffect?
+  //
+  // ModelMenu and ReasoningEffortMenu are conditionally rendered:
+  //   - ModelMenu:     `availableModels.length > 1 && selectedAgent?.running`
+  //   - ReasoningMenu: `selectedAgent?.running && currentReasoningEffort != null`
+  //
+  // On cold start the toolbar div itself may render before its
+  // conditionally-rendered children, or vice versa, depending on the
+  // order of state hydration.  useEffect with `[]` runs once on mount
+  // and then never again — so if it runs BEFORE the model/effort buttons
+  // exist, ResizeObserver is attached to a half-formed DOM and stays
+  // attached even when the buttons arrive later, BUT the observer's
+  // initial synchronous callback already fired with the half-formed
+  // state and cached "no buttons → no fold" forever.
+  //
+  // A ref callback fires every time React attaches the ref to a DOM
+  // node — and crucially, when the toolbar div re-mounts due to React
+  // reconciler activity (StrictMode double-invoke, or any parent state
+  // that causes ChatPanel's children to re-render and remount the
+  // toolbar subtree), the OLD ref is called with `null` (cleanup) and
+  // the NEW ref is called with the new node (setup).  This naturally
+  // tears down and re-installs the observer across all "toolbar
+  // identity" changes, which is exactly what we need.
+  //
+  // Inside the ref callback we ALSO install a MutationObserver on the
+  // toolbar subtree to catch button-set changes that don't cause the
+  // toolbar itself to remount (agent becomes running → model menu
+  // appears inside the toolbar).
+  const toolbarRefCallback = useCallback((node: HTMLDivElement | null) => {
+    // Always update the shared ref so other code can read it.
+    toolbarRef.current = node;
+    if (!node) return;
 
-    console.log("[toolbar:effect] running", { running: runningRef.current, hasRef: true });
-
-    // Invalidate cache when the effect re-runs (agent changed).
-    cachedWidthsRef.current = null;
+    // ── Imperative, fully self-contained measurement engine ──────
+    //
+    // This closure captures nothing from React component state.  It
+    // reads/writes the DOM directly.  State sync to React happens
+    // through setTextHidden only at the end of a measurement, so
+    // even if React is in the middle of a render, the DOM stays
+    // visually consistent (we apply visibility BEFORE setting state).
+    let measuring = false;
+    let rafId = 0;
 
     const measure = () => {
-      const present: { id: string; el: HTMLElement }[] = [];
-      const refs: Record<string, React.RefObject<HTMLDivElement | null>> = {
-        model: modelBtnRef,
-        effort: effortBtnRef,
-        ws: wsBtnRef,
-        sk: skBtnRef,
-      };
-      for (const [id, ref] of Object.entries(refs)) {
-        if (ref.current) present.push({ id, el: ref.current });
-      }
-      console.log("[toolbar]", JSON.stringify({
-        containerW: container.offsetWidth,
-        present: present.map((p) => p.id),
-      }));
-      if (present.length === 0) return;
+      if (measuring) return;
+      measuring = true;
+      try {
+        const els = Array.from(
+          node.querySelectorAll<HTMLElement>("[data-toolbar-btn]"),
+        );
+        if (els.length === 0) return;
 
-      const findText = (el: HTMLElement): HTMLElement | null =>
-        el.querySelector('[data-toolbar-text]') as HTMLElement | null;
-      const findChevron = (el: HTMLElement): HTMLElement | null =>
-        el.querySelector('[data-toolbar-chevron]') as HTMLElement | null;
+        const spans = els.map((el) => ({
+          id: el.dataset.toolbarBtn as string,
+          text: el.querySelector<HTMLElement>("[data-toolbar-text]"),
+          chev: el.querySelector<HTMLElement>("[data-toolbar-chevron]"),
+          // icon-only width (text hidden) — measured first so it's stable.
+          iconWidth: el.offsetWidth,
+        }));
 
-      const cacheKey = present.map((p) => p.id).join(",");
-
-      let fullWidths: number[];
-      let iconWidths: number[];
-
-      if (cachedWidthsRef.current?.key === cacheKey) {
-        // Use cached measurements — no DOM writes, no forced layout.
-        fullWidths = cachedWidthsRef.current.full;
-        iconWidths = cachedWidthsRef.current.icon;
-      } else {
-        // First time (or button-set changed): measure true full widths
-        // via scrollWidth with all text visible, then icon-only widths.
-        present.forEach((b) => {
-          const t = findText(b.el); if (t) t.style.display = "";
-          const c = findChevron(b.el); if (c) c.style.display = "";
+        // Reveal all text/chevron to read true full widths.
+        spans.forEach(({ text, chev }) => {
+          if (text) text.style.display = "";
+          if (chev) chev.style.display = "";
         });
-        fullWidths = present.map((b) => b.el.scrollWidth);
+        const fullWidths = els.map((el) => el.offsetWidth);
 
-        present.forEach((b) => {
-          const t = findText(b.el); if (t) t.style.display = "none";
-          const c = findChevron(b.el); if (c) c.style.display = "none";
+        const GAP = 4;
+        const totalGaps = (els.length - 1) * GAP;
+
+        // Layout constants: container padding (px-3 = 12px each side),
+        // gap-2 between the left cluster and right cluster,
+        // ~60px for the right cluster (ContextUsageIcon + send button),
+        // ~68px for the upload buttons (paperclip + image).
+        const PAD_X = 24;
+        const FLEX_GAP = 8;
+        const RIGHT_CLUSTER = 60;
+        const UPLOAD_BUTTONS = 68;
+        const available = node.offsetWidth
+                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER - UPLOAD_BUTTONS;
+
+        // Progressive collapse from LEFT to RIGHT (matches the
+        // documented product behavior: model hides first, then effort,
+        // then ws, then sk — preserving the rightmost buttons which
+        // are usually the most context-relevant).
+        //
+        // Algorithm:
+        //   1. Start with all buttons fully visible.
+        //   2. If totalFull > available, fold the leftmost button.
+        //   3. Recheck; if still overflowing, fold the next leftmost.
+        //   4. Stop when it fits OR every button is folded.
+        //
+        // Folding a button changes total width by exactly
+        // (fullWidth - iconWidth) — the button stays in the row,
+        // its trailing gap-1 to the next button is unchanged.
+
+        const fold = new Array<boolean>(spans.length).fill(false);
+        let current = fullWidths.reduce((a, b) => a + b, 0) + totalGaps;
+        for (let i = 0; i < spans.length; i++) {
+          if (current <= available) break;
+          fold[i] = true;
+          current -= (fullWidths[i] - spans[i].iconWidth);
+        }
+
+        // Apply visibility to DOM synchronously (user sees correct
+        // layout this frame), THEN sync React state.
+        spans.forEach(({ text, chev }, i) => {
+          const display = fold[i] ? "none" : "";
+          if (text) text.style.display = display;
+          if (chev) chev.style.display = display;
         });
-        iconWidths = present.map((b) => b.el.offsetWidth);
 
-        // Restore all text visible (default before first fold).
-        present.forEach((b) => {
-          const t = findText(b.el); if (t) t.style.display = "";
-          const c = findChevron(b.el); if (c) c.style.display = "";
-        });
-
-        cachedWidthsRef.current = { key: cacheKey, full: fullWidths, icon: iconWidths };
-      }
-
-      // Compute available width for the left group.
-      // Container has px-3 (24px total), gap-2 (8px) between left/right groups,
-      // and a right cluster (ContextUsageIcon + send button ≈ 60px).
-      // The two icon-only upload buttons (file + image) sit inside the left
-      // group but are NOT in `present[]`, so we subtract their footprint
-      // (~30 px each + their gap-1 separators) from the available width.
-      const PAD_X = 24;
-      const FLEX_GAP = 8; // gap-2 between left and right flex children
-      const RIGHT_CLUSTER = 60;
-      const UPLOAD_BUTTONS = 68; // gap + fileBtn(~30) + gap + imageBtn(~30), not in present[]
-      const GAP = 4; // gap-1 between buttons in the left group
-      const available = container.offsetWidth - PAD_X - FLEX_GAP - RIGHT_CLUSTER - UPLOAD_BUTTONS;
-
-      // Greedy fold: start with all labels visible, then fold the lowest-importance
-      // button while the row would overflow. Folded buttons free up
-      // (fullWidth - iconWidth) pixels.
-      const totalFull =
-        fullWidths.reduce((a, b) => a + b, 0) + (present.length - 1) * GAP;
-      let currentTotal = totalFull;
-      const nextHidden: Record<string, boolean> = {};
-      present.forEach((b) => (nextHidden[b.id] = false));
-
-      if (currentTotal > available) {
-        // Fold all buttons when space is insufficient.  This ensures a
-        // consistent look — either ALL labels are visible or ALL are hidden
-        // (icons only).  A greedy "fold until it fits" approach would leave
-        // the highest-importance button (sk) with text while the others are
-        // icon-only, which looks inconsistent.
-        present.forEach((b) => (nextHidden[b.id] = true));
-      }
-
-      console.log("[toolbar:calc]", JSON.stringify({
-        fullWidths, iconWidths, available, totalFull, nextHidden,
-      }));
-
-      // Defer state update to next animation frame so React re-renders
-      // happen *after* the current layout is painted. This prevents
-      // synchronous layout interference with sibling panels (e.g. the
-      // agent-list subtly changing width during resize).
-      pendingHiddenRef.current = nextHidden;
-      if (toolbarRafRef.current === 0) {
-        toolbarRafRef.current = requestAnimationFrame(() => {
-          toolbarRafRef.current = 0;
-          const latest = pendingHiddenRef.current;
-          if (!latest) return;
-          setTextHidden((prev) => {
-            let changed = false;
-            for (const k of Object.keys(latest)) {
-              if (prev[k] !== latest[k]) { changed = true; break; }
+        setTextHidden((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          spans.forEach(({ id }, i) => {
+            if (next[id] !== fold[i]) {
+              next[id] = fold[i];
+              changed = true;
             }
-            return changed ? latest : prev;
           });
+          return changed ? next : prev;
         });
+      } finally {
+        measuring = false;
       }
     };
 
-    const ro = new ResizeObserver(measure);
-    ro.observe(container);
-    measure();
-    return () => {
+    const scheduleMeasure = () => {
+      if (rafId !== 0) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        measure();
+      });
+    };
+
+    // ResizeObserver: container width changes.
+    const ro = new ResizeObserver(() => scheduleMeasure());
+    ro.observe(node);
+
+    // MutationObserver: button-set changes. `attributes: true` covers
+    // WorkspaceSelector's text change (it updates the label when the
+    // user picks a different workspace) which DOES affect width.
+    const mo = new MutationObserver((mutations) => {
+      const relevant = mutations.some(
+        (m) =>
+          m.type === "childList" ||
+          m.type === "characterData" ||
+          (m.type === "attributes" && m.attributeName === "data-toolbar-text"),
+      );
+      if (relevant) scheduleMeasure();
+    });
+    mo.observe(node, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["data-toolbar-text"],
+    });
+
+    // Schedule the initial measurement for the next frame so React
+    // has time to commit children (especially the conditionally-
+    // rendered model/effort buttons).
+    scheduleMeasure();
+
+    // Stash teardown on the node so the next ref callback can clean
+    // up.  Without this, a re-mount would leak observers.
+    (node as unknown as { __toolbarTeardown__?: () => void }).__toolbarTeardown__ = () => {
       ro.disconnect();
-      if (toolbarRafRef.current) {
-        cancelAnimationFrame(toolbarRafRef.current);
-        toolbarRafRef.current = 0;
+      mo.disconnect();
+      if (rafId !== 0) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
       }
     };
-  }, []); // empty deps: runs once on mount, uses runningRef for current state
+  }, []);
 
   // Per-agent + per-session state selectors.
   // messages and sessionStatus are split into granular selectors because
@@ -1839,7 +1861,14 @@ export function ChatPanel() {
 
           {/* Bottom toolbar — @container for responsive button text collapse */}
           <div
-            ref={toolbarRef}
+            ref={(node) => {
+              // Cleanup the previous install (if any) before handing
+              // off to the ref callback, which re-installs on the new
+              // node.  This handles re-mounts cleanly.
+              const prev = (toolbarRef.current as unknown as { __toolbarTeardown__?: () => void } | null);
+              prev?.__toolbarTeardown__?.();
+              toolbarRefCallback(node);
+            }}
             className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]"
           >
             {/* Left: feature buttons */}
@@ -1853,6 +1882,7 @@ export function ChatPanel() {
                   currentModel={currentModel}
                   currentProvider={currentProvider}
                   onSelect={(m, p) => selectedAgentId && setCurrentModel(m, p, selectedAgentId)}
+                  btnId="model"
                 />
               )}
               {/* Reasoning effort toggle — shown when session has a non-null reasoningEffort (null = provider doesn't support reasoning) */}
@@ -1862,6 +1892,7 @@ export function ChatPanel() {
                   textHidden={textHidden.effort}
                   effort={currentReasoningEffort}
                   onChange={(e) => selectedAgentId && setReasoningEffort(e, selectedAgentId)}
+                  btnId="effort"
                 />
               )}
               {/* Workspace button */}
@@ -2033,6 +2064,7 @@ function ModelMenu({
   onSelect,
   textHidden,
   wrapperRef: externalRef,
+  btnId,
 }: {
   models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
   currentModel: string | null;
@@ -2041,6 +2073,8 @@ function ModelMenu({
   textHidden?: boolean;
   /** Optional external ref merged with the internal click-outside ref */
   wrapperRef?: React.Ref<HTMLDivElement>;
+  /** Toolbar button id used by ChatPanel's collapse observer */
+  btnId?: string;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -2097,6 +2131,7 @@ function ModelMenu({
       onToggle={() => setOpen(!open)}
       wrapperRef={ref}
       textHidden={textHidden}
+      btnId={btnId}
     >
       {/* Popup menu */}
       {open && (
@@ -2188,12 +2223,15 @@ function ReasoningEffortMenu({
   onChange,
   textHidden,
   wrapperRef: externalRef,
+  btnId,
 }: {
   effort: string | null;
   onChange: (effort: string) => void;
   textHidden?: boolean;
   /** Optional external ref merged with the internal click-outside ref */
   wrapperRef?: React.Ref<HTMLDivElement>;
+  /** Toolbar button id used by ChatPanel's collapse observer */
+  btnId?: string;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -2235,6 +2273,7 @@ function ReasoningEffortMenu({
       onToggle={() => setOpen(!open)}
       wrapperRef={ref}
       textHidden={textHidden}
+      btnId={btnId}
     >
       {open && (
         <div
