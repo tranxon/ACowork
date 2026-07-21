@@ -185,6 +185,26 @@ export function GlobalSearchPanel({
     }, [agentId, workspaceId, fileFilter, caseSensitive, wholeWord]);
 
 
+
+    /* ── Auto-search on query change (debounced) ─────────────────────── */
+    //
+    // Mirrors `GoToFilePalette` (Ctrl+P): typing triggers a debounced
+    // search via `doSearch`. Pressing Enter still calls `doSearch` directly
+    // (see `inputKeyDown`) — the second invocation is harmless because
+    // `doSearch` cancels its own in-flight request via `abortRef`.
+    //
+    // Debouncing avoids a request per keystroke on large workspaces and
+    // keeps the latest query winning via the AbortController inside
+    // `doSearch`.
+
+    useEffect(() => {
+        if (!query.trim() || !agentId) return;
+        const timer = setTimeout(() => {
+            void doSearch(query);
+        }, 150);
+        return () => clearTimeout(timer);
+    }, [query, agentId, doSearch]);
+
     /* ── Auto-focus ──────────────────────────────────────────────────── */
 
     useEffect(() => {

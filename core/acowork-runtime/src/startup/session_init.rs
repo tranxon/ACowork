@@ -302,6 +302,29 @@ pub(crate) async fn phase_b_init_session(
             *slot = Some(adapter);
         }
 
+        // ADR-040: Publish workspace query + mutation services. Workspace
+        // services only need the agent's `work_dir` (resolved at boot);
+        // they don't depend on async resources like memory_store, so we
+        // can wire them immediately. Both services must be published
+        // BEFORE the workspace HTTP handlers can serve a real response.
+        {
+            let query_svc: Arc<dyn crate::usecases::WorkspaceQueryService> = Arc::new(
+                crate::usecases::RuntimeWorkspaceQueryService::new(
+                    work_dir_path.to_path_buf(),
+                    ctx.agent_id.clone(),
+                ),
+            );
+            let mut slot = ctx.workspace_query_slot.lock().await;
+            *slot = Some(query_svc);
+        }
+        {
+            let mutation_svc: Arc<dyn crate::usecases::WorkspaceMutationService> = Arc::new(
+                crate::usecases::RuntimeWorkspaceMutationService::new(work_dir_path.to_path_buf()),
+            );
+            let mut slot = ctx.workspace_mutation_slot.lock().await;
+            *slot = Some(mutation_svc);
+        }
+
         // ── Resolve & persist agent_config.json defaults ─────────────
         //
         // agent_config.json is the single source of truth for the

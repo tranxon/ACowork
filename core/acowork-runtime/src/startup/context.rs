@@ -143,6 +143,13 @@ pub(crate) struct AgentBootContext {
     pub session_metadata_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
     /// ADR-040: Late-bind slot for memory query service.
     pub memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+    /// ADR-040: Late-bind slot for workspace query service
+    /// (read-only: `list_workspaces` / `list_tree` / `read_file` /
+    /// `find_files` / `search_files`).
+    pub workspace_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
+    /// ADR-040: Late-bind slot for workspace mutation service
+    /// (workspace CRUD + file/dir mutation).
+    pub workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
 }
 
 /// Context produced by Phase B (per-session initialization).

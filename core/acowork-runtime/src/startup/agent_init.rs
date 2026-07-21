@@ -109,6 +109,14 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let memory_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-040: Late-bind slots for workspace query + mutation services.
+    // Workspace services are populated immediately after the runtime
+    // boots (no async dependency like memory) — see session_init.rs.
+    let workspace_query_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -129,6 +137,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             mqtt_client_slot.clone(),
             session_metadata_slot.clone(),
             memory_query_slot.clone(),
+            workspace_query_slot.clone(),
+            workspace_mutation_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -619,6 +629,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_core_shared,
         session_metadata_slot,
         memory_query_slot,
+        workspace_query_slot,
+        workspace_mutation_slot,
     })
 }
 

@@ -103,6 +103,25 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces/tree",
             get(proxy_list_tree),
         )
+        // Routes 16-17: Workspace filename / content search (ADR-040).
+        // ADR-009 v2: the Runtime is the authoritative workspace API owner;
+        // the Gateway is now a thin reverse-proxy for these CPU-heavy
+        // filesystem walks. Earlier revisions of this module kept
+        // `find_files` / `search_files` on the Gateway side (running in
+        // the gateway process), but moving them to the Runtime gives us:
+        //   1. A single source of truth for the workspace tree root
+        //      (Runtime already resolves `__agent_home__` / additional dirs).
+        //   2. Path-traversal / canonicalize guard lives in one place.
+        //   3. Query params are forwarded verbatim — no Gateway-side
+        //      schema drift to maintain.
+        .route(
+            "/api/agents/{id}/workspaces/find",
+            get(proxy_find_files),
+        )
+        .route(
+            "/api/agents/{id}/workspaces/search",
+            get(proxy_search_files),
+        )
         .route(
             "/api/agents/{id}/sessions",
             get(proxy_list_sessions),
@@ -235,6 +254,31 @@ async fn proxy_list_tree(
 ) -> Response {
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, "/workspaces/tree", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/workspaces/find` to Runtime's
+/// `GET /workspaces/find`. Querystring keys: `q`, `workspace_id`, `limit`.
+async fn proxy_find_files(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/workspaces/find", &query, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/workspaces/search` to Runtime's
+/// `GET /workspaces/search`. Querystring keys: `q`, `workspace_id`, `include`,
+/// `max_results`, `case_sensitive`, `whole_word`.
+async fn proxy_search_files(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, "/workspaces/search", &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
