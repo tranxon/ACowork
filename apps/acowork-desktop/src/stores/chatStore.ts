@@ -115,6 +115,52 @@ function trimOldest(messages: ChatMessage[]): ChatMessage[] {
   return messages.slice(-MESSAGE_CACHE_WINDOW);
 }
 
+/**
+ * Apply `trimOldest` and adjust pagination metadata (messageOffset /
+ * messageLimit / messageTotal) to keep `hasOlder` / `hasNewer` accurate
+ * after mutations that bypass `loadSessionMessages` (i.e. MQTT-driven
+ * inserts and optimistic user-message appends).
+ *
+ * The offset/limit/total model:
+ *   offset = messages NEWER than the cache window (0 = includes newest)
+ *   limit  = size of the cache window
+ *   total  = total messages in the conversation
+ *
+ * When a NEW entry is added:
+ *   - total += 1
+ *   - If offset == 0 (cache includes newest): limit += 1, then subtract any
+ *     messages dropped by trimming.  The window grew on the newer end and
+ *     shrank on the older end.
+ *   - If offset > 0 (user scrolled up): offset += 1 (one more message is
+ *     now above the window), limit unchanged minus any trimming.
+ *
+ * When an IN-PLACE update occurs (same id, e.g. placeholder -> freeze):
+ *   - No change to total (count unchanged).
+ *   - If trimming drops messages (shouldn't normally happen since the array
+ *     length is the same), reduce limit accordingly.
+ */
+function applyTrimAndAdjustMeta(
+  ss: SessionChatState,
+  newMessages: ChatMessage[],
+  isNewEntry: boolean,
+): Partial<SessionChatState> {
+  const trimmed = trimOldest(newMessages);
+  const dropped = newMessages.length - trimmed.length;
+  const patch: Partial<SessionChatState> = { messages: trimmed };
+  if (isNewEntry) {
+    patch.messageTotal = ss.messageTotal + 1;
+    if (ss.messageOffset === 0) {
+      patch.messageLimit = Math.max(0, ss.messageLimit + 1 - dropped);
+    } else {
+      patch.messageOffset = ss.messageOffset + 1;
+      patch.messageLimit = Math.max(0, ss.messageLimit - dropped);
+    }
+  } else if (dropped > 0) {
+    patch.messageLimit = Math.max(0, ss.messageLimit - dropped);
+  }
+  return patch;
+}
+
 // ── ADR-035 C2: assistant activeStream safety valve ──
 //
 // assistant content is NEVER truncated for display — the user must see the
@@ -1141,11 +1187,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     if (sessionId) {
-      set((state) => ({
-        ...updateSessionState(state, agentId, sessionId, {
-          messages: [...getSessionState(state, agentId, sessionId).messages, userMsg],
-                }),
-      }));
+      set((state) => {
+        const ss = getSessionState(state, agentId, sessionId);
+        return updateSessionState(state, agentId, sessionId,
+          applyTrimAndAdjustMeta(ss, [...ss.messages, userMsg], true));
+      });
       // ── DIAG: verify optimistic user message insert ──
       console.log("[ChatStore:DEBUG] sendMessage optimistic insert", {
         sid: sessionId,
@@ -2061,9 +2107,9 @@ function upsertMessageInSession(state: ChatStore, agentId: string, sid: string, 
   if (idx >= 0) {
     const arr = ss.messages.slice();
     arr[idx] = msg;
-    return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+    return updateSessionState(state, agentId, sid, applyTrimAndAdjustMeta(ss, arr, false));
   }
-  return updateSessionState(state, agentId, sid, { messages: trimOldest([...ss.messages, msg]) });
+  return updateSessionState(state, agentId, sid, applyTrimAndAdjustMeta(ss, [...ss.messages, msg], true));
 }
 
 // ── Per-session seq-ordered insert (root fix for reorder) ──
@@ -2111,7 +2157,7 @@ function insertBySeq(state: ChatStore, agentId: string, sid: string, msg: ChatMe
     // pushes use the same seq as the placeholder; record_complete
     // carries that same seq back, so the array sort order is invariant.
     arr[byIdIdx] = { ...existing, ...msg, seq: existing.seq ?? msg.seq };
-    return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+    return updateSessionState(state, agentId, sid, applyTrimAndAdjustMeta(ss, arr, false));
   }
   // New entry: binary search the insertion point by seq ascending.
   // Live entries are strictly increasing in seq, so binary search is
@@ -2137,7 +2183,7 @@ function insertBySeq(state: ChatStore, agentId: string, sid: string, msg: ChatMe
     }
   }
   arr.splice(lo, 0, msg);
-  return updateSessionState(state, agentId, sid, { messages: trimOldest(arr) });
+  return updateSessionState(state, agentId, sid, applyTrimAndAdjustMeta(ss, arr, true));
 }
 
 function handleMessageEvent(
@@ -2512,12 +2558,15 @@ function handleMessageEvent(
         timestamp: Date.now(),
         ...getAgentSenderInfo(agentId),
       };
-      set((state) => ({
-        ...updateSessionState(state, agentId, sid!, {
-          messages: [...getSessionState(state, agentId, sid!).messages, errMsg],
-          isCompacting: false,
+      set((state) => {
+        const ss = getSessionState(state, agentId, sid!);
+        return {
+          ...updateSessionState(state, agentId, sid!, {
+            ...applyTrimAndAdjustMeta(ss, [...ss.messages, errMsg], true),
+            isCompacting: false,
           }),
-      }));
+        };
+      });
       break;
     }
 
