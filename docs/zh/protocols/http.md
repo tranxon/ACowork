@@ -12,7 +12,7 @@
 - **认证**：当 `[http].auth_enabled = true` 时，所有 `/api/*` 请求需带
   `Authorization: Bearer <token>`，token 文件位于 `<data_dir>/http_token`。
 - **错误格式**：`{ "error": "..." }` + 对应 HTTP 状态码
-- **WebSocket 升级**：`GET /api/agents/{id}/stream` 单独处理，详见 [websocket.md](./websocket.md)
+- **流式事件通道（MQTT）**：聊天事件流不再走 WebSocket，而是客户端订阅 [MQTT](./mqtt.md) topic `chat/stream/{session_id}`（Desktop App 通过其 Tauri 后端的 MQTT 客户端订阅）。
 
 ---
 
@@ -23,27 +23,32 @@ sequenceDiagram
     autonumber
     participant C as Client (Desktop App / CLI)
     participant G as Gateway (Axum)
-    participant RT as Agent Runtime (gRPC)
+    participant B as rumqttd Broker
+    participant RT as Agent Runtime (MQTT client + localhost HTTP)
 
     C->>G: HTTP 请求 + Bearer Token
     G->>G: 鉴权 / 解析 path
     alt 直接本地处理
         G-->>C: 200 + JSON
-    else 需 Runtime 协同
-        G->>RT: gRPC IntentReceived / Pending Request
-        RT-->>G: gRPC Result
-        G-->>C: 200 + JSON（聚合 Runtime 状态）
+    else 需 Runtime 协同（大数据查询 / 配置读）
+        G->>RT: HTTP 反向代理 → Runtime localhost HTTP
+        RT-->>G: JSON
+        G-->>C: 200 + JSON
+    else 需 Runtime 协同（事件触发 / Intent）
+        G->>B: PUB intent/...
+        B-->>RT: intent/...
+        RT-->>B: PUB 状态 / 结果
     else 流式事件
-        C->>G: Upgrade → WebSocket
-        G-->>C: stream chunks / done
+        C->>B: MQTT SUB chat/stream/{session_id}
+        B-->>C: chunk / tool_call / done
     end
 ```
 
 文字概括：
 
 - 所有 HTTP 请求由 Gateway 单点处理。
-- 仅少部分 endpoint（如 Memory、Skill 详情）需要向 Runtime 发起 gRPC 请求并等待结果。
-- 流式聊天事件走 WebSocket 升级而非 HTTP 长轮询。
+- 仅少部分 endpoint（如 Memory、Skill 详情、大数据消息历史）需要向 Runtime 协同，结果通过 **Gateway → Runtime localhost HTTP 的反向代理**返回（不经公网）。
+- 流式聊天事件走 **MQTT pub/sub**（topic `chat/stream/{session_id}`）而非 WebSocket。
 
 ---
 
@@ -78,7 +83,7 @@ sequenceDiagram
 | POST | `/api/agents/{id}/clone` | 克隆 Agent（skeleton 或 full） |
 | POST | `/api/agents/{id}/start` | 启动 Agent Runtime 子进程 |
 | POST | `/api/agents/{id}/stop` | 停止 Agent |
-| POST | `/api/agents/{id}/restart-debug` | 重启为 debug 模式（开启 Debug WebSocket） |
+| POST | `/api/agents/{id}/restart-debug` | 重启为 debug 模式（开启 Debug 通道） |
 | GET  | `/api/agents/{id}/model` | 当前使用的模型 / provider |
 | GET  | `/api/agents/{id}/config` | 读取 Agent 运行时配置（合并后） |
 | PUT  | `/api/agents/{id}/config` | 更新 Agent 配置（max_output_tokens、temperature、prompt、avatar…） |
@@ -94,8 +99,8 @@ sequenceDiagram
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
-| POST | `/api/agents/{id}/message` | 发送消息（fire-and-forget，Gateway 内部转 gRPC） |
-| GET  | `/api/agents/{id}/stream` | **WebSocket 升级**，详见 [websocket.md](./websocket.md) |
+| POST | `/api/agents/{id}/message` | 发送消息（fire-and-forget；Gateway 通过 MQTT PUB Intent 推送给 Runtime） |
+| GET  | `/api/agents/{id}/stream` | **已弃用**。聊天事件改为通过 [MQTT](./mqtt.md) topic `chat/stream/{session_id}` 订阅获取 |
 | GET  | `/api/agents/{id}/conversations` | 会话列表 |
 | GET  | `/api/agents/{id}/conversations/latest` | 最新会话消息 |
 | GET  | `/api/agents/{id}/sessions` | 会话列表（运行时视角） |
@@ -181,7 +186,7 @@ sequenceDiagram
 | DELETE | `/api/agents/{id}/memory/nodes/{node_id}` | 删除节点 |
 | POST | `/api/agents/{id}/memory/consolidate` | 触发记忆整合（`force`、`retention_days`） |
 
-> 上述 4 个 endpoint 均经 Gateway → Runtime 的 pending request 机制发起，Runtime 真实持有 Grafeo 存储。
+> 上述 4 个 endpoint 均经 Gateway → Runtime localhost HTTP 的反向代理发起；Runtime 真实持有 Grafeo 存储，HTTP 反代在 [mqtt.md §Runtime HTTP Server](./mqtt.md) 详述。
 
 ### 八、技能 (Skills)
 
@@ -236,14 +241,14 @@ sequenceDiagram
 | GET  | `/api/sessions/{session_id}/documents` | 列出附件 |
 | DELETE | `/api/sessions/{session_id}/documents/{doc_id}` | 删除附件 |
 
-> 附件元数据持久化到 `<data_dir>/sessions/{session_id}/documents/`，引用通过 `document_ids` 字段在 `send_message` / WebSocket `message` 中传给 Runtime。
+> 附件元数据持久化到 `<data_dir>/sessions/{session_id}/documents/`，引用通过 `document_ids` 字段在 `send_message` 中传给 Runtime（Runtime 经 MQTT PUB Intent 与 Gateway 同步）。
 
 ### 十三、调试与开发工具
 
 | 方法 | 路径 | 用途 |
 |------|------|------|
 | GET  | `/api/lsp/endpoint` | 取 LSP Relay 端点 |
-| POST | `/api/agents/{id}/restart-debug` | 重启 Agent 并开启 Debug WebSocket（开发者工具） |
+| POST | `/api/agents/{id}/restart-debug` | 重启 Agent 为 debug 模式（开启 Debug 通道，开发者工具） |
 
 ### 十四、交互（审批 / 问答）
 
@@ -272,7 +277,7 @@ sequenceDiagram
 | 404 | Agent / 资源不存在 |
 | 409 | 状态冲突：Agent 未运行、未安装 |
 | 500 | Gateway 内部错误 |
-| 502 / 503 | gRPC 通道不可用，Runtime 未连接 |
+| 502 / 503 | MQTT / 反向代理通道不可用，Runtime 未连接 |
 | 504 | Gateway → Runtime 请求超时 |
 
 ---
@@ -319,7 +324,7 @@ Content-Type: application/json
 { "message_id": "msg-11111111", "status": "sent" }
 ```
 
-随后客户端通过 `GET /api/agents/{id}/stream`（WebSocket）接收 `chunk` / `done` 事件流。详见 [websocket.md](./websocket.md)。
+随后客户端通过订阅 [MQTT](./mqtt.md) topic `chat/stream/{session_id}` 接收 `chunk` / `done` 事件流。`GET /api/agents/{id}/stream`（旧 WebSocket 端点）已弃用。
 
 ### 5.3 查询 Memory
 
@@ -332,7 +337,7 @@ Authorization: Bearer <token>
 
 ## 6. 注意事项
 
-1. **Gateway 不持久化业务数据**：Memory、Skill、Agent 配置等真实数据存于 Runtime 本地文件 / Grafeo；Gateway 通过 gRPC 拉取快照或透传请求。
-2. **多数写操作会触发热推送**：例如修改 Provider / MCP / Search 配置后，Gateway 通过 `GlobalResourcePusher` 向所有已连接 Runtime 广播 `ProviderListUpdate` / `SearchConfigDelivery` 等。
+1. **Gateway 不持久化业务数据**：Memory、Skill、Agent 配置等真实数据存于 Runtime 本地文件 / Grafeo；Gateway 通过 **HTTP 反向代理** Runtime localhost HTTP 拉取快照或透传请求，事件触发则通过 **MQTT PUB Intent**。
+2. **多数写操作会触发热推送**：例如修改 Provider / MCP / Search 配置后，Gateway 通过 MQTT **retained publish** 向所有已连接的 Runtime（订阅对应资源的 topic）同步最新可用列表，详见 [mqtt.md §全局资源可用性广播](./mqtt.md)。
 3. **CORS**：默认仅允许本地（Tauri、localhost:3000/5173）；远程 Desktop 场景需设置 `cors_enabled = true`。
-4. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，供前端 <img> / 视频等直接引用。
+4. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，供前端 <img> / 视频等直接引用（命名保留历史，不变更）。

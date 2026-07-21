@@ -1,27 +1,6 @@
 # MQTT 协议
 
 > Gateway 内嵌 MQTT Broker（[`rumqttd`](https://github.com/bytebeamio/rumqtt)），承担 **实时事件总线 + 轻量级状态同步** 职责。Topic 树遵循 **"按数据源 pub/sub"** 原则：每个主题代表一份数据资源，发布者 = 数据源权威，订阅者按需订阅。
->
-> **设计依据（按依赖顺序）**：
->
-> - [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — 用 MQTT 替换 gRPC + WebSocket（传输层基础）
-> - [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md) — MQTT / HTTP 职责边界
-> - [ADR-035](../../adr/zh/ADR-035-mqtt-streaming-push-refactor.md) — MQTT 流式传输重构（QoS 1 强制）
-> - [ADR-036](../../adr/zh/ADR-036-mqtt-status-push.md) — MQTT 连接状态由后端主动推送
-> - [ADR-038](../../adr/zh/ADR-038-session-lifecycle-explicit-model.md) — Session 生命周期显式化模型
-> - [ADR-039](../../adr/zh/ADR-039-mqtt-client-lifecycle.md) — **MQTT Client 生命周期框架**（状态机 + 异常分类 + Bootstrap 五步合约 + 对称设计 — 本文件 §5.1.1、§5.1.2、§8.6、§12、§14.5 沉淀）
->
-> **核心源码**：
->
-> - Broker（Gateway 嵌入）：`core/acowork-gateway/src/mqtt/broker.rs`
-> - Gateway 全局资源 HTTP 接口（全量 CRUD）：`core/acowork-gateway/src/http/global.rs`（规划）
-> - Gateway 全局资源可用状态发布器：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`（规划）
-> - Runtime MQTT 客户端：`core/acowork-runtime/src/mqtt/client.rs`
-> - Desktop（Tauri Rust）MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
-> - Protobuf 消息定义：`core/acowork-core/proto/mqtt_payload.proto`
-> - ACL 配置：`core/acowork-gateway/configs/rumqttd.toml`（规划）
-
-> **状态**：ADR-033 / 034 / 035 / 036 已落地；ADR-038 已落地；ADR-039 §5.1 Bootstrap 五步合约与 §14.5 set_max_packet_size + ConnAck 重做 已落地（Phase 1 完成）；ADR-039 Phase 2（共用 crate `acowork-mqtt-session`、ErrClass、SessionState、BootstrapAction trait、ReconnectPolicy）已落地。
 
 ---
 
@@ -136,10 +115,23 @@ acowork/global/
 ├── searches                   # [Retained] 当前已就绪的 search provider 列表
 │                              # 注：SearchRef 内嵌 `api_key` 字段
 │                              # （Gateway 从 Vault 解密后填入）
-└── embedding_models           # [Retained] 当前已就绪的 embedding model 列表
+├── embedding_models           # [Retained] 当前已就绪的 embedding model 列表
+└── user_profile               # [Retained, ADR-042] 当前 active user 的 profile 快照
+                               # payload = AvailableUsers {
+                               #   version: u64,                 # 镜像 user_profile_list.version
+                               #   active_user: UserProfileRef { # 空 user_id = 无 active user
+                               #     user_id, display_name, language, timezone,
+                               #     city?, country?, occupation?, communication_style?,
+                               #     custom_json,
+                               #   },
+                               # }
+                               # 注：Runtime 启动后用此快照构造 identity_context，
+                               # 供 compaction system prompt 注入语言偏好。
+                               # 用户在 Desktop Settings 切换 active profile 时
+                               # Gateway 重 publish 此主题，Runtime 立即收到。
 ```
 
-**为什么密钥在 `acowork/global/*` 主题里一起发布？** 这是 Runtime **唯一**的密钥获取路径——Runtime 启动时只 SUB `acowork/global/#`，没有 gRPC AgentHello 握手也没有单独的密钥请求主题：
+**为什么密钥在 `acowork/global/*` 主题里一起发布？** 这是 Runtime **唯一**的密钥获取路径——Runtime 启动时只 SUB `acowork/global/#`，所有密钥随 retained payload 一次性下发：
 
 1. **Gateway 是 broker 的同进程宿主**（见 §11），broker 只绑定 localhost（`127.0.0.1`），不出主机。PUBLISH 的 payload（含解密的密钥）不会进入网络。
 2. **Runtime 与 Gateway 同用户**——Runtime 是 Gateway 拉起的子进程，不存在"跨租户"密钥泄露场景。
@@ -158,6 +150,7 @@ acowork/global/
   - 一个 mcp 包下载失败 / 进程崩溃 → Gateway 检测 → 重算 payload 后 PUBLISH `acowork/global/mcps`(retain=true)
   - embedding model 加载完成 / 卸载 → PUBLISH `acowork/global/embedding_models`(retain=true)
   - Runtime 启动时立即收到 retained 当前快照;后续状态变化收到 push
+  - **ADR-042**:用户在 Settings 增/改/删 user profile 或切换 active user → Gateway 重 publish `acowork/global/user_profile`(retain=true)。Runtime 收到后通过 `SessionManager::update_user_identity` broadcast 到所有 session 的 `ContextBuilder.identity_context`。
 - **无 HTTP 兜底**：Runtime 启动后 `SUB acowork/global/#` 立即收到所有 retained 快照；断线重连后再次 SUB 同样立即收到最新 retained。MQTT Retained Message 原生语义已覆盖"快照 + 增量"两种需求，**不**提供 `GET /api/global/{kind}/available` 这类 HTTP 兜底接口。
 - **冲突解决**:Runtime 收到 push 时比较 `version`,新版本覆盖本地缓存,旧版本忽略(防止乱序)。
 - **QoS**:1(状态变更不能丢)。
@@ -168,7 +161,7 @@ acowork/global/
 >
 > 此外,所有 Runtime 看到的是同一份数据——这是它**不放在 `agents/{id}/` 下的根本原因**:没有 per-agent 差异。
 >
-> 这一层同时**携带每个 provider/MCP/search 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、从 `SearchRef.api_key` 取得 search provider key，填入 provider factory 与 MCP 客户端。**不**读环境变量、**不**走 gRPC AgentHello 握手——这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
+> 这一层同时**携带每个 provider/MCP/search 的解密后密钥**——Runtime 启动后 Phase A 解析 retained payload，从 `ProviderRef.api_key` 取得 OpenAI/Anthropic 等 LLM provider 的 API key、从 `McpRef.auth_token` 取得 MCP bearer token、从 `SearchRef.api_key` 取得 search provider key，填入 provider factory 与 MCP 客户端。这就是 §5.1 启动流程中 Runtime 一行 SUB `acowork/global/#` 就拿到全部启动期所需状态的根因。
 >
 > **为什么不用 `current` / `update` 两个子主题?**
 >
@@ -332,7 +325,7 @@ acowork/users/{user_id}/
 5. **snapshot 走 HTTP、增量走 MQTT**：session messages / memory nodes 这类**会被大量读且会持续增长**的资源，全量走 HTTP，**增量事件**走 MQTT（payload 本身就是最新数据，无需订阅者回拉）。
 6. **Gateway 只透传不转发**:Gateway 是 broker 宿主 + `acowork/global/*`(可用状态)数据源权威 + HTTP server。**不**作为 session 事件的"中转站",**不**维护 session 状态视图——session 权威在 Runtime,Desktop 直连即可。
 7. **变化 payload 总是包含最新值**：订阅 `meta` / `agents/{id}/config` / `acowork/global/{kind}` / `sessions/{sid}/meta` / `sessions/{sid}/config` 时，payload 总是完整最新数据，订阅者无需回 HTTP 拉快照。其中 `agents/{id}/config` 是 Runtime 当前生效的完整 agent_config.json（合并 manifest 默认值后的有效配置）—— Gateway 完全不参与 config 同步，Runtime 启动时从本地 `<work_dir>/config/agent_config.json` 加载，Desktop 改 config 通过 `PUT /api/agents/{id}/config` → Gateway 透传 → Runtime 内部 IPC 写入本地文件 + PUBLISH 新值。
-8. **gateway 不在 runtime 和 desktop 之间做转发**——这是本设计与旧 proposal 的**最关键差异**。
+8. **Gateway 不在 Runtime 与 Desktop 之间做转发**：Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；Desktop 发布的 control 指令**直接 PUB** `agents/{id}/sessions/control/...`。Runtime 是 session 权威，Gateway 不维护 session 状态视图。
 9. **全局资源三层分离**:
    - **第 1 层 - 全量原始列表**(用户在 Desktop Settings 里管理的原始配置):HTTP only,不走 MQTT。Desktop Settings 拉取后表单渲染,提交修改走 HTTP POST。
    - **第 2 层 - 已就绪可用状态**(Gateway health-check 后的可用资源):MQTT pub/sub,主题为 `acowork/global/{kind}`(单主题,Retained)。**不区分 agent**,所有 Runtime 共享同一份,因为"资源是否就绪"是全局事实。
@@ -432,7 +425,7 @@ sequenceDiagram
     RT->>BROKER: PUBLISH acowork/agents/{id}/config (Retained, Runtime 当前生效的完整 agent_config.json)
     RT->>BROKER: SUBSCRIBE acowork/global/# (立即收到全局资源 retained 快照——含各 provider/MCP/search 的解密后 key)
     RT->>BROKER: SUBSCRIBE acowork/agents/{id}/sessions/control/#
-    Note over RT: 收到 acowork/global/providers retained → Phase A 从 ProviderRef.api_key 取出 key 创建 LLM provider（不读环境变量、不走 gRPC AgentHello 握手）
+    Note over RT: 收到 acowork/global/providers retained → Phase A 从 ProviderRef.api_key 取出 key 创建 LLM provider
 
     Note over DA,BROKER: 6. Desktop (Tauri Backend) 连接
     DA->>BROKER: CONNECT (client_id: "user:{uid}:desktop:{pid}")
@@ -646,7 +639,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Desktop (Tauri Rust) — PUBLISH（控制指令）** | 同上 | `acowork/agents/{id}/sessions/control/#`（payload 带 sid） |
 
 > **Desktop 不应在前端直接连 MQTT Broker**：
-> 1. 浏览器 JS 不能连原生 TCP MQTT，必须走 WebSocket（rumqttd 的 WebSocket 支持待验证）
+> 1. 浏览器 JS 不能连原生 TCP MQTT
 > 2. Tauri Rust backend 已经有完整系统权限，用 `rumqttc` 直连 TCP broker 更简单可靠
 > 3. 安全：MQTT 连接在 Rust 层管理，前端通过 Tauri `invoke()` / `emit()` 间接收发
 >
@@ -705,8 +698,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 
 > **设计铁律**：Gateway 是 broker 宿主 + `acowork/global/*`（可用状态）数据源权威 + HTTP server + 反向代理，**不**作为业务事件的中转站。
 
-- **错误模式（旧设计）**：Runtime PUB `agents/{id}/stream/chunk` → Gateway SUB → 解析 `target` user_id → Gateway PUB `users/{uid}/agents/{id}/events` → Desktop 收到。链路长、Gateway 需维护状态、消息延迟 ×2。
-- **正确模式（新设计）**：Runtime PUB `agents/{id}/sessions/{sid}/messages/chunk` → Broker 路由 → Desktop 直连收到。链路短、Gateway 零参与、消息延迟 ×1、Gateway 崩溃不影响 session 通信。
+- **链路**：Runtime PUB `agents/{id}/sessions/{sid}/messages/chunk` → Broker 路由 → Desktop 直连收到。链路短、Gateway 零参与、消息延迟 ×1、Gateway 崩溃不影响 session 通信。
 - **Gateway 仅承担**：
   1. 维护 broker 进程（连接管理、ACL、retained 存储）
   2. 维护 `acowork/global/*` 主题（这是 Gateway 真正拥有的 MQTT 数据资源——所有 Runtime 共享的全局资源可用状态，**不区分 agent**）
@@ -728,6 +720,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | LSP available | Gateway | B | `acowork/global/lsps` (R, QoS 1) | — |
 | Search available | Gateway | KB | `acowork/global/searches` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
+| Active user profile（ADR-042） | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | —（Runtime 启动等 retained 快照，5s timeout fallback 到 None） |
 | Agent MCP 选择（`agent_mcp.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`active_mcp_servers`） | —（Desktop SUB retained 获取） |
 | Agent Search 选择（`agent_search.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`search_config`） | —（同上） |
 | Session provider/model 选择（`session_meta`） | Runtime（本地） | B | `agents/{id}/sessions/{sid}/meta` (R) | —（Desktop 进入 session 时 SUB retained） |
@@ -1054,7 +1047,7 @@ graph TB
 
 ## 12. 注意事项
 
-1. **Desktop 不应在前端直接连 MQTT Broker**：浏览器 JS 无法走原生 TCP，必须 WebSocket（待验证），统一由 Tauri Rust backend 用 `rumqttc` 直连更可靠安全。
+1. **Desktop 不应在前端直接连 MQTT Broker**：浏览器 JS 无法走原生 TCP，统一由 Tauri Rust backend 用 `rumqttc` 直连更可靠安全。
 2. **MQTT payload ≤ 100KB 阈值**：单条消息超过此阈值必须改走 HTTP（通过 Gateway 反向代理到 Runtime HTTP）；超过 `max_packet_size`（10MB）Broker 直接断开连接。Retained 消息占用 Broker 内存，全量大数据（message 列表、memory graph）不应走 MQTT retained。
 3. **顺序保证**：MQTT 协议保证同一 topic 内消息有序（RFC）。Session messages 全部走 `agents/{id}/sessions/{sid}/messages/*` 下各子主题，同一子主题内顺序天然保证；不同子主题之间不保证顺序（chunk / tool_call 间无需严格有序）。
 4. **多用户 ACL**：单用户阶段用最宽松 ACL（所有 desktop 订阅所有 agent）；多用户阶段按 user → agent 授权关系动态生成 ACL 规则。
@@ -1072,72 +1065,15 @@ graph TB
 ## 13. 相关源码索引
 
 - Broker 嵌入：`core/acowork-gateway/src/mqtt/broker.rs`
-- Gateway 全局资源 HTTP 端点（全量 CRUD）（规划）：`core/acowork-gateway/src/http/global.rs`
-- Gateway 全局资源 health-check + Publisher（规划）：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`
+- Gateway 全局资源 HTTP 端点（全量 CRUD）：`core/acowork-gateway/src/http/global.rs`
+- Gateway 全局资源 health-check + Publisher：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`
 - Runtime 全局资源可用状态内存缓存：`core/acowork-runtime/src/mqtt/available_cache.rs`
-- Runtime localhost HTTP server（规划）：`core/acowork-runtime/src/http/server.rs`
-- Gateway HTTP 反向代理（规划）：`core/acowork-gateway/src/http/proxy.rs`
-- ACL 加载与动态更新（规划）：`core/acowork-gateway/src/mqtt/acl.rs`
+- Runtime localhost HTTP server：`core/acowork-runtime/src/http/server.rs`
+- Gateway HTTP 反向代理：`core/acowork-gateway/src/http/proxy.rs`
+- ACL 加载与动态更新：`core/acowork-gateway/src/mqtt/acl.rs`
 - Runtime MQTT 客户端：`core/acowork-runtime/src/mqtt/client.rs`
 - Desktop Tauri MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
 - Protobuf 消息定义（独立文件 `mqtt_payload.proto`）：[`core/acowork-core/proto/mqtt_payload.proto`](../../../../core/acowork-core/proto/mqtt_payload.proto)
 - 默认端口（MQTT 端口 19875，broker / 客户端单一来源）：`core/acowork-core/src/defaults.rs`
 
-**生命周期框架**：两个 MQTT client 的状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。Runtime 与 Desktop 已共用同一份 `MqttSession` 抽象、同一份 `ErrClass` 分类器、同一份 `BootstrapAction` trait（Phase 1 已落地 set_max_packet_size + 显式 ConnAck 重做，Phase 2 已落地共用 crate `acowork-mqtt-session`）。
-
----
-
-## 14. 迁移路径（参考 ADR-033）
-
-MQTT 替换 gRPC + WebSocket 分阶段推进，每个阶段独立 buildable，可增量验证。
-
-### 14.1 阶段 1：Gateway MQTT 基础设施（双通道并存）
-
-| 范围 | 说明 |
-|------|------|
-| `mqtt/broker.rs` | rumqttd 嵌入配置与启动（端口 19875、连接数、packet size） |
-| `mqtt/global_resources_publisher.rs` | 后台 health-check loop + PUBLISH `acowork/global/{kind}` Retained |
-| `mqtt/acl.rs` | ACL 配置加载 |
-| `http/global.rs` | 全局资源全量 CRUD HTTP 端点 |
-| Gateway 启动 | 同时启动 gRPC server（旧）+ MQTT broker（新），handler 共享 |
-
-此阶段 gRPC 通道仍正常运行，MQTT 作为旁路验证。
-
-### 14.2 阶段 2：Runtime MQTT 客户端
-
-| 范围 | 说明 |
-|------|------|
-| `runtime/mqtt/client.rs` | Runtime MQTT client（连接、握手、pub-sub） |
-| `runtime/resources/available_cache.rs` | 内存缓存全局资源可用状态 |
-| Runtime 启动参数 | `--mqtt-port`（默认仍走 gRPC，可选切换 MQTT） |
-| Runtime 上线 | PUBLISH `agents/{id}/status` + `meta` + `config` Retained；SUB `acowork/global/#` + `sessions/control/#` |
-
-### 14.3 阶段 3：Desktop Tauri MQTT 集成
-
-| 范围 | 说明 |
-|------|------|
-| `src-tauri/src/mqtt_client.rs` | `rumqttc` 集成 + topic 订阅 + Tauri events 推送前端 |
-| 前端 invoke → Rust PUBLISH | 发消息、停止生成等控制指令 |
-| Rust SUBSCRIBE → Tauri emit → React | agent status/meta/config、session messages 等事件 |
-
-### 14.4 阶段 4：验证 + 清理
-
-| 范围 | 说明 |
-|------|------|
-| 端到端验证 | 发送消息 → LLM 流式 → 事件接收 → session 创建/删除 → 全局资源同步 |
-| 删除 gRPC | `grpc/server.rs`、`grpc/dispatch.rs`、`grpc/resource_pusher.rs` |
-| 删除 WebSocket Bridge | `http/chat.rs`（WS 部分）、`http/routes.rs`（Bridge 事件） |
-| 删除 Runtime gRPC | `runtime/grpc/client.rs` |
-| 预估删除量 | ~5,900 行 |
-
-> 业务逻辑 handler 函数（Gateway handlers + Runtime 各 handler）**不需要改**——输入输出类型不变（仍是 `GatewayRequest` / `GatewayResponse` 或 proto message），只换传输层。
-
-### 14.5 阶段 5：MQTT Client 生命周期框架（ADR-039，Phase 1 已完成，Phase 2 已完成）
-
-| 范围 | 说明 |
-|------|------|
-| Runtime `mqtt/client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker；事件循环捕获 `Incoming::ConnAck` 后调用 `Self::run_bootstrap()` 重做 status + meta + config + global/# + control/#；抽出 `BootstrapData` 缓存供多次 re-bootstrap 复用 |
-| Desktop `mqtt_client.rs` | `set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, ...)` 对齐 broker |
-| Phase 2 `acowork-mqtt-session` 共用 crate | ✅ Runtime 与 Desktop 共用 `MqttSession<S>` / `SessionState` / `ErrClass` / `BootstrapAction` / `ReconnectPolicy` |
-
-详细设计、Phase 1 落地、Phase 2 演进路径、验收标准、回滚策略：见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。
+> MQTT Client 状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。
