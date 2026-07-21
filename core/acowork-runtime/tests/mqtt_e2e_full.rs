@@ -60,6 +60,7 @@ fn integration_gateway_and_runtime_connect() {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         )
         .await
@@ -105,6 +106,7 @@ fn integration_control_message_flow() {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         ).await.unwrap();
 
@@ -185,6 +187,7 @@ fn integration_control_stop_flow() {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         ).await.unwrap();
 
@@ -235,6 +238,7 @@ fn integration_multiple_messages() {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         ).await.unwrap();
         let messages = ["msg-1", "msg-2", "msg-3"];
@@ -295,6 +299,7 @@ fn integration_lwt_offline_on_disconnect() {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         ).await.unwrap();
 

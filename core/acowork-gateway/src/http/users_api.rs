@@ -178,9 +178,11 @@ pub async fn create_user(
         resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
     }
 
-    // Hot push to all running agents
-    if let Some(pusher) = &state.pusher {
-        pusher.push_user_profile().await;
+    // ADR-033 / ADR-042: Trigger MQTT global resource republish so
+    // Runtime picks up the new (or re-activated) active user profile.
+    // Replaces the legacy gRPC pusher (no-op since ADR-040).
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     let version = {
@@ -264,11 +266,14 @@ pub async fn update_user(
         resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
     }
 
-    // Hot push if the updated user is the active one
+    // ADR-033 / ADR-042: Trigger MQTT global resource republish if
+    // the updated user is the active one. Replacing the legacy gRPC
+    // pusher (no-op since ADR-040).
     if updated_profile.is_active
-        && let Some(pusher) = &state.pusher {
-            pusher.push_user_profile().await;
-        }
+        && let Some(ref trigger) = state.mqtt_publisher_trigger
+    {
+        trigger.trigger();
+    }
 
     let version = {
         let gw = state.gateway_state.read().await;
@@ -324,9 +329,12 @@ pub async fn activate_user(
         resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
     }
 
-    // Hot push to all running agents
-    if let Some(pusher) = &state.pusher {
-        pusher.push_user_profile().await;
+    // ADR-033 / ADR-042: Trigger MQTT global resource republish so
+    // all Runtimes pick up the new active user. Activating is the
+    // most common hot-push path: user switches active profile, all
+    // open sessions immediately see the new identity_context.
+    if let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     let version = {
@@ -470,9 +478,12 @@ pub async fn update_user_avatar_config(
         resource_cache::rebuild_and_save_user_profile_cache(&mut gw, &data_dir);
     }
 
-    // Hot push to running agents
-    if is_active && let Some(pusher) = &state.pusher {
-        pusher.push_user_profile().await;
+    // ADR-033 / ADR-042: Trigger MQTT global resource republish if
+    // the user being modified is the active one. Avatar-only changes
+    // do not affect identity_context but still bump the user_profile
+    // list version; pushing keeps Runtime-side consumers in sync.
+    if is_active && let Some(ref trigger) = state.mqtt_publisher_trigger {
+        trigger.trigger();
     }
 
     // Return updated config

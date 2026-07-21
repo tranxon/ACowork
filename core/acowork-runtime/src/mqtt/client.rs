@@ -78,6 +78,20 @@ pub struct MqttConnectConfig<'a> {
     pub config_json: &'a str,
     pub available_cache: SharedAvailableCache,
     pub control_tx: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+    /// ADR-042: Sink for user-profile updates. The MQTT event loop sends
+    /// the latest `acowork_core::protocol::UserProfile` here whenever
+    /// `acowork/global/user_profile` retained is received (initial snapshot
+    /// or hot-push). The receiver (held by `agent_init.rs` → `gateway_loop`)
+    /// forwards to `SessionManager::update_user_identity` so all active
+    /// sessions pick up the new identity_context.
+    ///
+    /// Optional: when None, the MQTT event loop still updates
+    /// `available_cache` but does not notify SessionManager (suitable for
+    /// tests and Standalone mode where there is no SessionManager).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub identity_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
+    >,
 }
 
 /// Event payload for `publish_session_state_changed`.
@@ -239,6 +253,7 @@ impl RuntimeMqttClient {
         let poll_agent_id = cfg.agent_id.to_string();
         let poll_cache = cfg.available_cache.clone();
         let poll_control_tx = cfg.control_tx.clone();
+        let poll_identity_tx = cfg.identity_update_tx.clone();
         let poll_bootstrap = bootstrap_data.clone();
         let poll_client = client.clone();
         // ADR-039 §5.2.1: use a oneshot channel to synchronise
@@ -265,8 +280,25 @@ impl RuntimeMqttClient {
 
                         // Route global resource updates to the available cache.
                         if topic.starts_with("acowork/global/") {
+                            // ADR-042: peek at the cache after update to detect
+                            // user_profile changes. The cache itself is the
+                            // single source of truth — we just translate the
+                            // latest value into the SessionManager-facing
+                            // event.
                             let mut cache_write = poll_cache.write().await;
                             cache_write.update_from_mqtt(topic, &publish.payload);
+
+                            if topic == "acowork/global/user_profile" {
+                                let profile = cache_write.active_user_profile();
+                                tracing::debug!(
+                                    has_profile = profile.is_some(),
+                                    "acowork/global/user_profile retained received"
+                                );
+                                drop(cache_write);
+                                if let (Some(tx), Some(profile)) = (poll_identity_tx.as_ref(), profile) {
+                                    let _ = tx.send(profile);
+                                }
+                            }
                         }
 
                         // Route control commands to the control channel.
@@ -626,6 +658,33 @@ impl MqttChunkPublisher {
         &self.agent_id
     }
 
+    /// Clear a retained `messages/{event_type}` event for a session.
+    ///
+    /// Publishes a zero-byte payload with `retain = true` to the
+    /// `acowork/agents/{id}/sessions/{sid}/messages/{event_type}` topic.
+    /// Per MQTT spec this deletes the previously stored retained message,
+    /// preventing a reconnecting Desktop from receiving stale blocking
+    /// events (tool approval / ask question) from a previous turn.
+    pub async fn clear_retained_event(&self, session_id: &str, event_type: &str) {
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/messages/{}",
+            self.agent_id, session_id, event_type
+        );
+        if let Err(e) = self
+            .client
+            .publish(topic, QoS::AtLeastOnce, true, &[])
+            .await
+        {
+            tracing::warn!(
+                agent_id = %self.agent_id,
+                session_id = %session_id,
+                event_type = %event_type,
+                error = %e,
+                "Failed to clear retained MQTT event"
+            );
+        }
+    }
+
     /// Publish a session lifecycle envelope (created/deleted) to the
     /// `acowork/agents/{id}/sessions/{event_type}` topic with QoS 1.
     pub async fn publish_lifecycle(
@@ -756,7 +815,7 @@ impl MqttChunkPublisher {
     /// Publish a session event envelope to the broker at QoS 0 (default for
     /// `messages/*` streaming events per ADR-035 D1 / `mqtt.md` §8.3).
     async fn publish(&self, session_id: &str, event_type: &str, payload: &[u8]) {
-        self.publish_with_qos(session_id, event_type, payload, QoS::AtMostOnce).await;
+        self.publish_with_qos(session_id, event_type, payload, QoS::AtMostOnce, false).await;
     }
 
     /// Publish a session event envelope at the given QoS.
@@ -768,12 +827,19 @@ impl MqttChunkPublisher {
     /// (AtLeastOnce) because losing them breaks the approval flow and
     /// leaves the frontend with a stale session state.
     /// All other `messages/*` events stay at QoS 0.
+    ///
+    /// `session_state_changed` is published with `retain = true` so that
+    /// a Desktop client reconnecting to the broker immediately receives
+    /// the latest session status (Idle / Streaming) without needing an
+    /// HTTP round-trip. This is the primary recovery path for missed
+    /// state transitions during an MQTT outage.
     async fn publish_with_qos(
         &self,
         session_id: &str,
         event_type: &str,
         payload: &[u8],
         qos: QoS,
+        retain: bool,
     ) {
         let topic = format!(
             "acowork/agents/{}/sessions/{}/messages/{}",
@@ -781,7 +847,7 @@ impl MqttChunkPublisher {
         );
         if let Err(e) = self
             .client
-            .publish(topic, qos, false, payload)
+            .publish(topic, qos, retain, payload)
             .await
         {
             tracing::warn!(error = %e, session_id, event_type, "Failed to publish MQTT session event");
@@ -917,7 +983,7 @@ impl MqttChunkPublisher {
             payload: Some(data_envelope::Payload::SessionMessage(event)),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish_with_qos(&sid, "session_state_changed", &bytes, QoS::AtLeastOnce).await;
+        self.publish_with_qos(&sid, "session_state_changed", &bytes, QoS::AtLeastOnce, true).await;
     }
 
     /// Publish a context_usage event via MQTT (QoS 0).
@@ -986,7 +1052,12 @@ impl MqttChunkPublisher {
         self.publish(&sid, event_type, &bytes).await;
     }
 
-    /// Publish an ask_question event via MQTT (QoS 1).
+    /// Publish an ask_question event via MQTT (QoS 1, retained).
+    ///
+    /// Retained so that a Desktop reconnecting during a pending question
+    /// immediately receives the question content without needing an HTTP
+    /// round-trip. The retained message is cleared (zero-byte publish)
+    /// when the user answers – see `ClearRetainedEvent`.
     pub(crate) async fn publish_ask_question(&self, session_id: &str, message_id: &str, question_json: &str) {
         let sid = session_id.to_string();
         let mid = message_id.to_string();
@@ -1005,7 +1076,7 @@ impl MqttChunkPublisher {
             payload: Some(data_envelope::Payload::SessionMessage(event)),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish(&sid, "ask_question", &bytes).await;
+        self.publish_with_qos(&sid, "ask_question", &bytes, QoS::AtLeastOnce, true).await;
     }
 
     /// Publish a todo_updated event via MQTT (QoS 0).
@@ -1092,7 +1163,7 @@ impl MqttChunkPublisher {
             payload: Some(data_envelope::Payload::SessionMessage(event)),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish_with_qos(&sid, "tool_approval_needed", &bytes, QoS::AtLeastOnce).await;
+        self.publish_with_qos(&sid, "tool_approval_needed", &bytes, QoS::AtLeastOnce, true).await;
     }
 
     /// Publish a new_data_available event via MQTT (QoS 0).
@@ -1168,7 +1239,7 @@ impl MqttChunkPublisher {
         // 1 on both endpoints the broker preserves relative order
         // end-to-end; combined with the `seq` payload the Desktop is
         // also robust to any rare reorder.
-        self.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce).await;
+        self.publish_with_qos(&sid, "stream_delta", &bytes, QoS::AtLeastOnce, false).await;
     }
 
     /// Publish a `record_complete` event via MQTT (QoS 1, ADR-035 C1/O2).
@@ -1241,7 +1312,7 @@ impl MqttChunkPublisher {
         // terminal event; losing it leaves the message stuck. The
         // per-session `seq` makes the frame position self-healing on
         // the Desktop (see `insertBySeq`).
-        self.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce).await;
+        self.publish_with_qos(&sid, "record_complete", &bytes, QoS::AtLeastOnce, false).await;
     }
 }
 
@@ -1284,6 +1355,7 @@ mod tests {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         )
         .await
@@ -1364,6 +1436,7 @@ mod tests {
                 config_json: "{}",
                 available_cache: cache,
                 control_tx,
+                identity_update_tx: None,
             },
         )
         .await

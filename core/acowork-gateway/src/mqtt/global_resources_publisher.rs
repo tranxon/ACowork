@@ -22,8 +22,8 @@ use tokio::sync::Notify;
 
 use acowork_core::mqtt_proto::{
     self, AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, DataEnvelope, EmbeddingModelRef, McpRef, ProviderModelRef,
-    ProviderRef, SearchRef,
+    AvailableSearches, AvailableUsers, DataEnvelope, EmbeddingModelRef, McpRef,
+    ProviderModelRef, ProviderRef, SearchRef, UserProfileRef,
 };
 use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
@@ -38,6 +38,9 @@ mod topics {
     pub const SEARCHES: &str = "acowork/global/searches";
     pub const EMBEDDING_MODELS: &str = "acowork/global/embedding_models";
     pub const LSPS: &str = "acowork/global/lsps";
+    /// ADR-042: active user profile snapshot. Runtime uses this to populate
+    /// the identity_context for the compact model's language hint.
+    pub const USER_PROFILE: &str = "acowork/global/user_profile";
 }
 
 /// The Gateway's MQTT global resources publisher.
@@ -143,6 +146,7 @@ impl MqttGlobalResourcesPublisher {
     /// - `acowork/global/searches` — AvailableSearches
     /// - `acowork/global/embedding_models` — AvailableEmbeddingModels
     /// - `acowork/global/lsps` — AvailableLsps
+    /// - `acowork/global/user_profile` — AvailableUsers (ADR-042)
     async fn publish_all(&self) {
         let gw = self.gateway_state.read().await;
 
@@ -152,6 +156,7 @@ impl MqttGlobalResourcesPublisher {
         let searches_payload = build_available_searches(&gw);
         let embedding_payload = build_available_embedding_models(&gw);
         let lsp_payload = build_available_lsps(&gw);
+        let user_profile_payload = build_available_users(&gw);
 
         tracing::debug!(
             provider_count = providers_payload.providers.len(),
@@ -172,6 +177,7 @@ impl MqttGlobalResourcesPublisher {
         self.publish_searches(searches_payload).await;
         self.publish_embedding_models(embedding_payload).await;
         self.publish_lsps(lsp_payload).await;
+        self.publish_user_profiles(user_profile_payload).await;
     }
 
     async fn publish_providers(&self, payload: AvailableProviders) {
@@ -212,6 +218,19 @@ impl MqttGlobalResourcesPublisher {
             payload: Some(mqtt_proto::data_envelope::Payload::AvailableLsps(payload)),
         };
         self.publish_envelope_raw(topics::LSPS, &envelope).await;
+    }
+
+    /// ADR-042: publish the active user profile snapshot.
+    ///
+    /// Empty `active_user` (no user created yet) is still published as a
+    /// retained message with `version` bumped — this signals to Runtime
+    /// "no identity, fall back to detection-based heuristics".
+    async fn publish_user_profiles(&self, payload: AvailableUsers) {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(mqtt_proto::data_envelope::Payload::AvailableUsers(payload)),
+        };
+        self.publish_envelope_raw(topics::USER_PROFILE, &envelope).await;
     }
 
     /// Helper: publish a DataEnvelope with Retained=true.
@@ -428,6 +447,42 @@ fn build_available_lsps(gw: &GatewayState) -> AvailableLsps {
     }
 }
 
+/// ADR-042: Build `AvailableUsers` from the GatewayState user profile list.
+///
+/// Finds the user with `is_active == true` and serialises it into
+/// `UserProfileRef`. UI-only fields (avatar / builtin_avatar /
+/// created_at / updated_at / is_active) are omitted — Runtime never
+/// renders user profile UI. `custom` HashMap is serialised to JSON.
+fn build_available_users(gw: &GatewayState) -> AvailableUsers {
+    let list = &gw.resource_cache.user_profile_list;
+    let active = list.users.iter().find(|u| u.is_active).map(|u| {
+        let custom_json = serde_json::to_string(&u.custom).unwrap_or_else(|e| {
+            tracing::warn!(
+                user_id = %u.user_id,
+                error = %e,
+                "Failed to serialise UserProfile.custom to JSON; sending empty"
+            );
+            "{}".to_string()
+        });
+        UserProfileRef {
+            user_id: u.user_id.clone(),
+            display_name: u.display_name.clone(),
+            language: u.language.clone(),
+            timezone: u.timezone.clone(),
+            city: u.city.clone(),
+            country: u.country.clone(),
+            occupation: u.occupation.clone(),
+            communication_style: u.communication_style.clone(),
+            custom_json,
+        }
+    });
+
+    AvailableUsers {
+        version: list.version,
+        active_user: active,
+    }
+}
+
 // ── Enum mappers ───────────────────────────────────────────────────────
 
 fn map_protocol_type(pt: &ProtocolType) -> mqtt_proto::LlmProtocol {
@@ -531,7 +586,7 @@ mod tests {
             match eventloop.poll().await {
                 Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
                     received_topics.push(p.topic.clone());
-                    if received_topics.len() >= 5 {
+                    if received_topics.len() >= 6 {
                         break;
                     }
                 }
@@ -550,6 +605,12 @@ mod tests {
         assert!(
             received_topics.contains(&"acowork/global/mcps".to_string()),
             "should receive mcps retained: {:?}",
+            received_topics
+        );
+        // ADR-042: verify the new user_profile retained topic is published.
+        assert!(
+            received_topics.contains(&"acowork/global/user_profile".to_string()),
+            "should receive user_profile retained (ADR-042): {:?}",
             received_topics
         );
 

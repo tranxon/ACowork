@@ -114,6 +114,7 @@ pub(crate) async fn phase_d_run(
         mcp_runtime_tx,
         mcp_runtime_rx,
         ctx.mcp_notifier.subscribe(),
+        ctx.identity_update_rx.take(),
         &config.work_dir,
     )
     .await;
@@ -319,6 +320,12 @@ async fn mqtt_only_loop(
     mcp_runtime_tx: tokio::sync::mpsc::Sender<crate::tools::mcp_manager::McpConnectResult>,
     mut mcp_runtime_rx: tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
     mut mcp_config_rx: tokio::sync::watch::Receiver<()>,
+    // ADR-042: forwards `acowork/global/user_profile` retained updates from
+    // the MQTT event loop to SessionManager. None when running in tests or
+    // when MQTT is unavailable (Standalone mode).
+    mut identity_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
+    >,
     work_dir: &str,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
@@ -399,6 +406,24 @@ async fn mqtt_only_loop(
                     }
                     let _ = tx.send((registry, wrappers, specs, failures)).await;
                 });
+            }
+
+            // ADR-042: `acowork/global/user_profile` retained update →
+            // SessionManager::update_user_identity → broadcast to all sessions.
+            identity = async {
+                match identity_update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(profile) = identity {
+                    tracing::info!(
+                        user_id = %profile.user_id,
+                        language = %profile.language,
+                        "Applying acowork/global/user_profile update to SessionManager"
+                    );
+                    session_manager.update_user_identity(Some(profile));
+                }
             }
         }
     }

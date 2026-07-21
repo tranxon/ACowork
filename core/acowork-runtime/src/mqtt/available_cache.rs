@@ -3,8 +3,9 @@
 //! In-memory cache of the latest `acowork/global/{kind}` Retained messages.
 //! Updated by the Runtime MQTT client's event loop as it receives
 //! `Available*` payloads. The Runtime queries this cache to know which
-//! providers, MCPs, searches, embedding models, and LSP relays are
-//! currently available (health-check verified by Gateway).
+//! providers, MCPs, searches, embedding models, LSP relays, and the
+//! active user profile are currently available (health-check verified
+//! by Gateway; user profile is authoritative per ADR-042).
 //!
 //! See `docs/zh/protocols/mqtt.md` §3.1.1 and §4.
 
@@ -14,7 +15,7 @@ use tokio::sync::RwLock;
 
 use acowork_core::mqtt_proto::{
     AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, DataEnvelope,
+    AvailableSearches, AvailableUsers, DataEnvelope,
 };
 
 /// In-memory snapshot of all global resource available states.
@@ -27,6 +28,10 @@ pub struct AvailableResourceCache {
     pub searches: Option<AvailableSearches>,
     pub embedding_models: Option<AvailableEmbeddingModels>,
     pub lsps: Option<AvailableLsps>,
+    /// ADR-042: Active user profile (Gateway-authoritative). None until
+    /// the first `acowork/global/user_profile` retained is received, or
+    /// when no user has been created yet.
+    pub user_profile: Option<AvailableUsers>,
 }
 
 impl AvailableResourceCache {
@@ -99,6 +104,19 @@ impl AvailableResourceCache {
                 );
                 self.lsps = Some(p);
             }
+            acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(p) => {
+                let active = p
+                    .active_user
+                    .as_ref()
+                    .map(|u| u.user_id.as_str())
+                    .unwrap_or("");
+                tracing::debug!(
+                    version = p.version,
+                    active_user_id = %active,
+                    "Cached AvailableUsers"
+                );
+                self.user_profile = Some(p);
+            }
             _ => {
                 // Not a global resource payload — ignore
             }
@@ -137,6 +155,50 @@ impl AvailableResourceCache {
             .as_ref()
             .filter(|l| l.ready && !l.endpoint.is_empty())
             .map(|l| l.endpoint.clone())
+    }
+
+    /// ADR-042: Get the active user profile as the full
+    /// `acowork_core::protocol::UserProfile` struct (used by
+    /// `format_user_profile_context` to build identity_context).
+    ///
+    /// Returns `None` when:
+    /// - The cache hasn't received the first `acowork/global/user_profile`
+    ///   retained yet (Runtime just started), OR
+    /// - The Gateway hasn't created any user (empty active_user).
+    ///
+    /// The `custom` HashMap is reconstructed from the JSON-serialised
+    /// `custom_json` field; an empty string decodes to an empty map.
+    pub fn active_user_profile(&self) -> Option<acowork_core::protocol::UserProfile> {
+        let p = self.user_profile.as_ref()?;
+        let active = p.active_user.as_ref()?;
+        if active.user_id.is_empty() {
+            return None;
+        }
+        let custom: std::collections::HashMap<String, String> =
+            serde_json::from_str(&active.custom_json).unwrap_or_else(|e| {
+                tracing::warn!(
+                    user_id = %active.user_id,
+                    error = %e,
+                    "Failed to parse UserProfileRef.custom_json; using empty map"
+                );
+                Default::default()
+            });
+        Some(acowork_core::protocol::UserProfile {
+            user_id: active.user_id.clone(),
+            display_name: active.display_name.clone(),
+            language: active.language.clone(),
+            timezone: active.timezone.clone(),
+            city: active.city.clone(),
+            country: active.country.clone(),
+            occupation: active.occupation.clone(),
+            avatar: None,        // not carried in UserProfileRef
+            builtin_avatar: None, // not carried in UserProfileRef
+            communication_style: active.communication_style.clone(),
+            custom,
+            created_at: String::new(), // not carried in UserProfileRef
+            updated_at: String::new(), // not carried in UserProfileRef
+            is_active: true,           // subscribed topic only carries active
+        })
     }
 }
 
@@ -234,5 +296,96 @@ mod tests {
             cache.lsp_endpoint().as_deref(),
             Some("http://127.0.0.1:19878")
         );
+    }
+
+    // ── ADR-042: user_profile topic tests ─────────────────────────────
+
+    #[test]
+    fn test_update_from_mqtt_user_profile() {
+        use acowork_core::mqtt_proto::UserProfileRef;
+        let mut cache = AvailableResourceCache::new();
+
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                AvailableUsers {
+                    version: 7,
+                    active_user: Some(UserProfileRef {
+                        user_id: "u-1".to_string(),
+                        display_name: "大鱼".to_string(),
+                        language: "zh-CN".to_string(),
+                        timezone: "Asia/Shanghai".to_string(),
+                        city: Some("Beijing".to_string()),
+                        country: Some("CN".to_string()),
+                        occupation: Some("Software Engineer".to_string()),
+                        communication_style: Some("concise".to_string()),
+                        custom_json: r#"{"theme":"dark"}"#.to_string(),
+                    }),
+                },
+            )),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+
+        cache.update_from_mqtt("acowork/global/user_profile", &payload);
+
+        let profile = cache.active_user_profile().expect("active user should be present");
+        assert_eq!(profile.user_id, "u-1");
+        assert_eq!(profile.display_name, "大鱼");
+        assert_eq!(profile.language, "zh-CN");
+        assert_eq!(profile.timezone, "Asia/Shanghai");
+        assert_eq!(profile.city.as_deref(), Some("Beijing"));
+        assert_eq!(profile.occupation.as_deref(), Some("Software Engineer"));
+        assert_eq!(profile.communication_style.as_deref(), Some("concise"));
+        assert_eq!(profile.custom.get("theme").map(String::as_str), Some("dark"));
+        assert!(profile.is_active); // wire always carries active
+    }
+
+    #[test]
+    fn test_active_user_profile_empty_when_no_user() {
+        // Empty active_user (no user created yet) → None.
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers {
+                        version: 0,
+                        active_user: None,
+                    },
+                )),
+            }),
+        );
+        assert!(cache.active_user_profile().is_none());
+    }
+
+    #[test]
+    fn test_active_user_profile_invalid_custom_json() {
+        // Bad JSON in custom_json should not crash — fall back to empty map.
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers {
+                        version: 1,
+                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                            user_id: "u-1".into(),
+                            display_name: "Test".into(),
+                            language: "en-US".into(),
+                            timezone: "UTC".into(),
+                            city: None,
+                            country: None,
+                            occupation: None,
+                            communication_style: None,
+                            custom_json: "not valid json".into(),
+                        }),
+                    },
+                )),
+            }),
+        );
+        let profile = cache.active_user_profile().expect("should still return Some");
+        assert!(profile.custom.is_empty());
     }
 }

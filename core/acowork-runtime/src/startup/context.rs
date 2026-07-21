@@ -30,6 +30,12 @@ pub(crate) struct AgentBootContext {
     pub mqtt_client: Option<crate::mqtt::RuntimeMqttClient>,
     #[allow(dead_code)]
     pub available_cache: Option<crate::mqtt::SharedAvailableCache>,
+    /// ADR-042: receiver for `acowork/global/user_profile` retained updates.
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::update_user_identity`.
+    pub identity_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
+    >,
     /// Control command receiver (from MQTT control topics)
     pub control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
     #[allow(dead_code)]

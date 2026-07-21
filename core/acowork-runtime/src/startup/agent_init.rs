@@ -52,6 +52,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut mqtt_client: Option<crate::mqtt::RuntimeMqttClient> = None;
     let mut available_cache: Option<crate::mqtt::SharedAvailableCache> = None;
     let mut control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>> = None;
+    // ADR-042: receiver for `acowork/global/user_profile` retained updates,
+    // wired through `gateway_loop` to SessionManager.
+    let mut identity_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
+    > = None;
     let mut runtime_http_port: Option<u16> = None;
 
     // Shared session snapshot map, created here so it can be passed to both
@@ -152,6 +157,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     if let Some(mqtt_port) = config.mqtt_port {
         let cache = crate::mqtt::new_shared_cache();
         let (control_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
+        // ADR-042: sink for `acowork/global/user_profile` retained updates.
+        // The MQTT event loop decodes the payload and pushes the latest
+        // `UserProfile` here; gateway_loop forwards to SessionManager so
+        // all active sessions pick up the new identity_context.
+        let (identity_update_tx, identity_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<acowork_core::protocol::UserProfile>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
@@ -166,6 +177,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 config_json: &config_json,
                 available_cache: cache.clone(),
                 control_tx,
+                identity_update_tx: Some(identity_update_tx),
             },
         ).await {
             Ok(client) => {
@@ -209,6 +221,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 mqtt_client = Some(client);
                 available_cache = Some(cache);
                 control_rx = Some(ctrl_rx);
+                identity_update_rx = Some(identity_update_chan_rx);
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
         }
@@ -275,12 +288,28 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
                     let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
-                    let provider = crate::providers::router::create_provider(
+
+                    // Load (or initialize) the per-agent compatibility cache.
+                    // Persisted to `{work_dir}/config/provider_compat.json` so
+                    // successful fallback profiles survive restarts.
+                    let compat_cache_path = std::path::Path::new(&config.work_dir)
+                        .join("config")
+                        .join("provider_compat.json");
+                    let compat_cache = crate::providers::compat::CompatCache::load(
+                        compat_cache_path,
+                    );
+                    let wiring = crate::providers::router::ProviderWiring {
+                        provider_id: Some(prov.id.clone()),
+                        compat_cache: Some(compat_cache),
+                    };
+
+                    let provider = crate::providers::router::create_provider_with_wiring(
                         &prov.id,
                         &proto_str,
                         api_key_opt,
                         Some(&prov.base_url),
                         timeouts,
+                        wiring,
                     );
                     tracing::info!(
                         provider = %prov.id,
@@ -550,9 +579,49 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     );
 
     // ── Step 6: Build context builder ───────────────────────────────
-    // ADR-040: gRPC hello_config path removed. User identity is not yet
-    // available via MQTT; context builder is created without identity.
-    let identity_context: Option<String> = None;
+    // ADR-042: User identity is delivered via the `acowork/global/user_profile`
+    // retained MQTT topic (subscribed as part of `acowork/global/#` in the
+    // bootstrap). Wait up to 5s for the first snapshot to arrive so the
+    // compact model's language hint is populated from the start; on
+    // timeout (Gateway not running yet, no user created, etc.), fall
+    // back to None — the compaction prompt's detection-based fallback
+    // (ADR-011 v6) handles this gracefully.
+    let identity_context: Option<String> = match available_cache.as_ref() {
+        Some(cache) => {
+            // ADR-039 bootstrap has already received the ConnAck; the
+            // cached retained snapshot should be there. If not (race
+            // with broker publish), poll up to 5s.
+            let start = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(5);
+            let identity = loop {
+                {
+                    let cache_read = cache.read().await;
+                    if let Some(profile) = cache_read.active_user_profile() {
+                        break Some(crate::agent::session::session_manager::format_user_profile_context(
+                            &profile,
+                        ));
+                    }
+                }
+                if start.elapsed() >= timeout {
+                    break None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            tracing::info!(
+                has_identity = identity.is_some(),
+                ctx_len = identity.as_ref().map(|s| s.len()).unwrap_or(0),
+                waited_ms = start.elapsed().as_millis() as u64,
+                "Initial identity_context built from acowork/global/user_profile"
+            );
+            identity
+        }
+        None => {
+            tracing::warn!(
+                "available_cache not available; identity_context is None (compaction will use detection-based fallback)"
+            );
+            None
+        }
+    };
 
     let mut context_builder = ContextBuilder::new(system_prompt.clone())
         .with_identity(identity_context.clone())
@@ -596,6 +665,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         mqtt_client,
         available_cache,
         control_rx,
+        identity_update_rx,
         runtime_http_port,
         provider,
         resolved_model,

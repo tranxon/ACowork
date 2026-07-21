@@ -34,6 +34,10 @@ message DataEnvelope {
     AvailableSearches        available_searches        = 12;
     AvailableEmbeddingModels available_embedding_models = 13;
     AvailableLsps            available_lsps            = 14;
+    // ADR-042: Active user identity. Single-snapshot topic; Runtime uses
+    // this to populate `identity_context` for the compact model's
+    // language hint and for general per-user preferences.
+    AvailableUsers           available_users           = 15;
 
     // ── Agent lifecycle (Runtime → subscribers, Retained) ──
     AgentStatus              agent_status              = 20;
@@ -105,6 +109,64 @@ message AvailableLsps {
   string endpoint = 2;
   /// Whether the relay is healthy and ready.
   bool ready = 3;
+}
+
+// ── User identity (ADR-042) ─────────────────────────────────────────────
+
+/// Available users — current active user profile snapshot.
+///
+/// Topic: acowork/global/user_profile (Retained, QoS 1).
+///
+/// This topic closes a gap left by ADR-040 (gRPC hello_config removed)
+/// and ADR-033 (which did not include UserProfile in its MQTT topic
+/// tree). The Gateway is the Owner: it holds the active user in
+/// `resource_cache.user_profile_list` and re-publishes on every change.
+///
+/// `active_user` is empty when no user has been created (fresh Gateway
+/// install). Runtime treats empty as "no identity" and falls back to
+/// detection-based heuristics in the compaction prompt.
+///
+/// Note: this topic carries ONLY the active user, not the full user
+/// list. Multi-user isolation (different user → different agent view)
+/// is a separate concern handled by §3.4 user-scoped topics in mqtt.md.
+message AvailableUsers {
+  /// Monotonic version. Mirrors `user_profile_list.version`. Runtime
+  /// compares to detect stale pushes (retained re-delivery ordering).
+  uint64 version = 1;
+  /// The active user profile. Empty (`user_id == ""`) means no active
+  /// user; Runtime treats this as "no identity".
+  UserProfileRef active_user = 2;
+}
+
+/// Lightweight user profile reference.
+///
+/// Mirrors the relevant fields of
+/// `acowork_core::protocol::UserProfile` (Runtime's identity_context
+/// uses the full struct). UI-only fields (avatar, builtin_avatar,
+/// created_at, updated_at, is_active) are deliberately omitted —
+/// Runtime never renders user profile UI.
+///
+/// `custom_json` is a JSON-serialised `HashMap<String, String>` so the
+/// wire format stays simple (avoids embedding `map<string,string>`
+/// which complicates the schema and consumers).
+message UserProfileRef {
+  /// UUID v4. Empty when no active user.
+  string user_id = 1;
+  /// Display name — what the user wants to be called.
+  string display_name = 2;
+  /// Preferred language (BCP 47, e.g. "zh-CN", "en-US"). Used by
+  /// the compact model's system prompt to pick the summary language.
+  string language = 3;
+  /// Timezone (IANA, e.g. "Asia/Shanghai", "UTC").
+  string timezone = 4;
+  optional string city = 5;
+  optional string country = 6;
+  optional string occupation = 7;
+  /// "concise" | "detailed" | "casual" | ...
+  optional string communication_style = 8;
+  /// Free-form extension fields, JSON-serialised. Empty string when
+  /// the user has no custom preferences.
+  string custom_json = 9;
 }
 
 // ── Provider reference (mirrors ProviderListItem; carries the decrypted
