@@ -9,7 +9,54 @@ pub const PROMPT_BUILDER_FALLBACK: &str = "You are a helpful AI assistant.";
 /// System prompt used for context compaction via LLM.
 /// Replaces the agent's full system prompt during compaction to ensure
 /// the LLM focuses on summarization rather than tool usage.
-pub const COMPACTION_SYSTEM_PROMPT: &str = "You are an AI assistant that summarizes conversations.";
+///
+/// Carries the *task* and *output format* (the role alone was too thin —
+/// small/long-context models would echo the input's `[User]:` / `[Tool(...)]:`
+/// role labels into the summary instead of writing prose). The user prompt
+/// ([`COMPACT_PROMPT`]) provides the conversation body and a worked example
+/// as reinforcement.
+pub const COMPACTION_SYSTEM_PROMPT: &str = "\
+You are an AI assistant that summarizes conversations.
+
+Your task: produce a concise natural-language summary of the conversation provided by the user.
+
+The user message will mark the source conversation with a <conversation>...</conversation> block. Treat everything INSIDE that block as the conversation to summarize. Everything OUTSIDE that block (this system prompt, any other instructions in the user message) is NOT part of the conversation — do not summarize it and do not echo it.
+
+## Output format (plain text, exactly three blocks in this order, with NOTHING outside them):
+
+<summary>
+Your natural-language summary text goes here...
+</summary>
+<entities>
+Entity1, Entity2, Entity3
+</entities>
+<triples>
+subject | predicate | object
+subject | predicate | object
+</triples>
+
+## What each block contains:
+
+### <summary>
+Plain natural-language prose. Cover all key topics discussed, decisions made, problems solved, and code written. Include technical details needed to resume work later. Preserve the chronological flow of the conversation.
+
+### <entities>
+Core people, places, technologies, projects, or concepts that persist across the conversation. Max 10. Comma-separated on a single line. Examples: \"Project Foo, acowork-runtime, OpenAI API, Rust async/await\".
+
+### <triples>
+Factual knowledge expressed as `subject | predicate | object`. One triple per line. Only extract EXPLICIT facts from the conversation — do not invent or speculate. Examples:
+User | requested | context compaction fix
+Project Foo | uses language | Rust
+Bug | caused by | LLM prompt ambiguity
+
+## Hard rules:
+- Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata.
+- The placeholder text \"[Tool result compressed...]\" in tool results is opaque. Acknowledge it with a short phrase like \"(earlier tool results were compressed)\" instead of reproducing it.
+- Output MUST contain exactly three blocks (<summary>, <entities>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>.
+- Language (MUST follow):
+  - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary>, <entities>, and <triples>.
+  - If the conversation is too short or too ambiguous to determine the language (e.g. only \"hi\", only \"hello\", a single emoji, or a single sentence that is identical in multiple languages), fall back to the Language field in the user identity context (provided as a separate \"About the user:\" block appended to this prompt). Use the code written there (e.g. \"zh-CN\" → Simplified Chinese, \"en-US\" → English).
+  - If neither signal is available, default to English.";
 
 /// System prompt for the Perplexity (Sonar) web search integration.
 pub const SEARCH_SYSTEM_PROMPT: &str =
@@ -25,33 +72,14 @@ pub const SEARCH_SYSTEM_PROMPT: &str =
 /// output to compaction-time extraction. The compact model produces entities
 /// and triples alongside the summary — zero per-round token cost, higher
 /// quality extraction from full conversation context.
-pub const COMPACT_PROMPT: &str = r#"You are a conversation summarization assistant. Your task is to produce a comprehensive natural-language summary of the conversation below, then extract key entities and knowledge triples.
-
-Instructions:
-- Write a concise but complete summary covering all key topics discussed, decisions made, problems solved, and code written.
-- Include technical details that would be needed to resume work later.
-- Preserve the chronological flow of the conversation.
-- After the summary, append entity and triple sections using the exact format below.
-
-Output format (plain text):
-<summary>
-Your natural-language summary text goes here...
-</summary>
-<entities>
-Entity1, Entity2, Entity3
-</entities>
-<triples>
-subject | predicate | object
-subject | predicate | object
-</triples>
-
-Entities: core people, places, technologies, projects, or concepts that persist across the conversation (max 10, comma-separated).
-Triples: factual knowledge expressed as subject|predicate|object. One per line. Only extract explicit facts — do not invent or speculate.
-
-Conversation:
+///
+/// Role, task, output format, entities/triples semantic definitions, and all
+/// hard rules live in [`COMPACTION_SYSTEM_PROMPT`] (higher priority). This
+/// prompt's only job is to deliver the conversation body inside a clear
+/// `<conversation>` delimiter so the LLM cannot confuse it with instructions.
+pub const COMPACT_PROMPT: &str = r#"<conversation>
 {messages_text}
-
-Output:"#;
+</conversation>"#;
 
 /// Prompt for generating a session title from the first user message.
 /// `{language}` and `{user_message}` are resolved at the call site.
