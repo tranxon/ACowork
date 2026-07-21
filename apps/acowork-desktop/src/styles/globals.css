@@ -29,7 +29,7 @@
   /* = zinc-200, #e4e4e7 — sender-role label pill */
   --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
   /* = accent 50% — user message bubble */
-  --color-chat-user-text: hsl(240 100% 100% / 0.9);
+  --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
 
   /* Border radius — 4-tier unified scale
