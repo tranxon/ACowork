@@ -697,3 +697,104 @@ fn kill_stale_gateway_process() {
         }
     }
 }
+
+// ============================================================================
+// MQTT broker debug controls (ADR-XXX)
+// ============================================================================
+//
+// These commands proxy to the Gateway's debug HTTP endpoints
+// (`POST /api/debug/mqtt/{shutdown,start}`) so the frontend status bar
+// can exercise the MQTT reconnect path without DevTools. They are
+// idempotent and only do anything when the local Gateway is running
+// in the standard configuration.
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct MqttDebugResponse {
+    pub ok: bool,
+    pub message: String,
+}
+
+async fn call_mqtt_debug_endpoint(
+    state: tauri::State<'_, AppState>,
+    action: &str,
+) -> Result<MqttDebugResponse, String> {
+    let gateway_url = state.gateway.read().await.base_url().to_string();
+    let url = format!("{}/api/debug/mqtt/{}", gateway_url, action);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let resp = client
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Gateway unreachable at {}: {}", url, e))?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read Gateway response body: {}", e))?;
+    tracing::info!(
+        action,
+        %status,
+        content_type = %content_type,
+        body_len = body_bytes.len(),
+        body_preview = %String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(256)]),
+        "MQTT debug endpoint raw response"
+    );
+    // Try to parse as JSON first. If that fails (e.g. axum returned a
+    // text/plain error page from a panic), fall back to treating the
+    // body as a plain-text error message so the user still sees what
+    // went wrong.
+    let body: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(parse_err) => {
+            let text = String::from_utf8_lossy(&body_bytes);
+            return Err(format!(
+                "Gateway returned non-JSON response (status={}, content-type={:?}, body_len={}): {} | body: {}",
+                status,
+                content_type,
+                body_bytes.len(),
+                parse_err,
+                if text.len() > 200 { &text[..200] } else { &text },
+            ));
+        }
+    };
+
+    let ok = status.is_success()
+        && body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let message = body
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no message)")
+        .to_string();
+
+    tracing::info!(action, ok, %status, "MQTT debug endpoint returned: {}", message);
+    Ok(MqttDebugResponse { ok, message })
+}
+
+/// `POST /api/debug/mqtt/shutdown` — gracefully stop the broker.
+#[tauri::command]
+pub async fn debug_mqtt_shutdown(
+    state: tauri::State<'_, AppState>,
+) -> Result<MqttDebugResponse, String> {
+    call_mqtt_debug_endpoint(state, "shutdown").await
+}
+
+/// `POST /api/debug/mqtt/start` — restart the broker.
+#[tauri::command]
+pub async fn debug_mqtt_start(
+    state: tauri::State<'_, AppState>,
+) -> Result<MqttDebugResponse, String> {
+    call_mqtt_debug_endpoint(state, "start").await
+}

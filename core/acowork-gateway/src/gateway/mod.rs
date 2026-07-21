@@ -778,7 +778,7 @@ impl Gateway {
         // ADR-033: Start MQTT broker + Gateway client BEFORE HTTP server
         // so it's available for chat handlers to publish control commands.
         let mqtt_config = self.config.mqtt.clone();
-        let mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
+        let mut mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
             // ADR-033: start_broker_in_thread runs in a separate OS thread
             // because rumqttd creates its own tokio runtime internally.
             match crate::mqtt::start_broker_in_thread(&mqtt_config.host, mqtt_config.port) {
@@ -787,11 +787,31 @@ impl Gateway {
             }
         } else { None };
 
+        // ADR-XXX Debug: Share broker handle with HTTP debug endpoints so they can
+        // trigger graceful shutdown for connection-recovery tests.
+        if let Some(h) = mqtt_broker_handle.take() {
+            {
+                let gw = shared_state.write().await;
+                let mut ctrl = gw.mqtt_broker_control.lock().await;
+                *ctrl = Some(h);
+            }
+            tracing::info!("MQTT broker handle registered with debug control");
+        }
+
         // ADR-033: Create runtime HTTP registry and agent registry.
         let runtime_http_registry = crate::http::proxy::new_shared_registry();
         let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
 
-        let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_handle.is_some() {
+        // Track whether the broker actually started — used to gate the
+        // Gateway-side publisher without needing to re-check the broker
+        // handle (which has been moved into the debug control slot above).
+        let mqtt_broker_started = {
+            let ctrl = shared_state.read().await;
+            let guard = ctrl.mqtt_broker_control.lock().await;
+            guard.is_some()
+        };
+
+        let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {

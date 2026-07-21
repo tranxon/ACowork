@@ -165,6 +165,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::proxy::proxy_routes())
+        .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         .layer(middleware::from_fn(log_request_origin))

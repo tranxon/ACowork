@@ -13,6 +13,7 @@ use futures_core::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -34,6 +35,15 @@ pub struct OpenAIProvider {
     api_key: Option<String>,
     http_client: Client,
     stream_read_timeout: Duration,
+    /// Stable cache key prefix for `CompatCache`.  Set via
+    /// [`Self::set_provider_id`] at registration time.  When `None`,
+    /// the cache falls back to using the base_url hostname as a
+    /// namespace (best effort, still isolates most cases).
+    provider_id: Option<String>,
+    /// Compatibility cache — learned per-(provider, model) quirks.
+    /// `None` in unit tests / when the runtime has not wired it in yet.
+    /// Use [`Self::set_compat_cache`] to install once at startup.
+    compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
 }
 
 impl OpenAIProvider {
@@ -74,12 +84,51 @@ impl OpenAIProvider {
             api_key: api_key.map(ToString::to_string),
             http_client,
             stream_read_timeout,
+            provider_id: None,
+            compat_cache: None,
         }
     }
 
     /// Set API key after construction (e.g., from Vault KeyRelease)
     pub fn set_api_key(&mut self, key: String) {
         self.api_key = Some(key);
+    }
+
+    /// Install the stable provider identifier (used as cache key prefix).
+    /// Should be called once at registration time with the value from
+    /// the agent manifest's provider config (e.g. `"volcano-engine-coding"`).
+    pub fn set_provider_id(&mut self, provider_id: String) {
+        self.provider_id = Some(provider_id);
+    }
+
+    /// Install the compatibility cache.  Typically called once during startup.
+    /// Without this, the provider behaves exactly as before (always runs
+    /// the fallback chain).
+    pub fn set_compat_cache(
+        &mut self,
+        cache: Arc<crate::providers::compat::CompatCache>,
+    ) {
+        self.compat_cache = Some(cache);
+    }
+
+    /// Compute the cache key for this request.
+    /// Falls back to the base_url host when no `provider_id` was set
+    /// (preserves old behavior in tests / standalone use).
+    fn cache_key(&self, model: &str) -> String {
+        match &self.provider_id {
+            Some(id) => format!("{id}::{model}"),
+            None => {
+                // Extract host from base_url as a fallback namespace.
+                let host = self
+                    .base_url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("unknown");
+                format!("{host}::{model}")
+            }
+        }
     }
 }
 
@@ -107,7 +156,7 @@ fn openai_reasoning_str(effort: &ReasoningEffort) -> Option<&'static str> {
 
 // ── OpenAI API types ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
@@ -141,7 +190,7 @@ struct ThinkingMode {
 }
 
 /// OpenAI stream_options to request usage in the final chunk
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct StreamOptions {
     include_usage: bool,
 }
@@ -504,6 +553,93 @@ fn parse_response(msg: NativeResponseMessage, usage: Option<NativeUsage>) -> Cha
 
 // ── Provider trait implementation ───────────────────────────────────────
 
+// ── Compat cache helpers ──────────────────────────────────────────────────
+//
+// Apply a learned `StripProfile` to a `NativeChatRequest` before sending.
+// This is the **fast path**: we know which fields to drop, so we drop them
+// once and send a single HTTP request — no fallback chain.
+
+fn apply_profile(req: &mut NativeChatRequest, profile: &crate::providers::compat::StripProfile) {
+    if profile.strip_stream_options {
+        req.stream_options = None;
+    }
+    if profile.strip_reasoning_effort {
+        req.reasoning_effort = None;
+    }
+    if profile.strip_thinking {
+        req.thinking = None;
+    }
+    if profile.strip_temperature {
+        req.temperature = None;
+    }
+    if profile.strip_tools {
+        req.tools = None;
+    }
+    if let Some(cap) = profile.max_tokens_cap
+        && req.max_tokens.unwrap_or(0) > cap
+    {
+        req.max_tokens = Some(cap);
+    }
+}
+
+/// Construct a `StripProfile` from a known `NativeChatRequest` and the
+/// fields that were stripped vs. the original (i.e. which fallback generation
+/// matched).
+fn profile_from_request(
+    req: &NativeChatRequest,
+    original: &NativeChatRequest,
+    fallback_generation: u32,
+) -> crate::providers::compat::StripProfile {
+    crate::providers::compat::StripProfile {
+        strip_stream_options: req.stream_options.is_none() && original.stream_options.is_some(),
+        strip_reasoning_effort: req.reasoning_effort.is_none() && original.reasoning_effort.is_some(),
+        strip_thinking: req.thinking.is_none() && original.thinking.is_some(),
+        strip_temperature: req.temperature.is_none() && original.temperature.is_some(),
+        strip_tools: req.tools.is_none() && original.tools.is_some(),
+        max_tokens_cap: match (req.max_tokens, original.max_tokens) {
+            (Some(capped), Some(orig)) if capped < orig => Some(capped),
+            _ => None,
+        },
+        fallback_generation,
+        last_success_unix_ts: 0, // overwritten by `record_success`
+    }
+}
+
+impl OpenAIProvider {
+    /// Attempt one fallback request.  Returns `Some(stream)` on success
+    /// (after recording into the cache).  Returns `Ok(None)` on a 400/422
+    /// failure (caller should continue the chain).  Returns `Err(_)` on
+    /// network error or non-400 status.
+    async fn try_send_and_record(
+        &self,
+        url: &str,
+        attempt: &NativeChatRequest,
+        original: &NativeChatRequest,
+        fallback_generation: u32,
+        cache_key: &str,
+    ) -> acowork_core::error::Result<
+        Option<Box<dyn Stream<Item = StreamEvent> + Send>>,
+    > {
+        let resp = self.send_streaming_request(url, attempt).await?;
+        if resp.status().is_success() {
+            if let Some(cache) = self.compat_cache.as_ref() {
+                let profile = profile_from_request(attempt, original, fallback_generation);
+                cache.record_success(cache_key.to_string(), profile);
+            }
+            return Ok(Some(Self::sse_to_stream(resp, self.stream_read_timeout)));
+        }
+        let s = resp.status();
+        let b = resp.text().await.unwrap_or_default();
+        tracing::warn!(
+            fallback_generation,
+            status = %s,
+            error_body = %b,
+            "Fallback attempt failed",
+        );
+        Ok(None)
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     fn name(&self) -> &str {
@@ -698,6 +834,8 @@ impl Provider for OpenAIProvider {
             .map(|mode| ThinkingMode {
                 mode_type: mode.clone(),
             });
+        // Preserve model name for the cache key (we move `request` below).
+        let model_name = request.model.clone();
         let native_request = NativeChatRequest {
             model: request.model,
             messages: convert_messages(&request.messages),
@@ -711,6 +849,50 @@ impl Provider for OpenAIProvider {
             reasoning_effort: reasoning,
             thinking,
         };
+
+        let cache_key = self.cache_key(&model_name);
+        let url = format!("{}/chat/completions", self.base_url);
+
+        // ── Fast path: cached profile ──────────────────────────────────
+        // If we have already learned which fields to strip for this
+        // (provider, model) pair, apply it once and send — no chain.
+        if let Some(cache) = self.compat_cache.as_ref()
+            && let Some(profile) = cache.get(&cache_key)
+        {
+            let mut req = native_request.clone();
+            apply_profile(&mut req, &profile);
+            match self.send_streaming_request(&url, &req).await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::debug!(
+                        key = %cache_key,
+                        fallback_generation = profile.fallback_generation,
+                        "CompatCache hit — fast path",
+                    );
+                    return Ok(Self::sse_to_stream(
+                        resp,
+                        self.stream_read_timeout,
+                    ));
+                }
+                Ok(resp) => {
+                    // Provider changed behavior — drop stale profile.
+                    let s = resp.status();
+                    let b = resp.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        key = %cache_key,
+                        status = %s,
+                        error_body = %b,
+                        "CompatCache profile no longer valid — invalidating and re-probing",
+                    );
+                    cache.invalidate(&cache_key);
+                    // Fall through to fallback chain below.
+                }
+                Err(e) => {
+                    // Network error — keep cache (it might be transient),
+                    // propagate error to caller.
+                    return Err(e);
+                }
+            }
+        }
 
         // Log request payload for debugging tool definitions
         tracing::info!(
@@ -756,8 +938,8 @@ impl Provider for OpenAIProvider {
                     "Initial 400/422 — starting progressive fallback"
                 );
 
-                // Fallback 1: strip stream_options only
-                tracing::warn!("Fallback 1/3: stripping stream_options");
+                // ── Fallback 1: strip stream_options ───────────────────────
+                tracing::warn!("Fallback 1/4: stripping stream_options");
                 let fb1 = NativeChatRequest {
                     model: native_request.model.clone(),
                     messages: native_request.messages.clone(),
@@ -769,60 +951,83 @@ impl Provider for OpenAIProvider {
                     reasoning_effort: native_request.reasoning_effort.clone(),
                     thinking: native_request.thinking.clone(),
                 };
-                let resp1 = self.send_streaming_request(&url, &fb1).await?;
-                if resp1.status().is_success() {
-                    return Ok(Self::sse_to_stream(resp1, self.stream_read_timeout));
-                }
-                let s1 = resp1.status();
-                let b1 = resp1.text().await.unwrap_or_default();
-                tracing::warn!(status = %s1, error_body = %b1, "Fallback 1 failed");
-
-                // Fallback 2: also strip reasoning_effort
-                if native_request.reasoning_effort.is_some() {
-                    tracing::warn!("Fallback 2/3: also stripping reasoning_effort");
-                    let fb2 = NativeChatRequest {
-                        model: native_request.model.clone(),
-                        messages: native_request.messages.clone(),
-                        temperature: native_request.temperature,
-                        max_tokens: native_request.max_tokens,
-                        tools: native_request.tools.clone(),
-                        stream: Some(true),
-                        stream_options: None,
-                        reasoning_effort: None,
-                        thinking: native_request.thinking.clone(),
-                    };
-                    let resp2 = self.send_streaming_request(&url, &fb2).await?;
-                    if resp2.status().is_success() {
-                        return Ok(Self::sse_to_stream(resp2, self.stream_read_timeout));
-                    }
-                    let s2 = resp2.status();
-                    let b2 = resp2.text().await.unwrap_or_default();
-                    tracing::warn!(status = %s2, error_body = %b2, "Fallback 2 failed");
+                if let Some(stream) = self
+                    .try_send_and_record(&url, &fb1, &native_request, 1, &cache_key)
+                    .await?
+                {
+                    return Ok(stream);
                 }
 
-                // Fallback 3: also strip tools (last resort — model gets no tools)
-                tracing::warn!("Fallback 3/3: also stripping tools (last resort)");
+                // ── Fallback 2: also strip reasoning_effort, thinking, temperature ─
+                tracing::warn!(
+                    "Fallback 2/4: also stripping reasoning_effort, thinking, temperature"
+                );
+                let fb2 = NativeChatRequest {
+                    model: native_request.model.clone(),
+                    messages: native_request.messages.clone(),
+                    temperature: None,
+                    max_tokens: native_request.max_tokens,
+                    tools: native_request.tools.clone(),
+                    stream: Some(true),
+                    stream_options: None,
+                    reasoning_effort: None,
+                    thinking: None,
+                };
+                if let Some(stream) = self
+                    .try_send_and_record(&url, &fb2, &native_request, 2, &cache_key)
+                    .await?
+                {
+                    return Ok(stream);
+                }
+
+                // ── Fallback 3: cap max_tokens to 8192 (provider limit?) ────
+                tracing::warn!("Fallback 3/4: also capping max_tokens=8192");
                 let fb3 = NativeChatRequest {
                     model: native_request.model.clone(),
                     messages: native_request.messages.clone(),
-                    temperature: native_request.temperature,
-                    max_tokens: native_request.max_tokens,
+                    temperature: None,
+                    max_tokens: Some(8192),
+                    tools: native_request.tools.clone(),
+                    stream: Some(true),
+                    stream_options: None,
+                    reasoning_effort: None,
+                    thinking: None,
+                };
+                if let Some(stream) = self
+                    .try_send_and_record(&url, &fb3, &native_request, 3, &cache_key)
+                    .await?
+                {
+                    return Ok(stream);
+                }
+
+                // ── Fallback 4: also strip tools (last resort) ──────────────
+                tracing::warn!("Fallback 4/4: also stripping tools (last resort)");
+                let fb4 = NativeChatRequest {
+                    model: native_request.model.clone(),
+                    messages: native_request.messages.clone(),
+                    temperature: None,
+                    max_tokens: Some(8192),
                     tools: None,
                     stream: Some(true),
                     stream_options: None,
                     reasoning_effort: None,
-                    thinking: native_request.thinking.clone(),
+                    thinking: None,
                 };
-                let resp3 = self.send_streaming_request(&url, &fb3).await?;
-                if resp3.status().is_success() {
+                let resp4 = self.send_streaming_request(&url, &fb4).await?;
+                if resp4.status().is_success() {
                     tracing::warn!(
-                        "Fallback 3 succeeded — the 400 was caused by tool definitions. \
+                        "Fallback 4 succeeded — the 400 was caused by tool definitions. \
                          Tools have been stripped for this request."
                     );
-                    return Ok(Self::sse_to_stream(resp3, self.stream_read_timeout));
+                    if let Some(cache) = self.compat_cache.as_ref() {
+                        let profile =
+                            profile_from_request(&fb4, &native_request, 4);
+                        cache.record_success(cache_key.clone(), profile);
+                    }
+                    return Ok(Self::sse_to_stream(resp4, self.stream_read_timeout));
                 }
-                let s3 = resp3.status();
-                let b3 = resp3.text().await.unwrap_or_default();
+                let s4 = resp4.status();
+                let b4 = resp4.text().await.unwrap_or_default();
 
                 // All fallbacks failed — log comprehensive diagnostics
                 tracing::error!(
@@ -832,17 +1037,17 @@ impl Provider for OpenAIProvider {
                     has_stream_options = native_request.stream_options.is_some(),
                     has_reasoning_effort = native_request.reasoning_effort.is_some(),
                     has_temperature = native_request.temperature.is_some(),
+                    has_thinking = native_request.thinking.is_some(),
                     max_tokens = ?native_request.max_tokens,
                     initial_error = %body,
-                    fb1_error = %b1,
-                    fb3_error = %b3,
+                    final_error = %b4,
                     request_json = %request_json,
                     "All streaming fallbacks failed — full diagnostics"
                 );
 
                 let err = crate::providers::from_http_parts(
-                    s3.as_u16(),
-                    format!("OpenAI API error: {s3} - {b3}"),
+                    s4.as_u16(),
+                    format!("OpenAI API error: {s4} - {b4}"),
                     &headers,
                 );
                 return Err(acowork_core::AcoworkError::Provider(err));

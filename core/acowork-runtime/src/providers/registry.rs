@@ -56,6 +56,10 @@ impl std::fmt::Display for ModelCapability {
 pub struct ProviderEntry {
     /// The provider implementation
     pub provider: Arc<dyn Provider>,
+    /// Stable identifier used as the cache key prefix for `CompatCache`
+    /// (e.g. `"volcano-engine-coding"`).  Same model on different providers
+    /// gets isolated cache entries.
+    pub provider_id: String,
     /// Models available through this provider
     pub models: Vec<String>,
     /// Capabilities by model
@@ -144,8 +148,19 @@ impl ProviderRegistry {
         self.providers.write().insert(name.to_string(), entry);
     }
 
-    /// Register a simple provider with default settings
-    pub fn register_provider(&self, name: &str, provider: Arc<dyn Provider>, models: Vec<String>) {
+    /// Register a simple provider with default settings.
+    ///
+    /// `provider_id` is the stable cache key prefix for `CompatCache` —
+    /// pass the vendor identifier from config (e.g. `"volcano-engine-coding"`).
+    /// Two providers sharing the same `name` but different `provider_id`
+    /// will be treated as separate cache namespaces.
+    pub fn register_provider(
+        &self,
+        name: &str,
+        provider_id: &str,
+        provider: Arc<dyn Provider>,
+        models: Vec<String>,
+    ) {
         let mut capabilities = HashMap::new();
         for model in &models {
             capabilities.insert(model.clone(), default_capabilities_for_model(model));
@@ -155,6 +170,7 @@ impl ProviderRegistry {
             name,
             ProviderEntry {
                 provider,
+                provider_id: provider_id.to_string(),
                 models,
                 capabilities,
                 priority: 10,
@@ -359,6 +375,7 @@ mod tests {
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
         registry.register_provider(
             "openai",
+            "openai-official",
             provider,
             vec!["gpt-4".to_string(), "gpt-4o".to_string()],
         );
@@ -371,7 +388,7 @@ mod tests {
     fn test_unregister_provider() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", provider, vec!["gpt-4".to_string()]);
+        registry.register_provider("openai", "openai-official", provider, vec!["gpt-4".to_string()]);
         assert!(registry.unregister("openai"));
         assert!(registry.get("openai").is_none());
     }
@@ -381,10 +398,15 @@ mod tests {
         let registry = ProviderRegistry::new();
 
         let openai = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", openai, vec!["gpt-4".to_string()]);
+        registry.register_provider("openai", "openai-official", openai, vec!["gpt-4".to_string()]);
 
         let anthropic = Arc::new(AnthropicProvider::new(Some("sk-ant-test")));
-        registry.register_provider("anthropic", anthropic, vec!["claude-sonnet-4".to_string()]);
+        registry.register_provider(
+            "anthropic",
+            "anthropic-official",
+            anthropic,
+            vec!["claude-sonnet-4".to_string()],
+        );
 
         let gpt4_providers = registry.find_providers_for_model("gpt-4");
         assert_eq!(gpt4_providers.len(), 1);
@@ -399,7 +421,7 @@ mod tests {
     fn test_capability_query() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", provider, vec!["gpt-4".to_string()]);
+        registry.register_provider("openai", "openai-official", provider, vec!["gpt-4".to_string()]);
 
         assert!(registry.has_capability("openai", "gpt-4", ModelCapability::Streaming));
         assert!(registry.has_capability("openai", "gpt-4", ModelCapability::ToolUse));
@@ -454,11 +476,12 @@ mod tests {
         let registry = ProviderRegistry::new();
 
         let openai = Arc::new(OpenAIProvider::new(Some("sk-test")));
-        registry.register_provider("openai", openai, vec!["gpt-4".to_string()]);
+        registry.register_provider("openai", "openai-official", openai, vec!["gpt-4".to_string()]);
 
         let ollama = Arc::new(OllamaProvider::new());
         let mut entry = ProviderEntry {
             provider: ollama,
+            provider_id: "ollama-local".to_string(),
             models: vec!["gpt-4".to_string()], // Ollama can serve compatible models
             capabilities: HashMap::new(),
             priority: 20,

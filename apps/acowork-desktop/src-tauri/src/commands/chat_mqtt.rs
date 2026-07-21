@@ -276,29 +276,18 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         },
     ).await?;
 
-    // Subscribe to agent lifecycle topics
+    // Subscribe to ALL agent topics (lifecycle + session messages).
+    // `subscribe_agent_lifecycle` now subscribes to ALL_TOPIC_FILTERS
+    // which includes `messages/#` – this ensures the initial
+    // subscription set matches exactly what `resubscribe_all` restores
+    // on reconnect, eliminating the gap that previously caused silent
+    // event loss after a reconnect.
     client.subscribe_agent_lifecycle().await?;
-
-    // ADR-033: Subscribe to all session message topics (streaming chunks,
-    // context_usage, session_state_changed, etc.) so the frontend receives
-    // real-time session events across all sessions.
-    //
-    // ADR-035 O2: **QoS 1 is mandatory**. The Runtime publishes
-    // `stream_delta` and `record_complete` at QoS 1; if we subscribe at
-    // QoS 0 the broker downgrades delivery to fire-and-forget, losing the
-    // end-to-end ordering guarantee (and any QoS 1 retry semantics on the
-    // `record_complete` authoritative terminal event). See
-    // `subscribe_agent_session` for the per-session twin that already
-    // uses QoS 1.
-    client.subscribe(
-        "acowork/agents/+/sessions/+/messages/#",
-        crate::mqtt_client::MqttQoS::AtLeastOnce,
-    ).await?;
 
     let shared = Arc::new(tokio::sync::Mutex::new(client));
     *guard = Some(shared);
 
-    tracing::info!("Desktop MQTT client connected and subscribed to agent lifecycle");
+    tracing::info!("Desktop MQTT client connected and subscribed to all agent topics");
     Ok(())
 }
 
@@ -308,6 +297,32 @@ pub async fn disconnect_mqtt(state: tauri::State<'_, AppState>) -> Result<(), St
     let mut guard = state.mqtt_client.lock().await;
     *guard = None;
     tracing::info!("Desktop MQTT client disconnected");
+    Ok(())
+}
+
+/// Force a soft-restart of the MQTT client.
+///
+/// Drops the current `EventLoop` and creates a fresh `AsyncClient` +
+/// `EventLoop` pair, then re-subscribes to all topics. Use this when
+/// the MQTT connection appears stuck (e.g. status shows "Reconnecting"
+/// for an extended period, or messages stop arriving despite the broker
+/// being healthy).
+///
+/// Unlike `disconnect_mqtt` (which tears down the client entirely),
+/// this keeps the poll task alive and automatically recovers the
+/// connection.
+#[tauri::command]
+pub async fn force_reconnect_mqtt(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let guard = state.mqtt_client.lock().await;
+    let client = guard
+        .as_ref()
+        .ok_or_else(|| "MQTT client not connected".to_string())?;
+
+    let client = client.lock().await;
+    client.force_reconnect();
+    tracing::info!("MQTT force-reconnect triggered by user");
     Ok(())
 }
 

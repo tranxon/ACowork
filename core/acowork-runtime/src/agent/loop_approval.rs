@@ -419,6 +419,15 @@ impl AgentLoop {
             // 2. Pause and wait for user decision (no timeout)
             let decision = self.await_approval_decision(&request_id).await;
 
+            // Clear the retained `tool_approval_needed` message so a
+            // Desktop reconnecting later does not see a stale approval
+            // dialog from this turn.
+            let _ = self
+                .session_core
+                .try_send_chunk(ChunkEvent::ClearRetainedEvent {
+                    event_type: "tool_approval_needed".to_string(),
+                });
+
             // ADR-014: WaitingApproval → Streaming (resume after approval/rejection)
             self.transition_status(SessionStatus::Streaming { message_id: None });
 

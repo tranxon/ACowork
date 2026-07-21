@@ -54,6 +54,21 @@ impl ProviderTimeouts {
     }
 }
 
+/// Bundle of optional wiring passed to [`create_provider_with_wiring`].
+///
+/// `provider_id` is the stable cache key prefix used by `CompatCache`
+/// (typically the same as `provider_name`).  When `Some`, it is installed
+/// on the resulting `OpenAIProvider` so cache lookups namespace correctly.
+///
+/// `compat_cache` is the optional compatibility cache.  When `Some`, it
+/// is installed on the resulting `OpenAIProvider` so fallback
+/// successes are persisted across processes.
+#[derive(Default, Clone)]
+pub struct ProviderWiring {
+    pub provider_id: Option<String>,
+    pub compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
+}
+
 /// Create a provider based on protocol type.
 ///
 /// Protocol selection is data-driven: Gateway determines the correct
@@ -63,12 +78,35 @@ impl ProviderTimeouts {
 /// base_url is always supplied by the Gateway-delivered provider list.
 /// If missing, the provider will likely fail - this is expected since
 /// Runtime cannot function without Gateway.
+///
+/// Without wiring, the provider behaves exactly as before the
+/// compatibility-cache work — used by unit tests and standalone mode.
 pub fn create_provider(
     provider_name: &str,
     protocol_type: &ProtocolType,
     api_key: Option<&str>,
     base_url: Option<&str>,
     timeouts: Option<ProviderTimeouts>,
+) -> Arc<dyn Provider> {
+    create_provider_with_wiring(
+        provider_name,
+        protocol_type,
+        api_key,
+        base_url,
+        timeouts,
+        ProviderWiring::default(),
+    )
+}
+
+/// Same as [`create_provider`] but additionally installs `provider_id`
+/// and `compat_cache` on the constructed provider before returning.
+pub fn create_provider_with_wiring(
+    provider_name: &str,
+    protocol_type: &ProtocolType,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    timeouts: Option<ProviderTimeouts>,
+    wiring: ProviderWiring,
 ) -> Arc<dyn Provider> {
     let t = timeouts.unwrap_or_else(ProviderTimeouts::defaults);
     match protocol_type {
@@ -104,7 +142,7 @@ pub fn create_provider(
                 provider = provider_name,
                 "Using Google Gemini (OpenAI-compatible) provider"
             );
-            let provider = if let Some(url) = base_url {
+            let mut provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url_and_timeouts(
                     Some(url),
                     api_key,
@@ -121,6 +159,7 @@ pub fn create_provider(
                     t.stream_read_timeout,
                 )
             };
+            install_wiring(&mut provider, &wiring);
             Arc::new(provider)
         }
 
@@ -143,7 +182,7 @@ pub fn create_provider(
 
         ProtocolType::OpenAI => {
             tracing::info!(provider = provider_name, "Using OpenAI-compatible provider");
-            let provider = if let Some(url) = base_url {
+            let mut provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url_and_timeouts(
                     Some(url),
                     api_key,
@@ -160,8 +199,18 @@ pub fn create_provider(
                     t.stream_read_timeout,
                 )
             };
+            install_wiring(&mut provider, &wiring);
             Arc::new(provider)
         }
+    }
+}
+
+fn install_wiring(provider: &mut OpenAIProvider, wiring: &ProviderWiring) {
+    if let Some(id) = wiring.provider_id.clone() {
+        provider.set_provider_id(id);
+    }
+    if let Some(cache) = wiring.compat_cache.clone() {
+        provider.set_compat_cache(cache);
     }
 }
 

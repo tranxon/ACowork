@@ -9,6 +9,7 @@ pub mod auth;
 pub mod chat;
 pub mod config_api;
 pub mod cron_api;
+pub mod debug_mqtt;
 pub mod embedding_api;
 pub mod fs_browse;
 pub mod mcp_catalog_api;

@@ -1,6 +1,7 @@
 //! Provider module
 
 pub mod anthropic;
+pub mod compat;
 pub mod ollama;
 pub mod openai;
 pub mod registry;

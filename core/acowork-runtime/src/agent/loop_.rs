@@ -180,6 +180,18 @@ pub enum ChunkEvent {
         /// `None` when title has not been generated yet.
         title: Option<String>,
     },
+    /// Clear a retained `messages/*` event for this session.
+    ///
+    /// Published as a zero-byte payload with `retain = true` to the
+    /// `messages/{event_type}` topic, which instructs the broker to
+    /// delete the previously stored retained message. Used after a
+    /// blocking state (tool approval, ask question) is resolved so
+    /// that a Desktop reconnecting later does not receive a stale
+    /// retained event from a previous turn.
+    ClearRetainedEvent {
+        /// The event type suffix (e.g. "tool_approval_needed", "ask_question").
+        event_type: String,
+    },
     /// ADR-035: incremental streaming delta carrying actual data.
     ///
     /// Pushed via MQTT `messages/stream_delta` every `notify_interval_ms`

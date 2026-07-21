@@ -19,8 +19,7 @@ docs/
 │   └── protocols/           # API 协议参考文档（面向集成方）
 │       ├── README.md        # 协议总览 / 纲要
 │       ├── http.md          # Gateway HTTP REST API
-│       ├── grpc.md          # Gateway ↔ Runtime gRPC
-│       └── websocket.md     # 聊天流式事件 WebSocket
+│       └── mqtt.md          # 实时事件总线（替代已下架的 gRPC + WebSocket）
 ├── en/                      # English docs
 │   └── mcp-server-research.md
 ├── design/

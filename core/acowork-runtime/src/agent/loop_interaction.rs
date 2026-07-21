@@ -85,6 +85,14 @@ impl AgentLoop {
         // Wait for the user's answer (timeout driven by agent config)
         let answer = self.await_question_answer(&request_id).await;
 
+        // Clear the retained `ask_question` message so a Desktop
+        // reconnecting later does not see a stale question card.
+        let _ = self
+            .session_core
+            .try_send_chunk(ChunkEvent::ClearRetainedEvent {
+                event_type: "ask_question".to_string(),
+            });
+
         // Transition back to Streaming (the loop will continue)
         self.transition_status(SessionStatus::Streaming { message_id: None });
 

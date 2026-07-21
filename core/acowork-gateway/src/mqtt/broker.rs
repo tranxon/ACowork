@@ -27,10 +27,21 @@ pub enum MqttBrokerError {
 /// When created via `start_broker()`, holds the `Broker` directly so
 /// dropping the handle shuts down the broker. When created via
 /// `start_broker_in_thread()`, the broker lives in a parked OS thread.
+///
+/// Production callers never need to shut the broker down — it lives
+/// for the lifetime of the Gateway process. The optional `shutdown_tx`
+/// exists only so the debug HTTP endpoints (`POST /api/debug/mqtt/*`)
+/// can request a graceful exit without restarting the whole process.
 pub struct MqttBrokerHandle {
     /// Direct ownership (used by `start_broker`).
     #[allow(dead_code)]
     _broker: Option<Broker>,
+    /// Channel to signal the broker thread to exit.
+    /// `None` for handles created via `start_broker()` (direct
+    /// ownership — `Drop` of `Broker` shuts down the listener).
+    /// `Some` for handles from `start_broker_in_thread()` so debug
+    /// endpoints can request a graceful exit.
+    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
     /// The address the broker is listening on.
     pub listen_addr: SocketAddr,
 }
@@ -109,9 +120,22 @@ pub fn start_broker(host: &str, port: u16) -> Result<MqttBrokerHandle, MqttBroke
     tracing::info!(addr = %listen_addr, "MQTT broker started and accepting connections");
 
     // Return the Broker in the handle so the caller can keep it alive.
-    Ok(MqttBrokerHandle { _broker: Some(broker), listen_addr })
+    Ok(MqttBrokerHandle {
+        _broker: Some(broker),
+        shutdown_tx: None,
+        listen_addr,
+    })
 }
 
+/// Start the broker in a separate OS thread (non-blocking).
+///
+/// Required when calling from inside a tokio runtime, because rumqttd
+/// creates its own tokio runtime internally. The broker thread parks
+/// after startup to keep the `Broker` alive for the process lifetime.
+///
+/// Uses a short timeout (500 ms) to confirm startup, but does NOT block
+/// indefinitely — if the broker doesn't respond in time, the function
+/// still returns `Ok` so the Gateway can continue starting.
 /// Start the broker in a separate OS thread (non-blocking).
 ///
 /// Required when calling from inside a tokio runtime, because rumqttd
@@ -130,23 +154,41 @@ pub fn start_broker_in_thread(host: &str, port: u16) -> Result<MqttBrokerHandle,
         )))?;
 
     let (tx, rx) = std::sync::mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
     let h = host.to_string();
 
     std::thread::Builder::new()
         .name("mqtt-broker".into())
         .spawn(move || {
+            // Park until shutdown signal arrives. If `start_broker`
+            // fails, signal the parent and exit immediately.
             match start_broker(&h, port) {
-                Ok(_broker) => {
+                Ok(broker) => {
                     // Send confirmation — the Broker is alive on this
                     // thread's stack, and will stay alive until the
-                    // thread exits (via process shutdown).
+                    // thread exits (either via the shutdown signal or
+                    // process exit).
                     let _ = tx.send(Ok(()));
-                    // Park forever: the Broker lives on this thread's
-                    // stack. When the Gateway process is killed, this
-                    // thread is torn down and the Broker's Drop runs.
+                    // Park until shutdown signal arrives.
+                    //
+                    // `park_timeout` (vs. plain `park`) is used so the
+                    // thread can react to a shutdown request from the
+                    // debug HTTP endpoints without an explicit
+                    // `Thread::unpark` — which would require exposing
+                    // the parked Thread handle in `MqttBrokerHandle`,
+                    // a strictly debug-only concern. The 200 ms
+                    // timeout is a deliberate trade-off: it costs ~5
+                    // wakeups/sec/idle thread, but lets the debug
+                    // endpoint shut the broker down cleanly.
                     loop {
-                        std::thread::park();
+                        std::thread::park_timeout(std::time::Duration::from_millis(200));
+                        if shutdown_rx.try_recv().is_ok() {
+                            break;
+                        }
                     }
+                    // Broker drops here, closing all TCP connections.
+                    drop(broker);
+                    tracing::info!("MQTT broker thread exiting (broker dropped)");
                 }
                 Err(e) => {
                     let _ = tx.send(Err(e));
@@ -180,7 +222,11 @@ pub fn start_broker_in_thread(host: &str, port: u16) -> Result<MqttBrokerHandle,
         }
     }
 
-    Ok(MqttBrokerHandle { _broker: None, listen_addr })
+    Ok(MqttBrokerHandle {
+        _broker: None,
+        shutdown_tx: Some(shutdown_tx),
+        listen_addr,
+    })
 }
 
 /// Start the MQTT broker with default localhost settings.
@@ -189,6 +235,32 @@ pub fn start_default_broker() -> Result<MqttBrokerHandle, MqttBrokerError> {
         defaults::GATEWAY_MQTT_HOST,
         defaults::GATEWAY_MQTT_PORT,
     )
+}
+
+/// Gracefully shut down the broker.
+///
+/// Sends a signal to the broker thread (if running in-thread mode) to
+/// unpark and exit, which drops the `Broker` and closes all TCP
+/// connections. After shutdown, the broker is permanently stopped —
+/// restarting requires creating a new handle via `start_broker`.
+impl MqttBrokerHandle {
+    /// Signal the broker thread to exit, then return immediately.
+///
+/// This **does not wait** for the broker thread to actually exit (and
+/// for `Broker::drop()` to close the TCP listener). Callers that need
+/// to rebind the same port should sleep briefly after calling this to
+/// let the OS TIME_WAIT state drain.
+///
+/// Only handles created via [`start_broker_in_thread`] have a
+/// shutdown channel; handles from [`start_broker`] return an error.
+pub fn signal_shutdown(&mut self) -> Result<(), String> {
+    let tx = self
+        .shutdown_tx
+        .take()
+        .ok_or_else(|| "broker not running in threaded mode".to_string())?;
+    tx.send(()).map_err(|_| "broker thread already exited".to_string())?;
+    Ok(())
+}
 }
 
 #[cfg(test)]

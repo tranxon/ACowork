@@ -17,6 +17,7 @@ import { useStatusBarStore } from "../../stores/statusBarStore";
 import { cn } from "../../lib/utils";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
+import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore, type PanelTab } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -745,6 +746,7 @@ export function AppLayout() {
             )}
           </span>
         )}
+        <MqttDebugControls />
       </div>
 
     </div>

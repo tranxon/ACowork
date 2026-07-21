@@ -348,6 +348,10 @@ async fn relay_chunk_event_mqtt(
                 .await;
         }
 
+        ChunkEvent::ClearRetainedEvent { event_type } => {
+            publisher.clear_retained_event(sid, &event_type).await;
+        }
+
         // ADR-XXX: per-session persisted metadata changed. Published
         // with Retained=true so a (re)connecting Desktop immediately
         // receives the current state via the broker's retained store.

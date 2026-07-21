@@ -12,7 +12,15 @@ use crate::resource_cache::ResourceCache;
 use crate::vault::VaultFacade;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-
+use std::sync::Arc;
+/// Debug-only handle to the MQTT broker.
+///
+/// Wrapped in `tokio::sync::Mutex` because the `MqttBrokerHandle::shutdown`
+/// method requires `&mut self`. The HTTP debug handlers acquire this lock
+/// briefly during disconnect/reconnect tests.
+///
+/// **None** when MQTT is disabled in the Gateway config.
+pub type MqttBrokerControlHandle = tokio::sync::Mutex<Option<crate::mqtt::MqttBrokerHandle>>;
 /// Information about an installed agent
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
@@ -105,6 +113,13 @@ pub struct GatewayState {
     /// in-memory only (tests, package-manager helpers). `Some` in the
     /// real Gateway after `Gateway::run` initialises it from `data_dir`.
     pub interaction_store: Option<InteractionStore>,
+    /// ADR-XXX: MQTT broker control handle for debug endpoints.
+    ///
+    /// Holds the broker handle so the HTTP debug layer can request
+    /// graceful shutdown (e.g. for testing reconnection paths).
+    /// Always `Some` because initialised in `GatewayState::new`.
+    /// The inner `Option` is `None` when MQTT is disabled in config.
+    pub mqtt_broker_control: Arc<MqttBrokerControlHandle>,
 }
 
 impl GatewayState {
@@ -125,6 +140,7 @@ impl GatewayState {
             lsp_relay_process: None,
             last_interactions: HashMap::new(),
             interaction_store: None,
+            mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
