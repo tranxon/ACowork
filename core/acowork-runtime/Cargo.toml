@@ -61,6 +61,10 @@ prost.workspace = true
 rumqttc.workspace = true
 axum.workspace = true
 
+# Base64 encoding for binary file reads (workspace file read returns
+# base64-encoded content for image / PDF / archive types).
+base64.workspace = true
+
 # File system watching
 notify.workspace = true
 

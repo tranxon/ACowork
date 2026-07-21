@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use base64::Engine;
 use chrono::DateTime;
 use ignore::WalkBuilder;
 use regex::Regex;
@@ -137,6 +138,10 @@ impl RuntimeWorkspaceQueryService {
 
     /// Best-effort MIME type from file extension. Falls back to
     /// `application/octet-stream` for unknown extensions.
+    ///
+    /// Covers both the text formats read by the editor and the binary
+    /// image/PDF formats returned base64-encoded to the desktop image
+    /// preview branch (`mimeType.startsWith("image/")`).
     fn mime_type_for(rel_path: &str) -> &'static str {
         let ext = Path::new(rel_path)
             .extension()
@@ -164,6 +169,14 @@ impl RuntimeWorkspaceQueryService {
             "sh" | "bash" => "application/x-sh",
             "ps1" => "application/x-powershell",
             "toml" => "application/toml",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            "ico" => "image/x-icon",
+            "pdf" => "application/pdf",
             _ => "application/octet-stream",
         }
     }
@@ -310,7 +323,14 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
             )))
         })?;
 
-        let root_str = canonical_root.to_string_lossy().replace('\\', "/");
+        // Strip Windows `\\?\` extended-length path prefix and normalise
+        // separators to forward slashes. Forwarding the verbatim path
+        // (e.g. `\\?\D:\foo`) verbatim would surface as `//?/D:/foo` to
+        // the client; once it reaches `monaco.Uri.file` / `vscode-uri`,
+        // the `?` is URL-encoded to `%3F` and the resulting
+        // `file://%3F/d%3A/...` URI is rejected by rust-analyzer
+        // ("invalid international domain name").
+        let root_str = canonical_to_root_string(&canonical_root);
         let mut dirs: Vec<TreeEntryDto> = Vec::new();
         let mut files: Vec<TreeEntryDto> = Vec::new();
 
@@ -379,9 +399,18 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
             WorkspaceError::NotFound(format!("failed to read metadata for: {}", rel_path))
         })?;
 
-        let content = std::fs::read_to_string(&abs_path).map_err(|_| {
-            WorkspaceError::InvalidUtf8(format!("file is not valid UTF-8: {}", rel_path))
-        })?;
+        let is_binary = Self::is_binary_path(&abs_path);
+        
+        let content = if is_binary {
+            let bytes = std::fs::read(&abs_path).map_err(|_| {
+                WorkspaceError::NotFound(format!("failed to read file: {}", rel_path))
+            })?;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        } else {
+            std::fs::read_to_string(&abs_path).map_err(|_| {
+                WorkspaceError::InvalidUtf8(format!("file is not valid UTF-8: {}", rel_path))
+            })?
+        };
 
         Ok(WorkspaceFileDto {
             content,
@@ -467,13 +496,29 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
 
 // ── Blocking helpers (filename + content search) ───────────────────────────
 
+/// Convert an already-canonicalized path into a portable string form
+/// (no Windows `\\?\` extended-length prefix, forward slashes).
+///
+/// Used by every HTTP response field that exposes the workspace root
+/// to clients. Keeping the root free of OS-specific verbatim syntax
+/// prevents downstream bugs such as `file://%3F/d%3A/...` URLs after
+/// `monaco.Uri.file` / `vscode-uri` on the desktop side — see the
+/// `list_tree` impl comment for the full failure chain.
+fn canonical_to_root_string(canonical: &Path) -> String {
+    let s = canonical.to_string_lossy();
+    let stripped = s.strip_prefix(r"\\?\").unwrap_or(s.as_ref());
+    stripped.replace('\\', "/")
+}
+
+/// Resolve a workspace-root string for filesystem walks used by the
+/// blocking search helpers. Mirrors [`canonical_to_root_string`] but
+/// accepts a raw (possibly not-yet-canonicalized) string for callers
+/// that hold a `&str` rather than a `PathBuf`.
 fn normalised_root(workspace_root: &str) -> String {
-    let canonical_root = Path::new(workspace_root)
+    let canonical = Path::new(workspace_root)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(workspace_root));
-    let canonical_str = canonical_root.to_string_lossy();
-    let stripped = canonical_str.strip_prefix(r"\\?\").unwrap_or(canonical_str.as_ref());
-    stripped.replace('\\', "/")
+    canonical_to_root_string(&canonical)
 }
 
 fn run_filename_search(workspace_root: &str, pattern: &str, limit: usize) -> FindResponse {
@@ -648,5 +693,123 @@ fn run_search(
         matches: results,
         total_matches,
         truncated,
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecases::workspace_query::ListTreeParams;
+    use tempfile::tempdir;
+
+    /// On Windows, `std::fs::canonicalize` returns the verbatim
+    /// `\\?\D:\...` form. The helper must strip it so the resulting
+    /// string is safe to feed into `monaco.Uri.file` / LSP `rootUri`.
+    /// On non-Windows platforms the prefix is never produced, so we
+    /// only assert the no-prefix invariant universally.
+    #[test]
+    fn canonical_to_root_string_strips_windows_verbatim_prefix() {
+        let tmp = tempdir().expect("tempdir");
+        let canonical = tmp.path().canonicalize().expect("canonicalize");
+        let s = canonical_to_root_string(&canonical);
+
+        // Universal contract: no Windows extended-length prefix, ever.
+        // `std::path::Path::to_string_lossy` keeps backslashes on
+        // Windows so the prefix appears as `\\?\` (backslash form);
+        // `replace('\\', "/")` would have turned it into `//?/`
+        // (forward-slash form). The helper must strip both.
+        let canonical_str = canonical.to_string_lossy();
+        assert!(
+            !canonical_str.starts_with(r"\\?\") || !s.starts_with(r"\\?\"),
+            "result must not retain Windows verbatim backslash prefix, got: {s}"
+        );
+        assert!(
+            !s.starts_with("//?/"),
+            "result must not retain forward-slash verbatim prefix, got: {s}"
+        );
+        // Universal contract: forward slashes only.
+        assert!(!s.contains('\\'), "root string must use forward slashes, got: {s}");
+
+        // Cross-platform: result points at the temp directory.
+        let canonical_str = canonical.to_string_lossy();
+        let expected = canonical_str
+            .strip_prefix(r"\\?\")
+            .unwrap_or(canonical_str.as_ref())
+            .replace('\\', "/");
+        assert_eq!(s, expected);
+    }
+
+    /// `normalised_root` is the thin string-accepting wrapper used by
+    /// `find_files` / `search_files`. It must agree with
+    /// `canonical_to_root_string` on every platform.
+    #[test]
+    fn normalised_root_matches_canonical_to_root_string() {
+        let tmp = tempdir().expect("tempdir");
+        let input = tmp.path().to_string_lossy().to_string();
+        let a = normalised_root(&input);
+        let b = canonical_to_root_string(&tmp.path().canonicalize().expect("canonicalize"));
+        assert_eq!(a, b);
+    }
+
+    /// Regression test for the bug where `list_tree`'s response
+    /// `root` field surfaced as `//?/D:/...` on Windows, which the
+    /// desktop app then fed into `monaco.Uri.file`, producing
+    /// `file://%3F/d%3A/...` — an URI that rust-analyzer rejects with
+    /// "invalid international domain name" during `initialize`.
+    ///
+    /// Asserts the contract documented on `TreeResponse::root`: no
+    /// Windows `\\?\` prefix, forward slashes only.
+    #[tokio::test]
+    async fn list_tree_root_is_normalised_on_windows() {
+        let tmp = tempdir().expect("tempdir");
+        // Seed a directory entry so `read_dir` has something to list —
+        // irrelevant to the bug, but keeps the call cheap and
+        // unconditional.
+        std::fs::write(tmp.path().join("seed.txt"), "x").expect("write");
+
+        // work_dir == tempdir; resolve_root(workspace_id = "__agent_home__")
+        // returns work_dir unchanged.
+        let svc = RuntimeWorkspaceQueryService::new(
+            tmp.path().to_path_buf(),
+            "test-agent".to_string(),
+        );
+
+        let resp = svc
+            .list_tree(&ListTreeParams {
+                workspace_id: None,
+                path: Some(String::new()),
+            })
+            .await
+            .expect("list_tree");
+
+        // The bug surfaced the prefix as forward-slash form (`//?/`)
+        // because `to_string_lossy().replace('\\', "/")` rewrites the
+        // backslashes of the verbatim prefix. Reject both forms here
+        // — without the fix the result is `//?/C:/Users/...` and the
+        // assertion below fails loudly.
+        assert!(
+            !resp.root.starts_with("//?/") && !resp.root.starts_with(r"\\?\"),
+            "TreeResponse.root must not contain Windows verbatim prefix, got: {}",
+            resp.root
+        );
+        assert!(
+            !resp.root.contains('\\'),
+            "TreeResponse.root must use forward slashes, got: {}",
+            resp.root
+        );
+        // Sanity: ends with the tempdir's last segment.
+        let expected_suffix = tmp
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            resp.root.ends_with(&expected_suffix),
+            "root should end with the tempdir leaf, got: {} (want suffix: {expected_suffix})",
+            resp.root
+        );
     }
 }

@@ -264,7 +264,12 @@ impl RuntimeHttpServer {
             )
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/consolidate", post(trigger_consolidate))
-            .route("/files/{id}", get(get_file))
+            // NOTE: the legacy `GET /files/{id}` handler was removed as part
+            // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
+            // file reads now flow exclusively through
+            // `GET /workspaces/file?path=…` (see `read_workspace_file`), which
+            // dispatches via the `WorkspaceQueryService::read_file` trait so
+            // the HTTP server does not directly touch the filesystem.
             // workspaces: retained GET + 4 new mutation routes.
             .route("/workspaces", get(list_workspaces).post(create_workspace))
             .route(
@@ -871,104 +876,6 @@ async fn get_session(
         "meta": meta_obj,
         "live_state": live_state,
     })))
-}
-
-/// `GET /files/{id}` — file content.
-///
-/// Serves files from the Runtime's workspace. The `id` is a relative
-/// path within the workspace (sanitized to prevent path traversal).
-/// Returns text content for text files, base64-encoded content for binary
-/// files (images, PDFs, etc.).
-async fn get_file(
-    State(state): State<HttpState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // Sanitize: only allow alphanumeric + / + . + _ + - in the file id
-    if !id
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-')
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Prevent path traversal
-    if id.contains("..") {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let file_path = state.work_dir.join(&id);
-
-    if !file_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    let _metadata = std::fs::metadata(&file_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let extension = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Determine content type and encoding based on file extension.
-    let is_text = matches!(
-        extension.as_str(),
-        "txt" | "md" | "json" | "yaml" | "yml" | "toml" | "xml" | "html"
-            | "css" | "js" | "ts" | "rs" | "py" | "go" | "java" | "c" | "cpp"
-            | "h" | "sh" | "bat" | "ps1" | "log" | "csv" | "env" | "cfg"
-            | "ini" | "sql" | "r" | "rb" | "lua" | "swift" | "kt" | "scala"
-            | "vue" | "svelte" | "tsx" | "jsx" | "proto" | "graphql"
-    );
-
-    if is_text {
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(Json(serde_json::json!({
-            "path": id,
-            "content": content,
-            "content_type": format!("text/{}; charset=utf-8", extension),
-            "size": content.len(),
-            "encoding": "utf-8",
-        })))
-    } else {
-        let content = std::fs::read(&file_path)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let content_type = match extension.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            "webp" => "image/webp",
-            "ico" => "image/x-icon",
-            "bmp" => "image/bmp",
-            "pdf" => "application/pdf",
-            "zip" => "application/zip",
-            "gz" | "gzip" => "application/gzip",
-            "tar" => "application/x-tar",
-            "mp4" => "video/mp4",
-            "mp3" => "audio/mpeg",
-            "wav" => "audio/wav",
-            "woff" => "font/woff",
-            "woff2" => "font/woff2",
-            "ttf" => "font/ttf",
-            "otf" => "font/otf",
-            _ => "application/octet-stream",
-        };
-
-        // Use simple base64 encoding for binary files.
-        let encoded = base64_encode_simple(&content);
-
-        Ok(Json(serde_json::json!({
-            "path": id,
-            "content": encoded,
-            "content_type": content_type,
-            "size": content.len(),
-            "encoding": "base64",
-        })))
-    }
 }
 
 // ── Control plane redirects (ADR-034 §7.6.4) ──────────────────────
@@ -3236,6 +3143,20 @@ mod tests {
         assert_eq!(resp.status(), 200, "create-dir should be 200");
         assert!(ws_dir.join("subdir").is_dir(), "subdir must exist");
 
+        // 3a) Create an `assets` subdirectory for binary image test.
+        let resp = client
+            .post(format!("{}/workspaces/dir?workspace_id=alpha", base))
+            .json(&serde_json::json!({ "path": "assets" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "create-dir for assets should be 200"
+        );
+        assert!(ws_dir.join("assets").is_dir(), "assets dir must exist");
+
         // 4) POST /workspaces/file?workspace_id=… — create a new file.
         let resp = client
             .post(format!("{}/workspaces/file?workspace_id=alpha", base))
@@ -3302,7 +3223,7 @@ mod tests {
         );
 
         // 8) GET /workspaces/file — JSON envelope with mime helper
-        //    exercised via a .md file.
+        //    exercised via a .md file (text path).
         let resp = client
             .post(format!("{}/workspaces/file?workspace_id=alpha", base))
             .json(&serde_json::json!({
@@ -3322,6 +3243,62 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["mimeType"], "text/markdown");
         assert_eq!(body["size"], 10); // "# heading\n" is 10 bytes
+
+        // 8a) Binary image test (JPG/SVG read via base64): write a
+        // tiny image + verify GET returns base64 content + correct
+        // mimeType.
+        use base64::Engine;
+        let tiny_jpg_bytes: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0]; // JPEG SOI marker, minimal header
+        std::fs::write(ws_dir.join("assets").join("1.jpg"), &tiny_jpg_bytes).unwrap();
+
+        let resp = client
+            .get(format!(
+                "{}/workspaces/file?workspace_id=alpha&path=assets/1.jpg",
+                base
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "GET /workspaces/file for JPG must return 200"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["mimeType"], "image/jpeg");
+        assert_eq!(body["size"], 4);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(body["content"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, tiny_jpg_bytes);
+
+        // 8b) SVG binary read test (SVG is listed in BINARY_EXTENSIONS so it
+        // gets base64-encoded, even though it's actually text; the frontend
+        // still renders it correctly in the image preview branch because
+        // mimeType starts with "image/").
+        let tiny_svg = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1' />";
+        std::fs::write(ws_dir.join("assets").join("test.svg"), tiny_svg).unwrap();
+
+        let resp = client
+            .get(format!(
+                "{}/workspaces/file?workspace_id=alpha&path=assets/test.svg",
+                base
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "GET /workspaces/file for SVG must return 200"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["mimeType"], "image/svg+xml");
+        assert_eq!(body["size"], tiny_svg.len() as u64);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(body["content"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, tiny_svg.as_bytes());
 
         // 9) DELETE /workspaces/file?workspace_id=… — body {path}.
         let resp = client

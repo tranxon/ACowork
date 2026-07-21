@@ -118,6 +118,10 @@ pub struct TreeEntryDto {
 /// Response for `list_tree`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeResponse {
+    /// Normalised workspace root (no Windows `\\?\` prefix,
+    /// forward-slash separators). Exposed verbatim to clients; the
+    /// contract mirrors [`FindResponse::root`] and the
+    /// `canonical_to_root_string` helper that produces both fields.
     pub root: String,
     pub path: String,
     pub entries: Vec<TreeEntryDto>,
@@ -167,6 +171,7 @@ impl From<&FilePathQuery> for ReadFileParams {
 
 /// Response for `read_file` — JSON envelope the desktop expects.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileDto {
     pub content: String,
     pub size: u64,
