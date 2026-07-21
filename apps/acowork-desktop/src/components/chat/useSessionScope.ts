@@ -36,22 +36,6 @@ export interface PendingImage {
  */
 export interface SessionScope {
   // ── Scroll & Virtual ──
-  /**
-   * Block id of the MessageBlock the user was reading at the moment the
-   * last "load older" was triggered.  Set by ChatPanel.handleScroll right
-   * before it calls `loadMoreOlderMessages` (using
-   * `VirtualMessageListHandle.getFirstVisibleBlockIndex()` to pick the
-   * block — a pure data query, not a scrollTop guess).  Read by
-   * `messageBlocks` useMemo in ChatPanel to mark exactly one block as
-   * `anchorToUser: true`.  The rendering layer (`VirtualMessageList`)
-   * then scrolls to that block once the new prepended data lands, and
-   * ChatPanel clears the field so the next "load older" cycle starts
-   * from a clean slate.
-   *
-   * `null` means "no pending anchor" — normal operation between
-   * pagination cycles.
-   */
-  anchorToUserBlockId: string | null;
   /** Tracks which session ID is being initial-loaded. `null` when no load is in flight. */
   isInitialLoad: string | null;
   /** True for the render immediately after the user sends a message. */
@@ -66,7 +50,6 @@ export interface SessionScope {
 /** Factory: returns a fresh default SessionScope. */
 export function createDefaultSessionScope(): SessionScope {
   return {
-    anchorToUserBlockId: null,
     isInitialLoad: null,
     userJustSent: false,
     thinkingWasShowing: false,
@@ -101,6 +84,8 @@ export interface SessionScopeAPI {
 
   showScrollToBottom: boolean;
   setShowScrollToBottom: (v: boolean) => void;
+  showScrollToTop: boolean;
+  setShowScrollToTop: (v: boolean) => void;
 }
 
 /**
@@ -132,6 +117,7 @@ export function useSessionScope(
   const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
   const [todosCollapsed, setTodosCollapsed] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [showScrollToTop, setShowScrollToTop] = useState(false);
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
@@ -168,6 +154,7 @@ export function useSessionScope(
     setImageCapableModels([]);
     setTodosCollapsed(false);
     setShowScrollToBottom(false);
+    setShowScrollToTop(false);
     onSessionChange?.();
   }, [currentSessionId, onSessionChange]);
 
@@ -187,5 +174,7 @@ export function useSessionScope(
     setTodosCollapsed,
     showScrollToBottom,
     setShowScrollToBottom,
+    showScrollToTop,
+    setShowScrollToTop,
   };
 }

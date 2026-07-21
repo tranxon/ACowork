@@ -264,6 +264,11 @@ interface SessionChatState {
    * to a Closed or NotFound session — the gate is enforced client-side
    * and the Runtime also enforces it server-side via state guard.
    */
+  /** Per-session loading-more flag. Guards against concurrent pagination
+   *  requests (scroll-up / ensureLatestInCache) for THIS session only -
+   *  other sessions are unaffected. Previously a global boolean which
+   *  caused cross-session blocking. */
+  isLoadingMore: boolean;
   isSessionReady: boolean;
 }
 
@@ -298,6 +303,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isAssistantReplying: false,
   isReasoning: false,
   isSessionReady: false,
+  isLoadingMore: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -473,8 +479,6 @@ interface ChatStore {
    */
   lastMqttError: string | null;
   availableModels: ModelEntry[];
-  /** Whether more messages are being loaded */
-  isLoadingMore: boolean;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => Promise<void>;
@@ -512,6 +516,12 @@ interface ChatStore {
    * Direction is **derived** from `sessionState.messageOffset` after the response
    * lands (see `SessionChatState` for the rules); callers don't need to specify it.
    *
+   * ADR-041 C2: `options.evictionDirection` lets the caller override the
+   * default trim direction. `'none'` skips trimming entirely (used when
+   * loading older messages during streaming, so the streaming tail isn't
+   * evicted). When omitted, the direction is derived from offset comparison
+   * (backward compatible).
+   *
    * Returns the window coordinates returned by the server, or `undefined` if
    * the response was discarded (stale sequence / aborted).
    */
@@ -520,14 +530,9 @@ interface ChatStore {
     sessionId: string,
     offset?: number,
     limit?: number,
+    options?: { evictionDirection?: "head" | "tail" | "none" },
   ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
-  /**
-   * Load older messages (scroll-up): next offset = messageOffset + messageLimit.
-   * Single-page load — caller (VirtualMessageList.ensureRenderable effect) decides
-   * whether to invoke again based on whether the viewport is full yet.
-   */
-  loadMoreOlderMessages: (agentId: string, sessionId: string) => Promise<void>;
   /**
    * One-shot jump to the latest page: replace cache with the LAST
    * MESSAGE_CACHE_WINDOW raw entries (offset=0, limit=MESSAGE_CACHE_WINDOW).
@@ -537,13 +542,17 @@ interface ChatStore {
    *  - Scroll-to-bottom button click
    *  - Initial state where the cache is parked at an older window
    *
-   * Replaces the old per-page `loadMoreNewerMessages` loop, which had to issue
-   * N HTTP requests to slide a cache from the middle to the tail.  This is
-   * strictly more efficient: one request, fresh cache, then the rendering
-   * layer's ensureRenderable effect decides if more prepended data is needed
-   * to fill the viewport (same loop as load-older).
    */
   ensureLatestInCache: (agentId: string, sessionId: string) => Promise<void>;
+  /**
+   * One-shot jump to the oldest page: replace cache with the FIRST
+   * MESSAGE_CACHE_WINDOW raw entries (offset=messageTotal-limit).
+   *
+   * Symmetric to ensureLatestInCache. Used by the scroll-to-top button
+   * to jump directly to the beginning of the conversation without
+   * paginating one page at a time.
+   */
+  ensureOldestInCache: (agentId: string, sessionId: string) => Promise<void>;
   /**
    * ADR-038: Strict UI-only switch — set which session is in the foreground.
    *
@@ -742,7 +751,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   mqttConnected: false,
   lastMqttError: null,
   availableModels: [],
-  isLoadingMore: false,
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -1425,6 +1433,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     sessionId: string,
     offset?: number,
     limit: number = 50,
+    options?: { evictionDirection?: "head" | "tail" | "none" },
   ): Promise<{ offset: number; limit: number; total: number } | undefined> => {
     // ADR-021: Per-session abortController + loadSequence (no cross-session interference).
     const sessionState = getSessionState(get(), agentId, sessionId);
@@ -1495,51 +1504,81 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
         const prevOffset = ss.messageOffset;
+        const prevLimit = ss.messageLimit;
 
         let nextMessages: ChatMessage[];
 
+        // ADR-041 C2: evictionDirection controls cache window trimming.
+        // - 'none': no trimming (window grows) - used by adapter loadBefore/loadAfter
+        // - 'tail': drop newest (slide window toward past)
+        // - 'head': drop oldest (slide window toward present)
+        // - undefined: derive from offset comparison (backward compatible)
+        const eviction = options?.evictionDirection;
+        const derivedDirection: "head" | "tail" =
+          returnedOffset > prevOffset ? "tail" : "head";
+        const effectiveDirection = eviction ?? derivedDirection;
+
+        // When evictionDirection='none', we need to track the full merged
+        // offset range so hasOlder/hasNewer are computed correctly.
+        // messageOffset = min(returnedOffset, prevOffset) = newest offset in cache
+        // messageLimit = max(returnedOffset+returnedLimit, prevOffset+prevLimit) - messageOffset
+        let finalOffset = returnedOffset;
+        let finalLimit = returnedLimit;
+
         if (isInitialLoad) {
-          // Full initial load — replace all messages + reset streaming state.
           clearSessionStreaming(sessionId);
           nextMessages = trimOldest(converted);
         } else if (returnedOffset > prevOffset) {
-          // Loading OLDER messages (scroll-up).  The server returned messages
-          // with indices further into the past; prepend them, then slide the
-          // cache window toward the past (drop newest from the back).
+          // Loading OLDER messages (scroll-up). Prepend older messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const older = converted.filter((m) => !existingIds.has(m.id));
           const merged = [...older, ...ss.messages];
-          nextMessages = merged.length > MESSAGE_CACHE_WINDOW
-            ? merged.slice(0, MESSAGE_CACHE_WINDOW)
-            : merged;
+          if (effectiveDirection === "none") {
+            nextMessages = merged;
+            // Compute the full merged range: offset 0 = newest, higher = older.
+            // prevOffset/prevLimit describe the old cache; returnedOffset/returnedLimit
+            // describe the newly loaded older page.
+            finalOffset = Math.min(returnedOffset, prevOffset);
+            finalLimit = Math.max(
+              returnedOffset + returnedLimit,
+              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+            ) - finalOffset;
+          } else {
+            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
+              ? merged.slice(0, MESSAGE_CACHE_WINDOW)
+              : merged;
+          }
         } else if (returnedOffset < prevOffset) {
-          // Loading NEWER messages (scroll-down).  The server returned messages
-          // closer to the present; append them, then slide the cache window
-          // toward the past (drop oldest from the front).
+          // Loading NEWER messages (scroll-down). Append newer messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const newer = converted.filter((m) => !existingIds.has(m.id));
           const merged = [...ss.messages, ...newer];
-          nextMessages = merged.length > MESSAGE_CACHE_WINDOW
-            ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
-            : merged;
+          if (effectiveDirection === "none") {
+            nextMessages = merged;
+            finalOffset = Math.min(returnedOffset, prevOffset);
+            finalLimit = Math.max(
+              returnedOffset + returnedLimit,
+              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+            ) - finalOffset;
+          } else {
+            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
+              ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
+              : merged;
+          }
         } else {
-          // offset === prevOffset: refresh in place (e.g. retry).  Just merge.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const same = converted.filter((m) => !existingIds.has(m.id));
           nextMessages = [...ss.messages, ...same];
         }
 
-        return {
-          ...updateSessionState(state, agentId, sessionId, {
-            messages: nextMessages,
-            messageOffset: returnedOffset,
-            messageLimit: returnedLimit,
-            messageTotal: returnedTotal,
-            isLoadingSession: false,
-            loadError: null,
-          }),
-          isLoadingMore: false,
-        };
+        return updateSessionState(state, agentId, sessionId, {
+          messages: nextMessages,
+          messageOffset: finalOffset,
+          messageLimit: finalLimit,
+          messageTotal: returnedTotal,
+          isLoadingSession: false,
+          loadError: null,
+        });
       });
 
       return { offset: returnedOffset, limit: returnedLimit, total: returnedTotal };
@@ -1550,22 +1589,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       if (e instanceof DOMException && e.name === "AbortError") {
         console.log(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
-        set((state) => ({
-          ...updateSessionState(state, agentId, sessionId, { isLoadingSession: false }),
-          isLoadingMore: false,
-        }));
+        set((state) => updateSessionState(state, agentId, sessionId, { isLoadingSession: false, isLoadingMore: false }));
         return;
       }
       console.error("[ChatStore] Failed to load session messages:", e);
-      set((state) => ({
-        ...updateSessionState(state, agentId, sessionId, {
-          messages: [],
-          messageOffset: 0,
-          messageLimit: 0,
-          messageTotal: 0,
-          isLoadingSession: false,
-          loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
-        }),
+      set((state) => updateSessionState(state, agentId, sessionId, {
+        messages: [],
+        messageOffset: 0,
+        messageLimit: 0,
+        messageTotal: 0,
+        isLoadingSession: false,
+        loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
         isLoadingMore: false,
       }));
     } finally {
@@ -1593,23 +1627,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
   },
 
-  /** Load older messages (scroll-up). offset advances by messageLimit each call. */
-  loadMoreOlderMessages: async (agentId: string, sessionId: string) => {
-    const { isLoadingMore } = get();
-    const sessionState = getSessionState(get(), agentId, sessionId);
-    if (isLoadingMore) return;
-    const { messageOffset, messageLimit, messageTotal } = sessionState;
-    // No older messages available.
-    if (messageOffset + messageLimit >= messageTotal) return;
-    if (messageLimit <= 0) return;
-    const nextOffset = messageOffset + messageLimit;
-    set({ isLoadingMore: true });
-    try {
-      await get().loadSessionMessages(agentId, sessionId, nextOffset, messageLimit);
-    } finally {
-      set({ isLoadingMore: false });
-    }
-  },
 
   /**
    * One-shot jump to the latest page (offset=0, limit=MESSAGE_CACHE_WINDOW).
@@ -1625,9 +1642,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * — the caller is expected to check `messageOffset > 0` before invoking.
    */
   ensureLatestInCache: async (agentId: string, sessionId: string) => {
-    const { isLoadingMore } = get();
-    if (isLoadingMore) return;
     const sessionState = getSessionState(get(), agentId, sessionId);
+    if (sessionState.isLoadingMore) return;
     const { messageOffset, messageTotal, messages } = sessionState;
     // Already at the newest page:
     //   - messageOffset === 0 (window anchored at the tail), AND
@@ -1646,11 +1662,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       messageTotal > 0 &&
       messages.length >= Math.min(MESSAGE_CACHE_WINDOW, messageTotal);
     if (tailCovered) return;
-    set({ isLoadingMore: true });
+    set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
     try {
       await get().loadSessionMessages(agentId, sessionId, 0, MESSAGE_CACHE_WINDOW);
     } finally {
-      set({ isLoadingMore: false });
+      set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
+    }
+  },
+
+  ensureOldestInCache: async (agentId: string, sessionId: string) => {
+    const sessionState = getSessionState(get(), agentId, sessionId);
+    if (sessionState.isLoadingMore) return;
+    const { messageOffset, messageLimit, messageTotal, messages } = sessionState;
+    // Already at the oldest page?
+    //   - The cache window's far edge touches the end of the conversation
+    //     (messageOffset + messageLimit >= messageTotal), AND
+    //   - We have data (messageTotal > 0).
+    const headCovered =
+      messageTotal > 0 &&
+      messageOffset + messageLimit >= messageTotal &&
+      messages.length >= Math.min(MESSAGE_CACHE_WINDOW, messageTotal);
+    if (headCovered) return;
+    set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
+    try {
+      // Load the oldest page: offset = max(0, total - WINDOW).
+      // offset=0 means newest; higher offset = older.
+      // The oldest page starts at offset = total - limit (clamped to 0).
+      const limit = MESSAGE_CACHE_WINDOW;
+      const oldestOffset = Math.max(0, messageTotal - limit);
+      await get().loadSessionMessages(agentId, sessionId, oldestOffset, limit);
+    } finally {
+      set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }
   },
 

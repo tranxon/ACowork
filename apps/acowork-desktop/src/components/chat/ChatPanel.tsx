@@ -12,60 +12,12 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
-
-/**
- * `MessageBlock` — strict intermediate representation between the data layer
- * (raw `ChatMessage[]` in the chatStore) and the rendering layer
- * (`VirtualMessageList`).
- *
- * Why this exists:
- *  - The chatStore stores raw messages in chronological order. A single
- *    "display group" (think + tool_call + tool_result folded into one chip)
- *    can span multiple raw messages.
- *  - The rendering layer needs a stable unit keyed by a single `blockId` so
- *    React's diff and TanStack's virtualizer can identify it cleanly.
- *  - Several display decisions that used to live in the rendering layer as
- *    *estimated* visual state (sticky-bottom, scroll restoration on prepend)
- *    are derivable purely from properties carried on the block itself.
- *
- * Every property on this interface is data-defined, not visually estimated:
- *
- * - `type`           drives the component choice (MessageBubble vs ExploreBlock).
- * - `items`          the raw messages the block contains; for non-group blocks
- *                    `items.length === 1`. This is the single source of truth
- *                    for "what raw entries does this block render".
- * - `rawCount`       `items.length` cached for cheap arithmetic in pagination.
- * - `anchorToLatest` true iff this block contains the **last raw entry** in
- *                    the current messages array. Pure data semantics — the
- *                    rendering layer derives "user is at the bottom" from
- *                    "the viewport contains an anchorToLatest block".
- * - `anchorToUser`   transient: true on exactly one block immediately after
- *                    a "load older" trigger, so the rendering layer knows
- *                    which block to keep visually stable when older messages
- *                    are prepended. Cleared after the renderer scrolls to it.
- */
-export interface MessageBlock {
-  blockId: string;
-  type: ChatMessage["type"] | "explore_group";
-  items: ChatMessage[];
-  rawCount: number;
-  anchorToLatest: boolean;
-  anchorToUser: boolean;
-  /**
-   * True iff an `assistant` (or other non-explore) message follows this
-   * explore block in display order.  Drives ExploreBlock's auto-collapse
-   * and the virtualizer's exact-height estimator (collapsed = ~32px header
-   * only, expanded = header + content up to 240px cap).  Pre-computed here
-   * so the rendering layer doesn't have to walk the array a second time.
-   * Only meaningful for `type === "explore_group"`; false for all others.
-   */
-  hasFollowUpReply: boolean;
-}
+import { useChatListAdapter } from "./useChatListAdapter";
 
 /**
  * Merge an internal ref (used for click-outside detection) with an external
@@ -414,7 +366,6 @@ export function ChatPanel() {
   // Global state and actions — selectors to avoid full-store re-render
   const mqttConnected = useChatStore((s) => s.mqttConnected);
   const availableModels = useChatStore((s) => s.availableModels);
-  const isLoadingMore = useChatStore((s) => s.isLoadingMore);
   // Stable function refs
   const {
     sendMessage,
@@ -438,6 +389,21 @@ export function ChatPanel() {
   // leak across session switches.
   const session = useSessionScope(currentSessionId);
 
+  // ── ADR-041 C4: ChatListAdapter ──────────────────────────────────
+  // The single bridge between chatStore (data) and VirtualMessageList (render).
+  // Owns: block folding, bidirectional pagination, scroll anchoring,
+  // sticky-bottom state, and ensure-renderable (onLayout).
+  const adapter = useChatListAdapter(selectedAgentId, currentSessionId);
+
+  // Ref mirror of adapter - updated on every render so handleScroll (a stable
+  // callback with zero deps) always reads the latest values. This eliminates
+  // the stale-closure bug where onScroll fires during useLayoutEffect before
+  // React has updated the event handler.
+  const adapterRef = useRef(adapter);
+  adapterRef.current = adapter;
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
 
   // Auto-collapse todo list when all tasks are completed
@@ -455,16 +421,6 @@ export function ChatPanel() {
    *  check instead: if compositionEnd happened within the last 300ms, the
    *  Enter was almost certainly an IME confirmation, not a send intent. */
   const lastCompositionEndRef = useRef(0);
-  /**
-   * "Pinned to bottom" UI preference — owned HERE (not in session.scope)
-   * because it is per-USER-INTENT, not per-session.  Owned by ChatPanel so
-   * it survives useSessionScope's session-change reset.  Shared with
-   * VirtualMessageList via prop, which writes to it on mount and reads it
-   * from the sticky-bottom effect.  handleScroll and scrollToBottom also
-   * write to it from user-initiated scroll/button actions.
-   */
-  const pinnedToBottomRef = useRef(false);
-
   /**
    * Imperative handle to VirtualMessageList. Exposes data-derived queries
    * about the rendered MessageBlock layout. Used here by handleScroll to pick
@@ -514,97 +470,8 @@ export function ChatPanel() {
     });
   }
 
-  // ── Strict intermediate layer: raw `messages` → `MessageBlock[]` ──────────
-  //
-  // This is the ONLY place that knows about the relationship between raw
-  // entries (chatStore.messages, one ChatMessage per JSONL line) and the
-  // visual blocks the renderer draws. After this useMemo runs, every
-  // downstream consumer (virtualCount, sticky-bottom logic, scroll
-  // restoration, Agent-header detection, hasFollowUpReply) reads from
-  // `messageBlocks` and never from `messages` directly.
-  //
-  // Two derived properties on every block are critical and must not be
-  // guessed at by the rendering layer:
-  //
-  //  - `anchorToLatest` — set iff the block contains the **last raw entry**
-  //    in `messages`. Pure data: derived from the loop's cursor index
-  //    versus `lastIdx`. The rendering layer derives "user is at the
-  //    bottom" by asking "is any visible block anchorToLatest?", with no
-  //    scrollTop or estimateSize involvement.
-  //
-  //  - `anchorToUser` — transient: set on exactly one block per "load
-  //    older" cycle, read from `scope.current.anchorToUserBlockId` which
-  //    ChatPanel.handleScroll writes right before triggering
-  //    loadMoreOlderMessages. The rendering layer scrolls to the
-  //    anchorToUser block after the prepend lands, then clears the flag
-  //    (also via the scope ref) so it doesn't fire twice.
-  const messageBlocks = useMemo<MessageBlock[]>(() => {
-    const blocks: MessageBlock[] = [];
-    const lastIdx = messages.length - 1;
-    const anchorToUserBlockId = session.scope.current.anchorToUserBlockId;
-    let exploreStart = -1;
-    let exploreBuffer: ChatMessage[] = [];
-
-    const flushExplore = () => {
-      if (exploreBuffer.length === 0) return;
-      const startCursor = exploreStart;
-      const items = exploreBuffer;
-      const exploreBlockId = `block-${startCursor}`;
-      blocks.push({
-        blockId: exploreBlockId,
-        type: "explore_group",
-        items,
-        rawCount: items.length,
-        anchorToLatest: startCursor + items.length - 1 === lastIdx,
-        anchorToUser: anchorToUserBlockId === exploreBlockId,
-        // Backfilled in the second pass below (needs lookahead at the next
-        // block to decide).  Default false here so the type checker is happy.
-        hasFollowUpReply: false,
-      });
-      exploreBuffer = [];
-      exploreStart = -1;
-    };
-
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      const blockId = `block-${i}`;
-
-      if (msg.type === "tool_call" || msg.type === "tool_result" || msg.type === "thought") {
-        if (exploreStart < 0) exploreStart = i;
-        exploreBuffer.push(msg);
-      } else {
-        flushExplore();
-        blocks.push({
-          blockId,
-          type: msg.type,
-          items: [msg],
-          rawCount: 1,
-          anchorToLatest: i === lastIdx,
-          anchorToUser: anchorToUserBlockId === blockId,
-          // Only meaningful for explore_group; false for everyone else.
-          hasFollowUpReply: false,
-        });
-      }
-    }
-    flushExplore();
-
-    // Second pass: an explore_group has a follow-up reply iff the next block
-    // in display order is NOT itself an explore_group (the original rule,
-    // now hoisted into the block shape so the height estimator and the
-    // renderer agree without re-walking the array).
-    for (let i = 0; i < blocks.length - 1; i++) {
-      const cur = blocks[i];
-      if (cur.type === "explore_group" && blocks[i + 1].type !== "explore_group") {
-        blocks[i] = { ...cur, hasFollowUpReply: true };
-      }
-    }
-
-    return blocks;
-    // session.scope is a stable ref object — its `.current` is read for the
-    // latest anchorToUserBlockId without re-creating the memo. The parent
-    // re-renders after the scope ref is mutated, picking up the new flag on
-    // the next paint.
-  }, [messages, session.scope]);
+  // ADR-041 C4: messageBlocks now comes from the adapter.
+  const messageBlocks = adapter.blocks;
 
   // Show compacting indicator below messages when compaction is in progress
   const isCompacting = sessionState?.isCompacting ?? false;
@@ -782,7 +649,7 @@ export function ChatPanel() {
       if (!key || !container) return;
 
       const distFromBottom = getDistanceFromBottom(container);
-      console.log("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottomRef: pinnedToBottomRef.current, distFromBottom });
+      console.log("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottom: adapter.isPinnedToBottom, distFromBottom });
       setScrollSnapshot(key, {
         scrollOffset: container.scrollTop,
         // Use a generous threshold (120px) for snapshot: if the user was only
@@ -796,7 +663,7 @@ export function ChatPanel() {
         // also prevents the "nav-back lands on the top of the conversation"
         // bug where a transient pinnedToBottom=false read would otherwise
         // restore a small scrollOffset.
-        pinnedToBottom: sending || pinnedToBottomRef.current || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+        pinnedToBottom: sending || adapter.isPinnedToBottom || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
       });
     };
   }, [currentScrollKey]);
@@ -919,10 +786,10 @@ export function ChatPanel() {
     if (!container) return;
 
     if (snapshot.pinnedToBottom) {
-      pinnedToBottomRef.current = true;
+      adapter.setPinnedToBottom(true);
       container.scrollTop = container.scrollHeight;
     } else if (snapshot.scrollOffset > 0) {
-      pinnedToBottomRef.current = false;
+      adapter.setPinnedToBottom(false);
       container.scrollTop = snapshot.scrollOffset;
     }
   }, [currentScrollKey, virtualCount, restorePinnedToBottom]);
@@ -934,135 +801,85 @@ export function ChatPanel() {
     useChatStore.getState().ensureLatestInCache(selectedAgentId, currentSessionId);
   }, [selectedAgentId, currentSessionId]);
 
-  // ── Page-cursor derived predicates ──
-  // "hasOlder" is the rendering layer's gate for "is there more data the user
-  // can scroll back to?".  Used by VirtualMessageList's ensureRenderable
-  // effect to decide whether to invoke onNeedMore.  Derived from the same
-  // raw-entry cursor as the pagination logic (loadMoreOlderMessages), so the
-  // two paths can't drift out of sync.
-  //
-  // MUST use three independent primitive selectors (NOT a single selector
-  // returning a fresh `{ ... }` object).  Returning a new object literal
-  // each call defeats zustand's default Object.is shallow comparison and
-  // causes ChatPanel to re-render on every store update — combined with
-  // effects that mutate the store, this triggers the
-  // "Maximum update depth exceeded" infinite loop.
-  const messageOffset = useChatStore((s) => {
-    if (!selectedAgentId || !currentSessionId) return 0;
-    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageOffset ?? 0;
-  });
-  const messageLimit = useChatStore((s) => {
-    if (!selectedAgentId || !currentSessionId) return 0;
-    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageLimit ?? 0;
-  });
-  const messageTotal = useChatStore((s) => {
-    if (!selectedAgentId || !currentSessionId) return 0;
-    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messageTotal ?? 0;
-  });
-  const hasOlder =
-    messageOffset + messageLimit < messageTotal && messageLimit > 0;
-
-  // ── onNeedMore: load one older page when ensureRenderable asks for it ──
-  // Single-page load; the VirtualMessageList effect keeps firing until the
-  // viewport is full (or we hit the top).  Internally guarded by
-  // `isLoadingMore` so this is safe to call repeatedly.
-  const handleNeedMore = useCallback(() => {
-    if (!selectedAgentId || !currentSessionId) return;
-    void useChatStore.getState().loadMoreOlderMessages(selectedAgentId, currentSessionId);
-  }, [selectedAgentId, currentSessionId]);
+  // ADR-041 C4: Pagination state (hasOlder, hasNewer, isLoading) and
+  // actions (loadBefore, loadAfter, jumpToLatest) are now managed by the
+  // adapter. ChatPanel no longer reads messageOffset/messageLimit/messageTotal
+  // or defines handleNeedMore.
 
   // ── Scroll-to-bottom ─────────────────────────────────────────
-  // Data-driven two-phase jump:
-  //   Phase 1 — await ensureLatestInCache: fetches the LAST
-  //             MESSAGE_CACHE_WINDOW raw entries.  MUST complete
-  //             before phase 2, otherwise scrollToIndex fires with
-  //             stale virtualCount and the position ends up in the
-  //             middle after the cache refresh changes totalSize.
-  //   Phase 2 — vmlRef.scrollToBottom(): delegates to virtualizer.scrollToIndex
-  //             using measurementsCache.  Since phase 1 just refreshed the
-  //             cache with the most recent entries, those items are guaranteed
-  //             to be in the measurement cache (they're the items the user
-  //             was just looking at OR are about to look at), so scrollToIndex
-  //             lands on the exact real bottom — no estimation, no force-overscan
-  //             hack, no rAF retry needed.
+  // ADR-041 C4: Delegates to adapter.jumpToLatest(), which replaces the
+  // cache with the latest page and sets jumpTarget='bottom'.
+  // VML consumes the target and scrolls to the last block.
   const scrollToBottom = useCallback(async () => {
     if (!selectedAgentId || !currentSessionId) return;
-    pinnedToBottomRef.current = true;
-    await useChatStore.getState().ensureLatestInCache(selectedAgentId, currentSessionId);
+    adapter.setPinnedToBottom(true);
+    await adapter.jumpToLatest();
+    // Also call vmlRef.scrollToBottom for immediate DOM scroll (the
+    // jumpTarget effect handles the data-driven path, but
+    // this gives instant feedback if the cache was already at latest).
     vmlRef.current?.scrollToBottom();
-  }, [selectedAgentId, currentSessionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedAgentId, currentSessionId, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Scroll-to-top ──────────────────────────────────────────────
+  // Symmetric to scrollToBottom: calls adapter.jumpToOldest() which
+  // loads the oldest page from the server (offset=total-limit) and sets
+  // jumpTarget='top' so VML scrolls to the first block.
+  const scrollToTop = useCallback(async () => {
+    if (!selectedAgentId || !currentSessionId) return;
+    await adapter.jumpToOldest();
+  }, [selectedAgentId, currentSessionId, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Scroll handler ────────────────────────────────────────────────
+  // Only handles UI updates (button visibility, sticky bottom).
+  // Pagination is handled exclusively by the 150ms timer above.
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
-    if (!container || !selectedAgentId) return;
+    if (!container) return;
+    const ad = adapterRef.current;
+    const sess = sessionRef.current;
 
-    // Scroll-to-bottom button visibility
-    const distFromBottom = getDistanceFromBottom(container);
-    session.setShowScrollToBottom(distFromBottom > container.clientHeight);
+    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    sess.setShowScrollToBottom(distFromBottom > container.clientHeight);
+    sess.setShowScrollToTop(container.scrollTop > container.clientHeight);
+    ad.setPinnedToBottom(distFromBottom <= 5);
+  }, []);
 
-    // Update pinned-to-bottom state
-    // Strict threshold (5px): within 5px of bottom → sticky, otherwise → release.
-    // No hysteresis zone — the user only needs to scroll up ~5px to escape
-    // auto-scroll during streaming. Content growth never fires scroll events,
-    // so this state is updated purely by user-initiated scrolls.
-    //
-    // NOTE: This is intentionally narrower than the snapshot threshold (120px,
-    // CHAT_BOTTOM_THRESHOLD_PX).  The snapshot needs tolerance for layout shift
-    // across navigation; the live handler should be sensitive to user intent.
-    pinnedToBottomRef.current = distFromBottom <= 5;
+  // ── Pagination timer ─────────────────────────────────────────────
+  //
+  // The SOLE pagination trigger. A 150ms interval that reads scrollTop
+  // from the DOM and pagination state from the adapter ref. No dependency
+  // on onScroll events, React effect ordering, or closure freshness.
+  //
+  // Why a timer: after loadBefore prepends data, VML's scrollHeight delta
+  // effect adjusts scrollTop. We need to re-check whether scrollTop is
+  // still near the edge. onScroll from that adjustment may fire at an
+  // unpredictable time relative to React's render cycle. The timer
+  // sidesteps all timing issues: it reads the FINAL state at each tick.
+  //
+  // The check is cheap (a few property reads + comparisons). 150ms gives
+  // responsive feel (< 1 frame at 60fps is 16ms, but data loading itself
+  // takes 100-500ms, so 150ms overhead is negligible).
+  useEffect(() => {
+    if (!selectedAgentId || !currentSessionId) return;
+    const interval = setInterval(() => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+      const ad = adapterRef.current;
+      if (ad.isLoading) return;
 
-    // ── Pagination trigger ──
-    // One-way detection: near top → load older.  Loading newer is NOT
-    // triggered here — under the unified data-window model:
-    //   - Initial mount / session switch calls ensureLatestInCache (cache
-    //     lands at offset=0 immediately).
-    //   - The scroll-to-bottom button calls ensureLatestInCache before
-    //     scrolling (so the cache is guaranteed at the tail).
-    //   - VirtualMessageList's ensureRenderable effect handles "cache
-    //     doesn't yet fill the viewport" by looping loadMoreOlderMessages
-    //     one page at a time until getTotalSize() >= clientHeight.
-    //
-    // The only direction the user can pull data by scrolling is OLDER
-    // (scrolling up).  Scrolling DOWN through the latest content is just
-    // a forward browse — no fetch needed because the cache already holds
-    // the most recent MESSAGE_CACHE_WINDOW entries.
-    const { isLoadingMore } = useChatStore.getState();
-    if (isLoadingMore) return;
-    const agent = useChatStore.getState().agentStates[selectedAgentId];
-    const activeSessId = agent?.activeSessionId;
-    const sessState = activeSessId ? agent?.sessionStates[activeSessId] : undefined;
-    if (!sessState) return;
-    const messageOffset = sessState.messageOffset ?? 0;
-    const messageLimit = sessState.messageLimit ?? 0;
-    const messageTotal = sessState.messageTotal ?? 0;
-    const currentSessionId = selectedAgentId ? useChatStore.getState().getActiveSessionId(selectedAgentId) : null;
-    if (!currentSessionId) return;
+      const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    const hasOlder = messageOffset + messageLimit < messageTotal && messageLimit > 0;
-    if (hasOlder && container.scrollTop < 50) {
-      // Record the "anchorToUser" blockId BEFORE the load fires.  After older
-      // messages are prepended upstream, the messageBlocks useMemo will mark
-      // exactly one block with anchorToUser=true (the one whose blockId
-      // matches); the load-older effect inside VirtualMessageList will then
-      // scrollToIndex to that block, putting the user back at the same
-      // visual position they were reading at.
-      //
-      // Data-driven: the anchor blockId is read directly from the strict
-      // intermediate layer (messageBlocks[firstVisibleIdx].blockId). No
-      // pixel math, no scrollHeight-delta estimation.
-      const firstVisibleIdx = vmlRef.current?.getFirstVisibleBlockIndex() ?? null;
-      if (firstVisibleIdx !== null) {
-        const anchorBlock = messageBlocks[firstVisibleIdx];
-        if (anchorBlock) {
-          session.scope.current.anchorToUserBlockId = anchorBlock.blockId;
-        }
+      if (container.scrollTop < 50 && ad.hasOlder) {
+        console.log('[timer] loadBefore', { scrollTop: container.scrollTop, hasOlder: ad.hasOlder, blocks: ad.blocks.length });
+        void ad.loadBefore();
+      } else if (distFromBottom < 50 && ad.hasNewer) {
+        console.log('[timer] loadAfter', { distFromBottom, hasNewer: ad.hasNewer, blocks: ad.blocks.length });
+        void ad.loadAfter();
       }
-      void useChatStore
-        .getState()
-        .loadMoreOlderMessages(selectedAgentId, currentSessionId);
-    }
-  }, [selectedAgentId, session]);
+    }, 150);
+    return () => clearInterval(interval);
+  }, [selectedAgentId, currentSessionId]);
+
 
   const handleSend = () => {
     const content = session.inputValue.trim();
@@ -1504,12 +1321,8 @@ export function ChatPanel() {
               userBuiltinAvatarId={userBuiltinAvatarId}
               onApprove={handleToolApprove}
               t={t}
+              adapter={adapter}
               scrollContainerRef={messagesContainerRef}
-              scope={session.scope}
-              pinnedToBottomRef={pinnedToBottomRef}
-              isLoadingMore={isLoadingMore}
-              hasOlder={hasOlder}
-              onNeedMore={handleNeedMore}
               isLoadingSession={isLoadingSession}
               loadError={loadError}
               messages={messages}
@@ -1608,6 +1421,16 @@ export function ChatPanel() {
               />
             )}
           </div>
+          {/* Scroll-to-top button - visible when scrolled down > 1 screen */}
+          {session.showScrollToTop && (
+            <button
+              onClick={scrollToTop}
+              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              aria-label="Scroll to top"
+            >
+              <ChevronsUp className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+            </button>
+          )}
           {/* Scroll-to-bottom button — visible when scrolled up > 1 screen */}
           {session.showScrollToBottom && (
             <button

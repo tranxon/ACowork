@@ -4,8 +4,8 @@ import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
-import type { SessionScope } from "./useSessionScope";
-import type { MessageBlock } from "./ChatPanel";
+import type { MessageBlock } from "./messageFolder";
+import type { ChatListAdapter } from "./useChatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
@@ -16,26 +16,25 @@ const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
 
 interface VirtualMessageListProps {
   /**
-   * Pre-folded display blocks derived from raw `ChatMessage[]` by
-   * ChatPanel.  Every block carries `anchorToLatest` (data semantics:
-   * "this block contains the latest raw entry") and optional
-   * `anchorToUser` (transient: set on one block per "load older" cycle).
-   * The rendering layer reads ONLY from this array — never from raw
-   * messages — to keep the data/UI boundary strict.
+   * ADR-041 C4: The ChatListAdapter - single bridge between chatStore
+   * and VML. Provides blocks, pagination state/actions, scroll anchoring,
+   * sticky-bottom, and ensure-renderable (onLayout).
+   */
+  adapter: ChatListAdapter;
+  /**
+   * Pre-folded display blocks from the adapter (adapter.blocks).
+   * Kept as a separate prop for direct access in the virtualizer's
+   * estimateSize and render functions.
    */
   messageBlocks: MessageBlock[];
   /**
-   * Total virtual item count, owned by ChatPanel — already includes the
+   * Total virtual item count, owned by ChatPanel - already includes the
    * trailing extras (compacting indicator and/or replying indicator).
-   * VirtualMessageList only reads it; the slot mapping for extra items is
-   * fixed and described on `estimateBlockHeight` (blockHeightEstimator.ts).
    */
   virtualCount: number;
-  /** Whether to show the compacting indicator as an extra virtual item
-   *  (always the LAST trailing slot when present). */
+  /** Whether to show the compacting indicator as an extra virtual item. */
   showCompactingItem: boolean;
-  /** Whether to show the replying indicator as an extra virtual item
-   *  (always sits immediately after messageBlocks when present). */
+  /** Whether to show the replying indicator as an extra virtual item. */
   showReplyingItem: boolean;
   /** Whether the session is currently streaming. */
   sending: boolean;
@@ -66,32 +65,6 @@ interface VirtualMessageListProps {
   t: (key: string, params?: Record<string, unknown>) => string;
   /** Ref to the scroll container (owned by ChatPanel). */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
-  /** Per-session scope ref (for isLoadingMore, anchorToUserBlockId, etc.). */
-  scope: React.MutableRefObject<SessionScope>;
-  /**
-   * Ref to the "pinned-to-bottom" flag — a per-USER-INTENT UI preference
-   * (not per-session).  Owned by ChatPanel so it survives useSessionScope's
-   * session-change reset.  VirtualMessageList writes to it from its mount
-   * effect and reads it from the sticky-bottom effect.
-   */
-  pinnedToBottomRef: React.MutableRefObject<boolean>;
-  /** Whether "load more" is in progress. */
-  isLoadingMore: boolean;
-  /**
-   * True iff older data exists beyond the current cache window
-   * (`messageOffset + messageLimit < messageTotal`).  Used by the
-   * ensureRenderable effect to decide whether to invoke `onNeedMore`
-   * when the rendered viewport is shorter than the container.
-   */
-  hasOlder: boolean;
-  /**
-   * Called by the ensureRenderable effect when the rendered viewport is
-   * shorter than the container AND `hasOlder` is true.  Wired to
-   * `chatStore.loadMoreOlderMessages` by the parent (ChatPanel).  Fires
-   * one page at a time; the effect re-checks after the load completes
-   * and may fire again until the viewport is full (or we hit the top).
-   */
-  onNeedMore: () => void;
   /** Whether the session is loading. */
   isLoadingSession: boolean;
   /** Session load error message. */
@@ -112,7 +85,6 @@ interface VirtualMessageListProps {
 // layout** — no scrollTop pixel guessing, no estimateSize-based heuristics.
 //
 // Used by ChatPanel to:
-//   - pick the "anchorToUser" block before triggering loadMoreOlderMessages
 //   - compute `pinnedToBottom` for nav-back snapshots without trusting
 //     scrollTop pixel arithmetic.
 
@@ -127,13 +99,6 @@ export interface VirtualMessageListHandle {
    * Index of the last block currently visible in the viewport, or null.
    */
   getLastVisibleBlockIndex: () => number | null;
-  /**
-   * True iff at least one visible block carries `anchorToLatest === true`.
-   * This is the strict, data-derived definition of "the user is at the
-   * bottom of the conversation" — no scrollTop comparison, no threshold,
-   * no estimateSize-derived assumptions.
-   */
-  isAnchorToLatestInView: () => boolean;
   /**
    * Scroll to the last virtual item, using virtualizer.scrollToIndex
    * (data-driven — the virtualizer computes the exact pixel offset from
@@ -165,6 +130,7 @@ export const VirtualMessageList = React.forwardRef<
   VirtualMessageListProps
 >(function VirtualMessageList(props, ref) {
   const {
+    adapter,
     messageBlocks,
     virtualCount,
     showCompactingItem,
@@ -181,11 +147,6 @@ export const VirtualMessageList = React.forwardRef<
     onApprove,
     t,
     scrollContainerRef,
-    scope,
-    pinnedToBottomRef,
-    isLoadingMore,
-    hasOlder,
-    onNeedMore,
     isLoadingSession,
     loadError,
     messages,
@@ -271,6 +232,11 @@ export const VirtualMessageList = React.forwardRef<
     overscan: 5,
     gap: 4,
     initialOffset: initialScrollOffset ?? 0,
+    // getItemKey: use content-derived blockId so the virtualizer's internal
+    // measurement cache survives prepend/append. Without this, the cache is
+    // keyed by index and all measurements shift when items are prepended,
+    // making getTotalSize() inaccurate and breaking the scrollHeight delta.
+    getItemKey: (index: number) => messageBlocksRef.current[index]?.blockId ?? index,
     // Custom scrollToFn: use synchronous scrollTop assignment instead of
     // element.scrollTo().  On WKWebView (macOS Safari), element.scrollTo()
     // can be asynchronous even with behavior:"auto", causing the scroll
@@ -396,9 +362,8 @@ export const VirtualMessageList = React.forwardRef<
   // from virtualizer.getVirtualItems() intersecting the messageBlocks array.
   //
   // These powers the "strict intermediate layer" architecture: ChatPanel
-  // uses them to pick the anchorToUser block before triggering
-  // loadMoreOlderMessages and to derive pinnedToBottom for nav-back
-  // snapshots, without ever guessing at the user's reading position.
+  // Used by handleScroll to get first/last visible block indices
+  // for pagination triggers.
   React.useImperativeHandle(
     ref,
     () => ({
@@ -409,13 +374,6 @@ export const VirtualMessageList = React.forwardRef<
       getLastVisibleBlockIndex: () => {
         const items = virtualizer.getVirtualItems();
         return items.length > 0 ? items[items.length - 1].index : null;
-      },
-      isAnchorToLatestInView: () => {
-        const items = virtualizer.getVirtualItems();
-        return items.some((item) => {
-          const block = messageBlocks[item.index];
-          return block?.anchorToLatest === true;
-        });
       },
       scrollToBottom: () => {
         const count = virtualizer.options.count;
@@ -455,140 +413,133 @@ export const VirtualMessageList = React.forwardRef<
 
     if (initialScrollOffset !== undefined && initialScrollOffset >= 0) {
       container.scrollTop = initialScrollOffset;
-      pinnedToBottomRef.current = false;
+      adapter.setPinnedToBottom(false);
       return;
     }
 
-    pinnedToBottomRef.current = true;
+    adapter.setPinnedToBottom(true);
     virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
   }, [virtualCount, initialScrollOffset, containerWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Load-OLDER: scroll to anchor block after messages prepended ───────
+  // ── scrollHeight delta: maintain scroll position after prepend ───────
   //
-  // When the user scrolls near the top and `loadMoreOlderMessages` fires,
-  // ChatPanel has already recorded the first visible block's `blockId` into
-  // `scope.current.anchorToUserBlockId` BEFORE the HTTP request.  After
-  // the older messages prepend and `isLoadingMore` flips back to false,
-  // `messageBlocks` is rebuilt with the new prepended block(s); exactly one
-  // of those blocks now carries `anchorToUser: true` (set by the
-  // messageBlocks useMemo, which reads the scope ref).  We scroll to that
-  // block via `virtualizer.scrollToIndex` — a data-driven scroll, not a
-  // scrollTop-pixel-math guess — and immediately clear the field so it
-  // doesn't fire twice.
+  // Classic infinite-scroll technique. When loadBefore prepends data:
+  //   1. Before prepend: scrollHeight = H_old (recorded in prevScrollHeightRef)
+  //   2. After prepend:  scrollHeight = H_new (current container.scrollHeight)
+  //   3. delta = H_new - H_old = height of prepended content
+  //   4. scrollTop += delta -> user's viewport stays on the same content
+  //   5. onScroll fires -> handleScroll checks -> scrollTop > threshold -> stop
   //
-  // SCROLL-DOWN / "go to latest" needs NO restoration here: under the
-  // unified data-window model, the cache starts at offset=0 (the most
-  // recent MESSAGE_CACHE_WINDOW entries) via ensureLatestInCache, so the
-  // user always has the tail already in the cache when they navigate to
-  // the bottom.  scrollToBottom in ChatPanel just re-issues the same
-  // ensureLatestInCache + a single scrollToIndex(end), no prepend
-  // restoration needed.
-  const prevIsLoadingMoreRef = useRef(false);
+  // For append (loadAfter): no adjustment needed, new content extends below.
+  //
+  // Detection: compare first block's blockId. If it changed AND the old
+  // first block still exists in the new array, it was a prepend.
+  const prevScrollHeightRef = useRef(0);
+  const prevFirstBlockIdRef = useRef<string | null>(null);
+
   useLayoutEffect(() => {
-    const wasLoading = prevIsLoadingMoreRef.current;
-    prevIsLoadingMoreRef.current = isLoadingMore;
-    if (!wasLoading || isLoadingMore) return;
-    const anchorBlockId = scope.current.anchorToUserBlockId;
-    if (!anchorBlockId) return;
-    const idx = messageBlocks.findIndex((b) => b.blockId === anchorBlockId);
-    if (idx < 0) return;
-    scope.current.anchorToUserBlockId = null;
-    virtualizer.scrollToIndex(idx, { align: "start" });
-  }, [isLoadingMore, virtualizer, scope, messageBlocks]);
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const currentFirstBlockId = messageBlocks[0]?.blockId ?? null;
+
+    const wasPrepend =
+      prevFirstBlockIdRef.current !== null &&
+      prevFirstBlockIdRef.current !== currentFirstBlockId &&
+      messageBlocks.some((b) => b.blockId === prevFirstBlockIdRef.current);
+
+    // Diagnostic: log EVERY run
+    console.log('[VML:scrollDelta]', {
+      wasPrepend,
+      prevFirstId: prevFirstBlockIdRef.current?.slice(0, 20),
+      currFirstId: currentFirstBlockId?.slice(0, 20),
+      oldFirstStillExists: prevFirstBlockIdRef.current
+        ? messageBlocks.some((b) => b.blockId === prevFirstBlockIdRef.current)
+        : 'N/A',
+      prevHeight: prevScrollHeightRef.current,
+      currHeight: container.scrollHeight,
+      delta: wasPrepend ? container.scrollHeight - prevScrollHeightRef.current : 0,
+      scrollTop: container.scrollTop,
+      blocksCount: messageBlocks.length,
+    });
+
+    if (wasPrepend && prevScrollHeightRef.current > 0) {
+      const delta = container.scrollHeight - prevScrollHeightRef.current;
+      if (delta > 0) {
+        container.scrollTop += delta;
+        console.log('[VML:scrollDelta] ADJUSTED scrollTop to', container.scrollTop);
+      } else {
+        console.log('[VML:scrollDelta] delta <= 0, no adjustment');
+      }
+    }
+
+    prevFirstBlockIdRef.current = currentFirstBlockId;
+    prevScrollHeightRef.current = container.scrollHeight;
+  }, [messageBlocks, scrollContainerRef]);
+
+  // ── Jump target: scroll to top/bottom after jumpToLatest/jumpToOldest ──
+  useLayoutEffect(() => {
+    const target = adapter.jumpTarget;
+    if (!target) return;
+    adapter.clearJumpTarget();
+
+    if (target === "bottom" && virtualCount > 0) {
+      virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
+    } else if (target === "top" && virtualCount > 0) {
+      virtualizer.scrollToIndex(0, { align: "start" });
+    }
+  }, [adapter, virtualizer, virtualCount]);
 
   // ── Sticky-bottom: keep pinned when new items are appended ─────────
   //
-  // Trigger condition is purely data-derived:
-  //   - `virtualCount` increased (a new block was APPENDED to messageBlocks,
-  //     i.e. rawCount grew in tail position; prepends also grow virtualCount
-  //     but those don't trigger because the load-older effect above just
-  //     scrolled to the anchorToUser block, putting the user away from
-  //     the bottom by definition)
-  //   - `pinnedToBottomRef.current === true` (per-USER-INTENT flag, owned
-  //     by ChatPanel; the only thing that flips it is a real user scroll)
-  //
-  // When a streaming block grows in place (same block, more content),
-  // virtualCount doesn't change, but the viewport DOES contain an
-  // anchorToLatest block — and the virtualizer's measureElement ref
-  // resizes the row, which on its own re-renders the viewport with the
-  // anchorToLatest block still visible.  The `isAnchorToLatestInView`
-  // query via the imperative handle detects that case and re-anchors
-  // to the bottom of the now-taller block.
+  // ADR-041 C4: Reads adapter.isPinnedToBottom instead of pinnedToBottomRef.
+  // When virtualCount grows and the user is pinned to bottom, auto-scroll
+  // to the new last item.
   const prevVirtualCountRef = useRef(0);
   useLayoutEffect(() => {
     if (!didInitialScrollRef.current) return;
     const countGrew = virtualCount > prevVirtualCountRef.current;
     prevVirtualCountRef.current = virtualCount;
     if (!countGrew) return;
-    if (!pinnedToBottomRef.current) return;
+    if (!adapter.isPinnedToBottom) return;
     if (virtualCount === 0) return;
     virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-  }, [virtualCount, virtualizer, pinnedToBottomRef]);
+  }, [virtualCount, virtualizer, adapter]);
 
-  // ── Ensure-renderable: load more older pages until viewport is full ────────
+  // ── Ensure-renderable: fill viewport via adapter.onLayout ────────────
   //
-  // The unified data-window model: the cache starts at offset=0 holding the
-  // LAST MESSAGE_CACHE_WINDOW raw entries (via ensureLatestInCache).  If those
-  // entries don't yet fill the viewport — e.g. a brand-new session with very
-  // few messages, or a session whose blockHeight average is unusually tall —
-  // we need to prepend older pages until the rendered content overflows the
-  // container, or we hit the top of the conversation (`!hasOlder`).
-  //
-  // "Filled" is judged strictly by measurementsCache (the virtualizer's real,
-  // measured heights) compared against the container's clientHeight.  No
-  // estimateSize-based guesswork, no scrollTop pixel arithmetic.
-  //
-  // The effect re-runs on every virtualCount / virtualizer / hasOlder /
-  // isLoadingMore change so it keeps making progress after each page lands.
-  // The parent's guard inside loadMoreOlderMessages (`if (isLoadingMore) return;`)
-  // prevents overlapping requests — this effect just keeps firing until either
-  // the viewport fills or we run out of older pages.
-  //
-  // Hard cap: at most MAX_ENSURE_RENDERABLE_PAGES consecutive page-loads per
-  // component mount.  Protects against pathological layouts (e.g. an extra-
-  // small viewport combined with unusually tall per-block heights) where
-  // legitimately filling the viewport would require dozens of HTTP requests
-  // and thousands of raw entries.  After the cap is hit the user sees what
-  // they have — the next upward scroll naturally triggers more
-  // loadMoreOlderMessages through the normal handleScroll path.  The counter
-  // resets on every session switch because the parent's key={currentScrollKey}
-  // remounts this component.
-  const MAX_ENSURE_RENDERABLE_PAGES = 10;
-  const ensureRenderableCountRef = useRef(0);
+  // ADR-041 C4: Delegates to adapter.onLayout(totalHeight, viewportHeight).
+  // The adapter decides whether to loadBefore or loadAfter based on
+  // hasOlder/hasNewer and the current streaming state. This fixes the
+  // old bug where only loadBefore was called (causing "stuck at top,
+  // can't reach bottom" when the tail was evicted).
   useLayoutEffect(() => {
     if (!didInitialScrollRef.current) return;
     if (virtualCount === 0) return;
-    if (isLoadingMore) return;
-    if (!hasOlder) return;
-    if (ensureRenderableCountRef.current >= MAX_ENSURE_RENDERABLE_PAGES) return;
+    if (adapter.isLoading) return;
 
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    // virtualizer.getTotalSize() walks the measurementsCache; if a block has
-    // never been rendered, its estimateSize fills the gap.  The container's
-    // clientHeight is the actual viewport height.  If the real rendered total
-    // is below the viewport, we still need more.
     const totalHeight = virtualizer.getTotalSize();
     const viewportHeight = container.clientHeight;
     if (totalHeight >= viewportHeight) return;
 
-    ensureRenderableCountRef.current += 1;
-    onNeedMore();
+    adapter.onLayout(totalHeight, viewportHeight);
   }, [
     virtualCount,
     virtualizer,
-    hasOlder,
-    isLoadingMore,
-    onNeedMore,
+    adapter,
     scrollContainerRef,
   ]);
+
+
 
   // ── Render ───────────────────────────────────────────────────────
   return (
     <>
       {/* Loading more indicator at top */}
-      {isLoadingMore && (
+      {adapter.isLoading && (
         <div className="flex items-center justify-center py-2">
           <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
           <span className="ml-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">Loading more...</span>

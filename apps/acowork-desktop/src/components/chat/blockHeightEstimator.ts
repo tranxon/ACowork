@@ -61,7 +61,7 @@
  * the union of all sessions opened in the current window (~MB at worst).
  */
 
-import type { MessageBlock } from "./ChatPanel";
+import type { MessageBlock } from "./messageFolder";
 import {
   BUBBLE_PADDING_Y,
   LINE_HEIGHT_PX,
