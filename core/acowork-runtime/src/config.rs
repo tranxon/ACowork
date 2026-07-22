@@ -207,7 +207,7 @@ fn default_min_distill_chars() -> usize {
 }
 
 fn default_distill_max_tokens() -> u32 {
-    2048
+    2000
 }
 
 impl Default for RuntimeConfig {

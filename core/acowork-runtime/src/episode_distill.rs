@@ -563,7 +563,7 @@ pub(crate) async fn compact_with_llm(
 /// Unlike [`compact_with_llm`], this is a minimal single-message call:
 /// - No system prompt
 /// - No identity block injection (language is already resolved into `{language}`)
-/// - Lower `max_tokens` (title is ≤30 chars)
+/// - Lower `max_tokens` (title is ≤SESSION_TITLE_MAX_CHARS chars)
 ///
 /// `prompt` should be [`crate::prompt::TITLE_PROMPT`] with `{language}` and
 /// `{user_message}` already resolved by the caller.

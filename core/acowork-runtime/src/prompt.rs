@@ -81,6 +81,10 @@ pub const COMPACT_PROMPT: &str = r#"<conversation>
 {messages_text}
 </conversation>"#;
 
+/// Maximum character length for a session title after truncation.
+/// Used by the post-generation `.take(N)` guard in `loop_.rs`.
+pub const SESSION_TITLE_MAX_CHARS: usize = 30;
+
 /// Prompt for generating a session title from the first user message.
 /// `{language}` and `{user_message}` are resolved at the call site.
 pub const TITLE_PROMPT: &str = r#"Generate a session title (max 30 characters) for the user_message. Write the title in the user's preferred language as {language}.

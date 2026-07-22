@@ -692,7 +692,7 @@ impl ConversationSession {
 
     /// Set the session title from the first user message.
     ///
-    /// Truncates to 30 characters. Only sets title once —
+    /// Truncates to [`crate::prompt::SESSION_TITLE_MAX_CHARS`] characters. Only sets title once —
     /// subsequent calls are no-ops.
     pub fn set_title(&self, content: &str) {
         if self.title_set.swap(true, Ordering::Relaxed) {
@@ -700,20 +700,20 @@ impl ConversationSession {
         }
         let title = {
             let chars: Vec<char> = content.chars().collect();
-            if chars.len() <= 30 {
+            if chars.len() <= crate::prompt::SESSION_TITLE_MAX_CHARS {
                 content.to_string()
             } else {
-                // Find the last natural break point within first 30 chars
+                // Find the last natural break point within first N chars
                 let break_chars = [',', '，', '.', '。', '!', '！', '?', '？', ';', '；', '\n'];
-                if let Some(pos) = chars[..30].iter().rposition(|c| break_chars.contains(c)) {
+                if let Some(pos) = chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().rposition(|c| break_chars.contains(c)) {
                     let truncated: String = chars[..=pos].iter().collect();
-                    if pos < 29 {
+                    if pos < crate::prompt::SESSION_TITLE_MAX_CHARS - 1 {
                         truncated
                     } else {
                         format!("{}...", truncated)
                     }
                 } else {
-                    let truncated: String = chars[..30].iter().collect();
+                    let truncated: String = chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().collect();
                     format!("{}...", truncated)
                 }
             }
@@ -742,10 +742,10 @@ impl ConversationSession {
         }
         let truncated = {
             let chars: Vec<char> = title.chars().collect();
-            if chars.len() <= 30 {
+            if chars.len() <= crate::prompt::SESSION_TITLE_MAX_CHARS {
                 title.to_string()
             } else {
-                format!("{}...", chars[..30].iter().collect::<String>())
+                format!("{}...", chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().collect::<String>())
             }
         };
         self.title_set.store(true, Ordering::Relaxed);

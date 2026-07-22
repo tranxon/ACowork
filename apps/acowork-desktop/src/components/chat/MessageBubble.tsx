@@ -277,24 +277,20 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "assistant") {
-    const showPlaceholder = !displayContent;
-
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
 <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              {displayContent && (
+              {!isStreaming && displayContent ? (
                 <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
                   <StreamMarkdown content={displayContent} />
                 </div>
-              )}
-              {!displayContent && showPlaceholder && (
+              ) : (
                 <span className="inline-flex items-center gap-1.5">
                   <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
                   <span className="text-zinc-400">{t("chatPanel.thinking")}</span>
                 </span>
               )}
-              {isStreaming && <span className="ml-0.5 inline-block animate-pulse">▌</span>}
             </div>
           </div>
       </MessageContentWrapper>

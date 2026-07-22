@@ -675,7 +675,7 @@ impl AgentLoop {
                     .as_ref()
                     .and_then(|conv| conv.title())
                 {
-                    let trimmed: String = existing_title.chars().take(30).collect();
+                    let trimmed: String = existing_title.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
                     *self.session_core.title.write().unwrap() = Some(trimmed);
                 } else {
                     let lang = self
@@ -746,14 +746,14 @@ impl AgentLoop {
                                 // counters so the agent-total line in the
                                 // Results Panel accounts for this call.
                                 core_clone.accumulate_llm_usage(&usage);
-                                let trimmed: String = title.chars().take(30).collect();
+                                let trimmed: String = title.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
                                 *session_core_title.write().unwrap() = Some(trimmed);
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     "LLM session title generation failed (non-fatal): {e}"
                                 );
-                                let fallback: String = fallback_msg.chars().take(30).collect();
+                                let fallback: String = fallback_msg.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
                                 *session_core_title.write().unwrap() = Some(fallback);
                             }
                         }
