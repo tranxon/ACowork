@@ -3126,8 +3126,8 @@ mod tests {
         assert_eq!(body["content"], "hello workspace\n");
         assert_eq!(body["size"], 16); // "hello workspace\n" is 16 bytes
         assert_eq!(body["mimeType"], "text/plain");
-        assert_eq!(body["is_file"], true);
-        assert_eq!(body["is_dir"], false);
+        assert_eq!(body["isFile"], true);
+        assert_eq!(body["isDir"], false);
         assert_eq!(body["path"], "readme.txt");
         assert!(body["modified"].is_string());
 

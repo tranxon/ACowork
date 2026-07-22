@@ -2043,8 +2043,11 @@ mod tests {
             crate::prompt::COMPACTION_SYSTEM_PROMPT,
             "with identity=None, system prompt must be the base prompt unchanged"
         );
-        // User message keeps the unmodified COMPACT_PROMPT template
-        assert!(req.messages[1].content.contains("<summary>"));
+        // User message keeps the unmodified COMPACT_PROMPT template — body
+        // only, no summarization instructions (those live in
+        // COMPACTION_SYSTEM_PROMPT now per the prompt.rs architecture note).
+        assert!(req.messages[1].content.contains("<conversation>"));
+        assert!(req.messages[1].content.contains("</conversation>"));
     }
 
     #[tokio::test]
@@ -2074,11 +2077,14 @@ mod tests {
         assert!(system.contains(identity), "identity text must be embedded verbatim");
         assert!(system.contains("Language"), "language directive must be present");
         assert!(system.contains("preferred language"), "language directive must be present");
-        // The original COMPACT_PROMPT body must NOT be polluted — it stays
-        // in the user message untouched.
-        assert!(req.messages[1].content.contains("You are a conversation summarization assistant"));
-        assert!(!req.messages[0].content.contains("You are a conversation summarization assistant"),
-            "the inner COMPACT_PROMPT instructions must remain in the user message, not leak into system");
+        // COMPACT_PROMPT (user) is now body-only — summarization role lives
+        // in COMPACTION_SYSTEM_PROMPT (system). Assert the split:
+        // - system carries the summarization role/instructions
+        // - user stays focused on the conversation body, free of role leakage
+        assert!(req.messages[0].content.contains("summarizes conversations"),
+            "system prompt must carry the summarization role/instructions");
+        assert!(!req.messages[1].content.contains("summarizes conversations"),
+            "user message must stay focused on conversation body, not leak system role instructions");
     }
 
     #[tokio::test]
