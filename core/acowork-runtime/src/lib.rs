@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod agent_config;
+pub mod cancellation;
 pub mod cli;
 pub mod config;
 pub mod conversation;

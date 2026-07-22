@@ -90,7 +90,9 @@ wasmtime-wasi = { workspace = true, optional = true }
 [dev-dependencies]
 acowork-core = { workspace = true }
 acowork-gateway = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+# ADR-044 Phase 1: test-util enables paused time + auto-advance helpers used by
+# cancellation/integration_tests.rs (tokio::time::timeout + spawned tasks).
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 mockito = { workspace = true }
