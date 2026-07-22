@@ -570,12 +570,15 @@ impl SessionCore {
 
     /// Rebuild Provider instance for a given provider_id from the global cache.
     /// Wires up 429-retry UX when session state is available.
+    /// Pass the shared `compat_cache` so the rebuilt provider benefits from
+    /// the same fallback-profile cache as the startup provider.
     pub fn build_provider_for(
         &self,
         provider_id: &str,
         config: &crate::config::RuntimeConfig,
         global_provider_list: &std::sync::RwLock<Vec<acowork_core::protocol::ProviderListItem>>,
         provider_key_vault: &std::sync::RwLock<std::collections::HashMap<String, String>>,
+        compat_cache: Option<&std::sync::Arc<crate::providers::compat::CompatCache>>,
     ) -> Option<Arc<dyn acowork_core::providers::traits::Provider>> {
         let provider_meta = {
             let list = global_provider_list.read().unwrap();
@@ -594,11 +597,16 @@ impl SessionCore {
             api_key_len = api_key.as_ref().map(|k| k.len()).unwrap_or(0),
             api_key_present = api_key.is_some(),
             vault_contains_provider = provider_key_vault.read().unwrap().contains_key(provider_id),
+            has_compat_cache = compat_cache.is_some(),
             "build_provider_for resolved credentials (debug)"
         );
 
         let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
-        let raw = crate::providers::router::create_provider(
+        let wiring = crate::providers::router::ProviderWiring {
+            provider_id: Some(provider_meta.id.clone()),
+            compat_cache: compat_cache.cloned(),
+        };
+        let raw = crate::providers::router::create_provider_with_wiring(
             &provider_meta.id,
             &provider_meta.protocol_type,
             api_key.as_deref(),
@@ -608,6 +616,7 @@ impl SessionCore {
                 Some(&provider_meta.base_url)
             },
             timeouts,
+            wiring,
         );
         let retry_config = crate::providers::reliable::RetryConfig::from(&config.timeouts.retry);
         let mut reliable =

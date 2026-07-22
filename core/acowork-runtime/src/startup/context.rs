@@ -53,6 +53,12 @@ pub(crate) struct AgentBootContext {
     /// Provider ID resolved at startup (used to detect session mismatch).
     pub gateway_current_provider_id: Option<String>,
 
+    /// Per-agent compatibility cache (persisted to
+    /// `{work_dir}/config/provider_compat.json`).  Shared across all
+    /// providers created for this agent, including those rebuilt by
+    /// `build_provider_for` during 429-retry / session-resume.
+    pub compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
+
     // Embedding provider (None when Tier-1 ONNX provider construction failed —
     // memory then degrades to text-only search via memory::manager fallback)
     pub emb_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>>,

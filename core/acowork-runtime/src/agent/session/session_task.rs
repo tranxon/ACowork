@@ -508,6 +508,7 @@ impl SessionTask {
                 &core_mut.config,
                 &core_mut.global_provider_list,
                 &core_mut.provider_key_vault,
+                core_mut.compat_cache.as_ref(),
             )
         {
             let model = session.model.clone().unwrap_or_default();
@@ -1170,6 +1171,7 @@ impl SessionTask {
                             &agent_loop.core.config,
                             &agent_loop.core.global_provider_list,
                             &agent_loop.core.provider_key_vault,
+                            agent_loop.core.compat_cache.as_ref(),
                         )
                         {
                             agent_loop.update_provider(

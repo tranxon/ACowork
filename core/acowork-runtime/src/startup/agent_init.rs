@@ -249,6 +249,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut gateway_current_provider_id: Option<String> = None;
     let resource_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
 
+    let mut compat_cache: Option<Arc<crate::providers::compat::CompatCache>> = None;
+
     let (provider, resolved_model, available_models, protocol_type) = {
         // ADR-033: MQTT available_cache is the only provider source (gRPC path removed per ADR-040).
         if let Some(ref cache) = available_cache {
@@ -295,12 +297,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let compat_cache_path = std::path::Path::new(&config.work_dir)
                         .join("config")
                         .join("provider_compat.json");
-                    let compat_cache = crate::providers::compat::CompatCache::load(
+                    let compat_cache_arc = crate::providers::compat::CompatCache::load(
                         compat_cache_path,
                     );
+                    compat_cache = Some(compat_cache_arc.clone());
                     let wiring = crate::providers::router::ProviderWiring {
                         provider_id: Some(prov.id.clone()),
-                        compat_cache: Some(compat_cache),
+                        compat_cache: Some(compat_cache_arc),
                     };
 
                     let provider = crate::providers::router::create_provider_with_wiring(
@@ -672,6 +675,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         available_models,
         protocol_type,
         gateway_current_provider_id,
+        compat_cache,
         emb_provider,
         active_tools,
         tool_definitions,

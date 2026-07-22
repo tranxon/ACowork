@@ -93,6 +93,9 @@ impl StripProfile {
 pub struct CompatCache {
     inner: RwLock<HashMap<String, StripProfile>>,
     persist_path: PathBuf,
+    /// Serializes concurrent `write_atomic` calls so that two spawned
+    /// persist tasks never race on the same `*.tmp` file.
+    persist_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CompatCache {
@@ -137,6 +140,7 @@ impl CompatCache {
         Arc::new(Self {
             inner: RwLock::new(entries),
             persist_path,
+            persist_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -184,10 +188,17 @@ impl CompatCache {
     }
 
     /// Spawn an async task to write the cache to disk.  Atomic via tmp+rename.
+    /// A `Mutex` serializes concurrent writes so two spawned tasks never
+    /// race on the same `*.tmp` file.
     fn persist_async(&self) {
         let path = self.persist_path.clone();
         let snapshot = self.snapshot();
+        let lock = self.persist_lock.clone();
         tokio::spawn(async move {
+            // Serialize concurrent persist tasks.  The lock is held for
+            // the duration of the write+rename so a later task always
+            // sees a clean tmp file.
+            let _guard = lock.lock().await;
             if let Err(e) = write_atomic(&path, &snapshot).await {
                 warn!(
                     path = %path.display(),

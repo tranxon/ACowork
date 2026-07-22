@@ -107,6 +107,12 @@ pub struct AgentCore {
     pub(crate) provider_list_version: u64,
     /// Provider key vault (in-memory only, never persisted).
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, String>>>,
+
+    /// Per-agent compatibility cache, shared across all provider instances
+    /// (including those rebuilt by `build_provider_for`).  `None` when no
+    /// provider was available at startup (noop fallback).
+    pub(crate) compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
+
     /// Provider→compact_model mapping from provider_list at AgentHello.
     pub(crate) provider_compact_models: HashMap<String, Option<String>>,
     /// LLM temperature override (from Gateway config via agent_config.json).
@@ -216,6 +222,7 @@ impl AgentCore {
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: 0,
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
+            compat_cache: None,
             provider_compact_models: HashMap::new(),
             temperature_override: None,
             manifest_temperature,
@@ -842,6 +849,7 @@ impl Clone for AgentCore {
             global_provider_list: self.global_provider_list.clone(),
             provider_list_version: self.provider_list_version,
             provider_key_vault: self.provider_key_vault.clone(),
+            compat_cache: self.compat_cache.clone(),
             provider_compact_models: self.provider_compact_models.clone(),
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,

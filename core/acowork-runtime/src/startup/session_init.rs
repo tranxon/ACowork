@@ -218,6 +218,10 @@ pub(crate) async fn phase_b_init_session(
 
     // Inject global provider list, key vault, and memory into AgentCore.
     if let Some(c) = Arc::get_mut(&mut core) {
+        // Inject the per-agent compatibility cache so `build_provider_for`
+        // can wire it into rebuilt providers (429-retry / session-resume).
+        c.compat_cache = ctx.compat_cache.take();
+
         // ADR-040: gRPC hello_config path removed. Provider list is loaded
         // from the on-disk resource cache (written by a previous Gateway run).
         let providers_for_init = ctx.resource_cache.providers.as_ref();
