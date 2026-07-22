@@ -249,7 +249,7 @@ interface SessionChatState {
     startedAt: number; // Date.now() for frontend countdown timer
   } | null;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
-  pendingQuestion: AskQuestionEvent | null;
+  pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
   loadError: string | null;
   /** ADR-014/021: Session lifecycle status from backend (sole source of truth for "sending" state) */
@@ -328,7 +328,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   iterationLimitPaused: null,
   retryWaitInfo: null,
   pendingApproval: {},
-  pendingQuestion: null,
+  pendingQuestions: [],
   isLoadingSession: false,
   loadError: null,
   sessionStatus: null,
@@ -547,7 +547,7 @@ interface ChatStore {
   resolveApproval: (agentId: string) => void;
   /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
   resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => void;
-  resolveQuestion: (agentId: string) => void;
+  resolveQuestion: (agentId: string, requestId: string) => void;
   loadConversationHistory: (agentId: string) => Promise<void>;
   /**
    * Load messages for a session via HTTP pagination.
@@ -1434,10 +1434,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return updateSessionState(state, agentId, sessionId, { pendingApproval: nextPending });
     });
   },
-  resolveQuestion: (agentId: string) => {
+  resolveQuestion: (agentId: string, requestId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
-    set((state) => updateSessionState(state, agentId, sessionId, { pendingQuestion: null }));
+    set((state) => updateSessionState(state, agentId, sessionId, {
+      pendingQuestions: (getSessionState(state, agentId, sessionId).pendingQuestions ?? []).filter(
+        (q) => q.request_id !== requestId
+      ),
+    }));
   },
   loadConversationHistory: async (agentId: string) => {
     try {
@@ -2616,9 +2620,16 @@ function handleMessageEvent(
 
     case "ask_question":
       if (sid) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          pendingQuestion: data as unknown as AskQuestionEvent,
-        }));
+        set((state) => {
+          const current = getSessionState(state, agentId, sid).pendingQuestions ?? [];
+          // Avoid duplicates if the same request_id arrives twice (MQTT QoS)
+          if (current.some((q) => q.request_id === (data as unknown as AskQuestionEvent).request_id)) {
+            return state;
+          }
+          return updateSessionState(state, agentId, sid, {
+          pendingQuestions: [...current, data as unknown as AskQuestionEvent],
+          });
+        });
       }
       break;
 
@@ -2739,7 +2750,7 @@ function handleMessageEvent(
             // When status transitions TO Idle from non-Idle, clear pending flags
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
               sessionPatch.pendingApproval = {};
-              sessionPatch.pendingQuestion = null;
+              sessionPatch.pendingQuestions = [];
               sessionPatch.iterationLimitPaused = null;
               sessionPatch.isAssistantReplying = false;
 

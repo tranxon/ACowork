@@ -12,7 +12,7 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
@@ -330,7 +330,16 @@ export function ChatPanel() {
   });
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
-  const pendingQuestion = sessionState?.pendingQuestion ?? null;
+  const pendingQuestions = sessionState?.pendingQuestions ?? [];
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  // Reset to first question when the list changes (new question arrives)
+  useEffect(() => {
+    if (pendingQuestions.length === 0) {
+      setCurrentQuestionIndex(0);
+    } else if (currentQuestionIndex >= pendingQuestions.length) {
+      setCurrentQuestionIndex(pendingQuestions.length - 1);
+    }
+  }, [pendingQuestions.length, currentQuestionIndex]);
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
   const loadError = sessionState?.loadError ?? null;
   const todos = sessionState?.todos ?? [];
@@ -1156,7 +1165,7 @@ export function ChatPanel() {
     }
   };
 
-  // Ask question answer: send answer via MQTT, then clear pendingQuestion
+  // Ask question answer: send answer via MQTT, then clear the answered question from the queue
   const handleQuestionAnswer = async (requestId: string, answer: string) => {
     if (!selectedAgentId) return;
     const agentId = String(selectedAgentId);
@@ -1174,8 +1183,8 @@ export function ChatPanel() {
     } catch (err) {
       console.error("[ChatPanel] Failed to send question answer:", err);
     }
-    // Clear pending question state regardless of result
-    useChatStore.getState().resolveQuestion(agentId);
+    // Clear the answered question from the queue by requestId
+    useChatStore.getState().resolveQuestion(agentId, requestId);
   };
 
   // Auto-send queued messages when agent finishes execution
@@ -1416,14 +1425,62 @@ export function ChatPanel() {
                 </div>
               </div>
             )}
-            {/* Ask question card — shown when LLM asks the user a question */}
-            {pendingQuestion && (
-              <AskQuestionCard
-                event={pendingQuestion}
-                agentId={selectedAgentId ?? ""}
-                sessionId={currentSessionId}
-                onAnswer={handleQuestionAnswer}
-              />
+            {/* Ask question cards — shown when LLM asks the user questions */}
+            {pendingQuestions.length > 0 && (
+              <div className="space-y-1">
+                {/* Progress indicator */}
+                <div className="flex items-center gap-2 px-1">
+                  <div className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                      {currentQuestionIndex + 1} / {pendingQuestions.length}
+                    </span>
+                    <span>{t("askQuestionCard.questions")}</span>
+                  </div>
+                  {pendingQuestions.length > 1 && (
+                    <div className="flex items-center gap-1 ml-auto">
+                      <button
+                        onClick={() => setCurrentQuestionIndex((i) => Math.max(0, i - 1))}
+                        disabled={currentQuestionIndex === 0}
+                        className="rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label={t("askQuestionCard.previous")}
+                      >
+                        <ChevronLeft className="h-3.5 w-3.5" />
+                      </button>
+                      {/* Dots */}
+                      <div className="flex items-center gap-1 mx-1">
+                        {pendingQuestions.map((_, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => setCurrentQuestionIndex(idx)}
+                            className={`h-1.5 w-1.5 rounded-full transition-all ${
+                              idx === currentQuestionIndex
+                                ? "bg-zinc-500 dark:bg-zinc-300 w-3"
+                                : "bg-zinc-300 dark:bg-zinc-600 hover:bg-zinc-400 dark:hover:bg-zinc-500"
+                            }`}
+                            aria-label={`${t("askQuestionCard.goTo")} ${idx + 1}`}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => setCurrentQuestionIndex((i) => Math.min(pendingQuestions.length - 1, i + 1))}
+                        disabled={currentQuestionIndex === pendingQuestions.length - 1}
+                        className="rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label={t("askQuestionCard.next")}
+                      >
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+                {/* Current question card */}
+                <AskQuestionCard
+                  key={pendingQuestions[currentQuestionIndex].request_id}
+                  event={pendingQuestions[currentQuestionIndex]}
+                  agentId={selectedAgentId ?? ""}
+                  sessionId={currentSessionId}
+                  onAnswer={handleQuestionAnswer}
+                />
+              </div>
             )}
           </div>
           {/* Scroll-to-top button - visible when scrolled down > 1 screen */}

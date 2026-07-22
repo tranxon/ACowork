@@ -876,7 +876,11 @@
     "other": "Other",
     "placeholder": "Type your answer...",
     "submit": "Submit",
-    "submitted": "Submitted"
+    "submitted": "Submitted",
+    "questions": "questions",
+    "previous": "Previous",
+    "next": "Next",
+    "goTo": "Go to"
   },
   "debugPausedBanner": {
     "resume": "Resume",
