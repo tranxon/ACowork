@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::context::ContextBuilder;
 use crate::agent::inbound::InboundMessage;
+use crate::cancellation::CancelHandle;
 use crate::agent::loop_::{AgentLoop, ChunkEvent, SessionChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_core::SessionCore;
@@ -576,6 +577,26 @@ impl SessionTask {
     /// Returns None in standalone mode (where urgent_stop is not initialized).
     pub(crate) fn urgent_stop_notify(&self) -> Option<Arc<Notify>> {
         self.agent_loop.session_core.urgent_stop.clone()
+    }
+
+    /// Return the `Arc` slot handle to the session's per-request
+    /// [`CancelHandle`] so [`crate::agent::session::session_manager::SessionManager`]
+    /// can route external cancellation signals (MQTT `StopGeneration`,
+    /// debug `Stop`, CLI cancel) to the **current** generation of the
+    /// handle on every dispatch.
+    ///
+    /// Unlike [`urgent_stop_notify`](Self::urgent_stop_notify) this always
+    /// returns a clonable handle — the slot is unconditionally allocated
+    /// in [`crate::agent::session_core::SessionCore::new`].
+    ///
+    /// ADR-044 §4.5: the field exposed here is an `Arc<parking_lot::Mutex<CancelHandle>>`,
+    /// not a plain `CancelHandle`, because external sources must always
+    /// observe the *current* request's generation. Storing a plain clone
+    /// would freeze the generation to whatever was in the slot at
+    /// registration time (the bug this design eliminates — see
+    /// `SessionCore::begin_new_request`).
+    pub(crate) fn cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
+        self.agent_loop.session_core.cancel_handle_arc()
     }
 
     /// Run the session task, processing messages until Stop or channel close.

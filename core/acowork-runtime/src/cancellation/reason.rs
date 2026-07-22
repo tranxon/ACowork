@@ -1,6 +1,6 @@
 //! Cancellation reason taxonomy.
 //!
-//! Provides structured metadata for *why* a [`CancellationToken`](super::CancellationToken)
+//! Provides structured metadata for *why* a [`CancelHandle`](super::CancelHandle)
 //! was flipped, so downstream code (logging, telemetry, user-visible error
 //! messages) can disambiguate "user pressed Stop" from "budget exhausted".
 //!
@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-/// Why a [`CancellationToken`](super::CancellationToken) was cancelled.
+/// Why a [`CancelHandle`](super::CancelHandle) was cancelled.
 ///
 /// `UserStop` carries both the *source* (which UI surface initiated the cancel)
 /// and a free-form *reason* string supplied by that source (e.g. "user_requested",

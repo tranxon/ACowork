@@ -460,6 +460,7 @@ async fn dispatch_inbound(
     use crate::agent::inbound::InboundMessage;
     use crate::agent::loop_::CompressionAction;
     use crate::agent::session::SessionMessage;
+    use crate::cancellation::{CancellationReason, StopSource};
     use crate::error::RuntimeError;
     use acowork_core::mqtt_proto::{data_envelope, DataEnvelope};
 
@@ -548,14 +549,58 @@ async fn dispatch_inbound(
         ),
 
         // ② Stop signal → session task inbox
-        InboundMessage::Stop { reason } => forward_to_session_inbound(
-            session_manager,
-            lifecycle_publisher,
-            &session_id,
-            "stop",
-            work_dir,
-            InboundMessage::Stop { reason },
-        ),
+        InboundMessage::Stop { reason } => {
+            // ADR-044 §4.5: flip the session's **current request's** `CancelHandle`
+            // *before* forwarding so any currently-blocked `tokio::select!`
+            // branch on the session wakes immediately. The handle's level-
+            // triggered `Notify` + `AtomicU8` state means the cancel takes
+            // effect on the next checkpoint even if the session task is
+            // mid-await on something *other* than a Notify — notably inside
+            // `provider.chat_stream().await` while establishing a TCP/TLS
+            // connection (the TTFT stop bug, ADR §1.3, §4.4).
+            //
+            // `session_manager.cancel_handle(&session_id)` reads through the
+            // `Arc<parking_lot::Mutex<CancelHandle>>` slot, so we always
+            // target the *current* request's generation — never a stale
+            // clone from session creation time (the §4.5 guarantee).
+            //
+            // We deliberately call `cancel()` regardless of whether the
+            // session is currently registered in `cancel_handles`:
+            // `None` simply means the session has already been evicted or
+            // closed, in which case the cancel is a no-op (no panic, just a
+            // debug log) and the subsequent `forward_to_session_inbound`
+            // call will surface the same eviction as a structured error.
+            match session_manager.cancel_handle(&session_id) {
+                Some(handle) => {
+                    handle.cancel(CancellationReason::UserStop {
+                        source: StopSource::ChatPanel {
+                            agent_id: session_manager.agent_id().to_string(),
+                            session_id: session_id.clone(),
+                        },
+                        reason: reason.clone(),
+                    });
+                    tracing::info!(
+                        session_id = %session_id,
+                        reason = %reason,
+                        "ADR-044 §4.5: cancellation handle fired for MQTT Stop signal"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "Stop signal: no cancel handle registered (session evicted?)"
+                    );
+                }
+            }
+            forward_to_session_inbound(
+                session_manager,
+                lifecycle_publisher,
+                &session_id,
+                "stop",
+                work_dir,
+                InboundMessage::Stop { reason },
+            )
+        }
 
         // ③ Continue execution → session task inbox
         InboundMessage::ContinueExecution { reason, .. } => forward_to_session_inbound(

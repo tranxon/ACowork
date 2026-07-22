@@ -18,6 +18,7 @@ use futures::StreamExt;
 
 use super::context::ContextBuilder;
 use super::loop_::{AgentLoop, ChunkEvent, ControlDecision};
+use crate::cancellation::select_on_cancel;
 use crate::error::{Result, RuntimeError};
 
 impl AgentLoop {
@@ -68,8 +69,54 @@ impl AgentLoop {
         );
         // ADR-021: Frontend polls via HTTP — ReasoningStarted is no longer
         // sent via channel. The frontend detects streaming state via poll.
-        let stream = self.core.provider.chat_stream(chat_request.clone()).await?;
-        let mut stream = Box::into_pin(stream);
+        //
+        // ADR-044 Phase 3 (TTFT stop bug fix, ADR §1.3 / §4.4): wrap the
+        // `chat_stream()` future in `select_on_cancel` so a Stop signal that
+        // arrives *during* TCP/TLS/HTTP-headers/SSE-first-chunk — any of
+        // which can take 10–30s — drops the underlying `reqwest::send()`
+        // future within microseconds. Without this wrapper, the bare
+        // `.await` is not contained in any `tokio::select!` so neither the
+        // 500ms idle poll nor a `Notify` can wake it; the user-perceived
+        // stop latency equals the upstream TTFT.
+        //
+        // `select_on_cancel` races the future against the session's
+        // `CancelHandle`. On cancel, the `chat_stream` future is
+        // dropped (HTTP request aborted), we receive `Ok(None)` and return
+        // a stopped ChatResponse so the upstream `loop_::run_inner` sees the
+        // same shape it would after a mid-stream Stop. The chunk channel
+        // also receives `ChunkEvent::Stopped { content: "" }` so the UI
+        // can clear its streaming indicator immediately.
+        //
+        // ADR-044 §4.5: the handle here is the *current request's* handle
+        // — `run_inner` called `begin_new_request()` before entering this
+        // method, so a Cancel from a prior request cannot short-circuit
+        // this run.
+        let cancel_handle = self.session_core.cancel_handle();
+        let provider_stream = select_on_cancel(
+            cancel_handle.clone(),
+            self.core.provider.chat_stream(chat_request.clone()),
+        )
+        .await?;
+        let mut stream = match provider_stream {
+            Some(s) => Box::into_pin(s),
+            None => {
+                tracing::info!(
+                    "chat_stream() cancelled by user before first chunk arrived — \
+                     aborting TTFT wait"
+                );
+                // Flush any half-written streaming line and emit a Stopped
+                // chunk event so the UI drops its streaming indicator even
+                // though no content was accumulated. Returns a stopped
+                // ChatResponse so the upstream loop sees the same control
+                // flow shape it would after a mid-stream Stop.
+                self.session_core
+                    .flush_streaming_line(self.session.conversation.as_ref());
+                let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
+                    content: String::new(),
+                });
+                return Ok(build_stopped_response(String::new(), String::new()));
+            }
+        };
         let mut accumulated_content = String::new();
         let mut accumulated_reasoning_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
@@ -108,6 +155,13 @@ impl AgentLoop {
         // When the stream actively sends data, the event branch wins immediately
         // (no 500ms latency). When idle, the sleep branch fires every 500ms.
         loop {
+            // ADR-044 §4.5: bind the *current request's* handle to a
+            // local so the Arc inside it outlives the `cancelled()` future.
+            // Re-read on every iteration so any slot swap that happened
+            // mid-stream is observed (defensive — `begin_new_request` is
+            // only called from `run_inner` entry, so within one stream
+            // consumption the slot is stable in practice).
+            let cancel_handle = self.session_core.cancel_handle();
             tokio::select! {
                 event = stream.next() => {
                     match event {
@@ -370,15 +424,28 @@ impl AgentLoop {
                         }
                     }
                 }
-                // Urgent stop via Notify — fired by Gateway gRPC
-                // for immediate LLM stream cancellation.
-                _ = self.session_core.urgent_stop.as_ref().unwrap().notified() => {
+                // Cancellation handle — fires when external sources (MQTT
+                // `StopGeneration` dispatcher in `startup/gateway_loop.rs`,
+                // debug server Stop, CLI cancel, test harness) call
+                // `cancel()` on the session's `CancelHandle`.
+                //
+                // ADR-044 Phase 3: replaces the legacy `urgent_stop` Notify,
+                // which was only triggered in the debug path. The handle's
+                // level-triggered `Notify` + persistent `AtomicU8` state
+                // means this branch wakes within microseconds of `cancel()`
+                // and remains armed even if `cancel()` lands between select!
+                // iterations (a race the legacy Notify could miss).
+                //
+                // ADR-044 §4.5: this is the *current request's* handle —
+                // see `SessionCore::begin_new_request` for how the slot is
+                // swapped at every `run_inner` entry.
+                _ = cancel_handle.cancelled() => {
                     match self.poll_control() {
                         ControlDecision::Stop => {
-                            tracing::info!("LLM stream stopped via Notify — aborting");
+                            tracing::info!("LLM stream stopped via cancellation token — aborting");
                         }
                         ControlDecision::Pause => {
-                            tracing::info!("LLM stream paused via Notify — aborting");
+                            tracing::info!("LLM stream paused via cancellation token — aborting");
                             self.pending_interrupt = Some(ControlDecision::Pause);
                         }
                         ControlDecision::Continue => {}

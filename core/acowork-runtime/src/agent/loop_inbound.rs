@@ -137,13 +137,23 @@ impl AgentLoop {
     /// in the agent loop calls.  It replaces the ad-hoc `poll_stop()` + scattered
     /// `DebugState` checks with one exhaustive decision.
     ///
-    /// Checks three sources in order:
+    /// Checks four sources in order:
     /// 1. `pending_interrupt` — set by sub-modules when a control signal was
     ///    consumed during a nested blocking wait (e.g. approval subsystem)
     /// 2. `inbound_rx` — `InboundMessage::Stop` / `UserOp::StopLoop` from
     ///    the Gateway chat-panel stop button
     /// 3. `DebugController::state` — `Paused` / `Stopped` set by the debug
     ///    panel (checked via non-blocking `try_lock()`)
+    /// 4. **ADR-044 Phase 3**: `SessionCore::cancel_handle` — lowest
+    ///    priority; only fires `Stop` (no Pause semantics). This is the
+    ///    *active* stop signal source: the MQTT
+    ///    `ControlAction::StopGeneration` dispatcher in
+    ///    `startup/gateway_loop.rs` calls `cancel(UserStop { ... })` here
+    ///    before forwarding the inbound message, so the cancel becomes
+    ///    observable on the next checkpoint regardless of whether the
+    ///    session task is currently inside a `tokio::select!`. Pause
+    ///    remains DebugController's exclusive responsibility — see
+    ///    ADR §4.3.
     ///
     /// Non-stop, non-pause messages are buffered into `deferred_inbound`
     /// for later re-injection by `drain_inbound_queue()`.
@@ -187,6 +197,19 @@ impl AgentLoop {
                 DebugState::Stopped => return ControlDecision::Stop,
                 _ => {}
             }
+        }
+
+        // 4. ADR-044 Phase 2: CancelHandle (lowest priority).
+        //    `is_cancelled()` is a single atomic load — zero contention
+        //    even when called on every checkpoint. Only Stop is returned;
+        //    Pause is DebugController's exclusive responsibility.
+        //
+        //    ADR-044 §4.5: the handle read here is the *current request's*
+        //    handle (see `SessionCore::begin_new_request`). It is replaced
+        //    with a fresh Active handle at every `run_inner` entry so that
+        //    a Stop from a prior request cannot short-circuit the next.
+        if self.session_core.cancel_handle().is_cancelled() {
+            return ControlDecision::Stop;
         }
 
         ControlDecision::Continue

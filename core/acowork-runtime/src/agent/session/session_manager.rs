@@ -24,6 +24,7 @@ use crate::agent::loop_::SessionChunkEvent;
 use crate::agent::session::session_handle::SessionHandle;
 use crate::agent::session::session_task::{SessionMessage, SessionTask};
 use crate::agent::session_state::{SessionState, SessionStatus, SharedLatestSession, SharedSessionSnapshots};
+use crate::cancellation::CancelHandle;
 use crate::config::DEFAULT_TEMPERATURE;
 use crate::conversation::{ConversationSession, read_session_meta};
 use crate::debug::controller::DebugController;
@@ -342,6 +343,32 @@ pub struct SessionManager {
     /// Keyed by session_id; fire_urgent_stop() looks up the target session's
     /// Notify and wakes only that session's tokio::select! branches.
     urgent_stops: HashMap<String, Arc<Notify>>,
+    /// ADR-044: Per-session cancellation tokens (the *new* single source of
+    /// truth for "stop this session now"). Keyed by `session_id` so external
+    /// signal sources — MQTT `ControlAction::StopGeneration` dispatcher, debug
+    /// server `Stop`, CLI cancel, test harness — can locate the target
+    /// session's token and call `cancel(CancellationReason::...)` on it.
+    ///
+    /// **Phase 3 (current state)**: registered in parallel with
+    /// `urgent_stops`, with the MQTT `ControlAction::StopGeneration`
+    /// dispatcher now firing `cancel(CancellationReason::UserStop)` here
+    /// before forwarding the inbound message — see
+    /// `startup/gateway_loop.rs::dispatch_inbound`. The token is the
+    /// *active* stop-path for production code; `urgent_stops` remains
+    /// wired only as a rollback safety net.
+    ///
+    /// **Phase 4**: `urgent_stops` removed; this map is the sole stop-path
+    /// index. Until then both maps stay in sync via the same lifecycle
+    /// hooks (insert on session creation, remove on close/delete/eviction).
+    ///
+    /// ADR-044 §4.5: keys are session IDs, values are `Arc<parking_lot::Mutex<CancelHandle>>`
+    /// slots — *not* `CancelHandle` clones. The slot indirection is what
+    /// makes the per-request boundary safe: external dispatchers read
+    /// through the Arc on every cancel call and observe the latest
+    /// generation (whatever `run_inner::begin_new_request` last wrote).
+    /// Storing a plain clone here would freeze the generation to whatever
+    /// was in the slot at registration time — the exact bug §4.5 fixes.
+    cancel_handles: HashMap<String, Arc<parking_lot::Mutex<CancelHandle>>>,
     /// Per-session committed_lines counter, shared between the writer thread
     /// (ConversationWriter) and the session's SessionCore. Each session gets its
     /// own independent counter; `committed_lines_for(session_id)` returns the
@@ -385,6 +412,7 @@ impl SessionManager {
             runtime_debug_handles: None,
             debug_controllers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             urgent_stops: HashMap::new(),
+            cancel_handles: HashMap::new(),
             session_committed_lines: HashMap::new(),
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -565,6 +593,16 @@ impl SessionManager {
         if let Some(notify) = task.urgent_stop_notify() {
             self.urgent_stops.insert(session_id.clone(), notify);
         }
+
+        // ADR-044 §4.5: Register the per-session Arc slot (not a `CancelHandle`
+        // clone). Phase 3 external callers (MQTT dispatcher, debug server)
+        // look up the slot via [`Self::cancel_handle`] and read the
+        // *current* generation through `Arc::lock()` on every dispatch —
+        // never a stale clone. Inserted unconditionally — the slot is
+        // always allocated in `SessionCore::new`, so no `Option` unwrap is
+        // needed here.
+        self.cancel_handles
+            .insert(session_id.clone(), task.cancel_handle_arc());
 
         // Spawn the session task with panic isolation.
         // catch_unwind ensures that if SessionTask::run() panics, we log the
@@ -981,11 +1019,51 @@ impl SessionManager {
         // Clean up per-session mappings
         self.pending_workspaces.remove(session_id);
         self.urgent_stops.remove(session_id);
+        self.cancel_handles.remove(session_id);
         self.session_committed_lines.remove(session_id);
         self.session_delivery_cursors.write().unwrap().remove(session_id);
 
         tracing::info!(session_id = %session_id, "SessionManager: closed session");
         Ok(())
+    }
+
+    /// Look up a session's **current request's** [`CancelHandle`] by `session_id`.
+    ///
+    /// ADR-044 §4.5: external signal sources (MQTT `ControlAction::StopGeneration`
+    /// dispatcher in `startup/gateway_loop.rs`, debug server `Stop` handler,
+    /// CLI cancel command, test harness) use this to obtain a handle and call
+    /// `cancel(CancellationReason::UserStop { ... })` on it. Returns `None`
+    /// when the session is not registered (evicted, never created, or
+    /// already closed) — callers should treat that as "no session to stop"
+    /// and log a warning rather than crash.
+    ///
+    /// **Always reads the *current* generation**: the stored value is an
+    /// `Arc<parking_lot::Mutex<CancelHandle>>` slot, not a handle clone.
+    /// We take a brief `parking_lot::Mutex` lock to clone the handle the
+    /// slot currently holds, so callers always see whatever
+    /// `run_inner::begin_new_request` last wrote — never a stale clone
+    /// from session creation time.
+    ///
+    /// **Symmetry with the legacy `urgent_stops` map**: this is the canonical
+    /// successor of the `fire_urgent_stop()`-style helper. The MQTT
+    /// dispatcher calls `cancel(UserStop { source: ChatPanel { agent_id, session_id }, reason })`
+    /// here at the start of its stop-message handler; the legacy `urgent_stops`
+    /// map remains for incremental rollback and is removed in Phase 4.
+    pub fn cancel_handle(&self, session_id: &str) -> Option<CancelHandle> {
+        let slot = self.cancel_handles.get(session_id)?;
+        Some(slot.lock().clone())
+    }
+
+    /// Return the `agent_id` of the owning runtime, for use as the
+    /// `StopSource::ChatPanel { agent_id, ... }` payload.
+    ///
+    /// ADR-044 Phase 3: external callers (MQTT dispatcher, debug server,
+    /// CLI) need a stable handle to identify which agent initiated the
+    /// cancel when constructing [`CancellationReason::UserStop`]. Returns
+    /// a borrowed `&str` from the [`AgentCore`](crate::agent::AgentCore)
+    /// template so no allocation is needed at the hot path.
+    pub fn agent_id(&self) -> &str {
+        &self.core.config.agent_id
     }
 
     /// Delete a session: close the task, remove index entry, and delete JSONL file.
@@ -1019,6 +1097,7 @@ impl SessionManager {
             // Clean up in-memory mappings
             self.pending_workspaces.remove(session_id);
             self.urgent_stops.remove(session_id);
+            self.cancel_handles.remove(session_id);
             self.session_committed_lines.remove(session_id);
             self.session_delivery_cursors.write().unwrap().remove(session_id);
 

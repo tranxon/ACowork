@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
 use crate::agent::loop_approval::ApprovalHandle;
 use crate::agent::session_state::SessionStatus;
+use crate::cancellation::CancelHandle;
 use crate::conversation::StreamingStateMap;
 use crate::providers::reliable::RetryWaitHandle;
 
@@ -77,7 +78,53 @@ pub(crate) struct SessionCore {
 
     /// Urgent stop notify — fired by Gateway to cancel tool execution
     /// immediately.  Each session gets its own independent Notify.
+    ///
+    /// **ADR-044 Phase 4**: legacy path, slated for removal. After Phase 3,
+    /// every `tokio::select!` branch in `loop_llm.rs` / `loop_tools.rs` that
+    /// previously awaited this Notify has been migrated to
+    /// `self.cancel_handle().cancelled()` — the handle is now the sole
+    /// producer of `select!` wakeups for tool/LLM execution stops in
+    /// production MQTT paths. Kept around through Phase 4 only for
+    /// incremental rollback safety; once Phase 4 ships it is deleted.
     pub(crate) urgent_stop: Option<Arc<Notify>>,
+
+    /// ADR-044 §4.5: **per-request cancellation slot**. Holds the
+    /// **current request's** [`CancelHandle`]; swapped for a fresh `Active`
+    /// handle at every `AgentLoop::run_inner` entry via
+    /// [`Self::begin_new_request`]. Hiding the handle inside a slot is
+    /// what makes the stop-then-continue flow safe: a Stop from a prior
+    /// request can never short-circuit `select_on_cancel` on the next
+    /// request because the slot no longer points at the cancelled handle.
+    ///
+    /// # Why an `Arc<parking_lot::Mutex<CancelHandle>>` slot (not a plain `CancelHandle`)
+    ///
+    /// The slot must be readable from `SessionManager` (which lives on a
+    /// different task) **without** holding a stale clone: external stop
+    /// signal sources (MQTT dispatcher, debug server) must always target
+    /// the **current** request's handle. A plain value field would only
+    /// ever be inspected when `SessionManager` snapshots the handle into
+    /// its `cancel_handles` HashMap, leaving the map holding a fixed clone
+    /// that ignores later swaps. The Arc\<Mutex\> slot eliminates that
+    /// hazard by construction: SessionManager reads through the Arc on
+    /// every external cancel dispatch and observes the latest value.
+    ///
+    /// # Lifetime
+    ///
+    /// The outer `Arc` lives for the session. The inner `Mutex<CancelHandle>`
+    /// is swapped wholesale at every request boundary, so the previous
+    /// handle's `Arc` reference count keeps it alive until the in-flight
+    /// `select_on_cancel` futures that still hold a clone are dropped
+    /// (cheap, sub-millisecond — the inner future is already being torn
+    /// down by `run_inner`'s return path).
+    ///
+    /// ADR-044 Phase 3 history: the field was originally a plain
+    /// `CancellationToken: CancelHandle` (then named `CancellationToken`).
+    /// The §4.5 fix upgrades it to a slot because the previous design
+    /// held the handle for the entire session lifetime, leaving subsequent
+    /// requests perpetually Cancelled once any prior request was stopped.
+    /// The slot design makes that bug structurally impossible.
+    pub(crate) current_cancel_handle:
+        Arc<parking_lot::Mutex<CancelHandle>>,
 
     /// Watch sender for session status (ADR-014).
     /// None for CLI-only sessions.
@@ -153,6 +200,11 @@ impl SessionCore {
             // carry `seq`). See field doc above.
             seq_counter: Arc::new(AtomicU64::new(0)),
             urgent_stop: Some(Arc::new(Notify::new())),
+            // ADR-044 §4.5: each session starts with a fresh `Active`
+            // handle in its per-request slot. `AgentLoop::run_inner`
+            // calls `begin_new_request()` at every entry so the handle
+            // is always generation-fresh — see field docs above.
+            current_cancel_handle: Arc::new(parking_lot::Mutex::new(CancelHandle::new())),
             status_tx: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
                 SessionStatus::Streaming { message_id: None },
@@ -172,6 +224,75 @@ impl SessionCore {
     /// in `messages[]` even if MQTT happens to deliver them out of order.
     pub(crate) fn next_seq(&self) -> u64 {
         self.seq_counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Begin a new request cycle: atomically swap a fresh `Active`
+    /// [`CancelHandle`] into the per-request slot and return a clone of it.
+    ///
+    /// Called from `AgentLoop::run_inner` at the start of every
+    /// user-driven request (chat message, debug replay, intent message,
+    /// etc.). The previous handle remains valid (its `Arc` reference count
+    /// stays positive until any future still holding a clone is dropped)
+    /// but it is no longer the handle that external cancel signal sources
+    /// target — they always read through
+    /// [`Self::cancel_handle_arc`] and observe the *current* generation.
+    ///
+    /// # Why this is structurally required (ADR-044 §4.5)
+    ///
+    /// Before this fix the slot held a single `CancelHandle` for the
+    /// entire session lifetime, so a Stop from request N permanently
+    /// flipped the handle to `Cancelled` and every subsequent request
+    /// (N+1, N+2, …) short-circuited through `select_on_cancel` within
+    /// microseconds — the session was unusable until the user created a
+    /// brand new session (which allocated a fresh `Arc`). Swapping at
+    /// every request boundary eliminates that bug class by construction:
+    /// `begin_new_request` is the *only* code that writes the slot, and
+    /// the type system guarantees external callers read through `Arc`,
+    /// not a stale clone.
+    ///
+    /// Locking strategy: `parking_lot::Mutex` (not `tokio::Mutex`) because
+    /// the critical section is a single assignment; contention is bounded
+    /// to one quick compare-and-store per request boundary.
+    pub(crate) fn begin_new_request(&self) -> CancelHandle {
+        let new_handle = CancelHandle::new();
+        *self.current_cancel_handle.lock() = new_handle.clone();
+        new_handle
+    }
+
+    /// Read the **current request's** [`CancelHandle`].
+    ///
+    /// Equivalent to (but cheaper than) [`Self::begin_new_request`]:
+    /// returns a clone of whatever handle is in the slot right now
+    /// without allocating a new one. Callers that only need to await
+    /// cancellation (e.g. `loop_inbound::poll_control`'s `is_cancelled()`
+    /// check, `select!` `cancelled()` branches in `loop_llm.rs` /
+    /// `loop_tools.rs`) use this accessor; `run_inner` uses
+    /// [`Self::begin_new_request`] to set up a new generation.
+    ///
+    /// The handle obtained here is a one-shot view of the *current*
+    /// generation: if a fresh request starts before this handle resolves,
+    /// the *current* handle has been swapped — this clone still observes
+    /// the (now-retired) generation, but external sources read through
+    /// [`Self::cancel_handle_arc`] and target the new one instead.
+    pub(crate) fn cancel_handle(&self) -> CancelHandle {
+        self.current_cancel_handle.lock().clone()
+    }
+
+    /// Return the `Arc` handle to the per-request slot itself.
+    ///
+    /// Used by [`crate::agent::session::session_manager::SessionManager`]
+    /// at session creation time so external cancel signal sources
+    /// (MQTT `StopGeneration` dispatcher, debug server, CLI cancel) can
+    /// locate the slot by `session_id` and read the *current* handle
+    /// through it on every dispatch — never a stale clone.
+    ///
+    /// Storing the `Arc` in `SessionManager::cancel_handles: HashMap`
+    /// (instead of a plain `CancelHandle` clone) is what makes the
+    /// per-request boundary work: queries through the Arc always observe
+    /// the latest value, regardless of how many `begin_new_request`
+    /// swaps happened since registration.
+    pub(crate) fn cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
+        self.current_cancel_handle.clone()
     }
 
     // ── Chunk event helpers ──────────────────────────────────────────

@@ -618,6 +618,24 @@ impl AgentLoop {
         message_id: Option<String>,
         raw_user_message: Option<&str>,
     ) -> Result<String> {
+        // ADR-044 §4.5: allocate a fresh `Active` `CancelHandle` for this
+        // request. Critical — without this swap, a Stop from a previous
+        // request would short-circuit `select_on_cancel` in
+        // `loop_llm::chat_stream` and `loop_tools::*` because the slot
+        // would still point at the previously-cancelled handle (Arc keeps
+        // it alive until the in-flight future is dropped). The slot is
+        // the single source of truth: external cancel sources read through
+        // `Arc::lock()` on every dispatch and always observe the
+        // generation we write here.
+        //
+        // Why at the *top* of `run_inner` (not at session creation, not
+        // per iteration): handle scope = request scope. Within one
+        // request, multiple iterations (tool-call chains) share the
+        // generation so the user can still Stop mid-tool-execution.
+        // A new generation is established only when a new user-driven
+        // request begins.
+        let _cancel_handle = self.session_core.begin_new_request();
+
         // ADR-014: Idle → Streaming
         self.transition_status(SessionStatus::Streaming { message_id: None });
 

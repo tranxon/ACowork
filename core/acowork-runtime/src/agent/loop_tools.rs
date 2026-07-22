@@ -164,6 +164,13 @@ impl AgentLoop {
         if use_gateway_approval {
             // ── Gateway mode: 4-way select (results / timeout / approval / interrupt) ──
             while collected.len() < total {
+                // ADR-044 §4.5: bind the *current request's* handle to a
+                // local so the Arc inside it outlives the `cancelled()`
+                // future. Re-read on every iteration so we observe any
+                // slot swap that happened mid-tool-execution (none is
+                // expected within one request — `begin_new_request` is
+                // only called from `run_inner` entry — but defensive).
+                let cancel_handle = self.session_core.cancel_handle();
                 tokio::select! {
                     entry = rx.recv() => {
                         match entry {
@@ -212,13 +219,29 @@ impl AgentLoop {
                             }
                         }
                     }
-                    // Urgent stop via Notify — fired by Gateway gRPC
-                    // (Stop / Restart-in-Debug) for immediate tool cancellation.
-                    // Takes priority over the 500ms poll fallback.
-                    _ = self.session_core.urgent_stop.as_ref().unwrap().notified() => {
+                    // Cancellation handle — fires when external sources
+                    // (MQTT `StopGeneration` dispatcher in
+                    // `startup/gateway_loop.rs`, debug server Stop, CLI
+                    // cancel, test harness) call `cancel()` on this
+                    // session's `CancelHandle`.
+                    //
+                    // ADR-044 Phase 3: replaces the legacy `urgent_stop`
+                    // Notify, which was only triggered in the debug path
+                    // and consequently never fired under the production
+                    // MQTT stop flow (the root cause of the TTFT stop bug).
+                    // The handle's level-triggered `Notify` + persistent
+                    // `AtomicU8` state means this branch wakes within
+                    // microseconds of `cancel()` — long before the 500ms
+                    // idle-poll fallback would observe the inbound Stop
+                    // message.
+                    //
+                    // ADR-044 §4.5: this is the *current request's* handle
+                    // — see `SessionCore::begin_new_request` for how the
+                    // slot is swapped at every `run_inner` entry.
+                    _ = cancel_handle.cancelled() => {
                         match self.poll_control() {
                             c @ (ControlDecision::Stop | ControlDecision::Pause) => {
-                                tracing::info!(signal = ?c, "Control signal via Notify — aborting tools");
+                                tracing::info!(signal = ?c, "Control signal via cancellation handle — aborting tools");
                                 for handle in &handles {
                                     handle.abort();
                                 }
@@ -250,6 +273,10 @@ impl AgentLoop {
         } else {
             // ── CLI / test mode: 4-way select (results / timeout / stop / notify) ──
             while collected.len() < total {
+                // ADR-044 §4.5: bind the *current request's* handle to a
+                // local (see the gateway-mode branch above for the full
+                // rationale on the binding pattern).
+                let cancel_handle = self.session_core.cancel_handle();
                 tokio::select! {
                     entry = rx.recv() => {
                         match entry {
@@ -268,10 +295,10 @@ impl AgentLoop {
                         }
                         break;
                     }
-                    _ = self.session_core.urgent_stop.as_ref().unwrap().notified() => {
+                    _ = cancel_handle.cancelled() => {
                         match self.poll_control() {
                             c @ (ControlDecision::Stop | ControlDecision::Pause) => {
-                                tracing::info!(signal = ?c, "Control signal via Notify — aborting tools");
+                                tracing::info!(signal = ?c, "Control signal via cancellation handle — aborting tools");
                                 for handle in &handles {
                                     handle.abort();
                                 }

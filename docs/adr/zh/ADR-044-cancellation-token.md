@@ -192,22 +192,47 @@ graph TD
 
 ### 4.1 概念
 
-引入 `agent::cancellation::CancellationToken`，作为会话级取消信号的**单一真相源**。它是一个 `Arc<Inner>` 共享句柄：
+引入 `agent::cancellation::CancelHandle`，作为**当前请求级**取消信号的**单一真相源**。它是一个 `Arc<Inner>` 共享句柄（命名上用 `Handle` 而非 `Token` 是因为本项目里 `token` 一词已被 LLM 数据单位 `input_tokens`/`output_tokens`/`total_tokens` 占用，避免阅读时歧义；语义上等价于 `tokio_util::sync::CancellationToken`、.NET `CancellationToken`）。
 
-- **发出方**：session_task 创建时构造一个 token，连同 Arc 句柄注册到 SessionManager（按 session_id 索引），便于外部（MQTT dispatcher / Debug server / test harness / CLI）通过 session_id 查找并 trigger
-- **接收方**：每个可能阻塞的 future 调用 `token.cancelled()`（future impl）或者 `select! { ... _ = token.cancelled() => ... }`
+- **发出方**：session_task 创建时构造一个**槽位** `Arc<parking_lot::Mutex<CancelHandle>>`，连同 Arc 句柄注册到 SessionManager（按 session_id 索引），便于外部（MQTT dispatcher / Debug server / test harness / CLI）通过 session_id 查找并 trigger。每次 `AgentLoop::run_inner` 入口调用 `begin_new_request()` 把槽里换成全新 Active 句柄——保证一次 request = 一代 handle
+- **接收方**：每个可能阻塞的 future 调用 `session_core.cancel_handle().cancelled()`（future impl）或者 `select! { ... _ = handle.cancelled() => ... }`，**读取时**通过 `Arc::lock()` 拿到当前代的句柄
 
-CancellationToken 内部状态：
+> **§4.5 重要修正**：早期版本（Phase 1-3）用 `CancelHandle`（原 `CancellationToken`）作为**会话级**句柄，一次 cancel 永久污染后续 request。`run_inner` 入口改为装入新句柄后，句柄升级为**请求级**信号源——与生产语义（Stop 只取消当前 request，不杀 session）对齐。详见 §4.5 节。
+
+CancelHandle 内部状态：
 
 ```rust
-pub struct CancellationToken {
-    inner: Arc<CancellationInner>,
+pub struct CancelHandle {
+    inner: Arc<CancelInner>,
 }
 
-struct CancellationInner {
+struct CancelInner {
     state: AtomicU8,           // 0=Active, 1=Cancelled
     notify: Notify,            // 唤醒 select! 分支
     reason: Mutex<Option<CancellationReason>>, // 谁、为什么、何时取消
+}
+
+// 在 SessionCore 中：
+pub(crate) struct SessionCore {
+    /// §4.5: 当前 request 的句柄槽位
+    current_cancel_handle: Arc<parking_lot::Mutex<CancelHandle>>,
+    // ...
+}
+
+impl SessionCore {
+    pub(crate) fn begin_new_request(&self) -> CancelHandle {
+        let new_handle = CancelHandle::new();
+        *self.current_cancel_handle.lock() = new_handle.clone();
+        new_handle
+    }
+
+    pub(crate) fn cancel_handle(&self) -> CancelHandle {
+        self.current_cancel_handle.lock().clone()
+    }
+
+    pub(crate) fn cancel_handle_arc(&self) -> Arc<parking_lot::Mutex<CancelHandle>> {
+        self.current_cancel_handle.clone()
+    }
 }
 
 pub enum CancellationReason {
@@ -252,7 +277,7 @@ tokio::select! {
 ```rust
 // loop_llm.rs:71 改造
 let provider_stream = self.core.provider.chat_stream(chat_request.clone());
-let stream = select_cancelled(token.clone(), provider_stream).await?
+let stream = select_on_cancel(handle.clone(), provider_stream).await?
     .ok_or(RuntimeError::Cancelled)?;
 
 tokio::pin!(stream);
@@ -264,8 +289,8 @@ tokio::pin!(stream);
 ```rust
 // MQTT dispatcher in gateway_loop.rs:
 fn handle_stop(session_id: &str, reason: String) {
-    if let Some(token) = session_manager.cancellation_token(session_id) {
-        token.cancel(CancellationReason::UserStop {
+    if let Some(handle) = session_manager.cancel_handle(session_id) {
+        handle.cancel(CancellationReason::UserStop {
             source: StopSource::ChatPanel { agent_id, session_id },
             reason,
         });
@@ -274,7 +299,7 @@ fn handle_stop(session_id: &str, reason: String) {
 
 // Debug server:
 fn handle_pause(session_id: &str) {
-    session_manager.cancellation_token(session_id)?
+    session_manager.cancel_handle(session_id)?
         .cancel(CancellationReason::Pause);
 }
 ```
@@ -295,16 +320,16 @@ fn handle_pause(session_id: &str) {
 1. `reqwest.send().await`  - 建立 HTTP 连接（TLS 握手 + HTTP 请求发送 + 等待响应头）
 2. `response.bytes_stream()` - 拿 SSE 流
 
-关键洞察：**不需要拆分 Provider trait**。`select_cancelled` 用 `tokio::select!` 竞争 cancel future 和原 future，当 cancel 胜出时，原 future 被 **drop**。对于 `chat_stream().await` 这个 future，drop 意味着内部挂起的 `reqwest.send().await` 一同被 drop，**HTTP 请求中止**。这正是我们想要的行为。
+关键洞察：**不需要拆分 Provider trait**。`select_on_cancel` 用 `tokio::select!` 竞争 cancel future 和原 future，当 cancel 胜出时，原 future 被 **drop**。对于 `chat_stream().await` 这个 future，drop 意味着内部挂起的 `reqwest.send().await` 一同被 drop，**HTTP 请求中止**。这正是我们想要的行为。
 
 ```rust
-async fn select_cancelled<T>(
-    token: CancellationToken,
+async fn select_on_cancel<T>(
+    handle: CancelHandle,
     fut: impl Future<Output = Result<T, AcoworkError>>,
 ) -> Result<Option<T>, AcoworkError> {
     tokio::select! {
         biased;
-        _ = token.cancelled() => Ok(None),      // 取消 - fut 被 drop，HTTP 请求中止
+        _ = handle.cancelled() => Ok(None),     // 取消 - fut 被 drop，HTTP 请求中止
         result = fut => result.map(Some),
     }
 }
@@ -314,8 +339,8 @@ loop_llm.rs:71 改造：
 
 ```rust
 // 不需要改 Provider trait，不需要拆分 chat_stream
-let stream = select_cancelled(
-    token.clone(),
+let stream = select_on_cancel(
+    handle.clone(),
     self.core.provider.chat_stream(chat_request.clone()),
 ).await?;
 
@@ -325,20 +350,20 @@ let stream = match stream {
 };
 
 let mut stream = Box::into_pin(stream);
-// 然后进现有 select! 循环，加 token.cancelled() 分支
+// 然后进现有 select! 循环，加 handle.cancelled() 分支
 ```
 
 **为什么不拆分 Provider trait**（原先考虑过的方案，已否决）：
 - 原方案提出把 `chat_stream` 拆成 `chat_stream_request`（返回 `reqwest::Response`）+ `chat_stream_sse_to_events`，以便"直接 abort reqwest 连接"
-- 但 `select_cancelled` drop future 时已经中止了 HTTP 请求——两种方案的取消行为完全相同
+- 但 `select_on_cancel` drop future 时已经中止了 HTTP 请求——两种方案的取消行为完全相同
 - 拆分 trait 会把 `reqwest::Response` 引入 `acowork-core/src/providers/traits.rs`，**core 层被耦合到具体 HTTP 客户端**，违反分层原则
 - 需要修改全部 5 个 Provider 实现（`openai.rs`、`anthropic.rs`、`ollama.rs`、`reliable.rs`、`router.rs`），其中 `reliable.rs` 的重试逻辑建立在 `chat_stream()` 整体调用上，拆分后重试边界需重新设计
 - 收益为零：两种方案下"后台 reqwest task 残留"的 trade-off 完全相同
 
 **好处**：
-- TCP 连接阶段被 `select_cancelled` 包裹，stop 信号能在 100ms 内打断
+- TCP 连接阶段被 `select_on_cancel` 包裹，stop 信号能在 100ms 内打断
 - 即使 reqwest task 还在 doomed 状态，Runtime 已经返回了 - UI 立刻进入 idle
-- 后续 SSE 流的 select! 循环已经能正确响应 stop（既存的 500ms 兜底已经在这里；引入 token.cancelled() 后<1ms 响应）
+- 后续 SSE 流的 select! 循环已经能正确响应 stop（既存的 500ms 兜底已经在这里；引入 handle.cancelled() 后<1ms 响应）
 - **零侵入**：不修改 Provider trait，不影响任何现有 Provider 实现
 
 **已知 trade-off**：被取消后，reqwest task 可能仍在后台跑直到 OS 关闭 socket。这是合理的——用户感知到 stop 生效即可，后台 task 自然超时清理。
@@ -351,38 +376,39 @@ let mut stream = Box::into_pin(stream);
 
 **Phase 1：基础设施（无功能变更）**
 1. 新增 `core/acowork-runtime/src/cancellation/` 模块
-   - `token.rs` — `CancellationToken`、`CancellationReason`、`StopSource`
+   - `token.rs` — `CancelHandle`、`CancellationReason`、`StopSource`
    - `reason.rs` — reason 序列化（log + telemetry）
-   - `wrapper.rs` — `select_cancelled`、`cancelled_or` 等 future helpers
-   - `integration_tests.rs` — token + select_cancelled 行为单测（fast/cancel/race/re-entry）
+   - `wrapper.rs` — `select_on_cancel`、`cancelled_or` 等 future helpers
+   - `integration_tests.rs` — handle + select_on_cancel 行为单测（fast/cancel/race/re-entry）
 2. `Cargo.toml` 加 dev-deps `tokio = { features = ["test-util"] }`，lib.rs pub mod cancellation
 
-**Phase 2：把 session_core.urgent_stop 切换到 token（仅做加法，不删旧机制）**
-3. `session_core.rs`: 新增 `CancellationToken` 字段（与 `urgent_stop` 并存，不删除 urgent_stop）
-4. `session_manager.rs`: 新增 `HashMap<session_id, CancellationToken>`（与 `urgent_stops` 并存）；新增 `cancellation_token(session_id) -> Option<CancellationToken>` 公共方法
-5. `loop_inbound.rs`: `poll_control()` 内部增加对 token 状态的检查（与 `pending_interrupt` / `inbound_rx` / `DebugController` 并存，优先级最低）
+**Phase 2：把 session_core.urgent_stop 切换到 handle（仅做加法，不删旧机制）**
+3. `session_core.rs`: 新增 `CancelHandle` 字段（与 `urgent_stop` 并存，不删除 urgent_stop）
+4. `session_manager.rs`: 新增 `HashMap<session_id, CancelHandle>`（与 `urgent_stops` 并存）；新增 `cancel_handle(session_id) -> Option<CancelHandle>` 公共方法
+5. `loop_inbound.rs`: `poll_control()` 内部增加对 handle 状态的检查（与 `pending_interrupt` / `inbound_rx` / `DebugController` 并存，优先级最低）
 6. 编译通过 + 现有测试通过 = Phase 2 终点
 
-> **注意**：Phase 2 不删除 `pending_interrupt`。`pending_interrupt` 的设计目的是解决 sub-module `select!` 消费 Notify 事件后的信号传递竞态。CancellationToken 的 AtomicU8 持久状态确实能解决此竞态，但前提是 token 已在所有路径生效（Phase 3 才完成）。在 Phase 2 阶段删除 `pending_interrupt` 会导致 Stop 信号在 sub-module 消费后丢失。删除推迟到 Phase 4。
+> **注意**：Phase 2 不删除 `pending_interrupt`。`pending_interrupt` 的设计目的是解决 sub-module `select!` 消费 Notify 事件后的信号传递竞态。CancelHandle 的 AtomicU8 持久状态确实能解决此竞态，但前提是 handle 已在所有路径生效（Phase 3 才完成）。在 Phase 2 阶段删除 `pending_interrupt` 会导致 Stop 信号在 sub-module 消费后丢失。删除推迟到 Phase 4。
 
 **Phase 3：消除功能 gap（修 bug）**
-8. `startup/gateway_loop.rs` MQTT StopGeneration 路径：在 `forward_to_session_inbound` 之前调用 `session_manager.cancellation_token(sid)?.cancel(UserStop{...})`
-9. `loop_llm.rs:71` 的 `chat_stream().await` 用 `select_cancelled` 包裹（不拆分 Provider trait，见 §4.4）
-10. `loop_tools.rs` / `loop_approval.rs` 的 Notify 分支改为 `token.cancelled()`
+8. `startup/gateway_loop.rs` MQTT StopGeneration 路径：在 `forward_to_session_inbound` 之前调用 `session_manager.cancel_handle(sid)?.cancel(UserStop{...})`
+9. `loop_llm.rs:71` 的 `chat_stream().await` 用 `select_on_cancel` 包裹（不拆分 Provider trait，见 §4.4）
+10. `loop_tools.rs` / `loop_approval.rs` 的 Notify 分支改为 `handle.cancelled()`
 11. E2E：用户在 TTFT 阶段点 stop，端到端 ≤ 1 秒进入 idle
 
 **Phase 4：清理死代码（做减法）**
-12. `loop_.rs:346` 删除 `pending_interrupt`（此时 token 已在所有路径生效，AtomicU8 持久状态覆盖了原 `pending_interrupt` 的信号传递职责）
-13. 删除 `session_core.urgent_stop`、`session_manager.urgent_stops`（token 已完全替代）
+12. `loop_.rs:346` 删除 `pending_interrupt`（此时 handle 已在所有路径生效，AtomicU8 持久状态覆盖了原 `pending_interrupt` 的信号传递职责）
+13. 删除 `session_core.urgent_stop`、`session_manager.urgent_stops`（handle 已完全替代）
 14. `ControlDecision::Continue` 保留不动（作为 checkpoint API 的"无信号"返回值仍有用，删除需改为 `Option<ControlDecision>` 返回类型，涉及 ~10 处 match arm，收益不大）
-15. `DebugController::control_notify` 保留不动（Pause 不走 token，见 §4.3）
+15. `DebugController::control_notify` 保留不动（Pause 不走 handle，见 §4.3）
 
 ### 4.6 验证矩阵
 
 - **L1 单元测试**（cancellation/ 模块）：
-  - token cancel 前后 cancelled() future 行为
-  - select_cancelled：cancel 先到 / fut 先到 / cancel 在 race 期间多发的丢弃
+  - handle cancel 前后 cancelled() future 行为
+  - select_on_cancel：cancel 先到 / fut 先到 / cancel 在 race 期间多发的丢弃
   - reason 字段多线程可见性
+  - **L5 per-request 槽位测试**（ADR §4.5）：装新 handle 不污染上一代；通过 Arc 句柄读 Mutex 永远拿到当前代
 
 - **L2 现有测试不破坏**（运行时回归）：`cargo test -p acowork-runtime` 全过
 
@@ -396,6 +422,7 @@ let mut stream = Box::into_pin(stream);
   | 工具执行期间点 stop | tool handle abort，中止当前 iteration |
   | approval 等待期间点 stop | 立即从 approval wait 醒来，按 stop 处理 |
   | 用户点 stop 后又被 stop（重试 stop） | 单次取消生效，无重复副作用 |
+  | **用户在 stop 后发新消息（§4.5 回归场景）** | **正常响应**——`begin_new_request` 装入新 handle，旧 cancel 状态不污染后续 request |
   | 用户点 stop 但 LLM 当次已经返回了 chunk（race） | 当前 chunk 进入现有 chunk event 序列，下个 checkpoint 才退出 — 与当前行为一致 |
 
 ---
@@ -406,16 +433,16 @@ let mut stream = Box::into_pin(stream);
   - 进入 → 我开始 `cancellation/` 模块落代码，单测就位后再合并
   - 暂缓 → 本 ADR 草案保留，等出现更紧迫需求再做
 
-- **D2：`select_cancelled` 取消语义**：cancel 胜出时 drop 原 future（`chat_stream().await` 内部的 `reqwest.send().await` 被一同 drop，HTTP 请求中止），Runtime 立刻返回 `RuntimeError::Cancelled`。后台 reqwest task 可能短暂残留至 OS 关闭 socket，不影响用户感知
+- **D2：`select_on_cancel` 取消语义**：cancel 胜出时 drop 原 future（`chat_stream().await` 内部的 `reqwest.send().await` 被一同 drop，HTTP 请求中止），Runtime 立刻返回 `RuntimeError::Cancelled`。后台 reqwest task 可能短暂残留至 OS 关闭 socket，不影响用户感知
   - 推荐接受此语义。理由：(a) 不需要拆分 Provider trait，零侵入；(b) drop future 即中止 HTTP 请求，用户感知 stop 已生效；(c) reqwest task 残留几秒不影响用户感知
 
 - **D3：是否一次性迁移完毕（Phase 1-4 合并 PR）还是分 PR 落地？**
-  - 我倾向**分 3 个 PR**：PR1=Phase 1+2 基础设施（只引入不删旧）；PR2=Phase 3 接 MQTT 路径 + chat_stream select_cancelled 修主 bug；PR3=Phase 4 清理 urgent_stop / pending_interrupt 等旧字段（control_notify 保留）
+  - 我倾向**分 3 个 PR**：PR1=Phase 1+2 基础设施（只引入不删旧）；PR2=Phase 3 接 MQTT 路径 + chat_stream select_on_cancel 修主 bug；PR3=Phase 4 清理 urgent_stop / pending_interrupt 等旧字段（control_notify 保留）
   - 每个 PR 后端测试 + 你手动 Desktop stop 验证
 
-- **D4：是否同时给 DebugController 引入同一套 token？**
+- **D4：是否同时给 DebugController 引入同一套 handle？**
   - 当前 debug 路径独立有自己的 Notify，控制信号语义略有差别（Pause vs Stop vs Step）
-  - **推荐：不引入**。Pause 是 Debug 专属语义（可恢复），token 是二值不可逆的（Active->Cancelled），无法表达 Pause->Resume 循环。DebugController 继续独立管理 Pause/Resume，token 只管 Stop（用户取消）
+  - **推荐：不引入**。Pause 是 Debug 专属语义（可恢复），handle 是二值不可逆的（Active->Cancelled），无法表达 Pause->Resume 循环。DebugController 继续独立管理 Pause/Resume，handle 只管 Stop（用户取消）
 
 ---
 
@@ -450,7 +477,7 @@ let mut stream = Box::into_pin(stream);
 
 ### 7.1 风险
 
-- **R1**：`select_cancelled` 包裹 `chat_stream` 后，被取消时 reqwest task 还在后台跑，可能短暂占用 provider connection pool
+- **R1**：`select_on_cancel` 包裹 `chat_stream` 后，被取消时 reqwest task 还在后台跑，可能短暂占用 provider connection pool
   - 对策：未来独立任务中用 `tokio::time::timeout` 强 kill task（非本次范围）
 
 - **R2**：`pending_interrupt` 在 Phase 4 删除后，需确认 token 的 AtomicU8 持久状态已覆盖所有原 `pending_interrupt` 使用场景（`loop_approval.rs:156/295`、`loop_llm.rs:131/382/418`）。token 状态持久（不同于 Notify 的 edge-trigger），一旦 cancel 则 `is_cancelled()` 永远返回 true，天然解决信号吞没竞态
@@ -468,7 +495,7 @@ let mut stream = Box::into_pin(stream);
 
 ## 8. 不在范围
 
-- **Provider trait 的拆分**（`chat_stream` -> `chat_stream_request` + `chat_stream_sse_to_events`）- `select_cancelled` drop future 时已中止 HTTP 请求，拆分 trait 无额外收益且耦合 core 层到 reqwest（见 §4.4）
+- **Provider trait 的拆分**（`chat_stream` -> `chat_stream_request` + `chat_stream_sse_to_events`）- `select_on_cancel` drop future 时已中止 HTTP 请求，拆分 trait 无额外收益且耦合 core 层到 reqwest（见 §4.4）
 - **Provider 层的 abort handle 暴露**（未来独立任务，非本次范围）
 - **DebugController 的 Pause/Resume 迁移到 token** - Pause 是可恢复语义，token 是二值不可逆的，两者不兼容。DebugController 继续独立管理（见 §4.3）
 - **retry_sleep 取消**（reliable.rs:456 是另一段路径，与本次工单无关；当下次碰到 LLM 重试中 stop 才处理）
