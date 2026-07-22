@@ -494,6 +494,7 @@ message IterationLimitPausedPayload {
   string session_id = 1;
   uint32 iteration = 2;
   uint32 max_iterations = 3;
+  string message = 4;
 }
 
 message ToolApprovalNeededPayload {

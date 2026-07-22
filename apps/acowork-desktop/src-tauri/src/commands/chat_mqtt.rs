@@ -868,6 +868,7 @@ fn session_message_to_flat(
             m.insert("type".into(), serde_json::Value::String("iteration_limit_paused".into()));
             m.insert("iteration".into(), serde_json::json!(p.iteration));
             m.insert("max_iterations".into(), serde_json::json!(p.max_iterations));
+            m.insert("message".into(), serde_json::Value::String(p.message.clone()));
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::ToolApprovalNeeded(p) => {

@@ -76,12 +76,12 @@ export function DebugPausedBanner() {
     <div
       role="status"
       aria-live="polite"
-      className="mx-4 mt-1.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-amber-50/80 px-3 py-1.5 text-amber-900 select-none dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-100"
+      className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
       style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
     >
       <span className="flex shrink-0 items-center gap-1.5">
-        <Bug className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-        <Pause className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+        <Bug className="h-3.5 w-3.5 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
+        <Pause className="h-3 w-3 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
         <span className="text-xs font-medium">
           {stateLabel} in debug mode
         </span>
@@ -91,7 +91,7 @@ export function DebugPausedBanner() {
         <button
           type="button"
           onClick={handleResume}
-          className="flex items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:bg-amber-600"
+          className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
         >
           <Play className="h-3 w-3" fill="currentColor" />
           <span>{t("debugPausedBanner.resume")}</span>
@@ -100,7 +100,7 @@ export function DebugPausedBanner() {
         <button
           type="button"
           onClick={handleStep}
-          className="flex items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:bg-amber-600"
+          className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
         >
           <StepForward className="h-3 w-3" />
           <span>{t("debugPausedBanner.step")}</span>

@@ -79,7 +79,12 @@ pub enum ChunkEvent {
     /// so the frontend can clear the "compacting..." indicator.
     CompactingEnded,
     /// Iteration limit reached — agent loop paused
-    IterationLimitPaused { iteration: u32, max_iterations: u32 },
+    IterationLimitPaused {
+        iteration: u32,
+        max_iterations: u32,
+        /// Human-readable message (e.g. "Iteration limit reached (3/3). Click Continue to proceed.")
+        message: String,
+    },
     /// Tool execution requires user approval (shell command risk check).
     /// The Desktop App displays a confirmation dialog; the Runtime pauses
     /// until Gateway delivers an InboundMessage::ApprovalDecision.
@@ -785,9 +790,15 @@ impl AgentLoop {
                     max_iterations: Some(self.core.config.max_iterations),
                     retry_info: None,
                 });
+                let max_iters = self.core.config.max_iterations;
+                let message = format!(
+                    "Iteration limit reached ({}/{}). Click Continue to proceed.",
+                    iteration, max_iters
+                );
                 let _ = self.session_core.try_send_chunk(ChunkEvent::IterationLimitPaused {
                     iteration,
-                    max_iterations: self.core.config.max_iterations,
+                    max_iterations: max_iters,
+                    message,
                 });
 
                 // Wait for ContinueExecution or Interrupt from inbound queue

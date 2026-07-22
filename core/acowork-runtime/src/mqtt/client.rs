@@ -1105,6 +1105,7 @@ impl MqttChunkPublisher {
         session_id: &str,
         iteration: u32,
         max_iterations: u32,
+        message: String,
     ) {
         let sid = session_id.to_string();
         let agent_id = self.agent_id.clone();
@@ -1116,6 +1117,7 @@ impl MqttChunkPublisher {
                     session_id: sid.clone(),
                     iteration,
                     max_iterations,
+                    message,
                 },
             )),
         };

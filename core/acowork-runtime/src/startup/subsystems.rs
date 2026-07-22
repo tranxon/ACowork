@@ -180,9 +180,10 @@ async fn relay_chunk_event_mqtt(
         ChunkEvent::IterationLimitPaused {
             iteration,
             max_iterations,
+            message,
         } => {
             publisher
-                .publish_iteration_limit_paused(sid, iteration, max_iterations)
+                .publish_iteration_limit_paused(sid, iteration, max_iterations, message)
                 .await;
         }
 

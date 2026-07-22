@@ -1381,34 +1381,39 @@ export function ChatPanel() {
             {/* Debug paused banner — shown when the agent is in dev_mode and
                 the debugger is currently in Stepping/Paused state. Provides
                 F5 (resume) and F10 (step) actions directly from the chat. */}
-            <DebugPausedBanner />
+            <div className="mt-1.5 flex justify-center px-6">
+              <DebugPausedBanner />
+            </div>
             {/* 429 Retry wait banner — countdown + Skip Wait button, shown when
                 LLM provider returns 429 with Retry-After > 10s */}
-            <RetryWaitBanner />
+            <div className="mt-1.5 flex justify-center px-6">
+              <RetryWaitBanner />
+            </div>
             {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
-              <div className="flex flex-col items-start gap-1.5">
-                <span
-                  className="text-zinc-600 dark:text-zinc-400"
-                  style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
-                >
-                  {iterationLimitPaused.message}
-                </span>
-                <button
-                  onClick={() => {
-                    if (selectedAgentId) {
-                      session.scope.current.userJustSent = true;
-                      continueExecution(selectedAgentId);
-                    }
-                  }}
-                  className="flex w-fit max-w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-white transition-opacity hover:opacity-90"
-                  style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)", backgroundColor: "var(--color-accent)" }}
-                >
-                  <Play className="h-3.5 w-3.5" />
-                  <span>
-                    Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+              <div className="mt-1.5 flex justify-center px-6">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]">
+                  <span
+                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
+                  >
+                    {iterationLimitPaused.message}
                   </span>
-                </button>
+                  <button
+                    onClick={() => {
+                      if (selectedAgentId) {
+                        session.scope.current.userJustSent = true;
+                        continueExecution(selectedAgentId);
+                      }
+                    }}
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
+                  >
+                    <Play className="h-3 w-3" />
+                    <span>
+                      Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
+                    </span>
+                  </button>
+                </div>
               </div>
             )}
             {/* Ask question card — shown when LLM asks the user a question */}

@@ -94,9 +94,9 @@ export function RetryWaitBanner() {
     <div
       role="status"
       aria-live="polite"
-      className={`mx-4 mt-1.5 flex flex-wrap items-center gap-2 rounded-md border px-3 py-1.5 select-none ${
+      className={`inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border px-4 py-2 select-none ${
         isTimeoutMode
-          ? "border-indigo-200 bg-indigo-50/80 text-indigo-900 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-100"
+          ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)] dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
           : "border-orange-200 bg-orange-50/80 text-orange-900 dark:border-orange-900/50 dark:bg-orange-950/40 dark:text-orange-100"
       }`}
       style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
@@ -104,7 +104,7 @@ export function RetryWaitBanner() {
       <span className="flex shrink-0 items-center gap-1.5">
         <Clock className={`h-3.5 w-3.5 ${
           isTimeoutMode
-            ? "text-indigo-600 dark:text-indigo-400"
+            ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]"
             : "text-orange-600 dark:text-orange-400"
         }`} />
         <span className="text-xs font-medium">
@@ -118,7 +118,7 @@ export function RetryWaitBanner() {
 
       <span className={`hidden sm:inline text-[11px] ${
         isTimeoutMode
-          ? "text-indigo-600/70 dark:text-indigo-400/70"
+          ? "text-[var(--color-accent)]/70 dark:text-[var(--color-accent)]/70"
           : "text-orange-600/70 dark:text-orange-400/70"
       }`}>
         {retryWaitInfo.provider}
@@ -128,13 +128,13 @@ export function RetryWaitBanner() {
         {/* Countdown progress bar */}
         <div className={`hidden sm:block h-1.5 w-16 rounded-full ${
           isTimeoutMode
-            ? "bg-indigo-200 dark:bg-indigo-800/50"
+            ? "bg-[var(--color-accent)]/30 dark:bg-[var(--color-accent)]/30"
             : "bg-orange-200 dark:bg-orange-800/50"
         }`}>
           <div
             className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${
               isTimeoutMode
-                ? "bg-indigo-500"
+                ? "bg-[var(--color-accent)]"
                 : "bg-orange-500"
             }`}
             style={{
@@ -148,7 +148,7 @@ export function RetryWaitBanner() {
           onClick={handleSkip}
           className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-white transition-colors ${
             isTimeoutMode
-              ? "bg-indigo-500 hover:bg-indigo-600"
+              ? "bg-[var(--color-accent)] hover:brightness-90"
               : "bg-orange-500 hover:bg-orange-600"
           }`}
         >
