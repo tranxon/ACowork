@@ -435,7 +435,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         &config.agent_id,
         config.timeouts.tool_http_timeout_ms,
         has_search_providers,
-        None,
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),

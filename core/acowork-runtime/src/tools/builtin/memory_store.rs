@@ -8,11 +8,12 @@
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use acowork_grafeo::consolidation::MemoryStoreInput;
-use acowork_grafeo::grafeo::GrafeoStore;
 use acowork_grafeo::types::KnowledgeSubType;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
+
+use crate::memory::MemorySessionHandle;
 
 /// Default confidence when LLM does not provide one.
 const DEFAULT_CONFIDENCE: f32 = 0.7;
@@ -25,15 +26,18 @@ const DEFAULT_CONFIDENCE: f32 = 0.7;
 pub struct MemoryStoreTool {
     /// Agent ID (namespace for memory isolation)
     agent_id: String,
-    /// Grafeo memory store backend (may be None before initialization).
-    store: Option<Arc<GrafeoStore>>,
+    /// Memory session handle providing shared access to the Grafeo store.
+    /// Uses late-binding via RwLock — the store may be initialized after
+    /// tool construction (see `MemorySessionHandle::set_store`).
+    /// `None` when no Grafeo store is available (degraded mode).
+    handle: Option<Arc<MemorySessionHandle>>,
 }
 
 impl MemoryStoreTool {
-    pub fn new(agent_id: &str, store: Option<Arc<GrafeoStore>>) -> Self {
+    pub fn new(agent_id: &str, handle: Option<Arc<MemorySessionHandle>>) -> Self {
         Self {
             agent_id: agent_id.to_string(),
-            store,
+            handle,
         }
     }
 
@@ -156,8 +160,12 @@ impl Tool for MemoryStoreTool {
             })
         });
 
-        // --- Call GrafeoStore pipeline if available ---
-        match &self.store {
+        // --- Resolve GrafeoStore via late-binding handle ---
+        // The store may be None if AgentCore::init_memory_store hasn't
+        // completed yet (Phase B of startup). We fall back to a fake
+        // confirmation in that case.
+        let store = self.handle.as_ref().and_then(|h| h.store());
+        match store {
             Some(store) => {
                 let category_display = sub_type.as_str();
                 let input = MemoryStoreInput {

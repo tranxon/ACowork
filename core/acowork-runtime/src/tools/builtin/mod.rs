@@ -45,7 +45,6 @@ pub mod web_fetch;
 pub mod web_search;
 
 use acowork_core::tools::traits::Tool;
-use acowork_grafeo::grafeo::GrafeoStore;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,8 +65,7 @@ use search_backends::WebSearchEngine;
 /// * `has_search_providers` - Whether at least one search provider is configured.
 ///   When false, the `web_search` tool is skipped to avoid wasting LLM calls on
 ///   a tool that always returns "Provider not configured".
-/// * `grafeo_store` - Optional GrafeoStore for memory_store backend wiring.
-/// * `memory_session` - Optional MemorySessionHandle for memory_recall session-aware retrieval.
+/// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
@@ -78,7 +76,6 @@ pub fn all_builtin_tools(
     agent_id: &str,
     tool_http_timeout_ms: u64,
     has_search_providers: bool,
-    grafeo_store: Option<Arc<GrafeoStore>>,
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
@@ -99,12 +96,16 @@ pub fn all_builtin_tools(
         })
         .collect();
 
+    // Clone memory_session for MemoryStoreTool before the first use
+    // (MemoryRecallTool takes ownership of the original).
+    let memory_session_for_store = memory_session.clone();
+
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(memory_recall::MemoryRecallTool::new(
             agent_id,
             memory_session,
         )),
-        Arc::new(memory_store::MemoryStoreTool::new(agent_id, grafeo_store)),
+        Arc::new(memory_store::MemoryStoreTool::new(agent_id, memory_session_for_store)),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::with_timeout(
             Duration::from_millis(tool_http_timeout_ms),
