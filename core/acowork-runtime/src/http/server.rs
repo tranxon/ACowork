@@ -3249,7 +3249,7 @@ mod tests {
         // mimeType.
         use base64::Engine;
         let tiny_jpg_bytes: [u8; 4] = [0xFF, 0xD8, 0xFF, 0xE0]; // JPEG SOI marker, minimal header
-        std::fs::write(ws_dir.join("assets").join("1.jpg"), &tiny_jpg_bytes).unwrap();
+        std::fs::write(ws_dir.join("assets").join("1.jpg"), tiny_jpg_bytes).unwrap();
 
         let resp = client
             .get(format!(
