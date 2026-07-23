@@ -12,7 +12,10 @@ import {
   DEFAULT_GATEWAY_MODE,
   DEFAULT_LOG_FILE_SIZE_MB,
   DEFAULT_LOG_FILE_COUNT,
+  DEFAULT_FRONTEND_LOG_LEVEL,
 } from "../lib/defaults";
+import { setLevel as setLoggerLevel, type LogLevel } from "../lib/logger";
+import { log } from "../lib/logger";
 
 /**
  * Push the current gateway config to the Rust backend so that:
@@ -31,7 +34,7 @@ async function pushGatewayConfigToRust(mode: GatewayMode, url: string): Promise<
       config: { mode, url },
     });
   } catch (err) {
-    console.warn("Failed to push gateway config to Rust:", err);
+    log.warn("Failed to push gateway config to Rust:", err);
   }
 }
 
@@ -45,6 +48,7 @@ const STORAGE_KEY_GATEWAY_URL = "acowork-gateway-url";
 const STORAGE_KEY_GATEWAY_MODE = "acowork-gateway-mode";
 const STORAGE_KEY_LOG_FILE_SIZE = "acowork-log-file-size";
 const STORAGE_KEY_LOG_FILE_COUNT = "acowork-log-file-count";
+const STORAGE_KEY_FRONTEND_LOG_LEVEL = "acowork-frontend-log-level";
 
 /** Read current OS theme preference from matchMedia */
 function readOsTheme(): "light" | "dark" {
@@ -182,6 +186,17 @@ function getPersistedLogFileCount(): number {
   return DEFAULT_LOG_FILE_COUNT;
 }
 
+/** Read persisted frontend log level from localStorage, fallback to "warn".
+ * Valid values: trace, debug, info, warn, error, off */
+function getPersistedFrontendLogLevel(): LogLevel {
+  const valid: LogLevel[] = ["trace", "debug", "info", "warn", "error", "off"];
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_FRONTEND_LOG_LEVEL);
+    if (stored && valid.includes(stored as LogLevel)) return stored as LogLevel;
+  } catch { }
+  return DEFAULT_FRONTEND_LOG_LEVEL;
+}
+
 /** Read persisted opacity from localStorage, fallback to 1.0 (opaque) */
 function getPersistedOpacity(): number {
   try {
@@ -206,6 +221,7 @@ interface SettingsStore {
   logLevel: string;
   logFileSizeMb: number;
   logFileCount: number;
+  frontendLogLevel: LogLevel;
   setTheme: (theme: Theme) => void;
   setFontSize: (size: number) => void;
   setContentWidth: (width: number) => void;
@@ -216,6 +232,7 @@ interface SettingsStore {
   setLogLevel: (level: string) => void;
   setLogFileSizeMb: (size: number) => void;
   setLogFileCount: (count: number) => void;
+  setFrontendLogLevel: (level: LogLevel) => void;
 }
 
 export const useSettingsStore = create<SettingsStore>((set, get) => {
@@ -224,6 +241,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   const initialOsTheme = readOsTheme();
   const initialFontSize = getPersistedFontSize();
   const initialLogLevel = getPersistedLogLevel();
+  const initialFrontendLogLevel = getPersistedFrontendLogLevel();
   const initialOpacity = getPersistedOpacity();
   const initialContentWidth = getPersistedContentWidth();
   const initialAccentColor = getPersistedAccentColor();
@@ -232,6 +250,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   applyOpacity(initialOpacity);
   applyContentWidth(initialContentWidth);
   applyAccentColor(initialAccentColor);
+  // Sync logger module level with persisted setting on startup
+  setLoggerLevel(initialFrontendLogLevel);
 
   // Subscribe to OS theme changes so theme="system" stays in sync.
   // Without this listener the .dark class on <html> is frozen at app
@@ -273,6 +293,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     logLevel: initialLogLevel,
     logFileSizeMb: getPersistedLogFileSizeMb(),
     logFileCount: getPersistedLogFileCount(),
+    frontendLogLevel: initialFrontendLogLevel,
 
     setTheme: (theme) => {
       const osTheme = get().osTheme;
@@ -330,6 +351,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     setLogFileCount: (logFileCount) => {
       try { localStorage.setItem(STORAGE_KEY_LOG_FILE_COUNT, String(logFileCount)); } catch { }
       set({ logFileCount });
+    },
+    setFrontendLogLevel: (frontendLogLevel) => {
+      try { localStorage.setItem(STORAGE_KEY_FRONTEND_LOG_LEVEL, frontendLogLevel); } catch { }
+      setLoggerLevel(frontendLogLevel);
+      set({ frontendLogLevel });
     },
   };
 });

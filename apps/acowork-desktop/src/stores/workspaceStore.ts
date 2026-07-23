@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
 import { useChatStore } from "./chatStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
+import { log } from "../lib/logger";
 
 /** Single workspace directory entry — matches Gateway API response */
 interface WorkspaceDir {
@@ -184,7 +185,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const baseUrl = getGatewayUrl();
       const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces`);
       if (!resp.ok) {
-        console.error("[WorkspaceStore] fetchWorkspaces failed:", resp.status, resp.statusText);
+        log.error("[WorkspaceStore] fetchWorkspaces failed:", resp.status, resp.statusText);
         set({ loading: false });
         return;
       }
@@ -197,14 +198,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         loading: false,
       });
     } catch (e) {
-      console.error("[WorkspaceStore] fetchWorkspaces error:", e);
+      log.error("[WorkspaceStore] fetchWorkspaces error:", e);
       if (seq !== requestSeq) return;
       set({ loading: false });
     }
   },
 
   setSessionWorkspace: async (agentId: string, sessionId: string, workspaceId: string) => {
-    console.log("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });
+    log.debug("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });
     const seq = ++requestSeq;
     const prevWorkspaces = get().workspaces;
     const prevMap = { ...get().sessionWorkspaceMap };
@@ -220,7 +221,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         },
       });
     } catch (e) {
-      console.error("[WorkspaceStore] setSessionWorkspace error:", e);
+      log.error("[WorkspaceStore] setSessionWorkspace error:", e);
       if (seq !== requestSeq) return;
       set({ workspaces: prevWorkspaces, sessionWorkspaceMap: prevMap });
     }
@@ -231,7 +232,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // Legacy wrapper: resolve active session ID and delegate to setSessionWorkspace
     const activeSessionId = useChatStore.getState().getActiveSessionId(agentId);
     if (!activeSessionId) {
-      console.warn("[WorkspaceStore] setCurrentWorkspace: no active session for agent", agentId);
+      log.warn("[WorkspaceStore] setCurrentWorkspace: no active session for agent", agentId);
       return;
     }
     return get().setSessionWorkspace(agentId, activeSessionId, workspaceId);
@@ -291,7 +292,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const url = `${baseUrl}/api/agents/${agentId}/workspaces/tree${qs ? `?${qs}` : ""}`;
       const resp = await fetch(url);
       if (!resp.ok) {
-        console.error("[WorkspaceStore] fetchTree failed:", resp.status, resp.statusText);
+        log.error("[WorkspaceStore] fetchTree failed:", resp.status, resp.statusText);
         return null;
       }
       const data = (await resp.json()) as TreeResponse;
@@ -307,7 +308,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }));
       return data.entries;
     } catch (e) {
-      console.error("[WorkspaceStore] fetchTree error:", e);
+      log.error("[WorkspaceStore] fetchTree error:", e);
       set((state) => {
         const next = new Set(state.treeLoadingPaths);
         next.delete(cacheKey);
@@ -347,7 +348,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         // 404 = agent not running. Treat as no results so the UI stays
         // quiet instead of logging a misleading error.
         if (resp.status === 404) return null;
-        console.error("[WorkspaceStore] findFiles failed:", resp.status, resp.statusText);
+        log.error("[WorkspaceStore] findFiles failed:", resp.status, resp.statusText);
         return null;
       }
       return (await resp.json()) as FileFindResponse;
@@ -355,7 +356,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // AbortError is expected when the caller cancels an in-flight
       // request (e.g. user kept typing); don't log it as an error.
       if (e instanceof DOMException && e.name === "AbortError") return null;
-      console.error("[WorkspaceStore] findFiles error:", e);
+      log.error("[WorkspaceStore] findFiles error:", e);
       return null;
     }
   },
@@ -405,12 +406,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] createFile failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] createFile failed:", resp.status, resp.statusText, body);
         return false;
       }
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] createFile error:", e);
+      log.error("[WorkspaceStore] createFile error:", e);
       return false;
     }
   },
@@ -430,12 +431,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] createDir failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] createDir failed:", resp.status, resp.statusText, body);
         return false;
       }
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] createDir error:", e);
+      log.error("[WorkspaceStore] createDir error:", e);
       return false;
     }
   },
@@ -455,12 +456,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] deleteFile failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] deleteFile failed:", resp.status, resp.statusText, body);
         return false;
       }
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] deleteFile error:", e);
+      log.error("[WorkspaceStore] deleteFile error:", e);
       return false;
     }
   },
@@ -480,12 +481,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] deleteDir failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] deleteDir failed:", resp.status, resp.statusText, body);
         return false;
       }
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] deleteDir error:", e);
+      log.error("[WorkspaceStore] deleteDir error:", e);
       return false;
     }
   },
@@ -505,12 +506,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] copyItem failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] copyItem failed:", resp.status, resp.statusText, body);
         return false;
       }
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] copyItem error:", e);
+      log.error("[WorkspaceStore] copyItem error:", e);
       return false;
     }
   },
@@ -531,7 +532,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => "<unreadable>");
-        console.error("[WorkspaceStore] setPromptFile failed:", resp.status, resp.statusText, body);
+        log.error("[WorkspaceStore] setPromptFile failed:", resp.status, resp.statusText, body);
         return false;
       }
       // Update the local workspace state
@@ -541,7 +542,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }));
       return true;
     } catch (e) {
-      console.error("[WorkspaceStore] setPromptFile error:", e);
+      log.error("[WorkspaceStore] setPromptFile error:", e);
       return false;
     }
   },

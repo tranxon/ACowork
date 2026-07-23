@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
+import { log } from "../lib/logger";
 
 /**
  * Check if a string looks like a valid HTTP/HTTPS URL.
@@ -219,7 +220,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             const url = buildFileUrl(agentId, workspaceId, relPath);
             const resp = await fetch(url);
             if (!resp.ok) {
-                console.error("[FileEditorStore] read_file failed:", resp.status);
+                log.error("[FileEditorStore] read_file failed:", resp.status);
                 // Remove the file on error
                 set((state) => ({
                     openFiles: state.openFiles.filter((f) => f.id !== fileId),
@@ -236,7 +237,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 ),
             }));
         } catch (e) {
-            console.error("[FileEditorStore] openFile error:", e);
+            log.error("[FileEditorStore] openFile error:", e);
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId ? { ...f, loading: false } : f,
@@ -288,7 +289,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             const url = buildFileUrl(agentId, workspaceId, relPath);
             const resp = await fetch(url);
             if (!resp.ok) {
-                console.error("[FileEditorStore] openPreview read failed:", resp.status);
+                log.error("[FileEditorStore] openPreview read failed:", resp.status);
                 set((state) => ({
                     openFiles: state.openFiles.filter((f) => f.id !== fileId),
                     activeFileId: state.activeFileId === fileId ? null : state.activeFileId,
@@ -304,7 +305,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 ),
             }));
         } catch (e) {
-            console.error("[FileEditorStore] openPreview error:", e);
+            log.error("[FileEditorStore] openPreview error:", e);
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId ? { ...f, loading: false } : f,
@@ -415,7 +416,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 body: JSON.stringify({ content: file.content }),
             });
             if (!resp.ok) {
-                console.error("[FileEditorStore] saveFile failed:", resp.status);
+                log.error("[FileEditorStore] saveFile failed:", resp.status);
                 return;
             }
             set((state) => ({
@@ -426,7 +427,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 ),
             }));
         } catch (e) {
-            console.error("[FileEditorStore] saveFile error:", e);
+            log.error("[FileEditorStore] saveFile error:", e);
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId ? { ...f, saving: false } : f,
@@ -454,7 +455,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             const url = buildFileUrl(file.agentId, file.workspaceId, file.relPath);
             const resp = await fetch(url);
             if (!resp.ok) {
-                console.error("[FileEditorStore] refreshFile failed:", resp.status);
+                log.error("[FileEditorStore] refreshFile failed:", resp.status);
                 set((state) => ({
                     openFiles: state.openFiles.map((f) =>
                         f.id === fileId ? { ...f, loading: false } : f,
@@ -479,7 +480,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 ),
             }));
         } catch (e) {
-            console.error("[FileEditorStore] refreshFile error:", e);
+            log.error("[FileEditorStore] refreshFile error:", e);
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId ? { ...f, loading: false } : f,
@@ -498,7 +499,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
     openUrl: (agentId: string, url: string) => {
         const normalized = normalizeUrl(url);
         if (!normalized) {
-            console.warn("[FileEditorStore] openUrl — skipping invalid URL:", url);
+            log.warn("[FileEditorStore] openUrl — skipping invalid URL:", url);
             return;
         }
 

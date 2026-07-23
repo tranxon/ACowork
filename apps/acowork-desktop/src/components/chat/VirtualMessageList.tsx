@@ -7,6 +7,7 @@ import { MessageBubble } from "./MessageBubble";
 import type { MessageBlock } from "./messageFolder";
 import type { ChatListAdapter } from "./useChatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
+import { log } from "../../lib/logger";
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
@@ -449,7 +450,7 @@ export const VirtualMessageList = React.forwardRef<
       messageBlocks.some((b) => b.blockId === prevFirstBlockIdRef.current);
 
     // Diagnostic: log EVERY run
-    console.log('[VML:scrollDelta]', {
+    log.debug('[VML:scrollDelta]', {
       wasPrepend,
       prevFirstId: prevFirstBlockIdRef.current?.slice(0, 20),
       currFirstId: currentFirstBlockId?.slice(0, 20),
@@ -467,9 +468,9 @@ export const VirtualMessageList = React.forwardRef<
       const delta = container.scrollHeight - prevScrollHeightRef.current;
       if (delta > 0) {
         container.scrollTop += delta;
-        console.log('[VML:scrollDelta] ADJUSTED scrollTop to', container.scrollTop);
+        log.debug('[VML:scrollDelta] ADJUSTED scrollTop to', container.scrollTop);
       } else {
-        console.log('[VML:scrollDelta] delta <= 0, no adjustment');
+        log.debug('[VML:scrollDelta] delta <= 0, no adjustment');
       }
     }
 

@@ -19,6 +19,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { DEFAULT_GATEWAY_URL } from "../../lib/config";
 import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
+import { log } from "../../lib/logger";
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -155,7 +156,7 @@ export function GlobalSearchPanel({
             clearTimeout(timeoutId);
 
             if (!resp.ok) {
-                console.error("[GlobalSearch] search failed:", resp.status);
+                log.error("[GlobalSearch] search failed:", resp.status);
                 setMatches([]);
                 setTotalMatches(0);
                 setSearched(true);
@@ -171,10 +172,10 @@ export function GlobalSearchPanel({
             setError(null);
         } catch (e: any) {
             if (e?.name === "AbortError") {
-                console.log("[GlobalSearch] search aborted (timeout or new query)");
+                log.debug("[GlobalSearch] search aborted (timeout or new query)");
                 setError("Search timed out — try a more specific query or file filter");
             } else {
-                console.error("[GlobalSearch] search error:", e);
+                log.error("[GlobalSearch] search error:", e);
                 setError("Search failed — check Gateway connection");
             }
             setMatches([]);

@@ -26,6 +26,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import type { MonacoLanguageClient } from "monaco-languageclient";
+import { log } from "../../lib/logger";
 
 /** A single LSP workspace/symbol result, normalized for display. */
 interface LspSymbolResult {
@@ -266,7 +267,7 @@ export function SymbolSearchPanel({
                 setUnsupported(true);
                 setError(null);
             } else {
-                console.error("[SymbolSearch] error:", e);
+                log.error("[SymbolSearch] error:", e);
                 setError(`Symbol search failed: ${msg || String(e)}`);
             }
             setResults([]);

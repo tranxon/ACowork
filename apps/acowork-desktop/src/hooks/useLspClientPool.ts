@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MonacoLanguageClient } from "monaco-languageclient";
 import { type LspStatus } from "../lib/lspUtils";
+import { log } from "../lib/logger";
 import {
     LspConnection,
     type LspConnectParams,
@@ -87,7 +88,7 @@ class LspPoolManager {
     scheduleEviction(language: string, graceMs: number): void {
         if (this._evictionTimers.has(language)) return;
 
-        console.log(
+        log.debug(
             "[LSP] pool schedule disconnect —",
             language,
             `${graceMs / 1000}s`,
@@ -108,7 +109,7 @@ class LspPoolManager {
 
         const conn = this._connections.get(language);
         if (conn) {
-            console.log("[LSP] pool evict —", language);
+            log.debug("[LSP] pool evict —", language);
             conn.disconnect();
             this._connections.delete(language);
         }
@@ -229,7 +230,7 @@ export function useLspClientPool(
     // ── teardown on unmount ────────────────────────────────────────────
     useEffect(() => {
         return () => {
-            console.log("[LSP] pool unmount — tearing down all clients");
+            log.debug("[LSP] pool unmount — tearing down all clients");
             pool.evictAll();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps

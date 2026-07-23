@@ -21,6 +21,7 @@ import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
+import { log } from "../../lib/logger";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
@@ -241,7 +242,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/status`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data) console.debug("[ResultsPanel] Agent status:", data);
+        if (data) log.debug("[ResultsPanel] Agent status:", data);
       })
       .catch(() => {/* ignore */});
   }, [selectedAgentId, selectedAgent?.running, selectedAgent?.ready]);
@@ -339,7 +340,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     <>
                       <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
                       <ControlButton
-                        onClick={() => reExecute(activeSessionId).catch(console.error)}
+                        onClick={() => reExecute(activeSessionId).catch(log.error)}
                         title={t("resultsPanel.buttonReExecute")}
                         active
                       >
@@ -391,13 +392,13 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     onSaveEdit={(section, content) => {
                       const patches: Record<string, unknown> = {};
                       patches[section] = content;
-                      patchContext(activeSessionId, patches).catch(console.error);
+                      patchContext(activeSessionId, patches).catch(log.error);
                       setEditingSection(null);
                     }}
                     onEditChange={(content) =>
                       setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
                     }
-                    onRewind={(iter) => rewind(activeSessionId, iter).catch(console.error)}
+                    onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
                     getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
                   />
                 ))}

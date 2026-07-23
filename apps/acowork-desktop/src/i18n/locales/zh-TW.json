@@ -157,6 +157,7 @@
     "inputParamsConnecting": "輸入參數...（正在連線至 Agent...）",
     "selectReasoningEffort": "思考深度",
     "llmNotConfigured": "未設定 LLM 服務商。請在 Harness → 模型服務商 中新增 API 金鑰。",
+    "thinking": "正在思考...",
     "replying": "正在回覆...",
     "working": "正在處理...",
     "compacting": "上下文壓縮中...",
@@ -321,6 +322,8 @@
     "reset": "重設",
     "logSetup": "日誌設定",
     "logLevel": "日誌層級",
+    "frontendLogLevel": "前端日誌層級",
+    "frontendLogLevelHint": "控制 DevTools 控制台輸出。日常使用推薦 'warn'。",
     "logFileSize": "日誌檔案大小（MB）",
     "logFileSizeHint": "0 = 停用分割。檔案命名為 YYYYMMDD_HHMMSS.log",
     "noSplit": "不分割",
@@ -767,6 +770,7 @@
     "running_other": "{{count}} 個執行中"
   },
   "thinkBlock": {
+    "thinking": "正在思考",
     "thought": "深度思考",
     "showingLatest": "僅顯示最新內容"
   },

@@ -72,6 +72,7 @@
     "selectReasoningEffort": "Reasoning effort",
     "startAgent": "Start Agent",
     "llmNotConfigured": "No LLM provider configured. Please add an API key in Harness → Providers.",
+    "thinking": "Thinking...",
     "replying": "Replying...",
     "working": "working ...",
     "compacting": "Context compacting...",
@@ -426,6 +427,8 @@
     "reset": "Reset",
     "logSetup": "Log setup",
     "logLevel": "Log Level",
+    "frontendLogLevel": "Frontend Log Level",
+    "frontendLogLevelHint": "Controls console output in DevTools. 'warn' is recommended.",
     "logFileSize": "Log File Size (MB)",
     "logFileSizeHint": "0 = disable split. Files named as YYYYMMDD_HHMMSS.log",
     "noSplit": "No split",
@@ -843,6 +846,7 @@
     "running_other": "{{count}} running"
   },
   "thinkBlock": {
+    "thinking": "Thinking",
     "thought": "Thought",
     "showingLatest": "Showing latest"
   },

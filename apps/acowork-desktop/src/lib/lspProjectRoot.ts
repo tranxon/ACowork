@@ -14,6 +14,7 @@
  */
 
 import { getLspRelayUrl } from "./gateway-api";
+import { log } from "./logger";
 
 /**
  * Discover the language-specific project root for a given file.
@@ -36,7 +37,7 @@ export async function discoverProjectRoot(
 ): Promise<string> {
     const relayUrl = await getLspRelayUrl();
     if (!relayUrl) {
-        console.warn("[LSP] project root discovery unavailable — relay not reachable, using workspace root");
+        log.warn("[LSP] project root discovery unavailable — relay not reachable, using workspace root");
         return workspaceRoot;
     }
 
@@ -52,14 +53,14 @@ export async function discoverProjectRoot(
         });
 
         if (!resp.ok) {
-            console.warn(`[LSP] project root discovery returned ${resp.status}, fallback to workspace root`);
+            log.warn(`[LSP] project root discovery returned ${resp.status}, fallback to workspace root`);
             return workspaceRoot;
         }
 
         const data = await resp.json();
         return data.project_root;
     } catch (err) {
-        console.warn("[LSP] project root discovery failed —", err, ", fallback to workspace root");
+        log.warn("[LSP] project root discovery failed —", err, ", fallback to workspace root");
         return workspaceRoot;
     }
 }

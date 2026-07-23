@@ -851,6 +851,14 @@ export interface ActiveStream {
   role: "thought" | "assistant";
   lines: StreamLine[];
   prevMessageId: string | null;
+  /** Incrementally built content string.  Appended to on every stream_delta
+   *  in O(1) per line, replacing the previous O(N) `lines.map().join()`
+   *  per delta (which was O(N²) over a full stream and caused severe V8
+   *  heap expansion during long assistant replies).
+   *
+   *  Rebuilt from scratch only on truncation (thought 5-line cap or
+   *  assistant 10k safety valve), which is rare and bounded. */
+  contentBuilder: string;
 }
 
 /**

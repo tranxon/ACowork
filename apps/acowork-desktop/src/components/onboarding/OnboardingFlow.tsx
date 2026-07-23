@@ -16,6 +16,7 @@ import { ErrorBox } from "../common/ErrorBox";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ModelMultiSelect } from "../harness/ModelMultiSelect";
 import brandMark from "../../../../../assets/brand-mark.svg";
+import { log } from "../../lib/logger";
 
 const TOTAL_STEPS = 5;
 
@@ -100,7 +101,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
         city: state.city.trim() || undefined,
         occupation: state.occupation.trim() || undefined,
       }).catch((err) => {
-        console.warn("Failed to create user profile during onboarding:", err);
+        log.warn("Failed to create user profile during onboarding:", err);
       });
       // Sync the display name to the local profile store so the avatar
       // picker in ProfileTab immediately shows the name just entered.

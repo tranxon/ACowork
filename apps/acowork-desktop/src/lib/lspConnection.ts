@@ -27,6 +27,7 @@ import {
     toLspLanguageId,
 } from "./lspUtils";
 import { discoverProjectRoot } from "./lspProjectRoot";
+import { log } from "./logger";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -254,7 +255,7 @@ export class LspConnection {
                     language,
                     workspaceRoot,
                 );
-                console.log(
+                log.debug(
                     "[LSP] LspConnection project root —",
                     language,
                     "workspace:",
@@ -264,7 +265,7 @@ export class LspConnection {
                 );
             }
         } catch (err) {
-            console.warn(
+            log.warn(
                 "[LSP] LspConnection project root discovery failed —",
                 language,
                 err,
@@ -279,21 +280,21 @@ export class LspConnection {
             wsUrl = await buildLspWsUrl(language, projectRoot);
         } catch (err) {
             if (signal.aborted) return;
-            console.error("[LSP] LspConnection buildLspWsUrl failed —", language, err);
+            log.error("[LSP] LspConnection buildLspWsUrl failed —", language, err);
             this._setStatus(
                 "error",
                 formatLspError(language, `LSP relay unavailable: ${err}`),
             );
             return;
         }
-        console.log("[LSP] LspConnection connecting —", language, "url:", wsUrl);
+        log.debug("[LSP] LspConnection connecting —", language, "url:", wsUrl);
 
         let ws: WebSocket;
         try {
             ws = new WebSocket(wsUrl);
         } catch (err) {
             if (signal.aborted) return;
-            console.error("[LSP] LspConnection ws ctor failed —", language, err);
+            log.error("[LSP] LspConnection ws ctor failed —", language, err);
             this._setStatus(
                 "error",
                 formatLspError(language, `Failed to connect: ${err}`),
@@ -307,7 +308,7 @@ export class LspConnection {
             await this._waitForOpen(ws, signal);
         } catch (err) {
             if (signal.aborted) return;
-            console.error("[LSP] LspConnection ws open failed —", language, err);
+            log.error("[LSP] LspConnection ws open failed —", language, err);
             this._setStatus(
                 "error",
                 formatLspError(language, String(err)),
@@ -317,7 +318,7 @@ export class LspConnection {
         if (signal.aborted) return;
 
         const t1 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection ws opened —",
             language,
             `elapsed: ${Math.round(t1 - t0)}ms`,
@@ -328,7 +329,7 @@ export class LspConnection {
             await ensureVscodeApiInitialized();
         } catch (err) {
             if (signal.aborted) return;
-            console.error("[LSP] LspConnection VS Code API init failed —", language, err);
+            log.error("[LSP] LspConnection VS Code API init failed —", language, err);
             this._setStatus(
                 "error",
                 formatLspError(language, `VS Code API init failed: ${err}`),
@@ -338,7 +339,7 @@ export class LspConnection {
         if (signal.aborted) return;
 
         const t2 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection vscode api ready —",
             language,
             `elapsed: ${Math.round(t2 - t1)}ms`,
@@ -382,7 +383,7 @@ export class LspConnection {
         };
 
         const t3 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection transports ready —",
             language,
             `elapsed: ${Math.round(t3 - t2)}ms`,
@@ -396,7 +397,7 @@ export class LspConnection {
         });
 
         const t4 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection MonacoLanguageClient created —",
             language,
             `elapsed: ${Math.round(t4 - t3)}ms`,
@@ -404,7 +405,7 @@ export class LspConnection {
 
         // Wire state-change listener
         lspClient.onDidChangeState((e) => {
-            console.log(
+            log.debug(
                 "[LSP] LspConnection client state —",
                 language,
                 State[e.oldState],
@@ -419,7 +420,7 @@ export class LspConnection {
         // Post-open ws handlers
         ws.onclose = (e) => {
             if (this._cancelled()) return;
-            console.warn(
+            log.warn(
                 "[LSP] LspConnection ws closed after open —",
                 language,
                 "code:",
@@ -447,7 +448,7 @@ export class LspConnection {
         };
         ws.onerror = (ev) => {
             if (!this._cancelled()) {
-                console.error(
+                log.error(
                     "[LSP] LspConnection ws error after open —",
                     language,
                     ev,
@@ -456,7 +457,7 @@ export class LspConnection {
         };
 
         // 9. Start handshake (with timeout + retry for shutdown races)
-        console.log("[LSP] LspConnection calling lspClient.start() —", language);
+        log.debug("[LSP] LspConnection calling lspClient.start() —", language);
 
         let attempt = 0;
         let startResult: "ok" | "timeout";
@@ -485,7 +486,7 @@ export class LspConnection {
                     msg.includes("Shutdown already requested") &&
                     attempt < 5
                 ) {
-                    console.warn(
+                    log.warn(
                         "[LSP] LspConnection start retry —",
                         language,
                         "attempt",
@@ -503,7 +504,7 @@ export class LspConnection {
         if (signal.aborted) return;
 
         if (startResult === "timeout") {
-            console.error(
+            log.error(
                 "[LSP] LspConnection start timeout —",
                 language,
                 `total elapsed: ${Math.round(performance.now() - t0)}ms`,
@@ -525,7 +526,7 @@ export class LspConnection {
         }
 
         const t5 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection client started —",
             language,
             `start() elapsed: ${Math.round(t5 - t4)}ms`,
@@ -551,7 +552,7 @@ export class LspConnection {
                         },
                     });
                 } catch (err) {
-                    console.warn(
+                    log.warn(
                         "[LSP] LspConnection manual didOpen failed —",
                         language,
                         err,
@@ -559,7 +560,7 @@ export class LspConnection {
                 }
             }
         } catch (err) {
-            console.warn(
+            log.warn(
                 "[LSP] LspConnection monaco import failed —",
                 language,
                 err,
@@ -584,12 +585,12 @@ export class LspConnection {
                     },
                 },
             );
-            console.log(
+            log.debug(
                 "[LSP] LspConnection sent workspace/didChangeConfiguration —",
                 language,
             );
         } catch (err) {
-            console.warn(
+            log.warn(
                 "[LSP] LspConnection didChangeConfiguration failed —",
                 language,
                 err,
@@ -602,7 +603,7 @@ export class LspConnection {
         this._setStatus("connected", language);
 
         const t6 = performance.now();
-        console.log(
+        log.debug(
             "[LSP] LspConnection handshake complete —",
             language,
             `didOpen+publish elapsed: ${Math.round(t6 - t5)}ms`,
@@ -628,7 +629,7 @@ export class LspConnection {
         );
 
         lspClient.onNotification("$/progress" as any, (p: any) => {
-            console.log(
+            log.debug(
                 "[LSP] $/progress received —",
                 p?.value?.kind,
                 p?.value?.title || "",

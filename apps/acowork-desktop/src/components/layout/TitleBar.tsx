@@ -1,5 +1,6 @@
 import { Minus, Square, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { log } from "../../lib/logger";
 
 export function TitleBar() {
   const isMacOS = navigator.platform.includes("Mac");
@@ -9,7 +10,7 @@ export function TitleBar() {
     try {
       await win.minimize();
     } catch (error) {
-      console.error("Failed to minimize:", error);
+      log.error("Failed to minimize:", error);
     }
   };
 
@@ -17,7 +18,7 @@ export function TitleBar() {
     try {
       await win.toggleMaximize();
     } catch (error) {
-      console.error("Failed to toggle maximize:", error);
+      log.error("Failed to toggle maximize:", error);
     }
   };
 
@@ -25,7 +26,7 @@ export function TitleBar() {
     try {
       await win.close();
     } catch (error) {
-      console.error("Failed to close:", error);
+      log.error("Failed to close:", error);
     }
   };
 

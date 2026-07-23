@@ -157,6 +157,7 @@
     "inputParamsConnecting": "매개변수 입력...（Agent에 연결 중...）",
     "selectReasoningEffort": "思考深度",
     "llmNotConfigured": "LLM 공급자가 설정되지 않았습니다. Harness → Providers에서 API 키를 추가하세요.",
+    "thinking": "생각 중...",
     "replying": "답장 중...",
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
@@ -321,6 +322,8 @@
     "reset": "초기화",
     "logSetup": "로그 설정",
     "logLevel": "로그 레벨",
+    "frontendLogLevel": "프론트엔드 로그 레벨",
+    "frontendLogLevelHint": "DevTools 콘솔 출력을 제어합니다. 일상 사용은 'warn'을 권장.",
     "logFileSize": "로그 파일 크기 (MB)",
     "logFileSizeHint": "0 = 분할 비활성화。파일명은 YYYYMMDD_HHMMSS.log",
     "noSplit": "분할 안 함",
@@ -767,6 +770,7 @@
     "running_other": "{{count}}개 실행 중"
   },
   "thinkBlock": {
+    "thinking": "생각 중",
     "thought": "심층 사고",
     "showingLatest": "최신만 표시"
   },

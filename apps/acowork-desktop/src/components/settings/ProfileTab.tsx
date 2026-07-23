@@ -16,6 +16,7 @@ import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import i18n from "../../i18n";
+import { log } from "../../lib/logger";
 
 const TIMEZONES = [
   "Asia/Shanghai",
@@ -126,7 +127,7 @@ export function ProfileTab() {
       setSavedMsg("saved");
       setTimeout(() => setSavedMsg(null), 2000);
     } catch (err) {
-      console.warn(`Failed to save ${field}:`, err);
+      log.warn(`Failed to save ${field}:`, err);
       setSavedMsg("failed");
     } finally {
       setSaving(false);
@@ -157,7 +158,7 @@ export function ProfileTab() {
         backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
       });
     } catch (err) {
-      console.warn("[ProfileTab] Select custom avatar failed:", err);
+      log.warn("[ProfileTab] Select custom avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);
@@ -174,7 +175,7 @@ export function ProfileTab() {
         backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
       });
     } catch (err) {
-      console.warn("[ProfileTab] Select builtin avatar failed:", err);
+      log.warn("[ProfileTab] Select builtin avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);
@@ -194,7 +195,7 @@ export function ProfileTab() {
       const resp = await fetchUserAvatarAssets();
       setAvatarAssets(resp.assets);
     } catch (err) {
-      console.warn("[ProfileTab] Avatar upload failed:", err);
+      log.warn("[ProfileTab] Avatar upload failed:", err);
     } finally {
       setAvatarBusy(false);
     }
@@ -211,7 +212,7 @@ export function ProfileTab() {
       setAvatarAssets(assetsResp.assets);
       setAvatarConfig(cfg);
     } catch (err) {
-      console.warn("[ProfileTab] Delete avatar failed:", err);
+      log.warn("[ProfileTab] Delete avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);
@@ -402,10 +403,10 @@ export function ProfileTab() {
                 value={language}
                 onChange={(e) => {
                   const lng = e.target.value;
-                  console.log("[ProfileTab] Switching language to:", lng);
+                  log.debug("[ProfileTab] Switching language to:", lng);
                   setLanguage(lng);
                   i18n.changeLanguage(lng).then(() => {
-                    console.log("[ProfileTab] changeLanguage resolved, i18n.language =", i18n.language);
+                    log.debug("[ProfileTab] changeLanguage resolved, i18n.language =", i18n.language);
                   });
                   if (backendUser?.user_id) {
                     saveField(backendUser.user_id, "language", lng);

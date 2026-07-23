@@ -12,6 +12,7 @@ import type {
 } from "../../lib/types";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { resolveAgentAvatarUrl } from "../../lib/avatar";
+import { log } from "../../lib/logger";
 import {
   CheckCircle,
   XCircle,
@@ -124,7 +125,7 @@ export function PublishWizard({
       .catch((err) => {
         if (cancelled) return;
         // Non-fatal: the wizard can still proceed without an initial selection.
-        console.warn("Failed to load agent detail for publish wizard:", err);
+        log.warn("Failed to load agent detail for publish wizard:", err);
       });
     return () => {
       cancelled = true;

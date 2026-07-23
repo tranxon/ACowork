@@ -1,6 +1,7 @@
 import React from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { log } from "../../lib/logger";
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -84,7 +85,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
-    console.error("[ErrorBoundary] Caught render error:", error, info);
+    log.error("[ErrorBoundary] Caught render error:", error, info);
 
     // 首次崩溃时自动尝试恢复（重新挂载子组件），避免无限重试循环
     if (!this.state.autoRetried) {

@@ -10,6 +10,7 @@ import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
+import { log } from "../lib/logger";
 
 // ---------------------------------------------------------------------------
 // ADR-035: per-session active stream buffer (replaces ADR-027 multi-buffer).
@@ -60,7 +61,7 @@ export function getStreamingContent(sessionId: string, messageId: string): Strea
     let entry = streamingSnapshots.get(sessionId);
     if (!entry) {
       entry = {
-        content: as.lines.map(l => l.content).join("\n"),
+        content: as.contentBuilder,
         isStreaming: true,
         lineCount: as.lines.length,
       };
@@ -776,7 +777,7 @@ export async function initMqttListener(): Promise<void> {
   } catch (err) {
     // Tauri command not registered (older binary) or other transient
     // failure — fall back to the event stream alone.
-    console.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
+    log.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
   }
 }
 
@@ -918,7 +919,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         payloadJson: { session_id: sessionId },
       });
     } catch (err) {
-      console.warn("[chatStore] close_session MQTT failed (UI already cleaned up):", err);
+      log.warn("[chatStore] close_session MQTT failed (UI already cleaned up):", err);
     }
 
     return newActiveId;
@@ -936,7 +937,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "compress_action",
       payloadJson: { session_id: sessionId, compress_type: compressType },
-    }).catch((err: unknown) => console.warn("[ChatStore] compress_action via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] compress_action via MQTT failed:", err));
   },
 
   /**
@@ -959,7 +960,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => {
       const agent = getAgentState(state, agentId);
       if (!agent.openSessionIds.includes(sessionId)) {
-        console.warn(
+        log.warn(
           `[chatStore] setActiveTab: ${sessionId} not in openSessionIds — ` +
           `call openSession(agentId, sessionId) first`,
         );
@@ -1026,7 +1027,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         payloadJson: { session_id: sessionId },
       });
     } catch (err) {
-      console.warn("[chatStore] open_session MQTT failed:", err);
+      log.warn("[chatStore] open_session MQTT failed:", err);
     }
 
     // 3. Local cache: load conversation history (initial-load semantics).
@@ -1035,7 +1036,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       await get().loadSessionMessages(agentId, sessionId);
     } catch (err) {
-      console.warn("[chatStore] loadSessionMessages after openSession failed:", err);
+      log.warn("[chatStore] loadSessionMessages after openSession failed:", err);
     }
   },
 
@@ -1193,7 +1194,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           applyTrimAndAdjustMeta(ss, [...ss.messages, userMsg], true));
       });
       // ── DIAG: verify optimistic user message insert ──
-      console.log("[ChatStore:DEBUG] sendMessage optimistic insert", {
+      log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
         sid: sessionId,
         userMsgId,
         messagesLenAfter: getSessionState(get(), agentId, sessionId).messages.length,
@@ -1258,9 +1259,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           params_json: paramsJson,
         },
       });
-      console.log("[ChatStore] Message sent via MQTT:", userMsgId);
+      log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
     } catch (error) {
-      console.error("[ChatStore] MQTT message send failed:", error);
+      log.error("[ChatStore] MQTT message send failed:", error);
       const errorMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
         type: "system",
@@ -1278,7 +1279,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   stopCurrentMessage: async (agentId: string) => {
-    console.log("[ChatStore] Stopping current message for agent:", agentId);
+    log.debug("[ChatStore] Stopping current message for agent:", agentId);
 
     // ADR-034 Phase 5: Send stop via MQTT with reason
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1286,7 +1287,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "stop",
       payloadJson: { session_id: sessionId, reason: "user_requested" },
-    }).catch((err: unknown) => console.warn("[ChatStore] stop via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] stop via MQTT failed:", err));
 
     const activeSessionId = getAgentState(get(), agentId).activeSessionId;
     if (activeSessionId) {
@@ -1304,7 +1305,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "stop",
       payloadJson: { session_id: sessionId, reason: "user_requested" },
-    }).catch((err: unknown) => console.warn("[ChatStore] sendStop via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] sendStop via MQTT failed:", err));
 
     // Optimistic: immediately mark as stopping so the UI exits "working" state
     // without waiting for the backend Stopped/SessionStateChanged event.
@@ -1334,7 +1335,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setCurrentModel: (model: string, provider: string, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
-    console.log("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, sessionId });
+    log.debug("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, sessionId });
     if (!sessionId) return;
 
     // Resolve new model's default reasoning effort from availableModels
@@ -1363,7 +1364,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "model_switch",
       payloadJson: { model_id: model, session_id: sessionId, provider_id: provider },
-    }).catch((err: unknown) => console.warn("[ChatStore] model_switch via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] model_switch via MQTT failed:", err));
   },
 
   setSessionWorkspaceMqtt: (agentId: string, sessionId: string, workspaceId: string) => {
@@ -1371,7 +1372,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "workspace_switch",
       payloadJson: { workspace_id: workspaceId, session_id: sessionId },
-    }).catch((err: unknown) => console.warn("[ChatStore] workspace_switch via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] workspace_switch via MQTT failed:", err));
   },
   setReasoningEffort: (effort: string, agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
@@ -1385,7 +1386,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "reasoning_effort",
       payloadJson: { effort, session_id: sessionId },
-    }).catch((err: unknown) => console.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] reasoning_effort via MQTT failed:", err));
   },
   setAvailableModels: (models: ModelEntry[]) => {
     set({ availableModels: models });
@@ -1407,7 +1408,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }));
       }
     } catch (error) {
-      console.error("[ChatStore] Failed to send continue signal:", error);
+      log.error("[ChatStore] Failed to send continue signal:", error);
     }
   },
 
@@ -1416,7 +1417,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentId,
       command: "update_session_title",
       payloadJson: { session_id: sessionId, title },
-    }).catch((err: unknown) => console.warn("[ChatStore] update_session_title via MQTT failed:", err));
+    }).catch((err: unknown) => log.warn("[ChatStore] update_session_title via MQTT failed:", err));
   },
 
   resolveApproval: (agentId: string) => {
@@ -1470,7 +1471,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((state) => updateSessionState(state, agentId, sessionId, { messages: historyMessages }));
       }
     } catch (e) {
-      console.error("[ChatStore] Failed to load conversation history:", e);
+      log.error("[ChatStore] Failed to load conversation history:", e);
       const sessionId = getAgentState(get(), agentId).activeSessionId;
       if (sessionId) {
         set((state) => updateSessionState(state, agentId, sessionId, { messages: [] }));
@@ -1533,7 +1534,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       );
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
-        console.log(`[ChatStore] Discarding stale loadSessionMessages response (seq ${seq})`);
+        log.debug(`[ChatStore] Discarding stale loadSessionMessages response (seq ${seq})`);
         return;
       }
 
@@ -1542,7 +1543,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const data = (await resp.json()) as PaginatedMessages;
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
-        console.log(`[ChatStore] Discarding stale response after json parse (seq ${seq})`);
+        log.debug(`[ChatStore] Discarding stale response after json parse (seq ${seq})`);
         return;
       }
 
@@ -1634,15 +1635,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return { offset: returnedOffset, limit: returnedLimit, total: returnedTotal };
     } catch (e: unknown) {
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
-        console.log(`[ChatStore] Discarding stale error response (seq ${seq})`);
+        log.debug(`[ChatStore] Discarding stale error response (seq ${seq})`);
         return;
       }
       if (e instanceof DOMException && e.name === "AbortError") {
-        console.log(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
+        log.debug(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
         set((state) => updateSessionState(state, agentId, sessionId, { isLoadingSession: false, isLoadingMore: false }));
         return;
       }
-      console.error("[ChatStore] Failed to load session messages:", e);
+      log.error("[ChatStore] Failed to load session messages:", e);
       set((state) => updateSessionState(state, agentId, sessionId, {
         messages: [],
         messageOffset: 0,
@@ -1842,7 +1843,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
       );
       if (!resp.ok) {
-        console.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
+        log.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
         return;
       }
       const data = await resp.json() as {
@@ -1897,7 +1898,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, meta.workspace_id as string);
       }
     } catch (e) {
-      console.warn("[ChatStore] fetchSessionState failed:", e);
+      log.warn("[ChatStore] fetchSessionState failed:", e);
     }
   },
 }));
@@ -2200,7 +2201,7 @@ function handleMessageEvent(
 
   // ── DIAG: log every incoming WS message ──
   // if (eventType === "tool_approval_needed" || eventType === "tool_call") {
-  //   console.log("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
+  //   log.debug("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
   // }
 
   // For content events: route to the session specified by event.session_id
@@ -2249,7 +2250,7 @@ function handleMessageEvent(
       if (!sid) break;
       const lines = (data.lines as Array<{role:string;message_id:string;line_no:number;content:string}>) ?? [];
       // ── DIAG: log every incoming stream_delta ──
-      console.log("[ChatStore:DEBUG] stream_delta RECEIVED", {
+      log.debug("[ChatStore:DEBUG] stream_delta RECEIVED", {
         sid,
         eventSessionId: data.session_id,
         msgId: lines[0]?.message_id,
@@ -2281,7 +2282,7 @@ function handleMessageEvent(
         const state = get();
         const msgs = getSessionState(state, agentId, sid!).messages;
         const prevMessageId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
-        as = { messageId: msgId, role, lines: [], prevMessageId, seq: incomingSeq };
+        as = { messageId: msgId, role, lines: [], prevMessageId, seq: incomingSeq, contentBuilder: "" };
         activeStreams.set(sid, as);
         set(state => insertBySeq(state, agentId, sid!, {
           id: msgId,
@@ -2294,7 +2295,7 @@ function handleMessageEvent(
           ...getAgentSenderInfo(agentId),
         }));
         // ── DIAG: verify placeholder actually inserted ──
-        console.log("[ChatStore:DEBUG] stream_delta PLACEHOLDER CREATED", {
+        log.debug("[ChatStore:DEBUG] stream_delta PLACEHOLDER CREATED", {
           sid,
           msgId,
           role,
@@ -2304,33 +2305,33 @@ function handleMessageEvent(
         if (prevMsgId) notifyActiveStreamSubscribers(sid, prevMsgId);
       }
       if (!as) break;
-      for (const l of lines) as.lines.push({ role: l.role === 'assistant' ? 'assistant' : 'thought', lineNo: l.line_no, content: l.content });
+      // Incrementally build contentBuilder (O(1) per line) instead of
+      // O(N) map+join on every delta.  The old approach was O(N^2) over a
+      // full stream: delta #1 joined 1 line, delta #500 joined 500 lines,
+      // producing ~12 MB of temporary strings per 500-line reply.
+      for (const l of lines) {
+        as.lines.push({ role: l.role === 'assistant' ? 'assistant' : 'thought', lineNo: l.line_no, content: l.content });
+        as.contentBuilder = as.contentBuilder
+          ? as.contentBuilder + "\n" + l.content
+          : l.content;
+      }
       if (as.role === 'thought' && as.lines.length > 5) {
         as.lines = as.lines.slice(-5);
+        as.contentBuilder = as.lines.map(l => l.content).join("\n");
       } else if (as.role === 'assistant' && as.lines.length > ASSISTANT_LINE_SAFETY_CAP) {
         // ADR-035 C2 safety valve: assistant content is never truncated for
         // display, but if record_complete is lost AND idle realignment fails,
         // prevent unbounded memory growth. Keep the newest lines. This should
         // never trigger in normal operation — if it does, the record_complete
         // delivery path has a bug.
-        console.warn(
+        log.warn(
           `[ChatStore] ADR-035 C2 safety valve: assistant activeStream hit` +
           ` ${ASSISTANT_LINE_SAFETY_CAP}-line cap (messageId=${as.messageId}).` +
           ` record_complete likely lost — trimming oldest to prevent OOM.`,
         );
         as.lines = as.lines.slice(-ASSISTANT_LINE_SAFETY_CAP);
+        as.contentBuilder = as.lines.map(l => l.content).join("\n");
       }
-      // Rebuild the cached snapshot with a fresh reference BEFORE notifying
-      // subscribers, so the next useSyncExternalStore getSnapshot() returns
-      // a different object than the previous render and the bubble actually
-      // re-renders with the new content.  Without this, line changes land
-      // in `as.lines` but `getStreamingContent` would still return the
-      // pre-rebuild snapshot → React thinks nothing changed → no re-render.
-      streamingSnapshots.set(sid, {
-        content: as.lines.map(l => l.content).join("\n"),
-        isStreaming: true,
-        lineCount: as.lines.length,
-      });
       // Flip the per-session `isAssistantReplying` flag once the line count
       // crosses the threshold. Done OUTSIDE the per-message bubble render
       // path so the indicator is a stable session-level signal that cannot
@@ -2345,15 +2346,28 @@ function handleMessageEvent(
             isAssistantReplying: shouldBeReplying,
           }));
         }
+        // Assistant bubble returns null during streaming (MessageBubble:288)
+        // and ExploreBlock only reads streamingContent for thought items.
+        // The replying indicator is driven by isAssistantReplying above.
+        // Skipping snapshot+notify eliminates O(N) map+join, snapshot object
+        // allocation, and a wasted React re-render on every delta.
+        // The final notify happens in record_complete when the stream freezes.
+      } else {
+        // thought: ThinkBlock renders live content, so update snapshot.
+        streamingSnapshots.set(sid, {
+          content: as.contentBuilder,
+          isStreaming: true,
+          lineCount: as.lines.length,
+        });
+        notifyActiveStreamSubscribers(sid, msgId);
       }
-      notifyActiveStreamSubscribers(sid, msgId);
       break;
     }
 
     case "record_complete": {
       if (!sid) break;
       // ── DIAG: log every incoming record_complete ──
-      console.log("[ChatStore:DEBUG] record_complete RECEIVED", {
+      log.debug("[ChatStore:DEBUG] record_complete RECEIVED", {
         sid,
         eventSessionId: data.session_id,
         msgId: data.message_id,
@@ -2409,7 +2423,7 @@ function handleMessageEvent(
         const prevInWindow = as.prevMessageId == null
           || msgs.some(m => m.id === as.prevMessageId);
         if (prevInWindow) {
-          const fc = role === 'thought' ? as.lines.map(l => l.content).join('\n') : payloadContent;
+          const fc = role === 'thought' ? as.contentBuilder : payloadContent;
           // `insertBySeq` replaces the placeholder in-place (same id) and
           // preserves the original seq (via the by-id branch). This keeps
           // the frozen record at the same position the placeholder
@@ -2500,7 +2514,7 @@ function handleMessageEvent(
     case "model_confirmed": {
       const confirmedModel = data.model as string;
       const confirmedProvider = data.provider as string | undefined;
-      console.log("[ChatStore] Model switch confirmed:", confirmedModel, confirmedProvider);
+      log.debug("[ChatStore] Model switch confirmed:", confirmedModel, confirmedProvider);
       if (confirmedModel && sid) {
         // Resolve new model's default reasoning effort
         const models = get().availableModels;
@@ -2524,7 +2538,7 @@ function handleMessageEvent(
 
     case "reasoning_effort_confirmed": {
       const confirmedEffort = data.effort as string;
-      console.log("[ChatStore] Reasoning effort confirmed:", confirmedEffort);
+      log.debug("[ChatStore] Reasoning effort confirmed:", confirmedEffort);
       if (confirmedEffort && sid) {
         set((state) => updateSessionState(state, agentId, sid!, {
           reasoningEffort: confirmedEffort,
@@ -2551,7 +2565,7 @@ function handleMessageEvent(
       const errorMsg = (data.content ?? data.message) as string;
       const errorDetail = (data.detail) as string | undefined;
       const errorType = (data.error_type) as string | undefined;
-      console.error("[ChatStore] Server error:", errorMsg, errorDetail);
+      log.error("[ChatStore] Server error:", errorMsg, errorDetail);
       // ADR-035 Phase 3: no polling
       const errMsg: ChatMessage = {
         id: `msg-error-${Date.now()}`,
@@ -2586,7 +2600,7 @@ function handleMessageEvent(
     }
 
     case "tool_approval_needed": {
-      console.log("[DIAG:tool_approval_needed]", {
+      log.debug("[DIAG:tool_approval_needed]", {
         sid,
         agentId,
         "data.tool_call_id": data.tool_call_id,
@@ -2601,7 +2615,7 @@ function handleMessageEvent(
           const prevPending = agentState?.sessionStates[sid]?.pendingApproval || {};
           const key = approvalEvent.tool_call_id || approvalEvent.request_id;
           const newPending = { ...prevPending, [key]: approvalEvent };
-          console.log("[DIAG:tool_approval_needed:set]", {
+          log.debug("[DIAG:tool_approval_needed:set]", {
             sid,
             key,
             prevKeys: Object.keys(prevPending),
@@ -2613,7 +2627,7 @@ function handleMessageEvent(
           });
         });
       } else {
-        console.warn("[DIAG:tool_approval_needed] DROPPED — sid is null!");
+        log.warn("[DIAG:tool_approval_needed] DROPPED — sid is null!");
       }
       break;
     }
@@ -2634,11 +2648,11 @@ function handleMessageEvent(
       break;
 
     case "memory_updated":
-      console.log("[WS] Memory updated event:", data);
+      log.debug("[WS] Memory updated event:", data);
       break;
 
     case "skill_executed":
-      console.log("[WS] Skill executed event:", data);
+      log.debug("[WS] Skill executed event:", data);
       break;
 
     case "compacting_started":
@@ -2681,10 +2695,10 @@ function handleMessageEvent(
             ? (nested as ContextUsageInfo)
             : null;
         if (usage) {
-          console.log("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
+          log.debug("[ChatStore] context_usage RECEIVED for agent:", agentId, usage);
           set((state) => updateSessionState(state, agentId, sid, { contextUsage: usage, isCompacting: false }));
         } else {
-          console.warn(
+          log.warn(
             "[ChatStore] context_usage event missing nested context_usage payload — skipping StatusBar update to avoid undefined fields:",
             data,
           );
@@ -2718,7 +2732,7 @@ function handleMessageEvent(
         if (status) {
           // DEBUG: log status transitions
           const prev = getSessionState(get(), agentId, sid!);
-          console.log(
+          log.debug(
             `[ChatStore:DEBUG] session_state_changed for ${agentId}/${sid}: ` +
             `prev=${prev.sessionStatus?.status} → next=${status.status}, ` +
             `messageCount=${prev.messages.length}`,
@@ -2762,7 +2776,7 @@ function handleMessageEvent(
               // message from JSONL via the HTTP reload.
               const activeStream = activeStreams.get(sid);
               if (activeStream) {
-                console.warn(
+                log.warn(
                   `[ChatStore] ADR-035 C2: activeStream still present at idle` +
                   ` (messageId=${activeStream.messageId}, role=${activeStream.role},` +
                   ` lines=${activeStream.lines.length}) — record_complete likely lost,` +
@@ -2826,7 +2840,7 @@ function handleMessageEvent(
       const agentStore = useAgentStore.getState();
       // Refresh the list first so the new entry is rendered.
       agentStore.fetchSessions(agentId).catch((e) => {
-        console.warn("[ChatStore] fetchSessions after session_created failed:", e);
+        log.warn("[ChatStore] fetchSessions after session_created failed:", e);
       });
       // ADR-038: a freshly-created session is Active by definition (the
       // backend has just spawned the session task), so we use strict
@@ -2855,7 +2869,7 @@ function handleMessageEvent(
       const provider = typeof data.provider === "string" && data.provider ? data.provider : null;
       const lastActiveAt =
         typeof data.last_active_at === "string" && data.last_active_at ? data.last_active_at : null;
-      console.log(
+      log.debug(
         `[ChatStore] session_opened for ${agentId}/${sid}: status=${status ?? "?"}, ` +
         `model=${model ?? "?"}, provider=${provider ?? "?"}, last_active_at=${lastActiveAt ?? "?"}`,
       );
@@ -2891,7 +2905,7 @@ function handleMessageEvent(
       if (!sid) break;
       const reason = (data.reason as string | undefined) ?? "session_closed";
       const attempted = (data.attempted_command as string | undefined) ?? "?";
-      console.warn(
+      log.warn(
         `[ChatStore] session_not_opened for ${agentId}/${sid}: ` +
         `attempted=${attempted}, reason=${reason}`,
       );
@@ -2927,14 +2941,14 @@ function handleMessageEvent(
       if (!deletedSessionId) break;
       const agentStore = useAgentStore.getState();
       agentStore.fetchSessions(agentId).catch((e) => {
-        console.warn("[ChatStore] fetchSessions after session_deleted failed:", e);
+        log.warn("[ChatStore] fetchSessions after session_deleted failed:", e);
       });
       break;
     }
 
     // ── Session meta (model_id, provider_id, tokens, title, message_count) ──
     case "session_meta": {
-      console.log("[ChatStore:DEBUG] session_meta RECEIVED", {
+      log.debug("[ChatStore:DEBUG] session_meta RECEIVED", {
         sid,
         agentId,
         model_id: data.model_id,
@@ -2964,12 +2978,12 @@ function handleMessageEvent(
         patch.temperature = data.temperature;
       }
       if (Object.keys(patch).length > 0) {
-        console.log("[ChatStore:DEBUG] session_meta applying patch", { sid, patch });
+        log.debug("[ChatStore:DEBUG] session_meta applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof data.workspace_id === "string" && data.workspace_id) {
-        console.log("[ChatStore:DEBUG] session_meta setting workspace", { sid, workspace_id: data.workspace_id });
+        log.debug("[ChatStore:DEBUG] session_meta setting workspace", { sid, workspace_id: data.workspace_id });
         useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id);
       }
       break;
@@ -3003,7 +3017,7 @@ function handleMessageEvent(
       if (aid && typeof data.config_json === "string") {
         try {
           const config = JSON.parse(data.config_json);
-          console.log("[ChatStore] Agent config updated:", aid, config);
+          log.debug("[ChatStore] Agent config updated:", aid, config);
           // ADR-034 §7.6.4: Runtime republishes its merged AgentConfig
           // (manifest defaults + agent_config.json) as a retained MQTT
           // message on startup and after each PUT /api/agents/{id}/config.
@@ -3014,7 +3028,7 @@ function handleMessageEvent(
           // leave the Setup panel showing stale localStorage values.
           emitAgentConfigRefresh(aid);
         } catch (e) {
-          console.warn("[ChatStore] Failed to parse agent_config JSON:", e);
+          log.warn("[ChatStore] Failed to parse agent_config JSON:", e);
         }
       }
       break;
@@ -3024,7 +3038,7 @@ function handleMessageEvent(
       // Sidecar status is currently a debug feature without agent_id routing.
       // The listener at line 609 filters out events without agent_id, so this
       // branch is reached only if agent_id is added to the Rust forwarding.
-      console.log("[ChatStore] Sidecar status:", {
+      log.debug("[ChatStore] Sidecar status:", {
         kind: data.kind,
         endpoint: data.endpoint,
         ready: data.ready,
@@ -3034,13 +3048,13 @@ function handleMessageEvent(
 
     case "session_config": {
       if (sid && typeof data.config_json === "string") {
-        console.log("[ChatStore] Session config updated:", sid, data.config_json.slice(0, 120));
+        log.debug("[ChatStore] Session config updated:", sid, data.config_json.slice(0, 120));
       }
       break;
     }
 
     case "memory_node_update": {
-      console.log("[ChatStore] Memory node update:", {
+      log.debug("[ChatStore] Memory node update:", {
         node_id: data.node_id,
         agent_id: data.agent_id,
       });
@@ -3048,6 +3062,6 @@ function handleMessageEvent(
     }
 
     default:
-      console.log("[ChatStore] Unknown event type:", eventType, data);
+      log.debug("[ChatStore] Unknown event type:", eventType, data);
   }
 }

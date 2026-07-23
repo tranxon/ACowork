@@ -8,6 +8,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
 import brandMark from "../../../../../assets/brand-mark.svg";
+import { log } from "../../lib/logger";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
@@ -55,18 +56,18 @@ async function bootGateway(): Promise<void> {
         await invoke("ensure_system_agent");
     } catch (err) {
         // Non-fatal: user can install agents manually
-        console.warn("ensure_system_agent failed:", err);
+        log.warn("ensure_system_agent failed:", err);
     }
 
     // 4) Connect MQTT client for real-time events (ADR-033).
     try {
         await invoke("connect_mqtt");
-        console.log("[bootGateway] MQTT connected");
+        log.debug("[bootGateway] MQTT connected");
         // ADR-033: Register frontend MQTT event listener
         await initMqttListener();
-        console.log("[bootGateway] MQTT listener initialized");
+        log.debug("[bootGateway] MQTT listener initialized");
     } catch (err) {
-        console.warn("connect_mqtt failed:", err);
+        log.warn("connect_mqtt failed:", err);
     }
 }
 
@@ -185,7 +186,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             try {
                 await bootGateway();
             } catch (err) {
-                console.error("bootGateway failed:", err);
+                log.error("bootGateway failed:", err);
                 // Fall through to health polling — Gateway may still be
                 // reachable from a previous run.
             }

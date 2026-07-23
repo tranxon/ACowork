@@ -24,6 +24,7 @@ import { GoToFilePalette } from "./GoToFilePalette";
 import { GlobalSearchPanel } from "./GlobalSearchPanel";
 import { SymbolSearchPanel } from "./SymbolSearchPanel";
 import { Tooltip } from "../common/Tooltip";
+import { log } from "../../lib/logger";
 
 // ── LSP Install Hints ─────────────────────────────────────────────────
 
@@ -493,7 +494,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     // Diagnostic logging — only when key inputs change, not on every render.
     useEffect(() => {
-        console.log(
+        log.debug(
             "[LSP] FileEditorPanel — lspLanguage:", lspLanguage,
             "status:", lspStatus,
             "lspEnabled:", lspEnabled,
@@ -603,20 +604,20 @@ export function FileEditorPanel({ width }: { width: number }) {
         editor.onDidChangeModel(() => {
             const newModel = editor.getModel();
             if (!newModel) {
-                console.log("[LSP] onDidChangeModel — model is null");
+                log.debug("[LSP] onDidChangeModel — model is null");
                 return;
             }
 
             // Only process file:// URIs — ignore inmemory://, output://, etc.
             const scheme = newModel.uri.scheme;
             if (scheme !== 'file') {
-                console.log("[LSP] onDidChangeModel — ignoring non-file model:", newModel.uri.toString());
+                log.debug("[LSP] onDidChangeModel — ignoring non-file model:", newModel.uri.toString());
                 return;
             }
 
             // The model's URI path is the relative path (e.g. "core/runtime/src/foo.rs")
             const relPath = newModel.uri.path.replace(/^\/+/, "");
-            console.log("[LSP] onDidChangeModel — new relPath:", relPath, "uri:", newModel.uri.toString());
+            log.debug("[LSP] onDidChangeModel — new relPath:", relPath, "uri:", newModel.uri.toString());
 
             // Restore previously saved view state for this model unless a
             // pending navigation will override it below.
@@ -657,7 +658,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             endColumn: nav.endColumn,
                         });
                     }
-                    console.log(`[LSP] onDidChangeModel — deferred navigation applied to line: ${safeLine}`);
+                    log.debug(`[LSP] onDidChangeModel — deferred navigation applied to line: ${safeLine}`);
                 });
             }
 
@@ -667,13 +668,13 @@ export function FileEditorPanel({ width }: { width: number }) {
             const store = useFileEditorStore.getState();
             const activeFile = store.openFiles.find((f) => f.id === store.activeFileId);
             if (activeFile && activeFile.relPath === relPath) {
-                console.log("[LSP] onDidChangeModel — same file as active, skipping store sync");
+                log.debug("[LSP] onDidChangeModel — same file as active, skipping store sync");
                 return;
             }
 
             const existingFile = store.openFiles.find((f) => f.relPath === relPath);
             if (existingFile) {
-                console.log("[LSP] onDidChangeModel — activating existing tab:", existingFile.id);
+                log.debug("[LSP] onDidChangeModel — activating existing tab:", existingFile.id);
                 store.setActiveFile(existingFile.id);
                 return;
             }
@@ -682,7 +683,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             // for LSP cross-file reference preview. Open it via the store, which
             // re-uses the existing model content (already fetched).
             if (activeFile) {
-                console.log("[LSP] onDidChangeModel — cross-file navigation, opening:", relPath);
+                log.debug("[LSP] onDidChangeModel — cross-file navigation, opening:", relPath);
                 void store.openFile(activeFile.agentId, activeFile.workspaceId, relPath);
             }
         });
@@ -741,7 +742,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
             ],
             run: () => {
-                console.log("[GlobalSearch] addAction fired — opening panel");
+                log.debug("[GlobalSearch] addAction fired — opening panel");
                 setShowGlobalSearch(true);
             },
         });
@@ -760,7 +761,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyT,
             ],
             run: () => {
-                console.log("[SymbolSearch] addAction fired — opening panel");
+                log.debug("[SymbolSearch] addAction fired — opening panel");
                 setShowSymbolSearch(true);
             },
         });
@@ -777,10 +778,10 @@ export function FileEditorPanel({ width }: { width: number }) {
             const editorAny = editor as any;
             const svcKeys = Object.keys(editorAny).filter(k => k.toLowerCase().includes("service") || k.toLowerCase().includes("codeeditor"));
             // Use console.warn so it stands out in the console
-            console.warn("[LSP] ═══ Editor internal service keys:", svcKeys);
-            console.warn("[LSP] ═══ _codeEditorService:", !!editorAny._codeEditorService,
+            log.warn("[LSP] ═══ Editor internal service keys:", svcKeys);
+            log.warn("[LSP] ═══ _codeEditorService:", !!editorAny._codeEditorService,
                 "openCodeEditor:", !!editorAny._codeEditorService?.openCodeEditor);
-            console.warn("[LSP] ═══ _instantiationService:", !!editorAny._instantiationService);
+            log.warn("[LSP] ═══ _instantiationService:", !!editorAny._instantiationService);
 
             let codeEditorSvc = editorAny._codeEditorService;
 
@@ -797,10 +798,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                             }
                             return null;
                         });
-                        console.log("[LSP] _instantiationService lookup result:", !!codeEditorSvc);
+                        log.debug("[LSP] _instantiationService lookup result:", !!codeEditorSvc);
                     }
                 } catch (e) {
-                    console.warn("[LSP] _instantiationService lookup failed:", e);
+                    log.warn("[LSP] _instantiationService lookup failed:", e);
                 }
             }
 
@@ -813,7 +814,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     source: any
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 ): Promise<any> => {
-                    console.log("[LSP] openCodeEditor — input.resource:", input?.resource?.toString(),
+                    log.debug("[LSP] openCodeEditor — input.resource:", input?.resource?.toString(),
                         "selection:", JSON.stringify(input?.options?.selection));
 
                     // Try default behavior first (same-file navigation)
@@ -837,9 +838,9 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     endColumn: selection.endColumn,
                                 });
                             }
-                            console.log(`[LSP] openCodeEditor — same-file nav, applied selection to line: ${pos.lineNumber}`);
+                            log.debug(`[LSP] openCodeEditor — same-file nav, applied selection to line: ${pos.lineNumber}`);
                         } else {
-                            console.log("[LSP] openCodeEditor — default handled it (same file, no selection to apply)");
+                            log.debug("[LSP] openCodeEditor — default handled it (same file, no selection to apply)");
                         }
                         return result;
                     }
@@ -848,19 +849,19 @@ export function FileEditorPanel({ width }: { width: number }) {
                     const targetUri = input?.resource;
                     const selection = input?.options?.selection;
                     if (!targetUri) {
-                        console.warn("[LSP] openCodeEditor — no target URI, giving up");
+                        log.warn("[LSP] openCodeEditor — no target URI, giving up");
                         return null;
                     }
 
                     // Not a file URI — let Monaco handle natively (inmemory://, output://, etc.)
                     if (targetUri.scheme !== 'file') {
-                        console.log("[LSP] openCodeEditor — ignoring non-file URI:", targetUri.toString());
+                        log.debug("[LSP] openCodeEditor — ignoring non-file URI:", targetUri.toString());
                         return null;
                     }
 
                     // Extract relPath from model URI (e.g. file:///core/.../foo.rs → core/.../foo.rs)
                     const relPath = targetUri.path.replace(/^\/+/, "");
-                    console.log("[LSP] openCodeEditor — cross-file navigation to:", relPath);
+                    log.debug("[LSP] openCodeEditor — cross-file navigation to:", relPath);
 
                     // Check if the target file is already the active file — in this
                     // case setActiveFile() won't change the model, so onDidChangeModel
@@ -893,7 +894,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         endColumn: sel.endColumn,
                                     });
                                 }
-                                console.log(`[LSP] openCodeEditor — deferred navigation applied (same file) to line: ${pos.lineNumber}`);
+                                log.debug(`[LSP] openCodeEditor — deferred navigation applied (same file) to line: ${pos.lineNumber}`);
                             });
                         }
                         return editorRef.current ?? null;
@@ -913,7 +914,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     const existingFile = store.openFiles.find((f) => f.relPath === relPath);
 
                     if (existingFile) {
-                        console.log("[LSP] openCodeEditor — activating existing tab:", existingFile.id);
+                        log.debug("[LSP] openCodeEditor — activating existing tab:", existingFile.id);
                         store.setActiveFile(existingFile.id);
                     } else {
                         if (currentActiveFile) {
@@ -930,13 +931,13 @@ export function FileEditorPanel({ width }: { width: number }) {
                             if (existingModel && monacoInst) {
                                 const content = existingModel.getValue();
                                 const lang = existingModel.getLanguageId();
-                                console.log("[LSP] openCodeEditor — reusing model content, lines:", content.split("\n").length);
+                                log.debug("[LSP] openCodeEditor — reusing model content, lines:", content.split("\n").length);
                                 store.openFileWithContent(
                                     currentActiveFile.agentId, currentActiveFile.workspaceId,
                                     relPath, content, lang
                                 );
                             } else {
-                                console.log("[LSP] openCodeEditor — opening new file (fetch):", relPath);
+                                log.debug("[LSP] openCodeEditor — opening new file (fetch):", relPath);
                                 void store.openFile(currentActiveFile.agentId, currentActiveFile.workspaceId, relPath);
                             }
                         }
@@ -945,9 +946,9 @@ export function FileEditorPanel({ width }: { width: number }) {
                     return null; // We handled navigation via React state
                 };
                 codeEditorOverriddenRef.current = true;
-                console.warn("[LSP] ═══ ICodeEditorService.openCodeEditor OVERRIDDEN — cross-file navigation enabled");
+                log.warn("[LSP] ═══ ICodeEditorService.openCodeEditor OVERRIDDEN — cross-file navigation enabled");
             } else {
-                console.warn("[LSP] ═══ Could not access _codeEditorService — cross-file navigation won't work");
+                log.warn("[LSP] ═══ Could not access _codeEditorService — cross-file navigation won't work");
             }
         }
 
@@ -998,7 +999,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
         // Detect LSP client reconnection — re-open all tracked documents
         if (prevLspClientRef.current !== null && prevLspClientRef.current !== lspClient) {
-            console.log("[LSP] DocumentTracker: client reconnected, re-opening all tracked docs");
+            log.debug("[LSP] DocumentTracker: client reconnected, re-opening all tracked docs");
             tracker.reopenAll(lspClient, monacoRef.current);
         }
         prevLspClientRef.current = lspClient;
@@ -1037,7 +1038,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         // Register providers when both monaco and LSP client are ready
         if (monacoRef.current && lspClient && lspLanguage && workspaceRoot && activeFile) {
             try {
-                console.log("[LSP] Registering providers for:", lspLanguage, "client:", !!lspClient);
+                log.debug("[LSP] Registering providers for:", lspLanguage, "client:", !!lspClient);
                 lspProvidersRef.current = registerLspProviders(monacoRef.current, {
                     client: lspClient,
                     language: lspLanguage,
@@ -1046,10 +1047,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                     workspaceId: activeFile.workspaceId,
                 });
             } catch (err) {
-                console.warn("[LSP] Failed to register providers:", err);
+                log.warn("[LSP] Failed to register providers:", err);
             }
         } else {
-            console.log("[LSP] Skipping provider registration — monaco:", !!monacoRef.current, "client:", !!lspClient, "language:", lspLanguage);
+            log.debug("[LSP] Skipping provider registration — monaco:", !!monacoRef.current, "client:", !!lspClient, "language:", lspLanguage);
         }
 
         return () => {

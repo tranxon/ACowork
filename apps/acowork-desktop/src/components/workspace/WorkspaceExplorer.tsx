@@ -12,6 +12,7 @@ import { getFileIcon } from "./FileTree/fileIcons";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
+import { log } from "../../lib/logger";
 
 /** Abbreviate a file path from the left: "…parent/filename.ext" */
 function abbreviatePath(path: string): string {
@@ -167,13 +168,13 @@ export function WorkspaceExplorer() {
     }, [selectedAgentId, currentWorkspaceId, invalidateTreeCache, fetchTree]);
 
     const handleNewFile = useCallback(() => {
-        console.log("[WorkspaceExplorer] handleNewFile clicked, agent:", selectedAgentId, "workspace:", currentWorkspaceId);
+        log.debug("[WorkspaceExplorer] handleNewFile clicked, agent:", selectedAgentId, "workspace:", currentWorkspaceId);
         setNewItemName("");
         setNewItemPrompt({ type: "file", parentPath: "" });
     }, [selectedAgentId, currentWorkspaceId]);
 
     const handleNewFolder = useCallback(() => {
-        console.log("[WorkspaceExplorer] handleNewFolder clicked");
+        log.debug("[WorkspaceExplorer] handleNewFolder clicked");
         setNewItemName("");
         setNewItemPrompt({ type: "dir", parentPath: "" });
     }, []);
@@ -190,7 +191,7 @@ export function WorkspaceExplorer() {
 
         const relPath = newItemPrompt.parentPath ? `${newItemPrompt.parentPath}/${name}` : name;
 
-        console.log("[WorkspaceExplorer] Creating", newItemPrompt.type, "at", relPath, "workspace:", currentWorkspaceId);
+        log.debug("[WorkspaceExplorer] Creating", newItemPrompt.type, "at", relPath, "workspace:", currentWorkspaceId);
 
         let ok: boolean;
         if (newItemPrompt.type === "file") {
@@ -199,7 +200,7 @@ export function WorkspaceExplorer() {
             ok = await createDir(selectedAgentId, currentWorkspaceId, relPath);
         }
 
-        console.log("[WorkspaceExplorer] Create result:", ok);
+        log.debug("[WorkspaceExplorer] Create result:", ok);
 
         if (ok) {
             // Re-fetch only the parent directory — fetchTree overwrites its cache entry,
@@ -216,7 +217,7 @@ export function WorkspaceExplorer() {
     }, [selectedAgentId, currentWorkspaceId, newItemPrompt, newItemName, createFile, createDir, fetchTree]);
 
     const handlePromptKeyDown = useCallback((e: React.KeyboardEvent) => {
-        console.log("[WorkspaceExplorer] keyDown:", e.key, "newItemName:", newItemName);
+        log.debug("[WorkspaceExplorer] keyDown:", e.key, "newItemName:", newItemName);
         if (e.key === "Escape") {
             cancelPrompt();
         } else if (e.key === "Enter") {

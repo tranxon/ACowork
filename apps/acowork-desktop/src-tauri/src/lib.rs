@@ -216,10 +216,30 @@ mod power {
     static LAST_BIASED_MS: AtomicU64 = AtomicU64::new(0);
     static LAST_UNBIASED_MS: AtomicU64 = AtomicU64::new(0);
 
+    /// Timestamp (biased clock) of the last reload that was triggered.
+    /// Used to enforce a cooldown period and prevent rapid successive
+    /// reloads from causing GPU process accumulation.
+    static LAST_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
+
     /// Minimum *actual* sleep duration (ms) to trigger recovery.
     /// We measure real sleep, not wall-clock gaps, so even a few seconds
     /// is significant.  5 s filters timer imprecision.
     const SLEEP_THRESHOLD_MS: u64 = 5_000;
+
+    /// Cooldown after a reload before another one can be triggered.
+    ///
+    /// `window.reload()` is asynchronous — the old renderer process is
+    /// torn down and a new one is spawned, but this takes time.  If the
+    /// system sleeps and wakes again while a previous reload is still in
+    /// progress, a second reload would fire, spawning yet another set of
+    /// renderer/GPU processes before the old ones are cleaned up.  Over
+    /// rapid sleep/wake cycles this leads to GPU process leaks.
+    ///
+    /// 15 s is long enough for the reload to complete (typically < 2 s)
+    /// plus a safety margin, while short enough that a genuine second
+    /// sleep/wake (e.g. user closes and reopens the laptop after a brief
+    /// check) will still be recovered within a reasonable time.
+    const RELOAD_COOLDOWN_MS: u64 = 15_000;
 
     // ── Windows FFI ──────────────────────────────────────────────────────
 
@@ -286,6 +306,13 @@ mod power {
 
     /// Returns `true` if the system was genuinely asleep (not merely
     /// minimised or backgrounded) since the last call.
+    ///
+    /// A cooldown period (`RELOAD_COOLDOWN_MS`) is enforced after each
+    /// positive detection to prevent rapid successive reloads from
+    /// accumulating GPU/renderer processes during quick sleep/wake cycles.
+    /// If a new sleep is detected during cooldown, the clock baseline is
+    /// still updated (so we don't re-trigger on the *same* sleep), but no
+    /// reload is returned.
     pub fn check_resume() -> bool {
         let Some((biased_ms, unbiased_ms)) = sample() else {
             return false; // API failure or unsupported platform
@@ -303,6 +330,23 @@ mod power {
         let sleep_ms = biased_delta.saturating_sub(unbiased_delta);
 
         if sleep_ms > SLEEP_THRESHOLD_MS {
+            // Check cooldown: if the last reload was within RELOAD_COOLDOWN_MS,
+            // skip this reload to prevent GPU process accumulation.
+            let last_reload = LAST_RELOAD_MS.load(Ordering::Relaxed);
+            let elapsed_since_reload = biased_ms.saturating_sub(last_reload);
+            if last_reload > 0 && elapsed_since_reload < RELOAD_COOLDOWN_MS {
+                tracing::info!(
+                    sleep_ms,
+                    biased_delta_ms = biased_delta,
+                    unbiased_delta_ms = unbiased_delta,
+                    elapsed_since_reload_ms = elapsed_since_reload,
+                    cooldown_remaining_ms = RELOAD_COOLDOWN_MS - elapsed_since_reload,
+                    "Actual system sleep detected but within reload cooldown — skipping reload"
+                );
+                return false;
+            }
+
+            LAST_RELOAD_MS.store(biased_ms, Ordering::Relaxed);
             tracing::info!(
                 sleep_ms,
                 biased_delta_ms = biased_delta,

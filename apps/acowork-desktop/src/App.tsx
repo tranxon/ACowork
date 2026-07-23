@@ -5,18 +5,14 @@ import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
-import { useSystemResume } from "./hooks/useSystemResume";
+import { log } from "./lib/logger";
 
 function App() {
-  // Detect system resume from sleep and reload webview to recover GPU compositor.
-  // Must be mounted before any other UI so it survives the full app lifecycle.
-  useSystemResume();
-
   // On sleep-recovery reload, skip splash screen — gateway is already running
   // (Rust backend survives reload) and Zustand persisted stores restore from
   // localStorage, so we can jump straight to AppLayout.
   const isRecoveryReload = sessionStorage.getItem("acowork_recovery_reload") === "1";
-  console.log("[App] boot branch selection", { isRecoveryReload });
+  log.debug("[App] boot branch selection", { isRecoveryReload });
 
   const [onboardingDone, setOnboardingDone] = useState(() => {
     return localStorage.getItem("acowork_onboarding") === "completed";
@@ -42,7 +38,7 @@ function App() {
         await win.show();
         await win.setFocus();
       } catch (e) {
-        console.error("Failed to show window:", e);
+        log.error("Failed to show window:", e);
       }
     };
     showWindow();

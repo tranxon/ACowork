@@ -5,6 +5,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
+import { log } from "../../lib/logger";
 import {
   Play,
   Pause,
@@ -242,7 +243,7 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
           <>
             <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
             <ControlButton
-              onClick={() => reExecute(activeSessionId).catch(console.error)}
+              onClick={() => reExecute(activeSessionId).catch(log.error)}
               title={t("debugPanel.buttonReExecute")}
               active
             >
@@ -293,13 +294,13 @@ export function DebugPanel({ width = 320 }: { width?: number }) {
             onSaveEdit={(section, content) => {
               const patches: Record<string, unknown> = {};
               patches[section] = content;
-              patchContext(activeSessionId, patches).catch(console.error);
+              patchContext(activeSessionId, patches).catch(log.error);
               setEditingSection(null);
             }}
             onEditChange={(content) =>
               setEditingSection((prev) => (prev ? { ...prev, current: content } : null))
             }
-            onRewind={(iter) => rewind(activeSessionId, iter).catch(console.error)}
+            onRewind={(iter) => rewind(activeSessionId, iter).catch(log.error)}
             getSection={(iteration, section) => getSection(activeSessionId, iteration, section)}
           />
         ))}

@@ -18,6 +18,7 @@ import {
   resolveAgentAvatarFileUrl,
 } from "../../lib/avatar";
 import type { AvatarAssetEntry, AvatarConfigResponse } from "../../lib/types";
+import { log } from "../../lib/logger";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -68,11 +69,11 @@ export function AgentSetupTab() {
 
     fetchAvatarConfig(selectedAgentId)
       .then((cfg) => { if (!cancelled) setAvatarConfig(cfg); })
-      .catch((err) => { if (!cancelled) console.debug("[AgentSetup] Avatar config fetch failed:", err); });
+      .catch((err) => { if (!cancelled) log.debug("[AgentSetup] Avatar config fetch failed:", err); });
 
     fetchAvatarAssets(selectedAgentId)
       .then((resp) => { if (!cancelled) setAvatarAssets(resp.assets); })
-      .catch((err) => { if (!cancelled) console.debug("[AgentSetup] Avatar assets fetch failed:", err); });
+      .catch((err) => { if (!cancelled) log.debug("[AgentSetup] Avatar assets fetch failed:", err); });
 
     return () => { cancelled = true; };
   }, [selectedAgentId]);
@@ -124,7 +125,7 @@ export function AgentSetupTab() {
         });
       })
       .catch((err) => {
-        if (!cancelled) console.debug("[AgentSetup] Agent not ready:", err);
+        if (!cancelled) log.debug("[AgentSetup] Agent not ready:", err);
       })
       .finally(() => { if (!cancelled) setConfigLoading(false); });
     return () => { cancelled = true; };
@@ -220,7 +221,7 @@ if (profile.toolResultCompressionMode !== undefined) {
         `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
         { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       );
-      if (!res.ok) console.warn("[AgentSetup] Config update failed:", res.status);
+      if (!res.ok) log.warn("[AgentSetup] Config update failed:", res.status);
 
       // Immediately sync the new temperature into the chat store so the
       // ResultsPanel status tab shows the updated value right away,
@@ -266,7 +267,7 @@ if (profile.toolResultCompressionMode !== undefined) {
       clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
-      console.warn("[AgentSetup] Select custom avatar failed:", err);
+      log.warn("[AgentSetup] Select custom avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);
@@ -282,7 +283,7 @@ if (profile.toolResultCompressionMode !== undefined) {
       clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
-      console.warn("[AgentSetup] Select builtin avatar failed:", err);
+      log.warn("[AgentSetup] Select builtin avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);
@@ -314,7 +315,7 @@ if (profile.toolResultCompressionMode !== undefined) {
       const resp = await fetchAvatarAssets(selectedAgentId);
       setAvatarAssets(resp.assets);
     } catch (err) {
-      console.warn("[AgentSetup] Avatar upload failed:", err);
+      log.warn("[AgentSetup] Avatar upload failed:", err);
     } finally {
       setAvatarBusy(false);
     }
@@ -337,7 +338,7 @@ if (profile.toolResultCompressionMode !== undefined) {
       clearAgentAvatarCache(selectedAgentId);
       await fetchAgents();
     } catch (err) {
-      console.warn("[AgentSetup] Delete avatar failed:", err);
+      log.warn("[AgentSetup] Delete avatar failed:", err);
     } finally {
       setAvatarBusy(false);
       setAvatarPopupOpen(false);

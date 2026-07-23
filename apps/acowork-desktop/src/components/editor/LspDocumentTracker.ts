@@ -1,6 +1,7 @@
 import type { editor } from "monaco-editor";
 import type { MonacoLanguageClient } from "monaco-languageclient";
 import { buildAbsoluteUri } from "../../lib/lspUtils";
+import { log } from "../../lib/logger";
 
 /**
  * Manages LSP textDocument lifecycle notifications (didOpen/didChange/didClose).
@@ -46,7 +47,7 @@ export class LspDocumentTracker {
                 },
             });
         } catch (err) {
-            console.warn("[LSP] DocumentTracker: didOpen failed:", absUri, err);
+            log.warn("[LSP] DocumentTracker: didOpen failed:", absUri, err);
             return;
         }
 
@@ -61,7 +62,7 @@ export class LspDocumentTracker {
             changeDisposable,
         });
 
-        console.log("[LSP] DocumentTracker: opened", absUri);
+        log.debug("[LSP] DocumentTracker: opened", absUri);
     }
 
     /**
@@ -94,7 +95,7 @@ export class LspDocumentTracker {
                 contentChanges,
             });
         } catch (err) {
-            console.warn("[LSP] DocumentTracker: didChange failed:", absUri, err);
+            log.warn("[LSP] DocumentTracker: didChange failed:", absUri, err);
         }
     }
 
@@ -117,11 +118,11 @@ export class LspDocumentTracker {
                 textDocument: { uri: absUri },
             });
         } catch (err) {
-            console.warn("[LSP] DocumentTracker: didClose failed:", absUri, err);
+            log.warn("[LSP] DocumentTracker: didClose failed:", absUri, err);
         }
 
         this.openDocuments.delete(absUri);
-        console.log("[LSP] DocumentTracker: closed", absUri);
+        log.debug("[LSP] DocumentTracker: closed", absUri);
     }
 
     /**
@@ -138,7 +139,7 @@ export class LspDocumentTracker {
                 textDocument: { uri: absUri },
             });
         } catch (err) {
-            console.warn("[LSP] DocumentTracker: didClose failed:", absUri, err);
+            log.warn("[LSP] DocumentTracker: didClose failed:", absUri, err);
         }
 
         this.openDocuments.delete(absUri);
@@ -196,6 +197,6 @@ export class LspDocumentTracker {
             }
         }
         this.openDocuments.clear();
-        console.log("[LSP] DocumentTracker: disposed all");
+        log.debug("[LSP] DocumentTracker: disposed all");
     }
 }

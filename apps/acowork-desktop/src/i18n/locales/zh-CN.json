@@ -159,6 +159,7 @@
     "selectReasoningEffort": "思考深度",
     "startAgent": "启动 Agent",
     "llmNotConfigured": "未配置 LLM 服务商。请在 Harness → 模型服务商 中添加 API 密钥。",
+    "thinking": "正在思考...",
     "replying": "正在回复...",
     "working": "正在处理...",
     "compacting": "上下文压缩中...",
@@ -324,6 +325,8 @@
     "reset": "重置",
     "logSetup": "日志设置",
     "logLevel": "日志级别",
+    "frontendLogLevel": "前端日志级别",
+    "frontendLogLevelHint": "控制 DevTools 控制台输出。日常使用推荐 'warn'。",
     "logFileSize": "日志文件大小 (MB)",
     "logFileSizeHint": "0 = 禁用分割。文件命名为 YYYYMMDD_HHMMSS.log",
     "noSplit": "不分割",
@@ -791,6 +794,7 @@
     "running_other": "{{count}} 个运行中"
   },
   "thinkBlock": {
+    "thinking": "正在思考",
     "thought": "深度思考",
     "showingLatest": "仅显示最新内容"
   },

@@ -12,6 +12,7 @@ import {
   startMigration,
 } from "../lib/gateway-api";
 import { useGatewayStore } from "./gatewayStore";
+import { log } from "../lib/logger";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
@@ -111,7 +112,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       const data: MemoryStatsResponse = await res.json();
       set({ stats: data });
     } catch (e) {
-      console.error("Failed to fetch memory stats:", e);
+      log.error("Failed to fetch memory stats:", e);
     }
   },
 

@@ -14,6 +14,7 @@ import type { MonacoLanguageClient } from "monaco-languageclient";
 import { getGatewayUrl } from "../../lib/config";
 import { buildAbsoluteUri } from "../../lib/lspUtils";
 import { toLspLanguageId } from "../../lib/lspUtils";
+import { log } from "../../lib/logger";
 
 // ── LSP → Monaco severity mapping ─────────────────────────────────────
 
@@ -65,7 +66,7 @@ function trackPreviewModel(
         const oldUri = monacoInst.Uri.parse(oldestKey);
         const oldModel = monacoInst.editor.getModel(oldUri);
         if (oldModel) {
-            console.log("[LSP] ModelPool: evicting preview model:", oldestKey);
+            log.debug("[LSP] ModelPool: evicting preview model:", oldestKey);
             oldModel.dispose();
         }
     }
@@ -105,7 +106,7 @@ export function disposeModelForFile(
         unpinPreviewModel(monacoUri.toString());
 
         model.dispose();
-        console.log("[LSP] ModelPool: disposed model for closed tab:", relPath);
+        log.debug("[LSP] ModelPool: disposed model for closed tab:", relPath);
     }
 }
 
@@ -242,7 +243,7 @@ export function sendDidOpenForModel(
 ): void {
     const relPath = model.uri.path.replace(/^\/+/, "");
     const absUri = buildAbsoluteUri(workspaceRoot, relPath);
-    console.log("[LSP] sendDidOpenForModel — relPath:", relPath, "absUri:", absUri);
+    log.debug("[LSP] sendDidOpenForModel — relPath:", relPath, "absUri:", absUri);
     try {
         client.sendNotification("textDocument/didOpen", {
             textDocument: {
@@ -253,7 +254,7 @@ export function sendDidOpenForModel(
             },
         });
     } catch (err) {
-        console.warn("[LSP] sendDidOpenForModel failed:", err);
+        log.warn("[LSP] sendDidOpenForModel failed:", err);
     }
 }
 
@@ -287,7 +288,7 @@ async function ensureModelsForUris(
     }
     // Deduplicate URIs — multiple references may point to the same file
     const uris = [...new Set(rawUris)];
-    console.log("[LSP] ensureModelsForUris — extracted URIs:", uris.length, "(deduplicated from", rawUris.length, ") workspaceRoot:", workspaceRoot);
+    log.debug("[LSP] ensureModelsForUris — extracted URIs:", uris.length, "(deduplicated from", rawUris.length, ") workspaceRoot:", workspaceRoot);
     if (uris.length === 0) return;
 
     // For each URI, check if a model exists; if not, create one
@@ -295,18 +296,18 @@ async function ensureModelsForUris(
     for (const lspUri of uris) {
         // Compute the relative path from the absolute LSP URI
         const relPath = extractRelPath(lspUri, workspaceRoot);
-        console.log("[LSP] ensureModelsForUris — lspUri:", lspUri, "→ relPath:", relPath);
+        log.debug("[LSP] ensureModelsForUris — lspUri:", lspUri, "→ relPath:", relPath);
         if (!relPath) continue;
 
         // Check if a model already exists for this relative path
         const monacoUri = monacoInst.Uri.parse(relPath);
         const existingModel = monacoInst.editor.getModel(monacoUri);
         if (existingModel) {
-            console.log("[LSP] ensureModelsForUris — model already exists for:", relPath);
+            log.debug("[LSP] ensureModelsForUris — model already exists for:", relPath);
             continue;
         }
 
-        console.log("[LSP] ensureModelsForUris — no model for:", relPath, "fetching...");
+        log.debug("[LSP] ensureModelsForUris — no model for:", relPath, "fetching...");
         // No model — fetch content and create one
         fetchPromises.push(
             (async () => {
@@ -320,7 +321,7 @@ async function ensureModelsForUris(
                     const url = `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
                     const resp = await fetch(url);
                     if (!resp.ok) {
-                        console.warn("[LSP] Failed to fetch file for model creation:", relPath, resp.status);
+                        log.warn("[LSP] Failed to fetch file for model creation:", relPath, resp.status);
                         return;
                     }
                     const data = (await resp.json()) as { content: string };
@@ -328,11 +329,11 @@ async function ensureModelsForUris(
                     // Re-check before creating — another parallel fetch may have
                     // already created the model for this URI
                     if (monacoInst.editor.getModel(monacoUri)) {
-                        console.log("[LSP] Model created by parallel fetch, skipping:", relPath);
+                        log.debug("[LSP] Model created by parallel fetch, skipping:", relPath);
                         return;
                     }
                     monacoInst.editor.createModel(data.content, lang, monacoUri);
-                    console.log("[LSP] Created model for:", relPath, "lang:", lang, "size:", data.content.length);
+                    log.debug("[LSP] Created model for:", relPath, "lang:", lang, "size:", data.content.length);
                     // Register as preview model — capped by LRU eviction
                     trackPreviewModel(monacoInst, monacoUri);
                     // Notify the LSP server about the new model so it can
@@ -342,18 +343,18 @@ async function ensureModelsForUris(
                         sendDidOpenForModel(client, newModel, workspaceRoot);
                     }
                 } catch (err) {
-                    console.warn("[LSP] Error creating model for:", relPath, err);
+                    log.warn("[LSP] Error creating model for:", relPath, err);
                 }
             })()
         );
     }
 
     if (fetchPromises.length > 0) {
-        console.log("[LSP] ensureModelsForUris — awaiting", fetchPromises.length, "fetch(es)");
+        log.debug("[LSP] ensureModelsForUris — awaiting", fetchPromises.length, "fetch(es)");
         await Promise.all(fetchPromises);
-        console.log("[LSP] ensureModelsForUris — all fetches done");
+        log.debug("[LSP] ensureModelsForUris — all fetches done");
     } else {
-        console.log("[LSP] ensureModelsForUris — no fetches needed");
+        log.debug("[LSP] ensureModelsForUris — no fetches needed");
     }
 }
 
@@ -445,7 +446,7 @@ export function registerLspProviders(
 
     // Debug: log what models exist for this language
     const models = monaco.editor.getModels();
-    console.log("[LSP] registerLspProviders — language:", language, "models:", models.map(m => ({ uri: m.uri.toString(), lang: m.getLanguageId() })));
+    log.debug("[LSP] registerLspProviders — language:", language, "models:", models.map(m => ({ uri: m.uri.toString(), lang: m.getLanguageId() })));
 
     // ── Completion Provider (Ctrl+Space) ───────────────────────────────
     disposables.push(
@@ -486,7 +487,7 @@ export function registerLspProviders(
                     textDocument: { uri: lspUri },
                     position: toLspPosition(position),
                 };
-                console.log("[LSP] definition request — modelUri:", model.uri.toString(),
+                log.debug("[LSP] definition request — modelUri:", model.uri.toString(),
                     "lspUri:", lspUri, "pos:", JSON.stringify(params.position));
                 try {
                     const t0 = performance.now();
@@ -495,15 +496,15 @@ export function registerLspProviders(
                         params
                     );
                     const ms = (performance.now() - t0).toFixed(0);
-                    console.log("[LSP] definition result:", result, `(${ms}ms)`);
+                    log.debug("[LSP] definition result:", result, `(${ms}ms)`);
                     // Ensure models exist for all referenced files so Monaco
                     // can display the peek widget and navigate to them
                     await ensureModelsForUris(result, monaco, workspaceRoot, agentId, workspaceId, client);
                     const links = asLocationLinks(result, monaco, workspaceRoot);
-                    console.log("[LSP] definition asLocationLinks:", links.length, "items", links.map(l => l.uri.toString()));
+                    log.debug("[LSP] definition asLocationLinks:", links.length, "items", links.map(l => l.uri.toString()));
                     return links;
                 } catch (err) {
-                    console.warn("[LSP] definition error:", err);
+                    log.warn("[LSP] definition error:", err);
                     return [];
                 }
             },
@@ -520,7 +521,7 @@ export function registerLspProviders(
                     position: toLspPosition(position),
                     context: { includeDeclaration: context.includeDeclaration },
                 };
-                console.log("[LSP] references request — modelUri:", model.uri.toString(), "lspUri:", lspUri);
+                log.debug("[LSP] references request — modelUri:", model.uri.toString(), "lspUri:", lspUri);
                 try {
                     const t0 = performance.now();
                     const result = await client.sendRequest(
@@ -528,15 +529,15 @@ export function registerLspProviders(
                         params
                     );
                     const ms = (performance.now() - t0).toFixed(0);
-                    console.log("[LSP] references result:", result, `(${ms}ms)`);
+                    log.debug("[LSP] references result:", result, `(${ms}ms)`);
                     // Ensure models exist for all referenced files so Monaco
                     // can display the reference peek widget and navigate
                     await ensureModelsForUris(result, monaco, workspaceRoot, agentId, workspaceId, client);
                     const locs = asLocations(result, monaco, workspaceRoot);
-                    console.log("[LSP] references asLocations:", locs.length, "items", locs.map(l => l.uri.toString()));
+                    log.debug("[LSP] references asLocations:", locs.length, "items", locs.map(l => l.uri.toString()));
                     return locs;
                 } catch (err) {
-                    console.warn("[LSP] references error:", err);
+                    log.warn("[LSP] references error:", err);
                     return [];
                 }
             },
@@ -552,15 +553,15 @@ export function registerLspProviders(
                     textDocument: { uri: lspUri },
                     position: toLspPosition(position),
                 };
-                console.log("[LSP] hover request — modelUri:", model.uri.toString(), "lspUri:", lspUri);
+                log.debug("[LSP] hover request — modelUri:", model.uri.toString(), "lspUri:", lspUri);
                 try {
                     const t0 = performance.now();
                     const result = await client.sendRequest("textDocument/hover", params);
                     const ms = (performance.now() - t0).toFixed(0);
-                    console.log("[LSP] hover result:", result, `(${ms}ms)`);
+                    log.debug("[LSP] hover result:", result, `(${ms}ms)`);
                     return asHover(result);
                 } catch (err) {
-                    console.warn("[LSP] hover error:", err);
+                    log.warn("[LSP] hover error:", err);
                     return null;
                 }
             },
@@ -604,7 +605,7 @@ export function registerLspProviders(
             const monacoUri = lspUriToMonacoUri(lspUri, workspaceRoot, monaco);
             const model = monaco.editor.getModel(monacoUri);
             if (!model) {
-                console.log("[LSP] diagnostics dropped — no model for:", monacoUri.toString());
+                log.debug("[LSP] diagnostics dropped — no model for:", monacoUri.toString());
                 return;
             }
 
@@ -617,7 +618,7 @@ export function registerLspProviders(
                 for (const d of diags) {
                     bySeverity[d.severity] = (bySeverity[d.severity] ?? 0) + 1;
                 }
-                console.log(
+                log.debug(
                     "[LSP] diagnostics —",
                     lspUri.split("/").pop(),
                     "total:", diags.length,
@@ -766,7 +767,7 @@ function asLocationLinks(
                 range: toMonacoRange(item.range),
             };
         });
-    console.log("[LSP] asLocationLinks — mapped:", mapped.map(l => ({
+    log.debug("[LSP] asLocationLinks — mapped:", mapped.map(l => ({
         uri: l.uri.toString(),
         hasModel: !!monacoInst.editor.getModel(l.uri),
     })));
@@ -778,7 +779,7 @@ function asLocationLinks(
             // when trying to create a preview for a file without a model.
             const model = monacoInst.editor.getModel(loc.uri);
             if (!model) {
-                console.warn("[LSP] asLocationLinks — skipping location, no model:", loc.uri.toString());
+                log.warn("[LSP] asLocationLinks — skipping location, no model:", loc.uri.toString());
                 return false;
             }
             return true;
@@ -798,7 +799,7 @@ function asLocations(
             uri: lspUriToMonacoUri(item.uri, workspaceRoot, monacoInst),
             range: toMonacoRange(item.range),
         }));
-    console.log("[LSP] asLocations — mapped:", mapped.map(l => ({
+    log.debug("[LSP] asLocations — mapped:", mapped.map(l => ({
         uri: l.uri.toString(),
         hasModel: !!monacoInst.editor.getModel(l.uri),
     })));
@@ -807,7 +808,7 @@ function asLocations(
             // Safety filter: only include locations that have a Monaco model.
             const model = monacoInst.editor.getModel(loc.uri);
             if (!model) {
-                console.warn("[LSP] asLocations — skipping location, no model:", loc.uri.toString());
+                log.warn("[LSP] asLocations — skipping location, no model:", loc.uri.toString());
                 return false;
             }
             return true;

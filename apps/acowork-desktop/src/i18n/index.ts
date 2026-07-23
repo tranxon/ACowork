@@ -6,6 +6,7 @@ import zhCN from "./locales/zh-CN.json";
 import zhTW from "./locales/zh-TW.json";
 import ja from "./locales/ja.json";
 import ko from "./locales/ko.json";
+import { log } from "../lib/logger";
 
 const STORAGE_KEY = "i18nextLng";
 
@@ -76,7 +77,7 @@ function runRuntimeI18nLint(): void {
         findSingleBraceViolations(bundle, label),
     );
     if (violations.length === 0) {
-        console.log(`[i18n-lint] OK — all 5 locale files use valid i18next double-brace placeholders.`);
+        log.debug(`[i18n-lint] OK — all 5 locale files use valid i18next double-brace placeholders.`);
         return;
     }
     console.groupCollapsed(
@@ -85,7 +86,7 @@ function runRuntimeI18nLint(): void {
         "color: #ef4444; font-weight: bold;",
     );
     for (const v of violations) {
-        console.warn(
+        log.warn(
             `[i18n-lint] ${v.file} > ${v.key}: single-brace placeholder \`${v.token}\` ` +
             `in "${v.value.slice(0, 80)}${v.value.length > 80 ? "…" : ""}". ` +
             `Use \`{{${v.token.slice(1, -1)}}}\` instead.`,
@@ -113,7 +114,7 @@ function detectLanguage(): string {
 }
 
 const initialLang = detectLanguage();
-console.log("[i18n] Detected initial language:", initialLang);
+log.debug("[i18n] Detected initial language:", initialLang);
 
 i18n
     .use(initReactI18next)
@@ -127,11 +128,11 @@ i18n
         },
     })
     .then(() => {
-        console.log("[i18n] Initialized, current language:", i18n.language);
+        log.debug("[i18n] Initialized, current language:", i18n.language);
     });
 
 i18n.on("languageChanged", (lng) => {
-    console.log("[i18n] Language changed to:", lng);
+    log.debug("[i18n] Language changed to:", lng);
     try {
         localStorage.setItem(STORAGE_KEY, lng);
     } catch { /* ignore */ }

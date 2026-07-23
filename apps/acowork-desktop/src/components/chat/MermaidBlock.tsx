@@ -2,6 +2,7 @@ import { useEffect, useRef, useLayoutEffect, useState } from "react";
 import mermaid from "mermaid";
 import Panzoom, { PanzoomObject } from "@panzoom/panzoom";
 import { ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
+import { log } from "../../lib/logger";
 
 const SCALE_MIN = 0.2;
 const SCALE_MAX = 8;
@@ -242,8 +243,8 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
           }
         } catch (err) {
           if (lastLoggedFailRef.current !== failHash) {
-            console.error("[MermaidBlock] render failed:", err);
-            console.error("[MermaidBlock] chart content:", chart.slice(0, 500));
+            log.error("[MermaidBlock] render failed:", err);
+            log.error("[MermaidBlock] chart content:", chart.slice(0, 500));
             lastLoggedFailRef.current = failHash;
           }
           if (!cancelled) {

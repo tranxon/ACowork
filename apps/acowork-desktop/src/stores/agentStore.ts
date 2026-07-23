@@ -7,6 +7,7 @@ import { isSessionActive } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { log } from "../lib/logger";
 
 /** System Agent ID — always auto-started by Gateway */
 export const SYSTEM_AGENT_ID = "com.acowork.system";
@@ -319,7 +320,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const t1 = performance.now();
       const sr = list.find((a: AgentInfo) => a.agent_id === "com.acowork.senior-engineer");
       if (sr) {
-        console.log(
+        log.debug(
           `[AgentStore] fetchAgents took ${(t1 - t0).toFixed(0)}ms | senior-engineer: running=${sr.running} ready=${sr.ready} connected=${sr.connected}`,
         );
       }
@@ -620,7 +621,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         set((state) => patchAgent(state, agentId, { isLoading: false }));
         return;
       }
-      console.error("[AgentStore] Failed to fetch sessions:", e);
+      log.error("[AgentStore] Failed to fetch sessions:", e);
       set((state) => patchAgent(state, agentId, { sessions: [], isLoading: false }));
     }
   },
@@ -703,7 +704,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Session meta (workspace_id) will be applied when the session_created
       // event arrives.
     } catch (e) {
-      console.error("[AgentStore] Failed to create session:", e);
+      log.error("[AgentStore] Failed to create session:", e);
     }
   },
 
@@ -754,7 +755,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
             payloadJson: { session_id: sessionId },
           });
         } catch (err) {
-          console.warn("[AgentStore] close_session MQTT failed:", err);
+          log.warn("[AgentStore] close_session MQTT failed:", err);
         }
       }
 
@@ -770,7 +771,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       }
       useChatStore.getState().removeSessionState(agentId, sessionId);
     } catch (e) {
-      console.error("[AgentStore] Failed to close session:", e);
+      log.error("[AgentStore] Failed to close session:", e);
     }
   },
 
@@ -816,7 +817,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // Invalidate session title so it gets re-fetched (undefined = not yet fetched)
       set((state) => patchAgent(state, agentId, { sessionTitle: undefined }));
     } catch (e) {
-      console.error("[AgentStore] Failed to delete session:", e);
+      log.error("[AgentStore] Failed to delete session:", e);
     }
   },
 

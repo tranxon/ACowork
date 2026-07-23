@@ -9,6 +9,7 @@ import type { IWebSocket } from "vscode-ws-jsonrpc";
 import { getCachedLspRelayEndpoint, invalidateLspRelayEndpointCache } from "./gateway-api";
 import { MonacoVscodeApiWrapper } from "monaco-languageclient/vscodeApiWrapper";
 import type { MonacoVscodeApiConfig } from "monaco-languageclient/vscodeApiWrapper";
+import { log } from "./logger";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ let vscodeApiInitDone = false;
 export async function ensureVscodeApiInitialized(): Promise<void> {
     if (vscodeApiInitDone) return;
     if (!vscodeApiInitPromise) {
-        console.log("[LSP] Initializing VS Code API services (first time)...");
+        log.debug("[LSP] Initializing VS Code API services (first time)...");
         const t0 = performance.now();
         vscodeApiInitPromise = (async () => {
             try {
@@ -63,16 +64,16 @@ export async function ensureVscodeApiInitialized(): Promise<void> {
                     noSyntaxValidation: true,
                     noSuggestionDiagnostics: true,
                 });
-                console.log("[LSP] Monaco built-in TS diagnostics disabled — using tsserver");
+                log.debug("[LSP] Monaco built-in TS diagnostics disabled — using tsserver");
 
                 vscodeApiInitDone = true;
-                console.log(
+                log.debug(
                     "[LSP] VS Code API services initialized successfully",
                     `elapsed: ${Math.round(performance.now() - t0)}ms`,
                 );
             } catch (err) {
                 vscodeApiInitPromise = null; // allow retry
-                console.error("[LSP] VS Code API initialization failed:", err);
+                log.error("[LSP] VS Code API initialization failed:", err);
                 throw err;
             }
         })();
@@ -136,7 +137,7 @@ export async function buildLspWsUrl(
     if (workspaceRoot) params.set("workspace_root", workspaceRoot);
     const qs = params.toString();
     const result = qs ? `${url}?${qs}` : url;
-    console.log(
+    log.debug(
         "[LSP] buildLspWsUrl — relay endpoint:",
         `${ep.host}:${ep.port}`,
         "→ result:",

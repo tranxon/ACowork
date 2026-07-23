@@ -22,6 +22,7 @@ import type {
   LspServersWithStatus,
 } from "./types";
 import { getGatewayUrl } from "./config";
+import { log } from "./logger";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
@@ -191,7 +192,7 @@ export async function resetOnboarding(
   try {
     return await resetGateway(gatewayUrl);
   } catch (e) {
-    console.warn(
+    log.warn(
       "Gateway reset failed (frontend onboarding state cleared anyway):",
       e,
     );

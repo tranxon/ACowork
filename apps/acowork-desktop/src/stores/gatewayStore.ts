@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import type { HealthResponse, GatewayStatus, LocalGatewayState, AgentMigrationProgress } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
+import { log } from "../lib/logger";
 
 interface GatewayStore {
   status: GatewayStatus;
@@ -60,7 +61,7 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
       // Check health now that the local gateway is up
       await get().checkHealth();
     } catch (err) {
-      console.error("Failed to start local gateway:", err);
+      log.error("Failed to start local gateway:", err);
       set({ localState: "error" });
     }
   },
@@ -71,7 +72,7 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
       await invoke("stop_local_gateway");
       set({ localState: "stopped", status: "disconnected", health: null });
     } catch (err) {
-      console.error("Failed to stop local gateway:", err);
+      log.error("Failed to stop local gateway:", err);
       set({ localState: "error" });
     }
   },

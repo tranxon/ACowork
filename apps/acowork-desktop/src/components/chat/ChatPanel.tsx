@@ -52,6 +52,7 @@ import { DocumentChip } from "./DocumentChip";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
+import { log } from "../../lib/logger";
 
 // Generous threshold used ONLY for scroll snapshot on unmount (nav-back).
 // Real-time pinned-to-bottom detection in handleScroll uses a strict 5px
@@ -471,7 +472,7 @@ export function ChatPanel() {
   const lastSnapshotSigRef = useRef("");
   if (snapshotSig !== lastSnapshotSigRef.current) {
     lastSnapshotSigRef.current = snapshotSig;
-    console.log("[CP:snapshot-read]", {
+    log.debug("[CP:snapshot-read]", {
       currentScrollKey,
       scrollSnapshot,
       sending,
@@ -658,7 +659,7 @@ export function ChatPanel() {
       if (!key || !container) return;
 
       const distFromBottom = getDistanceFromBottom(container);
-      console.log("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottom: adapter.isPinnedToBottom, distFromBottom });
+      log.debug("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottom: adapter.isPinnedToBottom, distFromBottom });
       setScrollSnapshot(key, {
         scrollOffset: container.scrollTop,
         // Use a generous threshold (120px) for snapshot: if the user was only
@@ -689,7 +690,7 @@ export function ChatPanel() {
 
     const currentSessId = useChatStore.getState().agentStates[selectedAgentId]?.activeSessionId;
     if (!currentSessId) {
-      console.log("[ChatPanel:mount] no active session, deferring...");
+      log.debug("[ChatPanel:mount] no active session, deferring...");
       return;
     }
 
@@ -703,7 +704,7 @@ export function ChatPanel() {
     const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages;
     const hasMessages = !!(existingMessages && existingMessages.length > 0);
 
-    console.log("[ChatPanel:mount] atomized restore start", {
+    log.debug("[ChatPanel:mount] atomized restore start", {
       agentId: selectedAgentId,
       sessionId: currentSessId,
       hasMessages,
@@ -723,7 +724,7 @@ export function ChatPanel() {
         .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessId))
         .finally(() => {
           session.scope.current.isInitialLoad = null;
-          console.log("[ChatPanel:mount] atomized restore done (full)", {
+          log.debug("[ChatPanel:mount] atomized restore done (full)", {
             agentId: selectedAgentId,
             sessionId: currentSessId,
             messageCount: useChatStore.getState().agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages?.length ?? 0,
@@ -733,7 +734,7 @@ export function ChatPanel() {
       // 2b. Messages already in store (nav-back: same agent, same session).
       //     No reload needed — messages survive in zustand across unmount.
       chatStore.fetchSessionState(selectedAgentId, currentSessId);
-      console.log("[ChatPanel:mount] atomized restore done (incremental)", {
+      log.debug("[ChatPanel:mount] atomized restore done (incremental)", {
         agentId: selectedAgentId,
         sessionId: currentSessId,
         messageCount: existingMessages.length,
@@ -751,7 +752,7 @@ export function ChatPanel() {
     // Guard: mount effect (above) already handles the initial session load.
     // If it set isInitialLoad, it means a load is in progress for this session.
     if (session.scope.current.isInitialLoad === currentSessionId) {
-      console.log("[ChatPanel:session-switch] skipped (mount effect loading this session)");
+      log.debug("[ChatPanel:session-switch] skipped (mount effect loading this session)");
       return;
     }
 
@@ -763,7 +764,7 @@ export function ChatPanel() {
       return;
     }
 
-    console.log("[ChatPanel:session-switch] loading messages", {
+    log.debug("[ChatPanel:session-switch] loading messages", {
       agentId: selectedAgentId,
       sessionId: currentSessionId,
     });
@@ -879,10 +880,10 @@ export function ChatPanel() {
       const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
 
       if (container.scrollTop < 50 && ad.hasOlder) {
-        console.log('[timer] loadBefore', { scrollTop: container.scrollTop, hasOlder: ad.hasOlder, blocks: ad.blocks.length });
+        log.debug('[timer] loadBefore', { scrollTop: container.scrollTop, hasOlder: ad.hasOlder, blocks: ad.blocks.length });
         void ad.loadBefore();
       } else if (distFromBottom < 50 && ad.hasNewer) {
-        console.log('[timer] loadAfter', { distFromBottom, hasNewer: ad.hasNewer, blocks: ad.blocks.length });
+        log.debug('[timer] loadAfter', { distFromBottom, hasNewer: ad.hasNewer, blocks: ad.blocks.length });
         void ad.loadAfter();
       }
     }, 150);
@@ -1046,7 +1047,7 @@ export function ChatPanel() {
       ));
     } catch (err) {
       const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "Upload failed";
-      console.error("[ChatPanel] Document upload failed:", err);
+      log.error("[ChatPanel] Document upload failed:", err);
       // Update chip to error
       session.setPendingFiles(prev => prev.map((f) =>
         f.tempId === tempId ? { ...f, status: "error", errorMessage: msg } : f
@@ -1072,7 +1073,7 @@ export function ChatPanel() {
       // Find models that support image — including other providers
       const imageModels = availableModels.filter(m => m.input_modalities?.includes('image'));
       if (imageModels.length === 0) {
-        console.warn("[ChatPanel] No image-capable models available — skipping dialog");
+        log.warn("[ChatPanel] No image-capable models available — skipping dialog");
         return;
       }
       session.setImageCapableModels(imageModels);
@@ -1128,7 +1129,7 @@ export function ChatPanel() {
         height: dims.height,
       }]);
     } catch (err) {
-      console.error("[ChatPanel] Image selection failed:", err);
+      log.error("[ChatPanel] Image selection failed:", err);
     }
   };
 
@@ -1155,7 +1156,7 @@ export function ChatPanel() {
         },
       });
     } catch (err) {
-      console.error("[ChatPanel] Failed to send approval:", err);
+      log.error("[ChatPanel] Failed to send approval:", err);
     }
     // Clear the specific approval from the pending map by tool_call_id
     if (selectedAgentId && approval.tool_call_id) {
@@ -1181,7 +1182,7 @@ export function ChatPanel() {
         },
       });
     } catch (err) {
-      console.error("[ChatPanel] Failed to send question answer:", err);
+      log.error("[ChatPanel] Failed to send question answer:", err);
     }
     // Clear the answered question from the queue by requestId
     useChatStore.getState().resolveQuestion(agentId, requestId);

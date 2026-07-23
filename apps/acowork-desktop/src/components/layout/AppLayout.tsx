@@ -23,6 +23,7 @@ import { useLayoutStore, type PanelTab } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Bot, MessagesSquare, Cpu } from "lucide-react";
+import { log } from "../../lib/logger";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -78,7 +79,7 @@ export function AppLayout() {
     const a = useAgentStore.getState();
     const c = useChatStore.getState();
     const sid = a.selectedAgentId ?? "";
-    console.log("[AppLayout] MOUNT", {
+    log.debug("[AppLayout] MOUNT", {
       recoveryReloadFlag: sessionStorage.getItem("acowork_recovery_reload"),
       selectedAgentId: a.selectedAgentId,
       activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
@@ -99,7 +100,7 @@ export function AppLayout() {
     const store = useAgentStore.getState();
     if (Object.keys(store.agents).length === 0) {
       void store.fetchAgents().then(() => {
-        console.log("[AppLayout] initial fetchAgents complete", {
+        log.debug("[AppLayout] initial fetchAgents complete", {
           selectedAgentId: store.selectedAgentId,
           knownAgents: Object.keys(store.agents),
         });
@@ -250,10 +251,10 @@ export function AppLayout() {
       try {
         await invoke("set_window_effect", { isDark });
         if (cancelled) return;
-        console.log(`[vibrancy] set_window_effect(isDark=${isDark}) succeeded (attempt ${attempt})`);
+        log.debug(`[vibrancy] set_window_effect(isDark=${isDark}) succeeded (attempt ${attempt})`);
         lastAppliedIsDarkRef.current = isDark;
       } catch (e: unknown) {
-        console.warn(`[vibrancy] set_window_effect attempt ${attempt} failed:`, e);
+        log.warn(`[vibrancy] set_window_effect attempt ${attempt} failed:`, e);
         if (!cancelled && attempt < 3) {
           const delay = 200 * Math.pow(2, attempt - 1); // 200, 400, 800 ms
           setTimeout(() => tryApply(attempt + 1), delay);
@@ -394,7 +395,7 @@ export function AppLayout() {
       const a = useAgentStore.getState();
       const c = useChatStore.getState();
       const sid = a.selectedAgentId ?? "";
-      console.log("[AppLayout] Page visible after sleep/lock", {
+      log.debug("[AppLayout] Page visible after sleep/lock", {
         selectedAgentId: a.selectedAgentId,
         activeSessionId: c.agentStates[sid]?.activeSessionId ?? null,
         openSessionIds: c.agentStates[sid]?.openSessionIds ?? [],

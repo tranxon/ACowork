@@ -13,6 +13,7 @@ import { StyledInput } from "../common/StyledInput";
 import { ProfileTab } from "./ProfileTab";
 import { TabButton } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
+import { log } from "../../lib/logger";
 
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
 
@@ -532,7 +533,7 @@ function GeneralTab() {
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showResetOnboardingConfirm, setShowResetOnboardingConfirm] = useState(false);
-  const { logLevel, setLogLevel, logFileSizeMb, setLogFileSizeMb, logFileCount, setLogFileCount } = useSettingsStore();
+  const { logLevel, setLogLevel, logFileSizeMb, setLogFileSizeMb, logFileCount, setLogFileCount, frontendLogLevel, setFrontendLogLevel } = useSettingsStore();
 
   useEffect(() => {
     fetch(`${getGatewayUrl()}/api/config`)
@@ -604,6 +605,36 @@ function GeneralTab() {
               <option value="error">error</option>
             </select>
           </div>
+        </div>
+
+        {/* Frontend log level (DevTools console) */}
+        <div className="mb-3">
+          <label className="block mb-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+            {t("settings.frontendLogLevel")}
+          </label>
+          <div>
+            <select
+              value={frontendLogLevel}
+              onChange={(e) => setFrontendLogLevel(e.target.value as "trace" | "debug" | "info" | "warn" | "error" | "off")}
+              className="w-[5.5rem] appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+              style={{
+                backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                backgroundPosition: 'right 0.5rem center',
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '1.5em 1.5em',
+              }}
+            >
+              <option value="trace">trace</option>
+              <option value="debug">debug</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+              <option value="off">off</option>
+            </select>
+          </div>
+          <p className="mt-1 text-[10px] text-zinc-400">
+            {t("settings.frontendLogLevelHint")}
+          </p>
         </div>
 
         {/* Log file size */}
@@ -753,7 +784,7 @@ function GeneralTab() {
               const { resetOnboarding } = await import("../../lib/gateway-api");
               await resetOnboarding();
             } catch (e) {
-              console.error("Failed to reset onboarding:", e);
+              log.error("Failed to reset onboarding:", e);
             }
             window.location.reload();
           }}

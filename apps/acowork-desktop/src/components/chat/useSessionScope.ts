@@ -1,5 +1,6 @@
 import { useRef, useState, useLayoutEffect } from "react";
 import type { ModelEntry } from "../../lib/types";
+import { log } from "../../lib/logger";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -121,7 +122,7 @@ export function useSessionScope(
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
-    console.log("[useSessionScope] reset-effect fire", {
+    log.debug("[useSessionScope] reset-effect fire", {
       currentSessionId,
       prevSessionRef: prevSessionRef.current,
     });
@@ -134,7 +135,7 @@ export function useSessionScope(
     prevSessionRef.current = currentSessionId;
 
     if (isFreshMount) {
-      console.log("[useSessionScope] fresh mount — no reset performed", {
+      log.debug("[useSessionScope] fresh mount — no reset performed", {
         currentSessionId,
       });
       // Fresh mount: scope is already in default state (useRef(default)) and

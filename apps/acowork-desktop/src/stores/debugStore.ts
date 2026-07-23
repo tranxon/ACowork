@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { useChatStore } from "./chatStore";
 import { useAgentStore } from "./agentStore";
+import { log } from "../lib/logger";
 
 // ── Debug Protocol types ──────────────────────────────────────────────
 
@@ -191,7 +192,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
       socket.onopen = () => {
         if (get().socket !== socket) {
-          console.log("[debugStore] onopen: socket is not current, ignoring");
+          log.debug("[debugStore] onopen: socket is not current, ignoring");
           return;
         }
         set({ connected: true, connecting: false });
@@ -220,13 +221,13 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
               }
             }
           } else if ("method" in msg) {
-            console.log("[debugStore] received event:", msg.method, msg.params);
+            log.debug("[debugStore] received event:", msg.method, msg.params);
             store._handleEvent(msg as JsonRpcEvent);
           } else {
-            console.warn("[debugStore] unexpected message format:", msg);
+            log.warn("[debugStore] unexpected message format:", msg);
           }
         } catch (e) {
-          console.warn("[debugStore] failed to parse message:", e);
+          log.warn("[debugStore] failed to parse message:", e);
         }
       };
 
@@ -344,7 +345,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         const iteration = (params.iteration as number) ?? 0;
         const sections = params.sections as ContextSnapshotMeta["sections"] | undefined;
         const total_token_estimate = (params.total_token_estimate as number) ?? 0;
-        console.log("[debugStore] onContextBuilt: sid=", targetSid, "iteration=", iteration, "sections=", !!sections);
+        log.debug("[debugStore] onContextBuilt: sid=", targetSid, "iteration=", iteration, "sections=", !!sections);
         if (sections) {
           setSession((current) => {
             const currentSnapshots = current.snapshots;
@@ -352,11 +353,11 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
               ? Math.max(...currentSnapshots.map((sn) => sn.iteration))
               : 0;
             if (currentSnapshots.length > 0 && iteration > maxExisting + 1) {
-              console.log("[debugStore] onContextBuilt: discarding stale event sid=", targetSid, "iteration=", iteration);
+              log.debug("[debugStore] onContextBuilt: discarding stale event sid=", targetSid, "iteration=", iteration);
               return current;
             }
             if (currentSnapshots.some((sn) => sn.iteration === iteration)) {
-              console.log("[debugStore] onContextBuilt: skipping duplicate sid=", targetSid, "iteration=", iteration);
+              log.debug("[debugStore] onContextBuilt: skipping duplicate sid=", targetSid, "iteration=", iteration);
               return current;
             }
             return {
@@ -402,7 +403,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   restart: async (sessionId: string | null) => {
     const agentId = get().debugAgentId;
     if (!agentId) {
-      console.warn("[debugStore] restart: no debugAgentId, skipping");
+      log.warn("[debugStore] restart: no debugAgentId, skipping");
       return;
     }
     // Route through Gateway gRPC EnableDebugMode (the debugger.restart RPC
@@ -410,7 +411,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     try {
       await useAgentStore.getState().restartAgentInDebug(agentId);
     } catch (e) {
-      console.error("[debugStore] restart: restartAgentInDebug failed:", e);
+      log.error("[debugStore] restart: restartAgentInDebug failed:", e);
       throw e;
     }
     await get().getState(sessionId).catch(() => { });

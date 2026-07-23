@@ -5,6 +5,7 @@ import type {
   SkillExecutionHistoryResponse,
 } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
+import { log } from "../lib/logger";
 
 interface SkillStore {
   skills: SkillListEntry[];
@@ -74,7 +75,7 @@ export const useSkillStore = create<SkillStore>((set, get) => ({
       const data: SkillExecutionHistoryResponse = await res.json();
       set({ executionHistory: data });
     } catch (e) {
-      console.error("Failed to fetch skill history:", e);
+      log.error("Failed to fetch skill history:", e);
     }
   },
 
