@@ -1453,7 +1453,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                 ) : activeFile.kind === "url" ? (
                     <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
-                    <div className="flex h-full w-full items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+                    // Match the text/Markdown/HTML preview surface (Monaco `vs`/`vs-dark` ~#FFFFFF/#1E1E1E
+                    // and HtmlPreviewView iframe bg-white) so the panel reads as one "editor canvas"
+                    // distinct from the surrounding chat-area bg (`#FAFAFA` / zinc-900). zinc-50/zinc-900
+                    // previously collapsed into the chat surface and the image looked unframed.
+                    <div className="flex h-full w-full items-center justify-center bg-white dark:bg-zinc-800">
                         <img
                             src={"data:" + activeFile.mimeType + ";base64," + activeFile.content}
                             alt={activeFile.fileName}
