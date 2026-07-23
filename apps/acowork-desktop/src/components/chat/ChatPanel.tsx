@@ -1202,7 +1202,7 @@ export function ChatPanel() {
   // ── Empty state: no agents at all ──
   if (Object.keys(useAgentStore.getState().agents).length === 0) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+      <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
           <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">No agents available</p>
@@ -1215,7 +1215,7 @@ export function ChatPanel() {
   // ── No agent selected ──
   if (!selectedAgent) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+      <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <Bot className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
           <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">Select an agent to start chatting</p>
@@ -1228,7 +1228,7 @@ export function ChatPanel() {
   // ── Agent not running ──
   if (!selectedAgent.running) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+      <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <Tooltip content={t("chatPanel.startAgent")} variant="plain">
             <button
@@ -1259,7 +1259,7 @@ export function ChatPanel() {
   // when the chat view finally mounts, the session is fully bootstrapped.
   if (!currentSessionId) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+      <div className="flex flex-1 items-center justify-center">
         <div className="text-center">
           <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
           <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading session...</p>
@@ -1281,7 +1281,7 @@ export function ChatPanel() {
   return (
     <>
       <div
-        className="flex flex-1 min-w-[288px] flex-col bg-[#FAFAFA] dark:bg-zinc-900 rounded-xl overflow-hidden"
+        className="flex flex-1 min-w-[288px] flex-col overflow-hidden"
       >
         {/* LLM config warning */}
         {hasLlmConfig === false && (

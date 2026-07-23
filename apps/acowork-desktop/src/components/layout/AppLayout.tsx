@@ -640,7 +640,7 @@ export function AppLayout() {
 
         {/* Content area based on current view */}
         {currentView === "chat" && (
-          <div className="flex flex-1 overflow-hidden">
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-[#FAFAFA] dark:bg-zinc-900">
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
 
