@@ -72,7 +72,6 @@
     "selectReasoningEffort": "Reasoning effort",
     "startAgent": "Start Agent",
     "llmNotConfigured": "No LLM provider configured. Please add an API key in Harness → Providers.",
-    "thinking": "Thinking...",
     "replying": "Replying...",
     "working": "working ...",
     "compacting": "Context compacting...",
@@ -844,7 +843,6 @@
     "running_other": "{{count}} running"
   },
   "thinkBlock": {
-    "thinking": "Thinking",
     "thought": "Thought",
     "showingLatest": "Showing latest"
   },

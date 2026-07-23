@@ -228,7 +228,6 @@ const MessageBubble = React.memo(function MessageBubble({
   const streaming = useStreamingContent(currentSessionId, message.id);
   const displayContent = streaming?.content ?? message.content;
   const isStreaming = streaming?.isStreaming ?? false;
-  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
@@ -277,20 +276,23 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "assistant") {
+    // During streaming the session-level "replying" indicator in
+    // VirtualMessageList takes over entirely — the bubble itself must not
+    // render any placeholder (would double up with the outer indicator) and
+    // must not render streaming markdown either (would cause full re-parse of
+    // the accumulated string on every stream_delta, generating large amounts
+    // of GC churn — an approach previously discarded for this reason).
+    // The bubble fully materialises only after record_complete, when
+    // useStreamingContent returns null and displayContent falls back to the
+    // frozen message.content.
+    if (isStreaming || !displayContent) return null;
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
 <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              {!isStreaming && displayContent ? (
-                <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
-                  <StreamMarkdown content={displayContent} />
-                </div>
-              ) : (
-                <span className="inline-flex items-center gap-1.5">
-                  <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                  <span className="text-zinc-400">{t("chatPanel.thinking")}</span>
-                </span>
-              )}
+              <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
+                <StreamMarkdown content={displayContent} />
+              </div>
             </div>
           </div>
       </MessageContentWrapper>

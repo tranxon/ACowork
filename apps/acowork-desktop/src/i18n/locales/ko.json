@@ -157,7 +157,6 @@
     "inputParamsConnecting": "매개변수 입력...（Agent에 연결 중...）",
     "selectReasoningEffort": "思考深度",
     "llmNotConfigured": "LLM 공급자가 설정되지 않았습니다. Harness → Providers에서 API 키를 추가하세요.",
-    "thinking": "생각 중...",
     "replying": "답장 중...",
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
@@ -768,7 +767,6 @@
     "running_other": "{{count}}개 실행 중"
   },
   "thinkBlock": {
-    "thinking": "생각 중",
     "thought": "심층 사고",
     "showingLatest": "최신만 표시"
   },

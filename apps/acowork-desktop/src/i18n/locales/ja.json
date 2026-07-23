@@ -159,7 +159,6 @@
     "selectModel": "Select model",
     "startAgent": "Start Agent",
     "llmNotConfigured": "LLM プロバイダーが設定されていません。Harness → Providers で API キーを追加してください。",
-    "thinking": "思考中...",
     "replying": "返信中...",
     "working": "処理中...",
     "compacting": "コンテキスト圧縮中...",
@@ -770,7 +769,6 @@
     "running_other": "{{count}} 件実行中"
   },
   "thinkBlock": {
-    "thinking": "思考中",
     "thought": "深い思考",
     "showingLatest": "最新のみ表示"
   },
