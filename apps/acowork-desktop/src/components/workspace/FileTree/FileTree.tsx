@@ -1,7 +1,6 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useWorkspaceStore, type TreeEntry } from "../../../stores/workspaceStore";
-import { useAgentStore } from "../../../stores/agentStore";
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
@@ -20,21 +19,71 @@ interface FileTreeProps {
     agentId: string;
     workspaceId: string;
     sessionId: string;
+    /** Currently-selected entry path (controlled by parent). `null` = nothing selected. */
+    selectedPath?: string | null;
+    /** Notify parent of selection changes. `type` is `null` when `path` is `null` (deselect). */
+    onSelectPath?: (path: string | null, type: "file" | "dir" | null) => void;
     onFileDoubleClick?: (entry: TreeEntry, relPath: string) => void;
     onContextNewItem?: (type: "file" | "dir", parentPath: string) => void;
     onDelete?: (relPath: string, isDir: boolean) => void;
     onCopy?: (relPath: string, isDir: boolean) => void;
     onPaste?: (parentPath: string) => void;
+    onRename?: (relPath: string, newName: string, isDir: boolean) => Promise<boolean>;
+    /** When this matches a node's `relPath`, that node renders an inline
+     * rename input seeded with `renameInitialValue`. Owned by the parent
+     * so the same machinery drives right-click "New File / New Folder /
+     * Paste" (which create + enter rename) and right-click "Rename" on
+     * an existing entry. */
+    renameTarget?: string | null;
+    renameInitialValue?: string;
+    /** Notify the parent that the inline rename finished — either via
+     * Enter (commit) or Esc / blur with no change (cancel). The parent
+     * then clears `renameTarget`. */
+    onCancelRename?: (relPath: string) => void;
+    /** Right-click "Rename" on an existing entry — parent decides the
+     * target + initial value (typically `entry.name`). */
+    onRequestRename?: (relPath: string, initialName: string) => void;
+    /** RelPath of the entry currently being dragged, or `null` when no
+     * drag is in progress. The matching node renders at reduced opacity
+     * (`.file-tree-row-drag-source`). Owned by the parent so the row
+     * highlight + the drop target highlight are coordinated from one
+     * place — clearing one clears the other. */
+    draggingRelPath?: string | null;
+    /** RelPath of the directory the cursor is hovering — that node's row
+     * gets the accent background (`.file-tree-row-drop-target`). `null`
+     * when no drag is in progress or the cursor is over an invalid
+     * target. */
+    dropTarget?: string | null;
+    /** pointerdown on a row - records the drag candidate. The parent's
+     * global pointermove/pointerup listeners handle the actual drag. */
+    onPointerDownTreeEntry?: (relPath: string, isDir: boolean, e: React.PointerEvent) => void;
 }
 
-export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, onContextNewItem, onDelete, onCopy, onPaste }: FileTreeProps) {
-    const [selectedPath, setSelectedPath] = useState<string | null>(null);
+export function FileTree({
+    agentId,
+    workspaceId,
+    sessionId,
+    selectedPath = null,
+    onSelectPath,
+    onFileDoubleClick,
+    onContextNewItem,
+    onDelete,
+    onCopy,
+    onPaste,
+    onRename,
+    renameTarget = null,
+    renameInitialValue = "",
+    onCancelRename,
+    onRequestRename,
+    draggingRelPath = null,
+    dropTarget = null,
+    onPointerDownTreeEntry,
+}: FileTreeProps) {
     const treeCache = useWorkspaceStore((s) => s.treeCache);
     const fetchTree = useWorkspaceStore((s) => s.fetchTree);
     const treeLoadingPaths = useWorkspaceStore((s) => s.treeLoadingPaths);
     const toggleTreeExpandedPath = useChatStore((s) => s.toggleTreeExpandedPath);
     const expandTreeToPath = useChatStore((s) => s.expandTreeToPath);
-    const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
 
     /** Build cache key prefix: agentId:workspaceId (tree cache is NOT per-session) */
     const treeCachePrefix = `${agentId}:${workspaceId}`;
@@ -62,10 +111,7 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
         return dirs;
     }, [openFiles]);
 
-    // Reset state when agent or workspace changes
-    useEffect(() => {
-        setSelectedPath(null);
-    }, [selectedAgentId, workspaceId]);
+    // Selection is owned by WorkspaceExplorer now; nothing to reset locally.
 
     // Fetch root when agent or workspace changes
     useEffect(() => {
@@ -148,9 +194,12 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
         [agentId, workspaceId, sessionId, treeCachePrefix, expandedPaths, treeCache, fetchTree, toggleTreeExpandedPath],
     );
 
-    const handleSelect = useCallback((_entry: TreeEntry, relPath: string) => {
-        setSelectedPath(relPath);
-    }, []);
+    const handleSelect = useCallback(
+        (entry: TreeEntry, relPath: string) => {
+            onSelectPath?.(relPath, entry.type === "directory" ? "dir" : "file");
+        },
+        [onSelectPath],
+    );
 
     // Virtual scrolling setup — row height scales with global font size
     const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -171,7 +220,7 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
         if (consumedLocateSeqRef.current !== locateRequest.seq) return;
         const idx = flatNodes.findIndex((n) => n.relPath === locateRequest.relPath);
         if (idx < 0) return;
-        setSelectedPath(locateRequest.relPath);
+        onSelectPath?.(locateRequest.relPath, "file");
         // Defer one frame so the virtualizer has updated totalSize for the
         // newly-loaded flatNodes length before we ask it to scroll.
         const frame = requestAnimationFrame(() => {
@@ -202,7 +251,7 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
     return (
         <div
             ref={scrollRef}
-            className="flex-1 min-h-0 overflow-auto"
+            className="file-tree-scroller flex-1 min-h-0 overflow-auto"
         >
             <div
                 style={{
@@ -247,6 +296,14 @@ export function FileTree({ agentId, workspaceId, sessionId, onFileDoubleClick, o
                                 onDelete={onDelete}
                                 onCopy={onCopy}
                                 onPaste={onPaste}
+                                onRename={onRename}
+                                renameTarget={renameTarget}
+                                renameInitialValue={renameInitialValue}
+                                onCancelRename={onCancelRename}
+                                onRequestRename={onRequestRename}
+                                draggingRelPath={draggingRelPath}
+                                dropTarget={dropTarget}
+                                onPointerDownTreeEntry={onPointerDownTreeEntry}
                             />
                         </div>
                     );

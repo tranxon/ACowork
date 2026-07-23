@@ -13,6 +13,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
 import { log } from "../../lib/logger";
+import { useToast } from "../common/ToastProvider";
 
 /** Abbreviate a file path from the left: "…parent/filename.ext" */
 function abbreviatePath(path: string): string {
@@ -29,6 +30,7 @@ function abbreviatePath(path: string): string {
 
 export function WorkspaceExplorer() {
     const { t } = useTranslation();
+    const { addToast } = useToast();
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
@@ -40,6 +42,7 @@ export function WorkspaceExplorer() {
     const deleteFile = useWorkspaceStore((s) => s.deleteFile);
     const deleteDir = useWorkspaceStore((s) => s.deleteDir);
     const copyItem = useWorkspaceStore((s) => s.copyItem);
+    const renameItem = useWorkspaceStore((s) => s.renameItem);
     const setCopiedEntry = useWorkspaceStore((s) => s.setCopiedEntry);
     const openFile = useFileEditorStore((s) => s.openFile);
     const openPreview = useFileEditorStore((s) => s.openPreview);
@@ -52,16 +55,287 @@ export function WorkspaceExplorer() {
         ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
         : "__agent_home__";
 
-    const [newItemPrompt, setNewItemPrompt] = useState<{ type: "file" | "dir"; parentPath: string } | null>(null);
-    const [newItemName, setNewItemName] = useState("");
-    const promptInputRef = useRef<HTMLInputElement | null>(null);
+    // Parent-controlled inline rename — when `renameTarget` matches a
+    // tree node's relPath, that node swaps its name span for an input
+    // and the user types the new name. The actual `rename_item` call
+    // lives in `handleRename` below; here we only own the trigger.
+    //
+    // macOS Finder-style flows: right-click → "New File" / "New Folder"
+    // / "Paste" all call `requestRenameFor(relPath, initialValue)` after
+    // the create succeeds so the user can immediately retype the name.
+    const [renameTarget, setRenameTarget] = useState<string | null>(null);
+    const [renameInitialValue, setRenameInitialValue] = useState<string>("");
 
-    // Auto-focus the prompt input when it appears
+    const requestRenameFor = useCallback((relPath: string, initialValue: string) => {
+        setRenameTarget(relPath);
+        setRenameInitialValue(initialValue);
+    }, []);
+
+    const cancelExternalRename = useCallback(() => {
+        setRenameTarget(null);
+        setRenameInitialValue("");
+    }, []);
+
+    // ── Pointer-based Drag & Drop ─────────────────────────────────────
+    //
+    // HTML5 DnD (dragstart/dragover/drop) is unreliable in macOS
+    // WKWebView: `dragover`/`drop` events don't fire on child elements
+    // during internal drags, and state updates during dragstart cause
+    // Virtualizer DOM re-layout which cancels the native drag session.
+    // We bypass the HTML5 DnD API entirely and implement dragging with
+    // Pointer Events - the same approach used by dnd-kit's PointerSensor.
+    //
+    // Flow:
+    //   1. `pointerdown` on a row -> record drag candidate (path + start coords)
+    //   2. `pointermove` (global) -> if moved > 5px, enter drag mode,
+    //      use `elementFromPoint` to find target row, update `dropTarget`
+    //   3. `pointerup` (global) -> if on valid target, call `handleMoveItem`
+    //
+    // `draggingRelPath` drives the `.file-tree-row-drag-source` visual
+    // (opacity 0.5 + pointer-events:none so elementFromPoint sees through).
+    // `dropTarget` drives the `.file-tree-row-drop-target` highlight.
+    const [draggingRelPath, setDraggingRelPath] = useState<string | null>(null);
+    const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+    /** Mutable drag state - survives re-renders without triggering them. */
+    const dragStateRef = useRef<{
+        relPath: string;
+        isDir: boolean;
+        startX: number;
+        startY: number;
+        active: boolean;
+    } | null>(null);
+
+    const clearDragState = useCallback(() => {
+        dragStateRef.current = null;
+        setDraggingRelPath(null);
+        setDropTarget(null);
+    }, []);
+
+    /** Returns `true` when `destParent === sourceRelPath` OR
+     * `sourceRelPath.startsWith(destParent + "/")` - i.e. the move is
+     * to itself or to one of its own ancestors. We must refuse because
+     * it would either be a no-op (self) or create a cycle (ancestor). */
+    const isSelfOrAncestor = useCallback((sourceRelPath: string, destParent: string) => {
+        if (destParent === sourceRelPath) return true;
+        if (destParent === "") return false; // dropping onto workspace root is always valid
+        return sourceRelPath === destParent || sourceRelPath.startsWith(`${destParent}/`);
+    }, []);
+
+    /** Move a tree entry to a new parent directory. */
+    const handleMoveItem = useCallback(
+        async (sourceRelPath: string, destParentRelPath: string, isDir: boolean): Promise<boolean> => {
+            if (!selectedAgentId) return false;
+
+            if (isSelfOrAncestor(sourceRelPath, destParentRelPath)) {
+                log.warn(
+                    "[WorkspaceExplorer] drop rejected (self/ancestor): source=%s destParent=%s",
+                    sourceRelPath,
+                    destParentRelPath,
+                );
+                return false;
+            }
+
+            const basename = sourceRelPath.split("/").pop() ?? sourceRelPath;
+            const dest =
+                destParentRelPath === ""
+                    ? basename
+                    : `${destParentRelPath}/${basename}`;
+
+            log.debug(
+                "[WorkspaceExplorer] DnD move: source=%s dest=%s (dir=%s)",
+                sourceRelPath,
+                dest,
+                isDir,
+            );
+
+            const ok = await renameItem(selectedAgentId, currentWorkspaceId, sourceRelPath, dest);
+            if (!ok) {
+                addToast({ type: "error", message: `Move failed: ${basename}` });
+                return false;
+            }
+            // Refresh both ends so the source disappears from its
+            // old parent and the entry appears in the destination.
+            const sourceParent =
+                sourceRelPath.includes("/")
+                    ? sourceRelPath.substring(0, sourceRelPath.lastIndexOf("/"))
+                    : "";
+            if (sourceParent) {
+                fetchTree(selectedAgentId, currentWorkspaceId, sourceParent);
+            } else {
+                fetchTree(selectedAgentId, currentWorkspaceId, "");
+            }
+            fetchTree(selectedAgentId, currentWorkspaceId, destParentRelPath);
+            return true;
+        },
+        [selectedAgentId, currentWorkspaceId, renameItem, fetchTree, isSelfOrAncestor, addToast],
+    );
+
+    /** `pointerdown` on a tree row - records the drag candidate but
+     * does NOT start dragging yet. The actual drag begins only after
+     * the pointer moves beyond DRAG_THRESHOLD pixels. */
+    const onPointerDownTreeEntry = useCallback(
+        (relPath: string, isDir: boolean, e: React.PointerEvent) => {
+            if (e.button !== 0) return; // only left button
+            dragStateRef.current = {
+                relPath,
+                isDir,
+                startX: e.clientX,
+                startY: e.clientY,
+                active: false,
+            };
+        },
+        [],
+    );
+
+    /** Global pointermove/pointerup listeners - registered once.
+     * These handle the entire drag lifecycle without HTML5 DnD. */
     useEffect(() => {
-        if (newItemPrompt && promptInputRef.current) {
-            promptInputRef.current.focus();
-        }
-    }, [newItemPrompt]);
+        const DRAG_THRESHOLD = 5;
+
+        const findRowUnderCursor = (x: number, y: number): { relPath: string; isDir: boolean } | null => {
+            const el = document.elementFromPoint(x, y);
+            const row = el?.closest('[data-rel-path]') as HTMLElement | null;
+            if (!row) return null;
+            return {
+                relPath: row.getAttribute('data-rel-path') ?? '',
+                isDir: row.getAttribute('data-is-dir') === 'true',
+            };
+        };
+
+        const handlePointerMove = (e: PointerEvent) => {
+            const ds = dragStateRef.current;
+            if (!ds) return;
+
+            if (!ds.active) {
+                const dx = e.clientX - ds.startX;
+                const dy = e.clientY - ds.startY;
+                if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+                ds.active = true;
+                setDraggingRelPath(ds.relPath);
+            }
+
+            const target = findRowUnderCursor(e.clientX, e.clientY);
+            // No row under cursor -> blank space = workspace root ("")
+            // which is always a valid drop target (unless source IS root).
+            if (!target) {
+                setDropTarget(isSelfOrAncestor(ds.relPath, "") ? null : "");
+                return;
+            }
+            if (!target.isDir || isSelfOrAncestor(ds.relPath, target.relPath)) {
+                setDropTarget(null);
+            } else {
+                setDropTarget(target.relPath);
+            }
+        };
+
+        const handlePointerUp = (e: PointerEvent) => {
+            const ds = dragStateRef.current;
+            if (!ds) return;
+
+            if (ds.active) {
+                const target = findRowUnderCursor(e.clientX, e.clientY);
+                // No row -> drop to workspace root ("")
+                const destRelPath = target ? target.relPath : "";
+                const destIsDir = target ? target.isDir : true;
+                if (destIsDir && !isSelfOrAncestor(ds.relPath, destRelPath)) {
+                    void handleMoveItem(ds.relPath, destRelPath, ds.isDir);
+                }
+            }
+
+            clearDragState();
+        };
+
+        const handlePointerCancel = () => clearDragState();
+
+        window.addEventListener('pointermove', handlePointerMove);
+        window.addEventListener('pointerup', handlePointerUp);
+        window.addEventListener('pointercancel', handlePointerCancel);
+        return () => {
+            window.removeEventListener('pointermove', handlePointerMove);
+            window.removeEventListener('pointerup', handlePointerUp);
+            window.removeEventListener('pointercancel', handlePointerCancel);
+        };
+    }, [isSelfOrAncestor, handleMoveItem, clearDragState]);
+
+
+    // Selected tree entry — drives the toolbar's "create in selected dir"
+    // behaviour. `null` means nothing is selected, so the toolbar falls
+    // back to the workspace root.
+    const [selectedEntry, setSelectedEntry] = useState<{ path: string; type: "file" | "dir" } | null>(null);
+
+    // Reset selection when agent or workspace changes — the previously-
+    // selected path is not guaranteed to exist in the new tree.
+    useEffect(() => {
+        setSelectedEntry(null);
+    }, [selectedAgentId, currentWorkspaceId]);
+
+    /* ── Selection bridging from FileTree ──────────────────────────────── */
+    const handleSelectPath = useCallback(
+        (path: string | null, type: "file" | "dir" | null) => {
+            if (path === null || type === null) {
+                setSelectedEntry(null);
+            } else {
+                setSelectedEntry({ path, type });
+            }
+        },
+        [],
+    );
+
+    /* ── Rename handler ──────────────────────────────────────────────────
+     * `newName` must be just the basename — the parent path is taken from
+     * the entry's current location. The desktop appends `-copy N` only for
+     * paste; renames use exactly what the user types. */
+    const handleRename = useCallback(
+        async (relPath: string, newName: string, isDir: boolean): Promise<boolean> => {
+            const trimmed = newName.trim();
+            if (!trimmed) return false;
+            const oldName = relPath.split("/").pop() ?? "";
+            if (trimmed === oldName) {
+                // No-op rename — close the rename input even though the
+                // server wasn't called.
+                cancelExternalRename();
+                return true;
+            }
+            const parentPath = relPath.substring(0, relPath.lastIndexOf("/"));
+            const dest = parentPath ? `${parentPath}/${trimmed}` : trimmed;
+            const ok = await renameItem(selectedAgentId ?? "", currentWorkspaceId, relPath, dest);
+            if (!ok) {
+                addToast({ type: "error", message: `Rename failed: ${oldName} → ${trimmed}` });
+                return false;
+            }
+            // Close the rename input — the node at `relPath` will unmount
+            // and a fresh one will mount at `dest` (the tree re-flattens
+            // on the next render of `flatNodes`).
+            cancelExternalRename();
+            // Refresh the parent directory so the renamed entry shows up.
+            if (parentPath) {
+                fetchTree(selectedAgentId ?? "", currentWorkspaceId, parentPath);
+            } else {
+                fetchTree(selectedAgentId ?? "", currentWorkspaceId, "");
+            }
+            // Move selection to the new path so the toolbar's "create in
+            // selected dir" target stays sensible (only meaningful for
+            // directories).
+            if (isDir) {
+                setSelectedEntry({ path: dest, type: "dir" });
+            } else {
+                setSelectedEntry(null);
+            }
+            return true;
+        },
+        [selectedAgentId, currentWorkspaceId, renameItem, fetchTree, addToast, cancelExternalRename],
+    );
+
+    /** Right-click "Rename" on an existing entry — single source of truth
+     * lives in the parent so the same `renameTarget` machinery drives both
+     * the "New File / Paste" flow and the explicit Rename menu item. */
+    const handleRequestRename = useCallback(
+        (relPath: string, initialName: string) => {
+            requestRenameFor(relPath, initialName);
+        },
+        [requestRenameFor],
+    );
 
     /* ── Search box state (Ctrl+P-style file search above the file tree) ── */
     const [searchQuery, setSearchQuery] = useState("");
@@ -167,64 +441,93 @@ export function WorkspaceExplorer() {
         fetchTree(selectedAgentId, currentWorkspaceId, "");
     }, [selectedAgentId, currentWorkspaceId, invalidateTreeCache, fetchTree]);
 
+    /**
+     * Resolve the parent path that the toolbar's "New File / New Folder"
+     * buttons should target. Priority:
+     *   1. The currently-selected **directory** in the tree.
+     *   2. Workspace root (empty string) when nothing is selected or the
+     *      selection is a file.
+     */
+    const selectedDirParent = selectedEntry && selectedEntry.type === "dir"
+        ? selectedEntry.path
+        : "";
+
+    /** Build a deduplicated basename that does not collide with anything
+     * already in `parentPath`. Used by `quickCreateAndRename` for the
+     * macOS Finder-style `untitled` / `untitled 2` / `untitled 3` … naming
+     * and shared between files and dirs (the basename is identical for
+     * both — macOS Finder shows e.g. `untitled 2` for a folder). */
+    const buildUniqueName = useCallback(
+        (baseName: string, existingNames: Set<string>): string => {
+            if (!existingNames.has(baseName)) return baseName;
+            for (let i = 2; i < 1000; i++) {
+                const candidate = `${baseName} ${i}`;
+                if (!existingNames.has(candidate)) return candidate;
+            }
+            // Pathological fallback — give up and let the server return
+            // an error; we don't want to silently pick `untitled 1000`
+            // and confuse the user.
+            return baseName;
+        },
+        [],
+    );
+
+    /** macOS Finder-style quick-create: create an empty file/dir with
+     * the next free `untitled[N]` name, refresh the parent so the new
+     * entry appears, and immediately enter inline rename mode with
+     * that basename seeded in the input.
+     *
+     * Replaces the old two-step "type a name in a top-of-tree prompt
+     * then create" flow. The user can either keep the suggested name
+     * (just blur / Esc) or type a new one. */
+    const quickCreateAndRename = useCallback(
+        async (parentPath: string, type: "file" | "dir") => {
+            if (!selectedAgentId) return;
+            const treeCache = useWorkspaceStore.getState().treeCache;
+            const siblingCacheKey = `${selectedAgentId}:${currentWorkspaceId}:${parentPath}`;
+            const siblingNames = new Set<string>(
+                (treeCache[siblingCacheKey] ?? []).map((e) => e.name),
+            );
+            const baseName = "untitled";
+            const name = buildUniqueName(baseName, siblingNames);
+            const relPath = parentPath ? `${parentPath}/${name}` : name;
+
+            log.debug("[WorkspaceExplorer] quickCreate", type, "at", relPath, "workspace:", currentWorkspaceId);
+
+            const ok =
+                type === "file"
+                    ? await createFile(selectedAgentId, currentWorkspaceId, relPath)
+                    : await createDir(selectedAgentId, currentWorkspaceId, relPath);
+
+            if (!ok) {
+                addToast({ type: "error", message: `Create failed: ${name}` });
+                return;
+            }
+
+            // Refresh the parent so the new entry shows up before we
+            // ask for rename — otherwise the FileTreeNode with the new
+            // `relPath` doesn't exist yet and the rename input never
+            // appears. fetchTree overwrites its cache entry so we don't
+            // have to invalidate the whole tree.
+            if (parentPath) {
+                await fetchTree(selectedAgentId, currentWorkspaceId, parentPath);
+            } else {
+                await fetchTree(selectedAgentId, currentWorkspaceId, "");
+            }
+            requestRenameFor(relPath, name);
+        },
+        [selectedAgentId, currentWorkspaceId, createFile, createDir, fetchTree, buildUniqueName, requestRenameFor, addToast],
+    );
+
     const handleNewFile = useCallback(() => {
-        log.debug("[WorkspaceExplorer] handleNewFile clicked, agent:", selectedAgentId, "workspace:", currentWorkspaceId);
-        setNewItemName("");
-        setNewItemPrompt({ type: "file", parentPath: "" });
-    }, [selectedAgentId, currentWorkspaceId]);
+        log.debug("[WorkspaceExplorer] handleNewFile clicked, agent:", selectedAgentId, "workspace:", currentWorkspaceId, "parent:", selectedDirParent);
+        void quickCreateAndRename(selectedDirParent, "file");
+    }, [selectedAgentId, currentWorkspaceId, selectedDirParent, quickCreateAndRename]);
 
     const handleNewFolder = useCallback(() => {
-        log.debug("[WorkspaceExplorer] handleNewFolder clicked");
-        setNewItemName("");
-        setNewItemPrompt({ type: "dir", parentPath: "" });
-    }, []);
-
-    const cancelPrompt = useCallback(() => {
-        setNewItemPrompt(null);
-        setNewItemName("");
-    }, []);
-
-    const handlePromptSubmit = useCallback(async () => {
-        if (!selectedAgentId || !newItemPrompt) return;
-        const name = newItemName.trim();
-        if (!name) return;
-
-        const relPath = newItemPrompt.parentPath ? `${newItemPrompt.parentPath}/${name}` : name;
-
-        log.debug("[WorkspaceExplorer] Creating", newItemPrompt.type, "at", relPath, "workspace:", currentWorkspaceId);
-
-        let ok: boolean;
-        if (newItemPrompt.type === "file") {
-            ok = await createFile(selectedAgentId, currentWorkspaceId, relPath);
-        } else {
-            ok = await createDir(selectedAgentId, currentWorkspaceId, relPath);
-        }
-
-        log.debug("[WorkspaceExplorer] Create result:", ok);
-
-        if (ok) {
-            // Re-fetch only the parent directory — fetchTree overwrites its cache entry,
-            // so we don't need to invalidate everything (which would blank the tree).
-            if (newItemPrompt.parentPath) {
-                fetchTree(selectedAgentId, currentWorkspaceId, newItemPrompt.parentPath);
-            } else {
-                fetchTree(selectedAgentId, currentWorkspaceId, "");
-            }
-        }
-
-        setNewItemPrompt(null);
-        setNewItemName("");
-    }, [selectedAgentId, currentWorkspaceId, newItemPrompt, newItemName, createFile, createDir, fetchTree]);
-
-    const handlePromptKeyDown = useCallback((e: React.KeyboardEvent) => {
-        log.debug("[WorkspaceExplorer] keyDown:", e.key, "newItemName:", newItemName);
-        if (e.key === "Escape") {
-            cancelPrompt();
-        } else if (e.key === "Enter") {
-            e.preventDefault();
-            handlePromptSubmit();
-        }
-    }, [handlePromptSubmit, cancelPrompt, newItemName]);
+        log.debug("[WorkspaceExplorer] handleNewFolder clicked, parent:", selectedDirParent);
+        void quickCreateAndRename(selectedDirParent, "dir");
+    }, [selectedDirParent, quickCreateAndRename]);
 
     const handleFileDoubleClick = useCallback((_entry: TreeEntry, relPath: string) => {
         if (!selectedAgentId) return;
@@ -236,11 +539,15 @@ export function WorkspaceExplorer() {
         }
     }, [selectedAgentId, currentWorkspaceId, openFile, openPreview]);
 
-    /** Called from FileTree context menu to create item at a specific path */
-    const handleContextNewItem = useCallback((type: "file" | "dir", parentPath: string) => {
-        setNewItemName("");
-        setNewItemPrompt({ type, parentPath });
-    }, []);
+    /** Called from FileTree context menu to create item at a specific path —
+     * matches the toolbar flow so right-click "New File" / "New Folder"
+     * behaves identically: create immediately, then enter rename mode. */
+    const handleContextNewItem = useCallback(
+        (type: "file" | "dir", parentPath: string) => {
+            void quickCreateAndRename(parentPath, type);
+        },
+        [quickCreateAndRename],
+    );
 
     const handleDelete = useCallback(async (relPath: string, isDir: boolean) => {
         if (!selectedAgentId) return;
@@ -274,20 +581,69 @@ export function WorkspaceExplorer() {
         if (!entry || entry.agentId !== selectedAgentId || entry.workspaceId !== currentWorkspaceId) return;
 
         const name = entry.path.split("/").pop() || entry.path;
-        // Generate a unique name to avoid "Destination already exists":
-        // "aaa.txt" → "aaa copy.txt", "bbbb" → "bbbb copy"
-        const dotIdx = name.lastIndexOf(".");
-        const uniqueName = dotIdx > 0
-            ? `${name.slice(0, dotIdx)} copy${name.slice(dotIdx)}`
-            : `${name} copy`;
+
+        /**
+         * Build a deduplicated `-copy` suffix that does not collide with
+         * anything already in `parentPath`. The desktop walks the parent's
+         * tree cache first (cheap, in-memory) and falls back to the source
+         * dir when pasting back into the same place — both produce a name
+         * the user can recognise.
+         *
+         *   "aaa.txt"     → "aaa-copy.txt", "aaa-copy 2.txt", …
+         *   "bbbb"        → "bbbb-copy",    "bbbb-copy 2",    …
+         *   ".gitignore"  → ".gitignore-copy"     (the leading dot is preserved as the stem)
+         *
+         * The trailing suffix starts at `-copy` (not `-copy 2`) so the
+         * first paste looks visually distinct from the source — that is
+         * what makes the action feel like an actual copy, addressing the
+         * "looks like nothing was copied" UX bug.
+         */
+        const buildCopyName = (existingNames: Set<string>): string => {
+            const dotIdx = name.lastIndexOf(".");
+            // A leading dot (e.g. ".gitignore") is the stem, not an extension.
+            const hasExtension = dotIdx > 0;
+            const stem = hasExtension ? name.slice(0, dotIdx) : name;
+            const ext = hasExtension ? name.slice(dotIdx) : "";
+            const baseCandidate = `${stem}-copy${ext}`;
+            if (!existingNames.has(baseCandidate)) return baseCandidate;
+            for (let i = 2; i < 1000; i++) {
+                const candidate = `${stem}-copy ${i}${ext}`;
+                if (!existingNames.has(candidate)) return candidate;
+            }
+            // Pathological fallback — give up and let the server 400.
+            return baseCandidate;
+        };
+
+        // Collect existing sibling names from the tree cache so we don't
+        // race the server's "Destination already exists" 400.
+        const treeCache = useWorkspaceStore.getState().treeCache;
+        const siblingCacheKey = `${selectedAgentId}:${currentWorkspaceId}:${parentPath}`;
+        const siblingNames = new Set<string>(
+            (treeCache[siblingCacheKey] ?? []).map((e) => e.name),
+        );
+        const uniqueName = buildCopyName(siblingNames);
         const dest = parentPath ? `${parentPath}/${uniqueName}` : uniqueName;
 
         const ok = await copyItem(selectedAgentId, currentWorkspaceId, entry.path, dest);
         setCopiedEntry(null); // clear clipboard after paste (one-shot)
         if (ok) {
-            fetchTree(selectedAgentId, currentWorkspaceId, parentPath || "");
+            // Refresh parent BEFORE requesting rename so the new node is
+            // mounted in `flatNodes` (FileTreeNode with `relPath === dest`
+            // must exist for the rename input to render).
+            await fetchTree(selectedAgentId, currentWorkspaceId, parentPath || "");
+            requestRenameFor(dest, uniqueName);
+        } else {
+            // Surface the silent failure so users know why nothing
+            // appeared. The store already logged the underlying error;
+            // here we just give a recoverable hint.
+            log.warn(
+                "[WorkspaceExplorer] paste failed; clipboard cleared. source=%s dest=%s",
+                entry.path,
+                dest,
+            );
+            addToast({ type: "error", message: `Paste failed: ${name}` });
         }
-    }, [selectedAgentId, currentWorkspaceId, copyItem, fetchTree, setCopiedEntry]);
+    }, [selectedAgentId, currentWorkspaceId, copyItem, fetchTree, setCopiedEntry, requestRenameFor, addToast]);
 
     if (!selectedAgent?.running) {
         return (
@@ -329,24 +685,6 @@ export function WorkspaceExplorer() {
                     </button>
                 </div>
             </div>
-
-            {/* Inline name prompt for new file/directory */}
-            {newItemPrompt && (
-                <div className="flex items-center gap-1.5 border-b border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5">
-                    <span className="font-medium text-[10px] text-[var(--color-accent)] shrink-0">
-                        {newItemPrompt.type === "file" ? "New file:" : "New folder:"}
-                    </span>
-                    <input
-                        ref={promptInputRef}
-                        type="text"
-                        value={newItemName}
-                        onChange={(e) => setNewItemName(e.target.value)}
-                        onKeyDown={handlePromptKeyDown}
-                        placeholder={newItemPrompt.type === "file" ? "filename.ext" : "folder-name"}
-                        className="flex-1 bg-transparent text-xs text-zinc-700 outline-none placeholder:text-zinc-400 dark:text-zinc-300 dark:placeholder:text-zinc-500"
-                    />
-                </div>
-            )}
 
             {/* Search box with file-search dropdown (Ctrl+P-style).
                 Vertical padding (`py-1.5`) and min-h (`2.5rem`) are kept in
@@ -442,11 +780,25 @@ export function WorkspaceExplorer() {
                     agentId={selectedAgentId}
                     workspaceId={currentWorkspaceId}
                     sessionId={activeSessionId}
+                    selectedPath={selectedEntry?.path ?? null}
+                    onSelectPath={handleSelectPath}
                     onFileDoubleClick={handleFileDoubleClick}
                     onContextNewItem={handleContextNewItem}
                     onDelete={handleDelete}
                     onCopy={handleCopy}
                     onPaste={handlePaste}
+                    onRename={handleRename}
+                    renameTarget={renameTarget}
+                    renameInitialValue={renameInitialValue}
+                    onCancelRename={cancelExternalRename}
+                    onRequestRename={handleRequestRename}
+                    /* DnD wiring - pointer-event based, no HTML5 DnD.
+                     * draggingRelPath + dropTarget are visual-only state;
+                     * all drag logic lives in the global pointermove/
+                     * pointerup listeners above. */
+                    draggingRelPath={draggingRelPath}
+                    dropTarget={dropTarget}
+                    onPointerDownTreeEntry={onPointerDownTreeEntry}
                 />
             )}
         </div>
