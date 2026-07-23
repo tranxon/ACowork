@@ -7,6 +7,7 @@ import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { RadioGroup } from "../common/RadioGroup";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
+import { ACCENT_PRESETS } from "../../lib/accentPresets";
 import { Bug, Monitor } from "lucide-react";
 import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -426,32 +427,21 @@ function AppearanceTab() {
         <h2 className="mb-3 text-xs font-medium">{t("settings.accentColor")}</h2>
         <p className="mb-3 text-xs text-zinc-500">{t("settings.accentColor")}</p>
         <div className="flex flex-wrap gap-[14px]">
-          {[
-            // Cool tones
-            { label: "Blue", value: "#3b82f6" },
-            { label: "Indigo", value: "#6366f1" },
-            { label: "Violet", value: "#8b5cf6" },
-            { label: "Cyan", value: "#06b6d4" },
-            { label: "Teal", value: "#14b8a6" },
-            // Warm tones
-            { label: "Green", value: "#00C375" },
-            { label: "Rose", value: "#f43f5e" },
-            { label: "Orange", value: "#f97316" },
-            { label: "Amber", value: "#f59e0b" },
-            { label: "Pink", value: "#ec4899" },
-          ].map((c) => (
-            <Tooltip content={c.label} variant="plain" key={c.value}>
+          {ACCENT_PRESETS.map((c) => (
+            <Tooltip content={c.label} variant="plain" key={c.id}>
               <button
-                onClick={() => setAccentColor(c.value)}
+                onClick={() => setAccentColor(c.hex)}
+                aria-label={c.label}
+                data-accent-id={c.id}
                 className={cn(
                   "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
-                  accentColor === c.value
+                  accentColor.toLowerCase() === c.hex.toLowerCase()
                     ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
                     : "hover:scale-105",
                 )}
                 style={{
-                  backgroundColor: c.value,
-                  "--tw-ring-color": c.value,
+                  backgroundColor: c.hex,
+                  "--tw-ring-color": c.hex,
                 } as React.CSSProperties}
               />
             </Tooltip>

@@ -143,7 +143,47 @@
   /* py-1.5 = 6px */
   --tab-px: 0.75rem;
   /* px-3 = 12px */
+
+  /* ── Frosted-glass tint (accent-agnostic fallback) ────────────────
+     HSL components stored WITHOUT the hsl() wrapper, so consumers can
+     compose the alpha dynamically:
+
+        hsl(var(--glass-tint-light) / 0.5)
+
+     AppLayout's glassBg reads --glass-tint-light in light mode and
+     --glass-tint-dark in dark mode.  When the user picks an accent,
+     settingsStore applies `accent-{id}` to <html>, which selects one
+     of the per-accent overrides below and replaces these neutral
+     fallbacks with a hue-shifted variant.
+
+     At 8% saturation the tint stays visually neutral while still
+     providing enough hue information for the glass surface to be
+     perceptually distinct from pure-white/pure-black desktop wallpaper
+     — solving the "agent list blends into the border" issue when the
+     opacity slider is dragged down to zero. */
+  --glass-tint-light: 0 0% 92%;
+  --glass-tint-dark:  0 0% 14%;
 }
+
+/* ── Per-accent frosted-glass tints ──────────────────────────────
+   Each `.accent-{id}` class on <html> selects the matching preset.
+   Light mode reads --glass-tint-light (L=92%), dark mode reads
+   --glass-tint-dark (L=14%).  The hue matches the accent; saturation
+   stays at 8% so the surface looks like a near-neutral gray with only
+   a faint hue shift.
+
+   To tweak intensity or hue behavior, edit the values here (or in
+   lib/accentPresets.ts, which is the TS-side source of truth). */
+:root.accent-blue   { --glass-tint-light: 217 8% 92%; --glass-tint-dark: 217 8% 14%; }
+:root.accent-indigo { --glass-tint-light: 243 8% 92%; --glass-tint-dark: 243 8% 14%; }
+:root.accent-violet { --glass-tint-light: 258 8% 92%; --glass-tint-dark: 258 8% 14%; }
+:root.accent-cyan   { --glass-tint-light: 189 8% 92%; --glass-tint-dark: 189 8% 14%; }
+:root.accent-teal   { --glass-tint-light: 173 8% 92%; --glass-tint-dark: 173 8% 14%; }
+:root.accent-green  { --glass-tint-light: 158 8% 92%; --glass-tint-dark: 158 8% 14%; }
+:root.accent-rose   { --glass-tint-light: 350 8% 92%; --glass-tint-dark: 350 8% 14%; }
+:root.accent-orange { --glass-tint-light:  24 8% 92%; --glass-tint-dark:  24 8% 14%; }
+:root.accent-amber  { --glass-tint-light:  38 8% 92%; --glass-tint-dark:  38 8% 14%; }
+:root.accent-pink   { --glass-tint-light: 330 8% 92%; --glass-tint-dark: 330 8% 14%; }
 
 /* Dark mode overrides */
 .dark {

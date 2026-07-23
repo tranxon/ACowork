@@ -14,8 +14,16 @@ import {
   DEFAULT_LOG_FILE_COUNT,
   DEFAULT_FRONTEND_LOG_LEVEL,
 } from "../lib/defaults";
-import { setLevel as setLoggerLevel, type LogLevel } from "../lib/logger";
+import {
+  setLevel as setLoggerLevel,
+  type LogLevel,
+} from "../lib/logger";
 import { log } from "../lib/logger";
+import {
+  DEFAULT_ACCENT_PRESET,
+  getAccentPresetByHex,
+  type AccentPreset,
+} from "../lib/accentPresets";
 
 /**
  * Push the current gateway config to the Rust backend so that:
@@ -85,10 +93,31 @@ function applyOpacity(opacity: number) {
   document.documentElement.style.setProperty("--app-opacity", String(opacity));
 }
 
-/** Apply accent color to CSS custom property on root */
-function applyAccentColor(color: string) {
-  document.documentElement.style.setProperty("--color-accent", color);
-  document.documentElement.style.setProperty("--color-accent", color);
+/** Apply accent preset to the DOM.
+ *
+ * Two layers of effect:
+ *   1. `--color-accent` CSS variable — used by buttons, links, sliders, etc.
+ *   2. `accent-{id}` class on <html>  — selects the matching per-accent
+ *      block in globals.css that overrides `--glass-tint-light/dark`
+ *      with the preset's hue-shifted near-neutral.
+ *
+ * The macOS native vibrancy tint (set via the `set_window_effect`
+ * Tauri command) is owned by AppLayout — its useEffect on
+ * `[isDark, accentColor]` re-invokes the command whenever either
+ * changes, passing the matching RGBA tuples from `accentPresets.ts`.
+ * That keeps the Rust side stateless w.r.t. accent selection.
+ */
+function applyAccentPreset(preset: AccentPreset) {
+  document.documentElement.style.setProperty("--color-accent", preset.hex);
+  const classList = document.documentElement.classList;
+  // Remove any existing `accent-*` class, then add the current one.
+  // We iterate instead of using a regex because classList doesn't
+  // support wildcard removal in older browsers (and Safari < 17
+  // doesn't support `className.replace` with regex reliably either).
+  for (const cls of Array.from(classList)) {
+    if (cls.startsWith("accent-")) classList.remove(cls);
+  }
+  classList.add(`accent-${preset.id}`);
 }
 
 /** Read persisted theme from localStorage, fallback to "system" */
@@ -135,7 +164,13 @@ function getPersistedContentWidth(): number {
   return DEFAULT_CONTENT_WIDTH;
 }
 
-/** Read persisted accent color from localStorage, fallback to default blue */
+/** Read persisted accent color from localStorage, fallback to default blue.
+ *
+ * Always returns a valid `#rrggbb` hex string.  Unknown / malformed values
+ * are coerced to `DEFAULT_ACCENT_COLOR` so downstream code can rely on the
+ * format.  The matching `AccentPreset` is resolved lazily via
+ * `getAccentPresetByHex()` in `setAccentColor` — see `applyAccentPreset`.
+ */
 function getPersistedAccentColor(): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_ACCENT_COLOR);
@@ -249,7 +284,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   applyFontSize(initialFontSize);
   applyOpacity(initialOpacity);
   applyContentWidth(initialContentWidth);
-  applyAccentColor(initialAccentColor);
+  applyAccentPreset(getAccentPresetByHex(initialAccentColor) ?? DEFAULT_ACCENT_PRESET);
   // Sync logger module level with persisted setting on startup
   setLoggerLevel(initialFrontendLogLevel);
 
@@ -321,7 +356,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     },
 
     setAccentColor: (accentColor) => {
-      applyAccentColor(accentColor);
+      // Resolve the preset by hex; fall back to the default if the
+      // stored value is no longer a known preset (e.g. a removed accent).
+      const preset = getAccentPresetByHex(accentColor) ?? DEFAULT_ACCENT_PRESET;
+      applyAccentPreset(preset);
       try { localStorage.setItem(STORAGE_KEY_ACCENT_COLOR, accentColor); } catch { }
       set({ accentColor });
     },

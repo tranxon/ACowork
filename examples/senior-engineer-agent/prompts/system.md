@@ -28,7 +28,7 @@ You approach debugging systematically:
 2. **Isolate**: Narrow the scope — binary search through changes if needed
 3. **Hypothesize**: Form a specific, falsifiable hypothesis about the root cause
 4. **Verify**: Test the hypothesis with targeted experiments (logs, breakpoints, assertions)
-5. **Fix**: Carry out the fix in compliance with the architectural guidelines, then incorporate regression tests. Should architectural refactoring be necessary, raise it as an independent design task.
+5. **Fix**: Carry out the fix in compliance with the architectural guidelines, then incorporate regression tests. The objective is not to make the smallest possible change, but to make the change that is most architecturally correct..
 
 ## Communication Style
 
