@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use crate::usecases::workspace_mutation::{
-    CreateFileBody, FilePathQuery, PathOnlyBody, PromptFileBody, WorkspaceEntryInput,
-    WorkspaceMutationResponse, WorkspaceMutationService,
+    CopyMoveBody, CreateFileBody, FilePathQuery, PathOnlyBody, PromptFileBody,
+    WorkspaceEntryInput, WorkspaceMutationResponse, WorkspaceMutationService,
 };
 use crate::usecases::workspace_query::WorkspaceError;
 
@@ -48,6 +48,61 @@ impl RuntimeWorkspaceMutationService {
             .or_else(|| body_path.filter(|s| !s.is_empty()).map(|s| s.to_string()))
             .unwrap_or_default();
         (workspace_id, path)
+    }
+
+    /// Resolve `(workspace_id, source, dest)` from a [`CopyMoveBody`].
+    /// All three are workspace-relative paths; only `workspace_id` may
+    /// be carried in the querystring (the desktop's `workspaceStore`
+    /// puts it there). Returns empty strings if any path is missing —
+    /// the trait method is responsible for the "missing source/dest"
+    /// error so the message stays close to the field names.
+    fn resolve_copy_move(body: &CopyMoveBody) -> (Option<String>, String, String) {
+        let workspace_id = body.workspace_id.as_deref().and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        });
+        let source = body.source.clone().unwrap_or_default();
+        let dest = body.dest.clone().unwrap_or_default();
+        (workspace_id, source, dest)
+    }
+
+    /// Recursively copy a directory tree. Returns the underlying I/O
+    /// error message verbatim (no path leakage) so the trait method
+    /// can wrap it in `WorkspaceError::Persist`.
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+        std::fs::create_dir_all(dst)
+            .map_err(|e| format!("failed to create destination directory: {}", e))?;
+        for entry in std::fs::read_dir(src)
+            .map_err(|e| format!("failed to read source directory: {}", e))?
+        {
+            let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|e| format!("failed to read entry type: {}", e))?;
+            let src_child = entry.path();
+            // The file name alone is enough — `dst` is always absolute
+            // (it comes from `resolve_within` joining onto the
+            // workspace root).
+            let dst_child = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                Self::copy_dir_recursive(&src_child, &dst_child)?;
+            } else if file_type.is_symlink() {
+                // Re-materialise symlinks as their target bytes so the
+                // copy is independent of the source filesystem. Avoids
+                // dangling symlinks if the source is later deleted.
+                let target = std::fs::read(&src_child)
+                    .map_err(|e| format!("failed to read symlink target: {}", e))?;
+                std::fs::write(&dst_child, &target)
+                    .map_err(|e| format!("failed to write symlink target: {}", e))?;
+            } else {
+                std::fs::copy(&src_child, &dst_child)
+                    .map_err(|e| format!("failed to copy file: {}", e))?;
+            }
+        }
+        Ok(())
     }
 
     /// Resolve + path-traversal guard. Reuses the same logic as
@@ -468,6 +523,136 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         Ok(WorkspaceMutationResponse {
             ok: true,
             entry: Some(serde_json::json!({"deleted": true, "path": rel_path})),
+        })
+    }
+
+    async fn copy_item(
+        &self,
+        body: CopyMoveBody,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
+        let (workspace_id, source, dest) = Self::resolve_copy_move(&body);
+        if source.is_empty() || dest.is_empty() {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: "missing 'source' or 'dest' in body".to_string(),
+            });
+        }
+        let (_root, abs_src, rel_src) =
+            self.resolve_within(workspace_id.as_deref(), &source)?;
+        let (_root, abs_dest, rel_dest) =
+            self.resolve_within(workspace_id.as_deref(), &dest)?;
+
+        if !abs_src.exists() {
+            return Err(WorkspaceError::NotFound(format!(
+                "source does not exist: {}",
+                rel_src
+            )));
+        }
+        if abs_dest.exists() {
+            return Err(WorkspaceError::BadRequest {
+                status: 409,
+                message: format!("destination already exists: {}", rel_dest),
+            });
+        }
+        if abs_src == abs_dest {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: "source and destination are the same path".to_string(),
+            });
+        }
+        // The destination's parent directory must exist on Unix —
+        // `std::fs::copy` does not auto-create parents. Surface a
+        // clearer error than letting the syscall return ENOENT.
+        if let Some(parent) = abs_dest.parent()
+            && !parent.exists()
+        {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: format!(
+                    "destination parent directory does not exist: {}",
+                    rel_dest
+                ),
+            });
+        }
+
+        if abs_src.is_dir() {
+            Self::copy_dir_recursive(&abs_src, &abs_dest)
+                .map_err(|e| WorkspaceError::Persist(format!("copy failed: {}", e)))?;
+        } else {
+            std::fs::copy(&abs_src, &abs_dest).map_err(|e| {
+                WorkspaceError::Persist(format!("failed to copy file: {}", e))
+            })?;
+        }
+
+        Ok(WorkspaceMutationResponse {
+            ok: true,
+            entry: Some(serde_json::json!({
+                "copied": true,
+                "source": rel_src,
+                "dest": rel_dest,
+            })),
+        })
+    }
+
+    async fn rename_item(
+        &self,
+        body: CopyMoveBody,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
+        let (workspace_id, source, dest) = Self::resolve_copy_move(&body);
+        if source.is_empty() || dest.is_empty() {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: "missing 'source' or 'dest' in body".to_string(),
+            });
+        }
+        let (_root, abs_src, rel_src) =
+            self.resolve_within(workspace_id.as_deref(), &source)?;
+        let (_root, abs_dest, rel_dest) =
+            self.resolve_within(workspace_id.as_deref(), &dest)?;
+
+        if !abs_src.exists() {
+            return Err(WorkspaceError::NotFound(format!(
+                "source does not exist: {}",
+                rel_src
+            )));
+        }
+        if abs_dest.exists() {
+            return Err(WorkspaceError::BadRequest {
+                status: 409,
+                message: format!("destination already exists: {}", rel_dest),
+            });
+        }
+        if abs_src == abs_dest {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: "source and destination are the same path".to_string(),
+            });
+        }
+        // `std::fs::rename` is atomic on the same filesystem and falls
+        // back to copy+delete on cross-filesystem moves. Either way it
+        // requires the destination's parent directory to exist on Unix.
+        if let Some(parent) = abs_dest.parent()
+            && !parent.exists()
+        {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: format!(
+                    "destination parent directory does not exist: {}",
+                    rel_dest
+                ),
+            });
+        }
+
+        std::fs::rename(&abs_src, &abs_dest)
+            .map_err(|e| WorkspaceError::Persist(format!("failed to rename: {}", e)))?;
+
+        Ok(WorkspaceMutationResponse {
+            ok: true,
+            entry: Some(serde_json::json!({
+                "renamed": true,
+                "source": rel_src,
+                "dest": rel_dest,
+            })),
         })
     }
 }

@@ -614,6 +614,7 @@
       "newFolder": "新規フォルダ",
       "copy": "コピー",
       "paste": "貼り付け",
+      "rename": "名前を変更…",
       "delete": "削除"
     },
     "ariaLabelClearSearch": "検索をクリア",

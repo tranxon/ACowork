@@ -146,7 +146,8 @@ sequenceDiagram
 | GET  | `/api/agents/{agent_id}/workspaces/file-raw` | 读取原始文件（二进制） |
 | POST | `/api/agents/{agent_id}/workspaces/dir` | 创建目录 |
 | DELETE | `/api/agents/{agent_id}/workspaces/dir` | 删除目录 |
-| POST | `/api/agents/{agent_id}/workspaces/copy` | 复制文件/目录 |
+| POST | `/api/agents/{agent_id}/workspaces/copy` | 复制文件/目录（Runtime 反代） |
+| POST | `/api/agents/{agent_id}/workspaces/rename` | 原子重命名 file/dir（Runtime 反代） |
 | GET  | `/api/agents/{agent_id}/workspaces/search` | 按内容搜索 |
 | GET  | `/workspace-files/{agent_id}/{workspace_id}/{*path}` | 静态文件服务（前端直链） |
 | GET  | `/ws-files/{agent_id}/{*path}` | 静态文件服务（运行时输出） |

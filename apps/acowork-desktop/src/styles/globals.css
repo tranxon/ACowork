@@ -1404,3 +1404,35 @@ input[type="radio"]:checked {
   border-top-color: #3f3f46;
   /* zinc-700 */
 }
+
+/* ── File tree drag & drop state ────────────────────────────────────────
+ *
+ * Applied to `.file-tree-row` (FileTreeNode's row div).
+ *   - `.file-tree-row-drag-source` — the entry currently being dragged;
+ *     rendered at reduced opacity so the tree visually conveys
+ *     "this is the source, not a target".
+ *   - `.file-tree-row-drop-target` — the directory the cursor is over;
+ *     rendered with a translucent accent wash so the user knows where
+ *     the drop will land. The block treatment (vs. a thin left edge)
+ *     matches VS Code / Finder's drop-target style.
+ *
+ * Invalid targets (files, self/ancestor dirs) are intercepted earlier in
+ * `onDragOverTreeEntry` by setting `dataTransfer.dropEffect = "none"`,
+ * which the browser uses to render the "no drop" cursor — no extra
+ * class needed for that branch.
+ *
+ * `color-mix` keeps us brand-agnostic: changing `--color-accent` in
+ * the @theme block above automatically updates both highlights.
+ */
+.file-tree-row-drag-source {
+  opacity: 0.5;
+  /* Make the dragged row invisible to DOM hit-testing so
+   * `elementFromPoint` in the centralized drag-over handler
+   * sees through it to the row behind the cursor. Without this,
+   * the dragged row always occludes the target row. */
+  pointer-events: none;
+}
+
+.file-tree-row-drop-target {
+  background-color: color-mix(in srgb, var(--color-accent) 22%, transparent);
+}

@@ -612,6 +612,7 @@
       "newFolder": "新增資料夾",
       "copy": "複製",
       "paste": "貼上",
+      "rename": "重新命名…",
       "delete": "刪除"
     },
     "ariaLabelClearSearch": "清除搜尋",

@@ -1,19 +1,35 @@
-//! Workspace directory management API
+//! Static file serving for workspace-backed assets.
 //!
-//! Manages additional directories that agents can access beyond their workspace.
+//! All write-side workspace operations (file/dir create / write / delete
+//! / copy / rename) are handled by the Agent Runtime HTTP server and
+//! proxied verbatim through [`crate::http::proxy::proxy_routes`]. This
+//! module keeps only what **must** stay on the Gateway side: the
+//! static-asset endpoints used by the HTML preview iframe.
 //!
-//! **ADR-009 (v2)**: Gateway is pure pass-through for workspace config.
-//! No persistence to disk. Workspace config is maintained by Agent Runtime
-//! (in `agent_workspaces.json`). Gateway caches the config in `RunningAgentInfo`
-//! (in-memory only, cleared on disconnect) to serve HTTP API requests.
-//! ADR-033: gRPC push replaced with MQTT; workspace mutations are persisted
-//! to agent_workspaces.json on startup by Runtime.
+//! # Architecture
+//!
+//! The Runtime is the authoritative owner of workspace config (it writes
+//! `<work_dir>/config/agent_workspaces.json`); the Gateway must therefore
+//! resolve `workspace_id` against that same on-disk file when serving
+//! static assets. [`resolve_workspace_root`] reads
+//! `<info.workspace>/config/agent_workspaces.json` directly to look up
+//! the absolute path, so the HTML preview iframe renders correctly for
+//! both the agent home directory and every additional workspace.
+//!
+//! The Runtime's JSON-envelope `GET /workspaces/file` is **not** a
+//! suitable substitute for these static-asset endpoints — the preview
+//! iframe needs raw bytes (HTML / CSS / image binaries), and a base64
+//! JSON envelope would break every `<img>`, `<link>`, and `<script>`
+//! in the rendered document. That is why this module survives the
+//! ADR-040 / ADR-009 v2 "Runtime owns filesystem" refactor — see the
+//! module doc on `proxy_routes` for the full list of operations that
+//! have moved to the Runtime side.
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::get,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,61 +74,18 @@ pub enum AccessLevel {
     ReadWrite,
 }
 
+// ─── Static preview path resolution ───────────────────────────────────
 
-
-
-
-// ─── File Tree Explorer API ─────────────────────────────────────────────
-
-/// A single entry in a directory listing (file or subdirectory)
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TreeEntry {
-    /// File or directory name
-    pub name: String,
-    /// "file" or "directory"
-    #[serde(rename = "type")]
-    pub entry_type: String,
-    /// File size in bytes (None for directories)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    /// Last modified timestamp (RFC3339, None if unavailable)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub modified: Option<String>,
-    /// Number of direct children (only for directories, used for showing expansion arrow)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub children_count: Option<usize>,
-}
-
-/// Query parameters for the tree endpoint
-#[derive(Debug, Deserialize, Default)]
-pub struct TreeQuery {
-    /// Relative path within the workspace root (empty or "." = root)
-    #[serde(default)]
-    pub path: Option<String>,
-    /// Workspace ID to browse. "__agent_home__" or empty = agent home directory.
-    #[serde(default)]
-    pub workspace_id: Option<String>,
-}
-
-/// Response for the tree endpoint
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TreeResponse {
-    /// Absolute path of the workspace root
-    pub root: String,
-    /// Relative path that was listed
-    pub path: String,
-    /// Directory entries (directories first, then files, both alphabetical)
-    pub entries: Vec<TreeEntry>,
-}
-
-/// Resolve the absolute directory path for a tree request, ensuring it stays
-/// within the allowed workspace root. Returns `(root, abs_path, rel_path)`.
+/// Resolve the absolute file path for a static-asset request, ensuring
+/// it stays within the allowed workspace root. Returns
+/// `(root, abs_path, rel_path)`.
 ///
-/// For paths that don't yet exist on disk (e.g. creating a new file), the
-/// canonicalization is skipped and containment is verified by checking for
-/// parent-directory traversal (`..`) and absolute-path components.
+/// For paths that don't yet exist on disk, canonicalization is skipped
+/// and containment is verified by checking for parent-directory
+/// traversal (`..`) and absolute-path components. This is the
+/// path-traversal guard used by both `/workspace-files/...` and
+/// `/ws-files/...`; [`crate::http::proxy::proxy_routes`] handles every
+/// other write- and read-side path on the Runtime side.
 fn resolve_tree_path(
     root: &str,
     requested_path: &str,
@@ -217,71 +190,24 @@ fn detect_mime(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// Query parameters for file read/write
-#[derive(Debug, Deserialize, Default)]
-pub struct FileQuery {
-    /// Relative file path within the workspace
-    pub path: Option<String>,
-    /// Workspace ID. "__agent_home__" or empty = agent home directory
-    pub workspace_id: Option<String>,
-}
-
-/// Response for file read
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileResponse {
-    pub content: String,
-    pub size: u64,
-    pub mime_type: String,
-}
-
-/// Request body for file write
-#[derive(Debug, Deserialize)]
-pub struct WriteFileRequest {
-    pub content: String,
-}
-
-/// Request body for creating a new file/directory
-#[derive(Debug, Deserialize)]
-pub struct CreateFileRequest {
-    /// Relative path of the new file within the workspace
-    pub path: String,
-}
-
-/// Response for file/directory creation
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateFileResponse {
-    pub ok: bool,
-    pub path: String,
-}
-
-/// Response for file write
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteFileResponse {
-    pub ok: bool,
-    pub size: u64,
-}
-
-/// Request body for copy operation
-#[derive(Debug, Deserialize)]
-pub struct CopyRequest {
-    /// Relative path of the source file/directory
-    pub source: String,
-    /// Relative path of the destination
-    pub dest: String,
-}
-
-/// Request body for delete operation
-#[derive(Debug, Deserialize)]
-pub struct DeleteRequest {
-    /// Relative path to delete
-    pub path: String,
-}
-
 /// Resolve workspace root path for a given agent + workspace_id.
-/// Shared between tree and file APIs.
+///
+/// The Runtime writes additional workspace directories to
+/// `<work_dir>/config/agent_workspaces.json`. The Gateway's
+/// `RunningAgentInfo::workspace_config_json` field was previously used
+/// as an in-memory cache, but the population path (the
+/// `UpdateWorkspaceConfig` gRPC message) was never implemented — so
+/// reading it always returned `None` for every running agent, breaking
+/// every additional-workspace static asset request with a confusing
+/// "workspace config not available yet" 404.
+///
+/// To avoid bolting on a new state-sync coupling just to serve static
+/// files, we read the on-disk config that the Runtime maintains
+/// itself. The file is written by `RuntimeWorkspaceMutationService`
+/// via the `write-tmp-rename` pattern, so reading it here is safe and
+/// idempotent. If the file is missing (e.g. the agent has never
+/// configured additional workspaces), we treat the unknown id as a
+/// 404 — same outcome as a missing entry.
 async fn resolve_workspace_root(
     state: &AppState,
     id: &str,
@@ -295,52 +221,39 @@ async fn resolve_workspace_root(
 
     let ws_id = workspace_id.unwrap_or("");
     if ws_id.is_empty() || ws_id == "__agent_home__" {
-        Ok(info.workspace.clone())
-    } else {
-        let config = info
-            .workspace_config_json
-            .as_ref()
-            .and_then(|json| serde_json::from_str::<WorkspaceConfig>(json).ok());
-        match config {
-            Some(cfg) => cfg
-                .additional_dirs
-                .iter()
-                .find(|d| d.id == ws_id)
-                .map(|d| d.path.clone())
-                .ok_or_else(|| {
-                    ApiError::not_found(&format!("Workspace directory not found: {}", ws_id))
-                }),
-            None => Err(ApiError::not_found(
-                "Agent workspace config not available yet",
-            )),
-        }
-    }
-}
-
-
-/// Recursively copy a directory
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst)
-        .map_err(|e| format!("Failed to create destination directory: {}", e))?;
-
-    let entries =
-        std::fs::read_dir(src).map_err(|e| format!("Failed to read source directory: {}", e))?;
-
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("Failed to copy file: {}", e))?;
-        }
+        return Ok(info.workspace.clone());
     }
 
-    Ok(())
+    // `info.workspace` is the agent's work_dir — the same directory the
+    // Runtime treats as the canonical root for `config/agent_workspaces.json`.
+    let config_path = std::path::Path::new(&info.workspace)
+        .join("config")
+        .join("agent_workspaces.json");
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(_) => {
+            // The config file does not exist yet — meaning the agent
+            // has no additional workspaces at all. Anything beyond
+            // `__agent_home__` is therefore unknown.
+            return Err(ApiError::not_found(&format!(
+                "Workspace directory not found: {}",
+                ws_id
+            )));
+        }
+    };
+    let cfg: WorkspaceConfig = serde_json::from_str(&content).map_err(|e| {
+        ApiError::internal(&format!(
+            "Failed to parse agent_workspaces.json: {}",
+            e
+        ))
+    })?;
+    cfg.additional_dirs
+        .iter()
+        .find(|d| d.id == ws_id)
+        .map(|d| d.path.clone())
+        .ok_or_else(|| ApiError::not_found(&format!("Workspace directory not found: {}", ws_id)))
 }
+
 
 fn serve_workspace_file_from_root(
     workspace_root: String,
@@ -415,95 +328,34 @@ pub async fn serve_workspace_ws_file(
 type StreamFileResponse =
     Result<(StatusCode, [(&'static str, String); 2], axum::body::Body), (StatusCode, Json<ApiError>)>;
 
-/// `POST /api/agents/{id}/workspaces/copy` — copy a file or directory
-pub async fn copy_item(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(query): Query<FileQuery>,
-    Json(req): Json<CopyRequest>,
-) -> Result<(StatusCode, Json<CreateFileResponse>), (StatusCode, Json<ApiError>)> {
-    if req.source.is_empty() || req.dest.is_empty() {
-        return Err(ApiError::bad_request(
-            "Missing required 'source' or 'dest' parameter",
-        ));
-    }
-
-    let workspace_root =
-        resolve_workspace_root(&state, &id, query.workspace_id.as_deref()).await?;
-
-    let (_canonical_root, abs_src, _rel_src) =
-        resolve_tree_path(&workspace_root, &req.source).map_err(|e| ApiError::bad_request(&e))?;
-
-    let (_canonical_root, abs_dest, _rel_dest) =
-        resolve_tree_path(&workspace_root, &req.dest).map_err(|e| ApiError::bad_request(&e))?;
-
-    if abs_dest.exists() {
-        return Err(ApiError::bad_request(&format!(
-            "Destination already exists: {}",
-            req.dest
-        )));
-    }
-
-    if abs_src.is_dir() {
-        copy_dir_recursive(&abs_src, &abs_dest).map_err(|e| ApiError::internal(&e))?;
-    } else {
-        // Ensure parent directory exists
-        if let Some(parent) = abs_dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ApiError::internal(&format!("Failed to create parent directory: {}", e))
-            })?;
-        }
-        std::fs::copy(&abs_src, &abs_dest)
-            .map_err(|e| ApiError::internal(&format!("Failed to copy file: {}", e)))?;
-    }
-
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateFileResponse {
-            ok: true,
-            path: req.dest.clone(),
-        }),
-    ))
-}
-
-// ─── Content Search API ─────────────────────────────────────────────────
-//
-// Removed: as of the ADR-040 / ADR-009 v2 refactor, workspace find / search
-// run on the Runtime side (see `acowork_runtime::usecases::workspace_query`).
-// The Gateway now proxies `GET /api/agents/{id}/workspaces/find` and
-// `GET /api/agents/{id}/workspaces/search` verbatim to the Runtime.
-// See `crate::http::proxy::proxy_routes` for the proxy handlers.
-//
-
 // ─── Routes ─────────────────────────────────────────────────────────────
 
-/// Create workspace management routes
+/// Static-asset routes for the workspace browser's HTML preview iframe.
 ///
-/// # Architecture note (ADR-009 v2)
+/// # Architecture note (ADR-009 v2 + ADR-040 + ADR-034 §11.2)
 ///
-/// Per ADR-009 v2 the Gateway is a **pure pass-through** for all
-/// filesystem operations — it does not touch disk. The actual file/dir
-/// CRUD is therefore exposed through [`crate::http::proxy::proxy_routes`]
-/// which forwards verbatim to the agent's Runtime HTTP server. The
-/// routes registered here are limited to:
+/// Per the Runtime-owns-filesystem refactor, every write-side workspace
+/// operation is exposed through
+/// [`crate::http::proxy::proxy_routes`] which forwards verbatim to the
+/// agent's Runtime HTTP server. The only routes this module registers
+/// are:
 //
 ///
-/// 1. **`/workspaces/copy`** — duplicate a file/dir (server-side, so it
-///    works for cross-volume copies and large files).
-/// 2. **`/workspace-files/{agent_id}/{workspace_id}/{*path}`** —
-///    pass-through for the HTML preview iframe.
-/// 3. **`/ws-files/{agent_id}/{*path}`** — alias of the above for
-///    legacy callers.
+/// 1. **`/workspace-files/{agent_id}/{workspace_id}/{*path}`** —
+///    pass-through for the HTML preview iframe. Streams raw bytes so
+///    that `<img>`, `<link>`, `<script>`, and binary sub-resources
+///    resolve correctly. Resolves the workspace root via
+///    [`resolve_workspace_root`], which now reads
+///    `<work_dir>/config/agent_workspaces.json` directly instead of an
+///    in-memory cache that was never populated.
+/// 2. **`/ws-files/{agent_id}/{*path}`** — legacy alias of the above
+///    for callers that don't carry a `workspace_id` segment.
 ///
-/// The previous direct-on-Gateway implementations of
-/// `/workspaces/file`, `/workspaces/dir`, `/workspaces/find` and
-/// `/workspaces/search` have been removed; those paths now resolve to
-/// the proxy in `proxy.rs` (which carries out the read/write/delete /
-/// filename-search / content-search on the Runtime side per ADR-009 v2
-/// + ADR-040).
+/// All file/dir copy / rename / create / write / delete and tree /
+/// find / search operations are **not** registered here — they live in
+/// `proxy.rs` and run on the Runtime side.
 pub fn workspace_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/agents/{id}/workspaces/copy", post(copy_item))
         .route(
             "/workspace-files/{agent_id}/{workspace_id}/{*path}",
             get(serve_workspace_ws_file),
@@ -512,4 +364,94 @@ pub fn workspace_routes() -> Router<AppState> {
             "/ws-files/{agent_id}/{*path}",
             get(serve_ws_file),
         )
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resolve absolute paths inside a unique temp directory and return
+    /// both the root (as a `String` accepted by `resolve_tree_path`) and
+    /// the canonicalised `PathBuf` callers use to seed the filesystem.
+    ///
+    /// These tests guard the static-asset preview endpoints
+    /// (`/workspace-files/...` and `/ws-files/...`). After the
+    /// ADR-040 + ADR-034 §11.2 refactor, write-side workspace ops live
+    /// on the Runtime side; this module's only filesystem touchpoint
+    /// is the static preview, and its path-traversal guard remains
+    /// security-critical.
+    fn make_temp_workspace(label: &str) -> (String, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-gateway-preview-{}-{}",
+            label,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp workspace must be creatable");
+        let root = dir.canonicalize().expect("canonicalize temp dir");
+        (root.to_string_lossy().to_string(), root)
+    }
+
+    #[test]
+    fn resolve_tree_path_happy() {
+        let (root, root_path) = make_temp_workspace("happy");
+        std::fs::write(root_path.join("foo.txt"), "hi").unwrap();
+
+        let (_, abs, rel) = resolve_tree_path(&root, "foo.txt").unwrap();
+        assert_eq!(abs, root_path.join("foo.txt"));
+        assert_eq!(rel, "foo.txt");
+    }
+
+    #[test]
+    fn resolve_tree_path_rejects_traversal() {
+        let (root, _) = make_temp_workspace("traversal");
+        // `..` must be rejected at the validation step (path does not exist).
+        let res = resolve_tree_path(&root, "../etc/passwd");
+        assert!(res.is_err(), "path traversal must be rejected");
+    }
+
+    #[test]
+    fn resolve_tree_path_normalizes_absolute_to_relative() {
+        let (root, root_path) = make_temp_workspace("absolute-norm");
+
+        // A leading `/` is stripped during normalisation so callers may
+        // pass POSIX absolute-looking paths and have them resolved inside
+        // the workspace. The actual traversal guard (the `starts_with`
+        // check on the canonical path) prevents escape.
+        let (_, abs, rel) = resolve_tree_path(&root, "/foo/bar.txt").unwrap();
+        assert_eq!(abs, root_path.join("foo/bar.txt"));
+        assert_eq!(rel, "foo/bar.txt");
+    }
+
+    #[test]
+    fn resolve_tree_path_rejects_real_escape_via_canonical_contains() {
+        // Even with a leading `/` stripped, the canonicalised candidate
+        // must still start with the canonical workspace root. This is the
+        // real escape guard for both POSIX (`/etc/...`) and Windows
+        // (`C:\\...`) style inputs.
+        let (root, _) = make_temp_workspace("escape");
+        // Pretend a sibling dir exists at the workspace-root's parent —
+        // not strictly `/etc`, but sufficient to exercise the `starts_with`
+        // containment branch via a relative `..` escape.
+        let res = resolve_tree_path(&root, "subdir/../../escape-attempt");
+        // The path does not exist, so it goes through the non-existent
+        // branch which validates components. `..` is rejected there.
+        assert!(res.is_err(), "`..` escape must be rejected");
+    }
+
+    #[test]
+    fn resolve_tree_path_allows_nested_new_file() {
+        // `subdir/leaf.md` does not exist yet; resolution should still
+        // succeed because the static preview legitimately serves any
+        // existing file under the workspace root. The check must rely on
+        // component analysis, not canonicalization, for non-existent paths.
+        let (root, root_path) = make_temp_workspace("nested-new");
+        std::fs::create_dir_all(root_path.join("subdir")).unwrap();
+
+        let (_, abs, rel) = resolve_tree_path(&root, "subdir/leaf.md").unwrap();
+        assert_eq!(abs, root_path.join("subdir/leaf.md"));
+        assert_eq!(rel, "subdir/leaf.md");
+    }
 }

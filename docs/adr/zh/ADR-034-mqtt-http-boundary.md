@@ -1183,7 +1183,11 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 
 ### 11.2 Runtime 端点完整清单（localhost HTTP server）
 
-#### A. 数据面（25 条 — 12 保留修复 + 13 新增，含 6 个面板端点）
+#### A. 数据面（33 条 = 25 保留 + 8 新增；其中面板端点 6 个）
+
+> 8 个新增 = §11.2 22a-22h（workspace 文件系统读写：file/dir CRUD + copy + rename）。
+> 每个都通过 `WorkspaceMutationService` trait 走 UseCase 层（ADR-040），不直接
+> 摸文件系统；路径安全统一由 `resolve_within_static` 的 canonicalize-contains 守卫保证。
 
 | # | 端点 | 用途 | 业务逻辑 |
 |---|------|------|----------|
@@ -1209,6 +1213,14 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 | 20 | `PUT /workspaces/{ws_id}/prompt-file` | 设置 prompt 文件 | 更新条目 prompt_file |
 | 21 | `DELETE /workspaces/{ws_id}` | 删除 workspace | 移条目 |
 | 22 | `GET /workspaces/tree?workspace_id=&path=` | **面板 6 Workspace** 文件树 | `list_tree` |
+| 22a | `GET /workspaces/file?workspace_id=&path=` | 读取 file/dir metadata | `WorkspaceQueryService::read_file` (返回 JSON envelope，二进制走 base64) |
+| 22b | `POST /workspaces/file?workspace_id=` | 创建文本文件 | `WorkspaceMutationService::create_file` |
+| 22c | `PUT /workspaces/file?workspace_id=&path=` | 覆盖写入文本文件 | `WorkspaceMutationService::write_file` |
+| 22d | `DELETE /workspaces/file?workspace_id=` | 删除文件 | `WorkspaceMutationService::delete_file` |
+| 22e | `POST /workspaces/dir?workspace_id=` | 创建目录（递归）| `WorkspaceMutationService::create_dir` |
+| 22f | `DELETE /workspaces/dir?workspace_id=` | 删除目录（递归）| `WorkspaceMutationService::delete_dir` |
+| 22g | `POST /workspaces/copy?workspace_id=` | 复制 file/dir tree | `WorkspaceMutationService::copy_item` (Source/dest 同 workspace，dest 不存在) |
+| 22h | `POST /workspaces/rename?workspace_id=` | 原子 rename/move | `WorkspaceMutationService::rename_item` (`std::fs::rename`，dest 不存在) |
 | 23 | `GET /agents/{id}/config` | **面板 1 Setup** | 读 `agent_config.json` |
 | 24 | `GET /agents/{id}/tools` | **面板 3 Tools** | 读 `agent_tools.json` + `agent_mcp.json` + `agent_search.json` 合并 |
 | 25 | `GET /agents/{id}/status` | **面板 5 Agent Status** | Runtime 进程运行时状态（PID、启动时间、当前 session_id、运行状态）|
@@ -1222,7 +1234,12 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 
 ### 11.3 Gateway 端点完整清单
 
-#### A. 数据面反代 Runtime（25 条 — 12 保留修复 + 13 新增）
+#### A. 数据面反代 Runtime（33 条 = 25 保留 + 8 新增）
+
+> 8 个新增 = §11.3 22a-22h（workspace 文件系统读写），全部经
+> `acowork-gateway/src/http/proxy.rs::proxy_routes` 透传到 Runtime §11.2 22a-22h。
+> 之前 Gateway 直连的实现因 `RunningAgentInfo::workspace_config_json` 字段从未被
+> `UpdateWorkspaceConfig` gRPC 填充而对附加 workspace 100% 失效 — 现在删干净了。
 
 | # | Gateway 端点 | Runtime 端点 | 备注 |
 |---|--------------|--------------|------|
@@ -1248,6 +1265,14 @@ ADR-034  控制面/数据面分层规约 + HTTP 端点治理  (本 ADR v2.0,补�
 | 20 | `PUT /api/agents/{id}/workspaces/{ws_id}/prompt-file` | `PUT /workspaces/{ws_id}/prompt-file` | 新增 |
 | 21 | `DELETE /api/agents/{id}/workspaces/{ws_id}` | `DELETE /workspaces/{ws_id}` | 新增 |
 | 22 | `GET /api/agents/{id}/workspaces/tree` | `GET /workspaces/tree` | 保留（面板 6）|
+| 22a | `GET  /api/agents/{id}/workspaces/file?workspace_id=&path=` | `GET  /workspaces/file` | **新增**：文件读（面板 6 富预览 + Monaco 编辑）|
+| 22b | `POST /api/agents/{id}/workspaces/file?workspace_id=` | `POST /workspaces/file` | **新增**：创建文件 |
+| 22c | `PUT  /api/agents/{id}/workspaces/file?workspace_id=&path=` | `PUT  /workspaces/file` | **新增**：覆盖写 |
+| 22d | `DELETE /api/agents/{id}/workspaces/file?workspace_id=` | `DELETE /workspaces/file` | **新增**：删文件 |
+| 22e | `POST /api/agents/{id}/workspaces/dir?workspace_id=` | `POST /workspaces/dir` | **新增**：创建目录 |
+| 22f | `DELETE /api/agents/{id}/workspaces/dir?workspace_id=` | `DELETE /workspaces/dir` | **新增**：删目录 |
+| 22g | `POST /api/agents/{id}/workspaces/copy?workspace_id=` | `POST /workspaces/copy` | **新增**：file/dir 复制 |
+| 22h | `POST /api/agents/{id}/workspaces/rename?workspace_id=` | `POST /workspaces/rename` | **新增**：file/dir 原子重命名 |
 | 23 | `GET /api/agents/{id}/config` | `GET /agents/{id}/config` | **新增**（面板 1，Setup）|
 | 24 | `GET /api/agents/{id}/tools` | `GET /agents/{id}/tools` | **新增**（面板 3，Tools 合并 tools + mcp + search）|
 | 25 | `GET /api/agents/{id}/status` | `GET /agents/{id}/status` | **新增**（面板 5，Agent Status）|
@@ -1469,15 +1494,17 @@ Desktop App 全部 53 处 fetch 调用去重后分布如下, 分为 **A 面板 (
 | 3 | `PUT  /api/agents/{id}/workspaces/{id}` | update | ✅ | WorkspaceSelector.tsx:117,138 |
 | 4 | `DELETE /api/agents/{id}/workspaces/{id}` | delete | (未查) | (未查) |
 | 5 | `PUT  /api/agents/{id}/workspaces/{ws_id}/prompt-file` | set prompt | ✅ | workspaceStore.ts:526 |
-| 6 | `POST /api/agents/{id}/workspaces/file?path=` | write file | ⚠️ **ADR 未明确** | workspaceStore.ts:400 |
-| 7 | `GET  /api/agents/{id}/workspaces/file?path=` | read file | ⚠️ **ADR 未明确** | workspaceStore.ts:450 |
-| 8 | `DELETE /api/agents/{id}/workspaces/file?path=` | delete file | ⚠️ **ADR 未明确** | workspaceStore.ts:475 |
-| 9 | `POST /api/agents/{id}/workspaces/dir?path=` | create dir | ⚠️ **ADR 未明确** | workspaceStore.ts:425 |
-| 10 | `DELETE /api/agents/{id}/workspaces/dir?path=` | delete dir | ⚠️ **ADR 未明确** | workspaceStore.ts:475 |
-| 11 | `POST /api/agents/{id}/workspaces/copy?path=` | copy | ⚠️ **ADR 未明确** | workspaceStore.ts:500 |
-| 12 | `POST /api/agents/{id}/workspaces/find?path=` | find | ⚠️ **ADR 未明确** | workspaceStore.ts:341 |
+| 6 | `POST /api/agents/{id}/workspaces/file?path=` | write file | ✅ **Runtime 反代** | workspaceStore.ts:400 |
+| 7 | `GET  /api/agents/{id}/workspaces/file?path=` | read file | ✅ **Runtime 反代** | workspaceStore.ts:450 |
+| 8 | `DELETE /api/agents/{id}/workspaces/file?path=` | delete file | ✅ **Runtime 反代** | workspaceStore.ts:475 |
+| 9 | `POST /api/agents/{id}/workspaces/dir?path=` | create dir | ✅ **Runtime 反代** | workspaceStore.ts:425 |
+| 10 | `DELETE /api/agents/{id}/workspaces/dir?path=` | delete dir | ✅ **Runtime 反代** | workspaceStore.ts:475 |
+| 11 | `POST /api/agents/{id}/workspaces/copy?path=` | copy | ✅ **Runtime 反代** | workspaceStore.ts:500 |
+| 12 | `POST /api/agents/{id}/workspaces/rename?path=` | rename | ✅ **Runtime 反代** | workspaceStore.ts:526 |
+| 13 | `POST /api/agents/{id}/workspaces/find?path=` | find | ✅ **Runtime 反代** | workspaceStore.ts:341 |
+| 14 | `GET  /api/agents/{id}/workspaces/search?path=` | search | ✅ **Runtime 反代** | workspaceStore.ts:341 |
 
-**ADR 修正**: 第 6-12 条是 workspace 文件系统操作 (Gateway 本地, 不属于 Agent Runtime 隔离面)。本 ADR **不重写文件操作路由** (不属 Runtime 职责), 但明确这些端点 **不在 Runtime HTTP 反代面**, 由 Gateway 本地 `workspaces.rs` 处理。
+**ADR 修正**: 第 6-14 条是 workspace 文件系统操作。根据 ADR-040「Runtime 拥有 workspace 文件系统」+ ADR-009 v2「Gateway 仅作 reverse proxy」原则，这些端点全部走 Gateway → Runtime 反代路径（详见 §11.2.A 22a-22h 与 §11.3.A 22a-22h）。**Gateway 本地只剩静态资源端点**（`/workspace-files/{agent_id}/{workspace_id}/{*path}` 用于 HTML preview iframe 的 raw byte 流；`/ws-files/{agent_id}/{*path}` 兼容旧 caller），由 `acowork-gateway/src/http/workspaces.rs` 提供。这是 Runtime 没有 raw-byte GET 端点（避免 HTML preview iframe 被 base64 JSON 包装破坏）而留下的唯一例外。
 
 #### D. Avatar/Skills/User (4 条)
 

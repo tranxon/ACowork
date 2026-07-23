@@ -40,6 +40,8 @@
 //! DELETE /workspaces/file                        // NEW: delete file
 //! POST   /workspaces/dir                         // NEW: create dir
 //! DELETE /workspaces/dir                         // NEW: delete dir
+//! POST   /workspaces/copy                        // NEW: copy file/dir tree
+//! POST   /workspaces/rename                      // NEW: atomic rename (move)
 //! POST   /memory/nodes                           // NEW: create memory node
 //! PUT    /memory/nodes/{nid}                     // NEW: update memory node
 //! GET    /agents/{id}/config                     // NEW: panel 1
@@ -304,6 +306,21 @@ impl RuntimeHttpServer {
             .route(
                 "/workspaces/dir",
                 post(create_workspace_dir).delete(delete_workspace_dir),
+            )
+            // Workspace copy/rename (ADR-040 + ADR-034 §11.2 — these
+            // were previously gateway-direct and silently broken for
+            // additional workspaces because the gateway-side
+            // `resolve_workspace_root` read a never-populated in-memory
+            // field). The runtime owns the workspace config on disk
+            // (`<work_dir>/config/agent_workspaces.json`) so resolution
+            // works for every workspace ID, including the agent home.
+            .route(
+                "/workspaces/copy",
+                post(copy_workspace_item),
+            )
+            .route(
+                "/workspaces/rename",
+                post(rename_workspace_item),
             )
             // 3 NEW agent panel endpoints (panels 1/3/5).
             // `/agents/{id}/config` carries both GET (Setup panel) and
@@ -1133,6 +1150,64 @@ async fn delete_workspace_dir(
     .await
     .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"deleted": r.ok}))))
     .map_err(workspace_error_to_response)
+}
+
+/// `POST /workspaces/copy` — copy a file or directory tree.
+///
+/// Body: `{workspace_id?, source, dest}` (`workspace_id` may also live in
+/// the querystring). Both paths must resolve under the same workspace
+/// root and the destination's parent directory must already exist.
+/// Returns 409 if `dest` already exists.
+async fn copy_workspace_item(
+    State(state): State<HttpState>,
+    Query(qparams): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<crate::usecases::workspace_mutation::CopyMoveBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.workspace_mutation.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    // Prefer the querystring's workspace_id (matches the desktop
+    // `workspaceStore` convention) but fall back to the body if absent.
+    let mut body = body;
+    if let Some(qs_ws) = qparams.get("workspace_id").filter(|s| !s.is_empty())
+        && body.workspace_id.as_deref().unwrap_or("").is_empty()
+    {
+        body.workspace_id = Some(qs_ws.clone());
+    }
+    svc.copy_item(body)
+        .await
+        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"copied": r.ok}))))
+        .map_err(workspace_error_to_response)
+}
+
+/// `POST /workspaces/rename` — atomically rename (move) a file or
+/// directory inside the same workspace.
+///
+/// Body: `{workspace_id?, source, dest}`. `std::fs::rename` is atomic
+/// on the same filesystem and falls back to copy+delete across
+/// filesystem boundaries at the OS layer. Returns 409 if `dest` already
+/// exists — explicit user intent (paste-as-copy's recursive dedupe runs
+/// client-side) is responsible for picking an unused name.
+async fn rename_workspace_item(
+    State(state): State<HttpState>,
+    Query(qparams): Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<crate::usecases::workspace_mutation::CopyMoveBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.workspace_mutation.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let mut body = body;
+    if let Some(qs_ws) = qparams.get("workspace_id").filter(|s| !s.is_empty())
+        && body.workspace_id.as_deref().unwrap_or("").is_empty()
+    {
+        body.workspace_id = Some(qs_ws.clone());
+    }
+    svc.rename_item(body)
+        .await
+        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"renamed": r.ok}))))
+        .map_err(workspace_error_to_response)
 }
 
 /// Map [`WorkspaceError`] → `(StatusCode, Json<...>)` response tuple.
@@ -3352,6 +3427,165 @@ mod tests {
             resp.status(),
             400,
             "path-traversal escape must be rejected by the guard"
+        );
+
+        // 14) POST /workspaces/copy — copy a file inside the workspace.
+        //     Body `{workspace_id, source, dest}`. Dest must not exist yet.
+        std::fs::write(ws_dir.join("readme.txt"), "hello workspace\n").unwrap();
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "readme.txt",
+                "dest": "readme-copy.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "copy file must be 200");
+        assert!(ws_dir.join("readme-copy.txt").exists(), "copied file exists");
+        assert_eq!(
+            std::fs::read_to_string(ws_dir.join("readme-copy.txt")).unwrap(),
+            "hello workspace\n",
+            "copied file content matches"
+        );
+
+        // 15) POST /workspaces/copy on an existing dest — must 409.
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "readme.txt",
+                "dest": "readme-copy.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            409,
+            "copy over an existing destination must 409"
+        );
+
+        // 16) POST /workspaces/copy on a missing source — must 404.
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "nope.txt",
+                "dest": "x.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "copy of missing source must 404");
+
+        // 17) POST /workspaces/copy on a missing workspace_id — must 404.
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "unknown",
+                "source": "readme.txt",
+                "dest": "x.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            404,
+            "copy with unknown workspace_id must 404"
+        );
+
+        // 18) POST /workspaces/copy with a traversal in `dest` — must 400.
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "readme.txt",
+                "dest": "../escape.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            400,
+            "copy with traversal dest must 400 (path-traversal guard)"
+        );
+
+        // 19) POST /workspaces/rename — atomic rename (move) of a file.
+        let resp = client
+            .post(format!("{}/workspaces/rename", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "readme.txt",
+                "dest": "readme-renamed.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "rename file must be 200");
+        assert!(
+            !ws_dir.join("readme.txt").exists(),
+            "source must be gone after rename"
+        );
+        assert!(
+            ws_dir.join("readme-renamed.txt").exists(),
+            "dest must exist after rename"
+        );
+
+        // 20) POST /workspaces/rename on an existing dest — must 409.
+        let resp = client
+            .post(format!("{}/workspaces/rename", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "readme-renamed.txt",
+                "dest": "readme-copy.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            409,
+            "rename over an existing destination must 409"
+        );
+
+        // 21) POST /workspaces/rename on a missing source — must 404.
+        let resp = client
+            .post(format!("{}/workspaces/rename", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "missing.txt",
+                "dest": "x.txt",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "rename of missing source must 404");
+
+        // 22) Recursive directory copy — `assets/` contains 1.jpg + test.svg;
+        //     POST /workspaces/copy should preserve both.
+        let resp = client
+            .post(format!("{}/workspaces/copy", base))
+            .json(&serde_json::json!({
+                "workspace_id": "alpha",
+                "source": "assets",
+                "dest": "assets-copy",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "copy dir must be 200");
+        assert!(ws_dir.join("assets-copy").is_dir(), "copied dir exists");
+        assert!(
+            ws_dir.join("assets-copy").join("1.jpg").exists(),
+            "copied file inside dir exists"
+        );
+        assert!(
+            ws_dir.join("assets-copy").join("test.svg").exists(),
+            "copied file inside dir exists"
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

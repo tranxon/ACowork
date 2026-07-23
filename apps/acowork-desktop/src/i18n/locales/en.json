@@ -321,6 +321,7 @@
       "newFolder": "New Folder",
       "copy": "Copy",
       "paste": "Paste",
+      "rename": "Rename…",
       "delete": "Delete"
     },
     "defaultWorkingDirectory": "Default working directory",

@@ -85,6 +85,26 @@ pub struct PathOnlyBody {
     pub path: Option<String>,
 }
 
+/// Body for `copy_item` + `rename_item`. Both endpoints accept the same
+/// payload shape — a source path, a destination path, and an optional
+/// `workspace_id` selector (querystring wins; the body is the fallback
+/// for clients that can't carry one on DELETE-style calls, even though
+/// these are POST).
+///
+/// `source` and `dest` are workspace-relative paths (same shape as
+/// `PathOnlyBody::path`). They MUST stay inside the resolved workspace
+/// root — the implementation's `resolve_within` enforces this with the
+/// canonicalize-based path-traversal guard.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CopyMoveBody {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub dest: Option<String>,
+}
+
 /// Querystring for `read_file` / `write_file` / `delete_file` (path is
 /// here so DELETE bodies aren't required for HTTP clients that can't
 /// carry one).
@@ -170,5 +190,28 @@ pub trait WorkspaceMutationService: Send + Sync {
         &self,
         query_ws: Option<&str>,
         body: PathOnlyBody,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
+
+    /// `POST /workspaces/copy` — copy a file or directory tree to a new
+    /// location inside the same workspace. Both paths must resolve under
+    /// the workspace root (`resolve_within` enforces the traversal
+    /// guard). If `dest` already exists, returns `AlreadyExists` so the
+    /// desktop can surface a clear "destination exists" error rather
+    /// than overwriting user data silently.
+    async fn copy_item(
+        &self,
+        body: CopyMoveBody,
+    ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
+
+    /// `POST /workspaces/rename` — atomically rename (or move) a file or
+    /// directory inside the same workspace. Both paths must resolve
+    /// under the workspace root. If `dest` already exists, returns
+    /// `AlreadyExists` for the same reason as `copy_item`. The
+    /// underlying syscall (`std::fs::rename`) is atomic on the same
+    /// filesystem; cross-filesystem moves fall back to copy+delete at
+    /// the OS layer.
+    async fn rename_item(
+        &self,
+        body: CopyMoveBody,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError>;
 }

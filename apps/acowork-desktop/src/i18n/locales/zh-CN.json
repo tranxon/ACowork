@@ -634,6 +634,7 @@
       "newFolder": "新建文件夹",
       "copy": "复制",
       "paste": "粘贴",
+      "rename": "重命名…",
       "delete": "删除"
     },
     "ariaLabelClearSearch": "清除搜索",

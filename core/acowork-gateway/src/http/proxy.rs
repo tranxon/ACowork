@@ -207,6 +207,20 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces/dir",
             post(proxy_create_workspace_dir).delete(proxy_delete_workspace_dir),
         )
+        // Routes 10c-d: Workspace copy / rename (ADR-040 + ADR-034 §11.2).
+        // Body is `{workspace_id?, source, dest}` — `workspace_id` may
+        // also ride on the querystring (desktop's `workspaceStore`
+        // convention). Both endpoints must be reverse-proxied so the
+        // runtime — the workspace config owner — resolves the
+        // `workspace_id` against `<work_dir>/config/agent_workspaces.json`.
+        .route(
+            "/api/agents/{id}/workspaces/copy",
+            post(proxy_copy_workspace_item),
+        )
+        .route(
+            "/api/agents/{id}/workspaces/rename",
+            post(proxy_rename_workspace_item),
+        )
         // Routes 11-13: Agent config / tools / status
         .route(
             "/api/agents/{id}/config",
@@ -688,6 +702,59 @@ async fn proxy_delete_workspace_dir(
         "/workspaces/dir",
         &query,
         reqwest::Method::DELETE,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/workspaces/copy` → Runtime's
+/// `POST /workspaces/copy`. Body is `{workspace_id?, source, dest}`;
+/// `workspace_id` may also ride on the querystring. The runtime owns
+/// the workspace config on disk and resolves `workspace_id` against
+/// `<work_dir>/config/agent_workspaces.json`, which is why this
+/// endpoint is proxied rather than implemented on the Gateway side.
+async fn proxy_copy_workspace_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/copy",
+        &query,
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/workspaces/rename` → Runtime's
+/// `POST /workspaces/rename`. Same payload shape as `copy`.
+/// `std::fs::rename` is atomic on the same filesystem, so the latency
+/// overhead of the round-trip through the Runtime is irrelevant — the
+/// HTTP envelope dominates either way.
+async fn proxy_rename_workspace_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces/rename",
+        &query,
+        reqwest::Method::POST,
         payload,
         &headers,
     )

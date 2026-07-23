@@ -150,6 +150,13 @@ interface WorkspaceState {
   // Copy a file or directory within the workspace
   copyItem: (agentId: string, workspaceId: string, source: string, dest: string) => Promise<boolean>;
 
+  // Rename (move) a file or directory within the workspace — atomic on
+  // the same filesystem. Mirrors copyItem's signature so the UI code is
+  // symmetric. Returns false on 404 (missing source) or 400 (dest
+  // already exists); both are surfaced as a user-visible toast by the
+  // caller.
+  renameItem: (agentId: string, workspaceId: string, source: string, dest: string) => Promise<boolean>;
+
   // Clipboard for copy/paste — stores the source entry to be pasted
   copiedEntry: { agentId: string; workspaceId: string; path: string; type: "file" | "directory" } | null;
   setCopiedEntry: (entry: { agentId: string; workspaceId: string; path: string; type: "file" | "directory" } | null) => void;
@@ -512,6 +519,31 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return true;
     } catch (e) {
       log.error("[WorkspaceStore] copyItem error:", e);
+      return false;
+    }
+  },
+
+  renameItem: async (agentId: string, workspaceId: string, source: string, dest: string) => {
+    try {
+      const baseUrl = getGatewayUrl();
+      const params = new URLSearchParams();
+      if (workspaceId && workspaceId !== "__agent_home__") {
+        params.set("workspace_id", workspaceId);
+      }
+      const qs = params.toString();
+      const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces/rename${qs ? `?${qs}` : ""}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, dest }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "<unreadable>");
+        log.error("[WorkspaceStore] renameItem failed:", resp.status, resp.statusText, body);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      log.error("[WorkspaceStore] renameItem error:", e);
       return false;
     }
   },

@@ -612,6 +612,7 @@
       "newFolder": "새 폴더",
       "copy": "복사",
       "paste": "붙여넣기",
+      "rename": "이름 바꾸기…",
       "delete": "삭제"
     },
     "ariaLabelClearSearch": "검색 지우기",
