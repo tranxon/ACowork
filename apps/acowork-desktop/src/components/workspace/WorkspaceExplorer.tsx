@@ -348,9 +348,13 @@ export function WorkspaceExplorer() {
                 </div>
             )}
 
-            {/* Search box with file-search dropdown (Ctrl+P-style) */}
+            {/* Search box with file-search dropdown (Ctrl+P-style).
+                Vertical padding (`py-1.5`) and min-h (`2.5rem`) are kept in
+                sync with the workspace-selector toolbar row above so the
+                two header strips read as the same height — otherwise the
+                selector row visually dwarfs the search row (~40px vs ~28px). */}
             <div className="relative border-b border-zinc-200 dark:border-zinc-800">
-                <div className="flex items-center gap-1.5 px-3 py-1">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 min-h-[2.5rem]">
                     <Search className="h-3 w-3 shrink-0 text-zinc-400" />
                     <input
                         ref={searchInputRef}
