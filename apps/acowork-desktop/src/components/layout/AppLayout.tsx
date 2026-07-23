@@ -15,6 +15,10 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
 import { cn } from "../../lib/utils";
+import {
+  DEFAULT_ACCENT_PRESET,
+  getAccentPresetByHex,
+} from "../../lib/accentPresets";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
@@ -212,7 +216,7 @@ export function AppLayout() {
     typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
   const LIGHT_OPACITY_FLOOR = 0.18;
   const DARK_OPACITY_FLOOR = 0.10;
-  const { opacity, theme, osTheme } = useSettingsStore();
+  const { opacity, theme, osTheme, accentColor } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
   const lightOpacity = isMacOS
     ? Math.max(opacity, LIGHT_OPACITY_FLOOR)
@@ -220,11 +224,17 @@ export function AppLayout() {
   const darkOpacity = isMacOS
     ? Math.max(opacity, DARK_OPACITY_FLOOR)
     : opacity;
+  // CSS-layer glass tint.  The actual HSL components live in globals.css
+  // and shift with the active `.accent-{id}` class on <html> (set by
+  // settingsStore), so reading the CSS variable here means the surface
+  // hue automatically follows the accent preset the user picks — at 8%
+  // saturation the tint is almost neutral but distinct from pure white/
+  // black desktop wallpaper.
   const glassBg = isDark
-    ? `rgba(41,42,44,${darkOpacity})`
-    : `rgba(226,227,233,${lightOpacity})`;
+    ? `hsl(var(--glass-tint-dark) / ${darkOpacity})`
+    : `hsl(var(--glass-tint-light) / ${lightOpacity})`;
 
-  // ── Sync macOS native visual-effect material with theme ────────────
+  // ── Sync macOS native visual-effect material with theme + accent ──
   // The Rust setup() no longer applies an initial effect (to avoid
   // a race where its delayed retry loop clobbers this theme-aware
   // call).  This effect is the sole owner of the native material.
@@ -232,26 +242,51 @@ export function AppLayout() {
   // NSView hierarchy isn't ready yet when React first mounts.
   // Non-macOS: no-op.
   //
-  // lastAppliedIsDarkRef guards against double-invocation: React StrictMode
+  // The effect is keyed on BOTH `isDark` and `accentColor` so that
+  // changing either triggers a re-invoke — the native vibrancy tint
+  // (RGBA tuple passed to Rust) needs to follow accent changes too,
+  // otherwise the CSS-layer tint updates but the layer beneath the
+  // WebView stays neutral, defeating the purpose at opacity=0.
+  //
+  // lastAppliedKeyRef guards against double-invocation: React StrictMode
   // (dev only) and React 18 concurrent rendering can both run this effect
-  // twice for the same `isDark`.  The native `set_window_effect` is idempotent
-  // so this is not a correctness issue, but a duplicate call shows up in the
-  // console as `[vibrancy] set_window_effect(...) succeeded` twice and
-  // obscures the real boot-time signal.  We only skip when the previous run
-  // for this exact `isDark` value actually succeeded; failures do NOT update
-  // the ref so the retry path still works on the next attempt.
-  const lastAppliedIsDarkRef = useRef<boolean | null>(null);
+  // twice for the same (isDark, accentId) pair.  The native
+  // `set_window_effect` is idempotent so this is not a correctness issue,
+  // but a duplicate call shows up in the console twice and obscures the
+  // real boot-time signal.  We only skip when the previous run for this
+  // exact key actually succeeded; failures do NOT update the ref so the
+  // retry path still works on the next attempt.
+  const lastAppliedKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof navigator === "undefined" || !/Mac/i.test(navigator.userAgent)) return;
-    if (lastAppliedIsDarkRef.current === isDark) return;
+
+    const preset = getAccentPresetByHex(accentColor) ?? DEFAULT_ACCENT_PRESET;
+    const key = `${isDark ? "dark" : "light"}:${preset.id}`;
+    if (lastAppliedKeyRef.current === key) return;
 
     let cancelled = false;
     const tryApply = async (attempt: number) => {
       try {
-        await invoke("set_window_effect", { isDark });
+        await invoke("set_window_effect", {
+          isDark,
+          lightRgba: [
+            preset.glassRgbLight.r,
+            preset.glassRgbLight.g,
+            preset.glassRgbLight.b,
+            30, // alpha — matches the original UnderWindowBackground tint
+          ],
+          darkRgba: [
+            preset.glassRgbDark.r,
+            preset.glassRgbDark.g,
+            preset.glassRgbDark.b,
+            40, // alpha — matches the original Effect::Dark tint
+          ],
+        });
         if (cancelled) return;
-        console.log(`[vibrancy] set_window_effect(isDark=${isDark}) succeeded (attempt ${attempt})`);
-        lastAppliedIsDarkRef.current = isDark;
+        console.log(
+          `[vibrancy] set_window_effect(${preset.id}, isDark=${isDark}) succeeded (attempt ${attempt})`,
+        );
+        lastAppliedKeyRef.current = key;
       } catch (e: unknown) {
         console.warn(`[vibrancy] set_window_effect attempt ${attempt} failed:`, e);
         if (!cancelled && attempt < 3) {
@@ -263,7 +298,7 @@ export function AppLayout() {
     tryApply(1);
 
     return () => { cancelled = true; };
-  }, [isDark]);
+  }, [isDark, accentColor]);
 
   // ── Switch to debug tab when entering debug mode ─────────────────
   const prevIsDebugMode = useRef(isDebugMode);
