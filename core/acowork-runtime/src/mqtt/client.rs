@@ -1307,6 +1307,33 @@ impl MqttChunkPublisher {
         self.publish(&sid, "iteration_limit_paused", &bytes).await;
     }
 
+    /// Publish a loop_detected_paused event via MQTT (QoS 1).
+    pub(crate) async fn publish_loop_detected_paused(
+        &self,
+        session_id: &str,
+        message: &str,
+    ) {
+        let sid = session_id.to_string();
+        let msg = message.to_string();
+        let agent_id = self.agent_id.clone();
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::LoopDetectedPaused(
+                LoopDetectedPausedPayload {
+                    session_id: sid.clone(),
+                    message: msg,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "loop_detected_paused", &bytes).await;
+    }
+
     /// Publish a tool_approval_needed event via MQTT (QoS 1).
     ///
     /// ADR-034 Phase 8: takes a single `ToolApprovalNeededEvent` struct.
