@@ -329,6 +329,30 @@ pub(crate) async fn phase_b_init_session(
             *slot = Some(mutation_svc);
         }
 
+        // ADR-040 follow-up: Publish Tools-panel persistence service.
+        // The four `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
+        // HTTP handlers route through this trait. The service holds only
+        // the agent's `work_dir` (sync, no async dependency), so it can
+        // be wired immediately alongside the workspace services.
+        {
+            let tools_svc: Arc<dyn crate::usecases::AgentToolsService> = Arc::new(
+                crate::usecases::RuntimeAgentToolsService::new(work_dir_path.to_path_buf()),
+            );
+            let mut slot = ctx.agent_tools_slot.lock().await;
+            *slot = Some(tools_svc);
+        }
+
+        // ADR-040 follow-up: Publish per-agent runtime config service.
+        // The `PUT /agents/{id}/config` handler routes through this trait.
+        // Same sync-work_dir pattern as `agent_tools_slot` above.
+        {
+            let config_svc: Arc<dyn crate::usecases::AgentConfigService> = Arc::new(
+                crate::usecases::RuntimeAgentConfigService::new(work_dir_path.to_path_buf()),
+            );
+            let mut slot = ctx.agent_config_slot.lock().await;
+            *slot = Some(config_svc);
+        }
+
         // ── Resolve & persist agent_config.json defaults ─────────────
         //
         // agent_config.json is the single source of truth for the

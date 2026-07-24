@@ -122,6 +122,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-040 follow-up: Late-bind slot for the Tools-panel persistence
+    // service (the four `/agents/{id}/mcp-servers` and
+    // `/agents/{id}/search-config` HTTP handlers). The service holds
+    // only the work_dir (sync, no async dependency), so we wire it
+    // immediately after the workspace services in session_init.rs.
+    let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    // ADR-040 follow-up: Late-bind slot for the per-agent runtime
+    // config service (`PUT /agents/{id}/config`). Shares the same
+    // sync-work_dir state as `agent_tools_slot`, so the same
+    // session_init Phase B pattern applies.
+    let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -144,6 +159,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             memory_query_slot.clone(),
             workspace_query_slot.clone(),
             workspace_mutation_slot.clone(),
+            agent_tools_slot.clone(),
+            agent_config_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -178,6 +195,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 available_cache: cache.clone(),
                 control_tx,
                 identity_update_tx: Some(identity_update_tx),
+                work_dir: std::path::PathBuf::from(&config.work_dir),
             },
         ).await {
             Ok(client) => {
@@ -704,6 +722,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_query_slot,
         workspace_query_slot,
         workspace_mutation_slot,
+        agent_tools_slot,
+        agent_config_slot,
     })
 }
 

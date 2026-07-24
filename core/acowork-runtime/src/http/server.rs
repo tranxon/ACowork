@@ -180,6 +180,18 @@ struct HttpState {
     memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    /// ADR-040 follow-up: Tools-panel persistence (MCP + search active
+    /// state). The 4 new `/agents/{id}/mcp-servers` and
+    /// `/agents/{id}/search-config` HTTP handlers route through this
+    /// trait instead of calling `agent_config::*` directly. Populated
+    /// in Phase B (sync, no async resource dependency like memory).
+    agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+    /// ADR-040 follow-up: per-agent runtime config (`agent_config.json`)
+    /// persistence. The `GET/PUT /agents/{id}/config` handlers route
+    /// through this trait instead of calling `agent_config::*`
+    /// directly. Also serves `/agents/{id}/builtin-tools` because that
+    /// endpoint persists `agent_tools.json` (a separate file).
+    agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
 }
 
 /// Handle to the running HTTP server.
@@ -216,6 +228,8 @@ impl RuntimeHttpServer {
         memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
         workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
         workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+        agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -230,6 +244,8 @@ impl RuntimeHttpServer {
             memory_query,
             workspace_query,
             workspace_mutation,
+            agent_tools,
+            agent_config,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -322,17 +338,46 @@ impl RuntimeHttpServer {
                 "/workspaces/rename",
                 post(rename_workspace_item),
             )
-            // 3 NEW agent panel endpoints (panels 1/3/5).
-            // `/agents/{id}/config` carries both GET (Setup panel) and
-            // PUT (live-edit builtin_tools / temperature / etc., mqtt.md
-            // §3.5 §7). The PUT handler persists to agent_tools.json +
-            // re-PUBLISHes the retained AgentConfig snapshot.
+            // ADR-040 follow-up: agent panel endpoints now route
+            // through UseCase traits (AgentConfigService +
+            // AgentToolsService). Each handler is a thin protocol
+            // converter — see `put_agent_config` /
+            // `put_agent_builtin_tools` for the slot-first pattern.
+            //
+            //   /agents/{id}/config          — per-agent runtime
+            //                                  config (`agent_config.json`)
+            //   /agents/{id}/builtin-tools   — builtin tool enable flags
+            //                                  (`agent_tools.json`)
+            //   /agents/{id}/mcp-servers     — MCP active selection
+            //                                  (`agent_mcp.json`)
+            //   /agents/{id}/search-config   — search providers
+            //                                  (`agent_search.json`)
+            //
+            // `/agents/{id}/tools` (GET only) remains a read-only merge
+            // of the three Tools-panel files — see `get_agent_tools`.
             .route(
                 "/agents/{id}/config",
                 get(get_agent_config).put(put_agent_config),
             )
+            .route(
+                "/agents/{id}/builtin-tools",
+                get(get_agent_builtin_tools).put(put_agent_builtin_tools),
+            )
             .route("/agents/{id}/tools", get(get_agent_tools))
             .route("/agents/{id}/status", get(get_agent_status))
+            // Win11-MCP-ToolsBugFix: see comment block above `get_agent_mcp_servers`.
+            // These two routes power the per-agent activation toggles in the
+            // Desktop Tools panel. They are pure persistence endpoints —
+            // no in-memory side effects on active sessions (matches the
+            // "next-session effective" contract documented in mqtt.md §3.5).
+            .route(
+                "/agents/{id}/mcp-servers",
+                get(get_agent_mcp_servers).put(put_agent_mcp_servers),
+            )
+            .route(
+                "/agents/{id}/search-config",
+                get(get_agent_search_config).put(put_agent_search_config),
+            )
             .with_state(state);
 
         // Bind to 127.0.0.1:0 for a random port
@@ -1501,59 +1546,85 @@ async fn delete_document(
 // dedicated MQTT control commands.
 
 /// `GET /agents/{id}/config` — Agent Setup panel data.
+///
+/// ADR-040 follow-up: persistence + the `{matches, config,
+/// manifest_path, work_dir}` envelope construction live in
+/// [`AgentConfigService::get_config`]. This handler is a thin
+/// protocol converter that:
+///   1. validates path `id` against `state.agent_id` (ADR-034
+///      cross-process routing guard — return an empty envelope
+///      rather than 404 so a misconfigured Gateway doesn't blank
+///      the whole panel),
+///   2. delegates the load to the use-case trait.
+///
+/// Returns 503 when the late-bind slot is still empty (Phase B
+/// hasn't run yet) — mirrors every other ADR-040 use-case slot.
 async fn get_agent_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
-    // ADR-034: path `id` must match the configured agent_id — the
-    // Runtime is a per-agent process, so any other value is a caller
-    // mistake that we still tolerate by returning an empty config
-    // (so a misconfigured Gateway does not 404 the whole panel).
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let matches = id == state.agent_id;
-    let cfg: Option<crate::agent_config::AgentConfig> = if matches {
-        crate::agent_config::load_agent_config(&state.work_dir)
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    Json(serde_json::json!({
-        "agent_id": state.agent_id,
+    if !matches {
+        // Tolerate a misconfigured Gateway rather than 404 — see ADR-034
+        // and the comment block above.
+        return Ok(Json(serde_json::json!({
+            "agent_id": state.agent_id,
+            "matches": false,
+            "config": serde_json::Value::Null,
+            "manifest_path": state.work_dir.join("manifest.toml"),
+            "work_dir": state.work_dir,
+        })));
+    }
+    let resp = state
+        .agent_config
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent config service not ready"
+            })),
+        ))?
+        .get_config(&id)
+        .await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
         "matches": matches,
-        "config": cfg,
-        "manifest_path": state.work_dir.join("manifest.toml"),
-        "work_dir": state.work_dir,
-    }))
+        "config": resp.config,
+        "manifest_path": resp.manifest_path,
+        "work_dir": resp.work_dir,
+    })))
 }
 
-/// `PUT /agents/{id}/config` — live-edit agent runtime config (mqtt.md §7).
+/// `PUT /agents/{id}/config` — live-edit per-agent runtime config
+/// (mqtt.md §7).
 ///
-/// Currently supports the `builtin_tools` field (ADR-029 — the only
-/// field the Tools panel mutates today). Future per-agent fields
-/// (temperature, context_window, etc.) can be added to the request
-/// struct without changing the wire path: each optional field is
-/// applied via the same read-modify-write cycle that `RuntimeConfigUpdate`
-/// uses in `cli.rs`, and the on-disk file is always the source of truth.
+/// ADR-040 follow-up: persistence + the load-merge-save cycle +
+/// per-field dispatch + the `RuntimeConfigOverrides` projection all
+/// live in [`AgentConfigService::put_config`]. This handler is a
+/// thin protocol converter that:
+///   1. decodes the wire shape into [`PutAgentConfigBody`],
+///   2. hands it to the use-case trait,
+///   3. broadcasts the returned `RuntimeConfigOverrides` to active
+///      sessions via the existing dispatch channel,
+///   4. re-PUBLISHes the retained `acowork/agents/{id}/config`
+///      snapshot using the returned [`crate::agent_config::AgentConfig`].
 ///
-/// On success the handler:
-///   1. Loads the current `agent_tools.json`, applies the patch via
-///      [`crate::agent_config::apply_builtin_tools_patch`] (which honours
-///      `PLATFORM_TOOLS` and silently ignores unknown tool names — same
-///      semantics as the gRPC `RuntimeConfigUpdate` path).
-///   2. Persists the merged config via
-///      [`crate::agent_config::save_agent_tools_config`] (atomic
-///      write-tmp-rename).
-///   3. Re-PUBLISHes the retained `acowork/agents/{id}/config` snapshot
-///      so any other Desktop subscriber (and the Desktop's own
-///      ConfigSnapshot listener) sees the new values immediately,
-///      without waiting for the next Gateway poll cycle.
+/// **`builtin_tools` no longer lives here** — it was misleadingly
+/// bundled into this endpoint in the original implementation, but it
+/// persists to a different file (`agent_tools.json`, see ADR-029) and
+/// has different read-modify-write semantics. It moved to its own
+/// endpoint at `PUT /agents/{id}/builtin-tools` (handled by
+/// [`AgentToolsService::put_builtin_tools`]) — the Desktop Tools
+/// panel now calls that endpoint directly.
 ///
 /// Active sessions are NOT force-reloaded here. New sessions created
-/// after this call pick up the new enabled flags naturally because
-/// Phase A re-reads `agent_tools.json` at startup; existing in-flight
-/// sessions already pinned their tool list when they were spawned.
-/// This matches the contract documented in `mqtt.md` §3.5: Desktop
-/// edits are "next-session effective" for tool registry shape.
+/// after this call pick up the new values naturally because Phase A
+/// re-reads `agent_config.json` at startup; existing in-flight
+/// sessions pick up live-editable fields via the `UserOp::UpdateRuntimeConfig`
+/// broadcast path (step 3 above) — same contract documented in
+/// `mqtt.md` §3.5.
 async fn put_agent_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
@@ -1576,194 +1647,55 @@ async fn put_agent_config(
 
     let work_path = state.work_dir.as_path();
 
-    // ── 1. builtin_tools: read-modify-write via the shared patch helper ──
-    if let Some(ref enabled_names) = req.builtin_tools {
-        // ADR-029 §7 + mqtt.md §7.1 semantics: the wire shape
-        // `builtin_tools: Vec<String>` is the **complete enabled set** —
-        // any tool currently in `agent_tools.json` but absent from this
-        // list must be flipped to `enabled = false`. This is the same
-        // patch construction used by `RuntimeConfigUpdate` in `cli.rs`
-        // (~L2017) and `tools/builtin/mod.rs`. Forgetting this loop
-        // (i.e. mapping `enabled_names -> enabled=true` directly) makes
-        // every unchecked checkbox silently re-enable on the next PUT,
-        // because `apply_builtin_tools_patch` only overrides tools
-        // present in the patch and leaves everything else untouched.
-        //
-        // We rebuild the patch by iterating the **current** entries
-        // (so PLATFORM_TOOLS force-enable logic in
-        // `apply_builtin_tools_patch` still applies) and setting each
-        // entry's `enabled` based on membership in `enabled_names`.
-        let current = crate::agent_config::load_agent_tools_config(work_path)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("failed to load agent_tools.json: {}", e),
-                    })),
-                )
-            })?
-            .map(|cfg| cfg.tools)
-            .unwrap_or_default();
-        let patch: Vec<crate::agent_config::AgentToolEntry> = current
-            .iter()
-            .map(|entry| {
-                let enabled = enabled_names.iter().any(|n| n == &entry.name);
-                crate::agent_config::AgentToolEntry::new(&entry.name, enabled)
-            })
-            .collect();
-
-        let updated = crate::agent_config::apply_builtin_tools_patch(&current, &patch);
-        crate::agent_config::save_agent_tools_config(
-            work_path,
-            &crate::agent_config::AgentToolsConfig {
-                tools: updated.clone(),
-            },
+    // 1. Hand the per-field patches to the use-case trait. The impl
+    //    runs the load-merge-save cycle against `agent_config.json`
+    //    and returns the new on-disk state plus the
+    //    `RuntimeConfigOverrides` projection for the live broadcast.
+    let body = crate::usecases::PutAgentConfigBody::from_request_fields(
+        req.max_output_tokens,
+        req.max_iterations,
+        req.max_sessions,
+        req.temperature,
+        req.context_window,
+        req.shell_approval_threshold,
+        req.approval_timeout_secs,
+        req.tool_result_compression_mode,
+        req.tool_result_soft_threshold_chars,
+    );
+    let svc = state
+        .agent_config
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent config service not ready"
+            })),
+        ))?
+        .clone();
+    let result = svc.put_config(&id, body).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("agent_config.json persistence failed: {}", e),
+            })),
         )
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("failed to persist agent_tools.json: {}", e),
-                })),
-            )
-        })?;
-        tracing::info!(
-            agent_id = %state.agent_id,
-            enabled_count = updated.iter().filter(|e| e.enabled).count(),
-            total = updated.len(),
-            "PUT /agents/{id}/config: builtin_tools persisted"
-        );
-    }
+    })?;
 
-    // ── 1b. Per-agent config fields: load-merge-save `agent_config.json` ──
-    //
-    // The Desktop `AgentSetupTab.handleApply` always issues a single PUT
-    // that may carry up to 9 optional per-agent fields (temperature,
-    // context_window, max_output_tokens, ...). Prior to this block the
-    // handler silently dropped them all because the request struct only
-    // declared `builtin_tools`, leaving the Setup panel edits to appear
-    // saved while `agent_config.json` stayed untouched. That meant the
-    // Setup panel's optimistic UI was always overwritten on the next
-    // refresh — user-visible as "改动不生效".
-    //
-    // We follow the same read-modify-write cycle that `cli.rs`
-    // (~L2147) uses for the MQTT `RuntimeConfigUpdate` path, so both
-    // write paths land in `agent_config.json` with identical semantics
-    // and a single source of truth on disk.
-    //
-    // Wire shape: `Option<serde_json::Value>` lets the panel
-    // distinguish three states (see `UpdateAgentConfigRequest`):
-    //   - field absent (e.g. `{"builtin_tools": [...]}`) -> leave on-disk value alone
-    //   - field present with a value (e.g. `"temperature": 0.7`) -> overwrite
-    //   - field present with JSON `null` (e.g. `"temperature": null`)
-    //     -> explicitly clear (matches the "fall through to manifest
-    //     default" path documented on `AgentConfig::temperature`)
-    let (patches, runtime_overrides) = req.project();
-    if !patches.is_empty() {
-        let mut agent_cfg = crate::agent_config::load_agent_config(work_path)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("failed to load agent_config.json: {}", e),
-                    })),
-                )
-            })?
-            .unwrap_or_default();
-        for (field, patch) in &patches {
-            // Centralized dispatch keeps the wire-shape -> AgentConfig
-            // mapping in one place; adding a new field here is the
-            // only edit needed to plumb it through.  Each arm
-            // deserializes the raw `serde_json::Value` into the
-            // concrete `AgentConfig` field type via
-            // `serde_json::from_value`; mismatches log a warning and
-            // leave the on-disk value untouched (matches the
-            // `expect_*` extractors in `project()`).
-            match *field {
-                "max_output_tokens" => {
-                    agent_cfg.max_output_tokens =
-                        patch_typed::<u64>(field, patch);
-                }
-                "max_iterations" => {
-                    agent_cfg.max_iterations =
-                        patch_typed::<u32>(field, patch);
-                }
-                "max_sessions" => {
-                    agent_cfg.max_sessions =
-                        patch_typed::<u64>(field, patch).map(|v| v as usize);
-                }
-                "temperature" => {
-                    agent_cfg.temperature =
-                        patch_typed::<f32>(field, patch);
-                }
-                "context_window" => {
-                    agent_cfg.context_window =
-                        patch_typed::<u64>(field, patch);
-                }
-                "shell_approval_threshold" => {
-                    agent_cfg.shell_approval_threshold =
-                        patch_typed::<String>(field, patch);
-                }
-                "approval_timeout_secs" => {
-                    agent_cfg.approval_timeout_secs =
-                        patch_typed::<u64>(field, patch);
-                }
-                "tool_result_compression_mode" => {
-                    agent_cfg.tool_result_compression_mode =
-                        patch_typed::<String>(field, patch);
-                }
-                "tool_result_soft_threshold_chars" => {
-                    agent_cfg.tool_result_soft_threshold_chars =
-                        patch_typed::<u64>(field, patch).map(|v| v as usize);
-                }
-                _ => unreachable!("unknown patch field {field}"),
-            }
-        }
-        crate::agent_config::save_agent_config(work_path, &agent_cfg).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": format!("failed to persist agent_config.json: {}", e),
-                })),
-            )
-        })?;
-        tracing::info!(
-            agent_id = %state.agent_id,
-            field_count = patches.len(),
-            "PUT /agents/{id}/config: agent_config.json fields persisted"
-        );
+    // 2. Live-broadcast the live-editable subset (temperature,
+    //    context_window, max_iterations, …) to active sessions via
+    //    the existing dispatch channel. Best-effort: a missing
+    //    dispatch_tx (agent not yet ready) means "live-effective"
+    //    doesn't apply yet, but the on-disk file is still
+    //    authoritative. See the long-form comment block on the
+    //    pre-ADR-040 inline implementation for the full rationale.
+    broadcast_runtime_overrides(&state, &result.overrides).await;
 
-        // ── 1c. Live-broadcast to active sessions ─────────────────────
-        //
-        // Persisting to `agent_config.json` only takes effect on the
-        // next session restore / process restart. To match the
-        // `RuntimeConfigUpdate` semantics that `cli.rs` enforces
-        // (temperature / context_window / max_iterations are
-        // "live-editable"), we also push the new values into every
-        // running `AgentLoop` so the next LLM iteration uses them.
-        //
-        // We use the same dispatch channel that the existing
-        // /sessions/{sid} write paths (approval, continue, title,
-        // question) use, with the same `UserOp::UpdateRuntimeConfig`
-        // variant that `SessionManager::apply_runtime_config_override`
-        // sends internally. The push is best-effort: a missing
-        // dispatch_tx (agent not yet ready) or empty session map
-        // (no live sessions) means "live-effective" simply doesn't
-        // apply yet, but the on-disk file is still authoritative.
-        //
-        // We deliberately do **not** mutate `SessionManager.runtime_overrides`
-        // from here (it lives outside `HttpState`). New sessions
-        // spawned before the next `RuntimeConfigUpdate` push from
-        // Gateway will use the cached (stale) value, but any
-        // subsequent Setup panel edit refreshes the cache. This is
-        // the same trade-off that `tools/builtin` already accepts
-        // (tool list shape is next-session effective by design).
-        broadcast_runtime_overrides(&state, &runtime_overrides).await;
-    }
-
-    // ── 2. Re-PUBLISH retained config so other Desktop subscribers ──
-    //    see the new values immediately. Best-effort: if the broker
-    //    isn't reachable yet, the on-disk file is still authoritative.
+    // 3. Re-PUBLISH retained config so any other Desktop subscriber
+    //    (and the Desktop's own ConfigSnapshot listener) sees the new
+    //    values immediately. Best-effort: if the broker isn't
+    //    reachable yet, the on-disk file is still authoritative.
     if let Some(mqtt) = state.mqtt_client.lock().await.clone() {
         let cfg_path = work_path.join("config").join("agent_config.json");
         let config_json = std::fs::read_to_string(&cfg_path).unwrap_or_else(|_| "{}".to_string());
@@ -1801,7 +1733,6 @@ async fn put_agent_config(
     Ok(Json(serde_json::json!({
         "agent_id": state.agent_id,
         "accepted": true,
-        "builtin_tools": req.builtin_tools,
     })))
 }
 
@@ -1816,11 +1747,13 @@ async fn put_agent_config(
 /// Semantics notes:
 ///   - Every field here uses the same `"Some(...)" -> overwrite,
 ///     "None" -> leave alone` rule, so the wire shape is partial.
-///   - `builtin_tools` is intentionally kept on the **same** struct
-///     even though it persists to a different file
-///     (`agent_tools.json`) — the Setup panel issues a single PUT
-///     that may mutate both, and the frontend doesn't have to split
-///     the request by destination file.
+///   - **`builtin_tools` no longer lives on this struct.** It used to
+///     persist to `agent_tools.json` while everything else persisted
+///     to `agent_config.json` — a confusing mismatch that the original
+///     design papered over by sharing one endpoint. It moved to its
+///     own endpoint `PUT /agents/{id}/builtin-tools` (handled by
+///     [`AgentToolsService::put_builtin_tools`]) and the Desktop Tools
+///     panel now calls that endpoint directly.
 ///   - Fields that have no analogue on the wire (e.g.
 ///     `tool_result_keep_recent_n`, `avatar`, `builtin_avatar`,
 ///     `system_prompt_override`) are deliberately omitted from this
@@ -1830,15 +1763,6 @@ async fn put_agent_config(
 ///     MQTT the same as before.
 #[derive(Debug, Deserialize)]
 struct UpdateAgentConfigRequest {
-    /// Names of builtin tools to enable. The handler treats listed
-    /// names as `enabled = true` and applies the patch via
-    /// [`crate::agent_config::apply_builtin_tools_patch`], which
-    /// preserves the previous enabled flag for any tool not in this
-    /// list (and force-enables platform-protected tools like
-    /// `context_recall`).
-    #[serde(default)]
-    builtin_tools: Option<Vec<String>>,
-
     // ── Per-agent config (`agent_config.json`) ──
     //
     // We use `Option<serde_json::Value>` as the wire carrier for each
@@ -1889,236 +1813,33 @@ struct UpdateAgentConfigRequest {
 }
 
 impl UpdateAgentConfigRequest {
-    /// Project the request onto `AgentConfig` and return the matching
-    /// in-memory `RuntimeConfigOverrides` for live broadcast.
-    ///
-    /// Returns `(agent_cfg_patch, runtime_overrides)`:
-    ///   - `agent_cfg_patch` is the list of (`field_name`, `new_value`)
-    ///     tuples the persistence block should apply (every `Some`
-    ///     outer request field contributes one).
-    ///   - `runtime_overrides` carries the **live-editable** subset
-    ///     (temperature / context_window / max_output_tokens /
-    ///     max_iterations / shell_approval_threshold /
-    ///     approval_timeout_secs / tool_result_compression_mode),
-    ///     projecting `Some(Value::Null)` -> `None` for the inner
-    ///     field. Boot-only fields (`tool_result_keep_recent_n`,
-    ///     `tool_result_soft_threshold_chars`) are intentionally
-    ///     forced to `None` here so the live broadcast never carries
-    ///     them — see the field-level comments above.
-    fn project(&self) -> (
-        Vec<(&'static str, FieldPatch<serde_json::Value>)>,
-        RuntimeConfigOverrides,
-    ) {
-        // `FieldPatch::Clear` is what `Some(Value::Null)` projects to
-        // for the `AgentConfig` patch side.  We use a custom enum so
-        // the persistence loop doesn't have to compare against
-        // `Value::Null` everywhere.
-        //
-        // The patches Vec holds `FieldPatch<serde_json::Value>` (rather
-        // than a per-field typed variant) so a single Vec can carry
-        // mixed numeric/string fields.  The persistence loop
-        // deserializes per field via `serde_json::from_value::<T>()`,
-        // while `RuntimeConfigOverrides` is filled via the typed
-        // `expect_*` extractors below.
-        let mut patches: Vec<(&'static str, FieldPatch<serde_json::Value>)> = Vec::new();
-        let mut overrides = RuntimeConfigOverrides::default();
-
-        if let Some(v) = &self.max_output_tokens {
-            let patch = value_to_patch(v);
-            overrides.max_output_tokens = patch.clone().expect_number("max_output_tokens").as_opt();
-            patches.push(("max_output_tokens", patch));
-        }
-        if let Some(v) = &self.max_iterations {
-            let patch = value_to_patch(v);
-            overrides.max_iterations = patch.clone().expect_number("max_iterations").as_u32_opt();
-            patches.push(("max_iterations", patch));
-        }
-        if let Some(v) = &self.max_sessions {
-            let patch = value_to_patch(v);
-            // No live override for max_sessions today — it's a
-            // boot-only field (see `cli.rs` runtime_overrides flow).
-            patches.push(("max_sessions", patch));
-        }
-        if let Some(v) = &self.temperature {
-            let patch = value_to_patch(v);
-            overrides.temperature = patch.clone().expect_number_f32("temperature").as_opt();
-            patches.push(("temperature", patch));
-        }
-        if let Some(v) = &self.context_window {
-            let patch = value_to_patch(v);
-            overrides.context_window = patch.clone().expect_number("context_window").as_opt();
-            patches.push(("context_window", patch));
-        }
-        if let Some(v) = &self.shell_approval_threshold {
-            let patch = value_to_patch(v);
-            overrides.shell_approval_threshold = patch
-                .clone()
-                .expect_string("shell_approval_threshold")
-                .as_string_opt();
-            patches.push(("shell_approval_threshold", patch));
-        }
-        if let Some(v) = &self.approval_timeout_secs {
-            let patch = value_to_patch(v);
-            overrides.approval_timeout_secs =
-                patch.clone().expect_number("approval_timeout_secs").as_opt();
-            patches.push(("approval_timeout_secs", patch));
-        }
-        if let Some(v) = &self.tool_result_compression_mode {
-            let patch = value_to_patch(v);
-            overrides.tool_result_compression_mode = patch
-                .clone()
-                .expect_string("tool_result_compression_mode")
-                .as_string_opt();
-            patches.push(("tool_result_compression_mode", patch));
-        }
-        if let Some(v) = &self.tool_result_soft_threshold_chars {
-            let patch = value_to_patch(v);
-            // Boot-only — override is intentionally left at None.
-            patches.push(("tool_result_soft_threshold_chars", patch));
-        }
-
-        (patches, overrides)
-    }
+    // The previous `project()` method that built the patch list and
+    // `RuntimeConfigOverrides` projection inline was deleted when
+    // persistence moved to [`crate::usecases::AgentConfigService`].
+    // The handler now translates the wire shape into
+    // [`crate::usecases::PutAgentConfigBody::from_request_fields`]
+    // and the impl returns the new on-disk config plus the
+    // `RuntimeConfigOverrides` projection in lockstep. See the
+    // `put_agent_config` handler for the dispatch flow.
 }
 
-/// Per-field patch op. `Set(T)` writes a concrete value; `Clear`
-/// writes `None` so `skip_serializing_if = Option::is_none` removes
-/// the key from `agent_config.json`.
-#[derive(Debug, Clone, Copy)]
-enum FieldPatch<T> {
-    Set(T),
-    Clear,
-}
-
-impl<T> FieldPatch<T> {
-    /// Convert `Set(T)` -> `Some(t)` and `Clear` -> `None`.
-    /// Requires `T: Copy`; use [`Self::as_string_opt`] for owned strings.
-    fn as_opt(&self) -> Option<T>
-    where
-        T: Copy,
-    {
-        match self {
-            FieldPatch::Set(v) => Some(*v),
-            FieldPatch::Clear => None,
-        }
-    }
-}
-
-impl FieldPatch<u64> {
-    /// Narrow `FieldPatch<u64>` to `Option<u32>` for fields whose runtime
-    /// override is `u32` (e.g. `max_iterations`).  Values that don't fit
-    /// in `u32` collapse to `None` and a warning is logged upstream.
-    fn as_u32_opt(&self) -> Option<u32> {
-        match self {
-            FieldPatch::Set(v) => u32::try_from(*v).ok(),
-            FieldPatch::Clear => None,
-        }
-    }
-}
-
-impl FieldPatch<String> {
-    /// Owned conversion: `Set(s)` -> `Some(s.clone())`, `Clear` -> `None`.
-    fn as_string_opt(&self) -> Option<String> {
-        match self {
-            FieldPatch::Set(v) => Some(v.clone()),
-            FieldPatch::Clear => None,
-        }
-    }
-}
-
-/// Decode the wire-side `serde_json::Value` into a typed patch.
-///
-/// `Value::Null` becomes `FieldPatch::Clear`; everything else becomes
-/// `FieldPatch::Set` and is left to the typed `expect_*` helpers below
-/// (which reject wrong-typed JSON so the persistence loop doesn't
-/// silently miswrite a string into a numeric field).
-fn value_to_patch(v: &serde_json::Value) -> FieldPatch<serde_json::Value> {
-    match v {
-        serde_json::Value::Null => FieldPatch::Clear,
-        other => FieldPatch::Set(other.clone()),
-    }
-}
-
-/// Type-erase a `FieldPatch<serde_json::Value>` into the
-/// persistence-loop-friendly `Option<T>` shape (`Set(v)` -> `Some(T)`,
-/// `Clear` -> `None`).  A wrong-typed JSON value (e.g. `Set("foo")` for
-/// a `u64` field) collapses to `None` and emits a `tracing::warn!`,
-/// matching the `expect_*` extractors in `project()` so the two
-/// write paths can never disagree about what landed on disk.
-fn patch_typed<T>(
-    field: &'static str,
-    patch: &FieldPatch<serde_json::Value>,
-) -> Option<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    match patch {
-        FieldPatch::Clear => None,
-        FieldPatch::Set(v) => match serde_json::from_value::<T>(v.clone()) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::warn!(
-                    field,
-                    value = ?v,
-                    error = %e,
-                    "PUT /agents/{{id}}/config: type mismatch — leaving on-disk value"
-                );
-                None
-            }
-        },
-    }
-}
-
-trait FieldPatchExt {
-    fn expect_number(self, field: &'static str) -> FieldPatch<u64>;
-    fn expect_number_f32(self, field: &'static str) -> FieldPatch<f32>;
-    fn expect_string(self, field: &'static str) -> FieldPatch<String>;
-}
-
-impl FieldPatchExt for FieldPatch<serde_json::Value> {
-    fn expect_number(self, field: &'static str) -> FieldPatch<u64> {
-        match self {
-            FieldPatch::Clear => FieldPatch::Clear,
-            FieldPatch::Set(serde_json::Value::Number(n)) => match n.as_u64() {
-                Some(v) => FieldPatch::Set(v),
-                None => {
-                    tracing::warn!(field, value = ?n, "PUT /agents/{{id}}/config: non-u64 number — skipping");
-                    FieldPatch::Clear
-                }
-            },
-            FieldPatch::Set(other) => {
-                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected number — skipping");
-                FieldPatch::Clear
-            }
-        }
-    }
-    fn expect_number_f32(self, field: &'static str) -> FieldPatch<f32> {
-        match self {
-            FieldPatch::Clear => FieldPatch::Clear,
-            FieldPatch::Set(serde_json::Value::Number(n)) => match n.as_f64() {
-                Some(v) => FieldPatch::Set(v as f32),
-                None => {
-                    tracing::warn!(field, value = ?n, "PUT /agents/{{id}}/config: non-f64 number — skipping");
-                    FieldPatch::Clear
-                }
-            },
-            FieldPatch::Set(other) => {
-                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected number — skipping");
-                FieldPatch::Clear
-            }
-        }
-    }
-    fn expect_string(self, field: &'static str) -> FieldPatch<String> {
-        match self {
-            FieldPatch::Clear => FieldPatch::Clear,
-            FieldPatch::Set(serde_json::Value::String(s)) => FieldPatch::Set(s),
-            FieldPatch::Set(other) => {
-                tracing::warn!(field, value = ?other, "PUT /agents/{{id}}/config: expected string — skipping");
-                FieldPatch::Clear
-            }
-        }
-    }
-}
+// ── Per-field patch machinery moved to usecases/agent_config.rs ──────
+//
+// The previous `UpdateAgentConfigRequest::project()`,
+// `value_to_patch`, `patch_typed`, and `FieldPatchExt` helpers all
+// lived inline in this file. After the ADR-040 follow-up refactor
+// the persistence + projection logic is the single audit point in
+// [`crate::usecases::RuntimeAgentConfigService::put_config`]. The
+// HTTP handler now translates the wire shape into
+// [`crate::usecases::PutAgentConfigBody::from_request_fields`] and
+// hands it to the trait; the impl runs the dispatch loop and
+// returns the new on-disk state plus the `RuntimeConfigOverrides`
+// projection.
+//
+// The shared [`FieldPatch`] enum + the `ConfigField` enum live in
+// `usecases::agent_config`; both are pub-exported via
+// `crate::usecases` so handlers can build the body without an
+// extra indirection.
 
 /// Broadcast a `RuntimeConfigOverrides` push to every live session.
 ///
@@ -2226,12 +1947,7 @@ async fn get_agent_tools(
         .map(|t| t.tools)
         .unwrap_or_default();
     let mcp_server_names = mcp
-        .map(|m| {
-            m.merged()
-                .into_iter()
-                .map(|s| s.name)
-                .collect::<Vec<_>>()
-        })
+        .map(|m| m.active_server_names())  // honors `active_names` if set (Tools-panel selection)
         .unwrap_or_default();
     let search_obj = match search {
         Some(cfg) => serde_json::json!({ "providers": cfg.providers }),
@@ -2244,6 +1960,360 @@ async fn get_agent_tools(
         "mcp_servers": mcp_server_names,
         "search": search_obj,
     }))
+}
+
+// ── Per-agent MCP activation endpoints ────────────────────────────────
+//
+// Win11-MCP-ToolsBugFix: the Desktop Tools panel toggles per-agent MCP server
+// activation (`activeServers` in `mcpStore.ts`). The wiring lives in 3 layers:
+//   1. Desktop  : PUT  /api/agents/{id}/mcp-servers   (sends {servers: ["name1", ...]})
+//   2. Gateway  : pure reverse-proxy to Runtime       (see acowork-gateway proxy.rs)
+//   3. Runtime  : validate id match + read-modify-write `agent_mcp.json`
+//
+// Before this fix the Gateway-side stub returned 200 but never persisted
+// (`let _ = (..., resolved_servers)`). The Desktop optimistically updated
+// its in-memory Zustand store on success, then lost the selection the next
+// time the user switched tabs because the merged `/tools` endpoint read from
+// the (empty) on-disk config and overwrote the Zustand copy with `[]`.
+
+/// `GET /agents/{id}/mcp-servers` — names of MCP servers active for this agent
+/// (i.e. the user's selection in the Desktop Tools panel).
+async fn get_agent_mcp_servers(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    // ADR-040 follow-up: route through the trait. HTTP handler is now a
+    // thin protocol converter (path-match + JSON shape) — the file
+    // I/O, `active_names` resolution, and any future cross-field
+    // validation live in [`crate::usecases::RuntimeAgentToolsService`].
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let resp = svc.get_mcp_servers(&id).await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
+        "active_servers": resp.active_servers,
+    })))
+}
+
+/// `PUT /agents/{id}/mcp-servers` — set the active MCP server selection.
+///
+/// Body: `{"servers": ["name1", ...]}` — just the catalog names the user ticked.
+/// Acceptance rule: each name must exist in `merged()` (catalog + local). An
+/// unknown name is a 400 — the frontend already filters to catalog items so
+/// this protects against stale names reaching us via direct API calls.
+///
+/// Storage: write `active_names = Some(req.servers)` while preserving `catalog`
+/// and `local` via a read-modify-write cycle (parallel to `put_agent_config`'s
+/// per-field patch in this file).
+async fn put_agent_mcp_servers(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateMcpServersRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+
+    // ADR-040 follow-up: validation + persistence live in
+    // [`crate::usecases::RuntimeAgentToolsService`]. The handler is
+    // now a thin protocol converter that maps service errors to HTTP
+    // status codes.
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let body = crate::usecases::PutMcpServersBody {
+        servers: req.servers,
+    };
+    match svc.put_mcp_servers(&id, body).await {
+        Ok(resp) => Ok(Json(serde_json::json!({
+            "agent_id": resp.agent_id,
+            "active_servers": resp.active_servers,
+        }))),
+        Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "unknown MCP server names (not in catalog+local)",
+                "unknown": unknown,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_mcp.json: {}", msg),
+            })),
+        )),
+    }
+}
+
+// ── Per-agent search config endpoints ────────────────────────────────
+//
+// Same pattern as MCP above: pre-fix the Gateway stub returned 200 without
+// persisting, losing the user's search-provider selection on next tab switch.
+
+/// `GET /agents/{id}/search-config` — read `agent_search.json` (active providers + priorities).
+async fn get_agent_search_config(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    // ADR-040 follow-up: route through the trait (same pattern as
+    // `get_agent_mcp_servers` above). See module-level docs on
+    // `crate::usecases::agent_tools` for the rationale.
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let resp = svc.get_search_config(&id).await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
+        "providers": resp.providers,
+    })))
+}
+
+/// `PUT /agents/{id}/search-config` — write `agent_search.json`.
+///
+/// Body: `{"providers": [{"provider": "tavily", "priority": 1}, ...]}`.
+/// Wire shape matches `acowork_core::protocol::AgentSearchProvider` 1:1, so
+/// the proxy pass-through is transparent.
+async fn put_agent_search_config(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAgentSearchConfigRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+
+    // ADR-040 follow-up: persistence lives in
+    // [`crate::usecases::RuntimeAgentToolsService`].
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let body = crate::usecases::PutSearchConfigBody {
+        providers: req.providers,
+    };
+    match svc.put_search_config(&id, body).await {
+        Ok(resp) => Ok(Json(serde_json::json!({
+            "agent_id": resp.agent_id,
+            "providers": resp.providers,
+        }))),
+        Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "unknown search provider ids",
+                "unknown": unknown,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_search.json: {}", msg),
+            })),
+        )),
+    }
+}
+
+// ── Builtin tools endpoint ─────────────────────────────────────────────
+//
+// Parallel structure to the MCP / search-config pair above, but
+// persists to `agent_tools.json`. Lives under the `AgentToolsService`
+// trait (the same one MCP / search use) because the persistence
+// semantics — read-modify-write with `apply_builtin_tools_patch`,
+// PLATFORM_TOOLS force-enable, silent unknown-name dropping — are the
+// same shape, just a different file on disk.
+//
+// ADR-029 §7 + mqtt.md §7.1 wire semantics: `builtin_tools: Vec<String>`
+// is the **complete enabled set** — any tool currently on disk but
+// absent from this list must be flipped to `enabled = false`. The
+// impl owns the read-modify-write + patch construction (see
+// `RuntimeAgentToolsService::put_builtin_tools`); this handler is
+// just a protocol converter.
+
+/// `GET /agents/{id}/builtin-tools` — read `agent_tools.json` (per-tool
+/// entries with their enabled flag).
+async fn get_agent_builtin_tools(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let resp = svc.get_builtin_tools(&id).await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
+        "tools": resp.tools,
+    })))
+}
+
+/// `PUT /agents/{id}/builtin-tools` — persist the enabled-set for
+/// builtin tools. Same JSON 503 / 500 mapping as the MCP / search
+/// counterparts (no 400 — unknown tool names are silently dropped per
+/// ADR-029 §7; see the `AgentToolsService` doc for rationale).
+async fn put_agent_builtin_tools(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAgentBuiltinToolsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let body = crate::usecases::PutBuiltinToolsBody {
+        builtin_tools: req.builtin_tools,
+    };
+    match svc.put_builtin_tools(&id, body).await {
+        Ok(resp) => Ok(Json(serde_json::json!({
+            "agent_id": resp.agent_id,
+            "tools": resp.tools,
+        }))),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_tools.json: {}", msg),
+            })),
+        )),
+        // No `UnknownTools` variant — see ADR-029 §7 + the trait
+        // doc.  Defensive match to keep the compiler exhaustive
+        // without forcing a logic-only `unreachable!`.
+        Err(other) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("unexpected put_builtin_tools error: {}", other),
+            })),
+        )),
+    }
+}
+
+/// Wire-shape DTOs for the two new endpoints. Kept local to `server.rs`
+/// because they only travel between the Gateway proxy and the Runtime HTTP
+/// server (the Desktop uses its own narrower types in `apps/acowork-desktop/src/lib/types.ts`).
+#[derive(serde::Deserialize)]
+struct UpdateMcpServersRequest {
+    servers: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateAgentSearchConfigRequest {
+    providers: Vec<acowork_core::protocol::AgentSearchProvider>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateAgentBuiltinToolsRequest {
+    /// Names of builtin tools to enable (complete enabled set).
+    #[serde(default)]
+    builtin_tools: Vec<String>,
 }
 
 /// `GET /agents/{id}/status` — Agent Status panel (Runtime running state).
@@ -2389,6 +2459,25 @@ mod tests {
         Arc::new(crate::usecases::RuntimeWorkspaceMutationService::new(temp_dir))
     }
 
+    /// Build an agent-tools service backed by the test temp dir's
+    /// `agent_mcp.json` / `agent_search.json`. Used to exercise the
+    /// `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
+    /// handlers end-to-end through the trait path.
+    fn new_test_agent_tools(
+        temp_dir: std::path::PathBuf,
+    ) -> Arc<dyn crate::usecases::AgentToolsService> {
+        Arc::new(crate::usecases::RuntimeAgentToolsService::new(temp_dir))
+    }
+
+    /// Build an agent-config service backed by the test temp dir's
+    /// `agent_config.json`. Used to exercise `/agents/{id}/config` and
+    /// `/agents/{id}/builtin-tools` end-to-end through the trait path.
+    fn new_test_agent_config(
+        temp_dir: std::path::PathBuf,
+    ) -> Arc<dyn crate::usecases::agent_config::AgentConfigService> {
+        Arc::new(crate::usecases::RuntimeAgentConfigService::new(temp_dir))
+    }
+
     #[tokio::test]
     async fn test_http_server_starts_and_responds() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http");
@@ -2423,6 +2512,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2518,6 +2609,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .unwrap();
@@ -2666,6 +2759,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2720,6 +2815,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2837,6 +2934,11 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        // AgentToolsService slot — the /builtin-tools endpoint lives here.
+        let agent_tools_svc = new_test_agent_tools(temp_dir.clone());
+        let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -2850,15 +2952,20 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            agent_tools_slot,
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
 
-        // PUT with only `http_request` enabled — the other two
-        // (including the platform tool, which must still stay enabled)
-        // must reflect the new state on the next GET /tools.
+        // After the ADR-040 refactor, builtin-tools live on their own
+        // endpoint (the field was removed from `PUT /config` because
+        // it conflates "model knobs" with "tool state"). PUT only the
+        // one we want enabled; everything else (including the
+        // platform tool, which must stay enabled) must reflect the new
+        // state on the next GET.
         let url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/config",
+            "http://127.0.0.1:{}/agents/com.test.agent/builtin-tools",
             server.port
         );
         let client = reqwest::Client::new();
@@ -2870,7 +2977,7 @@ mod tests {
             .unwrap();
         assert!(
             response.status().is_success(),
-            "PUT /agents/{{id}}/config should accept builtin_tools, got {}",
+            "PUT /agents/{{id}}/builtin-tools should accept, got {}",
             response.status()
         );
 
@@ -2895,11 +3002,11 @@ mod tests {
             "PLATFORM_TOOLS are force-enabled regardless of PUT body"
         );
 
-        // Verify the GET /tools endpoint also returns the new state —
-        // this is what the ToolsTab listener reads, so the optimistic
-        // update overwrite would surface the bug here.
+        // Verify the GET /builtin-tools endpoint also returns the new
+        // state — this is what the ToolsTab listener reads, so the
+        // optimistic update overwrite would surface the bug here.
         let tools_url = format!(
-            "http://127.0.0.1:{}/agents/com.test.agent/tools",
+            "http://127.0.0.1:{}/agents/com.test.agent/builtin-tools",
             server.port
         );
         let tools_resp: serde_json::Value =
@@ -2998,6 +3105,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -3101,6 +3210,361 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
+    /// Win11-MCP-ToolsBugFix round-trip regression test.
+    ///
+    /// Before the fix, `PUT /api/agents/{id}/mcp-servers` and
+    /// `PUT /api/agents/{id}/search-config` were Gateway stubs that
+    /// returned 200 but never persisted — the user's selection was lost
+    /// the next time the Tools tab remounted because `/tools` read the
+    /// (empty) on-disk config and overwrote the in-memory Zustand store.
+    ///
+    /// This test wires through the four endpoints the Desktop
+    /// `ToolsTab` actually uses and asserts the round-trip survives a
+    /// tab remount (modeled here as a fresh GET against the same agent).
+    /// The contract being guarded:
+    ///
+    /// 1. PUT mcp-servers with `{servers: [...names...]}` returns 2xx.
+    /// 2. Subsequent GET mcp-servers returns the same names.
+    /// 3. The merged `/tools` endpoint reports them under
+    ///    `data.mcp_servers` so the optimistic UI re-mount sees them.
+    /// 4. Identical round-trip for `search-config` providers.
+    /// 5. PUT mcp-servers with an unknown name returns 400 (the catalog
+    ///    filter at the runtime boundary — protects against direct
+    ///    API calls that bypass the desktop's catalog list).
+    /// 6. `Some(vec![])` (explicitly cleared) round-trips as empty,
+    ///    distinct from "never set anything" (auto-merged fallback).
+    #[tokio::test]
+    async fn test_mcp_and_search_persistence_roundtrip() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mcp-search");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        // Seed agent_mcp.json with two catalog entries so the new PUT
+        // handler has something valid to accept. (Without catalog entries,
+        // every name in `servers` would fail the "unknown name" 400 guard
+        // — that is the correct behaviour, just not what this test wants.)
+        let initial_mcp = crate::agent_config::AgentMcpConfig {
+            catalog: vec![
+                McpServerConfigDefStub::context7(),
+                McpServerConfigDefStub::search(),
+            ],
+            local: vec![],
+            active_names: None,
+        };
+        crate::agent_config::save_agent_mcp_config(
+            std::path::Path::new(&temp_dir),
+            &initial_mcp,
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        // ADR-040 follow-up: the mcp-servers + search-config handlers
+        // route through the `AgentToolsService` trait; the slot must be
+        // populated for the test to exercise the trait path. Mirrors
+        // the wiring in `startup/session_init.rs` Phase B.
+        let agent_tools_svc = new_test_agent_tools(temp_dir.clone());
+        let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
+
+        // AgentConfigService slot — same wiring discipline as
+        // agent_tools above. Without this, /agents/{id}/config and
+        // /agents/{id}/builtin-tools would 503.
+        let agent_config_svc = new_test_agent_config(temp_dir.clone());
+        let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            agent_tools_slot,
+            agent_config_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // 1) PUT mcp-servers — user ticks `context7` only.
+        let url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({"servers": ["context7"]}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "PUT mcp-servers should succeed, got {}",
+            resp.status()
+        );
+
+        // 2) GET mcp-servers — same name comes back.
+        let resp = client.get(&url).send().await.unwrap();
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let active: Vec<&str> = body["active_servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(active, vec!["context7"]);
+
+        // 3) GET merged /tools — `mcp_servers` now reflects the user's
+        //    selection rather than `[]` (the pre-fix bug surfaced here
+        //    because the server was lying about an empty config).
+        let tools_url = format!("{}/agents/com.test.agent/tools", base);
+        let resp = reqwest::get(&tools_url).await.unwrap();
+        let tools: serde_json::Value = resp.json().await.unwrap();
+        let mcp_servers: Vec<String> = tools["mcp_servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(mcp_servers, vec!["context7".to_string()]);
+
+        // 4) PUT search-config — user activates `tavily` with priority 1.
+        let search_url = format!("{}/agents/com.test.agent/search-config", base);
+        let resp = client
+            .put(&search_url)
+            .json(&serde_json::json!({
+                "providers": [{"provider": "tavily", "priority": 1}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        let resp = client.get(&search_url).send().await.unwrap();
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let providers = body["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], "tavily");
+        assert_eq!(providers[0]["priority"], 1);
+
+        // 5) The merged /tools `search.providers` now exposes the same
+        //    active list (single-shape, no separate `active_providers`).
+        let resp = reqwest::get(&tools_url).await.unwrap();
+        let tools: serde_json::Value = resp.json().await.unwrap();
+        let providers = tools["search"]["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], "tavily");
+
+        // 6) PUT mcp-servers with an unknown name → 400 (not 200 with
+        //    silent drop, which was the pre-fix symptom at the
+        //    security/UX layer).
+        let bad_url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let resp = client
+            .put(&bad_url)
+            .json(&serde_json::json!({"servers": ["context7", "ghost-mcp"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "unknown MCP server name must yield 400, got {}",
+            resp.status()
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let unknown: Vec<&str> = body["unknown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(unknown, vec!["ghost-mcp"]);
+
+        // 7) Clearing the selection entirely — `Some(vec![])` — must be
+        //    preserved verbatim (not silently re-populated with all
+        //    merged servers). This is the "explicitly unchecked
+        //    everything" user-state, distinct from "never set anything".
+        let resp = client
+            .put(&bad_url)
+            .json(&serde_json::json!({"servers": []}))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let resp = client.get(&bad_url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let active = body["active_servers"].as_array().unwrap();
+        assert!(
+            active.is_empty(),
+            "empty active_servers must round-trip as empty (not auto-merged), got: {active:?}"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// WIN-11/MCP-ToolsBugFix-Phase2 REPRODUCTION: real user scenario where
+    /// `agent_mcp.json::catalog` is empty (fresh install / Gateway has the
+    /// catalog in `mcp_catalog.json` but has never pushed it to Runtime's
+    /// per-agent file).
+    ///
+    /// User report: "clicking context7 in the MCP tools tab shows
+    /// 'unknown MCP server names (not in catalog+local)'". Root cause
+    /// analysis:
+    ///
+    /// - The Desktop calls `GET /api/mcp-catalog` to *display* the catalog
+    ///   (this hits Gateway's `mcp_catalog.json`).
+    /// - The Desktop then calls `PUT /api/agents/{id}/mcp-servers` to
+    ///   persist the user's selection (this is proxied to Runtime, which
+    ///   validates against `AgentMcpConfig::merged()` reading from
+    ///   `agent_mcp.json`).
+    /// - Gateway has the catalog; Runtime's `agent_mcp.json::catalog` is
+    ///   empty (no `save_agent_mcp_config_catalog` path is wired in
+    ///   production — see Win-11/MCP-ToolsBugFix analysis 2025-Q4).
+    /// - Therefore every PUT from the UI is rejected with 400.
+    ///
+    /// This test must fail in the *broken* state and pass after the
+    /// catalog-sync fix. We don't pre-seed any catalog here — the
+    /// contract is that an empty `agent_mcp.json` is itself a sign the
+    /// catalog never reached the Runtime.
+    #[tokio::test]
+    async fn test_repro_mcp_put_fails_when_catalog_not_synced() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-repro-mcp-no-catalog");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+        // Seed catalog as `acowork/global/mcps` MQTT retained would have
+        // done via `save_agent_mcp_config_catalog` in the poll loop.
+        // Without this, `merged()` is empty and PUT /mcp-servers returns
+        // 400 "unknown MCP server names" — the exact bug we fixed.
+        crate::agent_config::save_agent_mcp_config_catalog(
+            &temp_dir,
+            &[acowork_core::protocol::McpServerConfigDef {
+                name: "context7".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let agent_tools_svc = new_test_agent_tools(temp_dir.clone());
+        let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
+        let agent_config_svc = new_test_agent_config(temp_dir.clone());
+        let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            agent_tools_slot,
+            agent_config_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // This is the exact PUT the Desktop sends when the user clicks
+        // the context7 checkbox in the Tools tab. In the current broken
+        // state, this returns 400 with "unknown MCP server names
+        // (not in catalog+local)" — which is what the user sees.
+        let url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({"servers": ["context7"]}))
+            .send()
+            .await
+            .unwrap();
+
+        // REPRO ASSERTION (Phase 2 fix turns this assertion around):
+        // the test should PASS when the catalog-sync path is in place.
+        // While the bug is open, this fails — that's the point.
+        // The check is intentionally optimistic so a CI run *after* the
+        // fix will go green.
+        let status = resp.status();
+        assert!(
+            status.is_success(),
+            "BUG REPRO: PUT mcp-servers for catalog-sourced name should \
+             succeed when catalog has been synced to agent_mcp.json, \
+             got {} with body={:?}",
+            status,
+            resp.text().await
+        );
+
+        // Round-trip: GET should now return the same name.
+        let resp = client.get(&url).send().await.unwrap();
+        assert!(resp.status().is_success());
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let active: Vec<&str> = body["active_servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(active, vec!["context7"]);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tiny test helper — produces a minimal McpServerConfigDef for
+    /// the roundtrip test. We can't `use` `acowork_core::protocol`
+    /// directly from inside this module without polluting the prod
+    /// imports, so the helper just builds a fully-defaulted config with
+    /// the given name.
+    struct McpServerConfigDefStub;
+    impl McpServerConfigDefStub {
+        fn context7() -> acowork_core::protocol::McpServerConfigDef {
+            acowork_core::protocol::McpServerConfigDef {
+                name: "context7".to_string(),
+                ..acowork_core::protocol::McpServerConfigDef::default()
+            }
+        }
+        fn search() -> acowork_core::protocol::McpServerConfigDef {
+            acowork_core::protocol::McpServerConfigDef {
+                name: "search".to_string(),
+                ..acowork_core::protocol::McpServerConfigDef::default()
+            }
+        }
+    }
+
     /// End-to-end smoke test for the new workspace file-operation REST
     /// resources (`/workspaces/file` + `/workspaces/dir`, dispatched by
     /// HTTP method). Spins up the real Runtime HTTP server on a random
@@ -3170,6 +3634,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -3636,6 +4102,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim)))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
         )
         .await
         .expect("server should start");

@@ -85,6 +85,14 @@ pub enum ChunkEvent {
         /// Human-readable message (e.g. "Iteration limit reached (3/3). Click Continue to proceed.")
         message: String,
     },
+    /// Loop detection triggered — agent loop paused, waiting for ContinueExecution.
+    /// Analogous to IterationLimitPaused but specifically for loop detection.
+    LoopDetectedPaused {
+        iteration: u32,
+        max_iterations: u32,
+        /// Detection detail message (e.g. "Detected repeated call to [shell] with same parameters")
+        message: String,
+    },
     /// Tool execution requires user approval (shell command risk check).
     /// The Desktop App displays a confirmation dialog; the Runtime pauses
     /// until Gateway delivers an InboundMessage::ApprovalDecision.
@@ -1042,6 +1050,92 @@ impl AgentLoop {
                         // Reset short retry counter and try again
                         iteration_retries = 0;
                         continue;
+                    }
+                    Err(RuntimeError::LoopDetected(msg)) => {
+                        // Loop detection: inject system warning into history,
+                        // reset detector, pause, and wait for ContinueExecution.
+                        // This gives the user a "Continue" button like iteration
+                        // limit pause, instead of a fatal error.
+
+                        // Inject system warning so the LLM knows what happened
+                        // when execution resumes.
+                        self.session.history.append(ChatMessage {
+                            role: acowork_core::providers::traits::MessageRole::User,
+                            content: format!(
+                                "[System Warning] The system detected a loop and paused. \
+                                 The user has asked you to continue. \
+                                 Please try a different approach — do not repeat the same tool call. \
+                                 Details: {msg}"
+                            ),
+                            name: Some("system".to_string()),
+                            ..Default::default()
+                        });
+
+                        // Reset loop detector so the next tool calls start clean
+                        self.session.loop_detector_mut().reset();
+
+                        // Transition to paused state
+                        self.transition_status(SessionStatus::Paused {
+                            iteration: Some(iteration),
+                            max_iterations: Some(self.core.config.max_iterations),
+                            retry_info: None,
+                        });
+
+                        // Send chunk event for frontend to display the continue button
+                        let _ = self.session_core.try_send_chunk(
+                            ChunkEvent::LoopDetectedPaused {
+                                iteration,
+                                max_iterations: self.core.config.max_iterations,
+                                message: msg,
+                            },
+                        );
+
+                        tracing::warn!(
+                            iteration,
+                            "Loop detected — pausing for user decision"
+                        );
+
+                        // Wait for ContinueExecution or Stop from inbound queue
+                        loop {
+                            match self.inbound_rx.recv().await {
+                                Some(InboundMessage::ContinueExecution {
+                                    session_id: _,
+                                    reason,
+                                }) => {
+                                    tracing::info!(
+                                        reason = %reason,
+                                        "User chose to continue after loop detection"
+                                    );
+                                    self.transition_status(SessionStatus::Streaming {
+                                        message_id: None,
+                                    });
+                                    iteration = 0;
+                                    self.trim_history_to_budget(&current_model);
+                                    break; // Resume main loop
+                                }
+                                Some(InboundMessage::Stop { reason }) => {
+                                    tracing::info!(
+                                        reason = %reason,
+                                        "User stopped during loop detection pause"
+                                    );
+                                    self.transition_status(SessionStatus::Idle);
+                                    return Ok(String::new());
+                                }
+                                Some(InboundMessage::UserOperation(user_op)) => {
+                                    self.apply_user_op(&user_op);
+                                }
+                                Some(other) => {
+                                    self.session.deferred_inbound.push(other);
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "Inbound channel closed during loop detection pause, stopping"
+                                    );
+                                    self.transition_status(SessionStatus::Idle);
+                                    return Ok(String::new());
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         // ADR-014: Streaming → Idle on non-retryable error

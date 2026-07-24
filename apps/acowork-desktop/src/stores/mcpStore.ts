@@ -14,6 +14,16 @@ import type {
   McpHealthStatus,
 } from "../lib/types";
 
+/**
+ * Per-agent in-flight `PUT /mcp-servers` controllers.
+ *
+ * A newer toggle aborts the previous request so a slow response cannot
+ * overwrite the optimistic state written by the newer call. This is a
+ * module-level Map (not in the store) because AbortController is mutable
+ * and shouldn't trigger Zustand subscriptions.
+ */
+const inflightMcpPuts: Map<string, AbortController> = new Map();
+
 // ── Catalog types ────────────────────────────────────────────────────
 
 interface McpCatalogState {
@@ -219,28 +229,61 @@ export const useMcpStore = create<McpStore>((set, get) => ({
   },
 
   setActiveServers: async (agentId: string, serverNames: string[]) => {
+    // Cancel any in-flight PUT for this agent so a slow response from
+    // an earlier click cannot overwrite a later toggle's optimistic state.
+    const existing = inflightMcpPuts.get(agentId);
+    if (existing) existing.abort();
+    const controller = new AbortController();
+    inflightMcpPuts.set(agentId, controller);
+
+    // Snapshot the previous value for rollback on error.
+    const previous = get().activeServers[agentId] ?? [];
+
+    // Optimistic update: write the new active list immediately so the
+    // checkbox reflects the click without waiting for the PUT round-trip.
+    // The Rust trait layer validates every name against `cfg.merged()`
+    // and rejects with HTTP 400 on unknowns — those rejections will
+    // trigger the rollback below.
     set((s) => ({
       activationLoading: { ...s.activationLoading, [agentId]: true },
       error: null,
+      activeServers: { ...s.activeServers, [agentId]: serverNames },
     }));
     try {
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-servers`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ servers: serverNames }),
-      });
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/mcp-servers`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ servers: serverNames }),
+          signal: controller.signal,
+        },
+      );
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
         throw new Error(err.error || `HTTP ${resp.status}`);
+      }
+      // Clear the in-flight marker only if it's still ours; a newer
+      // call may have replaced it while we were awaiting.
+      if (inflightMcpPuts.get(agentId) === controller) {
+        inflightMcpPuts.delete(agentId);
       }
       set((s) => ({
         activeServers: { ...s.activeServers, [agentId]: serverNames },
         activationLoading: { ...s.activationLoading, [agentId]: false },
       }));
     } catch (e: unknown) {
+      // Aborted by a newer call → don't touch the optimistic state; the
+      // newer call already wrote its own serverNames.
+      if (controller.signal.aborted) return;
+      if (inflightMcpPuts.get(agentId) === controller) {
+        inflightMcpPuts.delete(agentId);
+      }
       const message = e instanceof Error ? e.message : String(e);
       set((s) => ({
         error: message,
+        // Roll back to the snapshot taken before the optimistic write.
+        activeServers: { ...s.activeServers, [agentId]: previous },
         activationLoading: { ...s.activationLoading, [agentId]: false },
       }));
     }

@@ -376,6 +376,7 @@
     "mcpServers": "MCPサーバー",
     "noMcpInCatalog": "カタログにMCPサーバーがありません。Harness > MCPタブでサーバーを追加してください。",
     "mcpToggleDesc": "このAgentのMCPサーバーを切り替えます。Harness > MCPタブでさらにサーバーを追加できます。",
+    "mcpToggleError": "MCPサーバーの更新に失敗しました：{{error}}",
     "applyToRuntime": "ランタイムに適用",
     "applying": "適用中...",
     "resetToDefaults": "デフォルトに戻す",

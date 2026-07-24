@@ -26,7 +26,8 @@ use acowork_core::mqtt_proto::{
     data_envelope, session_message,
     AgentConfig, AgentMeta, AskQuestionPayload, ChunkPayload, CompactingPayload,
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
-    IterationLimitPausedPayload, NewDataAvailablePayload, RecordCompletePayload,
+    IterationLimitPausedPayload, LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport,
+    NewDataAvailablePayload, RecordCompletePayload,
     SessionMessage, SessionStateChangedPayload, StoppedPayload, StreamDeltaPayload,
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
 };
@@ -36,6 +37,27 @@ use acowork_mqtt_session::{
 };
 
 use crate::mqtt::available_cache::SharedAvailableCache;
+use acowork_core::protocol::McpTransportDef;
+
+/// Convert a wire-format [`ProtoMcpTransport`] (from `McpRef` over MQTT)
+/// to the on-disk [`McpTransportDef`] used by `agent_mcp.json::catalog`.
+///
+/// Inverse of `gateway::mqtt::global_resources_publisher::map_mcp_transport`.
+/// The `Unspecified` variant is mapped to `Stdio` for backward
+/// compatibility with hand-written catalog entries that omitted the
+/// field; production data always carries an explicit transport.
+fn mcp_transport_to_def(t: i32) -> McpTransportDef {
+    match ProtoMcpTransport::try_from(t) {
+        Ok(ProtoMcpTransport::Stdio) => McpTransportDef::Stdio,
+        Ok(ProtoMcpTransport::Http) => McpTransportDef::Http,
+        Ok(ProtoMcpTransport::Sse) => McpTransportDef::Sse,
+        // Unspecified → Stdio fallback (matches the pre-proto era where
+        // the only transport existed). Avoids panicking on a malformed
+        // payload; a downgrade-to-stdio MCP will simply fail to spawn
+        // when the runtime tries to connect to it.
+        Ok(ProtoMcpTransport::Unspecified) | Err(_) => McpTransportDef::Stdio,
+    }
+}
 
 /// Watchdog timeout for `eventloop.poll()`.
 ///
@@ -100,6 +122,14 @@ pub struct MqttConnectConfig<'a> {
     pub identity_update_tx: Option<
         tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
     >,
+    /// Per-agent workspace directory (`work_dir`). Used by the MQTT poll
+    /// task to persist `acowork/global/mcps` into `agent_mcp.json::catalog`
+    /// so the Tools-panel `PUT /agents/{id}/mcp-servers` validation can
+    /// match catalog names against disk (the legacy gRPC path did this in
+    /// `handle_agent_hello`; that path was removed in ADR-040, leaving the
+    /// catalog sync as MQTT-only — see startup/subsystems.rs §MCP for the
+    /// rationale and the on-disk contract).
+    pub work_dir: std::path::PathBuf,
 }
 
 /// Event payload for `publish_session_state_changed`.
@@ -261,6 +291,7 @@ impl RuntimeMqttClient {
         options.set_last_will(will);
 
         let (client, mut eventloop) = AsyncClient::new(options.clone(), 100);
+        let client_for_poll = client.clone();
 
         // The `AsyncClient` is shared between the struct (for publishes)
         // and the poll task (for soft-restart).  Wrapping it in
@@ -286,6 +317,38 @@ impl RuntimeMqttClient {
         let poll_bootstrap = bootstrap_data.clone();
         let task_shared_client = Arc::clone(&shared_client);
         let task_options = options; // moved into poll task for soft-restart
+        let _poll_client = client_for_poll; // needed for the old API
+        // ADR-040 follow-up: the gRPC `handle_agent_hello` path used to
+        // call `agent_config::save_agent_mcp_config_catalog` on every
+        // (re)connect to refresh the per-agent catalog from the
+        // Gateway-side source of truth. That path was deleted when the
+        // gRPC hello-config transport went away (ADR-033 + ADR-040). The
+        // MQTT path replaces the transport, but the **persistence** step
+        // was left out — see `startup/subsystems.rs:89` for the residue.
+        //
+        // We close that gap here: when `acowork/global/mcps` retained is
+        // received, after updating the in-memory `available_cache`, we
+        // also persist the catalog (sans `auth_token`) into
+        // `agent_mcp.json::catalog` so that:
+        //
+        //   1. `PUT /agents/{id}/mcp-servers` validation in
+        //      `usecases::agent_tools_impl::put_mcp_servers` can resolve
+        //      catalog names against `merged()` — without this, every
+        //      PUT fails with "unknown MCP server names (not in
+        //      catalog+local)" (regression introduced by ADR-040).
+        //   2. The Tools-panel display in the Desktop can render the
+        //      catalog by reading `GET /agents/{id}/mcp-catalog` from
+        //      the Runtime (rather than from the Gateway, which is a
+        //      different source of truth).
+        //
+        // `auth_token` is NOT persisted — it stays in-memory only,
+        // mirroring the existing `provider_key_vault` pattern (see
+        // `agent/agent_core.rs::provider_key_vault`). Wiring it into an
+        // in-memory `mcp_key_vault` is a follow-up; today the Runtime
+        // only reads the token via the existing catalog path (the agent
+        // connect step does not require it because the Desktop's
+        // Tools-panel PUT does not connect).
+        let poll_work_dir = cfg.work_dir.clone();
         // ADR-039 §5.2.1: use a oneshot channel to synchronise
         // connect() with the first ConnAck instead of the old
         // wait_for_connection() anti-pattern (subscribe to a dummy
@@ -334,6 +397,55 @@ impl RuntimeMqttClient {
                                             drop(cache_write);
                                             if let (Some(tx), Some(profile)) = (poll_identity_tx.as_ref(), profile) {
                                                 let _ = tx.send(profile);
+                                            }
+                                        } else if topic == "acowork/global/mcps" {
+                                            // ADR-040 follow-up: persist catalog to disk
+                                            // so PUT /agents/{id}/mcp-servers validation
+                                            // can resolve names against merged(). See
+                                            // the long-form comment near `poll_work_dir`
+                                            // for the full rationale.
+                                            let servers = cache_write
+                                                .mcps
+                                                .as_ref()
+                                                .map(|m| m.servers.clone())
+                                                .unwrap_or_default();
+                                            drop(cache_write);
+                                            let defs: Vec<
+                                                acowork_core::protocol::McpServerConfigDef,
+                                            > = servers
+                                                .into_iter()
+                                                .map(|s| acowork_core::protocol::McpServerConfigDef {
+                                                    name: s.name.clone(),
+                                                    transport: mcp_transport_to_def(s.transport),
+                                                    url: if s.url.is_empty() { None } else { Some(s.url.clone()) },
+                                                    command: s.command.clone(),
+                                                    args: s.args.clone(),
+                                                    env: s.env.clone(),
+                                                    headers: s.headers.clone(),
+                                                    tool_timeout_secs: if s.tool_timeout_secs == 0 {
+                                                        None
+                                                    } else {
+                                                        Some(s.tool_timeout_secs)
+                                                    },
+                                                })
+                                                .collect();
+                                            if let Err(e) =
+                                                crate::agent_config::save_agent_mcp_config_catalog(
+                                                    &poll_work_dir,
+                                                    &defs,
+                                                )
+                                            {
+                                                tracing::warn!(
+                                                    agent_id = %poll_agent_id,
+                                                    error = %e,
+                                                    "Failed to persist acowork/global/mcps catalog to agent_mcp.json (PUT /mcp-servers will reject catalog names until retry)"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    agent_id = %poll_agent_id,
+                                                    catalog_count = defs.len(),
+                                                    "Synced MCP catalog from acowork/global/mcps into agent_mcp.json::catalog"
+                                                );
                                             }
                                         }
                                     }

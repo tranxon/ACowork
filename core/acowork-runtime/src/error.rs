@@ -126,6 +126,13 @@ impl RuntimeError {
                     "BudgetExceeded".to_string(),
                 )
             }
+            RuntimeError::LoopDetected(msg) => {
+                (
+                    "The agent appears to be stuck in a loop. Try continuing, or send a new message to guide it.".to_string(),
+                    msg.clone(),
+                    "LoopDetected".to_string(),
+                )
+            }
             _ => {
                 let detail = self.to_string();
                 (

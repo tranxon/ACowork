@@ -378,7 +378,8 @@
     "applying": "적용 중...",
     "resetToDefaults": "기본값으로 초기화",
     "resetAgentSetup": "Agent 설정 초기화",
-    "reset": "초기화"
+    "reset": "초기화",
+    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}"
   },
   "harness": {
     "tabProviders": "제공자",
@@ -639,7 +640,13 @@
     "batchCloseAllConfirm": "{{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 모두 삭제하고 닫으시겠습니까?",
     "save": "Save (Ctrl+S)",
     "locateInTree": "파일 트리에서 찾기",
-    "locateDisabled": { "no-file": "열린 파일이 없습니다", "loading": "파일을 불러오는 중입니다", "url-preview": "URL 미리보기는 작업 공간에 포함되지 않습니다", "wrong-agent": "이 파일은 다른 에이전트에 속합니다", "wrong-workspace": "이 파일은 다른 작업 공간에 속합니다" },
+    "locateDisabled": {
+      "no-file": "열린 파일이 없습니다",
+      "loading": "파일을 불러오는 중입니다",
+      "url-preview": "URL 미리보기는 작업 공간에 포함되지 않습니다",
+      "wrong-agent": "이 파일은 다른 에이전트에 속합니다",
+      "wrong-workspace": "이 파일은 다른 작업 공간에 속합니다"
+    },
     "copy": "Copy",
     "previewBadge": "미리보기",
     "previewLoading": "미리보기 로딩 중...",
@@ -776,28 +783,94 @@
     "showingLatest": "최신만 표시"
   },
   "tools": {
-    "memory_recall": { "running": "기억 회상 중", "done": "기억 회상 완료" },
-    "context_recall": { "running": "컨텍스트 회상 중", "done": "컨텍스트 회상 완료" },
-    "memory_store": { "running": "저장 중", "done": "저장됨" },
-    "http_request": { "running": "요청 중", "done": "요청됨" },
-    "web_fetch": { "running": "웹 페이지 가져오는 중", "done": "웹 페이지 가져옴" },
-    "web_search": { "running": "웹 검색 중", "done": "웹 검색 완료" },
-    "file_read": { "running": "파일 읽는 중", "done": "파일 읽음" },
-    "file_write": { "running": "파일 쓰는 중", "done": "파일 썼음" },
-    "file_edit": { "running": "파일 편집 중", "done": "파일 편집됨" },
-    "doc_reader": { "running": "문서 읽는 중", "done": "문서 읽음" },
-    "glob_search": { "running": "파일 패턴 매칭 중", "done": "파일 패턴 매칭 완료" },
-    "content_search": { "running": "내용 검색 중", "done": "내용 검색 완료" },
-    "intent_send": { "running": "인텐트 전송 중", "done": "인텐트 전송됨" },
-    "ask_user_question": { "running": "질문 중", "done": "질문 완료" },
-    "todo_write": { "running": "할 일 업데이트 중", "done": "할 일 업데이트됨" },
-    "mcp_install": { "running": "MCP 설치 중", "done": "MCP 설치됨" },
-    "mcp_uninstall": { "running": "MCP 제거 중", "done": "MCP 제거됨" },
-    "rag_query": { "running": "지식 베이스 조회 중", "done": "지식 베이스 조회 완료" },
-    "codebase": { "running": "코드 검색 중", "done": "코드 검색 완료" },
-    "bash": { "running": "Git Bash에서 실행 중", "done": "Git Bash에서 실행 완료" },
-    "powershell": { "running": "PowerShell에서 실행 중", "done": "PowerShell에서 실행 완료" },
-    "shell": { "running": "실행 중", "done": "실행 완료" }
+    "memory_recall": {
+      "running": "기억 회상 중",
+      "done": "기억 회상 완료"
+    },
+    "context_recall": {
+      "running": "컨텍스트 회상 중",
+      "done": "컨텍스트 회상 완료"
+    },
+    "memory_store": {
+      "running": "저장 중",
+      "done": "저장됨"
+    },
+    "http_request": {
+      "running": "요청 중",
+      "done": "요청됨"
+    },
+    "web_fetch": {
+      "running": "웹 페이지 가져오는 중",
+      "done": "웹 페이지 가져옴"
+    },
+    "web_search": {
+      "running": "웹 검색 중",
+      "done": "웹 검색 완료"
+    },
+    "file_read": {
+      "running": "파일 읽는 중",
+      "done": "파일 읽음"
+    },
+    "file_write": {
+      "running": "파일 쓰는 중",
+      "done": "파일 썼음"
+    },
+    "file_edit": {
+      "running": "파일 편집 중",
+      "done": "파일 편집됨"
+    },
+    "doc_reader": {
+      "running": "문서 읽는 중",
+      "done": "문서 읽음"
+    },
+    "glob_search": {
+      "running": "파일 패턴 매칭 중",
+      "done": "파일 패턴 매칭 완료"
+    },
+    "content_search": {
+      "running": "내용 검색 중",
+      "done": "내용 검색 완료"
+    },
+    "intent_send": {
+      "running": "인텐트 전송 중",
+      "done": "인텐트 전송됨"
+    },
+    "ask_user_question": {
+      "running": "질문 중",
+      "done": "질문 완료"
+    },
+    "todo_write": {
+      "running": "할 일 업데이트 중",
+      "done": "할 일 업데이트됨"
+    },
+    "mcp_install": {
+      "running": "MCP 설치 중",
+      "done": "MCP 설치됨"
+    },
+    "mcp_uninstall": {
+      "running": "MCP 제거 중",
+      "done": "MCP 제거됨"
+    },
+    "rag_query": {
+      "running": "지식 베이스 조회 중",
+      "done": "지식 베이스 조회 완료"
+    },
+    "codebase": {
+      "running": "코드 검색 중",
+      "done": "코드 검색 완료"
+    },
+    "bash": {
+      "running": "Git Bash에서 실행 중",
+      "done": "Git Bash에서 실행 완료"
+    },
+    "powershell": {
+      "running": "PowerShell에서 실행 중",
+      "done": "PowerShell에서 실행 완료"
+    },
+    "shell": {
+      "running": "실행 중",
+      "done": "실행 완료"
+    }
   },
   "askQuestionCard": {
     "other": "기타",
@@ -919,4 +992,3 @@
     "refreshing": "새로고침 중..."
   }
 }
-

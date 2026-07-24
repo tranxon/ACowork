@@ -28,6 +28,15 @@ pub struct AgentMcpConfig {
     /// Agent-installed local MCPs (managed by mcp_install / mcp_uninstall tools).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local: Vec<McpServerConfigDef>,
+    /// ADR-? / Win11-MCP-ToolsBugFix: user-selected subset of catalog names that
+    /// are **active** for this agent. When `None` (e.g. older files written
+    /// before the field existed) the merged list is treated as fully active
+    /// for backward compatibility. When `Some(_)`, only matching entries from
+    /// `merged()` are reported as active — e.g. `Some(vec![]) == "no servers
+    /// active"`. This is the field persisted by `PUT /agents/{id}/mcp-servers`
+    /// (per-agent activation toggle in the Desktop Tools panel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_names: Option<Vec<String>>,
 }
 
 impl AgentMcpConfig {
@@ -54,6 +63,25 @@ impl AgentMcpConfig {
     /// Check whether a name exists in catalog only.
     pub fn is_catalog(&self, name: &str) -> bool {
         self.catalog.iter().any(|c| c.name == name)
+    }
+
+    /// Names of servers that should be considered **active** for this agent.
+    ///
+    /// Resolution order:
+    /// 1. If `active_names` is `Some`, return that list verbatim (preserving
+    ///    caller's ordering for the Tools panel display).
+    /// 2. If `active_names` is `None` (file without the field — initial state
+    ///    or legacy migration), return an empty list — no servers are active
+    ///    by default. The user must explicitly enable servers via the Tools
+    ///    panel.
+    ///
+    /// `Some(vec![])` therefore means **no servers active** (the user
+    /// explicitly unchecked every catalog item).
+    pub fn active_server_names(&self) -> Vec<String> {
+        match &self.active_names {
+            Some(names) => names.clone(),
+            None => vec![],
+        }
     }
 }
 
@@ -686,6 +714,7 @@ pub fn load_agent_mcp_config(work_dir: &Path) -> Result<Option<AgentMcpConfig>, 
         let migrated = AgentMcpConfig {
             catalog: old_servers,
             local: Vec::new(),
+            active_names: None,
         };
         // Auto-save in the new format so we don't need to migrate again
         let _ = save_agent_mcp_config(work_dir, &migrated);
@@ -741,14 +770,20 @@ pub fn save_agent_mcp_config(work_dir: &Path, cfg: &AgentMcpConfig) -> Result<()
 
 /// Save only the catalog portion of agent MCP config.
 ///
-/// This is used by RuntimeConfigUpdate handler: Gateway pushes catalog MCPs,
-/// and we must preserve the `local` list (agent-installed MCPs).
-/// Reads the current config, replaces only `catalog`, and saves back.
+/// This is used by the `acowork/global/mcps` MQTT handler: Gateway pushes
+/// catalog MCPs, and we must preserve the user's `active_names` selection
+/// and the `local` list (agent-installed MCPs). Reads the current config,
+/// replaces only `catalog`, and saves back.
+///
+/// Note: previously this also reset `active_names = None`, which clobbered
+/// the user's Tools-panel selection on every Gateway catalog push (e.g.
+/// every Gateway restart). That reset is now gone — the catalog update is
+/// orthogonal to the activation toggle.
 pub fn save_agent_mcp_config_catalog(
     work_dir: &Path,
     catalog_servers: &[McpServerConfigDef],
 ) -> Result<(), String> {
-    // Load current config to preserve local entries
+    // Load current config to preserve local entries AND active_names.
     let current = load_agent_mcp_config(work_dir)
         .unwrap_or_default()
         .unwrap_or_default();
@@ -756,6 +791,7 @@ pub fn save_agent_mcp_config_catalog(
     let updated = AgentMcpConfig {
         catalog: catalog_servers.to_vec(),
         local: current.local,
+        active_names: current.active_names,
     };
 
     save_agent_mcp_config(work_dir, &updated)
@@ -887,7 +923,8 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
             }],
-        };
+        
+            active_names: None,};
 
         let merged = cfg.merged();
         assert_eq!(merged.len(), 2);
@@ -919,7 +956,8 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
             }],
-        };
+        
+            active_names: None,};
 
         let merged = cfg.merged();
         assert_eq!(merged.len(), 1);
@@ -950,7 +988,8 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
             }],
-        };
+        
+            active_names: None,};
 
         assert!(cfg.contains_name("cat"));
         assert!(cfg.contains_name("loc"));
@@ -980,7 +1019,8 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
             }],
-        };
+        
+            active_names: None,};
 
         assert!(cfg.is_catalog("cat"));
         assert!(!cfg.is_catalog("loc"));
@@ -1029,7 +1069,8 @@ mod tests {
                 },
                 tool_timeout_secs: None,
             }],
-        };
+        
+            active_names: None,};
 
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: AgentMcpConfig = serde_json::from_str(&json).unwrap();
@@ -1098,7 +1139,8 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 tool_timeout_secs: None,
             }],
-        };
+
+            active_names: None,};
         save_agent_mcp_config(dir.path(), &initial).unwrap();
 
         let new_catalog = vec![McpServerConfigDef {
@@ -1118,6 +1160,75 @@ mod tests {
         assert_eq!(reloaded.catalog[0].name, "new-cat");
         assert_eq!(reloaded.local.len(), 1);
         assert_eq!(reloaded.local[0].name, "orig-loc");
+    }
+
+    /// Regression: Gateway pushes catalog on every restart (retained
+    /// `acowork/global/mcps`). `save_agent_mcp_config_catalog` is invoked
+    /// from the Runtime MQTT poll loop in response. The function MUST
+    /// preserve the user's `active_names` selection (Tools panel
+    /// checkboxes), not reset it. Otherwise every Gateway restart
+    /// silently clears the user's MCP activation state.
+    ///
+    /// History: the original implementation set `active_names = None`
+    /// unconditionally, which is exactly the regression this test guards
+    /// against. See `mqtt/client.rs` poll loop for the call site.
+    #[test]
+    fn save_catalog_preserves_active_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // User has previously activated context7 in the Tools panel.
+        let initial = AgentMcpConfig {
+            catalog: vec![McpServerConfigDef {
+                name: "context7".into(),
+                transport: McpTransportDef::Stdio,
+                url: None,
+                command: "npx".into(),
+                args: vec!["-y".into(), "@upstash/context7-mcp".into()],
+                env: std::collections::HashMap::new(),
+                headers: std::collections::HashMap::new(),
+                tool_timeout_secs: None,
+            }],
+            local: vec![],
+            active_names: Some(vec!["context7".into()]),
+        };
+        save_agent_mcp_config(dir.path(), &initial).unwrap();
+
+        // Gateway republishes catalog with a new tool added.
+        let new_catalog = vec![
+            McpServerConfigDef {
+                name: "context7".into(),
+                transport: McpTransportDef::Stdio,
+                url: None,
+                command: "npx".into(),
+                args: vec!["-y".into(), "@upstash/context7-mcp".into()],
+                env: std::collections::HashMap::new(),
+                headers: std::collections::HashMap::new(),
+                tool_timeout_secs: None,
+            },
+            McpServerConfigDef {
+                name: "new-mcp".into(),
+                transport: McpTransportDef::Http,
+                url: Some("http://example.com".into()),
+                command: String::new(),
+                args: vec![],
+                env: std::collections::HashMap::new(),
+                headers: std::collections::HashMap::new(),
+                tool_timeout_secs: None,
+            },
+        ];
+        save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
+
+        // After sync: catalog replaced, but active_names survives.
+        let reloaded = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(reloaded.catalog.len(), 2);
+        assert_eq!(reloaded.catalog[1].name, "new-mcp");
+        assert_eq!(
+            reloaded.active_names,
+            Some(vec!["context7".into()]),
+            "active_names must survive a catalog sync (Gateway restart would otherwise wipe user MCP selection)"
+        );
     }
 
     #[test]

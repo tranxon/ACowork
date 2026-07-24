@@ -241,6 +241,8 @@ interface SessionChatState {
   messageLimit: number;
   messageTotal: number;
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
+  /** Loop detected pause — populated from loop_detected_paused event */
+  loopDetectedPaused: { message: string } | null;
   /** 429 retry wait info — populated from session_state_changed when the provider is rate-limited */
   retryWaitInfo: {
     waitMs: number;
@@ -327,6 +329,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messageLimit: 0,
   messageTotal: 0,
   iterationLimitPaused: null,
+  loopDetectedPaused: null,
   retryWaitInfo: null,
   pendingApproval: {},
   pendingQuestions: [],
@@ -1179,6 +1182,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageLimit: 0,
         messageTotal: 0,
         iterationLimitPaused: null,
+        loopDetectedPaused: null,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1198,6 +1202,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageLimit: 0,
         messageTotal: 0,
         iterationLimitPaused: null,
+        loopDetectedPaused: null,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1493,7 +1498,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       });
       if (sessionId) {
         set((state) => ({
-          ...updateSessionState(state, agentId, sessionId, { iterationLimitPaused: null }),
+          ...updateSessionState(state, agentId, sessionId, {
+            iterationLimitPaused: null,
+            loopDetectedPaused: null,
+          }),
         }));
       }
     } catch (error) {
@@ -2183,6 +2191,7 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
 
 const CONTENT_EVENT_TYPES = new Set([
   "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
+  "loop_detected_paused",
   "context_usage", "session_state_changed", "stopped", "todo_list_updated",
   "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
   "reasoning_started", "reasoning_ended",
@@ -2814,6 +2823,16 @@ function handleMessageEvent(
       break;
     }
 
+    case "loop_detected_paused": {
+      if (sid) {
+        const { message } = data as { message: string };
+        set((state) => updateSessionState(state, agentId, sid, {
+          loopDetectedPaused: { message },
+        }));
+      }
+      break;
+    }
+
     // ADR-014: Session lifecycle status changed — source of truth from backend
     case "session_state_changed": {
       if (sid) {
@@ -2855,6 +2874,7 @@ function handleMessageEvent(
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestions = [];
               sessionPatch.iterationLimitPaused = null;
+              sessionPatch.loopDetectedPaused = null;
               sessionPatch.isAssistantReplying = false;
 
               // ADR-035 C2/O2: if activeStream still has unfrozen content at
@@ -2889,8 +2909,9 @@ function handleMessageEvent(
                 startedAt: Date.now(),
               };
             } else if (prev.sessionStatus?.status === "paused" && status.status !== "paused") {
-              // Clear retry wait info when leaving paused state
+              // Clear retry wait info and loop detection when leaving paused state
               sessionPatch.retryWaitInfo = null;
+              sessionPatch.loopDetectedPaused = null;
             }
 
             // Update session state (status) then agent-level defaults

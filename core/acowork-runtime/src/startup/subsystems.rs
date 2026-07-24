@@ -369,6 +369,12 @@ async fn relay_chunk_event_mqtt(
             );
             publisher.publish_session_meta(sid, &meta).await;
         }
+
+        ChunkEvent::LoopDetectedPaused {
+            message, ..
+        } => {
+            publisher.publish_loop_detected_paused(sid, &message).await;
+        }
     }
 }
 
