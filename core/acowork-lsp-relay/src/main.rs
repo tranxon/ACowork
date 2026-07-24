@@ -45,6 +45,16 @@ struct Cli {
     #[arg(long, default_value = "300000")]
     gateway_health_timeout_ms: u64,
 
+    /// TTL in seconds for the LSP install-status cache.
+    ///
+    /// The harness UI's Check button and tab-mount both reuse cached
+    /// results within this window — a fresh PATH probe (fork+exec per
+    /// language) only runs on cache miss or when the user clicks the
+    /// top-bar Refresh button (`?force=true`). Default: 1800 (30 min).
+    /// Set to 0 to use the default.
+    #[arg(long, env = "ACOWORK_LSP_STATUS_TTL_SECS", default_value = "1800")]
+    lsp_status_ttl_secs: u64,
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -72,6 +82,11 @@ async fn main() {
     acowork_lsp_relay::config::init_lsp_servers_config(
         cli.lsp_config_dir.as_deref().map(std::path::Path::new),
     );
+
+    // Initialize the LSP install-status cache TTL. Must be called
+    // before any handler can call `probe_one` / `probe_all` — i.e.
+    // before `axum::serve` starts accepting connections.
+    acowork_lsp_relay::config::init_status_cache_ttl(cli.lsp_status_ttl_secs);
 
     // Create shutdown signal
     let shutdown = Shutdown::new();

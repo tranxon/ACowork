@@ -31,8 +31,8 @@ use acowork_core::event_bus::{BusEvent, EventBus};
 use acowork_core::health::HealthResponse;
 
 use crate::config::{
-    LspServerStatusEntry, LspServersConfig, LspServersWithStatus, compute_lsp_status,
-    compute_lsp_status_concurrent, lsp_servers_config, resolve_lsp_command,
+    LspServerStatusEntry, LspServersConfig, LspServersWithStatus, canonical_language,
+    lsp_servers_config, probe_all, probe_one, resolve_lsp_command,
 };
 use crate::pool::LspPool;
 use crate::relay::lsp_relay;
@@ -52,6 +52,19 @@ pub struct LspQuery {
     /// Workspace root directory (absolute path).
     #[serde(default)]
     pub workspace_root: Option<String>,
+}
+
+/// Query parameters for status endpoints (`/api/lsp/status` and
+/// `/api/lsp/status/{language}`).
+#[derive(Debug, Deserialize)]
+pub struct StatusQuery {
+    /// When `true`, bypass the status cache and probe fresh.
+    ///
+    /// The harness UI sends this on the top-bar Refresh button (full
+    /// re-probe is the user-intent there) and never on tab mount or
+    /// per-row Check (those should reuse cache entries within TTL).
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Request body for `POST /api/project-root/discover`.
@@ -152,18 +165,22 @@ async fn lsp_servers() -> Json<LspServersConfig> {
 /// 1–2s window where the list is visible but the badges are still
 /// being resolved (which previously caused a flash of "empty" badges).
 ///
-/// PATH probes are issued with bounded concurrency
-/// (see `compute_lsp_status_concurrent`) so the total wall time is
-/// capped regardless of how many languages are configured.
-async fn lsp_servers_with_status() -> Json<LspServersWithStatus> {
+/// PATH probes are issued via [`probe_all`], which caches results keyed
+/// by canonical language with a configurable TTL (default 30 minutes).
+/// Subsequent calls within the TTL are essentially free (HashMap read).
+/// Pass `?force=true` to bypass the cache and re-probe every language
+/// (used by the harness UI's top-bar Refresh button).
+async fn lsp_servers_with_status(
+    Query(query): Query<StatusQuery>,
+) -> Json<LspServersWithStatus> {
     let cfg = lsp_servers_config().clone();
-    let entries = compute_lsp_status_concurrent().await;
+    let entries = probe_all(query.force).await;
     // Use `IndexMap` so the status map's iteration order matches the
-    // language order returned by `compute_lsp_status_concurrent` (which
-    // is derived from `cfg.servers.keys()`, itself ordered). The harness
-    // UI iterates both maps in lockstep; with `HashMap` the iteration
-    // order would be randomized per-process and the badge color next to
-    // each server row would shuffle on every gateway restart.
+    // language order returned by `probe_all` (which is derived from
+    // `cfg.servers.keys()`, itself ordered). The harness UI iterates
+    // both maps in lockstep; with `HashMap` the iteration order would
+    // be randomized per-process and the badge color next to each
+    // server row would shuffle on every gateway restart.
     let mut status: indexmap::IndexMap<String, LspServerStatusEntry> =
         indexmap::IndexMap::with_capacity(entries.len());
     for entry in entries {
@@ -179,9 +196,46 @@ async fn lsp_servers_with_status() -> Json<LspServersWithStatus> {
 ///
 /// Kept separate from `/api/lsp/servers-with-status` so the frontend's
 /// per-row "Check" button can re-probe a single language without
-/// re-fetching the full server list.
-async fn lsp_status_list() -> Json<Vec<crate::config::LspServerStatusEntry>> {
-    Json(compute_lsp_status().await)
+/// re-fetching the full server list. Pass `?force=true` to bypass the
+/// cache.
+async fn lsp_status_list(
+    Query(query): Query<StatusQuery>,
+) -> Json<Vec<crate::config::LspServerStatusEntry>> {
+    Json(probe_all(query.force).await)
+}
+
+/// `GET /api/lsp/status/{language}` — report installation status for a
+/// single language.
+///
+/// Preferred over `/api/lsp/status` for the harness UI's per-row
+/// "Check Status" button — the previous behavior fetched the entire
+/// status array and re-probed every language just to update one row's
+/// badge. This endpoint probes (or cache-hits) only the requested
+/// language, then returns a single `LspServerStatusEntry` object
+/// (not an array).
+///
+/// Returns 404 if `language` is not in the configured server list
+/// (canonical form, e.g. "rust" not "rs"). The handler canonicalizes
+/// the input first so aliases like "js" → "typescript" resolve cleanly.
+async fn lsp_status_for_language(
+    Path(language): Path<String>,
+    Query(query): Query<StatusQuery>,
+) -> impl IntoResponse {
+    let lang_lower = language.to_lowercase();
+    let canonical = canonical_language(&lang_lower).to_string();
+    let cfg = lsp_servers_config();
+    if !cfg.servers.contains_key(&canonical) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Unknown LSP language: {}", language),
+                "code": 404
+            })),
+        )
+            .into_response();
+    }
+    let entry = probe_one(&canonical, query.force).await;
+    Json(entry).into_response()
 }
 
 // ── Project root discovery ────────────────────────────────────────────
@@ -263,6 +317,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/lsp/servers", get(lsp_servers))
         .route("/api/lsp/servers-with-status", get(lsp_servers_with_status))
         .route("/api/lsp/status", get(lsp_status_list))
+        .route("/api/lsp/status/{language}", get(lsp_status_for_language))
         .route(
             "/api/lsp/install/{language}",
             get(crate::install::lsp_install_script),
@@ -491,6 +546,88 @@ mod tests {
             assert!(entry["language"].is_string());
             assert!(entry["installed"].is_boolean());
         }
+    }
+
+    // ── GET /api/lsp/status/{language} ───────────────────────────────────
+
+    #[tokio::test]
+    async fn lsp_status_for_language_returns_single_entry() {
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/status/rust")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Response shape is a single object, not an array.
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_object(), "single-language status must be an object");
+        assert_eq!(json["language"], "rust");
+        assert!(json["installed"].is_boolean());
+    }
+
+    #[tokio::test]
+    async fn lsp_status_for_language_unknown_returns_404() {
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/status/brainfuck")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unknown language must return 404 (got {})",
+            resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_status_for_language_canonicalizes_alias() {
+        // `js` is an alias for `typescript` (see `canonical_language`).
+        // The endpoint should canonicalize before probing, so
+        // `/api/lsp/status/js` returns the `typescript` status object.
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/status/js")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["language"], "typescript",
+            "alias 'js' must canonicalize to 'typescript'"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_status_for_language_force_true_accepted() {
+        // `?force=true` is a hint to bypass the cache. The handler
+        // accepts it without 400 and still returns a valid status.
+        let state = test_state();
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/lsp/status/rust?force=true")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["language"], "rust");
+        assert!(json["installed"].is_boolean());
     }
 
     // ── GET /lsp/{language} (non-WebSocket, should still respond) ────────

@@ -5,11 +5,13 @@
 //! the new crate's binary location.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use indexmap::IndexMap;
+use tokio::sync::{Notify, RwLock};
 
 // ── LSP server configuration (from JSON file) ──────────────────────────
 
@@ -1012,6 +1014,365 @@ pub async fn compute_lsp_status_concurrent() -> Vec<LspServerStatusEntry> {
     entries
 }
 
+// ── Status cache ───────────────────────────────────────────────────────
+//
+// Each `compute_lsp_status()` call forks `cmd --version` for every
+// configured language — bounded by 4-concurrency it's roughly one probe
+// timeout (~2s worst case) per round, ~6s for all 13 languages. JVM-based
+// servers (jdtls, kotlin-language-server) fall through to a 5-second
+// LSP handshake probe, so the worst-case is even higher.
+//
+// The harness UI calls this endpoint on:
+//   - every Harness → LSP tab mount (AppLayout unmounts HarnessPage on
+//     view switch, so each re-entry remounts LspTab and triggers a load)
+//   - per-row "Check Status" button (one row in the UI, full probe on
+//     the server — see `handleCheck` in `apps/.../LspTab.tsx`)
+//   - top-bar Refresh button
+//
+// Without a cache this means a fresh 13-fork storm on every interaction.
+// The harness UI is read-mostly (status doesn't change unless the user
+// runs an install), so we cache the result keyed by canonical language
+// with a TTL:
+//
+//   - Cache hit within TTL: return immediately, no fork.
+//   - Cache miss or stale: probe (with bounded concurrency + dedup of
+//     concurrent probes for the same language), write result.
+//
+// Invalidation:
+//   - `invalidate_status(lang)`: drop the cached entry for `lang`. Called
+//     from the install endpoint after a successful install so the next
+//     probe reflects the freshly-installed binary.
+//   - `invalidate_all_status()`: clear the entire cache. Reserved for
+//     future "user changed PATH" hooks; not currently called.
+//
+// Force-refresh:
+//   - `probe_one(lang, force=true)` and `probe_all(force=true)` skip
+//     the cache. The harness UI's top-bar Refresh button uses this to
+//     re-probe on user demand.
+//
+// Configuration:
+//   - `STATUS_TTL_SECS`: AtomicU64, default 1800 (30 min). Set once at
+//     startup via `init_status_cache_ttl()` from CLI arg or env var.
+
+/// Default TTL for cached LSP install-status entries (seconds).
+///
+/// 30 minutes strikes a balance between freshness (user manually installs
+/// a binary outside our flow) and probe cost (a 13-language probe is
+/// ~6s with bounded concurrency).
+pub const DEFAULT_STATUS_TTL_SECS: u64 = 1800;
+
+/// Process-wide TTL for the status cache. Set once at startup via
+/// [`init_status_cache_ttl`] from CLI arg or env var. Reads use
+/// `Ordering::Relaxed` — the value is monotonic after init, and a stale
+/// read is harmless (worst case: probes run with the previous TTL for a
+/// few extra seconds during startup).
+static STATUS_TTL_SECS: AtomicU64 = AtomicU64::new(DEFAULT_STATUS_TTL_SECS);
+
+/// Initialize the status cache TTL. Call once at startup, before any
+/// `probe_one` / `probe_all` call.
+///
+/// `ttl_secs == 0` is treated as "use default" — protects against
+/// misconfigured CLI args or env vars (e.g. an empty env var string).
+pub fn init_status_cache_ttl(ttl_secs: u64) {
+    let effective = if ttl_secs == 0 {
+        DEFAULT_STATUS_TTL_SECS
+    } else {
+        ttl_secs
+    };
+    STATUS_TTL_SECS.store(effective, Ordering::Relaxed);
+    tracing::info!(
+        ttl_secs = effective,
+        "LSP status cache TTL initialized"
+    );
+}
+
+/// Read the current TTL. Internal — used by `probe_one` and tests.
+fn status_ttl_secs() -> u64 {
+    STATUS_TTL_SECS.load(Ordering::Relaxed)
+}
+
+/// Per-language cache entry: probe result + monotonic timestamp of the
+/// last successful probe.
+type CachedEntry = (LspServerStatusEntry, std::time::Instant);
+
+/// Type alias for the inner cache map (extracted to keep static decls
+/// readable).
+type CacheMap = HashMap<String, CachedEntry>;
+
+/// Process-wide status cache. `RwLock` because reads dominate (every UI
+/// load hits this) and writes are rare (only on cache miss + probe).
+static STATUS_CACHE: OnceLock<RwLock<CacheMap>> = OnceLock::new();
+
+fn status_cache() -> &'static RwLock<CacheMap> {
+    STATUS_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Process-wide in-flight probe map. Maps canonical language to a
+/// `Notify` handle — the first caller to insert becomes the "leader"
+/// and does the actual probe; subsequent callers ("followers") wait on
+/// the `Notify` and then re-read the cache.
+///
+/// We use a `std::sync::Mutex` (sync, not async) because the critical
+/// section is a tiny HashMap lookup/insert — holding an async mutex
+/// across a `Notify` would be a footgun (the async mutex would be
+/// locked while waiting on the leader).
+type InFlightMap = HashMap<String, Arc<Notify>>;
+static INFLIGHT: OnceLock<std::sync::Mutex<InFlightMap>> = OnceLock::new();
+
+fn inflight() -> &'static std::sync::Mutex<InFlightMap> {
+    INFLIGHT.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Probe concurrency limiter. Used inside `probe_one` to bound fork
+/// pressure (each probe is a `cmd --version` fork+exec, ~2s timeout
+/// per call; JVM servers may fall through to a 5s LSP handshake).
+///
+/// Set to match the existing `LSP_STATUS_PROBE_CONCURRENCY` constant —
+/// the cache changes when we probe, not how many probes we run in
+/// parallel.
+///
+/// Stored as `Arc<Semaphore>` (not `Semaphore` directly) because
+/// `tokio::sync::Semaphore::acquire_owned` is defined on
+/// `Arc<Semaphore>` and produces an owned `OwnedSemaphorePermit` that
+/// releases on drop. `tokio::sync::Semaphore` itself is not `Clone`,
+/// so we share the instance via `Arc`.
+static PROBE_SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn probe_sem() -> &'static Arc<tokio::sync::Semaphore> {
+    PROBE_SEM.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            LSP_STATUS_PROBE_CONCURRENCY,
+        ))
+    })
+}
+
+/// Acquire a probe slot for `canonical`. The returned guard either:
+///
+/// - Is a **leader** — this caller is responsible for running the probe
+///   and writing the cache. Drop the guard after writing; it will notify
+///   any followers and remove itself from the in-flight map.
+/// - Is a **follower** — another caller is already probing `canonical`.
+///   Call `wait_for_leader()` to await their result, then re-read the
+///   cache (the leader writes before dropping the guard).
+struct ProbeSlotGuard {
+    canonical: String,
+    is_leader: bool,
+    notify: Arc<Notify>,
+}
+
+impl ProbeSlotGuard {
+    /// Wait for the leader to finish probing. No-op if this guard is
+    /// the leader.
+    async fn wait_for_leader(&self) {
+        if !self.is_leader {
+            self.notify.notified().await;
+        }
+    }
+}
+
+impl Drop for ProbeSlotGuard {
+    fn drop(&mut self) {
+        if self.is_leader {
+            // Notify all followers BEFORE removing from the in-flight
+            // map. If we removed first, a follower could observe the
+            // map empty, decide it's a leader, and start a duplicate
+            // probe — race condition we want to avoid.
+            self.notify.notify_waiters();
+            if let Ok(mut map) = inflight().lock() {
+                map.remove(&self.canonical);
+            }
+        }
+    }
+}
+
+/// Acquire a probe slot for `canonical`. See [`ProbeSlotGuard`].
+fn acquire_probe_slot(canonical: &str) -> ProbeSlotGuard {
+    let mut map = inflight()
+        .lock()
+        .expect("INFLIGHT mutex poisoned — this is a bug");
+    if let Some(existing) = map.get(canonical).cloned() {
+        // Someone else is probing; we're a follower.
+        ProbeSlotGuard {
+            canonical: canonical.to_string(),
+            is_leader: false,
+            notify: existing,
+        }
+    } else {
+        // We're the leader — insert our Notify and return.
+        let notify = Arc::new(Notify::new());
+        map.insert(canonical.to_string(), Arc::clone(&notify));
+        ProbeSlotGuard {
+            canonical: canonical.to_string(),
+            is_leader: true,
+            notify,
+        }
+    }
+}
+
+/// Probe a single language with cache + in-flight dedup + bounded
+/// fork concurrency.
+///
+/// Behavior:
+/// - `force == false`: cache hit within TTL returns immediately.
+///   Otherwise acquire a probe slot, run the probe under a fork-permit,
+///   write the cache, drop the slot (notifies followers).
+/// - `force == true`: bypass cache and dedup; always fork. Still writes
+///   the cache so subsequent non-forced calls hit it.
+///
+/// Returns a `LspServerStatusEntry` for the canonical language. Languages
+/// not in the config return an "installed=false" entry (defensive — the
+/// routes layer filters by canonical, but tests may probe arbitrary
+/// strings).
+pub async fn probe_one(language: &str, force: bool) -> LspServerStatusEntry {
+    let lang_lower = language.to_lowercase();
+    let canonical = canonical_language(&lang_lower).to_string();
+    let ttl = status_ttl_secs();
+
+    // Cache fast path — only when not forcing.
+    if !force
+        && let Some(entry) = read_cache_if_fresh(&canonical, ttl).await
+    {
+        return entry;
+    }
+
+    // In-flight dedup — skipped when forcing (each force caller pays
+    // for their own fresh probe).
+    let guard = if !force {
+        Some(acquire_probe_slot(&canonical))
+    } else {
+        None
+    };
+
+    // If we're a follower, wait for the leader then re-check cache.
+    if let Some(g) = &guard
+        && !g.is_leader
+    {
+        g.wait_for_leader().await;
+        // Leader should have written the cache. Re-check before
+        // falling through to a fresh probe.
+        if let Some(entry) = read_cache_if_fresh(&canonical, ttl).await {
+            return entry;
+        }
+        // Leader didn't write (probe failed?). Fall through to
+        // probe ourselves — but skip dedup for this fallback.
+    }
+
+    // Acquire fork permit and run the probe. `acquire_owned` consumes
+    // an `Arc<Semaphore>` — clone the Arc first so the static instance
+    // remains available for future callers.
+    let permit = probe_sem()
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("probe semaphore never closed");
+    let entry = match resolve_lsp_command(&canonical).await {
+        Some(spec) => LspServerStatusEntry {
+            language: spec.language,
+            installed: true,
+            command: Some(spec.command),
+        },
+        None => LspServerStatusEntry {
+            language: canonical.clone(),
+            installed: false,
+            command: None,
+        },
+    };
+    drop(permit);
+
+    // Write to cache (always, even when forced — subsequent non-forced
+    // calls can still hit it within TTL).
+    write_cache(&canonical, entry.clone()).await;
+
+    entry
+}
+
+/// Probe every configured language with cache + in-flight dedup.
+///
+/// Equivalent ordering to [`compute_lsp_status_concurrent`] (sorted by
+/// canonical language), but reuses cached entries within TTL and
+/// coalesces concurrent probes for the same language.
+///
+/// `force == true` bypasses the cache (each language is probed fresh)
+/// but still writes results back so the next non-forced call hits the
+/// cache.
+pub async fn probe_all(force: bool) -> Vec<LspServerStatusEntry> {
+    let cfg = lsp_servers_config();
+    let languages: Vec<String> = cfg.servers.keys().cloned().collect();
+
+    let futures = languages.into_iter().map(|lang| async move {
+        probe_one(&lang, force).await
+    });
+
+    let mut entries = futures_util::future::join_all(futures).await;
+    entries.sort_by(|a, b| a.language.cmp(&b.language));
+    entries
+}
+
+/// Read a cache entry if it exists and was probed within `ttl` seconds.
+async fn read_cache_if_fresh(canonical: &str, ttl: u64) -> Option<LspServerStatusEntry> {
+    let cache = status_cache().read().await;
+    cache
+        .get(canonical)
+        .and_then(|(entry, probed_at)| {
+            if probed_at.elapsed().as_secs() < ttl {
+                Some(entry.clone())
+            } else {
+                None
+            }
+        })
+}
+
+/// Write a probe result to the cache with the current timestamp.
+async fn write_cache(canonical: &str, entry: LspServerStatusEntry) {
+    let mut cache = status_cache().write().await;
+    cache.insert(canonical.to_string(), (entry, std::time::Instant::now()));
+}
+
+/// Drop the cached entry for `canonical`. Next call to [`probe_one`] or
+/// [`probe_all`] will re-probe the language.
+///
+/// Called from the install endpoint after a successful install so the
+/// status reflects the freshly-installed binary without waiting for TTL.
+pub fn invalidate_status(canonical: &str) {
+    let canonical = canonical_language(canonical);
+    let cache = status_cache();
+    // We hold the sync lock briefly; spawn a task to drop the entry.
+    // Direct blocking_lock would also work but we want this fn to be
+    // callable from sync context (the install handler is async but the
+    // drop is sync-fast).
+    let canonical = canonical.to_string();
+    tokio::spawn(async move {
+        let mut cache = cache.write().await;
+        if cache.remove(&canonical).is_some() {
+            tracing::info!(
+                canonical = %canonical,
+                "Invalidated LSP status cache"
+            );
+        }
+    });
+}
+
+/// Drop the entire cache. Reserved for future use (e.g. user reports
+/// "PATH changed externally, re-probe everything"). Not currently
+/// called from any handler.
+pub fn invalidate_all_status() {
+    let cache = status_cache();
+    tokio::spawn(async move {
+        let mut cache = cache.write().await;
+        let count = cache.len();
+        cache.clear();
+        tracing::info!(count, "Invalidated entire LSP status cache");
+    });
+}
+
+/// Test-only helper: synchronous cache write bypassing TTL. Used by
+/// unit tests that want to seed the cache without spawning probes.
+#[cfg(test)]
+async fn seed_cache_for_test(canonical: &str, entry: LspServerStatusEntry) {
+    let mut cache = status_cache().write().await;
+    cache.insert(canonical.to_string(), (entry, std::time::Instant::now()));
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1427,5 +1788,169 @@ mod tests {
         // If no candidate succeeds, result is None.
         // Either way, it should NOT panic.
         let _ = result;
+    }
+
+    // ── Status cache tests ─────────────────────────────────────────────
+
+    /// `init_status_cache_ttl(0)` must fall back to `DEFAULT_STATUS_TTL_SECS`.
+    /// Protects against misconfigured env vars (`ACOWORK_LSP_STATUS_TTL_SECS=`
+    /// would otherwise parse as `0` and make every call go through the probe
+    /// path — defeating the cache).
+    #[test]
+    fn test_init_status_cache_ttl_zero_falls_back_to_default() {
+        let prev = status_ttl_secs();
+        init_status_cache_ttl(0);
+        assert_eq!(
+            status_ttl_secs(),
+            DEFAULT_STATUS_TTL_SECS,
+            "TTL=0 must fall back to default (got {})",
+            status_ttl_secs()
+        );
+        init_status_cache_ttl(prev);
+    }
+
+    #[test]
+    fn test_init_status_cache_ttl_stores_value() {
+        let prev = status_ttl_secs();
+        init_status_cache_ttl(120);
+        assert_eq!(status_ttl_secs(), 120);
+        init_status_cache_ttl(prev);
+    }
+
+    /// A TTL of 0 seconds must always report the cache as stale. This
+    /// guards against a future refactor accidentally allowing zero-TTL
+    /// cached entries to leak through.
+    #[tokio::test]
+    async fn test_read_cache_if_fresh_treats_zero_ttl_as_always_stale() {
+        let key = "test-cache-zero-ttl-key-acowork";
+        let entry = LspServerStatusEntry {
+            language: key.to_string(),
+            installed: true,
+            command: Some("/usr/bin/test".to_string()),
+        };
+        write_cache(key, entry).await;
+        let read_back = read_cache_if_fresh(key, 0).await;
+        assert!(
+            read_back.is_none(),
+            "TTL=0 must always return None"
+        );
+        // Cleanup
+        invalidate_status(key);
+    }
+
+    /// `read_cache_if_fresh` must return the cloned entry when the entry's
+    /// timestamp is within the TTL window.
+    #[tokio::test]
+    async fn test_read_cache_if_fresh_returns_cached() {
+        let key = "test-cache-roundtrip-acowork";
+        let entry = LspServerStatusEntry {
+            language: key.to_string(),
+            installed: true,
+            command: Some("/usr/bin/test".to_string()),
+        };
+        write_cache(key, entry.clone()).await;
+        let read_back = read_cache_if_fresh(key, 60).await;
+        assert_eq!(
+            read_back,
+            Some(entry),
+            "cache round-trip lost fidelity"
+        );
+        invalidate_status(key);
+    }
+
+    /// `probe_one` must reuse cached results for an unknown language
+    /// (not in `lsp_servers_config`) without re-probing. Two consecutive
+    /// calls return equivalent `LspServerStatusEntry` objects.
+    #[tokio::test]
+    async fn test_probe_one_unknown_language_returns_same_twice() {
+        let first = probe_one("test-unknown-language-acowork", false).await;
+        let second = probe_one("test-unknown-language-acowork", false).await;
+        assert_eq!(
+            first, second,
+            "probe_one should return identical results for identical inputs"
+        );
+        assert!(!first.installed);
+        assert!(first.command.is_none());
+        assert_eq!(first.language, "test-unknown-language-acowork");
+        invalidate_status("test-unknown-language-acowork");
+    }
+
+    /// `probe_one` with a seeded cache entry must return the cached value
+    /// when `force == false`. This is the central invariant for the
+    /// "Check button should not re-probe other languages" optimization.
+    ///
+    /// We seed a fake command path that wouldn't resolve from the real
+    /// filesystem probe — if `probe_one` respected the cache, the test
+    /// passes; if it bypassed the cache, the probe would either find the
+    /// real `rust-analyzer` (returning the real command) or not find
+    /// anything (returning installed=false), neither of which equals the
+    /// cached fake entry.
+    #[tokio::test]
+    async fn test_probe_one_honors_cache_for_real_language() {
+        let canonical = "rust";
+        let fake_command = "/tmp/acowork_test_fake_rust_xyz_42";
+        let fake_entry = LspServerStatusEntry {
+            language: canonical.to_string(),
+            installed: true,
+            command: Some(fake_command.to_string()),
+        };
+        seed_cache_for_test(canonical, fake_entry.clone()).await;
+
+        let result = probe_one(canonical, false).await;
+        assert_eq!(
+            result, fake_entry,
+            "probe_one must return seeded cache entry (cache bypassed otherwise)"
+        );
+
+        // Cleanup so other tests aren't affected.
+        invalidate_status(canonical);
+    }
+
+    /// `probe_all` returns one entry per configured language, sorted by
+    /// canonical name — preserves the existing contract of
+    /// `compute_lsp_status` / `compute_lsp_status_concurrent`.
+    #[tokio::test]
+    async fn test_probe_all_returns_sorted_entries() {
+        let cfg = lsp_servers_config();
+        let result = probe_all(false).await;
+        assert_eq!(
+            result.len(),
+            cfg.servers.len(),
+            "probe_all returned wrong number of entries"
+        );
+        let mut sorted = result.clone();
+        sorted.sort_by(|a, b| a.language.cmp(&b.language));
+        assert_eq!(
+            result, sorted,
+            "probe_all must return entries sorted by language"
+        );
+    }
+
+    /// `invalidate_status` must remove the cached entry so the next
+    /// `probe_one` call observes a cache miss. We verify by reading
+    /// `read_cache_if_fresh` directly before and after.
+    #[tokio::test]
+    async fn test_invalidate_status_removes_entry() {
+        let key = "test-invalidate-acowork";
+        let entry = LspServerStatusEntry {
+            language: key.to_string(),
+            installed: true,
+            command: Some("/usr/bin/test".to_string()),
+        };
+        write_cache(key, entry).await;
+        assert!(read_cache_if_fresh(key, 60).await.is_some());
+
+        // `invalidate_status` spawns an async task to perform the
+        // removal under the cache's write lock. We must yield so the
+        // spawned task runs before reading the post-invalidation state.
+        invalidate_status(key);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let post_invalidate = read_cache_if_fresh(key, 60).await;
+        assert!(
+            post_invalidate.is_none(),
+            "invalidate_status did not remove entry (got {:?})",
+            post_invalidate
+        );
     }
 }

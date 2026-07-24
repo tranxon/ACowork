@@ -398,6 +398,11 @@ export async function fetchLspServers(
  * concurrency (4 in flight), keeping total wall time roughly bounded
  * by a single probe timeout (~2s worst case).
  *
+ * Results are cached on the LSP Relay side keyed by canonical language
+ * with a configurable TTL (default 30 minutes). Pass `force = true` to
+ * bypass the cache and re-probe every language — use this only on the
+ * top-bar Refresh button, where a full re-probe is the user-intent.
+ *
  * **Not the preferred initial-load call** — the harness UI uses the
  * two-step `fetchLspServers` + `fetchLspStatus` pair instead so the
  * list renders immediately and badges resolve incrementally. This
@@ -406,8 +411,10 @@ export async function fetchLspServers(
  */
 export async function fetchLspServersWithStatus(
   relayUrl: string,
+  options: { force?: boolean } = {},
 ): Promise<LspServersWithStatus> {
-  const resp = await fetch(`${relayUrl}/api/lsp/servers-with-status`);
+  const qs = options.force ? "?force=true" : "";
+  const resp = await fetch(`${relayUrl}/api/lsp/servers-with-status${qs}`);
   if (!resp.ok) {
     throw new Error(
       `Failed to fetch LSP servers with status: ${resp.status}`,
@@ -428,14 +435,62 @@ export async function fetchLspServersWithStatus(
  * truth for the UI's "installed" badge and is used to disable the
  * Install button for already-installed servers.
  *
- * Unlike `handleCheck` in `LspTab`, this endpoint does NOT spawn any
- * LSP process — it's a fast PATH lookup, so it's safe to call on mount.
+ * Results are cached on the LSP Relay side keyed by canonical language
+ * with a configurable TTL (default 30 minutes). The harness UI does
+ * **not** pass `force = true` here so the first call within TTL is
+ * essentially free (HashMap read on the server); the top-bar Refresh
+ * button uses `force = true` for a full re-probe.
+ *
+ * **`force = true` is rarely useful at this endpoint** — prefer
+ * {@link fetchLspStatusForLanguage} for per-language forced probes,
+ * since the batch endpoint still probes every language when forcing.
  */
 export async function fetchLspStatus(
   relayUrl: string,
+  options: { force?: boolean } = {},
 ): Promise<LspServerStatusEntry[]> {
-  const resp = await fetch(`${relayUrl}/api/lsp/status`);
+  const qs = options.force ? "?force=true" : "";
+  const resp = await fetch(`${relayUrl}/api/lsp/status${qs}`);
   if (!resp.ok) throw new Error(`Failed to fetch LSP status: ${resp.status}`);
+  return resp.json();
+}
+
+/**
+ * Re-probe LSP installation status for a single language.
+ *
+ * Preferred over {@link fetchLspStatus} for the harness UI's per-row
+ * "Check Status" button — the previous behavior fetched the entire
+ * status array (probing every language in the config) just to update
+ * one row's badge. This endpoint probes only the requested language
+ * (or hits the cache) and returns a single `LspServerStatusEntry`
+ * object, not an array.
+ *
+ * The relay canonicalizes the input first, so language aliases (`js` →
+ * `typescript`, `yml` → `yaml`, etc.) resolve cleanly. Unknown
+ * languages return 404 — wrap in try/catch if the caller doesn't
+ * filter by configured languages first.
+ *
+ * Pass `force = true` to bypass the cache for the single language
+ * (e.g. immediately after an install). The relay's install endpoint
+ * also drops the cache entry on success, so `force = true` is rarely
+ * needed for the install flow.
+ */
+export async function fetchLspStatusForLanguage(
+  relayUrl: string,
+  language: string,
+  options: { force?: boolean } = {},
+): Promise<LspServerStatusEntry> {
+  const qs = options.force ? "?force=true" : "";
+  const encoded = encodeURIComponent(language);
+  const resp = await fetch(`${relayUrl}/api/lsp/status/${encoded}${qs}`);
+  if (resp.status === 404) {
+    throw new Error(`Unknown LSP language: ${language}`);
+  }
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to fetch LSP status for ${language}: ${resp.status}`,
+    );
+  }
   return resp.json();
 }
 

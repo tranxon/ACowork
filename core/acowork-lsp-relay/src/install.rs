@@ -15,7 +15,9 @@ use axum::{Json, extract::Path};
 
 use acowork_core::process::run_command_with_idle_timeout;
 
-use crate::config::{canonical_language, lsp_servers_config, refresh_path_from_profiles};
+use crate::config::{
+    canonical_language, invalidate_status, lsp_servers_config, refresh_path_from_profiles,
+};
 
 /// `GET /api/lsp/install/{language}` — return the install script content.
 pub async fn lsp_install_script(Path(language): Path<String>) -> impl IntoResponse {
@@ -161,6 +163,14 @@ pub async fn lsp_install_run(Path(language): Path<String>) -> impl IntoResponse 
                 // profile files here, we make the newly-installed binary
                 // discoverable immediately without restarting the LSP Relay.
                 refresh_path_from_profiles();
+                // Drop the cached status entry for this language so the
+                // next probe reflects the freshly-installed binary
+                // without waiting for the cache TTL (default 30 min).
+                // The harness UI re-mounts LspTab after a successful
+                // install (via window focus → user re-clicks Harness tab),
+                // so without invalidation the install appears to "succeed
+                // but status shows not installed" until TTL expiry.
+                invalidate_status(canonical);
                 StatusCode::OK
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR

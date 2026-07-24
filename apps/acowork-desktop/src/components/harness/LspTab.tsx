@@ -1,10 +1,60 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { fetchLspServers, fetchLspStatus, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
+import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
+
+/**
+ * Module-level cache of LSP install-status results, keyed by relay URL.
+ *
+ * Purpose: avoid re-fetching (and triggering the relay's full PROBE storm)
+ * when the user switches Chat → Harness → Chat → Harness in quick
+ * succession. Each Harness re-entry remounts `LspTab` (AppLayout
+ * unmounts `HarnessPage` on view switch — see AppLayout.tsx), so the
+ * `useState` inside the component is reset. The module-level cache
+ * survives unmount, so the second mount can `loadAll` and skip both
+ * the "checking" flash AND the network call for any language whose
+ * status was probed within `MODULE_HEALTH_CACHE_TTL_MS`.
+ *
+ * The relay itself also caches results (Phase 1) — the module-level
+ * cache is purely a UX optimization to skip the "checking" spinner
+ * flicker on re-mount, when the relay's cache is also likely fresh.
+ *
+ * Mirrors `MODULE_HEALTH_CACHE_TTL_MS` to the relay's
+ * `DEFAULT_STATUS_TTL_SECS` (30 min) — if the two go out of sync
+ * the worst case is a "checking" flash with a fast cache-hit
+ * underneath (still no fork on the relay side).
+ */
+type ModuleHealthCache = {
+  status: Record<string, LspHealthStatus>;
+  timestamp: Record<string, number>;
+};
+const moduleHealthCache = new Map<string, ModuleHealthCache>();
+const MODULE_HEALTH_CACHE_TTL_MS = 30 * 60 * 1000;
+
+function getModuleHealthCache(relayUrl: string): ModuleHealthCache | null {
+  return moduleHealthCache.get(relayUrl) ?? null;
+}
+
+function seedModuleHealthCache(
+  relayUrl: string,
+  entries: LspServerStatusEntry[],
+): void {
+  const existing = moduleHealthCache.get(relayUrl) ?? {
+    status: {},
+    timestamp: {},
+  };
+  const now = Date.now();
+  for (const entry of entries) {
+    existing.status[entry.language] = entry.installed
+      ? "installed"
+      : "not_installed";
+    existing.timestamp[entry.language] = now;
+  }
+  moduleHealthCache.set(relayUrl, existing);
+}
 
 /** Language display names for UI */
 const LANGUAGE_LABELS: Record<string, string> = {
@@ -69,7 +119,7 @@ export function LspTab() {
     return () => { cancelled = true; };
   }, [status]);
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (options: { force?: boolean } = {}) => {
     if (!relayUrl) return;
     setRefreshing(true);
     setError(null);
@@ -89,8 +139,21 @@ export function LspTab() {
       // started. React batches this setState with the `setConfig` call
       // above, so the list and the "checking" badges appear together
       // in a single paint.
+      //
+      // Skip the "checking" flip when `force = false` AND we already
+      // have a non-pending cached status for every language — this is
+      // the fast path on Tab re-mount: the user shouldn't see a
+      // "checking" flash if the LSP Relay has fresh cached data.
+      const cachedModule = getModuleHealthCache(relayUrl);
       const langs = Object.keys(cfg.servers);
-      if (langs.length > 0) {
+      const allCachedFresh =
+        !options.force &&
+        cachedModule != null &&
+        langs.every((lang) => {
+          const ts = cachedModule.timestamp[lang];
+          return typeof ts === "number" && Date.now() - ts < MODULE_HEALTH_CACHE_TTL_MS;
+        });
+      if (langs.length > 0 && !allCachedFresh) {
         setHealthStatus((prev) => {
           const next: Record<string, LspHealthStatus> = { ...prev };
           for (const lang of langs) {
@@ -100,11 +163,11 @@ export function LspTab() {
         });
       }
 
-      // Phase 2: probe PATH per language (slow, bounded concurrency on
-      // the server side). The list is already on screen; only badges
-      // need updating when the response arrives.
+      // Phase 2: probe PATH per language (cached on the relay).
+      // The list is already on screen; only badges need updating when
+      // the response arrives.
       try {
-        const entries = await fetchLspStatus(relayUrl);
+        const entries = await fetchLspStatus(relayUrl, { force: options.force });
         setHealthStatus((prev) => {
           const next = { ...prev };
           for (const entry of entries) {
@@ -112,6 +175,10 @@ export function LspTab() {
           }
           return next;
         });
+        // Mirror the result into the module-level cache so a remount
+        // (e.g. switching Chat → Harness → back to LSP) can skip the
+        // network call entirely.
+        seedModuleHealthCache(relayUrl, entries);
       } catch (statusErr) {
         // Phase 1 succeeded but the status probe failed — the list is
         // fine, so we don't surface a page-level error. Flip every row
@@ -163,18 +230,21 @@ export function LspTab() {
     setHealthErrors((prev) => ({ ...prev, [language]: null }));
 
     try {
-      const entries: LspServerStatusEntry[] = await fetchLspStatus(relayUrl);
-      // Update status for all languages from the backend response.
-      // This also clears the "checking" state for languages the user
-      // didn't explicitly click — harmless since loadStatus already
-      // seeded them on mount.
-      setHealthStatus((prev) => {
-        const next = { ...prev };
-        for (const entry of entries) {
-          next[entry.language] = entry.installed ? "installed" : "not_installed";
-        }
-        return next;
-      });
+      // Single-language endpoint: probes (or cache-hits) only this row.
+      // The old behavior fetched the full status array and re-probed
+      // every configured language just to update one badge — wasteful,
+      // and the entire grid would flicker through a "checking" state
+      // 12 times longer than necessary. The relay canonicalizes the
+      // language (e.g. "js" → "typescript") so the response key
+      // matches the canonical row key in our healthStatus map.
+      const entry = await fetchLspStatusForLanguage(relayUrl, language);
+      setHealthStatus((prev) => ({
+        ...prev,
+        [entry.language]: entry.installed ? "installed" : "not_installed",
+      }));
+      // Mirror the single-language result into the module-level cache
+      // so a future batch load can use it without re-fetching.
+      seedModuleHealthCache(relayUrl, [entry]);
     } catch (e) {
       setHealthStatus((prev) => ({ ...prev, [language]: "error" }));
       setHealthErrors((prev) => ({
@@ -275,7 +345,7 @@ export function LspTab() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harnessLsp.lspServerManagement")}</h2>
           <button
-            onClick={() => void loadAll()}
+            onClick={() => void loadAll({ force: true })}
             disabled={refreshing}
             className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
           >
