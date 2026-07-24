@@ -393,6 +393,10 @@ message SessionMessage {
     // ADR-035: a record finalized (committed to JSONL) carrying COMPLETE
     // content. Wired in Phase 2; proto defined now for the contract.
     RecordCompletePayload       record_complete         = 30;
+    // Runtime detected a tool-call loop and paused the session. The frontend
+    // displays the message and a "Continue" button so the user can decide
+    // whether to let the loop proceed.
+    LoopDetectedPausedPayload   loop_detected_paused    = 31;
   }
 }
 
@@ -495,6 +499,11 @@ message IterationLimitPausedPayload {
   uint32 iteration = 2;
   uint32 max_iterations = 3;
   string message = 4;
+}
+
+message LoopDetectedPausedPayload {
+  string session_id = 1;
+  string message = 2;
 }
 
 message ToolApprovalNeededPayload {

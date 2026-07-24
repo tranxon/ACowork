@@ -230,9 +230,33 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/tools",
             get(proxy_get_tools),
         )
+        // ADR-040 follow-up: builtin-tools moved off `/config` onto its
+        // own route. The read-side merge still lives at `/tools` (GET
+        // only), but write-side persistence of the enabled flag list is
+        // now its own endpoint here — symmetric with `/mcp-servers` and
+        // `/search-config`.
+        .route(
+            "/api/agents/{id}/builtin-tools",
+            get(proxy_get_builtin_tools).put(proxy_put_builtin_tools),
+        )
         .route(
             "/api/agents/{id}/status",
             get(proxy_get_status),
+        )
+        // Win11-MCP-ToolsBugFix: reverse-proxy per-agent MCP server activation
+        // (GET/PUT) and search-provider config (GET/PUT) to the Runtime. The
+        // Gateway used to handle these via `agents.rs` stubs that returned 200
+        // but never persisted — the user's selection was lost on the next
+        // Tools-tab remount. See `get_agent_mcp_servers` / `put_agent_mcp_servers`
+        // / `get_agent_search_config` / `put_agent_search_config` in the
+        // Runtime HTTP server for the persistence logic.
+        .route(
+            "/api/agents/{id}/mcp-servers",
+            get(proxy_get_mcp_servers).put(proxy_put_mcp_servers),
+        )
+        .route(
+            "/api/agents/{id}/search-config",
+            get(proxy_get_search_config).put(proxy_put_search_config),
         )
 }
 
@@ -836,6 +860,49 @@ async fn proxy_get_tools(
     proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
+/// Reverse-proxy `GET /api/agents/{id}/builtin-tools`
+/// to Runtime's `GET /agents/{id}/builtin-tools` (ADR-040 follow-up).
+async fn proxy_get_builtin_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/builtin-tools", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/builtin-tools`
+/// to Runtime's `PUT /agents/{id}/builtin-tools` (ADR-040 follow-up).
+///
+/// Mirrors `proxy_put_mcp_servers` / `proxy_put_search_config` exactly:
+/// this gateway surface is a transparent pipe so the ToolsTab can use
+/// one writes-one-endpoint pattern. All persistence + validation lives
+/// in the Runtime handler `put_agent_builtin_tools` — see
+/// `acowork-runtime/src/http/server.rs`.
+async fn proxy_put_builtin_tools(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/builtin-tools", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Reverse-proxy `GET /api/agents/{id}/status`
 /// to Runtime's `GET /agents/{id}/status`.
 async fn proxy_get_status(
@@ -845,6 +912,91 @@ async fn proxy_get_status(
 ) -> Response {
     let path = format!("/agents/{}/status", id);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+// ── Win11-MCP-ToolsBugFix: per-agent MCP / search-config proxy ─────────
+//
+// These four tiny handlers are the symmetric counterpart of `proxy_get_config`
+// / `proxy_put_config`. They only forward the request — all field
+// validation + persistence lives in the Runtime handlers
+// (`put_agent_mcp_servers`, `put_agent_search_config` in
+// `acowork-runtime/src/http/server.rs`). Keeping the Gateway branch stub-free
+// guarantees a single source of truth: tools panel writes always go through
+// the same atomic write-tmp-rename path that the other per-agent config
+// files use (`agent_mcp.json`, `agent_search.json`).
+
+/// Reverse-proxy `GET /api/agents/{id}/mcp-servers`
+/// to Runtime's `GET /agents/{id}/mcp-servers`.
+async fn proxy_get_mcp_servers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/mcp-servers", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/mcp-servers`
+/// to Runtime's `PUT /agents/{id}/mcp-servers`.
+async fn proxy_put_mcp_servers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/mcp-servers", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/search-config`
+/// to Runtime's `GET /agents/{id}/search-config`.
+async fn proxy_get_search_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/search-config", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/search-config`
+/// to Runtime's `PUT /agents/{id}/search-config`.
+async fn proxy_put_search_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/search-config", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Build a query string from a HashMap of params.

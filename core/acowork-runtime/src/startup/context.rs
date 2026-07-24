@@ -162,6 +162,15 @@ pub(crate) struct AgentBootContext {
     /// ADR-040: Late-bind slot for workspace mutation service
     /// (workspace CRUD + file/dir mutation).
     pub workspace_mutation_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+    /// ADR-040 follow-up: Late-bind slot for Tools-panel persistence
+    /// (the four `/agents/{id}/mcp-servers` and
+    /// `/agents/{id}/search-config` HTTP handlers). Populated in
+    /// Phase B (sync — no async resource dependency like memory).
+    pub agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+    /// ADR-040 follow-up: Late-bind slot for per-agent runtime config
+    /// (`agent_config.json`) persistence. Mirrors `agent_tools_slot` —
+    /// populated in Phase B (sync — no async resource dependency).
+    pub agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
 }
 
 /// Context produced by Phase B (per-session initialization).

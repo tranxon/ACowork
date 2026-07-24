@@ -863,6 +863,13 @@ fn session_message_to_flat(
             }
             Some(serde_json::Value::Object(m))
         }
+        session_message::Event::LoopDetectedPaused(p) => {
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("loop_detected_paused".into()));
+            m.insert("session_id".into(), serde_json::Value::String(p.session_id.clone()));
+            m.insert("message".into(), serde_json::Value::String(p.message.clone()));
+            Some(serde_json::Value::Object(m))
+        }
         session_message::Event::IterationLimitPaused(p) => {
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("iteration_limit_paused".into()));

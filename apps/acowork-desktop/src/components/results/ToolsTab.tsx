@@ -24,6 +24,7 @@ export function ToolsTab() {
   const catalog = useMcpStore((s) => s.catalog);
   const activeServers = useMcpStore((s) => selectedAgentId ? (s.activeServers[selectedAgentId] ?? EMPTY_ARRAY) : EMPTY_ARRAY);
   const activationLoading = useMcpStore((s) => selectedAgentId ? (s.activationLoading[selectedAgentId] ?? false) : false);
+  const mcpError = useMcpStore((s) => s.error);
   const loadCatalog = useMcpStore((s) => s.loadCatalog);
   const toggleServer = useMcpStore((s) => s.toggleServer);
 
@@ -60,14 +61,17 @@ export function ToolsTab() {
               activeServers: { ...s.activeServers, [selectedAgentId!]: data.mcp_servers },
             }));
           }
-          // search — search providers (both available list and active config)
-          if (data.search) {
-            if (Array.isArray(data.search.providers)) {
-              setSearchProviders(data.search.providers as SearchProviderListItem[]);
-            }
-            if (Array.isArray(data.search.active_providers)) {
-              setActiveSearch(data.search.active_providers as AgentSearchProvider[]);
-            }
+          // search — search providers (both available list and active config).
+          // ADR-034 §7.6.5: the merged /tools endpoint returns a single
+          // `providers` array — ordered active providers for this agent.
+          // Treating `providers` as "available candidates" and
+          // `active_providers` as "currently active" used to leave
+          // `activeSearch` empty on first render (the server only ships
+          // one key, not two), so the fresh-mount case showed no checked
+          // checkboxes even though search was already configured.
+          if (Array.isArray(data.search?.providers)) {
+            setSearchProviders(data.search.providers as SearchProviderListItem[]);
+            setActiveSearch(data.search.providers as AgentSearchProvider[]);
           }
         }
       } catch { /* agent not ready — user can re-open tab later */ }
@@ -97,9 +101,12 @@ export function ToolsTab() {
           }));
         }
         if (data.search) {
-          // ADR-034 §7.6.5: server returns `search.providers` (no separate
-          // `active_providers` key — agents consume the full ordered list).
+          // ADR-034 §7.6.5: server returns a single `providers` array which
+          // is the merged "active selection" view. Mirror the initial-load
+          // shape so the catalog list AND the active checkboxes stay in
+          // sync when an MCP/Search toggle elsewhere triggers a refresh.
           if (Array.isArray(data.search.providers)) {
+            setSearchProviders(data.search.providers as SearchProviderListItem[]);
             setActiveSearch(data.search.providers as AgentSearchProvider[]);
           }
         }
@@ -178,8 +185,13 @@ export function ToolsTab() {
     setBuiltinSaving(true);
     try {
       const enabledNames = next.filter((e) => e.enabled).map((e) => e.name);
+      // ADR-040 follow-up: `builtin_tools` moved off `/config` (where
+      // it conflated model knobs with tool state) onto its own route.
+      // The Gateway has no special-case logic here — it transparently
+      // reverse-proxies the path to the Runtime, so the desktop just
+      // hits the matched endpoint.
       await fetch(
-        `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+        `${getGatewayUrl()}/api/agents/${selectedAgentId}/builtin-tools`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -375,6 +387,29 @@ export function ToolsTab() {
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.mcpToggleDesc")}
         </p>
+        {/* Surface MCP PUT errors that the store would otherwise swallow.
+            The setActiveServers action optimistically updates the UI and
+            rolls back on failure; this banner makes the rollback visible
+            to the user instead of leaving the checkbox mysteriously
+            unchecked. */}
+        {mcpError && (
+          <div
+            role="alert"
+            className="mt-1 flex items-start gap-1.5 rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 px-2 py-1 text-[10px] text-[var(--color-destructive)] dark:border-[var(--color-destructive)]/40 dark:bg-[var(--color-destructive)]/15"
+          >
+            <span className="flex-1 break-words">
+              {t("agentSetup.mcpToggleError", { error: mcpError })}
+            </span>
+            <button
+              type="button"
+              onClick={() => useMcpStore.setState({ error: null })}
+              className="shrink-0 text-[10px] underline hover:no-underline"
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

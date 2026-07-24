@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
-    self, control_command::Command, data_envelope::Payload, ChatMessage,
-    ControlCommand, DataEnvelope,
+    self, control_command::Command, data_envelope::Payload, AvailableMcps,
+    ChatMessage, ControlCommand, DataEnvelope, McpRef, McpTransport as ProtoMcpTransport,
 };
 use acowork_gateway::mqtt::{start_broker_in_thread, GatewayMqttClient};
 use acowork_runtime::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
@@ -86,6 +86,7 @@ fn integration_gateway_and_runtime_connect() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         )
         .await
@@ -133,6 +134,7 @@ fn integration_control_message_flow() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
 
@@ -215,6 +217,7 @@ fn integration_control_stop_flow() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
 
@@ -308,6 +311,7 @@ fn integration_multiple_messages() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
         let messages = ["msg-1", "msg-2", "msg-3"];
@@ -375,6 +379,7 @@ fn integration_lwt_offline_on_disconnect() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
 
@@ -409,6 +414,175 @@ fn integration_lwt_offline_on_disconnect() {
         assert_eq!(status, "offline", "LWT should publish offline status");
 
         drop(client);
+    });
+    drop(broker);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 6: `acowork/global/mcps` retained → Runtime persists catalog to
+// `agent_mcp.json::catalog` so PUT /mcp-servers can resolve names
+// (regression: ADR-040 follow-up — see commit message).
+//
+// Repro: before this fix, Gateway published the MCP catalog on
+// `acowork/global/mcps` (retained), Runtime subscribed and updated the
+// in-memory `available_cache.mcps`, but the on-disk
+// `agent_mcp.json::catalog` stayed empty. The PUT /mcp-servers handler
+// validated names against `merged()` (catalog + local), which was empty,
+// so every "set active = ['context7']" call returned HTTP 400 with
+// `UnknownServers(["context7"])`. The frontend then rolled back the
+// optimistic toggle — user saw "checkbox won't tick".
+//
+// This test wires the full path: Gateway publish → broker retain →
+// Runtime poll → save_agent_mcp_config_catalog → agent_mcp.json on disk
+// contains catalog. After the publish, a direct `load_agent_mcp_config`
+// from the same work_dir sees the catalog.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn integration_catalog_retained_persists_to_agent_mcp_json() {
+    let port = fresh_broker_port();
+    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        // ── 1. Spin up Runtime with a real work_dir on disk ─────────
+        // The work_dir must exist so `save_agent_mcp_config_catalog`
+        // can mkdir config/ and atomic-rename the file. Tests that
+        // used `tempdir()` elsewhere went through `agent_config`
+        // directly; this one needs the *Runtime MQTT poll loop* to
+        // perform the write, which only happens after a retained
+        // message arrives on `acowork/global/mcps`.
+        let work_dir = std::env::temp_dir().join(format!(
+            "acowork-catalog-e2e-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
+
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _rt = RuntimeMqttClient::connect(
+            MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.catalog",
+                agent_name: "Catalog Test",
+                agent_version: "1.0.0",
+                avatar: None,
+                builtin_avatar: None,
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+                identity_update_tx: None,
+                work_dir: work_dir.clone(),
+            },
+        ).await.unwrap();
+
+        // ── 2. Gateway publishes `acowork/global/mcps` (retained) ───
+        // Mimics build_available_mcps in
+        // acowork-gateway/src/mqtt/global_resources_publisher.rs.
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port).await.unwrap();
+
+        let payload = AvailableMcps {
+            version: 1,
+            servers: vec![
+                McpRef {
+                    id: "context7".into(),
+                    name: "context7".into(),
+                    transport: ProtoMcpTransport::Stdio.into(),
+                    url: String::new(),
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@upstash/context7-mcp".into()],
+                    env: Default::default(),
+                    headers: Default::default(),
+                    tool_timeout_secs: 0,
+                    auth_token: "redacted-secret".into(), // wire-only; never persisted
+                },
+                McpRef {
+                    id: "openapi".into(),
+                    name: "openapi".into(),
+                    transport: ProtoMcpTransport::Http.into(),
+                    url: "https://api.example.com/mcp".into(),
+                    command: String::new(),
+                    args: vec![],
+                    env: Default::default(),
+                    headers: Default::default(),
+                    tool_timeout_secs: 30,
+                    auth_token: String::new(),
+                },
+            ],
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AvailableMcps(payload)),
+        };
+        gw.publish_envelope("acowork/global/mcps", &envelope, acowork_gateway::mqtt::MqttQoS::AtLeastOnce, true)
+            .await
+            .expect("gateway publish should succeed");
+        eprintln!("[test] gateway published available_mcps (retained)");
+
+        // ── 3. Wait for Runtime poll loop to receive and persist ────
+        // Polling cadence is driven by `MqttOptions.set_keep_alive` +
+        // the embedded broker's forwarding latency. 1s is generous on a
+        // busy dev box; observed worst-case end-to-end under parallel
+        // `cargo test` is ~500ms.
+        let agent_mcp_path = work_dir.join("config").join("agent_mcp.json");
+        let mut written = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if agent_mcp_path.exists() {
+                let raw = std::fs::read_to_string(&agent_mcp_path).unwrap();
+                if raw.contains("context7") && raw.contains("openapi") {
+                    written = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            written,
+            "Runtime should have written agent_mcp.json containing catalog \
+             entries (context7 + openapi) after receiving retained \
+             acowork/global/mcps. file={} exists={}",
+            agent_mcp_path.display(),
+            agent_mcp_path.exists(),
+        );
+
+        // ── 4. Verify catalog landed on disk (no auth_token leak) ───
+        let cfg = acowork_runtime::agent_config::load_agent_mcp_config(&work_dir)
+            .expect("load should succeed")
+            .expect("file should now exist");
+        assert_eq!(cfg.catalog.len(), 2, "catalog should have both entries");
+        assert_eq!(cfg.catalog[0].name, "context7");
+        assert_eq!(cfg.catalog[1].name, "openapi");
+
+        // auth_token MUST NOT be persisted (it's wire-only for the
+        // Runtime to authenticate live MCP requests, but disk storage
+        // would leak it via world-readable config files).
+        let raw_json = std::fs::read_to_string(&agent_mcp_path).unwrap();
+        assert!(
+            !raw_json.contains("redacted-secret"),
+            "auth_token leaked into agent_mcp.json (must be stripped before \
+             write); raw={}",
+            raw_json,
+        );
+
+        // ── 5. After sync, `merged()` resolves the catalog names ────
+        // This is what `put_mcp_servers` consults. Before the fix,
+        // this returned `vec![]` and PUT /mcp-servers 400'd with
+        // UnknownServers. After: the names resolve and the user's
+        // active_names write succeeds.
+        let merged = acowork_runtime::agent_config::load_merged_mcp_configs(&work_dir);
+        let merged_names: Vec<&str> = merged.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            merged_names.contains(&"context7"),
+            "merged() must include context7 — otherwise PUT /mcp-servers \
+             would still 400 with UnknownServers. got={:?}",
+            merged_names,
+        );
+
+        // ── 6. Cleanup ──────────────────────────────────────────────
+        drop(_rt);
+        drop(gw);
+        std::fs::remove_dir_all(&work_dir).ok();
     });
     drop(broker);
 }

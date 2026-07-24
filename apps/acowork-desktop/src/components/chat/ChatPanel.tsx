@@ -330,6 +330,7 @@ export function ChatPanel() {
     return agent.sessionStates[agent.activeSessionId] ?? null;
   });
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
+  const loopDetectedPaused = sessionState?.loopDetectedPaused ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
   const pendingQuestions = sessionState?.pendingQuestions ?? [];
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -1422,6 +1423,30 @@ export function ChatPanel() {
                     <span>
                       Continue ({iterationLimitPaused.iteration}/{iterationLimitPaused.maxIterations})
                     </span>
+                  </button>
+                </div>
+              </div>
+            )}
+            {loopDetectedPaused && (
+              <div className="mt-1.5 flex justify-center px-6">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 px-4 py-2 text-[var(--color-destructive)] select-none dark:border-[var(--color-destructive)]/40 dark:bg-[var(--color-destructive)]/15 dark:text-[var(--color-destructive)]">
+                  <span
+                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
+                  >
+                    {loopDetectedPaused.message}
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (selectedAgentId) {
+                        session.scope.current.userJustSent = true;
+                        continueExecution(selectedAgentId);
+                      }
+                    }}
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-destructive)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
+                  >
+                    <Play className="h-3 w-3" />
+                    <span>Continue</span>
                   </button>
                 </div>
               </div>

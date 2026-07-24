@@ -65,17 +65,17 @@ pub fn agent_routes() -> Router<AppState> {
         // persistence + live-broadcast now lives in the Runtime, so the
         // Gateway just forwards the body unchanged.
         // (intentionally NOT calling `put(...)` here — see proxy.rs.)
-        .route(
-            "/api/agents/{id}/mcp-servers",
-            get(get_agent_mcp_servers).put(update_agent_mcp_servers),
-        )
+        //
+        // Win11-MCP-ToolsBugFix (2026-07): the same ADR-034 pattern now also
+        // covers `GET/PUT /api/agents/{id}/mcp-servers` and
+        // `GET/PUT /api/agents/{id}/search-config`. Previously these were
+        // bespoke stubs in this module that returned 200 but never persisted
+        // (`let _ = (..., resolved_servers)`), causing the user's Tools-panel
+        // selection to silently disappear on the next tab remount. Routes
+        // are now registered in `proxy::proxy_routes` — see comment there.
         .route(
             "/api/agents/{id}/search-providers",
             get(get_agent_search_providers),
-        )
-        .route(
-            "/api/agents/{id}/search-config",
-            get(get_agent_search_config).put(update_agent_search_config),
         )
         // ADR-034: All Runtime endpoints live as pure reverse-proxy routes in
         // `proxy::proxy_routes`.  The routes that previously had bespoke
@@ -1769,127 +1769,6 @@ fn write_manifest_tools(install_path: &str, active_tools: &[String]) {
     }
 }
 
-// ── Agent MCP server activation handlers ─────────────────────────────
-
-/// MCP server activation response (per-agent)
-#[derive(Serialize)]
-pub struct AgentMcpServersResponse {
-    pub agent_id: String,
-    /// Names of active MCP servers (resolved from catalog)
-    pub active_servers: Vec<String>,
-}
-
-/// Request body for PUT /api/agents/{id}/mcp-servers
-#[derive(Deserialize)]
-pub struct UpdateMcpServersRequest {
-    /// List of MCP server names to activate (from catalog)
-    pub servers: Vec<String>,
-}
-
-/// `GET /api/agents/{id}/mcp-servers` — get active MCP server names for an agent
-///
-/// Returns the list of MCP server names that are currently active for this agent,
-/// queried from Runtime via gRPC (QueryConfig → ConfigSnapshot).
-pub async fn get_agent_mcp_servers(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AgentMcpServersResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists and is running
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        if let Some(info) = gw.running_agents.get(&agent_id) {
-            if !info.ready {
-                return Err(ApiError::service_unavailable(&format!(
-                    "Agent '{}' is starting up, please wait",
-                    agent_id
-                )));
-            }
-        } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent '{}' is not started",
-                agent_id
-            )));
-        }
-    }
-
-    // ADR-033: gRPC removed — config queries are no longer supported.
-    // Return empty list; MCP server config is read from agent_config.json.
-    let _ = (&state, &agent_id);
-    let active_servers: Vec<String> = Vec::new();
-
-    Ok(Json(AgentMcpServersResponse {
-        agent_id,
-        active_servers,
-    }))
-}
-
-/// `PUT /api/agents/{id}/mcp-servers` — set active MCP servers for an agent
-///
-/// Accepts a list of MCP server names. The Gateway:
-/// 1. Looks up each name in the global MCP catalog to get full config
-/// 2. Merges catalog definitions with any per-agent overrides
-/// 3. Saves the full configs to per-agent config
-/// 4. Pushes RuntimeConfigUpdate to the running agent via gRPC
-pub async fn update_agent_mcp_servers(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<UpdateMcpServersRequest>,
-) -> Result<Json<AgentMcpServersResponse>, (StatusCode, Json<ApiError>)> {
-    // Extract data from gateway state
-    let data_dir = {
-        let gw = state.gateway_state.read().await;
-
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-
-        gw.config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.data_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./data"))
-    };
-
-    // Load catalog
-    let catalog = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir)
-        .map_err(|e| ApiError::internal(&e))?;
-
-    // Resolve each name from catalog
-    let mut resolved_servers = Vec::new();
-    let mut not_found = Vec::new();
-    for name in &req.servers {
-        if let Some(entry) = catalog.iter().find(|c| &c.name == name) {
-            resolved_servers.push(entry.clone());
-        } else {
-            not_found.push(name.clone());
-        }
-    }
-
-    if !not_found.is_empty() {
-        return Err(ApiError::bad_request(&format!(
-            "MCP servers not found in catalog: {}",
-            not_found.join(", ")
-        )));
-    }
-
-    // ADR-033: gRPC push removed — Runtime reads MCP config from persisted per-agent
-    // config on startup and via MQTT config hot-reload. No push needed here.
-    let _ = (&state, resolved_servers);
-
-    Ok(Json(AgentMcpServersResponse {
-        agent_id,
-        active_servers: req.servers,
-    }))
-}
-
 // ── Search provider per-agent config ─────────────────────────────────
 
 /// Response for per-agent search provider list
@@ -1900,32 +1779,16 @@ pub struct AgentSearchProvidersResponse {
     pub providers: Vec<acowork_core::protocol::SearchProviderListItem>,
 }
 
-/// Response for per-agent search config
-#[derive(Serialize, Deserialize)]
-pub struct AgentSearchConfigResponse {
-    #[serde(default)]
-    pub agent_id: String,
-    /// Active search providers with priority
-    pub providers: Vec<AgentSearchProviderEntry>,
-}
-
-/// A single active search provider entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSearchProviderEntry {
-    pub provider: String,
-    pub priority: u32,
-}
-
-/// Request body for PUT /api/agents/{id}/search-config
-#[derive(Deserialize)]
-pub struct UpdateAgentSearchConfigRequest {
-    pub providers: Vec<AgentSearchProviderEntry>,
-}
-
 /// `GET /api/agents/{id}/search-providers` — get search provider list for agent
 ///
 /// Returns the search provider catalog from Gateway's resource cache.
 /// This tells the frontend which providers have API keys configured.
+///
+/// Win11-MCP-ToolsBugFix: `GET/PUT /api/agents/{id}/search-config` (the user's
+/// active-provider selection) USED TO live here as a stub that returned 200
+/// but never persisted — selection silently reset on next Tools-tab remount.
+/// Those two endpoints now reverse-proxy to the Runtime; see
+/// `proxy::proxy_routes()` for the route registration.
 pub async fn get_agent_search_providers(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1947,88 +1810,6 @@ pub async fn get_agent_search_providers(
     Ok(Json(AgentSearchProvidersResponse {
         agent_id,
         providers,
-    }))
-}
-
-/// `GET /api/agents/{id}/search-config` — get per-agent search provider config
-///
-/// Returns the agent's current agent_search.json (active providers + priorities).
-pub async fn get_agent_search_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-) -> Result<Json<AgentSearchConfigResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists and is running
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-        if let Some(info) = gw.running_agents.get(&agent_id) {
-            if !info.ready {
-                return Err(ApiError::service_unavailable(&format!(
-                    "Agent '{}' is starting up, please wait",
-                    agent_id
-                )));
-            }
-        } else {
-            return Err(ApiError::service_unavailable(&format!(
-                "Agent '{}' is not started",
-                agent_id
-            )));
-        }
-    }
-
-    // ADR-033: gRPC removed — config queries are no longer supported.
-    // Return empty providers list; search config is read from agent_config.json.
-    let _ = (&state, &agent_id);
-    let providers = Vec::new();
-
-    Ok(Json(AgentSearchConfigResponse {
-        agent_id,
-        providers,
-    }))
-}
-
-/// `PUT /api/agents/{id}/search-config` — update per-agent search provider config
-///
-/// Saves the agent's chosen search providers + priorities to agent_search.json
-/// via RuntimeConfigUpdate push to the connected agent.
-pub async fn update_agent_search_config(
-    State(state): State<AppState>,
-    Path(agent_id): Path<String>,
-    Json(req): Json<UpdateAgentSearchConfigRequest>,
-) -> Result<Json<AgentSearchConfigResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify agent exists
-    {
-        let gw = state.gateway_state.read().await;
-        if !gw.installed_agents.contains_key(&agent_id) {
-            return Err(ApiError::not_found(&format!(
-                "Agent not found: {}",
-                agent_id
-            )));
-        }
-    }
-
-    let _providers_json = serde_json::to_string(&AgentSearchConfigResponse {
-        agent_id: agent_id.clone(),
-        providers: req.providers.clone(),
-    })
-    .map_err(|e| ApiError::internal(&format!("Failed to serialize search config: {}", e)))?;
-
-    // ADR-033: gRPC removed — RuntimeConfigUpdate push no longer supported.
-    // Search config is persisted by the Runtime to agent_search.json.
-    let _ = (&state, &agent_id);
-    tracing::info!(
-        agent_id = %agent_id,
-        "Search config update persisted (Runtime will pick up on restart)"
-    );
-
-    Ok(Json(AgentSearchConfigResponse {
-        agent_id,
-        providers: req.providers,
     }))
 }
 
