@@ -659,21 +659,19 @@ export function ChatPanel() {
       if (!key || !container) return;
 
       const distFromBottom = getDistanceFromBottom(container);
-      log.debug("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, pinnedToBottom: adapter.isPinnedToBottom, distFromBottom });
+      log.debug("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, distFromBottom });
       setScrollSnapshot(key, {
         scrollOffset: container.scrollTop,
         // Use a generous threshold (120px) for snapshot: if the user was only
         // slightly scrolled up, treat it as pinned so nav-back re-pins to bottom.
-        // The real-time handleScroll below uses a strict 5px threshold, which is
-        // too tight for snapshot — a 1-frame layout shift could set it to 6px.
         //
         // During streaming we ALWAYS record pinnedToBottom=true, because the
         // message list is growing on every poll and the saved scrollOffset
         // would point to stale (or prepended) content after nav-back.  This
         // also prevents the "nav-back lands on the top of the conversation"
-        // bug where a transient pinnedToBottom=false read would otherwise
-        // restore a small scrollOffset.
-        pinnedToBottom: sending || adapter.isPinnedToBottom || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+        // bug where a transient stale read would otherwise restore a small
+        // scrollOffset.
+        pinnedToBottom: sending || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
       });
     };
   }, [currentScrollKey]);
@@ -786,7 +784,6 @@ export function ChatPanel() {
   // We handle restoration explicitly here in a useLayoutEffect so scroll
   // is set before the first paint.  This eliminates the "flash of top
   // position" that would occur with a useEffect-based approach.
-  const restorePinnedToBottom = scrollSnapshot?.pinnedToBottom ?? false;
   useLayoutEffect(() => {
     if (!currentScrollKey || virtualCount === 0) return;
     const snapshot = chatScrollSnapshots.get(currentScrollKey);
@@ -796,13 +793,11 @@ export function ChatPanel() {
     if (!container) return;
 
     if (snapshot.pinnedToBottom) {
-      adapter.setPinnedToBottom(true);
       container.scrollTop = container.scrollHeight;
     } else if (snapshot.scrollOffset > 0) {
-      adapter.setPinnedToBottom(false);
       container.scrollTop = snapshot.scrollOffset;
     }
-  }, [currentScrollKey, virtualCount, restorePinnedToBottom]);
+  }, [currentScrollKey, virtualCount, scrollSnapshot?.pinnedToBottom]);
 
   // ── Retry session load ──────────────────────────────────────────
   // Called from VirtualMessageList when user clicks retry on load error.
@@ -822,7 +817,6 @@ export function ChatPanel() {
   // VML consumes the target and scrolls to the last block.
   const scrollToBottom = useCallback(async () => {
     if (!selectedAgentId || !currentSessionId) return;
-    adapter.setPinnedToBottom(true);
     await adapter.jumpToLatest();
     // Also call vmlRef.scrollToBottom for immediate DOM scroll (the
     // jumpTarget effect handles the data-driven path, but
@@ -840,18 +834,20 @@ export function ChatPanel() {
   }, [selectedAgentId, currentSessionId, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Scroll handler ────────────────────────────────────────────────
-  // Only handles UI updates (button visibility, sticky bottom).
-  // Pagination is handled exclusively by the 150ms timer above.
+  // Only handles the up/down arrow button visibility (state-driven).
+  // Auto-scroll-to-bottom on new messages is gated by `distFromBottom >
+  // clientHeight` directly inside VirtualMessageList's sticky-bottom
+  // effect, evaluated against the live DOM — no shared ref channel to
+  // keep in sync. Pagination is handled exclusively by the 150ms timer
+  // below.
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    const ad = adapterRef.current;
     const sess = sessionRef.current;
 
     const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     sess.setShowScrollToBottom(distFromBottom > container.clientHeight);
     sess.setShowScrollToTop(container.scrollTop > container.clientHeight);
-    ad.setPinnedToBottom(distFromBottom <= 5);
   }, []);
 
   // ── Pagination timer ─────────────────────────────────────────────
@@ -1484,21 +1480,28 @@ export function ChatPanel() {
               </div>
             )}
           </div>
-          {/* Scroll-to-top button - visible when scrolled down > 1 screen */}
+          {/* Scroll-to-top button - visible when scrolled down > 1 screen.
+              Default opacity is reduced so the button does not visually crowd
+              the chat content; it goes fully opaque on hover/focus for clear
+              affordance. The existing `transition-all` covers the opacity
+              animation, and the `hover:bg-zinc-200` background change is
+              independent of the opacity change so both compose cleanly. */}
           {session.showScrollToTop && (
             <button
               onClick={scrollToTop}
-              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label="Scroll to top"
             >
               <ChevronsUp className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
             </button>
           )}
-          {/* Scroll-to-bottom button — visible when scrolled up > 1 screen */}
+          {/* Scroll-to-bottom button — visible when scrolled up > 1 screen.
+              Same default-reduced / hover-full-opacity treatment as the
+              scroll-to-top button for visual consistency. */}
           {session.showScrollToBottom && (
             <button
               onClick={scrollToBottom}
-              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label={t("chatPanel.ariaLabelScrollToBottom")}
             >
               <ChevronsDown className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />

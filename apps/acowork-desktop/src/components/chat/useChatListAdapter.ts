@@ -33,8 +33,6 @@ export interface ChatListAdapter {
   jumpToOldest: () => Promise<void>;
   readonly jumpTarget: "top" | "bottom" | null;
   clearJumpTarget: () => void;
-  readonly isPinnedToBottom: boolean;
-  setPinnedToBottom: (value: boolean) => void;
   onLayout: (totalHeight: number, viewportHeight: number) => void;
 }
 
@@ -131,18 +129,6 @@ export function useChatListAdapter(
     jumpTargetRef.current = null;
   }, []);
 
-  // ── Sticky bottom ──
-
-  const pinnedToBottomRef = useRef(true);
-  const [pinnedVersion, setPinnedVersion] = useState(0);
-  const isPinnedToBottom = pinnedToBottomRef.current;
-
-  const setPinnedToBottom = useCallback((value: boolean) => {
-    if (pinnedToBottomRef.current === value) return;
-    pinnedToBottomRef.current = value;
-    setPinnedVersion((v) => v + 1);
-  }, []);
-
   // ── Ensure-renderable guard ──
 
   const ensureRenderableCountRef = useRef(0);
@@ -223,14 +209,14 @@ export function useChatListAdapter(
     () => ({
       blocks, hasOlder, hasNewer, isLoading: isLoadingMore,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
-      jumpTarget, clearJumpTarget, isPinnedToBottom, setPinnedToBottom, onLayout,
+      jumpTarget, clearJumpTarget, onLayout,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       blocks, hasOlder, hasNewer, isLoadingMore,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
-      jumpTarget, clearJumpTarget, isPinnedToBottom, setPinnedToBottom, onLayout,
-      jumpVersion, pinnedVersion,
+      jumpTarget, clearJumpTarget, onLayout,
+      jumpVersion,
     ],
   );
 }

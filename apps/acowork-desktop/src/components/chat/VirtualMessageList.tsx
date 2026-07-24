@@ -414,11 +414,9 @@ export const VirtualMessageList = React.forwardRef<
 
     if (initialScrollOffset !== undefined && initialScrollOffset >= 0) {
       container.scrollTop = initialScrollOffset;
-      adapter.setPinnedToBottom(false);
       return;
     }
 
-    adapter.setPinnedToBottom(true);
     virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
   }, [virtualCount, initialScrollOffset, containerWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -493,19 +491,43 @@ export const VirtualMessageList = React.forwardRef<
 
   // ── Sticky-bottom: keep pinned when new items are appended ─────────
   //
-  // ADR-041 C4: Reads adapter.isPinnedToBottom instead of pinnedToBottomRef.
-  // When virtualCount grows and the user is pinned to bottom, auto-scroll
-  // to the new last item.
+  // Single source of truth: the actual DOM scroll position.
+  //
+  // The "auto-scroll-to-bottom" decision is the EXACT logical
+  // complement of the down-arrow button's visibility. They share one
+  // condition (`distFromBottom > clientHeight`) and one source
+  // (`container.scrollTop / scrollHeight / clientHeight`):
+  //
+  //   distFromBottom >  clientHeight   →  down-arrow visible  →  do NOT auto-scroll
+  //   distFromBottom <= clientHeight   →  down-arrow hidden   →  auto-scroll to bottom
+  //
+  // Unifying the two means there is no separate `pinnedToBottom` ref
+  // channel to keep in sync, no stale snapshot to read, and no race
+  // between "the button rendered" and "this effect fired". They cannot
+  // disagree because they are evaluated against the same DOM read.
+  //
+  // The `clientHeight` threshold (≈ one viewport height) means the user
+  // has to scroll more than a full screen away before the system stops
+  // following — matching the affordance of the down-arrow button.
   const prevVirtualCountRef = useRef(0);
   useLayoutEffect(() => {
     if (!didInitialScrollRef.current) return;
     const countGrew = virtualCount > prevVirtualCountRef.current;
     prevVirtualCountRef.current = virtualCount;
     if (!countGrew) return;
-    if (!adapter.isPinnedToBottom) return;
     if (virtualCount === 0) return;
+
+    // Same condition as `setShowScrollToBottom(distFromBottom > clientHeight)`
+    // in `handleScroll` — see ChatPanel.tsx. Evaluated here against the
+    // current DOM, not a ref snapshot.
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const distFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distFromBottom > container.clientHeight) return;
+
     virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-  }, [virtualCount, virtualizer, adapter]);
+  }, [virtualCount, virtualizer, scrollContainerRef]);
 
   // ── Ensure-renderable: fill viewport via adapter.onLayout ────────────
   //
