@@ -21,6 +21,19 @@ use acowork_mqtt_session::{
     SessionState, SessionStateTx,
 };
 
+/// Watchdog timeout for `eventloop.poll()`.
+///
+/// If poll() doesn't produce any event within this duration, the TCP
+/// socket is presumed half-dead (most commonly after OS sleep/wake where
+/// the kernel hasn't yet detected the broken connection). The poll task
+/// breaks to the soft-restart path, which drops the old EventLoop and
+/// creates a fresh TCP connection.
+///
+/// 90 s = 3 x keepalive (30 s). Normal connections produce at least one
+/// PINGRESP within every keepalive interval, so 90 s without any event
+/// strongly indicates a stuck socket.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
 pub enum MqttQoS {
@@ -397,6 +410,24 @@ impl DesktopMqttClient {
                         }
                         } // close match
                         } // close event_result arm
+
+                        // Watchdog: if poll() hasn't produced any event in
+                        // POLL_WATCHDOG_TIMEOUT, the TCP socket is likely
+                        // half-dead (e.g. after OS sleep/wake where the
+                        // kernel hasn't detected the broken connection).
+                        // Break to soft-restart path to create a fresh
+                        // connection.  The sleep future is dropped (reset)
+                        // every time poll() returns, so this only fires
+                        // when the connection is truly silent.
+                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
+                            tracing::warn!(
+                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
+                                "MQTT poll() watchdog timeout - \
+                                 forcing soft-restart (possible half-dead socket)"
+                            );
+                            poll_state_tx.set(SessionState::Reconnecting);
+                            break;
+                        }
                     } // close select!
                 } // close inner loop
 

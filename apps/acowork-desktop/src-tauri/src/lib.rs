@@ -307,13 +307,11 @@ mod power {
     /// Returns `true` if the system was genuinely asleep (not merely
     /// minimised or backgrounded) since the last call.
     ///
-    /// A cooldown period (`RELOAD_COOLDOWN_MS`) is enforced after each
-    /// positive detection to prevent rapid successive reloads from
-    /// accumulating GPU/renderer processes during quick sleep/wake cycles.
-    /// If a new sleep is detected during cooldown, the clock baseline is
-    /// still updated (so we don't re-trigger on the *same* sleep), but no
-    /// reload is returned.
-    pub fn check_resume() -> bool {
+    /// Updates the clock baseline on every call so that subsequent calls
+    /// measure sleep since the *last* call, not since the last reload.
+    /// No cooldown – callers use [`allow_reload_now`] to gate expensive
+    /// recovery actions like `window.reload()`.
+    pub fn detect_resume() -> bool {
         let Some((biased_ms, unbiased_ms)) = sample() else {
             return false; // API failure or unsupported platform
         };
@@ -330,33 +328,77 @@ mod power {
         let sleep_ms = biased_delta.saturating_sub(unbiased_delta);
 
         if sleep_ms > SLEEP_THRESHOLD_MS {
-            // Check cooldown: if the last reload was within RELOAD_COOLDOWN_MS,
-            // skip this reload to prevent GPU process accumulation.
-            let last_reload = LAST_RELOAD_MS.load(Ordering::Relaxed);
-            let elapsed_since_reload = biased_ms.saturating_sub(last_reload);
-            if last_reload > 0 && elapsed_since_reload < RELOAD_COOLDOWN_MS {
-                tracing::info!(
-                    sleep_ms,
-                    biased_delta_ms = biased_delta,
-                    unbiased_delta_ms = unbiased_delta,
-                    elapsed_since_reload_ms = elapsed_since_reload,
-                    cooldown_remaining_ms = RELOAD_COOLDOWN_MS - elapsed_since_reload,
-                    "Actual system sleep detected but within reload cooldown — skipping reload"
-                );
-                return false;
-            }
-
-            LAST_RELOAD_MS.store(biased_ms, Ordering::Relaxed);
             tracing::info!(
                 sleep_ms,
                 biased_delta_ms = biased_delta,
                 unbiased_delta_ms = unbiased_delta,
-                "Actual system sleep detected — triggering native webview reload"
+                "Actual system sleep detected"
             );
             true
         } else {
             false
         }
+    }
+
+    /// Returns `true` if a webview reload is permitted (i.e. the
+    /// `RELOAD_COOLDOWN_MS` window has elapsed since the last reload).
+    ///
+    /// On success, records the current biased clock as the last reload
+    /// time.  Call this *only* when about to actually reload – it has
+    /// a side effect of updating the cooldown timestamp.
+    pub fn allow_reload_now() -> bool {
+        let Some((biased_ms, _)) = sample() else {
+            return false; // API failure or unsupported platform
+        };
+
+        let last_reload = LAST_RELOAD_MS.load(Ordering::Relaxed);
+        let elapsed_since_reload = biased_ms.saturating_sub(last_reload);
+        if last_reload > 0 && elapsed_since_reload < RELOAD_COOLDOWN_MS {
+            tracing::info!(
+                elapsed_since_reload_ms = elapsed_since_reload,
+                cooldown_remaining_ms = RELOAD_COOLDOWN_MS - elapsed_since_reload,
+                "Reload cooldown active – skipping webview reload"
+            );
+            false
+        } else {
+            LAST_RELOAD_MS.store(biased_ms, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+/// Recovery actions after a system wake.
+///
+/// Called from both the 2-second polling task and the `Focused(true)`
+/// window event handler when [`power::detect_resume`] reports genuine
+/// sleep. Performs two independent actions:
+///
+/// 1. **Force-reconnect MQTT** – the OS may have killed the TCP socket
+///    during sleep, leaving `eventloop.poll()` hung on a dead connection
+///    that the kernel hasn't yet detected. `force_reconnect()` is cheap
+///    (drops + recreates EventLoop) and idempotent, so it needs no
+///    cooldown.
+///
+/// 2. **Reload webview** – gated by [`power::allow_reload_now`] to
+///    prevent GPU process accumulation during rapid sleep/wake cycles.
+fn recover_from_wake(app_handle: &tauri::AppHandle) {
+    // 1. Force-reconnect MQTT (async, fire-and-forget).
+    let mqtt_client = app_handle.state::<AppState>().mqtt_client.clone();
+    tauri::async_runtime::spawn(async move {
+        let guard = mqtt_client.lock().await;
+        if let Some(client) = guard.as_ref() {
+            let client = client.lock().await;
+            client.force_reconnect();
+            tracing::info!("MQTT force-reconnect triggered by system wake");
+        }
+    });
+
+    // 2. Reload webview (gated by cooldown to prevent GPU process leaks).
+    if power::allow_reload_now()
+        && let Some(window) = app_handle.get_webview_window("main")
+    {
+        let _ = window.eval("sessionStorage.setItem('acowork_recovery_reload', '1');");
+        let _ = window.reload();
     }
 }
 
@@ -554,40 +596,19 @@ pub fn run() {
             }
 
             // Spawn async task for automatic sleep detection.
-            // Polls biased/unbiased monotonic clocks every 2 s via the
-            // existing tokio runtime — no dedicated thread needed.  On
-            // detecting real sleep, the webview is reloaded natively
-            // (equivalent to F5) within ~2 s of waking, without user
-            // interaction.  The `Focused(true)` handler below provides
-            // immediate detection when the user clicks the window.  Both
-            // paths share the same atomic state in `power::check_resume`,
-            // so the reload fires exactly once per sleep cycle.
+            // Polls biased/unbiased monotonic clocks every 2 s.  On
+            // detecting real sleep, `recover_from_wake` force-reconnects
+            // the MQTT client (OS may have killed the TCP socket) and
+            // reloads the webview (gated by cooldown).  The `Focused(true)`
+            // handler below provides immediate detection when the user
+            // clicks the window.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
                 loop {
                     interval.tick().await;
-                    if power::check_resume() {
-                        // Native webview reload — calls ICoreWebView2::Reload()
-                        // (or equivalent), the same code path as pressing F5.
-                        // This works even when the WebView2 renderer/IPC is
-                        // broken after a GPU compositor crash during sleep.
-                        //
-                        // The previous approach (emit "system-resume" →
-                        // frontend JS listener → window.location.reload())
-                        // failed when the IPC channel was broken, leaving
-                        // the screen black until the user pressed F5.
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            // Set recovery flag so App.tsx skips the splash
-                            // screen.  Only effective if the JS renderer is
-                            // still alive; if not, the splash screen will
-                            // show briefly (gateway is already running).
-                            let _ = window.eval(
-                                "sessionStorage.setItem('acowork_recovery_reload', '1');",
-                            );
-                            // Native reload — primary recovery mechanism.
-                            let _ = window.reload();
-                        }
+                    if power::detect_resume() {
+                        recover_from_wake(&app_handle);
                     }
                 }
             });
@@ -607,18 +628,8 @@ pub fn run() {
                 // *actual* system sleep — not merely window minimise/restore.
                 // See the `power` module docs above for platform details.
                 tauri::WindowEvent::Focused(true) => {
-                    if power::check_resume() {
-                        // Same native reload as the polling task.  Provides
-                        // immediate recovery when the user clicks the window
-                        // after wake, without waiting for the next poll tick.
-                        // `window` here is a `&Window` (OS-level); we look up
-                        // the associated `WebviewWindow` to access eval/reload.
-                        if let Some(webview) = window.get_webview_window(window.label()) {
-                            let _ = webview.eval(
-                                "sessionStorage.setItem('acowork_recovery_reload', '1');",
-                            );
-                            let _ = webview.reload();
-                        }
+                    if power::detect_resume() {
+                        recover_from_wake(window.app_handle());
                     }
                 }
 
