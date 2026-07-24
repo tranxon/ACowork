@@ -713,8 +713,80 @@ interface ChatStore {
 let _mqttAgentEventUnlisten: (() => void) | null = null;
 let _mqttStatusUnlisten: (() => void) | null = null;
 
+/// Reentrancy guard for `initMqttListener`.
+///
+/// React StrictMode (dev) double-invokes `useEffect`, causing
+/// `bootGateway` → `initMqttListener` to be called twice concurrently.
+/// Without this guard, the second call cancels the first call's
+/// listeners before they finish registering, causing `mqtt-status`
+/// events to be lost.  The guard ensures the second call awaits the
+/// first and returns immediately.
+let _mqttInitPromise: Promise<void> | null = null;
+
+/// Interval handle for the background status-polling fallback.
+///
+/// When `get_mqtt_status` returns `connected: false` (e.g. the client
+/// is still in `Connecting` state after a wake-recovery reload), the
+/// `mqtt-status` event with `connected: true` may have been emitted
+/// *before* the listener was registered and was therefore lost.  The
+/// polling fallback calls `get_mqtt_status` every 1 s until the client
+/// reports `connected: true` or 30 attempts have been made.  This is
+/// purely a safety net - the event listener is the primary mechanism.
+let _mqttPollHandle: ReturnType<typeof setInterval> | null = null;
+
+function stopMqttPoll(): void {
+  if (_mqttPollHandle) {
+    clearInterval(_mqttPollHandle);
+    _mqttPollHandle = null;
+  }
+}
+
+function startMqttPoll(): void {
+  stopMqttPoll();
+  let attempts = 0;
+  _mqttPollHandle = setInterval(async () => {
+    attempts++;
+    if (attempts > 30) {
+      stopMqttPoll();
+      log.debug("MQTT status polling exhausted 30 attempts; relying on events only");
+      return;
+    }
+    try {
+      const snap = await invoke<{ known: boolean; connected: boolean; reason?: string | null }>(
+        "get_mqtt_status",
+      );
+      if (attempts <= 3 || attempts % 10 === 0) {
+        log.debug("[mqtt-poll] attempt", attempts, "snapshot:", JSON.stringify(snap));
+      }
+      if (snap.known && snap.connected) {
+        useChatStore.setState({ mqttConnected: true, lastMqttError: null });
+        stopMqttPoll();
+        log.debug("[mqtt-poll] connected confirmed after", attempts, "poll(s)");
+      }
+    } catch {
+      // Transient IPC failure - keep polling.
+    }
+  }, 1000);
+}
+
 export async function initMqttListener(): Promise<void> {
-  // Unregister previous listeners if any (idempotent re-init).
+  // Reentrancy guard: if a previous init is still in flight (React
+  // StrictMode double-call), await it and return instead of racing.
+  if (_mqttInitPromise) {
+    await _mqttInitPromise;
+    return;
+  }
+  _mqttInitPromise = doInitMqttListener();
+  try {
+    await _mqttInitPromise;
+  } finally {
+    _mqttInitPromise = null;
+  }
+}
+
+async function doInitMqttListener(): Promise<void> {
+  // Unregister previous listeners and stop any ongoing poll.
+  stopMqttPoll();
   if (_mqttAgentEventUnlisten) {
     _mqttAgentEventUnlisten();
     _mqttAgentEventUnlisten = null;
@@ -736,52 +808,69 @@ export async function initMqttListener(): Promise<void> {
     handleMessageEvent(data, store.setState, store.getState, agentId);
   });
 
-  // ADR-036: connection liveness is owned by the Rust eventloop.  We only
-  // consume.  The Tauri side always includes `connected` (and optionally
-  // `reason` when disconnected); we mirror the value verbatim onto the
-  // store.  We DO NOT optimistically set `mqttConnected: true` here —
-  // the very first `mqtt-status` event with `connected: true` will set it.
-  _mqttStatusUnlisten = await listen<{ connected: boolean; reason?: string }>(
-    "mqtt-status",
-    (event) => {
-      const { connected, reason } = event.payload;
-      useChatStore.setState({
-        mqttConnected: connected,
-        lastMqttError: connected ? null : reason ?? null,
-      });
-    },
-  );
+  // ADR-036: connection liveness is owned by the Rust eventloop.  We
+  // consume `mqtt-status` events for real-time updates.  The payload
+  // may include `connecting: true` or `reconnecting: true` for
+  // transient states that should NOT trigger the disconnected banner.
+  _mqttStatusUnlisten = await listen<{
+    connected: boolean;
+    reason?: string;
+    connecting?: boolean;
+    reconnecting?: boolean;
+  }>("mqtt-status", (event) => {
+    const { connected, reason, connecting, reconnecting } = event.payload;
+    if (connected) {
+      useChatStore.setState({ mqttConnected: true, lastMqttError: null });
+      stopMqttPoll();
+    } else if (connecting) {
+      // Client is attempting to connect - don't flash the error banner.
+      useChatStore.setState({ mqttConnected: false, lastMqttError: null });
+    } else if (reconnecting) {
+      // Client lost connection and is retrying - show a warning.
+      useChatStore.setState({ mqttConnected: false, lastMqttError: reason ?? "reconnecting" });
+    } else {
+      // Hard disconnect with a reason.
+      useChatStore.setState({ mqttConnected: false, lastMqttError: reason ?? null });
+    }
+  });
 
   // Pull the *current* status from the Rust side so we don't miss the
-  // initial state.  The poll task has been running since `connect_mqtt`
-  // returned, and any transition that happened before this listener
-  // registered is reflected in the shared `last_mqtt_status` slot.
+  // initial state.  The source of truth is `DesktopMqttClient::session_state`
+  // (a watch channel updated synchronously by the poll task).
   //
-  // `known: false` means the poll task hasn't observed any transition
-  // yet (e.g. broker is reachable but ConnAck hasn't arrived).  We
-  // treat that exactly like "unknown" — neither flip mqttConnected to
-  // true nor populate lastMqttError.  The first `mqtt-status` event
-  // will fill in the real state.
-  try {
-    const snapshot = await invoke<{
-      known: boolean;
-      connected: boolean;
-      reason?: string | null;
-    }>("get_mqtt_status");
-    if (snapshot.known) {
+  // If the snapshot shows `connected: false` (client is in `Connecting`
+  // or `Reconnecting` state), start the polling fallback to catch the
+  // eventual `Connected` transition - the `mqtt-status` event for that
+  // transition may have been emitted before this listener registered.
+    try {
+      const snapshot = await invoke<{
+        known: boolean;
+        connected: boolean;
+        reason?: string | null;
+      }>("get_mqtt_status");
+      log.debug("[initMqttListener] snapshot:", snapshot);
+      if (snapshot.known) {
       useChatStore.setState({
         mqttConnected: snapshot.connected,
         lastMqttError: snapshot.connected ? null : snapshot.reason ?? null,
       });
     }
+    // Start the polling fallback whenever we are not yet connected.
+    // It is harmless when the event stream is working and is a
+    // lifeline when the initial event was lost during webview reload.
+    if (!snapshot.connected) {
+      startMqttPoll();
+    }
   } catch (err) {
     // Tauri command not registered (older binary) or other transient
-    // failure — fall back to the event stream alone.
+    // failure - fall back to the event stream alone.
     log.warn("get_mqtt_status failed; relying on mqtt-status events:", err);
   }
 }
 
 export function disposeMqttListener(): void {
+  stopMqttPoll();
+  _mqttInitPromise = null;
   if (_mqttAgentEventUnlisten) {
     _mqttAgentEventUnlisten();
     _mqttAgentEventUnlisten = null;

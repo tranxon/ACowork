@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 acowork-core.workspace = true
 acowork-mcp.workspace = true
+acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
 acowork-sign.workspace = true
 acowork-vault.workspace = true
 acowork-memory.workspace = true

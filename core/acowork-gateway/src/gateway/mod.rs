@@ -825,38 +825,8 @@ impl Gateway {
 
             match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
                 Ok(c) => {
-                    tracing::info!("MQTT Gateway client connected");
+                    tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
-                    let client_for_subs = client.clone();
-                    tokio::spawn(async move {
-                        // Surface subscription errors instead of silently swallowing them —
-                        // if any subscription fails, downstream state will be stale with no
-                        // diagnostic trail (latency=0, 503s, agent list empty, etc.).
-                        if let Err(e) = client_for_subs
-                            .subscribe("acowork/agents/+/http_port", crate::mqtt::MqttQoS::AtLeastOnce)
-                            .await
-                        {
-                            tracing::error!(
-                                topic = "acowork/agents/+/http_port",
-                                error = %e,
-                                "Failed to subscribe to Runtime http_port topic — Gateway will 503 every reverse-proxy request"
-                            );
-                        } else {
-                            tracing::info!("Subscribed to acowork/agents/+/http_port");
-                        }
-                        if let Err(e) = client_for_subs
-                            .subscribe("acowork/agents/+/status", crate::mqtt::MqttQoS::AtLeastOnce)
-                            .await
-                        {
-                            tracing::error!(
-                                topic = "acowork/agents/+/status",
-                                error = %e,
-                                "Failed to subscribe to Runtime status topic — AgentRegistry will never be populated"
-                            );
-                        } else {
-                            tracing::info!("Subscribed to acowork/agents/+/status");
-                        }
-                    });
                     Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }

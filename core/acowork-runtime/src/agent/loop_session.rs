@@ -105,9 +105,13 @@ impl super::loop_::AgentLoop {
                 status
             );
         }
-        // Update watch channel for SessionHandle reads
+        // Update watch channel for SessionHandle reads.
+        // Use `send_modify` instead of `send` because `send` silently
+        // fails (returns Err without updating) when there are no
+        // receivers – e.g. after the SessionHandle is dropped but the
+        // agent loop hasn't exited yet.
         if let Some(ref tx) = self.session_core.status_tx {
-            let _ = tx.send(status.clone());
+            tx.send_modify(|v| *v = status.clone());
         }
         // Update shared snapshot for Gateway pull API.
         // The snapshot Arc is shared between SessionState and SessionHandle;

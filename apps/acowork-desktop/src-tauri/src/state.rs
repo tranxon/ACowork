@@ -1,13 +1,31 @@
 //! Application state shared across Tauri commands
 //!
 //! Holds shared, mutable application state accessible from any Tauri command.
+//!
+//! ## MQTT connection status (ADR-036 / ADR-039)
+//!
+//! MQTT connection state is intentionally NOT stored here.  The single
+//! source of truth lives in `DesktopMqttClient::session_state` (a
+//! `tokio::sync::watch` channel updated synchronously by the poll task's
+//! `on_status` callback).  `get_mqtt_status` reads it directly via
+//! `session_state().current()`, which means:
+//!
+//! - No cache to keep in sync with the watch channel
+//! - No `tokio::spawn` indirection that could race the frontend's
+//!   snapshot read after a webview reload
+//! - One well-defined path for status transitions
+//!
+//! The `on_status` callback also emits a `mqtt-status` Tauri event for
+//! real-time updates, but the event is best-effort: the frontend's
+//! `initMqttListener` always calls `get_mqtt_status` to fetch the
+//! authoritative snapshot, then subscribes for subsequent updates.
 
 use std::process::Child;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::gateway_client::GatewayClient;
-use crate::mqtt_client::{MqttStatus, SharedDesktopMqttClient};
+use crate::mqtt_client::SharedDesktopMqttClient;
 
 #[cfg(target_os = "windows")]
 use crate::win_job::JobHandle;
@@ -44,9 +62,9 @@ pub struct AppState {
     /// Gateway HTTP client. `base_url` reflects the active configuration:
     ///   - Local mode  → `acowork_core::defaults::GATEWAY_HTTP_URL`
     ///   - Remote mode → user-configured URL
-    pub gateway: Arc<RwLock<GatewayClient>>,
+    pub gateway: Arc<tokio::sync::RwLock<GatewayClient>>,
     /// Active deployment mode. Set by `set_gateway_config` (called from frontend).
-    pub gateway_mode: Arc<RwLock<GatewayMode>>,
+    pub gateway_mode: Arc<tokio::sync::RwLock<GatewayMode>>,
     /// Handle to the locally spawned Gateway process (None in remote mode
     /// or before `init_local_gateway` is called).
     pub gateway_process: Arc<Mutex<Option<Child>>>,
@@ -59,18 +77,10 @@ pub struct AppState {
     /// ADR-033 Phase 3: Desktop MQTT client for real-time events.
     /// Connected after the Gateway is confirmed healthy. None until
     /// `connect_mqtt` is called from the frontend.
+    ///
+    /// Connection state lives inside the client (`session_state()`); see
+    /// module docs.
     pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
-
-    /// ADR-036: last observed MQTT broker connection status.
-    ///
-    /// `None`  — the poll task has not yet observed any state transition
-    ///           (initial state, before first ConnAck / Disconnect).
-    /// `Some`  — the most recent transition observed by the poll task.
-    ///
-    /// This three-valued slot is the source of truth.  `get_mqtt_status`
-    /// returns it synchronously so the frontend can recover the initial
-    /// state without racing the `mqtt-status` Tauri event.
-    pub last_mqtt_status: Arc<RwLock<Option<MqttStatus>>>,
 }
 
 impl AppState {
@@ -81,18 +91,12 @@ impl AppState {
     ///   - base_url = acowork_core::defaults::GATEWAY_HTTP_URL
     pub fn new() -> Self {
         Self {
-            gateway: Arc::new(RwLock::new(GatewayClient::new())),
-            gateway_mode: Arc::new(RwLock::new(GatewayMode::Local)),
+            gateway: Arc::new(tokio::sync::RwLock::new(GatewayClient::new())),
+            gateway_mode: Arc::new(tokio::sync::RwLock::new(GatewayMode::Local)),
             gateway_process: Arc::new(Mutex::new(None)),
             #[cfg(target_os = "windows")]
             gateway_job: Arc::new(Mutex::new(None)),
             mqtt_client: Arc::new(Mutex::new(None)),
-            // ADR-036: starts as `None` (= "unknown / not yet observed").
-            // The poll task will overwrite this with the first ConnAck
-            // (or the first failed poll → Disconnected).  Distinguishing
-            // "unknown" from "disconnected" lets the frontend avoid
-            // flashing the disconnected banner on cold start.
-            last_mqtt_status: Arc::new(RwLock::new(None)),
         }
     }
 }

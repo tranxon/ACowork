@@ -36,12 +36,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
     let user_id = "default"; // Single-user phase; multi-user will use actual user_id
 
-    // ADR-036: clone the shared status slot so the `'static` on_status
-    // callback (which outlives this command) can keep it in sync.  The
-    // `get_mqtt_status` command reads the same slot synchronously so
-    // the frontend never races the listener registration.
-    let last_mqtt_status = state.last_mqtt_status.clone();
-
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
     // Also emits raw "mqtt-event" for debugging.
@@ -234,29 +228,31 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         }
     };
 
-    // Mirror into the shared status slot so `get_mqtt_status` can
-    // return the current value synchronously.  Cloned here (instead of
-    // moving the outer one) so we keep the original binding for any
-    // potential future use in this function body.
-    let on_status_last_mqtt_status = last_mqtt_status.clone();
-
     let client = DesktopMqttClient::connect_default(
         user_id,
         on_message,
-        // ADR-036: bridge `rumqttc` eventloop status → Tauri event so the
-        // React `chatStore` can keep `mqttConnected` truthful.  We emit a
-        // dedicated `mqtt-status` event (NOT `agent-event`/`mqtt-event`)
-        // because connection liveness is a different concern from the
-        // business message stream and must remain easy to filter on.
+        // ADR-036 / ADR-039: bridge `rumqttc` eventloop status → Tauri event.
         //
-        // We also mirror every transition into `last_mqtt_status`
-        // (shared with the `get_mqtt_status` command) so the
-        // frontend can fetch the current state synchronously after
-        // listener registration — no race with the first event.
+        // The `mqtt-status` event is BEST-EFFORT real-time notification.
+        // The source of truth lives in `DesktopMqttClient::session_state`
+        // (a watch channel updated synchronously by the poll task, which
+        // `get_mqtt_status` reads).  This callback must stay synchronous
+        // and side-effect-free apart from `app.emit` -- any state mutation
+        // here would re-introduce the race the architecture was refactored
+        // to avoid.
         move |status| {
             let payload = match &status {
                 MqttStatus::Connected => serde_json::json!({
                     "connected": true,
+                }),
+                MqttStatus::Connecting => serde_json::json!({
+                    "connected": false,
+                    "connecting": true,
+                }),
+                MqttStatus::Reconnecting { reason } => serde_json::json!({
+                    "connected": false,
+                    "reconnecting": true,
+                    "reason": reason,
                 }),
                 MqttStatus::Disconnected { reason } => serde_json::json!({
                     "connected": false,
@@ -266,13 +262,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             if let Err(e) = app.emit("mqtt-status", payload) {
                 tracing::warn!(error = %e, "failed to emit mqtt-status");
             }
-            // Mirror into shared state so `get_mqtt_status` returns
-            // the latest value.  We wrap the actual write in a tiny
-            // `tokio::spawn` to keep this callback non-async-friendly.
-            let slot = on_status_last_mqtt_status.clone();
-            tokio::spawn(async move {
-                *slot.write().await = Some(status);
-            });
         },
     ).await?;
 
@@ -328,37 +317,37 @@ pub async fn force_reconnect_mqtt(
 
 /// Snapshot of the current MQTT connection status, returned to the frontend.
 ///
-/// ADR-036: this synchronous query complements the `mqtt-status` Tauri event.
-/// The frontend's `initMqttListener` first registers the event listener
-/// (asynchronous, events between `connect_mqtt` return and `listen` resolving
-/// would otherwise be lost) and then calls this command to pull the current
-/// state from the Rust-side source-of-truth.
+/// ADR-036 / ADR-039: the source of truth is the `SessionState` watch
+/// channel held by `DesktopMqttClient`.  The poll task updates it
+/// synchronously inside its `on_status` callback (no `tokio::spawn`
+/// indirection), so this read is guaranteed to reflect the latest
+/// transition observed by the poll task.
 ///
-/// `known: false` means the poll task has not yet observed any transition
-/// (initial state, before the first ConnAck or Disconnect).  The frontend
-/// uses this to avoid flashing the disconnected banner on cold start.
+/// The frontend's `initMqttListener` calls this AFTER `listen()`
+/// resolves, so it never races the `mqtt-status` event either way:
+///   - If the event was emitted before `listen()` registered, the
+///     snapshot below returns the same value as the event would have.
+///   - If `listen()` registered first, future events flow normally.
+///
+/// `known: false` means the MQTT client is not yet connected (or has
+/// been torn down).  The frontend uses this to avoid flashing the
+/// disconnected banner on cold start.
 #[tauri::command]
 pub async fn get_mqtt_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let snapshot = state.last_mqtt_status.read().await.clone();
-    let payload = match &snapshot {
-        None => serde_json::json!({
+    let guard = state.mqtt_client.lock().await;
+    let Some(client) = guard.as_ref() else {
+        eprintln!("[get_mqtt_status] no client exists");
+        return Ok(serde_json::json!({
             "known": false,
             "connected": false,
             "reason": null,
-        }),
-        Some(MqttStatus::Connected) => serde_json::json!({
-            "known": true,
-            "connected": true,
-        }),
-        Some(MqttStatus::Disconnected { reason }) => serde_json::json!({
-            "known": true,
-            "connected": false,
-            "reason": reason,
-        }),
+        }));
     };
-    Ok(payload)
+    let client = client.lock().await;
+    let state = client.session_state();
+    Ok(mqtt_status_to_payload(&state))
 }
 
 /// Subscribe to session events for a specific agent session.
@@ -1009,5 +998,44 @@ mod tests {
         assert_eq!(extract_agent_id_from_topic(""), None);
         assert_eq!(extract_agent_id_from_topic("not/the/expected/topic"), None);
         assert_eq!(extract_agent_id_from_topic("acowork/agents//sessions/x/opened"), None);
+    }
+}
+
+/// Convert a `SessionState` into the JSON payload returned by `get_mqtt_status`
+/// and emitted as `mqtt-status` events.  Centralised so the snapshot and
+/// the event use byte-for-byte identical shapes.
+fn mqtt_status_to_payload(state: &acowork_mqtt_session::SessionState) -> serde_json::Value {
+    use acowork_mqtt_session::SessionState;
+    match state {
+        SessionState::Idle => serde_json::json!({
+            "known": false,
+            "connected": false,
+            "reason": null,
+        }),
+        // `Connecting` means the client exists and is actively trying to
+        // connect (initial connect or after force_reconnect).  We return
+        // `known: true` so the frontend updates its store and starts the
+        // polling fallback, rather than ignoring the snapshot.
+        SessionState::Connecting => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "connecting": true,
+            "reason": null,
+        }),
+        SessionState::Reconnecting => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "reconnecting": true,
+            "reason": "reconnecting",
+        }),
+        SessionState::Connected => serde_json::json!({
+            "known": true,
+            "connected": true,
+        }),
+        SessionState::Disconnected { reason } => serde_json::json!({
+            "known": true,
+            "connected": false,
+            "reason": reason,
+        }),
     }
 }

@@ -104,12 +104,24 @@ impl SessionStateTx {
     }
 
     /// Update the state. Logs the transition at INFO level.
+    ///
+    /// Uses `send_modify` instead of `send` because `send` returns
+    /// `Err` when there are no receivers – and in this architecture the
+    /// receiver is usually not held (the `SessionStateRx` from `new()`
+    /// is dropped).  `send_modify` unconditionally updates the stored
+    /// value and provides a reference to the previous value, which is
+    /// exactly what we need: `current()` reads via `borrow()` which
+    /// always reflects the latest stored value regardless of receiver
+    /// count.
     pub fn set(&self, state: SessionState) {
-        let prev = self.tx.borrow().clone();
-        if prev != state {
-            tracing::info!(from = %prev, to = %state, "MQTT session state transition");
-        }
-        let _ = self.tx.send(state);
+        let mut prev_str = String::new();
+        self.tx.send_modify(|current| {
+            if *current != state {
+                prev_str = format!("{}", *current);
+                tracing::info!(from = %prev_str, to = %state, "MQTT session state transition");
+            }
+            *current = state;
+        });
     }
 
     /// Read the current state without subscribing.
@@ -223,5 +235,50 @@ mod tests {
         let (tx, rx) = SessionStateTx::new(SessionState::Connected);
         assert_eq!(tx.current(), SessionState::Connected);
         assert_eq!(rx.current(), SessionState::Connected);
+    }
+
+    /// Regression test: `set` must update the value even when no
+    /// receiver is held.  This was the root cause of the MQTT
+    /// "perpetually connecting" bug – `watch::Sender::send` returns
+    /// `Err` (and does NOT update the stored value) when there are
+    /// zero receivers.  The fix uses `send_modify` which unconditionally
+    /// writes.
+    #[test]
+    fn set_works_without_receiver() {
+        let (tx, _rx) = SessionStateTx::new(SessionState::Connecting);
+        drop(_rx); // drop the only receiver
+
+        tx.set(SessionState::Connected);
+        assert_eq!(
+            tx.current(),
+            SessionState::Connected,
+            "set() must update the value even with no receivers"
+        );
+
+        tx.set(SessionState::Reconnecting);
+        assert_eq!(tx.current(), SessionState::Reconnecting);
+
+        tx.set(SessionState::Disconnected {
+            reason: "test".into(),
+        });
+        assert!(matches!(
+            tx.current(),
+            SessionState::Disconnected { .. }
+        ));
+    }
+
+    /// `current()` on a clone must see writes from the original,
+    /// and vice-versa – they share the same internal channel.
+    #[test]
+    fn clone_shares_state() {
+        let (tx, _rx) = SessionStateTx::new(SessionState::Idle);
+        let tx_clone = tx.clone();
+        drop(_rx);
+
+        tx_clone.set(SessionState::Connected);
+        assert_eq!(tx.current(), SessionState::Connected);
+
+        tx.set(SessionState::Reconnecting);
+        assert_eq!(tx_clone.current(), SessionState::Reconnecting);
     }
 }

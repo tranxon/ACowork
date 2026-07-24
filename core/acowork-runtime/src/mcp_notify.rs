@@ -45,7 +45,7 @@ impl McpConfigNotifier {
     /// notification yet, `send` will silently drop the old value
     /// and replace it with the new one (watch semantics).
     pub fn notify(&self) {
-        let _ = self.tx.send(());
+        self.tx.send_modify(|v| *v = ());
     }
 
     /// Get a new receiver for subscription.

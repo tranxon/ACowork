@@ -53,16 +53,18 @@ export function MqttDebugControls() {
         );
         setStatus(
           result.message,
-          result.ok ? "info" : "error"
+          result.ok ? "info" : "error",
+          "debug"
         );
         // Auto-clear info messages after a few seconds; keep errors visible.
         if (result.ok) {
-          setTimeout(clearStatus, 4000);
+          setTimeout(() => clearStatus("debug"), 4000);
         }
       } catch (e) {
         setStatus(
           `MQTT ${action} failed: ${e}`,
-          "error"
+          "error",
+          "debug"
         );
       } finally {
         setBusy(null);

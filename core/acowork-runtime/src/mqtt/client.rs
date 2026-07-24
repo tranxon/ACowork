@@ -37,6 +37,14 @@ use acowork_mqtt_session::{
 
 use crate::mqtt::available_cache::SharedAvailableCache;
 
+/// Watchdog timeout for `eventloop.poll()`.
+///
+/// If poll() doesn't produce any event within this duration, the TCP
+/// connection is likely half-dead (e.g. after OS sleep/wake where the
+/// kernel hasn't detected the broken connection). We break to the
+/// soft-restart path to create a fresh `AsyncClient` + `EventLoop`.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Error type for Runtime MQTT client operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeMqttClientError {
@@ -130,7 +138,13 @@ pub struct ToolApprovalNeededEvent<'a> {
 /// - Global resource subscription → `AvailableResourceCache`
 /// - Control command subscription → caller-provided channel
 pub struct RuntimeMqttClient {
-    client: AsyncClient,
+    /// Shared client handle, swappable during soft-restart.
+    ///
+    /// The poll task holds a clone of this `Arc<Mutex<AsyncClient>>` and
+    /// swaps in a fresh `AsyncClient` when it recreates the `EventLoop`.
+    /// All publish methods obtain a clone via `self.client().await`,
+    /// ensuring they always use the current handle.
+    shared_client: Arc<Mutex<AsyncClient>>,
     /// The agent_id this client represents.
     agent_id: String,
     /// Cached inputs needed to re-run `run_bootstrap` on every
@@ -152,7 +166,7 @@ pub struct RuntimeMqttClient {
 impl Clone for RuntimeMqttClient {
     fn clone(&self) -> Self {
         Self {
-            client: self.client.clone(),
+            shared_client: Arc::clone(&self.shared_client),
             agent_id: self.agent_id.clone(),
             bootstrap_data: Arc::clone(&self.bootstrap_data),
             _eventloop_guard: Arc::clone(&self._eventloop_guard),
@@ -189,6 +203,14 @@ struct BootstrapData {
 }
 
 impl RuntimeMqttClient {
+    /// Obtain a clone of the current `AsyncClient`.
+    ///
+    /// The lock is held only for the duration of the clone (an `Arc`
+    /// bump inside rumqttc), so this is safe to call from async code.
+    async fn client(&self) -> AsyncClient {
+        self.shared_client.lock().await.clone()
+    }
+
     /// Connect to the MQTT broker and perform the Phase 2 startup sequence.
     ///
     /// ADR-034 Phase 8: takes a single `MqttConnectConfig` struct.
@@ -238,7 +260,14 @@ impl RuntimeMqttClient {
         let will = LastWill::new(&bootstrap_data.status_topic, "offline", QoS::AtLeastOnce, true);
         options.set_last_will(will);
 
-        let (client, mut eventloop) = AsyncClient::new(options, 100);
+        let (client, mut eventloop) = AsyncClient::new(options.clone(), 100);
+
+        // The `AsyncClient` is shared between the struct (for publishes)
+        // and the poll task (for soft-restart).  Wrapping it in
+        // `Arc<Mutex<AsyncClient>>` allows the poll task to swap in a
+        // fresh client after a soft-restart while publish callers
+        // always observe the current handle.
+        let shared_client: Arc<Mutex<AsyncClient>> = Arc::new(Mutex::new(client));
 
         // Spawn the event-loop poller. It owns `eventloop` for the
         // lifetime of the client. In addition to per-publish routing
@@ -255,7 +284,8 @@ impl RuntimeMqttClient {
         let poll_control_tx = cfg.control_tx.clone();
         let poll_identity_tx = cfg.identity_update_tx.clone();
         let poll_bootstrap = bootstrap_data.clone();
-        let poll_client = client.clone();
+        let task_shared_client = Arc::clone(&shared_client);
+        let task_options = options; // moved into poll task for soft-restart
         // ADR-039 §5.2.1: use a oneshot channel to synchronise
         // connect() with the first ConnAck instead of the old
         // wait_for_connection() anti-pattern (subscribe to a dummy
@@ -272,122 +302,149 @@ impl RuntimeMqttClient {
         let reconnect_policy = ReconnectPolicy::default();
 
         let poll_task = tokio::spawn(async move {
-            let mut consecutive_failures: u32 = 0;
+            let mut soft_restart_count: u32 = 0;
+
+            // Outer loop: each iteration is a fresh client + eventloop.
+            // On fatal errors or watchdog timeout we break the inner
+            // loop and recreate the AsyncClient + EventLoop from
+            // scratch - a soft-restart that recovers from half-dead
+            // sockets and corrupted state machines (e.g. after OS
+            // sleep/wake).
             loop {
-                match eventloop.poll().await {
-                    Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
-                        let topic = &publish.topic;
+                let mut consecutive_failures: u32 = 0;
 
-                        // Route global resource updates to the available cache.
-                        if topic.starts_with("acowork/global/") {
-                            // ADR-042: peek at the cache after update to detect
-                            // user_profile changes. The cache itself is the
-                            // single source of truth — we just translate the
-                            // latest value into the SessionManager-facing
-                            // event.
-                            let mut cache_write = poll_cache.write().await;
-                            cache_write.update_from_mqtt(topic, &publish.payload);
+                // Inner loop: poll the current eventloop.
+                loop {
+                    tokio::select! {
+                        event_result = eventloop.poll() => {
+                            match event_result {
+                                Ok(Event::Incoming(rumqttc::Incoming::Publish(publish))) => {
+                                    let topic = &publish.topic;
 
-                            if topic == "acowork/global/user_profile" {
-                                let profile = cache_write.active_user_profile();
-                                tracing::debug!(
-                                    has_profile = profile.is_some(),
-                                    "acowork/global/user_profile retained received"
-                                );
-                                drop(cache_write);
-                                if let (Some(tx), Some(profile)) = (poll_identity_tx.as_ref(), profile) {
-                                    let _ = tx.send(profile);
+                                    if topic.starts_with("acowork/global/") {
+                                        let mut cache_write = poll_cache.write().await;
+                                        cache_write.update_from_mqtt(topic, &publish.payload);
+
+                                        if topic == "acowork/global/user_profile" {
+                                            let profile = cache_write.active_user_profile();
+                                            tracing::debug!(
+                                                has_profile = profile.is_some(),
+                                                "acowork/global/user_profile retained received"
+                                            );
+                                            drop(cache_write);
+                                            if let (Some(tx), Some(profile)) = (poll_identity_tx.as_ref(), profile) {
+                                                let _ = tx.send(profile);
+                                            }
+                                        }
+                                    }
+
+                                    if topic.starts_with(&poll_bootstrap.control_filter_prefix) {
+                                        let _ = poll_control_tx.send((topic.clone(), publish.payload.to_vec()));
+                                    }
+                                }
+                                Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
+                                    tracing::info!(
+                                        agent_id = %poll_agent_id,
+                                        "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
+                                    );
+                                    let poll_client = task_shared_client.lock().await.clone();
+                                    let result =
+                                        Self::run_bootstrap(&poll_client, &poll_bootstrap).await;
+                                    if let Err(ref e) = result {
+                                        let _ = poll_client
+                                            .publish(
+                                                &poll_bootstrap.status_topic,
+                                                QoS::AtLeastOnce,
+                                                true,
+                                                "degraded",
+                                            )
+                                            .await;
+                                        tracing::error!(
+                                            agent_id = %poll_agent_id,
+                                            error = %e,
+                                            "Runtime MQTT bootstrap after (re)connect failed - agent is degraded"
+                                        );
+                                        poll_state_tx.set(SessionState::Disconnected {
+                                            reason: format!("bootstrap failed: {e}"),
+                                        });
+                                    } else {
+                                        consecutive_failures = 0;
+                                        poll_state_tx.set(SessionState::Connected);
+                                    }
+                                    if let Some(tx) = first_conn_tx.take() {
+                                        let _ = tx.send(result);
+                                    }
+                                }
+                                Ok(_) => continue,
+                                Err(e) => {
+                                    let class = classify_err(&ErrorDescriptor::from(&e));
+                                    tracing::warn!(
+                                        agent_id = %poll_agent_id,
+                                        error = %e,
+                                        err_class = class.label(),
+                                        consecutive_failures,
+                                        "Runtime MQTT event loop error"
+                                    );
+
+                                    if class.is_fatal() {
+                                        // E2/E3/E4/E6: the EventLoop's internal
+                                        // state may be corrupt. Break to the
+                                        // soft-restart path instead of terminating
+                                        // the poll task. A fresh EventLoop +
+                                        // AsyncClient recovers from state-machine
+                                        // corruption caused by network disruptions
+                                        // (e.g. OS sleep/wake).
+                                        poll_state_tx.set(SessionState::Disconnected {
+                                            reason: format!("{}: {}", class.label(), e),
+                                        });
+                                        break;
+                                    }
+
+                                    poll_state_tx.set(SessionState::Reconnecting);
+                                    consecutive_failures += 1;
+                                    if let Some(backoff) =
+                                        reconnect_policy.backoff(class, consecutive_failures - 1)
+                                    {
+                                        tracing::info!(
+                                            agent_id = %poll_agent_id,
+                                            attempt = backoff.attempt,
+                                            sleep_ms = backoff.duration.as_millis(),
+                                            "Backing off before reconnect attempt"
+                                        );
+                                        tokio::time::sleep(backoff.duration).await;
+                                    }
                                 }
                             }
                         }
 
-                        // Route control commands to the control channel.
-                        if topic.starts_with(&poll_bootstrap.control_filter_prefix) {
-                            let _ = poll_control_tx.send((topic.clone(), publish.payload.to_vec()));
-                        }
-                    }
-                    // ADR-039: re-run bootstrap on every (re)connect.
-                    Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
-                        tracing::info!(
-                            agent_id = %poll_agent_id,
-                            "Runtime MQTT broker confirmed (re)connection - re-running bootstrap"
-                        );
-                        let result =
-                            Self::run_bootstrap(&poll_client, &poll_bootstrap).await;
-                        if let Err(ref e) = result {
-                            // ADR-039 P3: best-effort publish degraded
-                            // status so the Gateway can surface the
-                            // failure rather than the agent silently
-                            // appearing "online" with no subscriptions.
-                            let _ = poll_client
-                                .publish(
-                                    &poll_bootstrap.status_topic,
-                                    QoS::AtLeastOnce,
-                                    true,
-                                    "degraded",
-                                )
-                                .await;
-                            tracing::error!(
+                        // Watchdog: if poll() hasn't produced any event in
+                        // POLL_WATCHDOG_TIMEOUT, the TCP socket is likely
+                        // half-dead (e.g. after OS sleep/wake). Break to
+                        // the soft-restart path to create a fresh connection.
+                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
+                            tracing::warn!(
                                 agent_id = %poll_agent_id,
-                                error = %e,
-                                "Runtime MQTT bootstrap after (re)connect failed \
-                                 - agent is degraded"
+                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
+                                "Runtime MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
                             );
-                            poll_state_tx.set(SessionState::Disconnected {
-                                reason: format!("bootstrap failed: {e}"),
-                            });
-                        } else {
-                            // Bootstrap succeeded - reset failure counter
-                            // and mark as connected.
-                            consecutive_failures = 0;
-                            poll_state_tx.set(SessionState::Connected);
-                        }
-                        // Signal connect() on the first ConnAck only.
-                        // Subsequent reconnects just log - rumqttc
-                        // keeps the event loop alive and retries
-                        // automatically.
-                        if let Some(tx) = first_conn_tx.take() {
-                            let _ = tx.send(result);
-                        }
-                    }
-                    Ok(_) => continue,
-                    Err(e) => {
-                        // ADR-039 Phase 2: classify the error and
-                        // apply the appropriate recovery strategy.
-                        let class = classify_err(&ErrorDescriptor::from(&e));
-                        tracing::warn!(
-                            agent_id = %poll_agent_id,
-                            error = %e,
-                            err_class = class.label(),
-                            consecutive_failures,
-                            "Runtime MQTT event loop error"
-                        );
-
-                        if class.is_fatal() {
-                            // E2/E3/E4/E6: do not retry. Set terminal
-                            // state and break out of the event loop.
-                            poll_state_tx.set(SessionState::Disconnected {
-                                reason: format!("{}: {}", class.label(), e),
-                            });
+                            poll_state_tx.set(SessionState::Reconnecting);
                             break;
-                        }
-
-                        // E1/E5: retryable. Apply exponential backoff.
-                        poll_state_tx.set(SessionState::Reconnecting);
-                        consecutive_failures += 1;
-                        if let Some(backoff) =
-                            reconnect_policy.backoff(class, consecutive_failures - 1)
-                        {
-                            tracing::info!(
-                                agent_id = %poll_agent_id,
-                                attempt = backoff.attempt,
-                                sleep_ms = backoff.duration.as_millis(),
-                                "Backing off before reconnect attempt"
-                            );
-                            tokio::time::sleep(backoff.duration).await;
                         }
                     }
                 }
+
+                // Soft-restart: recreate client + EventLoop
+                poll_state_tx.set(SessionState::Connecting);
+                let (new_client, new_eventloop) =
+                    AsyncClient::new(task_options.clone(), 100);
+                *task_shared_client.lock().await = new_client;
+                eventloop = new_eventloop;
+                soft_restart_count += 1;
+                tracing::info!(
+                    agent_id = %poll_agent_id,
+                    soft_restart_count,
+                    "Runtime MQTT client soft-restarted with fresh EventLoop"
+                );
             }
         });
 
@@ -413,7 +470,7 @@ impl RuntimeMqttClient {
         );
 
         let mqtt_client = Self {
-            client: client.clone(),
+            shared_client,
             agent_id: cfg.agent_id.to_string(),
             bootstrap_data: bootstrap_data.clone(),
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
@@ -523,7 +580,7 @@ impl RuntimeMqttClient {
         retain: bool,
     ) -> Result<(), RuntimeMqttClientError> {
         let payload = prost::Message::encode_to_vec(envelope);
-        self.client
+        self.client().await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -534,7 +591,7 @@ impl RuntimeMqttClient {
     pub async fn publish_status(&self, online: bool) -> Result<(), RuntimeMqttClientError> {
         let topic = format!("acowork/agents/{}/status", self.agent_id);
         let payload = if online { "online" } else { "offline" };
-        self.client
+        self.client().await
             .publish(topic, QoS::AtLeastOnce, true, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("status: {}", e)))?;
@@ -549,7 +606,7 @@ impl RuntimeMqttClient {
         qos: MqttQoS,
         retain: bool,
     ) -> Result<(), RuntimeMqttClientError> {
-        self.client
+        self.client().await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -562,7 +619,7 @@ impl RuntimeMqttClient {
         filter: &str,
         qos: MqttQoS,
     ) -> Result<(), RuntimeMqttClientError> {
-        self.client
+        self.client().await
             .subscribe(filter, qos.into())
             .await
             .map_err(|e| RuntimeMqttClientError::Subscribe(format!("'{}': {}", filter, e)))?;
@@ -604,8 +661,8 @@ impl RuntimeMqttClient {
     }
 
     /// Get a clone of the inner AsyncClient.
-    pub fn inner(&self) -> AsyncClient {
-        self.client.clone()
+    pub async fn inner(&self) -> AsyncClient {
+        self.client().await
     }
 }
 
@@ -614,9 +671,10 @@ impl Drop for RuntimeMqttClient {
         // Best-effort: publish "offline" before the connection drops.
         // The Last Will ensures this happens even on crash, but a clean
         // disconnect publishes immediately rather than waiting for keep-alive timeout.
-        let client = self.client.clone();
+        let shared_client = Arc::clone(&self.shared_client);
         let status_topic = format!("acowork/agents/{}/status", self.agent_id);
         tokio::spawn(async move {
+            let client = shared_client.lock().await.clone();
             let _ = client
                 .publish(status_topic, QoS::AtLeastOnce, true, "offline")
                 .await;
@@ -641,7 +699,7 @@ pub type SharedRuntimeMqttClient = Arc<Mutex<RuntimeMqttClient>>;
 #[derive(Clone)]
 pub struct MqttChunkPublisher {
     agent_id: String,
-    client: AsyncClient,
+    shared_client: Arc<Mutex<AsyncClient>>,
 }
 
 impl MqttChunkPublisher {
@@ -649,8 +707,13 @@ impl MqttChunkPublisher {
     pub fn from_runtime_client(client: &RuntimeMqttClient) -> Self {
         Self {
             agent_id: client.agent_id().to_string(),
-            client: client.inner(),
+            shared_client: Arc::clone(&client.shared_client),
         }
+    }
+
+    /// Obtain a clone of the current AsyncClient.
+    async fn client(&self) -> AsyncClient {
+        self.shared_client.lock().await.clone()
     }
 
     /// Return the agent_id this publisher is bound to.
@@ -671,7 +734,8 @@ impl MqttChunkPublisher {
             self.agent_id, session_id, event_type
         );
         if let Err(e) = self
-            .client
+            .client()
+            .await
             .publish(topic, QoS::AtLeastOnce, true, &[])
             .await
         {
@@ -694,7 +758,7 @@ impl MqttChunkPublisher {
     ) -> Result<(), RuntimeMqttClientError> {
         let topic = format!("acowork/agents/{}/sessions/{}", self.agent_id, event_type);
         let bytes = prost::Message::encode_to_vec(envelope);
-        self.client
+        self.client().await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("lifecycle: {}", e)))
@@ -726,7 +790,7 @@ impl MqttChunkPublisher {
             self.agent_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.client
+        self.client().await
             .publish(topic, QoS::AtLeastOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("session_opened: {}", e)))
@@ -756,7 +820,7 @@ impl MqttChunkPublisher {
             self.agent_id, session_id
         );
         let bytes = prost::Message::encode_to_vec(&envelope);
-        self.client
+        self.client().await
             .publish(topic, QoS::AtMostOnce, false, bytes)
             .await
             .map_err(|e| RuntimeMqttClientError::Publish(format!("session_not_opened: {}", e)))
@@ -799,7 +863,8 @@ impl MqttChunkPublisher {
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         if let Err(e) = self
-            .client
+            .client()
+            .await
             .publish(topic, QoS::AtLeastOnce, /* retain */ true, bytes)
             .await
         {
@@ -846,7 +911,8 @@ impl MqttChunkPublisher {
             self.agent_id, session_id, event_type
         );
         if let Err(e) = self
-            .client
+            .client()
+            .await
             .publish(topic, qos, retain, payload)
             .await
         {

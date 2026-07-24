@@ -415,6 +415,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // strict setActiveTab.
         await chat.openSession(id, latest.session_id);
         await useChatStore.getState().fetchSessionState(id, latest.session_id);
+        // Populate the sessions array so the session tab bar and panel
+        // display the correct title instead of "Untitled" until the user
+        // manually opens the session list (which triggers fetchSessions).
+        get().fetchSessions(id);
       });
     }
   },

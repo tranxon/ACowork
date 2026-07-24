@@ -385,9 +385,9 @@ export function AppLayout() {
     if (gatewayStatus === "connected") {
       clearStatus();
     } else if (gatewayStatus === "error") {
-      setStatus("Gateway connection failed", "error");
+      setStatus("Gateway connection failed", "error", "gateway");
     } else {
-      setStatus("Connecting to Gateway...", "warning");
+      setStatus("Connecting to Gateway...", "warning", "gateway");
     }
   }, [gatewayStatus, setStatus, clearStatus]);
 
@@ -411,15 +411,12 @@ export function AppLayout() {
     if (gatewayStatus !== "connected") return;
     if (!mqttConnected && lastMqttError !== null) {
       const reason = lastMqttError ? `: ${lastMqttError}` : "";
-      setStatus(t("statusBar.mqttDisconnected", { reason }), "warning");
+      setStatus(t("statusBar.mqttDisconnected", { reason }), "warning", "mqtt");
     } else if (mqttConnected) {
-      // MQTT just reconnected — clear any leftover MQTT status message
-      // (but only if the status bar is currently showing an MQTT message;
-      // a generic warning should not be cleared).
-      const currentMsg = useStatusBarStore.getState().message;
-      if (currentMsg && currentMsg.startsWith(t("statusBar.mqttDisconnected", { reason: "" }).slice(0, 12))) {
-        clearStatus();
-      }
+      // MQTT just reconnected - clear the MQTT-disconnected status
+      // by source rather than by fragile text matching on the
+      // displayed string (which would break if translations change).
+      clearStatus("mqtt");
     }
   }, [mqttConnected, lastMqttError, gatewayStatus, setStatus, clearStatus, t]);
 

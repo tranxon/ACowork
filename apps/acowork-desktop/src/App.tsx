@@ -5,6 +5,7 @@ import { SplashScreen } from "./components/layout/SplashScreen";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { initMqttListener } from "./stores/chatStore";
 import { log } from "./lib/logger";
 
 function App() {
@@ -21,9 +22,16 @@ function App() {
   const [gatewayReady, setGatewayReady] = useState(isRecoveryReload);
 
   // Clear the recovery flag after mount so it doesn't affect future loads.
+  // Also re-register the MQTT listener: recovery reload skips SplashScreen
+  // (gateway is already running), but the webview reload destroyed all
+  // Tauri event listeners. Without re-registering, chatStore.mqttConnected
+  // stays false forever and the UI permanently shows "Connecting to agent".
   useEffect(() => {
     if (isRecoveryReload) {
       sessionStorage.removeItem("acowork_recovery_reload");
+      initMqttListener().catch((e) =>
+        log.warn("[App] initMqttListener failed on recovery reload:", e)
+      );
     }
   }, [isRecoveryReload]);
 

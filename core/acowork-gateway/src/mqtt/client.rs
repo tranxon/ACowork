@@ -10,11 +10,81 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+use rumqttc::{AsyncClient, ConnectionError, ConnectReturnCode, Event, Incoming, MqttOptions, QoS};
 use tokio::sync::Mutex;
 
 use acowork_core::defaults;
 use acowork_core::mqtt_proto::DataEnvelope;
+use acowork_mqtt_session::{
+    classify as classify_err, ErrorDescriptor, ErrorKind, RefusedReason, ReconnectPolicy,
+    SessionState, SessionStateTx,
+};
+
+/// Watchdog timeout for `eventloop.poll()`.
+///
+/// If poll() doesn't produce any event within this duration, the TCP
+/// socket is presumed half-dead (most commonly after OS sleep/wake).
+/// The poll task breaks to the soft-restart path, which drops the old
+/// EventLoop and creates a fresh TCP connection.
+///
+/// 90 s = 3 x keepalive (30 s).
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Build an [`ErrorDescriptor`] from rumqttc 0.25's `ConnectionError`.
+///
+/// This is the same adapter used by the Desktop client, bridging the
+/// rumqttc 0.25 error type to the version-agnostic `ErrorDescriptor`
+/// used by the shared `acowork-mqtt-session` crate.
+fn error_descriptor_from_rumqttc_025(err: &ConnectionError) -> ErrorDescriptor {
+    match err {
+        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => ErrorDescriptor {
+            kind: ErrorKind::Timeout,
+            io_kind: None,
+        },
+        ConnectionError::Io(io_err) => ErrorDescriptor {
+            kind: ErrorKind::Io,
+            io_kind: Some(io_err.kind()),
+        },
+        ConnectionError::ConnectionRefused(code) => ErrorDescriptor {
+            kind: ErrorKind::ConnectionRefused(match code {
+                ConnectReturnCode::BadUserNamePassword => RefusedReason::BadUserNamePassword,
+                ConnectReturnCode::NotAuthorized => RefusedReason::NotAuthorized,
+                ConnectReturnCode::RefusedProtocolVersion => RefusedReason::RefusedProtocolVersion,
+                ConnectReturnCode::BadClientId => RefusedReason::BadClientId,
+                ConnectReturnCode::ServiceUnavailable => RefusedReason::ServiceUnavailable,
+                _ => RefusedReason::Unknown,
+            }),
+            io_kind: None,
+        },
+        ConnectionError::MqttState(_) => ErrorDescriptor {
+            kind: ErrorKind::MqttState,
+            io_kind: None,
+        },
+        ConnectionError::NotConnAck(_) => ErrorDescriptor {
+            kind: ErrorKind::NotConnAck,
+            io_kind: None,
+        },
+        ConnectionError::RequestsDone => ErrorDescriptor {
+            kind: ErrorKind::RequestsDone,
+            io_kind: None,
+        },
+        _ => ErrorDescriptor {
+            kind: ErrorKind::Other,
+            io_kind: None,
+        },
+    }
+}
+
+/// Topic filters that must be re-subscribed on every ConnAck.
+///
+/// With `clean_session = true` the broker drops all subscriptions on
+/// disconnect, so **every** active subscription must be listed here.
+/// Without re-subscribing, the Gateway silently loses agent http_port
+/// and status updates after any MQTT reconnect.
+const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
+    ("acowork/agents/+/http_port", QoS::AtLeastOnce),
+    ("acowork/agents/+/status", QoS::AtLeastOnce),
+];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).
 pub type MqttMessageCallback = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
@@ -55,10 +125,17 @@ impl From<MqttQoS> for QoS {
 /// background tokio task to maintain the connection.
 #[derive(Clone)]
 pub struct GatewayMqttClient {
-    client: AsyncClient,
+    /// Shared client handle, swappable during soft-restart.
+    shared_client: Arc<Mutex<AsyncClient>>,
     /// The event loop is kept alive by the background poll task.
-    /// We hold the handle to prevent it from being dropped.
     _eventloop_guard: Arc<EventLoopGuard>,
+}
+
+impl GatewayMqttClient {
+    /// Obtain a clone of the current `AsyncClient`.
+    async fn client(&self) -> AsyncClient {
+        self.shared_client.lock().await.clone()
+    }
 }
 
 /// Guard that keeps the event loop polling task alive.
@@ -82,36 +159,124 @@ impl GatewayMqttClient {
         // Clean start = true (MQTT 3.1.1). No session persistence.
         options.set_clean_session(true);
 
-        let (client, mut eventloop) = AsyncClient::new(options, 50);
+        let (client, mut eventloop) = AsyncClient::new(options.clone(), 50);
+        let shared_client: Arc<Mutex<AsyncClient>> = Arc::new(Mutex::new(client));
 
-        // Spawn a background task to poll the event loop.
-        // This is required for the connection to be maintained and
-        // for automatic reconnection on network failures.
+        // ADR-039 Phase 2: session state broadcast + reconnect policy.
+        let (state_tx, _) = SessionStateTx::new(SessionState::Connecting);
+        let poll_state_tx = state_tx.clone();
+        let reconnect_policy = ReconnectPolicy::default();
+
+        let task_shared_client = Arc::clone(&shared_client);
+        let task_options = options;
+        let task_callback = message_callback;
+
+        // Spawn the eventloop poller with the same robust structure as
+        // Desktop and Agent Runtime: outer loop (soft-restart) + inner
+        // loop (normal polling) + watchdog + error classification.
         let poll_task = tokio::spawn(async move {
+            let mut soft_restart_count: u32 = 0;
+
             loop {
-                match eventloop.poll().await {
-                    Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                        tracing::trace!(topic = %publish.topic, "MQTT publish (gateway client)");
-                        if let Some(ref cb) = message_callback {
-                            cb(publish.topic, publish.payload.to_vec());
+                let mut consecutive_failures: u32 = 0;
+                let mut fatal_streak: u32 = 0;
+
+                loop {
+                    tokio::select! {
+                        event_result = eventloop.poll() => {
+                            match event_result {
+                                Ok(Event::Incoming(Incoming::Publish(publish))) => {
+                                    if let Some(ref cb) = task_callback {
+                                        cb(publish.topic, publish.payload.to_vec());
+                                    }
+                                }
+                                Ok(Event::Incoming(Incoming::ConnAck(_))) => {
+                                    tracing::info!(
+                                        "Gateway MQTT broker confirmed (re)connection - re-subscribing persistent topics"
+                                    );
+                                    poll_state_tx.set(SessionState::Connected);
+                                    consecutive_failures = 0;
+                                    fatal_streak = 0;
+
+                                    let poll_client = task_shared_client.lock().await.clone();
+                                    for (filter, qos) in PERSISTENT_SUBSCRIPTIONS {
+                                        if let Err(e) = poll_client.subscribe(*filter, *qos).await {
+                                            tracing::warn!(
+                                                filter,
+                                                error = %e,
+                                                "Gateway MQTT resubscribe failed"
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(Event::Incoming(Incoming::Disconnect)) => {
+                                    poll_state_tx.set(SessionState::Reconnecting);
+                                }
+                                Ok(_) => continue,
+                                Err(e) => {
+                                    let desc = error_descriptor_from_rumqttc_025(&e);
+                                    let class = classify_err(&desc);
+
+                                    tracing::warn!(
+                                        error = %e,
+                                        err_class = class.label(),
+                                        consecutive_failures,
+                                        "Gateway MQTT event loop error"
+                                    );
+
+                                    if class.is_fatal() {
+                                        fatal_streak += 1;
+                                        poll_state_tx.set(SessionState::Reconnecting);
+
+                                        if fatal_streak >= 3 {
+                                            soft_restart_count += 1;
+                                            tracing::warn!(
+                                                soft_restart_count,
+                                                "3 consecutive fatal errors - soft-restarting Gateway MQTT client"
+                                            );
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                    } else {
+                                        poll_state_tx.set(SessionState::Reconnecting);
+                                        consecutive_failures += 1;
+                                        if let Some(backoff) =
+                                            reconnect_policy.backoff(class, consecutive_failures - 1)
+                                        {
+                                            tokio::time::sleep(backoff.duration).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        _ = tokio::time::sleep(POLL_WATCHDOG_TIMEOUT) => {
+                            tracing::warn!(
+                                timeout_s = POLL_WATCHDOG_TIMEOUT.as_secs(),
+                                "Gateway MQTT poll() watchdog timeout - forcing soft-restart (possible half-dead socket)"
+                            );
+                            poll_state_tx.set(SessionState::Reconnecting);
+                            break;
                         }
                     }
-                    Ok(Event::Incoming(_)) => continue,
-                    Ok(Event::Outgoing(outgoing)) => {
-                        tracing::trace!(?outgoing, "MQTT outgoing (gateway client)");
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "MQTT event loop error (gateway client), will retry");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
                 }
+
+                // Soft-restart: recreate client + EventLoop
+                poll_state_tx.set(SessionState::Connecting);
+                let (new_client, new_eventloop) =
+                    AsyncClient::new(task_options.clone(), 50);
+                *task_shared_client.lock().await = new_client;
+                eventloop = new_eventloop;
+                tracing::info!(
+                    soft_restart_count,
+                    "Gateway MQTT client soft-restarted with fresh EventLoop"
+                );
             }
         });
 
         // Wait for the connection to be established.
-        // We attempt a lightweight operation (subscribe to a dummy topic)
-        // to verify connectivity. If it fails after retries, return error.
-        let connected = Self::wait_for_connection(&client, 20).await;
+        let probe_client = shared_client.lock().await.clone();
+        let connected = Self::wait_for_connection(&probe_client, 20).await;
         if !connected {
             return Err(GatewayMqttClientError::Connection(format!(
                 "Failed to connect to MQTT broker at {}:{} within timeout",
@@ -127,7 +292,7 @@ impl GatewayMqttClient {
         );
 
         Ok(Self {
-            client,
+            shared_client,
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
         })
     }
@@ -212,7 +377,7 @@ impl GatewayMqttClient {
         retain: bool,
     ) -> Result<(), GatewayMqttClientError> {
         let payload = prost::Message::encode_to_vec(envelope);
-        self.client
+        self.client().await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| GatewayMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -273,7 +438,7 @@ impl GatewayMqttClient {
         qos: MqttQoS,
         retain: bool,
     ) -> Result<(), GatewayMqttClientError> {
-        self.client
+        self.client().await
             .publish(topic, qos.into(), retain, payload)
             .await
             .map_err(|e| GatewayMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -288,7 +453,7 @@ impl GatewayMqttClient {
         qos: MqttQoS,
         retain: bool,
     ) -> Result<(), GatewayMqttClientError> {
-        self.client
+        self.client().await
             .publish(topic, qos.into(), retain, payload.as_bytes())
             .await
             .map_err(|e| GatewayMqttClientError::Publish(format!("'{}': {}", topic, e)))?;
@@ -302,7 +467,7 @@ impl GatewayMqttClient {
         filter: &str,
         qos: MqttQoS,
     ) -> Result<(), GatewayMqttClientError> {
-        self.client
+        self.client().await
             .subscribe(filter, qos.into())
             .await
             .map_err(|e| GatewayMqttClientError::Subscribe(format!("'{}': {}", filter, e)))?;
@@ -313,8 +478,8 @@ impl GatewayMqttClient {
     ///
     /// The returned client shares the same event loop, so publishes
     /// through it will be handled by the same connection.
-    pub fn inner(&self) -> AsyncClient {
-        self.client.clone()
+    pub async fn inner(&self) -> AsyncClient {
+        self.client().await
     }
 }
 

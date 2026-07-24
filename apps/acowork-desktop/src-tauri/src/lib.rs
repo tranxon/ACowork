@@ -30,6 +30,7 @@ mod tray;
 #[cfg(target_os = "windows")]
 mod win_wndproc;
 use state::AppState;
+use std::time::Duration;
 use tauri::Manager;
 
 // ── Windows Job Object for Gateway process tree cleanup ────────────────────
@@ -381,29 +382,166 @@ mod power {
 ///
 /// 2. **Reload webview** – gated by [`power::allow_reload_now`] to
 ///    prevent GPU process accumulation during rapid sleep/wake cycles.
+///
+/// **Concurrency guard**: `RECOVERY_IN_PROGRESS` prevents overlapping
+/// calls.  Although `detect_resume()` atomically updates the clock
+/// baseline (so it normally returns `true` only once per sleep event),
+/// the polling task and the `Focused(true)` handler could theoretically
+/// race on the very first call.  The guard ensures only one recovery
+/// task runs at a time, preventing a double `force_reconnect()` that
+/// would reset the connection the first task is waiting on.
+static RECOVERY_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn recover_from_wake(app_handle: &tauri::AppHandle) {
-    // 1. Force-reconnect MQTT (async, fire-and-forget).
+    // Concurrency guard: only one recovery task at a time.
+    if RECOVERY_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        tracing::debug!("recover_from_wake already in progress - skipping");
+        return;
+    }
+
+    let window = app_handle.get_webview_window("main");
     let mqtt_client = app_handle.state::<AppState>().mqtt_client.clone();
+
     tauri::async_runtime::spawn(async move {
-        let guard = mqtt_client.lock().await;
-        if let Some(client) = guard.as_ref() {
-            let client = client.lock().await;
-            client.force_reconnect();
-            tracing::info!("MQTT force-reconnect triggered by system wake");
+        // Ensure the guard is cleared even if the task panics.
+        let _guard = RecoveryGuard;
+
+        // 1. Force-reconnect MQTT.
+        {
+            let guard = mqtt_client.lock().await;
+            if let Some(client) = guard.as_ref() {
+                let client = client.lock().await;
+                client.force_reconnect();
+                tracing::info!("MQTT force-reconnect triggered by system wake");
+            }
+        }
+
+        // 2. Wait for MQTT to reach Connected state before reloading the
+        //    webview, so the frontend starts with a live connection instead
+        //    of racing against the reconnection and showing "Connecting to
+        //    agent..." for many seconds.
+        let connected = {
+            let guard = mqtt_client.lock().await;
+            match guard.as_ref() {
+                Some(client) => client.lock().await.wait_for_connected(Duration::from_secs(10)).await,
+                None => false,
+            }
+        };
+
+        if connected {
+            tracing::info!("MQTT reconnected after wake - reloading webview now");
+        } else {
+            tracing::warn!("MQTT not connected within 10s after wake - reloading webview anyway");
+        }
+
+        // 3. Reload webview with recovery flag (gated by cooldown).
+        //    Both setItem and reload are done in a single `eval` so they
+        //    execute in the same JS context - the flag is set before the
+        //    page unloads.  A separate `window.reload()` call after eval()
+        //    can race against the eval's execution and cancel it.
+        if power::allow_reload_now()
+            && let Some(window) = &window
+        {
+            match window.eval(
+                "sessionStorage.setItem('acowork_recovery_reload', '1');\
+                 window.location.reload()",
+            ) {
+                Ok(()) => tracing::info!("Webview reload triggered with recovery flag"),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "Failed to eval recovery reload script - \
+                     webview may be in an invalid state after wake"
+                ),
+            }
         }
     });
+}
 
-    // 2. Reload webview (gated by cooldown to prevent GPU process leaks).
-    if power::allow_reload_now()
-        && let Some(window) = app_handle.get_webview_window("main")
-    {
-        let _ = window.eval("sessionStorage.setItem('acowork_recovery_reload', '1');");
-        let _ = window.reload();
+/// RAII guard that clears `RECOVERY_IN_PROGRESS` when dropped.
+struct RecoveryGuard;
+
+impl Drop for RecoveryGuard {
+    fn drop(&mut self) {
+        RECOVERY_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Initialize tracing for the Desktop Rust backend.
+///
+/// Writes to a rolling file in the Gateway's data/logs directory
+/// (so all ACowork logs are co-located) and to stderr in dev builds.
+///
+/// Without this, all `tracing::info!`/`tracing::warn!` calls in the
+/// Desktop Rust code are silent no-ops, making runtime debugging
+/// impossible without ad-hoc `eprintln!` additions.
+fn init_desktop_tracing() {
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,acowork_desktop=debug"));
+
+    // Desktop writes to its OWN log directory, independent of the
+    // Gateway.  The Gateway may be remote; even when local, Desktop
+    // must not write into the Gateway's data tree.  Uses the same
+    // `~/.acowork` root so all ACowork artifacts are co-located.
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    let log_dir = std::path::PathBuf::from(home)
+        .join(".acowork")
+        .join("desktop-app")
+        .join("logs");
+
+    let file_appender = match acowork_core::logging::SizeRollingFileAppender::new(
+        log_dir.clone(),
+        5, // 5 MB per file
+        3, // keep 3 rotated files
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("WARN: failed to create file appender: {}; falling back to stderr-only", e);
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_writer(std::io::stderr)
+                .init();
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("WARN: failed to create log dir {:?}: {}", log_dir, e);
+    }
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_appender)
+        .with_ansi(false)
+        .with_target(true);
+
+    #[cfg(debug_assertions)]
+    let stderr_layer = Some(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(false),
+    );
+    #[cfg(not(debug_assertions))]
+    let stderr_layer: Option<tracing_subscriber::fmt::Layer<_>> = None;
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+
+    acowork_core::logging::install_panic_hook();
+    tracing::info!("Desktop tracing initialized (log_dir={:?})", log_dir);
+}
+
 pub fn run() {
+    init_desktop_tracing();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())

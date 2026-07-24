@@ -103,11 +103,22 @@ pub struct MqttMessage {
 /// error).
 #[derive(Debug, Clone)]
 pub enum MqttStatus {
+    /// The client is attempting to establish a connection (initial
+    /// connect or after a soft-restart / force-reconnect).  The
+    /// frontend uses this to avoid flashing the disconnected banner
+    /// while the client is actively trying to connect.
+    Connecting,
     /// Broker confirmed the connection (CONNACK received).  Also fired
     /// after a successful automatic reconnect following a disconnect.
     Connected,
+    /// Connection was lost and the client is retrying with backoff.
+    /// `reason` explains why the connection was lost.
+    Reconnecting { reason: String },
     /// Connection is no longer usable.  `reason` is a human-readable
     /// explanation suitable for surfacing in the UI status bar.
+    /// Currently unused by the poll task (which emits `Reconnecting`
+    /// instead), but retained for explicit disconnect scenarios.
+    #[allow(dead_code)]
     Disconnected { reason: String },
 }
 
@@ -320,6 +331,7 @@ impl DesktopMqttClient {
                                 "MQTT force-restart requested by user – \
                                  breaking to soft-restart path"
                             );
+                            on_status(MqttStatus::Connecting);
                             poll_state_tx.set(SessionState::Connecting);
                             break; // break inner loop -> outer loop recreates
                         }
@@ -351,7 +363,7 @@ impl DesktopMqttClient {
                         // client_id collision).  `rumqttc` will retry; we just
                         // surface the transition.
                         Ok(Event::Incoming(rumqttc::Incoming::Disconnect)) => {
-                            on_status(MqttStatus::Disconnected {
+                            on_status(MqttStatus::Reconnecting {
                                 reason: "broker sent DISCONNECT".into(),
                             });
                             poll_state_tx.set(SessionState::Reconnecting);
@@ -361,7 +373,7 @@ impl DesktopMqttClient {
                             let desc = error_descriptor_from_rumqttc_025(&e);
                             let class = classify_err(&desc);
 
-                            on_status(MqttStatus::Disconnected {
+                            on_status(MqttStatus::Reconnecting {
                                 reason: format!("eventloop error: {e}"),
                             });
 
@@ -425,6 +437,9 @@ impl DesktopMqttClient {
                                 "MQTT poll() watchdog timeout - \
                                  forcing soft-restart (possible half-dead socket)"
                             );
+                            on_status(MqttStatus::Reconnecting {
+                                reason: "poll watchdog timeout (possible half-dead socket)".into(),
+                            });
                             poll_state_tx.set(SessionState::Reconnecting);
                             break;
                         }
@@ -437,6 +452,7 @@ impl DesktopMqttClient {
                 // A fresh AsyncClient + EventLoop pair is created with the
                 // same MqttOptions. The new AsyncClient is swapped into the
                 // shared slot so Tauri command callers automatically use it.
+                on_status(MqttStatus::Connecting);
                 poll_state_tx.set(SessionState::Connecting);
                 let (new_client, new_eventloop) =
                     AsyncClient::new(task_options.clone(), 100);
@@ -679,6 +695,31 @@ impl DesktopMqttClient {
     /// despite the broker being healthy).
     pub fn force_reconnect(&self) {
         self.force_restart.notify_one();
+    }
+
+    /// Wait for the MQTT client to reach `Connected` state.
+    ///
+    /// Returns `true` if connected within the timeout, `false` otherwise.
+    /// Call this after `force_reconnect()` to ensure the frontend loads
+    /// with a live connection rather than racing against the reconnection.
+    ///
+    /// Uses a simple polling loop instead of `subscribe()` + `changed()`
+    /// to avoid the race where `Connected` is set between the subscribe
+    /// and the `changed()` wait, causing the latter to hang indefinitely.
+    pub async fn wait_for_connected(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        // Fast path: already connected.
+        if self.state_tx.current().is_connected() {
+            return true;
+        }
+        // Poll every 100 ms until connected or timeout.
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if self.state_tx.current().is_connected() {
+                return true;
+            }
+        }
+        false
     }
 }
 
