@@ -645,6 +645,8 @@
     "previewBadge": "預覽",
     "previewLoading": "正在載入預覽...",
     "previewDoubleClickHint": "雙擊切換到編輯器",
+    "markdownLinkNotFound": "所有工作區都未找到檔案:{{href}}",
+    "markdownImageClickHint": "點擊開啟預覽",
     "loadingUrl": "正在載入頁面...",
     "urlLoadError": "此頁面無法載入",
     "openInBrowser": "在瀏覽器中開啟",

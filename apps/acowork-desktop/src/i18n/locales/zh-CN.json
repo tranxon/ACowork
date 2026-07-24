@@ -669,6 +669,8 @@
     "previewDisabled": "当前文件不支持预览",
     "previewLoading": "正在加载预览...",
     "previewDoubleClickHint": "双击切换到编辑器",
+    "markdownLinkNotFound": "所有工作区都未找到文件:{{href}}",
+    "markdownImageClickHint": "点击打开预览",
     "loadingUrl": "正在加载页面...",
     "urlLoadError": "此页面无法加载",
     "openInBrowser": "在浏览器中打开",

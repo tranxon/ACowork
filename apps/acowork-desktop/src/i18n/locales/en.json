@@ -747,6 +747,8 @@
     "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",
     "previewDoubleClickHint": "Double-click to open in editor",
+    "markdownLinkNotFound": "File not found in any workspace: {{href}}",
+    "markdownImageClickHint": "Click to open preview",
     "loadingUrl": "Loading page...",
     "urlLoadError": "This page could not be loaded",
     "openInBrowser": "Open in browser",

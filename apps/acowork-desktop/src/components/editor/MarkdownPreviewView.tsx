@@ -1,4 +1,4 @@
-import React, { createElement, useCallback, useLayoutEffect, useMemo, useRef, Children, isValidElement } from "react";
+import React, { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, Children, isValidElement } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -10,8 +10,15 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { cn } from "../../lib/utils";
+import {
+    PASSTHROUGH_SCHEMES,
+    resolveAssetAcrossWorkspaces,
+    openFirstResolved,
+    notifyLinkNotFound,
+    type ResolvedAsset,
+} from "./markdownLinkResolver";
 
-/** ReactMarkdown component overrides — code blocks with title bar (mirrors ChatPanel). */
+/** ReactMarkdown `pre` override — code blocks with title bar (mirrors ChatPanel). */
 const markdownComponents = {
     pre: ({ children }: { children?: React.ReactNode }) => {
         const childArray = Children.toArray(children);
@@ -27,75 +34,7 @@ const markdownComponents = {
         }
         return <pre>{children}</pre>;
     },
-    /** Intercept link clicks: open URLs in a file block tab instead of navigating the webview. */
-    a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
-        const handleClick = (e: React.MouseEvent) => {
-            if (!href) return;
-            if (!/^https?:\/\//i.test(href)) return;
-            e.preventDefault();
-            const agentId = useAgentStore.getState().selectedAgentId;
-            if (agentId) {
-                useFileEditorStore.getState().openUrl(agentId, href);
-            }
-        };
-        return (
-            <a href={href} onClick={handleClick} {...rest}>
-                {children}
-            </a>
-        );
-    },
 };
-
-/** URL schemes that should be passed through to the webview as-is. */
-const PASSTHROUGH_SCHEMES = /^(https?:|data:|asset:|blob:|mailto:|tel:)/i;
-
-/** Absolute path prefixes (POSIX `/...` or Windows `C:\...` / `C:/...`). */
-const ABSOLUTE_PATH = /^([/\\]|[A-Za-z]:[/\\])/;
-
-/**
- * Resolve a markdown image `src` (relative or rooted) against the workspace
- * root and the directory of the markdown file. Handles `./` and `../`
- * segments. Returns a forward-slash separated path suitable for
- * `convertFileSrc`, or `null` if `src` is a non-file URL scheme (http, data,
- * asset, etc.).
- */
-function resolveLocalAssetPath(workspaceRoot: string, fileRelPath: string, src: string): string | null {
-    if (!src || PASSTHROUGH_SCHEMES.test(src)) return null;
-    if (ABSOLUTE_PATH.test(src)) return src;
-
-    // Directory of the markdown file (its own relPath).
-    const lastSep = Math.max(fileRelPath.lastIndexOf("/"), fileRelPath.lastIndexOf("\\"));
-    const fileDir = lastSep >= 0 ? fileRelPath.substring(0, lastSep) : "";
-
-    // Walk path segments, applying `./` and `../` against (workspaceRoot + fileDir).
-    const baseParts = workspaceRoot.split(/[/\\]/).filter(Boolean);
-    const fileDirParts = fileDir ? fileDir.split(/[/\\]/).filter(Boolean) : [];
-    const srcParts = src.split(/[/\\]/);
-
-    const result: string[] = [...baseParts];
-    for (const part of [...fileDirParts, ...srcParts]) {
-        if (part === "" || part === ".") continue;
-        if (part === "..") {
-            result.pop();
-        } else {
-            result.push(part);
-        }
-    }
-    const joined = result.join("/");
-    if (!joined) return null;
-
-    // Re-attach the POSIX leading "/" if the workspace root was an
-    // absolute path (macOS/Linux: starts with "/"). Without this,
-    // split("/").filter(Boolean) above drops the empty first segment,
-    // turning "/Users/foo/..." into "Users/foo/..." — a bare relative
-    // path that Tauri's asset:// protocol cannot resolve (404).
-    // Windows drive letters ("C:") survive filter(Boolean) intact, so
-    // they don't need this treatment.
-    if (workspaceRoot.startsWith("/") && !joined.startsWith("/")) {
-        return `/${joined}`;
-    }
-    return joined;
-}
 
 interface MarkdownPreviewViewProps {
     file: OpenFile;
@@ -133,51 +72,234 @@ function toAlignComponent(tag: string): React.ComponentType<any> {
     return AlignComponent;
 }
 
+/**
+ * Decide whether a markdown `href` should open in edit mode (`openFile`)
+ * or read-only preview mode (`openPreview`). Markdown/Markdown-variant
+ * links go to preview so the user sees rendered output; everything else
+ * (source code, config, etc.) opens in the editor.
+ *
+ * Centralising this avoids drift between `a` and `img` handlers.
+ */
+function pickOpenAction(href: string): "openFile" | "openPreview" {
+    return /\.m(?:d|arkdown|down)$/i.test(href) ? "openPreview" : "openFile";
+}
+
+/**
+ * Module-level `<img>` wrapper used by the ReactMarkdown override map.
+ *
+ * Lives outside `MarkdownPreviewView` so its React identity is stable
+ * across renders — react-markdown passes props through `components`,
+ * and a freshly-allocated function component on every render would
+ * remount the underlying `<img>` and break image caching/selection.
+ *
+ * Behaviour:
+ *  - Pass-through schemes (http/https/data/asset/blob) → render as-is.
+ *  - No workspace can resolve the src → render with the raw src and
+ *    skip click-to-open.
+ *  - Otherwise → render the first candidate's `asset://` URL and let
+ *    clicks run the cross-workspace open resolver.
+ */
+interface ImageWithClickProps extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, "src"> {
+    src?: string;
+    candidates: ResolvedAsset[];
+    onClickImage: (src: string) => Promise<boolean>;
+    clickHint: string;
+}
+
+const ImageWithClick = React.memo(function ImageWithClick({
+    src,
+    alt,
+    candidates,
+    onClickImage,
+    clickHint,
+    style,
+    ...rest
+}: ImageWithClickProps) {
+    if (!src) return <img alt={alt} {...rest} />;
+    if (PASSTHROUGH_SCHEMES.test(src)) {
+        return <img src={src} alt={alt} style={style} {...rest} />;
+    }
+    if (candidates.length === 0) {
+        return <img src={src} alt={alt} style={style} {...rest} />;
+    }
+
+    // Render the first (highest-priority) candidate. Cross-workspace
+    // rendering fallback on broken-image is intentionally omitted here:
+    // it adds `onError` state churn for the rare case where a stale
+    // current-workspace root misses the file, and the click handler
+    // already does the right thing for that case.
+    const current = candidates[0];
+    const handleClick = (e: React.MouseEvent<HTMLImageElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void onClickImage(src).then((opened) => {
+            if (!opened) notifyLinkNotFound(src);
+        });
+    };
+    return (
+        <img
+            src={convertFileSrc(current.absPath)}
+            alt={alt}
+            onClick={handleClick}
+            style={{ cursor: "pointer", ...style }}
+            title={clickHint}
+            {...rest}
+        />
+    );
+});
+
 export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     const { t } = useTranslation();
     const openFile = useFileEditorStore((s) => s.openFile);
-    const treeRoots = useWorkspaceStore((s) => s.treeRoots);
-    const workspaceRoot = treeRoots[`${file.agentId}:${file.workspaceId}`];
+    // `treeRoots` subscription kept so React re-renders the preview when the
+    // workspace tree finishes loading (the cross-workspace resolver inside
+    // `openResolved` reads `treeRoots` on demand, not through this variable).
+    useWorkspaceStore((s) => s.treeRoots);
 
     /** Switch the current tab from preview mode back to edit mode. */
     const handleOpenAsEditor = useCallback(() => {
         void openFile(file.agentId, file.workspaceId, file.relPath);
     }, [openFile, file.agentId, file.workspaceId, file.relPath]);
 
+    // Ensure the workspace list is loaded so cross-workspace link/image
+    // resolution can see all candidates. The store keeps a cache, so
+    // this is a no-op after the first successful fetch.
+    useEffect(() => {
+        const aid = file.agentId;
+        if (!aid) return;
+        const state = useWorkspaceStore.getState();
+        if (state.workspaces.length === 0 && !state.loading) {
+            void state.fetchWorkspaces(aid);
+        }
+    }, [file.agentId]);
+
+    /**
+     * Run the cross-workspace open resolver for `rawSrc`. Returns `true`
+     * if a tab was opened, `false` if every candidate HEAD-probed as 404
+     * (caller should toast). Captured by both `a` and `img` handlers
+     * below, so this is the single source of truth for "click to open".
+     */
+    const openResolved = useCallback(
+        async (rawSrc: string): Promise<boolean> => {
+            const candidates = resolveAssetAcrossWorkspaces(
+                file.agentId,
+                file.workspaceId,
+                file.relPath,
+                rawSrc,
+            );
+            if (candidates.length === 0) return false;
+            const action = pickOpenAction(rawSrc);
+            const result = await openFirstResolved(file.agentId, candidates, action);
+            return result.opened;
+        },
+        [file.agentId, file.workspaceId, file.relPath],
+    );
+
+    /**
+     * Synchronous `onClick` for markdown anchor tags.
+     *
+     * Routing:
+     *  - http(s) → existing URL-preview tab (iframe), preserved verbatim.
+     *  - same-page anchor (`#…`) → no preventDefault, webview scrolls.
+     *  - pass-through schemes (mailto, tel, data, asset, blob) → no
+     *    preventDefault, webview handles.
+     *  - everything else → resolve across workspaces (HEAD probe each
+     *    candidate) and open the first match; current workspace wins
+     *    on ties.
+     *
+     * preventDefault is only called for cases we actually handle. Other
+     * schemes fall through to the webview's default behaviour, which
+     * preserves the historical "weird URL → webview tries" path.
+     */
+    const handleLinkClick = useCallback(
+        (e: React.MouseEvent<HTMLAnchorElement>, href: string | undefined) => {
+            if (!href) return;
+
+            if (/^https?:\/\//i.test(href)) {
+                e.preventDefault();
+                const aid = useAgentStore.getState().selectedAgentId;
+                if (aid) useFileEditorStore.getState().openUrl(aid, href);
+                return;
+            }
+            if (href.startsWith("#")) return;
+            if (PASSTHROUGH_SCHEMES.test(href)) return;
+
+            // Local file path. Always take over navigation so the
+            // webview never falls back to `tauri://…` for non-URL hrefs
+            // (which is what was triggering the spurious "restart").
+            e.preventDefault();
+            void openResolved(href).then((opened) => {
+                if (!opened) notifyLinkNotFound(href);
+            });
+        },
+        [openResolved],
+    );
+
     /**
      * Component overrides for the preview's ReactMarkdown instance.
-     * Re-created only when the workspace root or the markdown file path
-     * changes — these are the only inputs the `img` resolver depends on.
+     * Re-created only when the markdown file's agent/workspace/path or
+     * the open-resolver identity changes — these are the inputs the
+     * `a` and `img` resolvers depend on.
      */
-    const previewComponents = useMemo(() => ({
-        ...markdownComponents,
-        /**
-         * React-markdown strips deprecated HTML attributes (align, valign, etc.)
-         * from React props. We read them from the raw HAST node injected by
-         * react-markdown (`node`) and translate them into inline styles, which
-         * are guaranteed to work across all rendering paths.
-         */
-        p: toAlignComponent("p"),
-        h1: toAlignComponent("h1"),
-        h2: toAlignComponent("h2"),
-        h3: toAlignComponent("h3"),
-        td: toAlignComponent("td"),
-        th: toAlignComponent("th"),
-        img: ({ src, alt, ...rest }: React.ImgHTMLAttributes<HTMLImageElement>) => {
-            if (!src) return <img alt={alt} {...rest} />;
-            // Pass-through schemes (http/https/data/asset/...) — render as-is.
-            if (PASSTHROUGH_SCHEMES.test(src)) {
-                return <img src={src} alt={alt} {...rest} />;
-            }
-            // No workspace root available yet — fall back to original src.
-            if (!workspaceRoot) {
-                return <img src={src} alt={alt} {...rest} />;
-            }
-            const absPath = resolveLocalAssetPath(workspaceRoot, file.relPath, src);
-            if (!absPath) return <img src={src} alt={alt} {...rest} />;
-            return <img src={convertFileSrc(absPath)} alt={alt} {...rest} />;
-        },
-    }), [workspaceRoot, file.relPath]);
+    const previewComponents = useMemo(() => {
+        const clickHint = t("fileEditor.markdownImageClickHint");
+        return {
+            ...markdownComponents,
+            /**
+             * React-markdown strips deprecated HTML attributes (align, valign, etc.)
+             * from React props. We read them from the raw HAST node injected by
+             * react-markdown (`node`) and translate them into inline styles, which
+             * are guaranteed to work across all rendering paths.
+             */
+            p: toAlignComponent("p"),
+            h1: toAlignComponent("h1"),
+            h2: toAlignComponent("h2"),
+            h3: toAlignComponent("h3"),
+            td: toAlignComponent("td"),
+            th: toAlignComponent("th"),
+            /**
+             * Anchor click dispatcher — see `handleLinkClick` for the full
+             * routing matrix. Wrapping the inline handler in a stable
+             * named closure keeps React reconciliation happy when the
+             * parent re-renders for unrelated reasons.
+             */
+            a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+                const onClick = (e: React.MouseEvent<HTMLAnchorElement>) =>
+                    handleLinkClick(e, href);
+                return (
+                    <a href={href} onClick={onClick} {...rest}>
+                        {children}
+                    </a>
+                );
+            },
+            /**
+             * Image: render the first cross-workspace-resolved candidate
+             * and make the image clickable so the user can open it in a
+             * preview tab. Click handling goes through the same
+             * `openResolved` resolver as link clicks for consistency.
+             */
+            img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
+                const src = props.src ?? "";
+                if (!src || PASSTHROUGH_SCHEMES.test(src)) {
+                    return <img {...props} />;
+                }
+                const candidates = resolveAssetAcrossWorkspaces(
+                    file.agentId,
+                    file.workspaceId,
+                    file.relPath,
+                    src,
+                );
+                return (
+                    <ImageWithClick
+                        {...props}
+                        candidates={candidates}
+                        onClickImage={openResolved}
+                        clickHint={clickHint}
+                    />
+                );
+            },
+        };
+    }, [file.agentId, file.workspaceId, file.relPath, openResolved, handleLinkClick, t]);
 
     if (file.loading) {
         return (
