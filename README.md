@@ -15,7 +15,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
   <a href="./docs/design/zh/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
-  <a href="./apps/desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
+  <a href="./apps/acowork-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
 </p>
 
 <p align="center">
@@ -170,7 +170,7 @@ Auto-detects architecture, enables CoreML on arm64, downloads/copies ONNX Runtim
 The Desktop App is a **frontend + thin Tauri v2 backend** — the React/TS frontend (no state persistence) drives everything via the Gateway, while the Tauri Rust side handles the system tray, the MQTT client that subscribes to real-time events on `localhost:19875`, and platform integration. REST calls go over HTTP (`http://127.0.0.1:19876`). Start it after the Gateway is running.
 
 ```bash
-cd apps/desktop
+cd apps/acowork-desktop
 npm install
 
 # Option A — Browser-only dev server
@@ -183,7 +183,7 @@ npm run tauri dev
 ### 5. Package a Desktop Installer (optional)
 
 ```bash
-# Windows — produces MSI/NSIS bundles under apps\desktop\src-tauri\target\release\bundle\
+# Windows — produces MSI/NSIS bundles under apps\acowork-desktop\src-tauri\target\release\bundle\
 .\dev\package_desktop_windows.ps1
 # Optional: -ReinstallOrt  -NoMirror
 
@@ -194,7 +194,7 @@ npm run tauri dev
 ./dev/package_desktop_linux.sh
 ```
 
-These scripts locate `.ort/`, copy `onnxruntime.{dll,dylib,so}` into `apps/desktop/src-tauri/bin/`, then run `npm run tauri build`.
+These scripts locate `.ort/`, copy `onnxruntime.{dll,dylib,so}` into `apps/acowork-desktop/src-tauri/bin/`, then run `npm run tauri build`.
 
 ### 6. Build & Sign an Agent Package
 

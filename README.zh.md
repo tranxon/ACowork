@@ -15,7 +15,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
   <a href="./docs/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
-  <a href="./apps/desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
+  <a href="./apps/acowork-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
 </p>
 
 <p align="center">
@@ -171,7 +171,7 @@ cd ACowork
 Desktop App 是**前端 + 轻量 Tauri v2 后端**——React/TS 前端(不持久化任何状态)全部通过 Gateway 操作,Tauri Rust 侧负责系统托盘、订阅实时事件的 MQTT 客户端(`localhost:19875`)以及平台集成。REST 调用走 HTTP(`http://127.0.0.1:19876`)。请在 Gateway 启动之后再运行 Desktop App。
 
 ```bash
-cd apps/desktop
+cd apps/acowork-desktop
 npm install
 
 # 方式 A —— 浏览器模式 dev server
@@ -184,7 +184,7 @@ npm run tauri dev
 ### 5. 打包桌面安装包（可选）
 
 ```bash
-# Windows —— 产物位于 apps\desktop\src-tauri\target\release\bundle\
+# Windows —— 产物位于 apps\acowork-desktop\src-tauri\target\release\bundle\
 .\dev\package_desktop_windows.ps1
 # 可选：-ReinstallOrt  -NoMirror
 
@@ -195,7 +195,7 @@ npm run tauri dev
 ./dev/package_desktop_linux.sh
 ```
 
-脚本会从 `.ort/` 找到 ONNX Runtime，把 `onnxruntime.{dll,dylib,so}` 拷贝到 `apps/desktop/src-tauri/bin/`，再调用 `npm run tauri build`。
+脚本会从 `.ort/` 找到 ONNX Runtime，把 `onnxruntime.{dll,dylib,so}` 拷贝到 `apps/acowork-desktop/src-tauri/bin/`，再调用 `npm run tauri build`。
 
 ### 6. 构建并签名 Agent 包
 
