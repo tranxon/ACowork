@@ -1,6 +1,7 @@
 # Gateway 组件详细设计
 
-> 版本：v3.1 | 更新日期：2026-04-14
+> 版本：v3.2 | 更新日期：2026-07-12
+> 本版本主要修订：§9 IPC 部分全面对齐 [ADR-033](./docs/design/zh/../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。HTTP API 仍保留 REST 接口，流式事件从 WebSocket 改为 MQTT 主题订阅。
 
 ---
 
@@ -13,8 +14,8 @@ Gateway 同时为两类消费者提供服务：
 │  Agent Runtime   │         │  Desktop App     │
 │  (多个进程)       │         │  / CLI           │
 └────────┬─────────┘         └────────┬─────────┘
-         │ gRPC API                 │ HTTP API
-         │ (IPC, 双向流)            │ (REST + WS)
+         │ MQTT + HTTP 反向代理       │ HTTP API
+         │ (MQTT pub/sub + 反代)     │ (REST)
          ▼                            ▼
 ┌────────────────────────────────────────────────┐
 │                Gateway (单进程)                 │
@@ -29,7 +30,7 @@ Gateway 同时为两类消费者提供服务：
 └────────────────────────────────────────────────┘
 ```
 
-- **gRPC API**：给 Agent Runtime 用的 IPC 通道（gRPC 双向流，传输层支持 Unix Socket / Named Pipe）
+- **MQTT + HTTP 反向代理**：给 Agent Runtime 用的 IPC 通道 —— MQTT 承载实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反向代理承载大数据查询（历史消息、会话查询），Runtime 自身不暴露对外端口
 - **HTTP API**：给 Desktop App / CLI 用的 REST 接口（Axum，localhost only）
 
 两者共享 Gateway 内部状态，只是接入层不同。
@@ -50,8 +51,8 @@ Gateway 同时为两类消费者提供服务：
 
 **进程管理：**
 - 使用 `std::process::Command` 创建子进程，设置独立工作目录、环境变量。
-- 启动参数注入：Agent 包路径、Gateway Socket 路径、Agent ID、工作区路径。
-- **API Key 分发**：Agent Runtime 连接 Gateway 后，通过 gRPC 传输 Key（不通过环境变量，避免 ps 泄露）。
+- 启动参数注入：Agent 包路径、Gateway MQTT broker 地址（`127.0.0.1:19875`）、Agent ID、工作区路径。
+- **API Key 分发**：Agent Runtime 通过 MQTT 握手（`AgentHello` 消息，见 [ADR-034](../../adr/zh/ADR-034-mqtt-http-boundary.md)）从 Gateway 拉取 Key（不在环境变量中传递，避免 ps 泄露）。
 - 健康检查：如果 Agent 进程退出，根据退出代码决定是否自动重启（可配置）。
 
 **休眠与唤醒：**
@@ -127,7 +128,7 @@ bwrap \
 ```
 
 - Agent manifest 中用 `vault:openai_key` 引用 Key，不存明文。
-- Agent Runtime 启动后通过 gRPC 获取 Key（一次性传输，不通过环境变量）。
+- Agent Runtime 启动后通过 MQTT 握手获取 Key（一次性传输，不通过环境变量）。
 - Key 在 Rust 侧零拷贝/密封存储（使用 secrecy::SecretString），LLM Client 直接使用该 Secret 签名请求，WASM 插件层绝对没有 API 能读取到该字符串。
 
 ## 6. Budget Tracker
@@ -152,34 +153,34 @@ bwrap \
   - `data/`：从包中复制，可读写。
   - `config/`：用户可修改的配置（初始来自包内 config）。
   - `memory/`：私有 Grafeo 数据库文件（`private.grafeo`）。
-  - `runtime/`：临时文件（socket、pid）。
+  - `runtime/`：临时文件（pid、HTTP 端口）。
 - **日志**：Gateway 收集所有 Agent 的 stdout/stderr，写入 `~/.local/share/agent-gateway/logs/`，支持按 Agent 过滤。
 
 ## 9. HTTP API（Desktop App / CLI 接入层）
 
-> **当前实现状态**：HTTP API 已基于 Axum 完整实现，提供 REST 接口和 WebSocket 流式支持。以下接口定义反映实际实现，但为保持文档简洁仅列出核心路由。完整路由列表参见代码 `crates/acowork-gateway/src/http/routes.rs`。
+> **当前实现状态**：HTTP API 已基于 Axum 完整实现，提供 REST 接口；流式事件经由 MQTT（详见 §9.1 双协议架构 与 [`docs/zh/protocols/README.md`](../../zh/protocols/README.md)）。以下接口定义反映实际实现，但为保持文档简洁仅列出核心路由。完整路由列表参见代码 `crates/acowork-gateway/src/http/routes.rs`。
 
-gRPC 是面向 Agent Runtime 进程间通信设计的 Protocol Buffers 双向流协议。HTTP API 作为 Desktop App 和 CLI 的统一接入层，在 gRPC 之上提供 REST 接口和 WebSocket 流式封装。
+Gateway 与 Agent Runtime 之间的 IPC 自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 **MQTT pub/sub + HTTP 反向代理**：MQTT 承担实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反代承担大数据查询与会话历史拉取。HTTP API 作为 Desktop App 和 CLI 的统一接入层，对 Runtime 不可见。
 
-### 9.1 为什么需要双 API 层
+### 9.1 为什么需要双协议（MQTT + HTTP）
 
-| 维度 | gRPC API | HTTP API |
-|------|----------|----------|
-| 消费者 | Agent Runtime | Desktop App / CLI |
-| 传输层 | gRPC（Unix Socket / Named Pipe / Local TCP）| HTTP (localhost) |
-| 通信模式 | 双向流（单一长连接，多路复用）| 请求/响应 + WebSocket 流式 |
-| 帧格式 | Protocol Buffers | 标准 HTTP/JSON + WebSocket |
-| 认证方式 | 进程级信任（本地 IPC）| localhost only + 可选 token |
-| 用途 | 进程间实时通信（Key 分发、身份注入、Intent、预算上报）| 用户界面操作（Agent 管理、对话、配置）|
+| 维度 | MQTT | HTTP 反向代理 |
+|------|------|---------------|
+| 消费者 | Agent Runtime（Gateway ↔ Runtime 双向） | Gateway → Runtime（按需转发） |
+| 监听端 | Gateway 内嵌 rumqttd broker（`127.0.0.1:19875`）| Gateway HTTP 反代（`127.0.0.1:19876`）|
+| 通信模式 | 主题 pub/sub（多对多，多路复用）| 请求/响应（点对点）|
+| 帧格式 | MQTT Payload（独立 protobuf 命名空间，见 [`core/acowork-core/proto/mqtt_payload.proto`](../../../core/acowork-core/proto/mqtt_payload.proto)）| 标准 HTTP/JSON |
+| 认证方式 | localhost only（依赖本地回路保护）| localhost only + 可选 Bearer Token |
+| 用途 | 实时事件推送、状态同步、Key 分发（AgentHello）、Intent 触发、Will+Retained 生命周期 | 会话历史、消息查询、配置回写、大数据量 payload 转发 |
 
-两者共享 Gateway 内部逻辑（Package Manager、Lifecycle Manager 等），只是接入层不同。HTTP API 是 gRPC 之上的封装，不引入新的业务逻辑。
+两者共享 Gateway 内部逻辑（Package Manager、Lifecycle Manager 等），只是承载协议不同。MQTT 不承载 req/res —— 任何"等回复"的场景走 HTTP 反代，由 Gateway 在内部转换为对 Runtime localhost HTTP 的调用（Runtime 自身不暴露对外端口）。
 
 ### 9.2 HTTP Server 配置
 
 ```rust
-// Gateway 进程启动时同时监听两个端口：
-// 1. gRPC（给 Agent Runtime 用）
-// 2. HTTP API（给 Desktop App / CLI 用）
+// Gateway 进程启动时同时启动两个端口：
+// 1. MQTT broker（内嵌 rumqttd，给 Agent Runtime + Desktop App 用）
+// 2. HTTP API（Axum，给 Desktop App / CLI 用；同时承担 Gateway -> Runtime 的反向代理）
 
 pub struct HttpConfig {
     /// 监听地址，默认 127.0.0.1
@@ -317,14 +318,20 @@ pub fn http_routes() -> Router<GatewayState> {
 // → 404 { "error": "agent not found" }
 // → 503 { "error": "agent not running" }
 
-// GET /api/agents/:id/stream (WebSocket Upgrade)
-// WebSocket 消息格式：
-// → Client sends: { "type": "message", "content": "..." }
-// ← Server pushes: { "type": "chunk", "delta": "今", "message_id": "msg-001" }
-// ← Server pushes: { "type": "chunk", "delta": "天", "message_id": "msg-001" }
-// ← Server pushes: { "type": "tool_call", "name": "http_request", "params": {...} }
-// ← Server pushes: { "type": "tool_result", "name": "http_request", "result": {...} }
-// ← Server pushes: { "type": "done", "message_id": "msg-001", "usage": {...} }
+// 流式事件改走 MQTT 主题订阅（ADR-033），WebSocket 通道已下线。
+// 消息发送仍走 HTTP POST（一次性、不等流式响应）：
+//
+// → POST /api/agents/:id/message  { content: "..." }
+//   → 200  { "message_id": "msg-001", "status": "queued" }
+//
+// 流式 chunk / tool_call / done 事件由 Desktop App 通过 MQTT broker 订阅：
+//
+// → Client: SUBSCRIBE acowork/agents/:id/sessions/:sid/messages/+
+// ← Broker PUB: { "type": "chunk",       "delta": "今", "message_id": "msg-001" }
+// ← Broker PUB: { "type": "chunk",       "delta": "天", "message_id": "msg-001" }
+// ← Broker PUB: { "type": "tool_call",   "name": "http_request", "params": {...} }
+// ← Broker PUB: { "type": "tool_result", "name": "http_request", "result": {...} }
+// ← Broker PUB: { "type": "done",        "message_id": "msg-001", "usage": {...} }
 ```
 
 #### 9.4.3 Vault
@@ -364,9 +371,11 @@ Vault 的 HTTP API **不返回明文 Key**，只返回存在性和脱敏预览�
 // → 200 { "status": "ok" }
 ```
 
-### 9.5 HTTP API 与 Socket API 的关系
+### 9.5 HTTP API 与 MQTT 的关系
 
-HTTP API 中的 Agent 管理操作（安装/卸载/启停）直接调用 Gateway 内部组件，与 Socket API 的处理逻辑共享：
+> **历史**：v3.1 及更早版本曾用 Socket API（Unix Socket / Named Pipe / Local TCP）作为 Gateway ↔ Runtime 的 IPC 通道，gRPC 时代为 Protocol Buffers 双向流（参见 [`16-ipc-grpc-migration.md`](./16-ipc-grpc-migration.md)）。自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起 IPC 收敛为 **MQTT + HTTP 反向代理**。
+
+HTTP API 中的 Agent 管理操作（安装/卸载/启停）直接调用 Gateway 内部组件，与 MQTT 通道的处理逻辑共享：
 
 ```
 POST /api/agents/:id/start
@@ -375,22 +384,25 @@ POST /api/agents/:id/start
 Gateway::lifecycle_manager().start_agent("com.example.weather")
        │
        ▼
-（与 Agent Runtime 通过 Socket 发起的启动请求走同一条代码路径）
+（与 Agent Runtime 通过 MQTT 发起的状态变更走同一条代码路径）
 ```
 
 对话消息的转发路径：
 
 ```
-Desktop App → POST /api/agents/:id/message
+Desktop App → POST /api/agents/:id/message        (HTTP 触发)
        │
        ▼
-Gateway → Intent Router → 转发给 Agent Runtime（通过 Socket API）
+Gateway → Intent Router → PUB intent/agents/:id/chat_message
+       │                                       (MQTT 实时通道)
+       ▼
+Agent Runtime 处理 → PUB chat/stream/:sid (chunk/tool_call/done)
        │
        ▼
-Agent Runtime 处理 → 响应通过 Gateway → Desktop App（WebSocket 推送）
+Broker 推送给 Desktop App (MQTT SUBSCRIBE chat/stream/:sid)
 ```
 
-HTTP API 不是独立于 Socket API 的旁路，而是 Socket API 的**管理面封装**。
+HTTP API 不是独立于 IPC 通道的旁路，而是 Runtime 协议的**管理面 + 反向代理封装**。运行时事件流走 MQTT，请求/响应走 HTTP 反代。
 
 ### 9.6 安全设计
 
@@ -400,7 +412,7 @@ HTTP API 不是独立于 Socket API 的旁路，而是 Socket API 的**管理面
 | Vault Key 脱敏 | GET 接口不返回明文，POST 接口接收明文 |
 | 无 CORS | 生产环境不开启跨域（localhost only 天然限制） |
 | 可选 Auth Token | Gateway 生成随机 token，Desktop App 首次连接时获取，后续请求携带 `Authorization: Bearer <token>` |
-| Agent 安装校验 | 与 Socket API 一样强制验证包签名 |
+| Agent 安装校验 | 强制验证包签名（HTTP 与 MQTT 通道共享同一校验路径） |
 
 Auth Token 机制（可选，Phase 5+）：
 ```
@@ -436,7 +448,7 @@ Desktop App 需要自动发现 Gateway 的 HTTP API 端口：
 // 发现策略（按优先级）：
 // 1. 读取 Desktop App 自身配置中保存的地址
 // 2. 读取 Gateway 的 pidfile：~/.local/share/agent-gateway/gateway.pid
-//    pidfile 内容：{ "pid": 12345, "http_port": 19876, "socket_path": "..." }
+//    pidfile 内容：{ "pid": 12345, "http_port": 19876, "mqtt_port": 19875 }
 // 3. 尝试默认地址 http://127.0.0.1:19876/health
 // 4. 提示用户手动配置
 ```
@@ -486,7 +498,7 @@ Desktop App 也走这条路径
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | CLI 与 Gateway 独立 | 独立二进制 | Gateway 可无 CLI 运行（Desktop App 足够），CLI 可安装在不同机器远程管理（未来） |
-| 通信方式 | HTTP API（非 Socket API） | Socket API 是二进制帧协议，面向 Agent Runtime；HTTP API 是标准 REST，CLI 天然适配 |
+| 通信方式 | HTTP API（不直接走 MQTT）| HTTP API 是标准 REST，CLI 天然适配；MQTT 用于 Gateway ↔ Runtime 的实时事件推送，CLI 不订阅流式事件 |
 | API Key 输入 | 交互式不回显 | 防止 shell history 泄露 Key |
 | CLI 框架 | clap | Rust 生态标准选择，与 acowork-sign 工具链保持一致 |
 
@@ -495,7 +507,7 @@ Desktop App 也走这条路径
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | Gateway 不代理业务逻辑 | 纯协调层 | 避免单点瓶颈；Agent Runtime 直连 LLM 延迟更低 |
-| 双 API 层 | Socket + HTTP | Socket API 面向 Agent Runtime IPC（高性能二进制帧），HTTP API 面向 Desktop App/CLI（标准 REST） |
+| 双协议层（自 ADR-033） | MQTT + HTTP 反向代理 | MQTT 承载实时事件推送（chat chunk、tool_call、done、设备状态），HTTP 反代承载大数据查询与会话历史（见 ADR-033 / ADR-034）|
 | HTTP 框架 | Axum | Rust 生态最成熟的 HTTP 框架；Gateway 已在技术选型中确认 |
 | HTTP 端口 | 127.0.0.1:19876 | 仅 localhost，安全；端口可配置；冲突时自动递增 |
 | Vault HTTP 脱敏 | 不返回明文 | 防止 Desktop App 前端漏洞导致 Key 泄露；POST 接口接收明文即可 |
