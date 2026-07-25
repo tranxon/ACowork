@@ -14,8 +14,8 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
-  <a href="./docs/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
-  <a href="./apps/acowork-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
+  <a href="./docs/design/zh/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
+  <a href="./apps/desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
 </p>
 
 <p align="center">
@@ -67,7 +67,7 @@ ACowork treats every Agent like an **app on your phone**. Each `.agent` package 
 | APK             | `.agent` package    | Declarative bundle (config + prompts + skills, no executable code) |
 | APK Signature   | Signing Block       | Package signing, verifies integrity and origin                     |
 | AMS             | Gateway             | Lifecycle management (install, start/stop, budget, rate)           |
-| Binder IPC      | Gateway Service API | Inter-process communication                                        |
+| Binder IPC      | MQTT + HTTP Reverse Proxy | IPC: real-time events + bulk query forwarding (see [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)) |
 | ContentProvider | System Agent        | System-level data service (identity, preferences)                  |
 | PMS             | Package Manager     | Install/uninstall/upgrade                                          |
 
@@ -167,10 +167,10 @@ Auto-detects architecture, enables CoreML on arm64, downloads/copies ONNX Runtim
 
 ### 4. Run the Desktop App
 
-The Desktop App is a **frontend only** — it talks to Gateway over HTTP (`http://127.0.0.1:19876`) and never persists state on its own. Start it after the Gateway is running.
+The Desktop App is a **frontend + thin Tauri v2 backend** — the React/TS frontend (no state persistence) drives everything via the Gateway, while the Tauri Rust side handles the system tray, the MQTT client that subscribes to real-time events on `localhost:19875`, and platform integration. REST calls go over HTTP (`http://127.0.0.1:19876`). Start it after the Gateway is running.
 
 ```bash
-cd apps/acowork-desktop
+cd apps/desktop
 npm install
 
 # Option A — Browser-only dev server
@@ -183,7 +183,7 @@ npm run tauri dev
 ### 5. Package a Desktop Installer (optional)
 
 ```bash
-# Windows — produces MSI/NSIS bundles under apps\acowork-desktop\src-tauri\target\release\bundle\
+# Windows — produces MSI/NSIS bundles under apps\desktop\src-tauri\target\release\bundle\
 .\dev\package_desktop_windows.ps1
 # Optional: -ReinstallOrt  -NoMirror
 
@@ -194,7 +194,7 @@ npm run tauri dev
 ./dev/package_desktop_linux.sh
 ```
 
-These scripts locate `.ort/`, copy `onnxruntime.{dll,dylib,so}` into `apps/acowork-desktop/src-tauri/bin/`, then run `npm run tauri build`.
+These scripts locate `.ort/`, copy `onnxruntime.{dll,dylib,so}` into `apps/desktop/src-tauri/bin/`, then run `npm run tauri build`.
 
 ### 6. Build & Sign an Agent Package
 
@@ -280,7 +280,7 @@ Agents are distributed as `.agent` archives containing manifest.toml, Prompts, S
 └── resources/             # Icons, i18n, etc.
 ```
 
-Packages must be signed (inspired by APK Signature Scheme v2). Phase 1 supports two signing identities: Developer (self-signed) and Platform (system Agent only).
+Packages must be signed (inspired by APK Signature Scheme v2). Two signing identities are supported: Developer (self-signed) and Platform (reserved for the system Agent).
 
 ### ⚙️ Universal Execution Engine
 The Agent Runtime is the platform's **single binary**, responsible for loading `.agent` packages and executing LLM interactions, tool dispatch, and memory read/write. Agents **connect directly to LLM APIs** — not proxied through Gateway — reducing latency and ensuring decentralization.
@@ -362,72 +362,98 @@ Developers build agents by **tuning declarative configurations** — crafting sy
 
 ## 📈 Project Status & Roadmap
 
-> **Current Status**: Alpha. Core Gateway, Runtime, Grafeo memory engine, and Desktop UI are under active development. See [docs/](docs/) for architecture design docs.
+> **Current Status**: Alpha. Core Gateway, Runtime, Grafeo memory engine, Desktop UI and the MQTT-based IPC (replacing the legacy gRPC + WebSocket stack, see [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)) are under active development. Architecture design docs live under [docs/design/zh/](./docs/design/zh/).
 
 | Phase   | Scope                                                                                                                                                  | Status        |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- |
-| Phase 1 | Foundation + LLM interaction (MVP): package parsing, signature verification, Runtime main loop, loop detection, Tool dedup, Rate tiers, Gateway basics | 🚧 In progress |
-| Phase 2 | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion, AutobiographicalNode                              | 🚧 In progress |
-| Phase 3 | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                                                                    | 📝 Designing   |
-| Phase 4 | Communication & coordination: Intent, Budget Tracker, Rate Limiter, Cron                                                                               | 📝 Designing   |
-| Phase 5 | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay                                                                        | 🚧 In progress |
+| Phase 1 | Foundation + LLM interaction (MVP): package parsing, signature verification, Runtime main loop, loop detection, Tool dedup, Rate tiers, Gateway basics | ✅ Done       |
+| Phase 2 | Memory layering + System Agent: Grafeo biomimetic layers, instant extraction, associative diffusion, AutobiographicalNode                              | 🚧 ~30–40% ¹ |
+| Phase 3 | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                                                                    | 🚧 Partial    |
+| Phase 4 | Communication & coordination: Intent, Budget Tracker, Rate Limiter, Cron                                                                               | 🚧 Partial    |
+| Phase 5 | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay; MQTT-based IPC refactor                                               | 🚧 In progress |
 | Phase 6 | Cloud & ecosystem: Memory Sync, remote registry, Agent store                                                                                           | 🔮 Planning    |
 | Phase 7 | Cross-platform: Windows / macOS / Android / iOS                                                                                                        | 🔮 Planning    |
 
+¹ Phase 2 has substantial library code (graph diffusion, forgetting, instant extraction, generalization) but most of it is **not yet wired into the runtime** — see [`docs/review/zh/22-memory-phase2-implementation-plan.md`](./docs/review/zh/22-memory-phase2-implementation-plan.md) for the gap analysis. The functional memory_store surface that the runtime actually calls today is significantly narrower than the design document implies.
+
 ### Core Crate Architecture
 
-ACowork adopts a **7-crate Rust workspace** architecture:
+ACowork adopts a **12-crate Rust workspace** under [`core/`](./core/Cargo.toml). Beyond the original seven, five have been added as scope grew (MCP integration, WASM tool SDK, ONNX-based embedding runtime, LSP relay, MQTT session/event layer):
 
-| Crate                                          | Responsibility                                                    | Status        |
-| ---------------------------------------------- | ----------------------------------------------------------------- | ------------- |
-| [`acowork-core`](./core/acowork-core/)       | Shared types, errors, config                                      | 🚧 In progress |
-| [`acowork-runtime`](./core/acowork-runtime/) | Agent Runtime: main loop, tool dispatch, Providers                | 🚧 In progress |
-| [`acowork-gateway`](./core/acowork-gateway/) | Gateway: package management, lifecycle, Intent routing            | 🚧 In progress |
-| [`acowork-grafeo`](./core/acowork-grafeo/)   | Graph database engine: HNSW index, BM25 search, ACID transactions | 🚧 In progress |
-| [`acowork-memory`](./core/acowork-memory/)   | Memory management: MemoryStore trait, Compaction scheduling       | 🚧 In progress |
-| [`acowork-vault`](./core/acowork-vault/)     | Encrypted key-value store                                         | 🚧 In progress |
-| [`acowork-sign`](./core/acowork-sign/)       | Package signing & verification                                    | 🚧 In progress |
+| Crate                                                | Responsibility                                                       | Status        |
+| ---------------------------------------------------- | -------------------------------------------------------------------- | ------------- |
+| [`acowork-core`](./core/acowork-core/)               | Shared types, errors, config, MQTT proto definitions                 | ✅            |
+| [`acowork-runtime`](./core/acowork-runtime/)         | Agent Runtime: main loop, tool dispatch, Providers                   | ✅            |
+| [`acowork-gateway`](./core/acowork-gateway/)         | Gateway: package management, lifecycle, Intent routing, HTTP API, embedded MQTT broker, HTTP reverse proxy | ✅ |
+| [`acowork-grafeo`](./core/acowork-grafeo/)           | Graph database engine: HNSW index, BM25 search, ACID transactions    | ✅            |
+| [`acowork-memory`](./core/acowork-memory/)           | Memory management: MemoryStore trait, Compaction scheduling          | 🚧 Partial    |
+| [`acowork-vault`](./core/acowork-vault/)             | Encrypted key-value store                                            | ✅            |
+| [`acowork-sign`](./core/acowork-sign/)               | Package signing & verification                                       | ✅            |
+| [`acowork-mcp`](./core/acowork-mcp/)                 | MCP (Model Context Protocol) client/server wrapper                   | 🚧 Partial    |
+| [`acowork-tool-sdk`](./core/acowork-tool-sdk/)       | SDK for building WASM custom tools (Wasmtime host side)              | ✅            |
+| [`acowork-embed`](./core/acowork-embed/)             | ONNX-Runtime-based embedding model runner                            | ✅            |
+| [`acowork-lsp-relay`](./core/acowork-lsp-relay/)     | LSP protocol relay (Desktop ↔ external language servers)            | ✅            |
+| [`acowork-mqtt-session`](./core/acowork-mqtt-session/) | MQTT session/event multiplexing between Gateway and Runtime children | ✅            |
+
+> Source of truth: [`core/Cargo.toml`](./core/Cargo.toml) `[workspace] members`. Status reflects what the runtime can actually call today, not what each crate's API surface declares.
 
 ---
 
 ## 📚 Design Documentation
 
-> Full architecture design docs live in [`docs/design/`](./docs/design/), module-level design in [`docs/module-design/`](./docs/module-design/).
+> Full architecture design docs live in [`docs/design/zh/`](./docs/design/zh/), module-level design in [`docs/module-design/zh/`](./docs/module-design/zh/). The legacy IPC gRPC design (`16-ipc-grpc-migration.md`) is kept for historical context — the production stack now uses MQTT + HTTP reverse-proxy, see [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md).
 
-| Doc                                                                            | Content                                                                      |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| [01-overview.md](./docs/design/01-overview.md)                                 | Platform overview: vision, core analogy, architecture, comparison            |
-| [02-agent-package.md](./docs/design/02-agent-package.md)                       | `.agent` package format, signing, manifest.toml                              |
-| [03-agent-runtime.md](./docs/design/03-agent-runtime.md)                       | Runtime main loop, context building, loop detection, Approval Gate           |
-| [04-gateway.md](./docs/design/04-gateway.md)                                   | Gateway: PackageManager, Lifecycle, IntentRouter, Vault, Budget, sandbox     |
-| [05-memory.md](./docs/design/05-memory.md)                                     | Biomimetic memory: 3-tier 5-class, Grafeo, forgetting, associative retrieval |
-| [06-communication.md](./docs/design/06-communication.md)                       | Gateway Service API + Intent protocol + Capability Registry                  |
-| [07-system-agent.md](./docs/design/07-system-agent.md)                         | System Agent: ContentProvider, cold-start identity injection                 |
-| [08-security.md](./docs/design/08-security.md)                                 | Security: process isolation, filesystem isolation, signing, WASM sandbox     |
-| [10-debug-protocol.md](./docs/design/10-debug-protocol.md)                     | Debug Protocol: DevMode, execution control, breakpoints, snapshots           |
-| [12-tool-system.md](./docs/design/12-tool-system.md)                           | Tool system: Built-in, WASM sandbox, Gateway Tools                           |
-| [13-skill-system.md](./docs/design/13-skill-system.md)                         | Skill system: SKILL.md format, Grafeo experience layer, self-learning        |
-| [14-desktop-app.md](./docs/design/14-desktop-app.md)                           | Desktop App: Tauri v2, system tray, DevMode                                  |
-| [15-conversation-persistence.md](./docs/design/15-conversation-persistence.md) | Conversation persistence: Session Actor, JSONL, Token budget                 |
+| Doc                                                                                | Content                                                                       |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [01-overview.md](./docs/design/zh/01-overview.md)                                 | Platform overview: vision, core analogy, architecture, comparison             |
+| [02-agent-package.md](./docs/design/zh/02-agent-package.md)                       | `.agent` package format, signing, manifest.toml                               |
+| [03-agent-runtime.md](./docs/design/zh/03-agent-runtime.md)                       | Runtime main loop, context building, loop detection, Approval Gate            |
+| [04-gateway.md](./docs/design/zh/04-gateway.md)                                   | Gateway: PackageManager, Lifecycle, IntentRouter, Vault, Budget, sandbox      |
+| [05-memory.md](./docs/design/zh/05-memory.md)                                     | Biomimetic memory: 3-tier 5-class, Grafeo, forgetting, associative retrieval |
+| [06-communication.md](./docs/design/zh/06-communication.md)                       | MQTT pub/sub + HTTP reverse-proxy + Intent protocol + Capability Registry    |
+| [07-system-agent.md](./docs/design/zh/07-system-agent.md)                         | System Agent: ContentProvider, cold-start identity injection                  |
+| [08-security.md](./docs/design/zh/08-security.md)                                 | Security: process isolation, filesystem isolation, signing, WASM sandbox      |
+| [10-debug-protocol.md](./docs/design/zh/10-debug-protocol.md)                     | Debug Protocol: DevMode, execution control, breakpoints, snapshots            |
+| [11-module-design.md](./docs/design/zh/11-module-design.md)                       | Module-design index — maps design docs to Rust crates                         |
+| [12-tool-system.md](./docs/design/zh/12-tool-system.md)                           | Tool system: Built-in, WASM sandbox, Gateway Tools                            |
+| [13-skill-system.md](./docs/design/zh/13-skill-system.md)                         | Skill system: SKILL.md format, Grafeo experience layer, self-learning         |
+| [14-desktop-app.md](./docs/design/zh/14-desktop-app.md)                           | Desktop App: Tauri v2, system tray, MQTT client, DevMode                      |
+| [15-conversation-persistence.md](./docs/design/zh/15-conversation-persistence.md) | Conversation persistence: Session Actor, JSONL, Token budget                  |
+| [16-ipc-grpc-migration.md](./docs/design/zh/16-ipc-grpc-migration.md)             | Legacy gRPC IPC design (superseded by MQTT; see ADR-033)                      |
+| [17-web-search-provider.md](./docs/design/zh/17-web-search-provider.md)           | Pluggable web-search provider abstraction                                     |
+| [18-user-identity-simplified.md](./docs/design/zh/18-user-identity-simplified.md) | Simplified user-identity model                                                |
+| [19-lsp-multi-language-project-root.md](./docs/design/zh/19-lsp-multi-language-project-root.md) | LSP multi-language project-root discovery & relay                |
 
 ### Architecture Decision Records (ADR)
 
-| Doc                                                                 | Decision                           |
-| ------------------------------------------------------------------- | ---------------------------------- |
-| [ADR-009](./docs/adr/ADR-009-gateway-workspace-isolation.md)        | Gateway workspace isolation        |
-| [ADR-010](./docs/adr/ADR-010-context-compression-simplification.md) | Context compression simplification |
-| [ADR-011](./docs/adr/ADR-011-compaction-as-distillation.md)         | Compaction as Distillation         |
+A growing set of ADRs lives under [`docs/adr/zh/`](./docs/adr/zh/) (currently 35+ records, ADR-009 → ADR-046). Below are the foundational and recently-shipped ones; for the full list browse the directory directly.
+
+| ADR                                                                                | Decision                                                |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| [ADR-009 — Gateway workspace isolation](./docs/adr/en/ADR-009-gateway-workspace-isolation.md) | Per-process namespace isolation in the Gateway          |
+| [ADR-010 — Context compression simplification](./docs/adr/zh/ADR-010-context-compression-simplification.md) | Simplified context-compression strategy                  |
+| [ADR-011 — Compaction as Distillation](./docs/adr/zh/ADR-011-compaction-as-distillation.md) | Compaction implemented as memory distillation            |
+| [ADR-020 — Data-flow layering](./docs/adr/zh/)                                       | Three-tier data flow (Gateway / Runtime / Agent)         |
+| [ADR-031 — Drop legacy IPC, consolidate on gRPC](./docs/adr/zh/)                    | Legacy IPC cleanup (later superseded by ADR-033)         |
+| [**ADR-033 — MQTT replaces gRPC + WebSocket**](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) | **MQTT replaces gRPC + WebSocket** (current IPC architecture) |
+| [ADR-034 — MQTT/HTTP boundary](./docs/adr/zh/)                                      | Responsibility split between MQTT and HTTP               |
+| [ADR-035 — MQTT streaming push refactor](./docs/adr/zh/)                           | Streaming push refactor on top of MQTT                   |
+| [ADR-036 — MQTT status push](./docs/adr/zh/)                                        | Status broadcast via MQTT (Will + Retained)               |
+| [ADR-043 — Session config/state split](./docs/adr/zh/)                              | Split Session static config from runtime state           |
+| [ADR-046 — Unified attachment entries](./docs/adr/zh/)                              | Unified model for attachment entries                     |
 
 ### Module-Level Design
 
-| Doc                                                       | Content                                      |
-| --------------------------------------------------------- | -------------------------------------------- |
-| [00-overview.md](./docs/module-design/00-overview.md)     | Module overview: 7-crate workspace structure |
-| [01-core.md](./docs/module-design/01-core.md)             | acowork-core design                         |
-| [02-runtime.md](./docs/module-design/02-runtime.md)       | acowork-runtime design                      |
-| [03-gateway.md](./docs/module-design/03-gateway.md)       | acowork-gateway design                      |
-| [04-grafeo.md](./docs/module-design/04-grafeo.md)         | acowork-grafeo design                       |
-| [05-vault-sign.md](./docs/module-design/05-vault-sign.md) | acowork-vault / sign design                 |
+| Doc                                                                                | Content                                          |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------ |
+| [00-overview.md](./docs/module-design/zh/00-overview.md)                           | Module overview: 12-crate workspace structure    |
+| [01-core.md](./docs/module-design/zh/01-core.md)                                   | `acowork-core` design                            |
+| [02-runtime.md](./docs/module-design/zh/02-runtime.md)                             | `acowork-runtime` design                         |
+| [03-gateway.md](./docs/module-design/zh/03-gateway.md)                             | `acowork-gateway` design                         |
+| [04-grafeo.md](./docs/module-design/zh/04-grafeo.md)                               | `acowork-grafeo` design                          |
+| [05-vault-sign.md](./docs/module-design/zh/05-vault-sign.md)                       | `acowork-vault` / `acowork-sign` design          |
+| [06-architecture.md](./docs/module-design/zh/06-architecture.md)                   | Cross-crate architecture & dependency rules      |
+| [06-ask-user-question-tool.md](./docs/module-design/zh/06-ask-user-question-tool.md) | The `ask_user_question` tool specification      |
 
 ---
 
@@ -450,11 +476,11 @@ ACowork.AI's design is deeply inspired by the following open-source projects:
 
 ## 🤝 Contributing
 
-The project is currently in **design phase**. Contributions to discussion and design review are welcome:
+The project has moved past design into **active implementation** (Alpha). Code, design feedback, and reviews are all welcome:
 
-- Browse existing design review reports in `docs/review/`
-- Submit design feedback via issues
-- Read [AGENTS.md](./AGENTS.md) for project conventions
+- Browse existing design & code-review reports in [`docs/review/zh/`](./docs/review/zh/)
+- Submit issues for bug reports, proposals, or design feedback
+- Read [AGENTS.md](./AGENTS.md) for project conventions before opening a PR
 
 ---
 
