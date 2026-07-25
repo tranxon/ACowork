@@ -1,8 +1,10 @@
 # 通信协议
 
-> 版本：v3.6 | 更新日期：2026-05-06
+> 版本：v3.7 | 更新日期：2026-07-12
 
-> **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息通过 gRPC Bidirectional Streaming 传输，与 GatewayRequest/Response 的自定义二进制帧分离。
+> **v3.7 变更**：§0/§1/§1.5 全面对齐 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime IPC 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。Intent 协议（§2）保持不变，仍是 Agent 间逻辑通信的语义合同（与传输无关）。
+>
+> **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息现在承载在 MQTT 主题 `acowork/sessions/...` 上，由 Gateway 反向代理 Runtime 的 localhost HTTP 处理 Session CRUD / 消息历史查询（见 [`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)、[`docs/zh/protocols/http.md`](../../zh/protocols/http.md)）。
 
 **交叉引用**：
 - Session Actor 架构：`15-conversation-persistence.md` §1.7
@@ -13,193 +15,78 @@
 
 ## 0. 通信架构总览
 
-ACowork 平台有三条独立的通信通道，各司其职：
+自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起，ACowork 平台有四条独立的通信通道，各司其职：
 
 ```
 ┌────────────────┐         ┌────────────────┐         ┌────────────────┐
 │  Desktop App   │         │  Agent Runtime │         │  Agent Runtime │
-│  / CLI         │         │  (Agent A)     │         │  (Agent B)     │
+│  (Tauri v2)    │         │  (Agent A)     │         │  (Agent B)     │
 └───────┬────────┘         └───────┬────────┘         └───────┬────────┘
         │                          │                          │
-        │ HTTP API                 │ gRPC                     │ gRPC
-        │ (REST + WS)              │ (Protocol Buffers)       │ (Protocol Buffers)
-        │                          │                          │
+        │ HTTP REST                │ MQTT + HTTP 反向代理     │
+        │ + MQTT SUB               │ (rumqttc + localhost     │
+        │                          │  HTTP server)            │
         ▼                          ▼                          ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         Gateway (单进程)                              │
 │                                                                      │
-│  HTTP API ──────┐  ┌──────── gRPC ────────────┐                   │
-│  (Axum)         │  │                             │                   │
-│  管理面操作       │  │  Agent IPC 操作              │                   │
-│  (CRUD, 对话)    │  │  (Key, Identity, Intent)    │                   │
-│                 │  │                             │                   │
-└─────────────────┘  └─────────────────────────────┘                   │
+│  HTTP API (Axum)    MQTT Broker (rumqttd)   HTTP Reverse Proxy        │
+│  ────────────────   ─────────────────────   ─────────────────────    │
+│  REST :19876        :19875                   → Runtime localhost      │
+│  Desktop / CLI      实时事件 / 状态           大数据查询 / 历史消息     │
+│  CRUD / 对话 / 配置  chunk / tool_call / done  反代后端 (不解析 body)   │
+│                                                                      │
+│  Intent Router (转发 / 订阅) · Package / Lifecycle · Vault · Config  │
 └──────────────────────────────────────────────────────────────────────┘
         ▲                          ▲                          ▲
         │                          │                          │
-        │                          │ Intent Router 转发        │
+        │                          │ Intent 主题转发           │
         └──────────────────────────┼──────────────────────────┘
 ```
 
-│ 通道 | 消费者 | 协议 | 用途 |
+| 通道 | 消费者 | 协议 | 用途 |
 |------|--------|------|------|
-| **gRPC** | Agent Runtime | Protocol Buffers（双向流） | Key 分发、身份注入、Intent 通信、预算上报、速率协调 |
-| **HTTP API** | Desktop App / CLI | REST + WebSocket | Agent 管理、对话、Vault、配置 |
-| **Debug Protocol** | Desktop App (DevMode) | JSON-RPC 2.0 over WebSocket | 步进调试、录制回放、Skill 热加载 |
+| **HTTP API** | Desktop App / CLI / Gateway → Runtime 反代 | REST (`http://127.0.0.1:19876`) | Agent 管理、对话触发、Vault、配置、大数据查询反代 |
+| **MQTT** | Agent Runtime ↔ Gateway ↔ Desktop App | MQTT 3.1.1 over TCP (`127.0.0.1:19875`, rumqttd broker) | 实时事件推送（chat chunk / tool_call / done）、状态同步、设备生命周期（Will+Retained）、Intent 主题路由 |
+| **HTTP 反向代理** | Gateway → Agent Runtime | HTTP（Runtime 自身监听 localhost 随机端口）| 会话历史拉取、消息分页查询、配置回写、AgentHello 等需要"等回复"的场景 |
+| **Debug Protocol** | Desktop App (DevMode) | JSON-RPC 2.0 over WebSocket（直接连 Agent Runtime）| 步进调试、录制回放、Skill 热加载（DevMode 仍走 WebSocket，与 IPC 主通道无关）|
 
-gRPC（§1.5）：Agent Runtime 与 Gateway 之间的 Protocol Buffers 双向流通信，替代了旧版自定义二进制帧 IPC。
-HTTP API（[04-gateway.md](./04-gateway.md) §9）：Desktop App / CLI 对 Gateway 的 REST/WebSocket 调用。
-Debug Protocol（[10-debug-protocol.md](./10-debug-protocol.md)）：Desktop App DevMode 对 Agent Runtime 的 JSON-RPC 2.0 WebSocket 调试通道。
+**权威参考：**
+- MQTT 主题树与 payload protobuf：[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)
+- HTTP REST：[`docs/zh/protocols/http.md`](../../zh/protocols/http.md)
+- Gateway HTTP 反代：[`docs/design/zh/04-gateway.md`](./04-gateway.md) §9
+- Debug Protocol：[`10-debug-protocol.md`](./10-debug-protocol.md)
 
-## 1. Gateway Service API（gRPC）
+**§1（Gateway Service API / gRPC）已整体退役** —— 旧 gRPC 合同层握手、帧格式、GatewayRequest/Response 枚举全部下线，相应职责拆分为 MQTT（事件）和 HTTP 反代（请求/响应）。历史合同定义仍可在 [`16-ipc-grpc-migration.md`](./16-ipc-grpc-migration.md) 查阅。
 
-Agent Runtime 与 Gateway 通过 **gRPC 双向流**通信。API 的消息格式和交互语义是**平台无关的合同**，传输层由各平台自行选择。
+**§2（跨 Agent 通信 / Intent 机制）与传输无关** —— Intent 消息结构、Capability Registry、路由流程等仍是平台语义合同，载荷直接落到 MQTT 主题 `acowork/intents/...` 上，传输层不参与语义。
 
-> **架构演进**：Phase 2 之前使用自定义二进制帧 IPC（4B 长度 + 1B 类型 + JSON 负载），Phase 2 迁移至 gRPC Protocol Buffers 双向流。旧版 IPC 代码已移除，本文档保留合同层设计供参考。
+## 1. Gateway Service API（已退役 — 拆分为 MQTT + HTTP 反向代理）
 
-### 1.1 合同层 vs 实现层
-
-| 层次 | 内容 | 说明 |
-|------|------|------|
-| **合同层**（所有平台必须遵守） | 帧格式、消息类型、请求/响应 JSON schema、握手协议 | Agent 开发者只需关心此层 |
-| **实现层**（各平台自行决定） | 传输方式、进程模型、沙箱方式 | 不影响 .agent 包兼容性 |
-
-**传输层实现选择：**
-
-| 平台 | 传输方式 | Endpoint 格式 |
-|------|---------|--------------|
-| Linux | Unix Domain Socket | `unix:///tmp/agent-gateway.sock` |
-| macOS | Unix Domain Socket | `unix:///tmp/agent-gateway.sock` |
-| Windows | Named Pipe | `pipe://agent-gateway` |
-| Android | Abstract Namespace Socket / Local TCP | `abstract://agent-gateway` / `tcp://127.0.0.1:19876` |
-| iOS | Local TCP | `tcp://127.0.0.1:19876` |
-
-Agent Runtime 启动时通过参数接收 endpoint 字符串，内部根据 scheme 选择传输实现。
-
-### 1.2 握手协议
-
-> **当前实现**：握手已简化为一次 gRPC AgentHello 双向流调用。Runtime 发送 AgentHello（含 agent_id、package_path、work_dir），Gateway 返回 AgentHelloResult（含 provider_list、user_identity、mcp_list、search_list 及对应密钥）。以下文档保留旧版多步握手流程作为参考。
-
-连接建立后，Gateway 与 Agent Runtime 依次完成握手、密钥下发、身份注入和能力概览推送：
-
-```json
-// ① Agent Runtime → Gateway
-{
-    "type": "handshake",
-    "agent_id": "com.example.weather",
-    "runtime_version": "1.0.0",
-    "protocol_version": 1
-}
-
-// ② Gateway → Agent Runtime（握手确认）
-{
-    "type": "handshake_ack",
-    "capabilities": ["streaming"],
-    "key_delivery": "in_band"
-}
-
-// ③ Gateway → Agent Runtime（推送 API Key）
-{
-    "type": "key_delivery",
-    "provider": "openai",
-    "api_key": "sk-..."
-}
-
-// ④ Gateway → Agent Runtime（推送用户身份）
-{
-    "type": "identity_delivery",
-    "fields": {"name": "张三", "city": "Shanghai", "language": "zh-CN", "timezone": "Asia/Shanghai"}
-}
-
-// ⑤ Gateway → Agent Runtime（推送邻居能力概览，名字级摘要）
-{
-    "type": "capability_overview",
-    "agents": [
-        {
-            "agent_id": "com.acowork.system",
-            "running": true,
-            "capabilities": []
-        },
-        {
-            "agent_id": "com.example.calendar",
-            "running": false,
-            "capabilities": ["create_event", "query_events", "delete_event"]
-        }
-    ]
-}
-```
-
-握手之后的所有消息，不管底层传输是什么，格式完全一致。
-
-**握手顺序说明：** Gateway 在握手确认后依次推送 Key → Identity → Capability Overview，Agent Runtime 在收到全部信息后才进入主循环就绪状态。Key 和 Identity 已在 03-agent-runtime.md 中说明，Capability Overview 详见第 2 节。
-
-### 1.3 帧格式
-
-```
-[4 bytes: body length (u32 big-endian)]
-[1 byte:  message type (0=request, 1=response, 2=stream_chunk, 3=error)]
-[N bytes: JSON body]
-```
-
-### 1.4 API 定义
-
-Agent Runtime 只在这些操作上和 Gateway 通信（不代理 LLM 调用和工具执行）：
-
-```rust
-enum GatewayRequest {
-    // --- 密钥 ---
-    KeyRelease { provider: String },           // 获取 API Key（启动时一次性）
-
-    // --- Intent ---
-    IntentSend {
-        target: String,
-        action: String,
-        params: serde_json::Value,
-        async_: bool,
-    },
-
-    // --- Capability 查询 ---
-    CapabilityQuery {
-        target: Option<String>,                // None = 查询所有已安装 Agent
-    },
-
-    // --- 预算协调 ---
-    BudgetQuery { provider: String },           // 查询剩余预算
-    UsageReport(UsageReport),                   // 上报 LLM 用量
-
-    // --- 速率协调 ---
-    RateAcquire { provider: String },           // 申请速率令牌
-
-    // --- 运行时权限请求 ---
-    PermissionRequest {
-        permission: String,
-        reason: String,
-    },
-}
-
-enum GatewayResponse {
-    KeyReleaseResult { api_key: String },
-    IntentDelivered { message_id: String },
-    IntentReceived { from: String, action: String, params: serde_json::Value },
-    CapabilityQueryResult {
-        agents: Vec<AgentCapabilityInfo>,       // 见 2.4 节
-    },
-    BudgetInfo { remaining_tokens: u64, remaining_cost_usd: f64 },
-    UsageReportAck {},
-    RateToken { granted: bool, retry_after_ms: Option<u64> },
-    PermissionResult { granted: bool, reason: Option<String> },
-}
-```
+> **ADR-033（2026-07-11）** 起，§1 描述的 gRPC 双向流 API 整体退役。原 §1.1–1.4 中的所有握手、帧格式、GatewayRequest/Response 枚举由以下两层承担：
+>
+> - **MQTT**（[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)）— 实时事件、状态推送、设备生命周期（Will+Retained）、Key 分发（AgentHello 握手响应）
+> - **HTTP 反向代理**（[`docs/design/zh/04-gateway.md`](./04-gateway.md) §9 + [`docs/zh/protocols/http.md`](../../zh/protocols/http.md)）— 会话历史、消息分页、Intent 触发、配置写回等"等回复"场景
+>
+> 旧合同层的完整记录（`16-ipc-grpc-migration.md`）保留作为历史参考；现有集成方请直接读上述两份现行协议文档。
+>
+> 之前 §1 的"合同层 vs 实现层"分层（消息格式 / JSON schema / 握手协议 vs 传输方式）不再适用 —— 现在合同层是 **MQTT 主题树 + mqtt_payload.proto + HTTP REST 路由**，没有"两套实现层"。
 
 ## 2. 跨 Agent 通信（Intent 机制）
 
 Agent 通过 Gateway 的 Intent Router 发送消息请求调用另一个 Agent 的能力。
 
-### 1.5 Session 管理 IPC 消息（gRPC）
+### 1.5 Session 管理 IPC 消息
 
 > v3.6 新增（2026-05-06）：支持 Session Actor 多会话并发模型。
+> v3.7 修订：传输层从 gRPC Bidirectional Stream 迁移到 **MQTT 主题 + HTTP 反向代理**；proto 定义仍有效，但落地路径变了。
 
-Session 相关的 Gateway ↔ Runtime IPC 消息通过 gRPC Bidirectional Streaming 传输。消息格式基于 Protocol Buffers，与 GatewayRequest/Response 的自定义二进制帧分离。
+Session 相关的 Gateway ↔ Runtime IPC 消息拆为两类传输：
+
+| 类别 | 承载通道 | 触发场景 | 消息类型 |
+|------|---------|---------|---------|
+| **Session 事件流** | MQTT 主题 `acowork/sessions/{sid}/events/#` | Gateway 转发 Runtime 的 chat chunk / tool_call / done 等流式事件 | 见 [`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md) §Session events |
+| **Session 查询/管理** | HTTP 反向代理（Gateway → Runtime localhost server `/sessions/...`） | 列表查询、最新会话、单会话消息分页、CRUD | `SessionList` / `ConversationMessages` / `CreateSessionResponse` / `ActivateSessionResponse` / `DeleteSessionResponse`（proto 定义保留，但承载通道从 gRPC 切到 HTTP 反代）|
 
 #### Proto 定义
 
@@ -257,20 +144,20 @@ message DeleteSessionResponse {
 }
 ```
 
-#### 与 GatewayRequest/Response 的关系
+#### 与 MQTT/HTTP 反向代理的对应关系（v3.7 修订）
 
 
-| 消息类型 | 通道 | 协议 | 用途 |
-|---------|------|------|------|
-| `GatewayRequest / Response` | Socket API | 自定义二进制帧 | Key、Intent、Budget、Rate、Permission |
-| `SessionList / ConversationMessages` 等 | gRPC Bidirectional Stream | Protocol Buffers | Session CRUD、消息查询 |
-| `IntentReceived`（含 action=chat_message） | gRPC Push | Protocol Buffers | **Chat 消息**（包含 session_id） |
+| 旧消息类型 | 新通道 | 协议 | 用途 |
+|-----------|--------|------|------|
+| `GatewayRequest` / `Response`（Key, Intent, Budget, Rate, Permission） | MQTT 主题 + HTTP 反代 | MQTT 3.1.1 / HTTP | Intent 触发走 MQTT 主题 `acowork/intents/...`；Budget / Rate 查询走 HTTP 反代 Runtime `/budget/...` `/rate/...` |
+| `SessionList` / `ConversationMessages` / CRUD 响应 | HTTP 反向代理 → Runtime `/sessions/...` | HTTP/JSON | Session CRUD、消息查询、消息分页 |
+| `IntentReceived`（含 action=chat_message）/ Chat 流式事件 | MQTT 主题 `acowork/agents/{id}/sessions/{sid}/messages/#` | MQTT 3.1.1（protobuf payload）| **Chat 消息与流式 chunk** |
 
 
-**为什么 Session 用 gRPC 而非 Socket API**：
-- Session 消息查询需要返回大量结构化数据（历史消息列表），二进制帧不适合批量数据
-- gRPC 的 streaming 支持自然对应"Gateway push → Runtime"的实时消息模式
-- 与 LLMConfigDelivery 等现有 gRPC 消息共用同一连接
+**为什么 Session 事件流用 MQTT、Session CRUD 用 HTTP 反代**：
+- Session 流式事件（chat chunk / tool_call / done）是典型的"一对多广播 + 多订阅方"模式，pub/sub 比请求/响应天然契合
+- Session 查询/CRUD 需要返回大量结构化数据（历史消息列表），走 HTTP 反向代理更直接（请求/响应 + 分页 + cursor）
+- Runtime 自己暴露 localhost HTTP server（随机端口），只对 Gateway 可见，不对外开端口
 
 #### 未知 role 类型的降级处理
 
@@ -743,6 +630,7 @@ Gateway → Runtime 单播推送。携带已格式化的工作区上下文文本
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
+| IPC 通道收敛（ADR-033） | 统一为 MQTT pub/sub + HTTP 反向代理 | 见 ADR-033 / ADR-034：MQTT 承担事件与状态、HTTP 反代承担 req/res 与历史查询；淘汰 gRPC 双向流与 WebSocket 流式推送 |
 | Capability 发现方式 | 启动时注入 + 运行时查询 | 启动注入满足常见需求（构建 prompt），运行时查询满足精确需求 |
 | Overview 内容粒度 | 名字级摘要（不含 schema） | 50 Agent × 5 capability 完整 schema 约 6000-8000 token，名字级仅 500-800 token |
 | 精确参数获取 | 调用前 CapabilityQuery 按需查询 | LLM 规划只需知道"谁会什么"，精确 schema 在执行时才需要 |
