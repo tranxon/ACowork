@@ -483,7 +483,7 @@ POST /api/v1/sessions/{session_id}/compress/summary
 → 200 OK（异步执行，不等结果）
 ```
 
-**Deskop App UI**（`apps/desktop/`）：
+**Deskop App UI**（`apps/acowork-desktop/`）：
 - **Setup 面板**（右侧）：新增 "Tool result compression" 选项（auto / manual radio），读 / 写 `agent_config.tool_result_compression_mode`。**2026-07-18 修订**：默认选中 "manual"。
 - **输入框 usage 弹出菜单**：新增**两个独立按钮**——"Tool results" / "Summary"。
 - 按钮点击 → Gateway HTTP API → 异步执行 → 完成后前端 polling `GET /api/v1/sessions/{id}/status` 反馈压缩条数
@@ -566,7 +566,7 @@ async fn finalize_restore(&mut self) -> Result<()> {
   - 工具清单追加 `context_recall`，permission 标记 `context:read`。
 - `docs/design/zh/17-gateway-api.md`（如不存在则新建）：
   - 列出 `POST /compress/tool_result` / `POST /compress/summary` API
-- `apps/desktop/src/components/SettingsPanel.*` / `ChatInput.*`：
+- `apps/acowork-desktop/src/components/SettingsPanel.*` / `ChatInput.*`：
   - 同步实现 setup 面板 + 输入框按钮
 - `docs/adr/zh/ADR-010-context-compression-simplification.md`：
   - "明确放弃的策略"表中 "Tool result 日常折叠" 一行更新为：**"Tool result 占位符压缩（ADR-032 引入）—— 不同于原截断方案，原始内容保留在 JSONL，LLM 可主动召回；`truncate_large_messages` 因同原理删除；运行时状态由规则派生，不污染持久化层"**。
@@ -1503,9 +1503,9 @@ fn resolve_keep_recent_n(&self) -> usize {
 | C4b | `core/acowork-runtime/src/agent/loop_.rs` | 主循环 `manual_compress_rx` channel + 入口 drain 逻辑 | +50 / -5 | |
 | C4b | `core/acowork-gateway/src/http/` | 新增 `POST /compress/tool_result` / `/compress/summary` 路由 + handler | +80 / 0 | |
 | C4b | `core/acowork-gateway/src/session_manager.rs` | `manual_compress_tx` 端：API → AgentLoop channel 注入 | +30 | |
-| C4c | `apps/desktop/src/components/SettingsPanel.*` | setup 面板新增 "Tool result compression" radio (auto/manual) | +40 / 0 | |
-| C4c | `apps/desktop/src/components/ChatInput.*` | usage 弹出菜单新增**两个独立按钮**（Tool results / Summary） | +60 / 0 | |
-| C4c | `apps/desktop/src/api/client.ts` | 新增 `compressToolResult()` / `compressSummary()` API 调用 | +25 | |
+| C4c | `apps/acowork-desktop/src/components/SettingsPanel.*` | setup 面板新增 "Tool result compression" radio (auto/manual) | +40 / 0 | |
+| C4c | `apps/acowork-desktop/src/components/ChatInput.*` | usage 弹出菜单新增**两个独立按钮**（Tool results / Summary） | +60 / 0 | |
+| C4c | `apps/acowork-desktop/src/api/client.ts` | 新增 `compressToolResult()` / `compressSummary()` API 调用 | +25 | |
 | C4d | `apps/cli/src/commands/compress.rs` | 新增 `acowork compress tool_result` / `compress summary` 子命令 | +90 / 0 | |
 | C4d | `apps/cli/src/ipc/client.rs` | CLI → Gateway IPC（Unix Socket / Named Pipe）连接 + channel 注入 | +50 / 0 | |
 | C4d | `apps/cli/src/commands/status.rs` | 新增 `acowork status --session <id>` 查询压缩状态 | +35 / 0 | |
@@ -1529,7 +1529,7 @@ fn resolve_keep_recent_n(&self) -> usize {
 | `docs/adr/zh/ADR-010-context-compression-simplification.md` | "明确放弃的策略" 表中 "Tool result 日常折叠" 一行更新：**"由 ADR-032 重新引入并升级为占位符+召回方案；同时 `truncate_large_messages` 因同原理删除"** |
 | `docs/adr/zh/ADR-014-loop-module-decomposition.md` | §transient 通道在 `loop_.rs` 的归属说明 + `manual_compress_rx` channel 归属 |
 | `examples/*/config/agent_config.json` | 暴露 3 个配置项：`tool_result_soft_threshold_chars` / `tool_result_compression_mode` / `tool_result_keep_recent_n`(默认 3) |
-| `apps/desktop/docs/` | 描述 setup 面板 + ChatInput 弹出菜单新增的"压缩上下文"按钮组 |
+| `apps/acowork-desktop/docs/` | 描述 setup 面板 + ChatInput 弹出菜单新增的"压缩上下文"按钮组 |
 
 ### 与现有压缩层次的交互
 

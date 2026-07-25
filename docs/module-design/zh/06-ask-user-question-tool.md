@@ -696,9 +696,9 @@ case 'ask_answer':
 
 | 文件                                              | 改动                                             |
 | ------------------------------------------------- | ------------------------------------------------ |
-| `apps/desktop/src/components/AskQuestionCard.tsx` | **新建** — 问题卡片组件                          |
-| `apps/desktop/src/components/ChatMessage.tsx`     | 集成 AskQuestionCard 渲染                        |
-| `apps/desktop/src/hooks/useWebSocket.ts`          | 新增 `ask_question` / `ask_answer` event handler |
+| `apps/acowork-desktop/src/components/AskQuestionCard.tsx` | **新建** — 问题卡片组件                          |
+| `apps/acowork-desktop/src/components/ChatMessage.tsx`     | 集成 AskQuestionCard 渲染                        |
+| `apps/acowork-desktop/src/hooks/useWebSocket.ts`          | 新增 `ask_question` / `ask_answer` event handler |
 
 ---
 

@@ -212,7 +212,7 @@ message DataEnvelope {
 
 `SessionMessage.event` 内的 `SessionStateChangedPayload session_state_changed = 25` 同步删除。
 
-Envelope `version` 字段从当前值 bump 至 v2。`apps/desktop` 通过 envelope.version 校验做兼容性判断。
+Envelope `version` 字段从当前值 bump 至 v2。`apps/acowork-desktop` 通过 envelope.version 校验做兼容性判断。
 
 #### 3.1.2 字段语义规范的注释
 

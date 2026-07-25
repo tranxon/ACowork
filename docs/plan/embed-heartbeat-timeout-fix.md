@@ -410,7 +410,7 @@ gateway 侧的 idle 超时已在 3.1 中实现，脚本内部的 timeout 作为�
 | # | 任务 | 文件 | 改动量 | 预计耗时 |
 |---|------|------|--------|----------|
 | 10 | LSP install 脚本内部增加 timeout | `assets/lsp_install/*.sh` | 每个 1-2 行 | 30min |
-| 11 | 前端增加 embed 服务状态指示器 | `apps/desktop/` | — | 2h |
+| 11 | 前端增加 embed 服务状态指示器 | `apps/acowork-desktop/` | — | 2h |
 | 12 | 文档更新 | `docs/` | — | 30min |
 
 ## 5. 测试计划
