@@ -1550,6 +1550,11 @@ mod tests {
         let (control_tx, _control_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
+        // Throwaway work_dir — the test only verifies bootstrap + publishes,
+        // not the MCP catalog poll task. A temp path keeps the poll task's
+        // filesystem writes (if any) from polluting the project tree.
+        let work_dir = std::env::temp_dir().join("acowork-test-mqtt-client-18980");
+
         let client = RuntimeMqttClient::connect(
             MqttConnectConfig {
                 host: "127.0.0.1",
@@ -1563,6 +1568,7 @@ mod tests {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir,
             },
         )
         .await
@@ -1631,6 +1637,10 @@ mod tests {
         let (control_tx, _control_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
 
+        // Throwaway work_dir (see test_runtime_mqtt_client_connects_and_publishes
+        // for rationale — bootstrap idempotency test never inspects the poll task).
+        let work_dir = std::env::temp_dir().join("acowork-test-mqtt-bootstrap-18981");
+
         let client = RuntimeMqttClient::connect(
             MqttConnectConfig {
                 host: "127.0.0.1",
@@ -1644,6 +1654,7 @@ mod tests {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                work_dir,
             },
         )
         .await
@@ -1654,12 +1665,16 @@ mod tests {
         let data = &client.bootstrap_data;
 
         // Second bootstrap (first was done by connect()).
-        RuntimeMqttClient::run_bootstrap(&client.client, data)
+        // `client()` is `async fn` returning `AsyncClient` by clone —
+        // the borrow into a new local keeps the future owned across `.await`.
+        let second_handle = client.client().await;
+        RuntimeMqttClient::run_bootstrap(&second_handle, data)
             .await
             .expect("second bootstrap should succeed (idempotent)");
 
-        // Third bootstrap.
-        RuntimeMqttClient::run_bootstrap(&client.client, data)
+        // Third bootstrap (refetched; the handle was moved into run_bootstrap).
+        let third_handle = client.client().await;
+        RuntimeMqttClient::run_bootstrap(&third_handle, data)
             .await
             .expect("third bootstrap should succeed (idempotent)");
 

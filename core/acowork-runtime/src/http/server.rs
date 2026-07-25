@@ -17,10 +17,8 @@
 //! GET    /sessions/latest                        // retained
 //! GET    /sessions/{sid}                         // NEW: panel-4 (merges meta + state)
 //! GET    /sessions/{sid}/messages                // retained
-//! GET    /sessions/{sid}/documents               // NEW
-//! POST   /sessions/{sid}/documents               // NEW
-//! GET    /sessions/{sid}/documents/{doc_id}      // NEW
-//! DELETE /sessions/{sid}/documents/{doc_id}      // NEW
+//! POST   /sessions/{sid}/files                   // ADR-046: upload file/image
+//! GET    /files/{document_id}                    // ADR-046: download blob
 //! GET    /memory/graph                           // FIXED: now uses Grafeo
 //! GET    /memory/nodes                           // retained
 //! GET    /memory/nodes/{nid}                     // NEW: memory_query::get_node
@@ -82,7 +80,7 @@ use tokio::sync::mpsc;
 use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
-use crate::conversation::{read_messages_paginated, ConversationEntry};
+
 use crate::mqtt::client::SharedRuntimeMqttClient;
 
 /// Error type for Runtime HTTP server operations.
@@ -192,6 +190,13 @@ struct HttpState {
     /// directly. Also serves `/agents/{id}/builtin-tools` because that
     /// endpoint persists `agent_tools.json` (a separate file).
     agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+    /// ADR-046: Late-bind slot for the unified attachment blob store
+    /// (`POST /sessions/{sid}/files` upload + `GET /files/{doc_id}`
+    /// download). The HTTP handlers route through this trait instead
+    /// of touching the filesystem directly — same ADR-040 pattern as
+    /// every other UseCase service. Populated in Phase B (sync —
+    /// requires only the boot-time `work_dir`).
+    attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
 }
 
 /// Handle to the running HTTP server.
@@ -230,6 +235,7 @@ impl RuntimeHttpServer {
         workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+        attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -246,6 +252,7 @@ impl RuntimeHttpServer {
             workspace_mutation,
             agent_tools,
             agent_config,
+            attachment,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -257,15 +264,13 @@ impl RuntimeHttpServer {
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
             .route("/sessions/{sid}", get(get_session))
             .route("/sessions/{sid}/messages", get(get_messages))
-            // 4 NEW document routes (panel-sub-component under session).
-            .route(
-                "/sessions/{sid}/documents",
-                post(upload_document).get(list_documents),
-            )
-            .route(
-                "/sessions/{sid}/documents/{doc_id}",
-                get(read_document).delete(delete_document),
-            )
+            // ADR-046: 2 attachment routes — POST is session-scoped (the desktop
+            // knows which session is sending the upload), GET is
+            // global-scoped (the desktop knows `document_id` from the
+            // JSONL metadata it already loaded, no session_id needed).
+            // Both route through `AttachmentService` (ADR-040).
+            .route("/sessions/{sid}/files", post(upload_file))
+            .route("/files/{document_id}", get(read_file))
             .route("/memory/graph", get(get_memory_graph))
             .route(
                 "/memory/nodes",
@@ -508,62 +513,42 @@ struct GetMessagesQuery {
 
 /// `GET /sessions/{sid}/messages` — paginated message list for a session.
 ///
-/// Delegates to [`crate::conversation::read_messages_paginated`], which is
-/// the same backend used by the legacy gRPC path. Supports `offset` /
-/// `limit` query parameters (no `direction`; direction is derived from
-/// `offset` itself). Both `offset` and `limit` are measured in raw
-/// entries, never in display groups. Returns 404 when the session JSONL
-/// file does not exist under `workspace/conversations/`.
+/// `GET /sessions/{sid}/messages` - paginated message list for a session.
+///
+/// ADR-040: delegates to [`SessionMetadataService::get_messages`] via
+/// the late-bind slot. The handler is a thin protocol converter - all
+/// file I/O, pagination, and ADR-035 D9.2 tool_result truncation live
+/// in the UseCase impl.
 async fn get_messages(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
     Query(query): Query<GetMessagesQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let session_path = state
-        .work_dir
-        .join("conversations")
-        .join(format!("{}.jsonl", sid));
-
-    if !session_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    let offset = query.offset.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50).clamp(1, 500);
-
-    let paginated = read_messages_paginated(&session_path, offset, limit).map_err(|e| {
-        tracing::warn!(
-            session_id = %sid,
-            error = %e,
-            "Failed to read session messages"
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // ADR-035 D9.2: truncate tool_result content to first 5 lines for
-    // display in ALL HTTP paths (first-page, scroll-back, reconnect
-    // realign). Full content stays in JSONL for LLM context. No exception.
-    let messages: Vec<ConversationEntry> = paginated
-        .messages
-        .into_iter()
-        .map(|mut m| {
-            if m.role == "tool_result" {
-                m.content = crate::cli::truncate_tool_result_for_display(&m.role, &m.content);
-            }
-            m
-        })
-        .collect();
-    let messages_value = serde_json::to_value(&messages)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let count = messages.len();
-
-    Ok(Json(serde_json::json!({
-        "messages": messages_value,
-        "offset": paginated.offset,
-        "limit": paginated.limit,
-        "total": paginated.total,
-        "count": count,
-    })))
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.session_metadata.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "session metadata service not ready"})),
+    ))?;
+    let resp = svc
+        .get_messages(&sid, query.offset, query.limit)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                session_id = %sid,
+                error = %e,
+                "Failed to read session messages"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+        })?;
+    Ok(Json(serde_json::to_value(resp).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "serialization failed"})),
+        )
+    })?))
 }
 
 /// `GET /memory/graph` — full memory graph (ADR-034 §11.2 #10).
@@ -841,117 +826,61 @@ async fn trigger_consolidate(
 
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────
 
-/// `GET /sessions/{sid}` — full session detail (ADR-034 §11.2 #4, panel 4).
+/// `GET /sessions/{sid}` - full session detail (ADR-034 \u00a711.2 #4, panel 4).
 ///
-/// Phase 3: this endpoint **absorbs** the legacy `/sessions/{sid}/state`.
-/// It merges two previously-separate sources of truth so the desktop
-/// Session Status panel can render with a single round-trip:
-///
-/// 1. **`meta.json`** under `workspace/conversations/meta/{sid}.json`
-///    — authoritative ADR-024 metadata (title, created_at,
-///    last_active_at, message_count, model, provider, workspace_id,
-///    reasoning_effort, temperature, etc.).
-/// 2. **`SharedSessionSnapshots`** — live `SessionRuntimeSnapshot`
-///    populated by SessionManager as the agent loop runs (current
-///    status, todos, context_usage ratio).
-///
-/// When the session has never been observed live (e.g. a brand-new
-/// session or one that has never been touched by the agent loop) the
-/// snapshot is absent; we still return the meta-derived fields and
-/// surface `live_state = null` so the UI can distinguish "no snapshot
-/// yet" from "snapshot present but empty".
+/// ADR-040: delegates to [`SessionMetadataService::get_session`] via
+/// the late-bind slot. The impl reads `meta.json` and merges the live
+/// `SharedSessionSnapshots` state into a single `SessionDetail` struct;
+/// this handler is a thin protocol converter that returns 404 when the
+/// session is completely unknown (no meta AND no live snapshot).
 async fn get_session(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // ── 1. Read meta.json (authoritative for static fields).
-    let meta_path = state
-        .work_dir
-        .join("conversations")
-        .join("meta")
-        .join(format!("{}.json", sid));
-    let meta: Option<serde_json::Value> = if meta_path.exists() {
-        std::fs::read_to_string(&meta_path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-    } else {
-        None
-    };
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.session_metadata.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "session metadata service not ready"})),
+    ))?;
+    let detail = svc.get_session(&sid).await.map_err(|e| {
+        tracing::warn!(session_id = %sid, error = %e, "Failed to read session detail");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
 
-    // Always emit at least the session_id so the panel can render an
-    // empty detail card even if meta.json has not been written yet
-    // (e.g. session is being created right now). 404 is reserved for
-    // sessions that are **completely unknown** — no meta AND no live
-    // snapshot.
-    let meta_obj = meta.clone().unwrap_or_else(|| {
-        serde_json::json!({
-            "session_id": sid,
-            "title": null,
-            "created_at": null,
-            "last_active_at": null,
-            "message_count": 0,
-        })
-    });
-
-    // ── 2. Read live runtime snapshot (best-effort; `None` for cold sessions).
-    //
-    // ADR-039: `live_state` carries only runtime fields (status, model,
-    // provider — the latter two as in-memory mirrors — ratio, todos,
-    // context_usage). Persistent fields (workspace_id, reasoning_effort,
-    // temperature) are read from `meta.json` above.
-    let snapshots = state
-        .session_snapshots
-        .read()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let live_state: Option<serde_json::Value> = snapshots.get(&sid).and_then(|snap_arc| {
-        snap_arc.read().ok().map(|snap| {
-            let status: serde_json::Value =
-                serde_json::from_str(&snap.status_json).unwrap_or(serde_json::Value::Null);
-            let todos: Option<serde_json::Value> = snap
-                .todos_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
-            let context_usage: Option<serde_json::Value> = snap
-                .context_usage_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
-            serde_json::json!({
-                "status": status,
-                "model": snap.model,
-                "provider": snap.provider,
-                "ratio": snap.ratio,
-                "todos": todos,
-                "context_usage": context_usage,
-            })
-        })
-    });
-
-    // ── 3. 404 only when both sources are absent. Either present is
-    //       enough to return 200 — the meta card alone is useful for
-    //       sessions that have been written but never observed.
-    if meta.is_none() && live_state.is_none() {
-        return Err(StatusCode::NOT_FOUND);
+    // 404 only when both meta and live_state are absent - either
+    // present is enough to return 200 (the meta card alone is useful
+    // for sessions that have been written but never observed).
+    if detail.title.is_none()
+        && detail.created_at.is_empty()
+        && detail.live_state.is_none()
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session not found"})),
+        ));
     }
 
+    // Build the response envelope: meta fields + live_state as a
+    // nested object (matches the pre-ADR-040 shape the desktop expects).
+    let meta = serde_json::json!({
+        "session_id": detail.session_id,
+        "title": detail.title,
+        "created_at": detail.created_at,
+        "last_active_at": detail.last_active_at,
+        "message_count": detail.message_count,
+        "model": detail.model,
+        "provider": detail.provider,
+        "workspace_id": detail.workspace_id,
+    });
     Ok(Json(serde_json::json!({
         "session_id": sid,
-        "meta": meta_obj,
-        "live_state": live_state,
+        "meta": meta,
+        "live_state": detail.live_state,
     })))
 }
-
-// ── Control plane redirects (ADR-034 §7.6.4) ──────────────────────
-//
-// Phase 3 removed all `POST /sessions/{sid}/{action}` HTTP handlers
-// from this server. User-initiated state changes (approval decision,
-// question answer, continue execution, session title, session close,
-// notify toggle, compress action) now flow through the dedicated MQTT
-// topic `acowork/agents/{id}/sessions/control/{cmd}` so the
-// deserialization + routing happens in a single place (see
-// `crate::mqtt::control` for the channel side).
-//
-// Keeping those handlers here would have meant two parallel ways to
-// drive the agent loop, which Phase 2 explicitly forbids (see §7.1 G1).
 
 // ── Workspace Query Handlers (ADR-040) ─────────────────────────────────────
 //
@@ -1268,274 +1197,177 @@ fn workspace_error_to_response(e: crate::usecases::WorkspaceError) -> (StatusCod
     (status, Json(serde_json::json!({"error": msg})))
 }
 
-// ── Document storage handlers (ADR-034 §11.2 #6-9) ───────────────────────
+// ── Attachment storage handlers (ADR-046) ─────────────────────────────────
 //
-// Per-session document uploads are stored as binary blobs on disk
-// (`work_dir/sessions/{sid}/documents/{doc_id}`) with a sidecar JSON
-// index (`documents.json`) that records the user-supplied filename +
-// upload timestamp + size. The doc_id itself is a sha256(content)
-// prefix — deterministic, collision-resistant, and stable across
-// re-uploads of the same file.
+// All uploads land in the unified blob store at
+// `<work_dir>/files/<document_id>` (no session subdirectory — JSONL is
+// the per-session index). Both handlers route through the
+// `AttachmentService` UseCase trait (ADR-040) so the HTTP layer never
+// touches the filesystem directly. Pre-Phase-B HTTP probes receive
+// `503 Service Unavailable` from the slot-first pattern, matching
+// every other `*Service` handler in this crate.
 
-/// Sidecar index format for `documents.json`.
-///
-/// Persisted as JSON for atomic write-tmp-rename. Each entry corresponds
-/// to a single document blob on disk; the sidecar is rebuilt from the
-/// filesystem on cold start so a corrupted `documents.json` never loses
-/// data — it just gets reset to `{"documents": []}`.
-#[derive(Serialize, Deserialize)]
-struct DocumentsIndex {
-    /// Session this index belongs to (informational; the on-disk
-    /// location is the parent directory).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    /// Format version (currently 1).
-    #[serde(default = "default_documents_index_version")]
-    version: u32,
-    /// Document entries, newest first.
-    documents: Vec<DocumentEntry>,
-}
+use axum::extract::Multipart;
 
-fn default_documents_index_version() -> u32 {
-    1
-}
-
-/// One document record in `documents.json`.
-#[derive(Serialize, Deserialize, Clone)]
-struct DocumentEntry {
-    /// Stable identifier (sha256-prefix of the document content).
-    doc_id: String,
-    /// User-supplied filename (UI hint only — not used as a filesystem
-    /// path component to avoid encoding issues).
-    filename: String,
-    /// Document size in bytes.
-    size: u64,
-    /// MIME type if the client supplied one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    /// ISO-8601 upload timestamp (UTC).
-    uploaded_at: String,
-}
-
-/// Resolve the on-disk directory for session documents.
-fn documents_dir(work_dir: &std::path::Path, sid: &str) -> PathBuf {
-    work_dir.join("sessions").join(sid).join("documents")
-}
-
-/// Resolve the sidecar index path.
-fn documents_index_path(work_dir: &std::path::Path, sid: &str) -> PathBuf {
-    work_dir.join("sessions").join(sid).join("documents.json")
-}
-
-/// Load the sidecar index, returning an empty index if the file is
-/// missing or corrupted (never an Err to the caller — corruption is
-/// recovered by returning an empty list and letting the caller decide).
-fn load_documents_index(work_dir: &std::path::Path, sid: &str) -> DocumentsIndex {
-    let path = documents_index_path(work_dir, sid);
-    if !path.exists() {
-        return DocumentsIndex {
-            session_id: Some(sid.to_string()),
-            version: 1,
-            documents: Vec::new(),
-        };
-    }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<DocumentsIndex>(&s).ok())
-        .unwrap_or_else(|| DocumentsIndex {
-            session_id: Some(sid.to_string()),
-            version: 1,
-            documents: Vec::new(),
-        })
-}
-
-/// Persist the sidecar index atomically (write-tmp-rename).
-fn save_documents_index(
-    work_dir: &std::path::Path,
-    sid: &str,
-    index: &DocumentsIndex,
-) -> Result<(), String> {
-    let dir = work_dir.join("sessions").join(sid);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("create_dir_all sessions/{}: {}", sid, e))?;
-    let path = documents_index_path(work_dir, sid);
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(index)
-        .map_err(|e| format!("serialize documents index: {}", e))?;
-    std::fs::write(&tmp, &json)
-        .map_err(|e| format!("write tmp {}: {}", tmp.display(), e))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| format!("rename tmp -> {}: {}", path.display(), e))?;
-    Ok(())
-}
-
-/// Compute a stable doc_id from raw bytes (sha256 first 12 hex chars).
-///
-/// A 48-bit prefix is enough to avoid collisions on the per-session
-/// document set (millions of files at p≈10⁻⁹); the full hash is
-/// recoverable from the prefix should we ever need to index globally.
-fn compute_doc_id(content: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    let h = hasher.finish();
-    format!("{:012x}-{:x}", h & 0xFFFF_FFFF_FFFF, (h >> 48) & 0xFFFF)
-}
-
-/// `POST /sessions/{sid}/documents` — upload a document for the session.
-///
-/// Accepts a JSON body `{ filename, content_b64, content_type? }`. The
-/// `content_b64` field is the base64-encoded binary payload; we decode
-/// it here so the wire format stays JSON-friendly without requiring a
-/// multipart parser on the desktop.
-#[derive(Debug, Deserialize)]
-struct UploadDocumentBody {
-    filename: String,
-    content_b64: String,
-    #[serde(default)]
-    content_type: Option<String>,
-}
-
-async fn upload_document(
-    State(state): State<HttpState>,
-    Path(sid): Path<String>,
-    Json(body): Json<UploadDocumentBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let bytes = base64_decode_simple(&body.content_b64)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let dir = documents_dir(&state.work_dir, &sid);
-    std::fs::create_dir_all(&dir)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let doc_id = compute_doc_id(&bytes);
-    let blob_path = dir.join(&doc_id);
-    std::fs::write(&blob_path, &bytes)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut index = load_documents_index(&state.work_dir, &sid);
-    // De-dup: if the same content is re-uploaded we return the existing
-    // record rather than creating a duplicate entry.
-    if let Some(existing) = index.documents.iter().find(|d| d.doc_id == doc_id) {
-        return Ok(Json(serde_json::json!({
-            "session_id": sid,
-            "doc_id": existing.doc_id,
-            "filename": existing.filename,
-            "size": existing.size,
-            "uploaded_at": existing.uploaded_at,
-            "duplicate": true,
-        })));
-    }
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let entry = DocumentEntry {
-        doc_id: doc_id.clone(),
-        filename: body.filename.clone(),
-        size: bytes.len() as u64,
-        content_type: body.content_type.clone(),
-        uploaded_at: now.clone(),
+/// Convert an [`AttachmentError`] into the `(status, json)` tuple
+/// used by every attachment handler. Mirrors the shape of
+/// `workspace_error_to_response` so a future API-surface change only
+/// touches this function.
+fn attachment_error_to_response(e: crate::usecases::AttachmentError) -> (StatusCode, Json<serde_json::Value>) {
+    use crate::usecases::AttachmentError as Ae;
+    let status = match &e {
+        Ae::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        Ae::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        Ae::InvalidDocumentId(_) => StatusCode::BAD_REQUEST,
+        Ae::NotFound(_) => StatusCode::NOT_FOUND,
+        Ae::Persistence(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    index.documents.insert(0, entry.clone());
-    save_documents_index(&state.work_dir, &sid, &index)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(serde_json::json!({
-        "session_id": sid,
-        "doc_id": doc_id,
-        "filename": entry.filename,
-        "size": entry.size,
-        "uploaded_at": now,
-        "duplicate": false,
-    })))
+    (status, Json(serde_json::json!({"error": e.to_string()})))
 }
 
-/// `GET /sessions/{sid}/documents` — list documents uploaded for the session.
-async fn list_documents(
-    State(state): State<HttpState>,
-    Path(sid): Path<String>,
-) -> Json<serde_json::Value> {
-    let index = load_documents_index(&state.work_dir, &sid);
-    Json(serde_json::json!({
-        "session_id": sid,
-        "documents": index.documents,
-        "total": index.documents.len(),
-    }))
-}
-
-/// `GET /sessions/{sid}/documents/{doc_id}` — read a document blob.
+/// `POST /sessions/{sid}/files` — upload a file or image.
 ///
-/// Binary files are returned base64-encoded; text files are returned as
-/// UTF-8. The `content_type` recorded at upload time is the source of
-/// truth — we do not sniff the file server-side.
-async fn read_document(
+/// Accepts a multipart form with one `file` field. Optional fields:
+///   - `width`, `height`: pixel dimensions for image uploads (the
+///     desktop frontend reads them via `new Image()` before sending).
+///     Both are optional; the renderer falls back to natural sizing
+///     when absent.
+///
+/// The `session_id` path parameter is informational only — the blob is
+/// stored globally (one directory for the whole agent) and the
+/// per-session association lives in the JSONL `file_upload` /
+/// `image_upload` system entry that the desktop writes via the
+/// `document_ids` MQTT param.
+async fn upload_file(
     State(state): State<HttpState>,
-    Path((sid, doc_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let blob_path = documents_dir(&state.work_dir, &sid).join(&doc_id);
-    if !blob_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
+    Path(_sid): Path<String>,
+    mut multipart: Multipart,
+) -> Result<Json<crate::usecases::UploadedFileResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state
+        .attachment
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable))?;
+
+    let mut filename: Option<String> = None;
+    let mut format: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        attachment_error_to_response(crate::usecases::AttachmentError::Persistence(format!(
+            "multipart: {e}"
+        )))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                filename = field.file_name().map(|s| s.to_string());
+                bytes = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| {
+                            attachment_error_to_response(crate::usecases::AttachmentError::Persistence(format!(
+                                "read bytes: {e}"
+                            )))
+                        })?
+                        .to_vec(),
+                );
+            }
+            "format" => {
+                format = Some(field.text().await.map_err(|e| {
+                    attachment_error_to_response(crate::usecases::AttachmentError::Persistence(format!(
+                        "read format: {e}"
+                    )))
+                })?);
+            }
+            "width" => {
+                if let Ok(s) = field.text().await {
+                    width = s.parse().ok();
+                }
+            }
+            "height" => {
+                if let Ok(s) = field.text().await {
+                    height = s.parse().ok();
+                }
+            }
+            _ => {
+                // Ignore unknown fields (forwards-compat for future
+                // client additions).
+            }
+        }
     }
-    let index = load_documents_index(&state.work_dir, &sid);
-    let entry = index.documents.iter().find(|d| d.doc_id == doc_id);
 
-    let bytes = std::fs::read(&blob_path)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let bytes = bytes.ok_or_else(|| {
+        attachment_error_to_response(crate::usecases::AttachmentError::Persistence(
+            "missing `file` field".to_string(),
+        ))
+    })?;
+    let filename = filename.unwrap_or_else(|| "upload".to_string());
+    let format = format.unwrap_or_else(|| {
+        // Fall back to the filename extension when the client didn't
+        // supply an explicit format. The runtime does NOT sniff
+        // content — clients are the source of truth.
+        std::path::Path::new(&filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default()
+    });
 
-    let is_text = entry
-        .as_ref()
-        .and_then(|e| e.content_type.as_deref())
-        .map(|ct| ct.starts_with("text/") || ct == "application/json")
-        .unwrap_or(false);
-
-    if is_text {
-        let content = String::from_utf8_lossy(&bytes).to_string();
-        Ok(Json(serde_json::json!({
-            "session_id": sid,
-            "doc_id": doc_id,
-            "filename": entry.map(|e| e.filename.clone()),
-            "content_type": entry.and_then(|e| e.content_type.clone()),
-            "content": content,
-            "encoding": "utf-8",
-            "size": bytes.len(),
-        })))
-    } else {
-        let encoded = base64_encode_simple(&bytes);
-        Ok(Json(serde_json::json!({
-            "session_id": sid,
-            "doc_id": doc_id,
-            "filename": entry.map(|e| e.filename.clone()),
-            "content_type": entry.and_then(|e| e.content_type.clone()),
-            "content": encoded,
-            "encoding": "base64",
-            "size": bytes.len(),
-        })))
-    }
+    let resp = svc
+        .upload_file(crate::usecases::UploadFileParams {
+            filename,
+            format,
+            bytes,
+            width,
+            height,
+        })
+        .await
+        .map_err(attachment_error_to_response)?;
+    Ok(Json(resp))
 }
 
-/// `DELETE /sessions/{sid}/documents/{doc_id}` — remove a document.
-async fn delete_document(
+/// `GET /files/{document_id}` — read a previously-uploaded blob.
+///
+/// Returns the raw bytes with `Content-Type` derived from the
+/// extension the desktop supplies via the `format` query param (the
+/// on-disk file has no extension — format lives in JSONL metadata).
+async fn read_file(
     State(state): State<HttpState>,
-    Path((sid, doc_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let blob_path = documents_dir(&state.work_dir, &sid).join(&doc_id);
-    let mut index = load_documents_index(&state.work_dir, &sid);
-    let initial_len = index.documents.len();
-    index.documents.retain(|d| d.doc_id != doc_id);
-    if index.documents.len() == initial_len {
-        // doc_id not in the index — nothing to delete from metadata,
-        // but still try to remove the blob (best-effort idempotent).
-        let _ = std::fs::remove_file(&blob_path);
-        return Err(StatusCode::NOT_FOUND);
-    }
-    save_documents_index(&state.work_dir, &sid, &index)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let _ = std::fs::remove_file(&blob_path);
-    Ok(Json(serde_json::json!({
-        "session_id": sid,
-        "doc_id": doc_id,
-        "deleted": true,
-    })))
+    Path(document_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<(StatusCode, [(axum::http::HeaderName, &'static str); 1], Vec<u8>), (StatusCode, Json<serde_json::Value>)> {
+    let svc = state
+        .attachment
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| attachment_error_to_response(crate::usecases::AttachmentError::ServiceUnavailable))?;
+
+    let bytes = svc
+        .read_file(&document_id)
+        .await
+        .map_err(attachment_error_to_response)?;
+
+    // Derive Content-Type from the `format` query param (extension
+    // only — no MIME sniffing server-side). Default to
+    // application/octet-stream when missing.
+    let format = params.get("format").map(String::as_str).unwrap_or("");
+    let content_type = match format {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    };
+
+    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], bytes))
 }
 
 
@@ -1645,8 +1477,6 @@ async fn put_agent_config(
         ));
     }
 
-    let work_path = state.work_dir.as_path();
-
     // 1. Hand the per-field patches to the use-case trait. The impl
     //    runs the load-merge-save cycle against `agent_config.json`
     //    and returns the new on-disk state plus the
@@ -1697,8 +1527,9 @@ async fn put_agent_config(
     //    values immediately. Best-effort: if the broker isn't
     //    reachable yet, the on-disk file is still authoritative.
     if let Some(mqtt) = state.mqtt_client.lock().await.clone() {
-        let cfg_path = work_path.join("config").join("agent_config.json");
-        let config_json = std::fs::read_to_string(&cfg_path).unwrap_or_else(|_| "{}".to_string());
+        // ADR-040: use the config_json returned by the UseCase impl
+        // instead of re-reading the file from disk.
+        let config_json = result.config_json.clone();
         let envelope = acowork_core::mqtt_proto::DataEnvelope {
             version: 1,
             payload: Some(
@@ -1919,47 +1750,50 @@ async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfi
 ///
 /// ADR-034 §7.6.5 defines the merged response schema:
 /// `{tools: [BuiltinToolEntry], mcp_servers: [server_name], search: {providers: [...]}}`
+/// `GET /agents/{id}/tools` - Tools panel (merged: builtin + mcp + search).
+///
+/// ADR-034 \u00a77.6.5 defines the merged response schema:
+/// `{tools: [BuiltinToolEntry], mcp_servers: [server_name], search: {providers: [...]}}`
 /// (panel 3 pulls all three sources in one HTTP call instead of 3 separate ones).
+///
+/// ADR-040: delegates to [`AgentToolsService::get_merged_tools`] via
+/// the late-bind slot. All three `agent_*` config files are read inside
+/// the UseCase impl; the handler is a thin protocol converter.
 async fn get_agent_tools(
     State(state): State<HttpState>,
     Path(id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let matches = id == state.agent_id;
-    let (tools, mcp, search) = if matches {
-        let tools = crate::agent_config::load_agent_tools_config(&state.work_dir)
-            .ok()
-            .flatten();
-        let mcp = crate::agent_config::load_agent_mcp_config(&state.work_dir)
-            .ok()
-            .flatten();
-        let search = crate::agent_config::load_agent_search_config(&state.work_dir)
-            .ok()
-            .flatten();
-        (tools, mcp, search)
-    } else {
-        (None, None, None)
-    };
-    // Schema must match ADR-034 §7.6.5 exactly — see frontend ToolsTab.tsx
-    // and mcpStore.loadActiveServers(). The Desktop relies on these keys
-    // (`tools`, `mcp_servers`, `search.providers`); mismatches here cause
-    // the entire Tools panel to render empty.
-    let tools_arr = tools
-        .map(|t| t.tools)
-        .unwrap_or_default();
-    let mcp_server_names = mcp
-        .map(|m| m.active_server_names())  // honors `active_names` if set (Tools-panel selection)
-        .unwrap_or_default();
-    let search_obj = match search {
-        Some(cfg) => serde_json::json!({ "providers": cfg.providers }),
-        None => serde_json::json!({ "providers": [] }),
-    };
-    Json(serde_json::json!({
-        "agent_id": state.agent_id,
-        "matches": matches,
-        "tools": tools_arr,
-        "mcp_servers": mcp_server_names,
-        "search": search_obj,
-    }))
+    if !matches {
+        // Tolerate a misconfigured Gateway rather than 404 - see ADR-034.
+        return Ok(Json(serde_json::json!({
+            "agent_id": state.agent_id,
+            "matches": false,
+            "tools": [],
+            "mcp_servers": [],
+            "search": { "providers": [] },
+        })));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+    let resp = svc.get_merged_tools(&id).await;
+    Ok(Json(serde_json::json!({
+        "agent_id": resp.agent_id,
+        "matches": true,
+        "tools": resp.tools,
+        "mcp_servers": resp.mcp_servers,
+        "search": resp.search,
+    })))
 }
 
 // ── Per-agent MCP activation endpoints ────────────────────────────────
@@ -2351,71 +2185,11 @@ async fn get_agent_status(
     }))
 }
 
-/// Simple base64 encoder (no external dependency needed for this module).
-fn base64_encode_simple(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((triple >> 18) & 0x3f) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3f) as usize] as char);
-        result.push(if chunk.len() > 1 { CHARS[((triple >> 6) & 0x3f) as usize] } else { b'=' } as char);
-        result.push(if chunk.len() > 2 { CHARS[(triple & 0x3f) as usize] } else { b'=' } as char);
-    }
-    result
-}
-
-/// Simple base64 decoder used by document upload. Tolerates URL-safe
-/// variants (replaces `-_` to `+/` before decoding) and padding-less
-/// inputs (re-pads to a multiple of 4).
-fn base64_decode_simple(input: &str) -> Result<Vec<u8>, String> {
-    let normalized: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    let normalized = normalized.replace('-', "+").replace('_', "/");
-    let padded = match normalized.len() % 4 {
-        0 => normalized,
-        1 => return Err("invalid base64 length".to_string()),
-        n => normalized + &"=".repeat(4 - n),
-    };
-    const TABLE: &[u8; 128] = &{
-        let mut t = [255u8; 128];
-        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i < chars.len() {
-            t[chars[i] as usize] = i as u8;
-            i += 1;
-        }
-        t
-    };
-    let mut out = Vec::with_capacity((padded.len() / 4) * 3);
-    for chunk in padded.as_bytes().chunks(4) {
-        let mut vals = [255u8; 4];
-        for (i, b) in chunk.iter().enumerate() {
-            if *b == b'=' {
-                vals[i] = 0;
-            } else if (*b as usize) < 128 && TABLE[*b as usize] != 255 {
-                vals[i] = TABLE[*b as usize];
-            } else {
-                return Err(format!("invalid base64 character: {}", *b as char));
-            }
-        }
-        let triple = ((vals[0] as u32) << 18)
-            | ((vals[1] as u32) << 12)
-            | ((vals[2] as u32) << 6)
-            | (vals[3] as u32);
-        out.push(((triple >> 16) & 0xFF) as u8);
-        if chunk.len() > 2 && chunk[2] != b'=' {
-            out.push(((triple >> 8) & 0xFF) as u8);
-        }
-        if chunk.len() > 3 && chunk[3] != b'=' {
-            out.push((triple & 0xFF) as u8);
-        }
-    }
-    Ok(out)
-}
-
+/// Simple base64 helpers were removed in ADR-046 — the legacy
+/// `POST /sessions/{sid}/documents` (which took a JSON body with a
+/// base64-encoded payload) is replaced by the multipart
+/// `POST /sessions/{sid}/files` endpoint that ships raw bytes. No
+/// other call site in the runtime needs these helpers.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2478,6 +2252,16 @@ mod tests {
         Arc::new(crate::usecases::RuntimeAgentConfigService::new(temp_dir))
     }
 
+    /// Build an attachment service backed by the test temp dir's
+    /// `<work_dir>/files/` blob store. Used to exercise
+    /// `POST /sessions/{sid}/files` and `GET /files/{document_id}`
+    /// end-to-end through the trait path.
+    fn new_test_attachment(
+        temp_dir: std::path::PathBuf,
+    ) -> Arc<dyn crate::usecases::AttachmentService> {
+        Arc::new(crate::usecases::RuntimeAttachmentService::new(temp_dir))
+    }
+
     #[tokio::test]
     async fn test_http_server_starts_and_responds() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http");
@@ -2514,6 +2298,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2611,6 +2396,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .unwrap();
@@ -2761,6 +2547,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2817,6 +2604,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -2954,6 +2742,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             agent_tools_slot,
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -3107,6 +2896,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -3283,6 +3073,11 @@ mod tests {
         let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
 
+        // AttachmentService slot — exercises POST /sessions/{sid}/files
+        // and GET /files/{document_id} through the trait path.
+        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3298,6 +3093,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             agent_tools_slot,
             agent_config_slot,
+            attachment_slot,
         )
         .await
         .expect("server should start");
@@ -3479,6 +3275,8 @@ mod tests {
         let agent_config_svc = new_test_agent_config(temp_dir.clone());
         let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::agent_config::AgentConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
+        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -3495,6 +3293,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             agent_tools_slot,
             agent_config_slot,
+            attachment_slot,
         )
         .await
         .expect("server should start");
@@ -3636,6 +3435,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");
@@ -4104,6 +3904,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
         )
         .await
         .expect("server should start");

@@ -171,6 +171,10 @@ pub(crate) struct AgentBootContext {
     /// (`agent_config.json`) persistence. Mirrors `agent_tools_slot` —
     /// populated in Phase B (sync — no async resource dependency).
     pub agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+    /// ADR-046: Late-bind slot for the attachment blob store
+    /// (`<work_dir>/files/<document_id>`). Same Phase B pattern as
+    /// `agent_tools_slot` / `agent_config_slot`.
+    pub attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
 }
 
 /// Context produced by Phase B (per-session initialization).

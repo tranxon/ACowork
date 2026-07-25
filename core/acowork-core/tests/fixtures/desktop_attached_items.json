@@ -1,0 +1,49 @@
+[
+  {
+    "type": "file_upload",
+    "documentId": "0123456789ab-3",
+    "filename": "Q3-report.pdf",
+    "format": "pdf",
+    "sizeBytes": 482301
+  },
+  {
+    "type": "image_upload",
+    "documentId": "fedcba987654-7",
+    "filename": "screen.png",
+    "format": "png",
+    "sizeBytes": 987654,
+    "width": 1920,
+    "height": 1080
+  },
+  {
+    "type": "image_upload",
+    "documentId": "112233445566-a",
+    "filename": "diagram.jpg",
+    "format": "jpg",
+    "sizeBytes": 12345
+  },
+  {
+    "type": "attached_file",
+    "absPath": "/Users/alice/projects/agentcow/core/acowork-runtime/src/lib.rs",
+    "name": "lib.rs"
+  },
+  {
+    "type": "attached_selection",
+    "absPath": "/Users/alice/projects/agentcow/core/acowork-runtime/src/agent/loop_.rs",
+    "name": "loop_.rs",
+    "startLine": 521,
+    "endLine": 540
+  },
+  {
+    "type": "attached_selection",
+    "absPath": "/Users/alice/projects/agentcow/core/acowork-runtime/src/main.rs",
+    "name": "main.rs",
+    "startLine": 42,
+    "endLine": 42
+  },
+  {
+    "type": "attached_folder",
+    "absPath": "/Users/alice/projects/agentcow/core/acowork-runtime/src/agent/session",
+    "name": "session"
+  }
+]

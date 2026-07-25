@@ -52,7 +52,8 @@ use acowork_core::protocol::AgentSearchConfig;
 use crate::agent_config;
 use crate::usecases::agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse,
-    PutBuiltinToolsBody, PutMcpServersBody, PutSearchConfigBody, SearchConfigResponse,
+    MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutSearchConfigBody,
+    SearchConfigResponse,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
@@ -232,5 +233,32 @@ impl AgentToolsService for RuntimeAgentToolsService {
             agent_id: agent_id.to_string(),
             tools: updated,
         })
+    }
+
+    async fn get_merged_tools(&self, agent_id: &str) -> MergedToolsResponse {
+        let tools = agent_config::load_agent_tools_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .map(|t| t.tools)
+            .unwrap_or_default();
+
+        let mcp_servers = agent_config::load_agent_mcp_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .map(|m| m.active_server_names())
+            .unwrap_or_default();
+
+        let search = agent_config::load_agent_search_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .map(|cfg| serde_json::json!({ "providers": cfg.providers }))
+            .unwrap_or_else(|| serde_json::json!({ "providers": [] }));
+
+        MergedToolsResponse {
+            agent_id: agent_id.to_string(),
+            tools,
+            mcp_servers,
+            search,
+        }
     }
 }

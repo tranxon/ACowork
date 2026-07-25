@@ -323,14 +323,64 @@ pub enum PoolingStrategy {
 
 /// A file or selection attached to a chat message from the Desktop App.
 ///
-/// The frontend sends an array of these via WebSocket (`attached_context`).
-/// The Gateway forwards them through `IntentReceived.params`, and the
-/// Runtime injects file-path references (with optional line ranges) into
-/// the user message so the LLM can use its own tools (`read_file`,
-/// `doc_reader`, etc.) to access the content on demand.
+/// The frontend sends an array of these via WebSocket (`attached_items`).
+/// ADR-046: this unified enum replaces the prior `document_ids` +
+/// `attached_context` fields. The Gateway forwards them through
+/// `params_json`, and the Runtime persists each as a system entry
+/// (via `AttachmentMeta`) and injects file-path hints into the user
+/// message for LLM tool access.
 ///
 /// The frontend is responsible for resolving the absolute path before
 /// sending — the Runtime uses `abs_path` directly without path joining.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AttachedItem {
+    /// User-uploaded document (PDF/DOCX/PPTX/XLSX).
+    #[serde(rename_all = "camelCase")]
+    FileUpload {
+        document_id: String,
+        filename: String,
+        format: String,
+        size_bytes: u64,
+    },
+    /// User-uploaded image (PNG/JPG).
+    #[serde(rename_all = "camelCase")]
+    ImageUpload {
+        document_id: String,
+        filename: String,
+        format: String,
+        size_bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
+    /// User-attached workspace file (read-only reference, not copied).
+    #[serde(rename_all = "camelCase")]
+    AttachedFile {
+        abs_path: String,
+        name: String,
+    },
+    /// User-attached workspace selection with explicit line range.
+    #[serde(rename_all = "camelCase")]
+    AttachedSelection {
+        abs_path: String,
+        name: String,
+        start_line: u32,
+        end_line: u32,
+    },
+    /// User-attached workspace folder. Directory contents are NOT copied;
+    /// the LLM is expected to walk the path on demand via its own tools.
+    #[serde(rename_all = "camelCase")]
+    AttachedFolder {
+        abs_path: String,
+        name: String,
+    },
+}
+
+/// Legacy — replaced by `AttachedItem` (ADR-046). Retained for
+/// deserialization of old `attached_context` payloads during transition.
+/// Will be removed after all frontend clients ship `attached_items`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachedContextItem {
@@ -1546,6 +1596,104 @@ mod tests {
         assert_eq!(parsed.context_type, "file");
         assert_eq!(parsed.start_line, Some(5));
         assert_eq!(parsed.end_line, Some(15));
+    }
+
+    // ── AttachedItem (ADR-046) ──────────────────────────────────────────
+
+    /// Frontend sends camelCase fields; the `type` tag is snake_case
+    /// (e.g. `"file_upload"`).
+    #[test]
+    fn test_attached_item_file_upload_roundtrip() {
+        let item = AttachedItem::FileUpload {
+            document_id: "doc-abc".into(),
+            filename: "report.pdf".into(),
+            format: "pdf".into(),
+            size_bytes: 12345,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"file_upload\""));
+        assert!(json.contains("\"documentId\":"));
+        assert!(json.contains("\"sizeBytes\":12345"));
+        // Round-trip
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
+    }
+
+    #[test]
+    fn test_attached_item_image_upload_with_dimensions() {
+        let item = AttachedItem::ImageUpload {
+            document_id: "doc-img".into(),
+            filename: "photo.png".into(),
+            format: "png".into(),
+            size_bytes: 987654,
+            width: Some(1920),
+            height: Some(1080),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"image_upload\""));
+        assert!(json.contains("\"width\":1920"));
+        assert!(json.contains("\"height\":1080"));
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
+    }
+
+    #[test]
+    fn test_attached_item_image_upload_omits_dimensions() {
+        let item = AttachedItem::ImageUpload {
+            document_id: "doc-img2".into(),
+            filename: "x.png".into(),
+            format: "png".into(),
+            size_bytes: 1,
+            width: None,
+            height: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("width"));
+        assert!(!json.contains("height"));
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
+    }
+
+    #[test]
+    fn test_attached_item_attached_file_roundtrip() {
+        let item = AttachedItem::AttachedFile {
+            abs_path: "/workspace/foo.rs".into(),
+            name: "foo.rs".into(),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"attached_file\""));
+        assert!(json.contains("\"absPath\":"));
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
+    }
+
+    #[test]
+    fn test_attached_item_attached_selection_roundtrip() {
+        let item = AttachedItem::AttachedSelection {
+            abs_path: "/workspace/bar.rs".into(),
+            name: "bar.rs".into(),
+            start_line: 10,
+            end_line: 25,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"attached_selection\""));
+        assert!(json.contains("\"startLine\":10"));
+        assert!(json.contains("\"endLine\":25"));
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
+    }
+
+    #[test]
+    fn test_attached_item_attached_folder_roundtrip() {
+        let item = AttachedItem::AttachedFolder {
+            abs_path: "/workspace/src".into(),
+            name: "src".into(),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"attached_folder\""));
+        assert!(json.contains("\"absPath\":"));
+        let parsed: AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
     }
 
     // ── SidecarKind wire compatibility ───────────────────────────────────

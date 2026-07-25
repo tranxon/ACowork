@@ -521,7 +521,7 @@ impl AgentLoop {
     // ── Memory system methods moved to loop_memory.rs (ADR-014 Phase 6) ──
     //   - init_memory_store
     //   - retrieve_and_inject_memories
-    //   - write_document_entries
+    //   - write_attached_items
 
     /// Execute a built-in tool by name, simulating an LLM tool call.
     ///

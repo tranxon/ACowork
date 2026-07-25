@@ -98,7 +98,9 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         )?;
 
         // Live state snapshot from SessionManager's shared snapshots.
-        let state = {
+        // Construct the full JSON object the desktop panel expects
+        // (status, model, provider, ratio, todos, context_usage).
+        let live_state = {
             let snaps = self
                 .session_snapshots
                 .read()
@@ -106,7 +108,27 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             match snaps.get(session_id) {
                 Some(snap) => {
                     match snap.read() {
-                        Ok(guard) => Some(guard.status_json.clone()),
+                        Ok(guard) => {
+                            let status: serde_json::Value =
+                                serde_json::from_str(&guard.status_json)
+                                    .unwrap_or(serde_json::Value::Null);
+                            let todos: Option<serde_json::Value> = guard
+                                .todos_json
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str(s).ok());
+                            let context_usage: Option<serde_json::Value> = guard
+                                .context_usage_json
+                                .as_deref()
+                                .and_then(|s| serde_json::from_str(s).ok());
+                            Some(serde_json::json!({
+                                "status": status,
+                                "model": guard.model,
+                                "provider": guard.provider,
+                                "ratio": guard.ratio,
+                                "todos": todos,
+                                "context_usage": context_usage,
+                            }))
+                        }
                         Err(_) => None,
                     }
                 }
@@ -123,7 +145,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             model: meta.model,
             provider: meta.provider,
             workspace_id: meta.workspace_id,
-            state,
+            live_state,
         })
     }
 
@@ -138,32 +160,53 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .join("conversations")
             .join(format!("{}.jsonl", session_id));
 
-        let paginated = conversation::read_messages_paginated(
-            &file_path,
-            offset.unwrap_or(0),
-            limit.unwrap_or(50),
-        )?;
+        let off = offset.unwrap_or(0);
+        let lim = limit.unwrap_or(50).clamp(1, 500);
 
+        let paginated = conversation::read_messages_paginated(&file_path, off, lim)?;
+
+        // ADR-035 D9.2: truncate tool_result content to first 5 lines
+        // for display in ALL HTTP paths. Full content stays in JSONL
+        // for LLM context.
         let messages: Vec<serde_json::Value> = paginated
             .messages
             .into_iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "id": entry.id,
-                    "ts": entry.ts,
-                    "role": entry.role,
-                    "content": entry.content,
-                    "metadata": entry.metadata,
-                })
+            .map(|mut entry| {
+                if entry.role == "tool_result" {
+                    entry.content = truncate_tool_result(&entry.content);
+                }
+                serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null)
             })
             .collect();
-
-        let count = paginated.total;
+        let count = messages.len();
 
         Ok(MessagesResponse {
             session_id: session_id.to_string(),
             messages,
+            offset: paginated.offset,
+            limit: paginated.limit,
+            total: paginated.total,
             count,
         })
     }
+}
+
+/// Truncate tool_result content to the first 5 lines for HTTP display.
+///
+/// ADR-035 D9.2: full content stays in JSONL for LLM context; HTTP
+/// responses only carry the truncated preview.
+///
+/// Single canonical home for this rule (ADR-040): the HTTP layer calls
+/// this through [`crate::usecases::SessionMetadataService::get_messages`],
+/// and `cli.rs::truncate_tool_result_for_display` is a `pub(crate)`
+/// re-export so any CLI preview path stays consistent without
+/// duplicating the lines-count constant.
+pub(crate) fn truncate_tool_result(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= 5 {
+        return content.to_string();
+    }
+    let mut truncated = lines.into_iter().take(5).collect::<Vec<_>>().join("\n");
+    truncated.push_str("\n...(truncated)");
+    truncated
 }

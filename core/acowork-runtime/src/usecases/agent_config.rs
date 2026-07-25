@@ -285,6 +285,10 @@ pub struct PutAgentConfigResult {
     pub agent_id: String,
     pub config: AgentConfig,
     pub overrides: RuntimeConfigOverrides,
+    /// Serialized JSON of the persisted `AgentConfig` - used by the
+    /// HTTP handler to re-PUBLISH the retained MQTT config snapshot
+    /// without re-reading the file from disk.
+    pub config_json: String,
 }
 
 // ── Error ──────────────────────────────────────────────────────────────

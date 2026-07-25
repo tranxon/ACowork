@@ -1,12 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { ToolApprovalNeededEvent } from "../../lib/types";
+import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
@@ -18,6 +18,23 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
 import { useChatListAdapter } from "./useChatListAdapter";
+
+/**
+ * Measure natural dimensions of an image whose src is already settable in the
+ * DOM (data URL, asset protocol URL, blob URL). Returns the naturalWidth /
+ * naturalHeight that the browser exposes once the image has loaded. ADR-046
+ * uses these to populate `image_upload.width` / `.height` so the runtime
+ * doesn't have to re-decode the blob just to render a thumbnail.
+ */
+function measureImage(src: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () =>
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error("Failed to load image for dimension detection"));
+    img.src = src;
+  });
+}
 
 /**
  * Merge an internal ref (used for click-outside detection) with an external
@@ -532,12 +549,10 @@ export function ChatPanel() {
       if (msg.type === "user") return true;
       // Skip non-message items that may be interleaved between the user
       // message and the working indicator (e.g., a compaction event loaded
-      // via poll after the user message was optimistically added, or a
-      // document_upload that arrived concurrently with the user send).
+      // via poll after the user message was optimistically added).
       if (
         msg.type === "compaction" ||
-        msg.type === "system" ||
-        msg.type === "document_upload"
+        msg.type === "system"
       ) {
         continue;
       }
@@ -890,43 +905,33 @@ export function ChatPanel() {
 
   const handleSend = () => {
     const content = session.inputValue.trim();
-    const hasSuccessfulFiles = session.pendingFiles.some((f) => f.status === "success");
-    const hasUploadingFiles = session.pendingFiles.some((f) => f.status === "uploading");
-    const hasImages = session.pendingImages.length > 0;
+    const hasItems = session.pendingAttachedItems.some(
+      (it) => it.status === "success" && it.item !== undefined,
+    );
+    const hasUploading = session.pendingAttachedItems.some(
+      (it) => it.status === "uploading",
+    );
 
-    // Block send: no content AND no files AND no images, or files still uploading
-    if ((!content && !hasSuccessfulFiles && !hasImages) || sending || !selectedAgentId || hasUploadingFiles) return;
+    // Block send: no content AND no resolved attachments, or attachments still uploading
+    if ((!content && !hasItems) || sending || !selectedAgentId || hasUploading) return;
 
-    // Collect successfully uploaded document IDs and metadata for optimistic bubbles
-    const documentIds = session.pendingFiles
-      .filter((f) => f.status === "success" && f.documentId)
-      .map((f) => f.documentId!);
-    const documents = session.pendingFiles
-      .filter((f) => f.status === "success" && f.documentId)
-      .map((f) => ({
-        id: f.documentId!,
-        filename: f.filename,
-        format: f.format,
-        size: f.size,
-      }));
-
-    // Build image parts from pending images (for multimodal content_parts)
-    const imageParts = session.pendingImages.map((img) => ({
-      url: img.base64Url,
-      width: img.width,
-      height: img.height,
-    }));
+    // Collect resolved (success) AttachedItem[] for the optimistic bubble
+    // and the MQTT `attached_items` payload. Backfill workspace refs
+    // (`attached_file` / `attached_selection` / `attached_folder`) are
+    // already AttachedItem-shaped so no post-processing is needed.
+    const attachedItems = session.pendingAttachedItems
+      .filter((it) => it.status === "success" && it.item !== undefined)
+      .map((it) => it.item!) as AttachedItem[];
 
     // sendMessage is async but we fire-and-forget here —
     // the store handles all state updates internally
     session.scope.current.userJustSent = true;
-    void sendMessage(content, selectedAgentId, activeSkill?.name, documentIds.length > 0 ? documentIds : undefined, documents.length > 0 ? documents : undefined, imageParts.length > 0 ? imageParts : undefined).then(() => {
+    void sendMessage(content, selectedAgentId, activeSkill?.name, attachedItems.length > 0 ? attachedItems : undefined).then(() => {
       clearActiveSkill();
     });
     session.setInputValue("");
-    // Clear pending files and images after send
-    session.setPendingFiles([]);
-    session.setPendingImages([]);
+    // Clear pending attachments after send (one-shot)
+    session.setPendingAttachedItems([]);
   };
 
   // Stop button dual-action:
@@ -968,109 +973,153 @@ export function ChatPanel() {
     }
   };
 
-  // File upload handler: open file dialog, then upload via Tauri command
+  // File upload handler: opens the dialog and dispatches to the shared
+  // upload pipeline. The pipeline handles both documents and images and
+  // emits a single `pendingAttachedItems` entry.
   const handleFileUpload = async () => {
-    // Import dialog dynamically to avoid build issues
+    // ADR-046: single upload entry-point for documents AND images. The
+    // runtime decodes the format string and persists the blob; the desktop
+    // wraps the response into a `FileUploadItem` / `ImageUploadItem`
+    // metadata envelope to attach to the next user message.
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
-      title: "Select a document",
+      title: "Select a document or image",
       filters: [{
-        name: "Documents",
-        extensions: ["pdf", "docx", "pptx", "xlsx"],
+        name: "Attachments",
+        extensions: ["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "gif", "webp"],
       }],
       multiple: false,
     });
 
     if (!selected) return;
-
     const filePath = selected as string;
     if (!filePath) return;
+    await uploadFileAtPath(filePath);
+  };
 
+  // Shared upload pipeline used by handleFileUpload (document-or-image dialog)
+  // and handleImageSelect (image-only dialog). The runtime accepts both via
+  // the same `upload_file` command.
+  const uploadFileAtPath = async (filePath: string) => {
     const filename = filePath.replace(/^.*[\\/]/, "");
     const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-    if (!["pdf", "docx", "pptx", "xlsx"].includes(ext)) return;
+    if (!["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return;
 
-    const tempId = `file-${Date.now()}`;
+    const tempId = `att-${Date.now()}`;
+    const format = ext;
+    const isImage = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
 
-    // Check prerequisites before adding chip
+    // Prerequisites — emit error chip and bail before invoking the backend.
     if (!currentSessionId) {
-      session.setPendingFiles(prev => [...prev, {
+      session.setPendingAttachedItems(prev => [...prev, {
         tempId,
-        filename,
-        format: ext,
-        size: 0,
         status: "error",
         errorMessage: "No active session",
       }]);
       return;
     }
     if (!selectedAgentId) {
-      session.setPendingFiles(prev => [...prev, {
+      session.setPendingAttachedItems(prev => [...prev, {
         tempId,
-        filename,
-        format: ext,
-        size: 0,
         status: "error",
         errorMessage: "No agent selected",
       }]);
       return;
     }
 
-    // Add pending chip with uploading status
-    session.setPendingFiles(prev => [...prev, {
+    // Add pending chip with uploading status. `localUrl` stays undefined for
+    // documents; for images the renderer reads from the original file path
+    // via the asset protocol while the upload is in flight.
+    const localUrl = isImage ? convertFileSrc(filePath) : undefined;
+    session.setPendingAttachedItems(prev => [...prev, {
       tempId,
-      filename,
-      format: ext,
-      size: 0,
       status: "uploading",
+      localUrl,
     }]);
 
     try {
+      // ADR-046: image width/height are pre-measured by the desktop via
+      // `new Image()` and sent as multipart fields. Documents omit them.
+      let width: number | undefined;
+      let height: number | undefined;
+      if (isImage && localUrl) {
+        const dims = await measureImage(localUrl);
+        width = dims.width;
+        height = dims.height;
+      }
+
       const result = await invoke<{
-        document_id: string;
+        documentId: string;
         filename: string;
         format: string;
-        size_bytes: number;
-      }>("upload_document", {
+        sizeBytes: number;
+        width?: number;
+        height?: number;
+      }>("upload_file", {
+        agentId: selectedAgentId,
         sessionId: currentSessionId,
         filePath,
+        format,
+        width,
+        height,
       });
 
-      // Update chip to success
-      session.setPendingFiles(prev => prev.map((f) =>
-        f.tempId === tempId
-          ? { ...f, status: "success", documentId: result.document_id, size: result.size_bytes }
-          : f
+      const item: AttachedItem = isImage
+        ? {
+            type: "image_upload",
+            documentId: result.documentId,
+            filename: result.filename,
+            format: result.format,
+            sizeBytes: result.sizeBytes,
+            ...(width !== undefined ? { width } : {}),
+            ...(height !== undefined ? { height } : {}),
+          }
+        : {
+            type: "file_upload",
+            documentId: result.documentId,
+            filename: result.filename,
+            format: result.format,
+            sizeBytes: result.sizeBytes,
+          };
+
+      session.setPendingAttachedItems(prev => prev.map((p) =>
+        p.tempId === tempId ? { ...p, status: "success", item } : p
       ));
     } catch (err) {
       const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "Upload failed";
-      log.error("[ChatPanel] Document upload failed:", err);
-      // Update chip to error
-      session.setPendingFiles(prev => prev.map((f) =>
-        f.tempId === tempId ? { ...f, status: "error", errorMessage: msg } : f
+      log.error("[ChatPanel] Attachment upload failed:", err);
+      session.setPendingAttachedItems(prev => prev.map((p) =>
+        p.tempId === tempId ? { ...p, status: "error", errorMessage: msg } : p
       ));
     }
   };
 
-  // Remove a pending file chip
-  const handleRemoveFile = (tempId: string) => {
-    session.setPendingFiles(prev => prev.filter((f) => f.tempId !== tempId));
+  // Remove a pending attachment chip
+  const handleRemovePending = (tempId: string) => {
+    session.setPendingAttachedItems(prev => prev.filter((p) => p.tempId !== tempId));
   };
 
   // Select image file via Tauri dialog, read as base64, and get dimensions
   const handleImageSelect = async () => {
     if (!currentSessionId || !selectedAgentId) return;
 
-    // Check if current model supports image input
+    // ADR-046: gate image selection on multimodal-supporting model — the
+    // runtime still accepts the upload, but the LLM prompt layer only
+    // consumes the dimensions; a non-vision model would treat the image as
+    // a placeholder reference. We surface the warning here before the user
+    // commits to a useless upload.
     const currentEntry = availableModels.find(
-      m => m.name === currentModel && m.provider === currentProvider
+      (m) => m.name === currentModel && m.provider === currentProvider,
     );
-    const supportsImage = currentEntry?.input_modalities?.includes('image');
+    const supportsImage = currentEntry?.input_modalities?.includes("image");
     if (!supportsImage) {
-      // Find models that support image — including other providers
-      const imageModels = availableModels.filter(m => m.input_modalities?.includes('image'));
+      const imageModels = availableModels.filter((m) =>
+        m.input_modalities?.includes("image"),
+      );
       if (imageModels.length === 0) {
-        log.warn("[ChatPanel] No image-capable models available — skipping dialog");
+        log.warn(
+          "[ChatPanel] No image-capable models available — skipping dialog",
+        );
         return;
       }
       session.setImageCapableModels(imageModels);
@@ -1078,61 +1127,30 @@ export function ChatPanel() {
       return;
     }
 
+    // ADR-046: image and document upload share the same code path. We just
+    // narrow the dialog filter to image extensions — the runtime handler
+    // already accepts both, and the resulting `image_upload` envelope
+    // (carrying `width`/`height` for the thumbnail) lands in the same
+    // `pendingAttachedItems` queue as document uploads.
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const selected = await open({
         title: t("chatPanel.selectImageTitle"),
-        filters: [{
-          name: "Images",
-          extensions: ["png", "jpg", "jpeg", "gif", "webp"],
-        }],
+        filters: [
+          {
+            name: "Images",
+            extensions: ["png", "jpg", "jpeg", "gif", "webp"],
+          },
+        ],
         multiple: false,
       });
       if (!selected) return;
       const filePath = selected as string;
       if (!filePath) return;
-
-      // Read file bytes via Tauri FS plugin (bypasses asset protocol scope limitations)
-      const filename = filePath.replace(/^.*[\\/]/, "");
-      const { readFile } = await import("@tauri-apps/plugin-fs");
-      const bytes = await readFile(filePath);
-
-      // Convert bytes to base64 data URL
-      const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-      const mimeMap: Record<string, string> = { png: "image/png", gif: "image/gif", webp: "image/webp", jpg: "image/jpeg", jpeg: "image/jpeg" };
-      const mime = mimeMap[ext] ?? "image/jpeg";
-      const chunks: string[] = [];
-      const CHUNK_SIZE = 8192;
-      for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-        chunks.push(String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE)));
-      }
-      const base64 = btoa(chunks.join(""));
-      const dataUrl = `data:${mime};base64,${base64}`;
-
-      // Get image dimensions
-      const dims = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-        const img = new window.Image();
-        img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-        img.onerror = () => reject(new Error("Failed to load image for dimension detection"));
-        img.src = dataUrl;
-      });
-
-      const tempId = `img-${Date.now()}`;
-      session.setPendingImages(prev => [...prev, {
-        tempId,
-        filename,
-        base64Url: dataUrl,
-        width: dims.width,
-        height: dims.height,
-      }]);
+      await uploadFileAtPath(filePath);
     } catch (err) {
       log.error("[ChatPanel] Image selection failed:", err);
     }
-  };
-
-  // Remove a pending image thumbnail
-  const handleRemoveImage = (tempId: string) => {
-    session.setPendingImages(prev => prev.filter((img) => img.tempId !== tempId));
   };
 
   // Tool approval: send decision via MQTT, then clear inline state
@@ -1678,45 +1696,90 @@ export function ChatPanel() {
             </div>
           )}
 
-          {/* Pending file chips */}
-          {session.pendingFiles.length > 0 && (
+          {/* Pending attachment chips (ADR-046: unified entry-point).
+              Documents use the existing `DocumentChip`; images get a thumbnail
+              variant. Both render from `pendingAttachedItems`. */}
+          {session.pendingAttachedItems.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
-              {session.pendingFiles.map((file) => (
-                <DocumentChip
-                  key={file.tempId}
-                  filename={file.filename}
-                  format={file.format}
-                  size={file.size > 0 ? file.size : undefined}
-                  status={file.status}
-                  errorMessage={file.errorMessage}
-                  onRemove={() => handleRemoveFile(file.tempId)}
-                />
-              ))}
-            </div>
-          )}
-          {/* Pending image thumbnails */}
-          {session.pendingImages.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 px-3 pt-2">
-              {session.pendingImages.map((img) => (
-                <div
-                  key={img.tempId}
-                  className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
-                >
-                  <img
-                    src={img.base64Url}
-                    alt={img.filename}
-                    className="h-full w-full object-cover"
+              {session.pendingAttachedItems.map((p) => {
+                const item = p.item;
+                // Workspace reference: already-resolved `attached_*` items.
+                if (item && (item.type === "attached_file"
+                  || item.type === "attached_selection"
+                  || item.type === "attached_folder")) {
+                  return (
+                    <DocumentChip
+                      key={p.tempId}
+                      filename={item.name}
+                      format="workspace"
+                      status={p.status}
+                      errorMessage={p.errorMessage}
+                      onRemove={() => handleRemovePending(p.tempId)}
+                    />
+                  );
+                }
+                // Image upload (or pre-upload with only localUrl set).
+                if (item && item.type === "image_upload") {
+                  return (
+                    <div
+                      key={p.tempId}
+                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
+                    >
+                      <img
+                        src={p.localUrl ?? `/api/agents/${selectedAgentId ?? ""}/files/${item.documentId}`}
+                        alt={item.filename}
+                        className="h-full w-full object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePending(p.tempId)}
+                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        aria-label={`Remove ${item.filename}`}
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
+                  );
+                }
+                // Pre-upload preview for an image that has only a localUrl.
+                if (!item && p.localUrl) {
+                  return (
+                    <div
+                      key={p.tempId}
+                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
+                    >
+                      <img
+                        src={p.localUrl}
+                        alt=""
+                        className="h-full w-full object-cover opacity-60"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePending(p.tempId)}
+                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        aria-label="Remove attachment"
+                      >
+                        <X size={10} />
+                      </button>
+                    </div>
+                  );
+                }
+                // Document upload (or upload-in-flight without resolved item).
+                const filename = item && item.type === "file_upload" ? item.filename : "";
+                const format = item && item.type === "file_upload" ? item.format : "";
+                const size = item && item.type === "file_upload" ? item.sizeBytes : undefined;
+                return (
+                  <DocumentChip
+                    key={p.tempId}
+                    filename={filename}
+                    format={format}
+                    size={size}
+                    status={p.status}
+                    errorMessage={p.errorMessage}
+                    onRemove={() => handleRemovePending(p.tempId)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveImage(img.tempId)}
-                    className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
-                    aria-label={`Remove ${img.filename}`}
-                  >
-                    <X size={10} />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
           {/* Attached context chips (from right-click "Add to Chat") */}
@@ -1865,8 +1928,8 @@ export function ChatPanel() {
                     sending
                       ? false
                       : (inputDisabled
-                        || (!session.inputValue.trim() && !session.pendingFiles.some(f => f.status === "success") && session.pendingImages.length === 0)
-                        || session.pendingFiles.some(f => f.status === "uploading"))
+                        || (!session.inputValue.trim() && !session.pendingAttachedItems.some((p) => p.status === "success" && p.item !== undefined))
+                        || session.pendingAttachedItems.some((p) => p.status === "uploading"))
                   }
                   aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}
                 >

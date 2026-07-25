@@ -154,6 +154,19 @@ pub struct BuiltinToolsResponse {
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
 }
 
+/// Response for `GET /agents/{id}/tools` - the merged Tools-panel view.
+///
+/// Combines all three Tools-panel sources (builtin tools, MCP servers,
+/// search providers) in a single round-trip so the desktop can render
+/// the entire panel without chaining three separate calls.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergedToolsResponse {
+    pub agent_id: String,
+    pub tools: Vec<crate::agent_config::AgentToolEntry>,
+    pub mcp_servers: Vec<String>,
+    pub search: serde_json::Value,
+}
+
 // ── Trait ──────────────────────────────────────────────────────────────
 
 /// UseCase trait for the Tools-panel persistence endpoints that mutate
@@ -219,4 +232,9 @@ pub trait AgentToolsService: Send + Sync {
         agent_id: &str,
         body: PutBuiltinToolsBody,
     ) -> Result<BuiltinToolsResponse, AgentToolsError>;
+
+    /// `GET /agents/{id}/tools` - merged Tools-panel view (builtin +
+    /// MCP + search). Read-only aggregation of the three Tools-panel
+    /// config files; the handler does not merge anything itself.
+    async fn get_merged_tools(&self, agent_id: &str) -> MergedToolsResponse;
 }

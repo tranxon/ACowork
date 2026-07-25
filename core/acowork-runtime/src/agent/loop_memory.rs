@@ -261,28 +261,98 @@ impl super::loop_::AgentLoop {
         }
     }
 
-    /// Write document upload entries to the conversation JSONL.
+    /// Persist attached items as standalone system entries in the
+    /// conversation JSONL (ADR-046). Handles all 5 attachment types
+    /// (file_upload / image_upload / attached_file / attached_selection
+    /// / attached_folder).
     ///
-    /// Each document is persisted as a `ConversationEntry` with `role: "system"`
-    /// and `metadata.type: "document_upload"` so that the Desktop App can render
-    /// document chips when loading historical sessions.
-    pub fn write_document_entries(&self, documents: &[serde_json::Value]) {
-        if let Some(ref conversation) = self.session.conversation {
-            for doc in documents {
-                let filename = doc.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-                let format = doc.get("format").and_then(|v| v.as_str()).unwrap_or("");
-                let size = doc.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size);
-                let metadata = serde_json::json!({
-                    "type": "document_upload",
-                    "document_id": doc.get("id"),
-                    "filename": filename,
-                    "format": format,
-                    "size_bytes": size,
-                    "path": doc.get("abs_path"),
-                });
-                conversation.append_message("system", &content, Some(metadata));
-            }
+    /// Each entry carries `role: "system"` and a strongly-typed
+    /// `AttachmentMeta` discriminator. The frontend reads `metadata.type`
+    /// and renders the appropriate chip / thumbnail. The original user
+    /// message is kept verbatim — no inline previews or tool-call results
+    /// are mixed in.
+    ///
+    /// Order: items are appended in the order the frontend provided them,
+    /// preserving the user's perceived attach sequence.
+    pub fn write_attached_items(
+        &self,
+        items: &[acowork_core::protocol::AttachedItem],
+    ) {
+        let Some(ref conversation) = self.session.conversation else {
+            return;
+        };
+        for item in items {
+            let (content, metadata) = match item {
+                acowork_core::protocol::AttachedItem::FileUpload { document_id, filename, format, size_bytes } => {
+                    let meta = crate::conversation::FileUploadMeta {
+                        document_id: document_id.clone(),
+                        filename: filename.clone(),
+                        format: format.clone(),
+                        size_bytes: *size_bytes,
+                    };
+                    let content = format!("Uploaded file: {} ({}, {} bytes)", filename, format, size_bytes);
+                    let metadata = serde_json::to_value(
+                        crate::conversation::AttachmentMeta::FileUpload(meta),
+                    )
+                    .expect("FileUploadMeta is always serializable");
+                    (content, Some(metadata))
+                }
+                acowork_core::protocol::AttachedItem::ImageUpload { document_id, filename, format, size_bytes, width, height } => {
+                    let meta = crate::conversation::ImageUploadMeta {
+                        document_id: document_id.clone(),
+                        filename: filename.clone(),
+                        format: format.clone(),
+                        size_bytes: *size_bytes,
+                        width: *width,
+                        height: *height,
+                    };
+                    let content = format!("Uploaded image: {} ({}, {} bytes)", filename, format, size_bytes);
+                    let metadata = serde_json::to_value(
+                        crate::conversation::AttachmentMeta::ImageUpload(meta),
+                    )
+                    .expect("ImageUploadMeta is always serializable");
+                    (content, Some(metadata))
+                }
+                acowork_core::protocol::AttachedItem::AttachedFile { abs_path, name } => {
+                    let meta = crate::conversation::AttachedFileMeta {
+                        abs_path: abs_path.clone(),
+                        name: name.clone(),
+                    };
+                    let content = format!("Attached file: {}", name);
+                    let metadata = serde_json::to_value(
+                        crate::conversation::AttachmentMeta::AttachedFile(meta),
+                    )
+                    .expect("AttachedFileMeta is always serializable");
+                    (content, Some(metadata))
+                }
+                acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, name, start_line, end_line } => {
+                    let meta = crate::conversation::AttachedSelectionMeta {
+                        abs_path: abs_path.clone(),
+                        name: name.clone(),
+                        start_line: *start_line,
+                        end_line: *end_line,
+                    };
+                    let content = format!("Attached selection: {} (L{}-L{})", name, start_line, end_line);
+                    let metadata = serde_json::to_value(
+                        crate::conversation::AttachmentMeta::AttachedSelection(meta),
+                    )
+                    .expect("AttachedSelectionMeta is always serializable");
+                    (content, Some(metadata))
+                }
+                acowork_core::protocol::AttachedItem::AttachedFolder { abs_path, name } => {
+                    let meta = crate::conversation::AttachedFolderMeta {
+                        abs_path: abs_path.clone(),
+                        name: name.clone(),
+                    };
+                    let content = format!("Attached folder: {}", name);
+                    let metadata = serde_json::to_value(
+                        crate::conversation::AttachmentMeta::AttachedFolder(meta),
+                    )
+                    .expect("AttachedFolderMeta is always serializable");
+                    (content, Some(metadata))
+                }
+            };
+            conversation.append_message("system", &content, metadata);
         }
     }
 

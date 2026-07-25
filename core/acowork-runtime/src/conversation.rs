@@ -104,6 +104,118 @@ pub struct CompactionEventMeta {
     pub after_tokens: u64,
 }
 
+// ── Attachment metadata (ADR-046) ──────────────────────────────────────────
+//
+// Every attachment is persisted as a `ConversationEntry` with `role: "system"`
+// and `metadata` carrying one of the variants below. The frontend uses
+// `metadata.type` to choose a renderer (chip / thumbnail / file link).
+//
+// ADR-046 replaces the prior flat `document_upload` metadata and the
+// lossy `attached_context` payload. Five types cover every user-attached
+// item (file upload, image upload, workspace file, workspace selection,
+// workspace folder).
+
+/// Discriminator tag for `AttachmentMeta`. The on-disk value is stable
+/// across versions — adding new variants is a forward-compatible change.
+pub const ATTACHMENT_TYPE_FILE_UPLOAD: &str = "file_upload";
+pub const ATTACHMENT_TYPE_IMAGE_UPLOAD: &str = "image_upload";
+pub const ATTACHMENT_TYPE_ATTACHED_FILE: &str = "attached_file";
+pub const ATTACHMENT_TYPE_ATTACHED_SELECTION: &str = "attached_selection";
+pub const ATTACHMENT_TYPE_ATTACHED_FOLDER: &str = "attached_folder";
+
+/// Discriminated union for `ConversationEntry.metadata` on attachment
+/// entries. The serialized form is a flat JSON object with a `"type"`
+/// field (e.g. `{"type":"file_upload","document_id":"...","filename":"..."}`)
+/// — matched by the frontend's `metadata.type` branch dispatch.
+///
+/// All variants serialize without a wrapping object so existing readers
+/// that ignore `metadata` continue to parse the entry as a benign system
+/// note.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AttachmentMeta {
+    /// User-uploaded document (PDF/DOCX/PPTX/XLSX). Filesystem blob is at
+    /// `<work_dir>/files/<document_id>`.
+    FileUpload(FileUploadMeta),
+    /// User-uploaded image (PNG/JPG). Filesystem blob is at
+    /// `<work_dir>/files/<document_id>`. `width`/`height` are best-effort
+    /// hints supplied by the desktop frontend (which uses `new Image()` to
+    /// read real dimensions); a CLI client may omit them and the renderer
+    /// falls back to `<img onLoad>` natural sizing.
+    ImageUpload(ImageUploadMeta),
+    /// User-attached workspace file (read-only reference, not copied).
+    AttachedFile(AttachedFileMeta),
+    /// User-attached workspace selection with explicit line range.
+    AttachedSelection(AttachedSelectionMeta),
+    /// User-attached workspace folder. Directory contents are NOT copied;
+    /// the LLM is expected to walk the path on demand via its own tools.
+    AttachedFolder(AttachedFolderMeta),
+}
+
+/// Metadata for a user-uploaded document (PDF/DOCX/PPTX/XLSX).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct FileUploadMeta {
+    /// Content hash + random suffix identifying the blob on disk
+    /// (`<work_dir>/files/<document_id>`).
+    pub document_id: String,
+    pub filename: String,
+    /// Lowercase extension without the dot (e.g. "pdf", "docx").
+    pub format: String,
+    pub size_bytes: u64,
+}
+
+/// Metadata for a user-uploaded image (PNG/JPG).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ImageUploadMeta {
+    pub document_id: String,
+    pub filename: String,
+    pub format: String,
+    pub size_bytes: u64,
+    /// Optional real pixel width, supplied by clients that can read it
+    /// (e.g. desktop frontend via `new Image()`). `None` is allowed — the
+    /// renderer falls back to the browser's natural sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Optional real pixel height, supplied alongside `width`. Same
+    /// fallback rules apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+/// Metadata for a workspace file attached via "Add to Chat". The path
+/// points at the original file on disk — no copy is made.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AttachedFileMeta {
+    pub abs_path: String,
+    pub name: String,
+}
+
+/// Metadata for a workspace selection attached via "Add to Chat" with
+/// an explicit line range.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AttachedSelectionMeta {
+    pub abs_path: String,
+    pub name: String,
+    /// 1-based start line (inclusive).
+    pub start_line: u32,
+    /// 1-based end line (inclusive).
+    pub end_line: u32,
+}
+
+/// Metadata for a workspace folder attached via "Add to Chat". Contents
+/// are NOT copied — the LLM uses its own tools to enumerate / read files
+/// on demand.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AttachedFolderMeta {
+    pub abs_path: String,
+    pub name: String,
+}
+
 /// Per-session metadata stored in `conversations/meta/{session_id}.json`.
 ///
 /// ADR-024: each session writes only its own meta file — no cross-session

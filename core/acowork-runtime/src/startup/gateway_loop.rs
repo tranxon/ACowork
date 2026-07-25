@@ -789,12 +789,18 @@ async fn dispatch_inbound(
             message_id,
             params_json,
         } => {
-            // Parse params_json to extract skill_instructions, documents,
-            // content_parts, and attached_context.
+            // Parse params_json to extract skill_instructions and
+            // attached_items (ADR-046 replaces the prior document_ids +
+            // content_parts + attached_context fields).
+            //
+            // ADR-046: `attached_items` is a strongly-typed discriminated
+            // union array. Each item carries a `"type"` tag matching the
+            // `AttachedItem` serde enum. Legacy `document_ids` and
+            // `attached_context` from old desktop clients are NOT accepted
+            // — there is no compatibility layer per ADR §4.
             let mut skill_instructions: Option<String> = None;
-            let mut documents: Option<Vec<serde_json::Value>> = None;
+            let mut attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> = None;
             let mut content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> = None;
-            let mut attached_context: Option<Vec<acowork_core::protocol::AttachedContextItem>> = None;
 
             if !params_json.is_empty()
                 && let Ok(params) = serde_json::from_str::<serde_json::Value>(&params_json)
@@ -804,14 +810,13 @@ async fn dispatch_inbound(
                     {
                         skill_instructions = Some(si.to_string());
                     }
-                    if let Some(docs) = params.get("document_ids").and_then(|v| v.as_array()) {
-                        let parsed: Vec<serde_json::Value> = docs
+                    if let Some(items) = params.get("attached_items").and_then(|v| v.as_array()) {
+                        let parsed: Vec<acowork_core::protocol::AttachedItem> = items
                             .iter()
-                            .filter_map(|d| d.as_str())
-                            .map(|id| serde_json::json!({ "id": id }))
+                            .filter_map(|d| serde_json::from_value::<acowork_core::protocol::AttachedItem>(d.clone()).ok())
                             .collect();
                         if !parsed.is_empty() {
-                            documents = Some(parsed);
+                            attached_items = Some(parsed);
                         }
                     }
                     if let Some(parts) = params.get("content_parts").and_then(|v| v.as_array()) {
@@ -823,15 +828,6 @@ async fn dispatch_inbound(
                             content_parts = Some(parsed);
                         }
                     }
-                    if let Some(ctx) = params.get("attached_context").and_then(|v| v.as_array()) {
-                        let parsed: Vec<acowork_core::protocol::AttachedContextItem> = ctx
-                            .iter()
-                            .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                            .collect();
-                        if !parsed.is_empty() {
-                            attached_context = Some(parsed);
-                        }
-                    }
             }
 
             session_manager
@@ -841,9 +837,8 @@ async fn dispatch_inbound(
                         content,
                         message_id,
                         skill_instructions,
-                        documents,
+                        attached_items,
                         content_parts,
-                        attached_context,
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))

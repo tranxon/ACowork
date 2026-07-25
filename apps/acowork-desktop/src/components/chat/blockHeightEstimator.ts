@@ -76,13 +76,11 @@ import {
   USER_AVATAR_SIZE_PX,
   USER_AVATAR_TOP_OFFSET_PX,
   USER_BUBBLE_MAX_HEIGHT_PX,
-  USER_DOCS_TOP_GAP_PX,
   DOCUMENT_CHIP_HEIGHT,
   EXPLORE_HEADER_HEIGHT,
   EXPLORE_CONTENT_MAX_HEIGHT,
   EXPLORE_CONTENT_PADDING_Y,
   EXPLORE_ITEM_ROW_HEIGHT,
-  COMPACTION_CARD_HEIGHT,
   SYSTEM_BUBBLE_HEIGHT,
   COMPACTING_INDICATOR_HEIGHT,
   REPLYING_INDICATOR_HEIGHT,
@@ -92,6 +90,12 @@ import {
   getContentMaxWidthPct,
   getFontSizePx,
 } from "./blockLayout";
+
+// ── Attachment system entry heights (ADR-046 §2.5) ──────────────────
+// These were previously exported from blockLayout.ts but are now local
+// because they are only referenced by this estimator.
+const ATTACHMENT_CHIP_HEIGHT_PX = 32;
+const ATTACHMENT_THUMB_HEIGHT_PX = 56;
 
 // ── Text-bubble content height ──────────────────────────────────────────
 
@@ -236,10 +240,10 @@ export function estimateBlockHeight(
       const msg = block.items[0];
       const content = msg?.content ?? "";
       const hasName = !!msg?.senderDisplayName;
-      const docCount = msg?.documents?.length ?? 0;
-      const hasDocs = docCount > 0;
       // Right column (text side): liveUserName (mt-[2px] + line) →
-      // mt-[6px] → bubble (capped at max-h-48) → mt-[6px] → doc row.
+      // mt-[6px] → bubble (capped at max-h-48). No inline attachment
+      // chips — ADR-046 renders each attachment as a separate system
+      // entry in the message list.
       const bubbleHeight = Math.min(
         USER_BUBBLE_MAX_HEIGHT_PX,
         estimateTextBubbleHeight(content, containerWidth),
@@ -247,8 +251,7 @@ export function estimateBlockHeight(
       const rightColumn =
         (hasName ? USER_NAME_TOP_GAP_PX + USER_NAME_LINE_HEIGHT_PX : 0)
         + USER_NAME_TO_BUBBLE_GAP_PX
-        + bubbleHeight
-        + (hasDocs ? USER_DOCS_TOP_GAP_PX + DOCUMENT_CHIP_HEIGHT : 0);
+        + bubbleHeight;
       // Left column (avatar side): mt-1 + 40px avatar.
       const leftColumn = USER_AVATAR_TOP_OFFSET_PX + USER_AVATAR_SIZE_PX;
       // The flex container is `items-start`, so total height = max of the
@@ -358,12 +361,22 @@ export function estimateBlockHeight(
       );
       return EXPLORE_HEADER_HEIGHT + contentHeight;
     }
-    case "system":
+    case "system": {
+      // ADR-046 §2.5: 5 attachment-type system entries have distinct
+      // heights. Check the message metadata to dispatch.
+      const msg = block.items[0];
+      const metaType = msg?.metadata?.type;
+      if (metaType === "file_upload") return DOCUMENT_CHIP_HEIGHT;
+      if (metaType === "image_upload") return ATTACHMENT_THUMB_HEIGHT_PX;
+      if (metaType === "attached_file"
+        || metaType === "attached_selection"
+        || metaType === "attached_folder") {
+        return ATTACHMENT_CHIP_HEIGHT_PX;
+      }
+      // Generic system notification.
       return SYSTEM_BUBBLE_HEIGHT;
+    }
     case "compaction":
-      return COMPACTION_CARD_HEIGHT;
-    case "document_upload":
-      return DOCUMENT_CHIP_HEIGHT;
     // tool_call / tool_result outside an explore_group (orphaned) are
     // rendered as their own MessageBubble with fixed-height toggles.
     case "tool_call":

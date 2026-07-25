@@ -569,7 +569,7 @@ pub fn run() {
             commands::agent::update_agent_manifest_avatar,
             commands::agent::upload_agent_file,
             commands::agent::upload_user_avatar_file,
-            commands::chat::upload_document,
+            commands::chat::upload_file,
             commands::vault::list_keys,
             commands::vault::add_key,
             commands::vault::remove_key,

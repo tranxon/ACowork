@@ -711,8 +711,7 @@ export const VirtualMessageList = React.forwardRef<
                     }
                     if (
                       prevType === "compaction" ||
-                      prevType === "system" ||
-                      prevType === "document_upload"
+                      prevType === "system"
                     ) {
                       continue;
                     }
@@ -723,8 +722,7 @@ export const VirtualMessageList = React.forwardRef<
                   const isAgent = t === "explore_group"
                     || (t !== "user"
                       && t !== "system"
-                      && t !== "compaction"
-                      && t !== "document_upload");
+                      && t !== "compaction");
                   if (!isAgent) return null;
                   return (
                     <div className="flex items-center gap-2 mb-2 mt-1">

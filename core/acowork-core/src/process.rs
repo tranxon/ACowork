@@ -520,7 +520,7 @@ mod tests {
         let script = r#"
             for /L %i in (1,1,10) do @(echo line %i & ping -n 1 127.0.0.1 > NUL)
         "#;
-        let mut cmd = bash_cmd(script);
+        let mut cmd = bash_cmd(&script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should NOT timeout — output is continuous");
@@ -651,7 +651,7 @@ mod tests {
         let script = r#"
             for /L %i in (1,1,1000) do @echo line %i
         "#;
-        let mut cmd = bash_cmd(script);
+        let mut cmd = bash_cmd(&script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");

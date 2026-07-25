@@ -159,7 +159,7 @@ pub enum InboundMessage {
     /// ADR-034 Phase 7: User chat message from MQTT SendMessage.
     /// Carries content and message_id for SessionMessage::ChatMessage.
     /// Also carries raw params_json so the handler can extract
-    /// attached_context / command / documents / content_parts.
+    /// attached_items / command / content_parts.
     ChatMessage {
         content: String,
         message_id: String,

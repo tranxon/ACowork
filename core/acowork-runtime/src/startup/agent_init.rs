@@ -137,6 +137,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let agent_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-046: attachment blob store (`POST /sessions/{sid}/files` +
+    // `GET /files/{doc_id}`). Same sync-work_dir pattern as the other
+    // services — populates in Phase B.
+    let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -161,6 +167,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             workspace_mutation_slot.clone(),
             agent_tools_slot.clone(),
             agent_config_slot.clone(),
+            attachment_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -724,6 +731,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         workspace_mutation_slot,
         agent_tools_slot,
         agent_config_slot,
+        attachment_slot,
     })
 }
 

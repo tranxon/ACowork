@@ -168,14 +168,19 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/state",
             get(proxy_get_session_state),
         )
-        // Routes 2-5: Session documents proxy
+        // ADR-046: File upload/download proxy. Replaces the legacy
+        // `/documents` routes (4 handlers deleted). The Runtime now
+        // exposes `POST /sessions/{sid}/files` (multipart upload) and
+        // `GET /files/{document_id}` (blob download). The Gateway is a
+        // transparent reverse-proxy - multipart bodies and binary
+        // responses flow through unchanged.
         .route(
-            "/api/agents/{id}/sessions/{sid}/documents",
-            post(proxy_upload_document).get(proxy_list_documents),
+            "/api/agents/{id}/sessions/{sid}/files",
+            post(proxy_upload_file),
         )
         .route(
-            "/api/agents/{id}/sessions/{sid}/documents/{doc_id}",
-            get(proxy_read_document).delete(proxy_delete_document),
+            "/api/agents/{id}/files/{document_id}",
+            get(proxy_download_file),
         )
         // Routes 6-9: Workspace config CRUD
         .route(
@@ -479,50 +484,46 @@ async fn proxy_memory_consolidate(
 
 // ── New Phase 4 proxy handlers ─────────────────────────────────────────
 
-/// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/documents`
-/// to Runtime's `POST /sessions/{sid}/documents`.
-async fn proxy_upload_document(
+/// Reverse-proxy `POST /api/agents/{id}/sessions/{sid}/files`
+/// to Runtime's `POST /sessions/{sid}/files` (ADR-046 multipart upload).
+///
+/// The multipart body and Content-Type header (including the boundary)
+/// are forwarded verbatim - the Gateway does not parse multipart.
+async fn proxy_upload_file(
     State(state): State<AppState>,
     Path((id, sid)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let path = format!("/sessions/{}/documents", sid);
+    let path = format!("/sessions/{}/files", sid);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
 }
 
-/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents`
-/// to Runtime's `GET /sessions/{sid}/documents`.
-async fn proxy_list_documents(
+/// Reverse-proxy `GET /api/agents/{id}/files/{document_id}`
+/// to Runtime's `GET /files/{document_id}` (ADR-046 blob download).
+///
+/// The `format` query parameter (file extension for Content-Type
+/// derivation) is forwarded as-is. The response body (raw bytes) and
+/// Content-Type header are returned verbatim.
+async fn proxy_download_file(
     State(state): State<AppState>,
-    Path((id, sid)): Path<(String, String)>,
+    Path((id, document_id)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let path = format!("/sessions/{}/documents", sid);
-    proxy_to_runtime(&state, &id, &path, "", &headers).await
-}
-
-/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
-/// to Runtime's `GET /sessions/{sid}/documents/{doc_id}`.
-async fn proxy_read_document(
-    State(state): State<AppState>,
-    Path((id, sid, doc_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let path = format!("/sessions/{}/documents/{}", sid, doc_id);
-    proxy_to_runtime(&state, &id, &path, "", &headers).await
-}
-
-/// Reverse-proxy `DELETE /api/agents/{id}/sessions/{sid}/documents/{doc_id}`
-/// to Runtime's `DELETE /sessions/{sid}/documents/{doc_id}`.
-async fn proxy_delete_document(
-    State(state): State<AppState>,
-    Path((id, sid, doc_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let path = format!("/sessions/{}/documents/{}", sid, doc_id);
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None, &headers).await
+    let path = format!("/files/{}", document_id);
+    // Forward query params (typically just `format=pdf` etc.)
+    let query = if params.is_empty() {
+        String::new()
+    } else {
+        params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect::<Vec<_>>()
+            .join("&")
+    };
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}`

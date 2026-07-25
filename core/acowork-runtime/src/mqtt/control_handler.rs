@@ -45,8 +45,13 @@ pub enum ControlAction {
         content: String,
         /// Optional slash command prefix (e.g. "/commit")
         command: String,
-        /// Rich payload as JSON (document_ids / content_parts / attached_context).
-        /// Empty string = plain text only.
+        /// Rich payload as JSON (attached_items / content_parts). Empty string =
+        /// plain text only. ADR-046 supersedes the legacy document_ids +
+        /// attached_context fields — see [`crate::conversation::AttachmentMeta`]
+        /// for the JSONL persistence shape and
+        /// [`acowork_core::protocol::AttachedItem`] for the wire shape
+        /// (camelCase inner fields, locked by
+        /// `core/acowork-core/tests/attached_items_wire.rs`).
         params_json: String,
     },
     /// User wants to stop generation.

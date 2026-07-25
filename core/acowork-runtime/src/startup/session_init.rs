@@ -353,6 +353,17 @@ pub(crate) async fn phase_b_init_session(
             *slot = Some(config_svc);
         }
 
+        // ADR-046: Publish attachment blob store. Same sync-work_dir
+        // pattern — `RuntimeAttachmentService` only needs the
+        // boot-time `work_dir`.
+        {
+            let attach_svc: Arc<dyn crate::usecases::AttachmentService> = Arc::new(
+                crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
+            );
+            let mut slot = ctx.attachment_slot.lock().await;
+            *slot = Some(attach_svc);
+        }
+
         // ── Resolve & persist agent_config.json defaults ─────────────
         //
         // agent_config.json is the single source of truth for the

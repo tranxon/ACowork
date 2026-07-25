@@ -36,6 +36,11 @@ pub struct SessionsListResponse {
 }
 
 /// Detail view of a single session (panel-4 endpoint).
+///
+/// `live_state` is an optional JSON object carrying the runtime
+/// snapshot fields (status, model, provider, ratio, todos,
+/// context_usage). The impl constructs this from
+/// `SharedSessionSnapshots`; `None` means no live snapshot exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub session_id: String,
@@ -46,8 +51,8 @@ pub struct SessionDetail {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub workspace_id: Option<String>,
-    // Live state snapshot from SessionManager.
-    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_state: Option<serde_json::Value>,
 }
 
 /// Response for `get_messages` — paginated messages from a session.
@@ -55,7 +60,10 @@ pub struct SessionDetail {
 pub struct MessagesResponse {
     pub session_id: String,
     pub messages: Vec<serde_json::Value>,
-    pub count: u64,
+    pub offset: u64,
+    pub limit: u32,
+    pub total: u64,
+    pub count: usize,
 }
 
 /// Session metadata query methods.

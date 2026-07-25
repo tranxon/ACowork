@@ -95,9 +95,6 @@ export const EXPLORE_ITEMS_GAP = 2;
 export const EXPLORE_ITEM_ROW_HEIGHT = 22;
 
 // ── Misc block heights (single-row, fixed) ─────────────────────────
-/** CompactionCard — `my-1 max-w-...` plus a single-line body. */
-export const COMPACTION_CARD_HEIGHT = 56;
-
 /** DocumentChip — single line, centered. */
 export const DOCUMENT_CHIP_HEIGHT = 28;
 

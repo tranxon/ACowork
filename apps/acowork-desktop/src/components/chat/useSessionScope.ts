@@ -1,26 +1,14 @@
 import { useRef, useState, useLayoutEffect } from "react";
-import type { ModelEntry } from "../../lib/types";
+import type { ModelEntry, PendingAttachedItem } from "../../lib/types";
 import { log } from "../../lib/logger";
 
 // ── Types ────────────────────────────────────────────────────────────
 
-export interface PendingFile {
-  tempId: string;
-  filename: string;
-  format: string;
-  size: number;
-  status: "uploading" | "success" | "error";
-  documentId?: string;
-  errorMessage?: string;
-}
-
-export interface PendingImage {
-  tempId: string;
-  filename: string;
-  base64Url: string;
-  width: number;
-  height: number;
-}
+// Re-export the unified `PendingAttachedItem` shape for backwards compat
+// at the consumer level. The legacy `PendingFile` / `PendingImage` types
+// were removed in ADR-046: a single queue now holds documents, images,
+// and workspace refs (all of which become an `AttachedItem` once resolved).
+export type { PendingAttachedItem };
 
 /**
  * Per-session mutable ref state. Stores values that need to persist across
@@ -68,11 +56,8 @@ export interface SessionScopeAPI {
   inputValue: string;
   setInputValue: (v: string) => void;
 
-  pendingFiles: PendingFile[];
-  setPendingFiles: React.Dispatch<React.SetStateAction<PendingFile[]>>;
-
-  pendingImages: PendingImage[];
-  setPendingImages: React.Dispatch<React.SetStateAction<PendingImage[]>>;
+  pendingAttachedItems: PendingAttachedItem[];
+  setPendingAttachedItems: React.Dispatch<React.SetStateAction<PendingAttachedItem[]>>;
 
   showImageUnsupportedDialog: boolean;
   setShowImageUnsupportedDialog: (v: boolean) => void;
@@ -112,8 +97,7 @@ export function useSessionScope(
 
   // ── State values (trigger re-render) ──
   const [inputValue, setInputValue] = useState("");
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingAttachedItems, setPendingAttachedItems] = useState<PendingAttachedItem[]>([]);
   const [showImageUnsupportedDialog, setShowImageUnsupportedDialog] = useState(false);
   const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
   const [todosCollapsed, setTodosCollapsed] = useState(false);
@@ -149,8 +133,7 @@ export function useSessionScope(
     // per-session state to clear leaks across sessions.
     scopeRef.current = createDefaultSessionScope();
     setInputValue("");
-    setPendingFiles([]);
-    setPendingImages([]);
+    setPendingAttachedItems([]);
     setShowImageUnsupportedDialog(false);
     setImageCapableModels([]);
     setTodosCollapsed(false);
@@ -163,10 +146,8 @@ export function useSessionScope(
     scope: scopeRef,
     inputValue,
     setInputValue,
-    pendingFiles,
-    setPendingFiles,
-    pendingImages,
-    setPendingImages,
+    pendingAttachedItems,
+    setPendingAttachedItems,
     showImageUnsupportedDialog,
     setShowImageUnsupportedDialog,
     imageCapableModels,

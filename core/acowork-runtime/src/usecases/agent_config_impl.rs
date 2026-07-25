@@ -102,10 +102,16 @@ impl AgentConfigService for RuntimeAgentConfigService {
         //    projection schema-locked to the live-broadcast path.
         let overrides = RuntimeConfigOverrides::from(&cfg);
 
+        // Serialize the persisted config so the HTTP handler can
+        // re-PUBLISH the retained MQTT snapshot without re-reading
+        // the file from disk (ADR-040: handler must not touch fs).
+        let config_json = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+
         Ok(PutAgentConfigResult {
             agent_id: agent_id.to_string(),
             config: cfg,
             overrides,
+            config_json,
         })
     }
 }

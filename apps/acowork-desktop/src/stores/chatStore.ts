@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, ActiveStream } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, ActiveStream, AttachedItem } from "../lib/types";
+import { toWireAttachedItems } from "../lib/types";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
@@ -531,7 +532,7 @@ interface ChatStore {
   availableModels: ModelEntry[];
 
   // ---- Actions ----
-  sendMessage: (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => Promise<void>;
+  sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
   stopCurrentMessage: (agentId: string) => Promise<void>;
   sendStop: (agentId: string) => void;
   /** Clear session state for a specific agent's active session */
@@ -1225,7 +1226,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // ADR-033: connectStream removed — MQTT connection is managed by the Rust backend.
   // The frontend no longer creates WebSocket connections.
 
-  sendMessage: async (content: string, agentId: string, command?: string, documentIds?: string[], documents?: Array<{ id: string; filename: string; format: string; size: number; path?: string }>, imageParts?: Array<{ url: string; width: number; height: number }>) => {
+  sendMessage: async (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
 
     // Add user message to the active session's state
@@ -1234,52 +1235,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // optimistic render and the backend-persisted message must share the same ID.
     const userMsgId = `msg-${crypto.randomUUID()}`;
 
-    // Collect documents for optimistic render: uploaded files + attached context.
-    const optimisticDocs: ChatMessage["documents"] = [];
-
-    // Uploaded documents (via doc_reader)
-    if (documents && documents.length > 0) {
-      for (const doc of documents) {
-        optimisticDocs.push({
-          filename: doc.filename,
-          format: doc.format,
-          size: doc.size,
-          documentId: doc.id,
-        });
-      }
-    }
-
-    // Attached context files (from workspace explorer / editor "Add to Chat")
-    // Include them as document chips so the first render shows file icons,
-    // matching the visual treatment that the backend-enriched message would
-    // have had before ID-based dedup was introduced.
-    if (sessionId) {
-      const ss = getSessionState(get(), agentId, sessionId);
-      if (ss.attachedContext.length > 0) {
-        for (const ctx of ss.attachedContext) {
-          if (ctx.type === "file" || ctx.type === "selection") {
-            optimisticDocs.push({
-              filename: ctx.name,
-              format: "text",
-            });
-          }
-        }
-      }
-    }
+    // ADR-046: every attachment — uploaded documents, uploaded images, AND
+    // workspace references — flows through the same `AttachedItem[]` list.
+    // The optimistic user message carries only the text content. The
+    // attachments are written as separate system entries by the backend
+    // and rendered as individual `AttachmentChipRow` in the message list.
+    const items = attachedItems ?? [];
 
     const userMsg: ChatMessage = {
       id: userMsgId,
       type: "user",
       content,
       timestamp: Date.now(),
-      ...(optimisticDocs.length > 0 ? { documents: optimisticDocs } : {}),
       ...getUserSenderInfo(),
     };
-
-    // Attach image info to user message for inline rendering
-    if (imageParts && imageParts.length > 0) {
-      userMsg.imageUrls = imageParts.map((img) => img.url);
-    }
 
     if (sessionId) {
       set((state) => {
@@ -1291,54 +1260,55 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
         sid: sessionId,
         userMsgId,
+        attachedItemCount: items.length,
         messagesLenAfter: getSessionState(get(), agentId, sessionId).messages.length,
       });
     }
 
-    // Build multimodal content_parts when images are attached
-    const contentParts = imageParts && imageParts.length > 0
-      ? [
-        { type: "text", text: content },
-        ...imageParts.map((img) => ({
-          type: "image_url",
-          image_url: { url: img.url, width: img.width, height: img.height },
-        })),
-      ]
-      : undefined;
-
-    // Build attached context payload from session state (files/selections from
-    // workspace explorer right-click or editor "Add to Chat" button).
-    // Passes file paths + line ranges as structured metadata so the Runtime
-    // can assemble the enriched context and inject it into the LLM prompt.
-    // The frontend no longer assembles prompt text — all context enrichment
-    // (including human-readable file summaries) is done by the backend.
-    let attachedContextPayload: Array<{ absPath: string; type: string; startLine?: number; endLine?: number }> | undefined;
+    // ADR-046: workspace refs (the `attachedContext` state field, which is
+    // also the source of `AttachedContextChips`) are bridged into the same
+    // `attached_items` envelope. After this snapshot the field is cleared
+    // so the next send starts with a fresh slate. Upload payloads from the
+    // caller (already in `items`) come first so upload chips win any
+    // filename collisions on render.
     if (sessionId) {
       const ss = getSessionState(get(), agentId, sessionId);
       if (ss.attachedContext.length > 0) {
-        attachedContextPayload = ss.attachedContext.map((ctx) => ({
-          absPath: ctx.absPath,
-          type: ctx.type,
-          startLine: ctx.startLine,
-          endLine: ctx.endLine,
-        }));
+        for (const ctx of ss.attachedContext) {
+          if (ctx.type === "file") {
+            items.push({
+              type: "attached_file",
+              absPath: ctx.absPath,
+              name: ctx.name,
+            });
+          } else if (ctx.type === "selection") {
+            items.push({
+              type: "attached_selection",
+              absPath: ctx.absPath,
+              name: ctx.name,
+              startLine: ctx.startLine ?? 1,
+              endLine: ctx.endLine ?? ctx.startLine ?? 1,
+            });
+          } else if (ctx.type === "directory") {
+            items.push({
+              type: "attached_folder",
+              absPath: ctx.absPath,
+              name: ctx.name,
+            });
+          }
+        }
+        set((s) =>
+          updateSessionState(s, agentId, sessionId, { attachedContext: [] }),
+        );
       }
     }
 
-    // Clear attached context after sending (one-shot)
-    if (sessionId) {
-      const ss = getSessionState(get(), agentId, sessionId);
-      if (ss.attachedContext.length > 0) {
-        set((s) => updateSessionState(s, agentId, sessionId, { attachedContext: [] }));
-      }
-    }
-
-    // ADR-034 Phase 5: All messages sent via MQTT with params_json for rich payload.
-    // HTTP fallback removed — Gateway no longer has send_message endpoint.
+    // ADR-046 §params: only `attached_items` survives. The legacy
+    // `content_parts` / `attached_context` / `document_ids` MQTT params are
+    // dropped — the runtime reads everything it needs from
+    // `params_json.attached_items`.
     const params: Record<string, unknown> = {};
-    if (documentIds?.length) params.document_ids = documentIds;
-    if (contentParts?.length) params.content_parts = contentParts;
-    if (attachedContextPayload?.length) params.attached_context = attachedContextPayload;
+    if (items.length > 0) params.attached_items = toWireAttachedItems(items);
     const paramsJson = Object.keys(params).length > 0 ? JSON.stringify(params) : "";
 
     try {
@@ -2058,13 +2028,19 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
   const meta = entry.metadata;
   if (!meta) return base;
 
-  // document_upload entries: extract fields from metadata
-  if (meta.type === "document_upload") {
-    base.type = "document_upload";
-    base.documentId = meta.document_id as string | undefined;
-    base.documentFormat = meta.format as string | undefined;
-    base.documentSize = meta.size_bytes as number | undefined;
-    base.documentPath = meta.path as string | undefined;
+  // ADR-046 §2.5: 5 attachment-type system entries. Each carries a
+  // `metadata.type` discriminator matching the backend `AttachmentMeta`
+  // serde tag. The raw metadata is stored on `ChatMessage.metadata` so
+  // the renderer (MessageBubble) can read it without re-parsing.
+  const ATTACHMENT_TYPES = new Set([
+    "file_upload",
+    "image_upload",
+    "attached_file",
+    "attached_selection",
+    "attached_folder",
+  ]);
+  if (entry.role === "system" && typeof meta.type === "string" && ATTACHMENT_TYPES.has(meta.type)) {
+    base.metadata = meta as Record<string, unknown>;
     return base;
   }
 
@@ -2090,101 +2066,16 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
 }
 
 /**
- * Merge document_upload entries into their following user messages,
- * and strip document-enriched content (appended by backend doc_reader)
- * from user message content.
- *
- * Backend persists document uploads as separate system-role entries with
- * metadata.type === "document_upload", and appends document parsed text to
- * the user message content. This reverses both to match the frontend's
- * optimistic message format (documents array inline in user message).
+ * Map raw ConversationEntry list to ChatMessage[] — replaces the legacy
+ * `mergeDocumentUploads` shim. Post-ADR-046 the runtime no longer writes
+ * a separate `document_upload` system entry or appends enriched document
+ * text into user content; everything is already inline as
+ * `metadata.attached_items` on the user entry itself, and `convertConversationEntry`
+ * rehydrates that into `ChatMessage.metadata`. So this function is
+ * now a thin map. Kept as a named helper so the callsite stays self-explanatory.
  */
 function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): ChatMessage[] {
-  const ENRICHMENT_TEXT = "The following documents were uploaded by the user.";
-  const result: ChatMessage[] = [];
-  let pendingDocs: ChatMessage["documents"] = [];
-
-  for (const entry of entries) {
-    // Collect document_upload entries to merge into the following user message
-    if (entry.metadata?.type === "document_upload") {
-      const meta = entry.metadata;
-      pendingDocs.push({
-        filename: (meta.filename as string) || "",
-        format: (meta.format as string) || "unknown",
-        size: meta.size_bytes as number | undefined,
-        documentId: meta.document_id as string | undefined,
-      });
-      continue;
-    }
-
-    const msg = convertConversationEntry(entry, agentId);
-
-    // Attach pending document info to the next user message
-    if (msg.type === "user" && pendingDocs.length > 0) {
-      msg.documents = pendingDocs;
-      pendingDocs = [];
-
-      // Strip enriched document content from user message content
-      if (msg.content) {
-        const idx = msg.content.indexOf(ENRICHMENT_TEXT);
-        if (idx !== -1) {
-          // Strip from the enrichment text start, handling optional "\n\n" prefix
-          msg.content = msg.content.substring(0, idx).replace(/\n\n$/, "");
-        }
-      }
-    }
-
-    // ── Strip attached-context enrichment from user messages ──────────
-    // Frontend prepends "[Attached context:]\n- file: `path`\n\n" to the
-    // user content; backend then appends "\n\nThe following workspace
-    // files were attached..." enrichment.  Reconstruct the `documents`
-    // array from the file references and keep only the actual user input.
-    // `selection` is emitted by the backend when an editor line-range was
-    // attached (chatStore `attachedContext.type === "selection"`); treat
-    // it the same as `file` for chip/document reconstruction — the line
-    // range in the line itself is informational only.
-    if (msg.type === "user" && msg.content) {
-      let cleanedContent = msg.content;
-      let attachedFiles: ChatMessage["documents"] = [];
-
-      // Parse frontend-added [Attached context:] block
-      const attachedCtxMatch = cleanedContent.match(
-        /^\[Attached context:\]\n([\s\S]*?)(?:\n\n|$)/,
-      );
-      if (attachedCtxMatch) {
-        const block = attachedCtxMatch[1];
-        for (const line of block.split('\n')) {
-          const fileMatch = line.match(/^- (?:file|folder|selection): `(.+?)`/);
-          if (fileMatch) {
-            const absPath = fileMatch[1];
-            const filename =
-              absPath.replace(/[/\\]$/, '').split(/[/\\]/).pop() ?? absPath;
-            attachedFiles.push({ filename, format: 'text' });
-          }
-        }
-        // Remove the [Attached context:] block
-        cleanedContent = cleanedContent.slice(attachedCtxMatch[0].length);
-      }
-
-      // Strip backend-added "The following workspace files..." enrichment
-      cleanedContent = cleanedContent.replace(
-        /\n\nThe following workspace files were attached by the user\..*$/s,
-        '',
-      );
-
-      // Apply changes only if we found enrichment text
-      if (cleanedContent !== msg.content) {
-        msg.content = cleanedContent;
-        if (attachedFiles.length > 0) {
-          msg.documents = [...(msg.documents ?? []), ...attachedFiles];
-        }
-      }
-    }
-
-    result.push(msg);
-  }
-
-  return result;
+  return entries.map((e) => convertConversationEntry(e, agentId));
 }
 
 // ── WebSocket event handler — routes by event.session_id ──────────────

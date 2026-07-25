@@ -6,6 +6,7 @@
 pub mod agent_config;
 pub mod agent_token;
 pub mod agent_tools;
+pub mod attachment;
 pub mod memory_query;
 pub mod session_control;
 pub mod session_metadata;
@@ -19,8 +20,11 @@ pub use agent_config::{
 };
 pub use agent_token::AgentTokenService;
 pub use agent_tools::{
-    AgentToolsError, AgentToolsService, BuiltinToolsResponse, PutBuiltinToolsBody,
-    PutMcpServersBody, PutSearchConfigBody,
+    AgentToolsError, AgentToolsService, BuiltinToolsResponse, MergedToolsResponse,
+    PutBuiltinToolsBody, PutMcpServersBody, PutSearchConfigBody,
+};
+pub use attachment::{
+    AttachmentError, AttachmentService, UploadFileParams, UploadedFileResponse, MAX_UPLOAD_BYTES,
 };
 pub use memory_query::MemoryQueryService;
 pub use session_control::SessionControlService;
@@ -32,6 +36,7 @@ pub use workspace_query::{WorkspaceError, WorkspaceQueryService};
 pub mod agent_config_impl;
 pub mod agent_token_impl;
 pub mod agent_tools_impl;
+pub mod attachment_impl;
 pub mod memory_query_impl;
 pub mod session_metadata_impl;
 pub mod workspace_mutation_impl;
@@ -40,6 +45,7 @@ pub mod workspace_query_impl;
 pub use agent_config_impl::RuntimeAgentConfigService;
 pub use agent_token_impl::RuntimeAgentTokenService;
 pub use agent_tools_impl::RuntimeAgentToolsService;
+pub use attachment_impl::RuntimeAttachmentService;
 pub use memory_query_impl::GrafeoMemoryAdapter;
 pub use session_metadata_impl::RuntimeSessionMetadataService;
 pub use workspace_mutation_impl::RuntimeWorkspaceMutationService;

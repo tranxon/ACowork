@@ -22,7 +22,6 @@ use crate::agent::session_core::SessionCore;
 use crate::agent::session_state::SessionState;
 use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
-use crate::tools::builtin::doc_reader::{self, ExtractOptions, detect_format};
 
 /// Messages that can be sent to a SessionTask.
 #[derive(Clone)]
@@ -34,18 +33,17 @@ pub enum SessionMessage {
         /// Skill instructions to inject into the system prompt (from command-based skill selection).
         /// When set, the instructions are injected via ContextBuilder rather than prepended to user content.
         skill_instructions: Option<String>,
-        /// Optional document references uploaded with this message.
-        /// Each entry: { "id", "filename", "abs_path", "format", "size" }
-        documents: Option<Vec<serde_json::Value>>,
+        /// ADR-046: unified array of attached items replacing the prior
+        /// `documents` + `attached_context` fields. Each item is a
+        /// discriminated union (file_upload / image_upload / attached_file
+        /// / attached_selection / attached_folder) carrying the full
+        /// metadata needed for JSONL persistence and prompt-side hints.
+        /// `None` / empty means no attachments.
+        attached_items: Option<Vec<acowork_core::protocol::AttachedItem>>,
         /// Optional multimodal content parts (e.g. text + image_url).
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
-        /// Files/selections attached by the user from workspace explorer / editor.
-        /// Each entry: { abs_path, type ("file"/"selection"), start_line?, end_line? }
-        /// The Runtime emits file-path references into the user message so the
-        /// LLM can use its own tools to read the content on demand.
-        attached_context: Option<Vec<acowork_core::protocol::AttachedContextItem>>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -156,20 +154,18 @@ impl std::fmt::Debug for SessionMessage {
                 content,
                 message_id,
                 skill_instructions,
-                documents,
+                attached_items,
                 content_parts,
-                attached_context,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
                 .field("message_id", message_id)
                 .field("has_skill", &skill_instructions.is_some())
-                .field("has_docs", &documents.is_some())
-                .field("has_content_parts", &content_parts.is_some())
                 .field(
                     "attached_count",
-                    &attached_context.as_ref().map(|c| c.len()).unwrap_or(0),
+                    &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
                 )
+                .field("has_content_parts", &content_parts.is_some())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::ModelSwitch { model, provider } => f
@@ -312,114 +308,12 @@ pub(crate) struct SessionTask {
     protocol_type: acowork_core::protocol::ProtocolType,
 }
 
-/// Extract text from a document file directly, bypassing PathGuardedTool.
-///
-/// Used during session message pre-processing to read user-uploaded documents
-/// from the session documents directory — which is NOT a workspace directory
-/// and would be rejected by `PathGuardedTool::validate_path()`.
-///
-/// Delegates to the doc_reader format-specific extractors in a `spawn_blocking`
-/// worker so that PDF rendering never blocks the async runtime.
-async fn extract_document_text(path: &std::path::Path) -> Result<String, String> {
-    let format = detect_format(path).ok_or_else(|| {
-        format!(
-            "Unsupported document format: {}",
-            path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("(none)")
-        )
-    })?;
-
-    let opts = ExtractOptions {
-        start_page: None,
-        end_page: None,
-        include_tables: true,
-    };
-
-    let path_clone = path.to_path_buf();
-    let opts_clone = opts.clone();
-
-    tokio::task::spawn_blocking(move || match format {
-        "pdf" => doc_reader::pdf::extract_text(&path_clone, &opts_clone),
-        "docx" => doc_reader::docx::extract_text(&path_clone, &opts_clone),
-        "pptx" => doc_reader::pptx::extract_text(&path_clone, &opts_clone),
-        "xlsx" => doc_reader::xlsx::extract_text(&path_clone, &opts_clone),
-        _ => unreachable!(),
-    })
-    .await
-    .map_err(|e| format!("Document extraction error: {e}"))
-    .and_then(|r| r)
-}
-
-/// Build context hints from attached context items.
-///
-/// Instead of reading file contents, this function only emits file-path
-/// references (with optional line ranges for selections) so the LLM can
-/// use its own tools (`read_file` for text files, `doc_reader` for binary
-/// documents) to access the content on demand. This avoids loading
-/// potentially large files into the prompt context and keeps the Runtime
-/// free of file-I/O concerns.
-fn build_attached_context_blocks(
-    items: &[acowork_core::protocol::AttachedContextItem],
-    session_id: &str,
-) -> Vec<String> {
-    let mut file_hints: Vec<String> = Vec::new();
-
-    for item in items {
-        // Only process file and selection types
-        if item.context_type == "directory" {
-            continue;
-        }
-
-        let path = std::path::Path::new(&item.abs_path);
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
-        let is_document = matches!(ext, "pdf" | "docx" | "pptx" | "xlsx");
-
-        tracing::info!(
-            session_id = %session_id,
-            abs_path = %item.abs_path,
-            context_type = %item.context_type,
-            is_document = is_document,
-            "SessionTask: attaching file reference"
-        );
-
-        let line_hint = match (item.start_line, item.end_line) {
-            (Some(s), Some(e)) if s != e => {
-                format!(" (lines {}–{})", s, e)
-            }
-            (Some(s), _) => format!(" (line {})", s),
-            _ => String::new(),
-        };
-
-        let has_line_range = item.context_type == "selection"
-            && (item.start_line.is_some() || item.end_line.is_some());
-
-        let hint = if is_document {
-            // Binary documents (PDF, DOCX, etc.): always use doc_reader.
-            // Line-level selection does not apply to binary formats.
-            format!(
-                "- `{}` — Use `doc_reader` to extract text from this document.",
-                item.abs_path
-            )
-        } else if has_line_range {
-            format!(
-                "- `{}`{} — Use `read_file` to read the specified lines.",
-                item.abs_path, line_hint
-            )
-        } else {
-            format!(
-                "- `{}` — Use `read_file` to read this file when needed.",
-                item.abs_path
-            )
-        };
-        file_hints.push(hint);
-    }
-
-    file_hints
-}
+// ADR-046: pre-extraction helpers (`extract_document_text`,
+// `build_attached_context_blocks`) were removed. Attachment records are
+// now persisted as standalone system JSONL entries via
+// `AgentLoop::write_attached_items` and rendered by the frontend from
+// the JSONL metadata. The Runtime no longer reads uploaded file bytes
+// or assembles complex prompt prefixes — see ADR-046 §2.4.
 
 impl SessionTask {
     /// Create a new SessionTask with the given shared core, session state,
@@ -809,17 +703,14 @@ impl SessionTask {
                     content,
                     message_id,
                     skill_instructions,
-                    documents,
+                    attached_items,
                     content_parts,
-                    attached_context,
                 }) => {
-                    let has_documents = documents.as_ref().is_some_and(|d| !d.is_empty());
+                    let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
-                    let has_attached = attached_context.as_ref().is_some_and(|a| !a.is_empty());
                     if content.trim().is_empty()
-                        && !has_documents
-                        && !has_content_parts
                         && !has_attached
+                        && !has_content_parts
                     {
                         tracing::warn!(
                             session_id = %session_id,
@@ -833,175 +724,71 @@ impl SessionTask {
                     // (e.g. after a rewind issued post-completion).
                     last_user_message = Some((content.clone(), message_id.clone()));
 
-                    // Persist document upload records to the conversation JSONL
-                    // before running the agent loop, so they appear in session history.
-                    if let Some(ref docs) = documents
-                        && !docs.is_empty() {
-                            agent_loop.write_document_entries(docs);
+                    // ADR-046: Persist all attachment records to the conversation
+                    // JSONL BEFORE running the agent loop. Each upload/file/folder
+                    // appears as an independent system entry that the frontend
+                    // renders as a chip / thumbnail / link on reload. The user's
+                    // original message is kept verbatim — no [Attached context:]
+                    // prefix, no inlined document body.
+                    //
+                    // Order: items are appended in the order the frontend sent
+                    // them, preserving the user's perceived attach sequence.
+                    if let Some(ref items) = attached_items
+                        && !items.is_empty() {
+                            agent_loop.write_attached_items(items);
                         }
 
-                    // Save the raw user message before enrichment.
-                    // This is the user's original input without any prompt assembly
-                    // (no [Attached context:] prefix, no document content, no file
-                    // hints). Used by AgentLoop for session title generation and
+                    // Save the raw user message before any prompt assembly.
+                    // Used by AgentLoop for session title generation and
                     // other metadata extraction that needs clean user input.
                     let raw_user_message = content.clone();
 
-                    // Build enriched user message: pre-extract user-uploaded document
-                    // content via doc_reader tool (simulating an LLM tool call) and
-                    // inject directly into context. This avoids an extra LLM round-trip
-                    // and eliminates the uncertainty of whether the LLM will call
-                    // doc_reader. The doc_reader tool remains available for
-                    // non-user-uploaded documents (e.g., files in workspace).
+                    // ADR-046: Build a *minimal* prompt-side hint for
+                    // attached workspace files / selections. The full
+                    // attachment metadata is already in the JSONL as separate
+                    // system entries (written above), so the LLM has the
+                    // authoritative record. The prompt hint exists only to
+                    // point the LLM at the right tool call when the user
+                    // asks about an attached file by name.
+                    //
+                    // No doc_reader pre-extraction (the LLM calls it
+                    // itself), no human-readable file list (frontend
+                    // renders that from the JSONL entries), no "The
+                    // following workspace files..." preamble.
                     let mut enriched_content = content.clone();
-                    if let Some(ref docs) = documents
-                        && !docs.is_empty() {
-                            let filenames: Vec<&str> = docs
-                                .iter()
-                                .filter_map(|d| d.get("filename").and_then(|v| v.as_str()))
+                    if let Some(ref items) = attached_items
+                        && !items.is_empty() {
+                            let hint_lines: Vec<String> = items.iter()
+                                .filter_map(|item| match item {
+                                    acowork_core::protocol::AttachedItem::AttachedFile { abs_path, .. } => {
+                                        Some(format!("- file: `{}`", abs_path))
+                                    }
+                                    acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, start_line, end_line, .. } => {
+                                        let line_info = if start_line != end_line {
+                                            format!(" (L{}-L{})", start_line, end_line)
+                                        } else {
+                                            format!(" (L{})", start_line)
+                                        };
+                                        Some(format!("- file: `{}`{}", abs_path, line_info))
+                                    }
+                                    // Folders and uploaded files don't need a prompt hint —
+                                    // the LLM can't walk a directory via read_file and
+                                    // uploaded blobs are not filesystem-accessible.
+                                    _ => None,
+                                })
                                 .collect();
-                            tracing::info!(
-                                session_id = %session_id,
-                                doc_count = docs.len(),
-                                filenames = ?filenames,
-                                "SessionTask: pre-extracting uploaded documents via doc_reader"
-                            );
-                            let mut doc_blocks: Vec<String> = Vec::new();
-                            for doc in docs {
-                                let abs_path =
-                                    doc.get("abs_path").and_then(|v| v.as_str()).unwrap_or("");
-                                let filename = doc
-                                    .get("filename")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("document");
-                                if abs_path.is_empty() {
-                                    continue;
-                                }
-                                let format = doc
-                                    .get("format")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                tracing::info!(
-                                    session_id = %session_id,
-                                    filename = %filename,
-                                    format = %format,
-                                    abs_path = %abs_path,
-                                    "SessionTask: extracting document"
-                                );
-                                let doc_path = std::path::Path::new(abs_path);
-                                // Bypass PathGuardedTool: session documents dir is NOT a
-                                // workspace directory, but the user explicitly uploaded
-                                // these files — they are trusted input.
-                                match extract_document_text(doc_path).await {
-                                    Ok(text) if !text.trim().is_empty() => {
-                                        doc_blocks.push(format!(
-                                            "<attached_document filename=\"{}\" format=\"{}\">\n{}\n</attached_document>",
-                                            filename, format, text
-                                        ));
-                                    }
-                                    Ok(_) => {
-                                        tracing::warn!(filename = %filename, "doc_reader returned empty content");
-                                        doc_blocks.push(format!(
-                                            "<attached_document filename=\"{}\" format=\"{}\">\n[Document is empty or contains no extractable text]\n</attached_document>",
-                                            filename, format
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(filename = %filename, error = %e, "Failed to extract document via doc_reader");
-                                        doc_blocks.push(format!(
-                                            "<attached_document filename=\"{}\" format=\"{}\">\n[Document extraction failed: {}]\n</attached_document>",
-                                            filename, format, e
-                                        ));
-                                    }
-                                }
-                            }
-                            if !doc_blocks.is_empty() {
-                                let prefix = if content.trim().is_empty() {
+                            if !hint_lines.is_empty() {
+                                let sep = if enriched_content.is_empty() {
                                     String::new()
                                 } else {
-                                    format!("{}\n\n", content)
+                                    format!("{}\n\n", enriched_content)
                                 };
                                 enriched_content = format!(
-                                    "{}The following documents were uploaded by the user. \
-                                     Their contents have been pre-extracted and included below. \
-                                     You do NOT need to use the `doc_reader` tool for these files.\n\n{}",
-                                    prefix,
-                                    doc_blocks.join("\n\n")
+                                    "{}[Attached workspace files — use `read_file` / `doc_reader` on demand]\n{}",
+                                    sep,
+                                    hint_lines.join("\n")
                                 );
                             }
-                            tracing::info!(
-                                session_id = %session_id,
-                                doc_blocks = doc_blocks.len(),
-                                enriched_len = enriched_content.len(),
-                                "SessionTask: document pre-extraction complete"
-                            );
-                        }
-
-                    // Build attached context: emit file-path references for
-                    // workspace files selected by the user from the workspace
-                    // explorer or editor "Add to Chat" button. The LLM will use
-                    // its own tools (read_file, doc_reader) to access file
-                    // contents on demand, avoiding large file injection into the
-                    // prompt context.
-                    //
-                    // Also prepend a human-readable file summary so the chat
-                    // history shows what was attached (previously done by the
-                    // frontend — now moved here for single-source prompt assembly).
-                    //
-                    // The frontend sends absolute paths (abs_path).
-                    if let Some(ref att_ctx) = attached_context
-                        && !att_ctx.is_empty() {
-                            tracing::info!(
-                                session_id = %session_id,
-                                count = att_ctx.len(),
-                                "SessionTask: building attached file references"
-                            );
-
-                            let file_hints = build_attached_context_blocks(att_ctx, &session_id);
-
-                            if !file_hints.is_empty() {
-                                // Build human-readable file list for chat history
-                                // (same format the frontend used to produce).
-                                let file_summary: Vec<String> = att_ctx.iter()
-                                    .filter(|ctx| ctx.context_type != "directory")
-                                    .map(|ctx| {
-                                        let line_info = match (ctx.start_line, ctx.end_line) {
-                                            (Some(s), Some(e)) if s != e => format!(" (L{}-L{})", s, e),
-                                            (Some(s), _) => format!(" (L{})", s),
-                                            _ => String::new(),
-                                        };
-                                        let type_label = match ctx.context_type.as_str() {
-                                            "selection" => "selection",
-                                            _ => "file",
-                                        };
-                                        format!("- {}: `{}`{}", type_label, ctx.abs_path, line_info)
-                                    })
-                                    .collect();
-
-                                let header = format!(
-                                    "[Attached context:]\n{}\n",
-                                    file_summary.join("\n")
-                                );
-
-                                // Assemble: human-readable header + user text + LLM instructions
-                                let body = if enriched_content.trim().is_empty() {
-                                    enriched_content
-                                } else {
-                                    format!("{}\n\n{}", header, enriched_content)
-                                };
-                                enriched_content = format!(
-                                    "{}The following workspace files were attached by the user. \
-                                     Use the suggested tools to read them when you need their contents.\n\n{}",
-                                    body,
-                                    file_hints.join("\n")
-                                );
-                            }
-                            tracing::info!(
-                                session_id = %session_id,
-                                file_hints = file_hints.len(),
-                                enriched_len = enriched_content.len(),
-                                "SessionTask: attached file references built"
-                            );
                         }
 
                     // Apply skill instructions to ContextBuilder (system prompt injection).
@@ -1660,160 +1447,63 @@ impl SessionTask {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // ADR-046: replaced the old `UploadedDocumentEntry` tests with
+    // direct `AttachedItem` wire-format verification. The runtime no
+    // longer uses a separate `UploadedDocumentEntry` struct.
 
+    /// Round-trips the wire schema for a file upload — the frontend sends
+    /// camelCase, the runtime reads the `AttachedItem` discriminated union.
     #[test]
-    fn test_attached_context_file_reference() {
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/project/src/main.rs".to_string(),
-            context_type: "file".to_string(),
-            start_line: None,
-            end_line: None,
-        }];
+    fn test_attached_item_file_upload_roundtrip() {
+        let item = acowork_core::protocol::AttachedItem::FileUpload {
+            document_id: "0123456789ab-3".to_string(),
+            filename: "report.pdf".to_string(),
+            format: "pdf".to_string(),
+            size_bytes: 12345,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"documentId\":"));
+        assert!(json.contains("\"type\":\"file_upload\""));
+        assert!(!json.contains("\"width\":"));
 
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("/project/src/main.rs"));
-        assert!(hints[0].contains("read_file"));
-        assert!(!hints[0].contains("doc_reader"));
+        let parsed: acowork_core::protocol::AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
     }
 
+    /// Image upload round-trips optional width/height when present.
     #[test]
-    fn test_attached_context_selection_with_line_range() {
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/project/src/lib.rs".to_string(),
-            context_type: "selection".to_string(),
-            start_line: Some(2),
-            end_line: Some(5),
-        }];
+    fn test_attached_item_image_upload_with_dimensions() {
+        let item = acowork_core::protocol::AttachedItem::ImageUpload {
+            document_id: "doc".to_string(),
+            filename: "screen.png".to_string(),
+            format: "png".to_string(),
+            size_bytes: 987654,
+            width: Some(1920),
+            height: Some(1080),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"type\":\"image_upload\""));
+        assert!(json.contains("\"width\":1920"));
+        assert!(json.contains("\"height\":1080"));
 
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("/project/src/lib.rs"));
-        assert!(hints[0].contains("lines 2–5"));
-        assert!(hints[0].contains("read_file"));
+        let parsed: acowork_core::protocol::AttachedItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, item);
     }
 
+    /// CLI-style clients may omit width/height; the field is genuinely
+    /// optional and serializes as absent (not null).
     #[test]
-    fn test_attached_context_selection_single_line() {
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/project/src/main.rs".to_string(),
-            context_type: "selection".to_string(),
-            start_line: Some(42),
-            end_line: Some(42),
-        }];
-
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("line 42"));
-        assert!(hints[0].contains("read_file"));
-        // Should NOT say "line range" for a single-line selection
-        assert!(!hints[0].contains("line range"));
-    }
-
-    #[test]
-    fn test_attached_context_selection_without_line_range_falls_back() {
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/project/src/lib.rs".to_string(),
-            context_type: "selection".to_string(),
-            start_line: None,
-            end_line: None,
-        }];
-
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("/project/src/lib.rs"));
-        assert!(hints[0].contains("read_file"));
-        // Should NOT mention lines when no line range is provided
-        assert!(!hints[0].contains("lines"));
-        assert!(!hints[0].contains("line "));
-    }
-
-    #[test]
-    fn test_attached_context_binary_document_uses_doc_reader() {
-        for ext in &["pdf", "docx", "pptx", "xlsx"] {
-            let items = vec![acowork_core::protocol::AttachedContextItem {
-                abs_path: format!("/docs/report.{}", ext),
-                context_type: "file".to_string(),
-                start_line: None,
-                end_line: None,
-            }];
-
-            let hints = build_attached_context_blocks(&items, "test-session");
-            assert_eq!(hints.len(), 1, "failed for extension: {}", ext);
-            assert!(
-                hints[0].contains("doc_reader"),
-                "expected doc_reader hint for {}, got: {}",
-                ext,
-                hints[0]
-            );
-            assert!(
-                !hints[0].contains("read_file"),
-                "should not mention read_file for {}, got: {}",
-                ext,
-                hints[0]
-            );
-        }
-    }
-
-    #[test]
-    fn test_attached_context_binary_document_ignores_line_range() {
-        // Even if the frontend sends a line range for a PDF,
-        // we should still emit doc_reader (not read_file with lines).
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/docs/spec.pdf".to_string(),
-            context_type: "selection".to_string(),
-            start_line: Some(1),
-            end_line: Some(10),
-        }];
-
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 1);
-        assert!(hints[0].contains("doc_reader"));
-        assert!(!hints[0].contains("read_file"));
-        assert!(!hints[0].contains("lines"));
-    }
-
-    #[test]
-    fn test_attached_context_directory_skipped() {
-        let items = vec![acowork_core::protocol::AttachedContextItem {
-            abs_path: "/some/dir".to_string(),
-            context_type: "directory".to_string(),
-            start_line: None,
-            end_line: None,
-        }];
-
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert!(hints.is_empty());
-    }
-
-    #[test]
-    fn test_attached_context_multiple_files() {
-        let items = vec![
-            acowork_core::protocol::AttachedContextItem {
-                abs_path: "/project/src/main.rs".to_string(),
-                context_type: "file".to_string(),
-                start_line: None,
-                end_line: None,
-            },
-            acowork_core::protocol::AttachedContextItem {
-                abs_path: "/project/src/lib.rs".to_string(),
-                context_type: "selection".to_string(),
-                start_line: Some(10),
-                end_line: Some(20),
-            },
-            acowork_core::protocol::AttachedContextItem {
-                abs_path: "/docs/guide.pdf".to_string(),
-                context_type: "file".to_string(),
-                start_line: None,
-                end_line: None,
-            },
-        ];
-
-        let hints = build_attached_context_blocks(&items, "test-session");
-        assert_eq!(hints.len(), 3);
-        assert!(hints[0].contains("read_file") && hints[0].contains("main.rs"));
-        assert!(hints[1].contains("read_file") && hints[1].contains("lines 10–20"));
-        assert!(hints[2].contains("doc_reader") && hints[2].contains("guide.pdf"));
+    fn test_attached_item_image_upload_omits_dimensions() {
+        let item = acowork_core::protocol::AttachedItem::ImageUpload {
+            document_id: "doc".to_string(),
+            filename: "x.png".to_string(),
+            format: "png".to_string(),
+            size_bytes: 1,
+            width: None,
+            height: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("width"));
+        assert!(!json.contains("height"));
     }
 }

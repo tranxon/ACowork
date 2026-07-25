@@ -369,21 +369,16 @@ async fn run_chat_loop(
     Ok(())
 }
 
-/// ADR-035 D9.2: truncate tool_result content to first 5 lines for display.
-/// Full content stays in JSONL (LLM context). No exception — all paths
-/// (MQTT push, HTTP first-page, scroll-back, reconnect realign) use this.
-pub(crate) fn truncate_tool_result_for_display(role: &str, content: &str) -> String {
-    if role != "tool_result" {
-        return content.to_string();
-    }
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.len() <= 5 {
-        return content.to_string();
-    }
-    let mut truncated = lines.into_iter().take(5).collect::<Vec<_>>().join("\n");
-    truncated.push_str("\n...(truncated)");
-    truncated
-}
+// ADR-035 D9.2 used to own a local `truncate_tool_result_for_display`
+// here. ADR-040 moved the canonical implementation to
+// `crate::usecases::session_metadata_impl::truncate_tool_result` so
+// the HTTP layer (`GET /sessions/{sid}/messages`) can route through
+// `SessionMetadataService::get_messages` without depending on `cli`.
+//
+// No CLI path currently calls this; if a future CLI preview path
+// (e.g. `acowork-cli cat conversations/<sid>.jsonl`) needs the same
+// truncation rule, it should import the canonical function from the
+// UseCase impl rather than re-introducing a duplicate here.
 
 /// User-facing override for skill mode, persisted in `.agent_skills.json`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]

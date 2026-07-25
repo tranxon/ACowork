@@ -357,33 +357,58 @@ impl GatewayClient {
         parse_gateway_response(resp).await
     }
 
-    // ── Documents ──────────────────────────────────────────────────────
+    // ── Attachment upload (ADR-046) ─────────────────────────────────────
 
-    /// `POST /api/sessions/:session_id/documents` — multipart upload
-    pub async fn upload_document(
+    /// `POST /api/agents/:agent_id/sessions/:session_id/files` — multipart
+    /// upload of a single document or image. The runtime persists the blob
+    /// at `<work_dir>/files/<document_id>` and returns the metadata envelope.
+    ///
+    /// `format` is the lowercase extension without dot (e.g. "pdf", "png").
+    /// `width` / `height` are optional and should be supplied for image
+    /// uploads (the desktop reads them via `new Image()`); the runtime
+    /// accepts their absence for non-image blobs.
+    ///
+    /// Replaces the legacy `/api/sessions/:sid/documents` route (deleted as
+    /// part of ADR-046 §Backend Storage).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upload_file(
         &self,
+        agent_id: &str,
         session_id: &str,
         file_path: &str,
-    ) -> Result<DocumentUploadResponse> {
+        format: &str,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> Result<FileUploadResponse> {
         let file_name = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("document.bin");
+            .unwrap_or("attachment.bin");
 
         let file_bytes = tokio::fs::read(file_path).await?;
         let part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name.to_string())
             .mime_str("application/octet-stream")?;
 
-        let form = reqwest::multipart::Form::new()
+        // Backend handler accepts `file` + optional `format` / `width` /
+        // `height` as flat multipart fields. Unknown fields are ignored.
+        let mut form = reqwest::multipart::Form::new()
             .part("file", part)
-            .text("filename", file_name.to_string());
+            .text("format", format.to_string());
+        if let Some(w) = width {
+            form = form.text("width", w.to_string());
+        }
+        if let Some(h) = height {
+            form = form.text("height", h.to_string());
+        }
 
         let resp = self
             .client
             .post(format!(
-                "{}/api/sessions/{}/documents",
-                self.base_url, session_id
+                "{}/api/agents/{}/sessions/{}/files",
+                self.base_url,
+                urlencoded(agent_id),
+                urlencoded(session_id),
             ))
             .multipart(form)
             .send()
@@ -821,13 +846,24 @@ pub struct SearchVaultKeyEntry {
     pub base_url: Option<String>,
 }
 
-// ── Document upload ───────────────────────────────────────────────────
+// ── Attachment upload (ADR-046) ────────────────────────────────────────
 
-/// Response from `POST /api/sessions/{sid}/documents`
+/// Response from `POST /api/agents/{agent_id}/sessions/{sid}/files`.
+///
+/// Mirrors backend `UploadedFileResponse` (camelCase via serde). `width` /
+/// `height` are only set for `image_upload` payloads where the desktop
+/// frontend had dimensions available at upload time. Fields are camelCase
+/// to match the wire JSON shape — the `#[allow(non_snake_case)]` below
+/// suppresses the lint without changing the wire contract.
+#[allow(non_snake_case)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentUploadResponse {
-    pub document_id: String,
+pub struct FileUploadResponse {
+    pub documentId: String,
     pub filename: String,
     pub format: String,
-    pub size_bytes: u64,
+    pub sizeBytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }

@@ -211,27 +211,24 @@ fn test_available_providers_roundtrip() {
 // or fallback semantics that §12.1 calls out.
 
 /// §12.1 #7-9: ChatMessage carries rich fields via `params_json`
-/// (document_ids / content_parts / attached_context). Verify all three
-/// sub-shapes survive encode → decode → dispatch as a single opaque JSON
+/// (attached_items / content_parts). Verify all three sub-shapes
+/// survive encode → decode → dispatch as a single opaque JSON
 /// blob (Runtime is responsible for parsing the inner shape).
 #[test]
 fn phase9_chat_message_rich_fields_via_params_json() {
     // Composed payload mirroring a real frontend chat_send invocation:
     // - multimodal image_url part
-    // - one uploaded document id
+    // - one uploaded document (file_upload)
     // - one attached file selection
     let rich_params = serde_json::json!({
-        "document_ids": ["doc-abc-123"],
+        "attached_items": [
+            {"type": "file_upload", "documentId": "doc-abc-123", "filename": "report.pdf", "format": "pdf", "sizeBytes": 12345},
+            {"type": "attached_selection", "absPath": "/workspace/foo.rs", "name": "foo.rs", "startLine": 10, "endLine": 25},
+        ],
         "content_parts": [
             {"type": "text", "text": "see this image:"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
         ],
-        "attached_context": [{
-            "abs_path": "/workspace/foo.rs",
-            "type": "selection",
-            "start_line": 10,
-            "end_line": 25,
-        }],
     });
     let params_json = serde_json::to_string(&rich_params).unwrap();
 

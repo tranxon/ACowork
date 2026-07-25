@@ -14,7 +14,7 @@ import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
-import { DocumentChip } from "./DocumentChip";
+import { AttachmentChipRow } from "./AttachmentChipRow";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -243,20 +243,6 @@ const MessageBubble = React.memo(function MessageBubble({
             {liveUserName && (
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
-            {/* Document chips attached to this message */}
-            {message.documents && message.documents.length > 0 && (
-              <div className="mt-[6px] flex flex-wrap justify-end gap-1.5 max-w-[85%]">
-                {message.documents.map((doc, i) => (
-                  <DocumentChip
-                    key={`${doc.documentId ?? i}`}
-                    filename={doc.filename}
-                    format={doc.format}
-                    size={doc.size}
-                    status="success"
-                  />
-                ))}
-              </div>
-            )}
             {message.content && (
               <div className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
                 {message.content}
@@ -345,6 +331,123 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "system") {
+    const meta = message.metadata;
+    const metaType = meta?.type as string | undefined;
+
+    // ADR-046 §2.5: 5 attachment-type system entries. Each renders a
+    // single `AttachmentChipRow` chip. The raw metadata from the JSONL
+    // entry is reconstructed into the `AttachedItem` discriminated union.
+    if (!meta) {
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 select-text">
+              {message.content}
+            </div>
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    if (metaType === "file_upload") {
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <AttachmentChipRow
+              item={{
+                type: "file_upload",
+                documentId: (meta.document_id as string) ?? "",
+                filename: (meta.filename as string) ?? "",
+                format: (meta.format as string) ?? "",
+                sizeBytes: (meta.size_bytes as number) ?? 0,
+              }}
+              compact
+            />
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    if (metaType === "image_upload") {
+      // Need the selected agent ID for the blob fetch. Use the global
+      // store rather than threading a prop through every bubble.
+      const selectedAgentId = useAgentStore.getState().selectedAgentId;
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <AttachmentChipRow
+              item={{
+                type: "image_upload",
+                documentId: (meta.document_id as string) ?? "",
+                filename: (meta.filename as string) ?? "",
+                format: (meta.format as string) ?? "",
+                sizeBytes: (meta.size_bytes as number) ?? 0,
+                width: typeof meta.width === "number" ? meta.width : undefined,
+                height: typeof meta.height === "number" ? meta.height : undefined,
+              }}
+              agentId={selectedAgentId}
+              compact
+            />
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    if (metaType === "attached_file") {
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <AttachmentChipRow
+              item={{
+                type: "attached_file",
+                absPath: (meta.abs_path as string) ?? "",
+                name: (meta.name as string) ?? (meta.abs_path as string) ?? "",
+              }}
+              compact
+            />
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    if (metaType === "attached_selection") {
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <AttachmentChipRow
+              item={{
+                type: "attached_selection",
+                absPath: (meta.abs_path as string) ?? "",
+                name: (meta.name as string) ?? (meta.abs_path as string) ?? "",
+                startLine: (meta.start_line as number) ?? 1,
+                endLine: (meta.end_line as number) ?? 1,
+              }}
+              compact
+            />
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    if (metaType === "attached_folder") {
+      return (
+        <MessageContentWrapper>
+          <div className="flex justify-center">
+            <AttachmentChipRow
+              item={{
+                type: "attached_folder",
+                absPath: (meta.abs_path as string) ?? "",
+                name: (meta.name as string) ?? (meta.abs_path as string) ?? "",
+              }}
+              compact
+            />
+          </div>
+        </MessageContentWrapper>
+      );
+    }
+
+    // Fallback: generic system message (non-attachment system entries
+    // like session notifications, etc.).
     return (
       <MessageContentWrapper>
         <div className="flex justify-center">
@@ -365,21 +468,6 @@ const MessageBubble = React.memo(function MessageBubble({
             summary={message.content}
             meta={message.compactionMeta}
             timestampMs={message.timestamp}
-          />
-        </div>
-      </MessageContentWrapper>
-    );
-  }
-
-  if (message.type === "document_upload") {
-    return (
-      <MessageContentWrapper>
-        <div className="flex justify-center">
-          <DocumentChip
-            filename={message.content.replace(/^Uploaded file: /, "").replace(/ \(.*, \d+ bytes\)$/, "")}
-            format={message.documentFormat ?? "unknown"}
-            size={message.documentSize}
-            status="success"
           />
         </div>
       </MessageContentWrapper>
