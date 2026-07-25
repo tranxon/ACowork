@@ -727,7 +727,7 @@ async fn apply_state_event(
 /// This is a local helper for the supervisor's state-transition call
 /// sites. The push channel is the generic `SidecarEndpointUpdate`
 /// introduced in ADR-030 Phase C2 — see `push_sidecar_endpoint` in
-/// `grpc::resource_pusher` for the full semantics.
+/// `mqtt::sidecar` for the full semantics.
 ///
 /// No-op if the embed process has not yet resolved its active model
 /// (`build_embed_sidecar_payload` returns `None`).

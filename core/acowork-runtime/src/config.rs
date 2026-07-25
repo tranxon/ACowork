@@ -47,10 +47,6 @@ pub struct RuntimeConfig {
     pub package_path: String,
     /// Working directory for the agent
     pub work_dir: String,
-    /// Gateway gRPC endpoint URL (e.g., http://127.0.0.1:19877).
-    /// When omitted, the runtime runs in standalone mode without Gateway.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_endpoint: Option<String>,
     /// ADR-033: MQTT broker port for Runtime MQTT client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt_port: Option<u16>,
@@ -216,7 +212,6 @@ impl Default for RuntimeConfig {
             agent_id: String::new(),
             package_path: String::new(),
             work_dir: String::new(),
-            gateway_endpoint: None,
             mqtt_port: None,
             http_port: None,
             manifest_path: None,
@@ -245,10 +240,6 @@ impl RuntimeConfig {
             agent_id: cli.agent_id.clone(),
             package_path: cli.package_path.clone(),
             work_dir: cli.work_dir.clone(),
-            gateway_endpoint: cli
-                .gateway_endpoint
-                .clone()
-                .or_else(|| cli.gateway_socket.clone()),
             manifest_path: cli.manifest_path.clone(),
             config_dir: cli.config_dir.clone(),
             dev_mode: cli.dev_mode,
@@ -260,12 +251,6 @@ impl RuntimeConfig {
             http_port: cli.http_port,
             ..Default::default()
         }
-    }
-
-    /// Get gateway address from `gateway_endpoint`.
-    /// Returns None if not set (standalone mode).
-    pub fn get_gateway_address(&self) -> Option<&str> {
-        self.gateway_endpoint.as_deref()
     }
 
     /// Validate startup-sensitive configuration values.

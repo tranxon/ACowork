@@ -162,10 +162,6 @@ pub struct DataFlowConfig {
     /// Default: 256 (control events are low-frequency; data events now via HTTP poll).
     #[serde(default = "default_bridge_ctrl_capacity")]
     pub bridge_ctrl_capacity: usize,
-    /// Capacity of the gRPC outbound mpsc channel (per-connection).
-    /// Default: 32.
-    #[serde(default = "default_grpc_outbound_capacity")]
-    pub grpc_outbound_capacity: usize,
     /// Capacity of the capability broadcast channel.
     /// Default: 64.
     #[serde(default = "default_capability_broadcast_capacity")]
@@ -178,9 +174,6 @@ fn default_worker_threads() -> usize {
 fn default_bridge_ctrl_capacity() -> usize {
     256
 }
-fn default_grpc_outbound_capacity() -> usize {
-    256
-}
 fn default_capability_broadcast_capacity() -> usize {
     64
 }
@@ -190,7 +183,6 @@ impl Default for DataFlowConfig {
         Self {
             worker_threads: default_worker_threads(),
             bridge_ctrl_capacity: default_bridge_ctrl_capacity(),
-            grpc_outbound_capacity: default_grpc_outbound_capacity(),
             capability_broadcast_capacity: default_capability_broadcast_capacity(),
         }
     }

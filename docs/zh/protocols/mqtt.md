@@ -403,7 +403,7 @@ sequenceDiagram
     Note over GW,BROKER: Gateway 本步仅连接 broker；后续 Global Resources Publisher 后台 loop 检测 provider/mcp/lsp/search/embedding 状态变化后 PUBLISH acowork/global/{kind} (Retained)
 
     Note over GW,RT: 2. Gateway spawn Runtime 进程
-    GW->>RT: spawn (命令行/env: --agent-id, --package-path=.agent 包, --work-dir, --config-dir, --gateway-endpoint, --http-port=0)
+    GW->>RT: spawn (命令行/env: --agent-id, --package-path=.agent 包, --work-dir, --config-dir, --mqtt-port, --http-port=0)
 
     Note over RT: 3. Runtime 启动：加载本地配置（纯本地文件读写，Gateway 完全不参与）
     RT->>RT: 启动 localhost HTTP server（--http-port=0 分配随机端口）
@@ -1065,7 +1065,6 @@ graph TB
 ## 13. 相关源码索引
 
 - Broker 嵌入：`core/acowork-gateway/src/mqtt/broker.rs`
-- Gateway 全局资源 HTTP 端点（全量 CRUD）：`core/acowork-gateway/src/http/global.rs`
 - Gateway 全局资源 health-check + Publisher：`core/acowork-gateway/src/mqtt/global_resources_publisher.rs`
 - Runtime 全局资源可用状态内存缓存：`core/acowork-runtime/src/mqtt/available_cache.rs`
 - Runtime localhost HTTP server：`core/acowork-runtime/src/http/server.rs`

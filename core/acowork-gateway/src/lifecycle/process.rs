@@ -29,7 +29,6 @@ pub async fn spawn_agent_process(
     agent_id: &str,
     install_path: &str,
     workspace: &Path,
-    gateway_grpc_endpoint: &str,
     dev_mode: bool,
     debug_port: Option<u16>,
     log_file_size_mb: u64,
@@ -67,9 +66,7 @@ pub async fn spawn_agent_process(
         .arg("--manifest-path")
         .arg(&manifest_path)
         .arg("--work-dir")
-        .arg(workspace)
-        .arg("--gateway-endpoint")
-        .arg(gateway_grpc_endpoint);
+        .arg(workspace);
 
     // ADR-033: Pass MQTT port so Runtime connects via MQTT instead of (or alongside) gRPC.
     if let Some(port) = mqtt_port {
@@ -269,7 +266,6 @@ mod tests {
             "com.test.nonexistent",
             "/nonexistent/path",
             Path::new("/tmp/nonexistent-workspace"),
-            "http://127.0.0.1:19877",
             false,
             None,
             10,
@@ -300,3 +296,4 @@ mod tests {
         assert!(result.is_err());
     }
 }
+

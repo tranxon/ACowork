@@ -262,7 +262,7 @@ Envelope `version` 字段从当前值 bump 至 v2。`apps/desktop` 通过 envelo
 | `core/acowork-gateway/src/mqtt/mod.rs` | 同步 ACL 常量 |
 | `core/acowork-gateway/src/http/chat.rs` | HTTP `GET /api/agents/{id}/sessions/{sid}/state` 同步返回 SessionConfig + SessionState 两份 JSON |
 | `core/acowork-gateway/src/http/config_api.rs` | 同步 |
-| `core/acowork-gateway/src/http/global.rs` | 同步 |
+| ~~`core/acowork-gateway/src/http/global.rs`~~ | ~~同步~~（文件已于 gRPC 清理提交中删除，全局资源 CRUD 已迁移到 MQTT retained） |
 | `core/acowork-gateway/src/mqtt/agent_registry.rs` | 同步 |
 | `core/acowork-gateway/src/mqtt/dispatch.rs` | 同步 |
 | `core/acowork-gateway/src/mqtt/global_resources_publisher.rs` | 同步 |

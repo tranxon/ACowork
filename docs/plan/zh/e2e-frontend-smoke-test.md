@@ -769,7 +769,6 @@ cd dev/e2e_frontend_smoke && pytest -v
 |------|------|
 | 路由聚合 | `core/acowork-gateway/src/http/routes.rs` |
 | Agent 管理 | `core/acowork-gateway/src/http/agents.rs` |
-| 全局资源 HTTP | `core/acowork-gateway/src/http/global.rs` |
 | MQTT Broker（嵌入） | `core/acowork-gateway/src/mqtt/broker.rs` |
 | Global Resources Publisher | `core/acowork-gateway/src/mqtt/global_resources_publisher.rs` |
 | ACL 加载 | `core/acowork-gateway/src/mqtt/acl.rs` |

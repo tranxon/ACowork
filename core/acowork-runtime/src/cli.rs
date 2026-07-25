@@ -36,14 +36,6 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_WORK_DIR")]
     pub work_dir: String,
 
-    /// Gateway gRPC endpoint URL (e.g., http://127.0.0.1:19877)
-    #[arg(long, env = "ACOWORK_GATEWAY_ENDPOINT")]
-    pub gateway_endpoint: Option<String>,
-
-    /// Gateway endpoint URL (deprecated, use --gateway-endpoint).
-    #[arg(long, env = "ACOWORK_GATEWAY_SOCKET", hide = true)]
-    pub gateway_socket: Option<String>,
-
     /// Enable developer mode (debug protocol)
     #[arg(long, default_value = "false")]
     pub dev_mode: bool,

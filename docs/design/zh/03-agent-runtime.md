@@ -28,7 +28,6 @@ acowork-runtime \
     --agent-id com.example.weather \
     --package-path /path/to/agent-package \
     --work-dir /home/user/.local/share/agent-gateway/agents/com.example.weather/workspace \
-    --gateway-endpoint unix:///tmp/agent-gateway.sock \
     --config-dir /home/user/.local/share/agent-gateway/agents/com.example.weather/config
 ```
 
@@ -39,22 +38,14 @@ acowork-runtime \
 | `--agent-id` | 是 | Agent 标识符，与 manifest 中一致 |
 | `--package-path` | 是 | .agent 包路径（解压后的目录或 ZIP 文件） |
 | `--work-dir` | 是 | Agent 工作区目录（含 data/、config/、memory/） |
-| `--gateway-endpoint` | 是 | Gateway gRPC 端点，格式按平台不同 |
-| `--gateway-socket` | 否 | Gateway Unix Socket 路径（与 endpoint 二选一） |
+| `--mqtt-port` | 否 | Gateway 嵌入式 MQTT broker 端口（与 Gateway 通讯；见 ADR-033） |
+| `--http-port` | 否 | Runtime localhost HTTP 端口（Desktop 反向代理发现；见 ADR-033） |
 | `--config-dir` | 否 | 用户配置目录（默认取 work-dir/config/） |
 | `--dev-mode` | 否 | 启用开发者模式（Debug 协议） |
 | `--debug-port` | 否 | Debug WebSocket 端口（默认 19878） |
 | `--log-level` | 否 | 日志级别（trace/debug/info/warn/error，默认 info） |
 
-**endpoint 格式由 Gateway 按平台决定：**
-
-| 平台 | 格式 | 示例 |
-|------|------|------|
-| Linux | `unix://<path>` | `unix:///tmp/agent-gateway.sock` |
-| macOS | `unix://<path>` | `unix:///tmp/agent-gateway.sock` |
-| Windows | `pipe://<name>` | `pipe://agent-gateway` |
-
-Runtime 内部按 scheme 选择传输实现，当前已迁移至 gRPC 双向流作为统一通信协议。详见 [06-communication.md](./06-communication.md)。
+Runtime 经由 `--mqtt-port` 连接 Gateway 的嵌入式 MQTT broker；MQTT 是 ADR-033 之后的统一传输协议（替代了历史的 gRPC 双向流）。详见 [06-communication.md](./06-communication.md) 与 [ADR-033](../adr/zh/ADR-033-mqtt-replace-grpc.md)。
 
 **身份信息获取：**
 

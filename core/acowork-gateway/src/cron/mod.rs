@@ -405,13 +405,11 @@ pub async fn run_cron_scheduler(
                 let mut gw = gateway_state.write().await;
                 if gw.is_installed(&agent_id) {
                     // Start the agent process
-                    let gateway_endpoint = "http://127.0.0.1:19877".to_string();
                     let log_file_size_mb =
                         gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
                     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
                     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
                         0,
-                        gateway_endpoint,
                         log_file_size_mb,
                         log_file_count,
                         None,

@@ -48,11 +48,6 @@ impl Gateway {
             ))
         })?;
 
-        // Build the gRPC endpoint URL that Runtime processes will use to connect.
-        // ADR-033: gRPC disabled; hardcoded endpoint kept for Runtime spawn args only.
-        // Runtime expects an HTTP URL like "http://127.0.0.1:19877".
-        let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
-
         // ADR-033: MQTT port for Runtime lifecycle (if MQTT is enabled).
         let lifecycle_mqtt_port = if config.mqtt.enabled { Some(config.mqtt.port) } else { None };
 
@@ -69,7 +64,6 @@ impl Gateway {
             state,
             lifecycle: LifecycleManager::new(
                 idle_timeout,
-                gateway_grpc_endpoint,
                 log_file_size_mb,
                 log_file_count,
                 lifecycle_mqtt_port,
@@ -316,14 +310,23 @@ impl Gateway {
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
     ///
     /// When Gateway restarts, previously spawned runtime processes lose their
-    /// connection and become useless orphans. This method finds them by scanning
-    /// for acowork-runtime processes whose `--gateway-endpoint` argument
-    /// matches this Gateway's endpoint.
+    /// MQTT connection (or fail to reconnect) and become useless orphans. This
+    /// method finds them by scanning for `acowork-runtime` processes whose
+    /// `--mqtt-port <N>` argument matches this Gateway's MQTT port.
+    ///
+    /// If MQTT is disabled on this Gateway, runtime processes are never given
+    /// `--mqtt-port` and orphans cannot be distinguished by port — we keep them.
     ///
     /// Since Gateway is single-instance per host (enforced by HTTP port probing),
-    /// scoping by endpoint is a safety measure against false positives.
+    /// scoping by MQTT port is a safety measure against false positives.
     fn cleanup_orphaned_runtimes(&self) -> usize {
-        let grpc_endpoint_url = "http://127.0.0.1:19877".to_string();
+        // ADR-033: gRPC endpoint no longer passed to Runtime. Use MQTT port
+        // as the unique cmdline marker tying a runtime to this Gateway.
+        let mqtt_marker = self
+            .config
+            .mqtt
+            .enabled
+            .then(|| format!("--mqtt-port {}", self.config.mqtt.port));
 
         // Find all acowork-runtime processes
         let output = match std::process::Command::new("pgrep")
@@ -337,7 +340,7 @@ impl Gateway {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let my_pid = std::process::id();
 
-        // Filter PIDs whose command line includes our gRPC endpoint
+        // Filter PIDs whose command line matches our MQTT marker (if any).
         let pids_to_kill: Vec<(u32, String)> = stdout
             .lines()
             .filter_map(|line| {
@@ -347,11 +350,11 @@ impl Gateway {
                     return None; // don't kill self
                 }
                 let cmdline = parts.get(1).map(|s| s.trim()).unwrap_or("");
-                // Only kill runtimes connected to OUR gRPC endpoint
-                if cmdline.contains(&grpc_endpoint_url) {
-                    Some((pid, cmdline.to_string()))
-                } else {
-                    None
+                match &mqtt_marker {
+                    Some(marker) if cmdline.contains(marker.as_str()) => {
+                        Some((pid, cmdline.to_string()))
+                    }
+                    _ => None,
                 }
             })
             .collect();

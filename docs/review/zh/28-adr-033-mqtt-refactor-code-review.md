@@ -556,7 +556,7 @@ fn runtime_http_client() -> &'static reqwest::Client {
 
 | 层级 | 设计文档要求 | 实际实现 | 状态 |
 |------|------------|---------|------|
-| L1 全量列表 | HTTP `/api/global/{kind}` | [`core/acowork-gateway/src/http/global.rs`](../../../../core/acowork-gateway/src/http/global.rs) | ✅ 完整 |
+| L1 全量列表 | HTTP `/api/global/{kind}` | [`core/acowork-gateway/src/http/global.rs`](../../../../core/acowork-gateway/src/http/global.rs)（已于 gRPC 清理提交中删除；评审当时仍存在且完整 ✅） | ✅ 完整 |
 | L2 已就绪状态 | MQTT Retained | 实现但 retain=false | ⚠️ 见 [P0-1](#p0-1-retained-消息未生效退化为-5s-轮询) |
 | L3 per-agent 选择 | 本地文件 | `RuntimeResourceCache` 已实现 | ✅ |
 

@@ -1409,12 +1409,8 @@ pub async fn start_agent(
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
-    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args;
-    // with MQTT the Runtime connects via MQTT port.
-    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
-        gateway_grpc_endpoint,
         log_file_size_mb,
         log_file_count,
         mqtt_port,
@@ -1474,12 +1470,8 @@ pub async fn stop_agent(
     }
 
     let idle_timeout = 300;
-    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args;
-    // with MQTT the Runtime connects via MQTT port.
-    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
-        gateway_grpc_endpoint,
         10,
         20,
         None,
@@ -1530,11 +1522,8 @@ pub async fn restart_agent_in_debug(
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
-    // ADR-033: gateway_endpoint URL is only used for Runtime spawn args.
-    let gateway_grpc_endpoint = "http://127.0.0.1:19877".to_string();
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         idle_timeout,
-        gateway_grpc_endpoint,
         log_file_size_mb,
         log_file_count,
         mqtt_port,

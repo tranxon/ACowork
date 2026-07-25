@@ -1,8 +1,10 @@
 //! Gateway Service API handler implementations
 //!
 //! Contains handler functions for processing Gateway Service API requests.
-//! These handlers are shared between the gRPC server (grpc/dispatch.rs)
-//! and can be used by any transport layer.
+//! These handlers are transport-agnostic: ADR-033 collapsed the legacy
+//! gRPC dispatch (`grpc/dispatch.rs`) and the HTTP route handlers into
+//! the same function surface, so any future transport (CLI, IPC, …)
+//! can call them directly without going through a per-protocol bridge.
 
 use std::sync::Arc;
 use tokio::sync::RwLock;

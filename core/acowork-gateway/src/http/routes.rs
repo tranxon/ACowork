@@ -22,9 +22,6 @@ use crate::resource_pusher::ResourcePusher;
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
 
-/// DEPRECATED (ADR-033): Type kept for compilation compat, always empty.
-pub type SessionPendingRequests = Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<serde_json::Value>>>>;
-
 /// Application state available to all HTTP handlers
 #[derive(Clone)]
 pub struct AppState {
@@ -47,8 +44,6 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
-    /// DEPRECATED (ADR-033): Always empty — gRPC removed, kept for compilation compat.
-    pub session_pending: SessionPendingRequests,
 }
 
 impl AppState {
@@ -67,7 +62,6 @@ impl AppState {
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
-            session_pending: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
