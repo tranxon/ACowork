@@ -1,149 +1,194 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 620" width="100%" height="100%">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 800" width="100%" height="100%">
   <!-- Background -->
-  <rect width="800" height="620" fill="#ffffff" rx="12" />
+  <rect width="1000" height="800" fill="#ffffff" rx="12" />
+
+  <!-- ==================== DESKTOP APP BOX ==================== -->
+  <rect x="20" y="20" width="960" height="110" rx="10" fill="#fef3c7" stroke="#fbbf24" stroke-width="1.5" />
+  <text x="500" y="48" text-anchor="middle" fill="#92400e" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">Desktop App (Tauri v2 · localhost only)</text>
+
+  <!-- Desktop sub-boxes -->
+  <rect x="40" y="65" width="200" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="140" y="92" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">React/TS UI</text>
+
+  <rect x="260" y="65" width="200" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="360" y="92" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">HTTP Client</text>
+
+  <rect x="480" y="65" width="200" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="580" y="92" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">MQTT Subscriber</text>
+
+  <rect x="700" y="65" width="200" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="800" y="92" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Tauri Rust Backend</text>
+
+  <!-- Sub-text under sub-boxes -->
+  <text x="140" y="123" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">(no state persistence)</text>
+  <text x="360" y="123" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">REST → :19876</text>
+  <text x="580" y="123" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">SUB → :19875</text>
+  <text x="800" y="123" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">system tray / etc.</text>
+
+  <!-- Down arrows from Desktop to Gateway -->
+  <line x1="360" y1="130" x2="360" y2="148" stroke="#94a3b8" stroke-width="2" />
+  <polygon points="353,148 360,158 367,148" fill="#94a3b8" />
+  <text x="370" y="143" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">HTTP REST</text>
+
+  <line x1="580" y1="130" x2="580" y2="148" stroke="#94a3b8" stroke-width="2" />
+  <polygon points="573,148 580,158 587,148" fill="#94a3b8" />
+  <text x="590" y="143" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">MQTT SUB</text>
 
   <!-- ==================== GATEWAY BOX ==================== -->
-  <rect x="20" y="10" width="760" height="190" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-  <text x="400" y="38" text-anchor="middle" fill="#334155" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">Gateway (Daemon)</text>
+  <rect x="20" y="160" width="960" height="240" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="500" y="188" text-anchor="middle" fill="#334155" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700">Gateway (Daemon)</text>
 
-  <!-- Row 1 -->
-  <rect x="40" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="125" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Package Manager</text>
+  <!-- Three protocol-level boxes -->
+  <rect x="40" y="205" width="280" height="100" rx="8" fill="#ffffff" stroke="#0ea5e9" stroke-width="1.5" />
+  <rect x="40" y="205" width="280" height="22" rx="8" fill="#0ea5e9" />
+  <rect x="40" y="218" width="280" height="9" fill="#0ea5e9" />
+  <text x="180" y="222" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">HTTP API</text>
+  <text x="180" y="250" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="11">Axum (Rust)</text>
+  <text x="180" y="268" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">:19876 · localhost</text>
+  <text x="180" y="286" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">CRUD · config · REST · reverse proxy</text>
 
-  <rect x="220" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="305" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Lifecycle Manager</text>
+  <rect x="340" y="205" width="280" height="100" rx="8" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.5" />
+  <rect x="340" y="205" width="280" height="22" rx="8" fill="#8b5cf6" />
+  <rect x="340" y="218" width="280" height="9" fill="#8b5cf6" />
+  <text x="480" y="222" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">MQTT Broker</text>
+  <text x="480" y="250" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="11">rumqttd (embedded)</text>
+  <text x="480" y="268" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">:19875 · localhost</text>
+  <text x="480" y="286" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">events · status · will · retained</text>
 
-  <rect x="400" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="485" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Intent Router</text>
+  <rect x="640" y="205" width="320" height="100" rx="8" fill="#ffffff" stroke="#f59e0b" stroke-width="1.5" />
+  <rect x="640" y="205" width="320" height="22" rx="8" fill="#f59e0b" />
+  <rect x="640" y="218" width="320" height="9" fill="#f59e0b" />
+  <text x="800" y="222" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">HTTP Reverse Proxy → Runtime</text>
+  <text x="800" y="250" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="11">per-Runtime localhost server</text>
+  <text x="800" y="268" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">bulk queries · historical messages</text>
+  <text x="800" y="286" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">forwards on the request path only</text>
 
-  <rect x="580" y="55" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="665" y="82" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Rate Limiter</text>
+  <!-- Internal services row -->
+  <rect x="40" y="320" width="920" height="60" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1" />
+  <text x="500" y="340" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="11" font-weight="600">Internal services</text>
+  <text x="500" y="358" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="11">Package Manager · Lifecycle · Intent Router · Budget Tracker · Rate Limiter · Vault · Config Manager</text>
+  <text x="500" y="374" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">+ Global Resources Publisher · MQTT Session Multiplexer</text>
 
-  <!-- Row 2 -->
-  <rect x="90" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="175" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Budget Tracker</text>
+  <!-- Down arrows from Gateway to Runtimes (3 Runtimes) -->
+  <!-- Runtime centerlines: 188, 500, 812 (for 3 boxes of width ~320 each at y=440+) -->
 
-  <rect x="315" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="400" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Key Vault</text>
+  <!-- HTTP Reverse Proxy arrows (orange) -->
+  <line x1="720" y1="400" x2="188" y2="438" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="5,3" />
+  <line x1="760" y1="400" x2="500" y2="438" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="5,3" />
+  <line x1="800" y1="400" x2="812" y2="438" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="5,3" />
+  <text x="858" y="425" fill="#d97706" font-family="system-ui, sans-serif" font-size="10">HTTP RP</text>
 
-  <rect x="540" y="115" width="170" height="46" rx="6" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
-  <text x="625" y="142" text-anchor="middle" fill="#475569" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Config Manager</text>
-
-  <!-- ==================== GATEWAY SERVICE API ==================== -->
-  <line x1="150" y1="200" x2="650" y2="200" stroke="#94a3b8" stroke-width="2" />
-  <line x1="400" y1="200" x2="400" y2="210" stroke="#94a3b8" stroke-width="2" />
-  <line x1="150" y1="200" x2="150" y2="210" stroke="#94a3b8" stroke-width="2" />
-  <line x1="650" y1="200" x2="650" y2="210" stroke="#94a3b8" stroke-width="2" />
-
-  <rect x="230" y="210" width="340" height="48" rx="8" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" />
-  <text x="400" y="232" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="13" font-weight="700">Gateway Service API</text>
-  <text x="400" y="249" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">Unix Socket / Named Pipe / Local TCP</text>
-
-  <!-- Down arrows -->
-  <line x1="150" y1="258" x2="150" y2="278" stroke="#94a3b8" stroke-width="2" />
-  <line x1="150" y1="278" x2="400" y2="278" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3" />
-  <line x1="400" y1="258" x2="400" y2="290" stroke="#94a3b8" stroke-width="2" />
-  <polygon points="393,290 400,300 407,290" fill="#94a3b8" />
-
-  <line x1="650" y1="258" x2="650" y2="278" stroke="#94a3b8" stroke-width="2" />
-  <line x1="650" y1="278" x2="400" y2="278" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3" />
-  <line x1="650" y1="278" x2="650" y2="290" stroke="#94a3b8" stroke-width="2" />
-  <polygon points="643,290 650,300 657,290" fill="#94a3b8" />
-
-  <line x1="400" y1="258" x2="400" y2="290" stroke="#94a3b8" stroke-width="2" />
-  <polygon points="393,290 400,300 407,290" fill="#94a3b8" />
-  <line x1="150" y1="258" x2="150" y2="290" stroke="#94a3b8" stroke-width="2" />
-  <polygon points="143,290 150,300 157,290" fill="#94a3b8" />
-  <line x1="650" y1="258" x2="650" y2="290" stroke="#94a3b8" stroke-width="2" />
-  <polygon points="643,290 650,300 657,290" fill="#94a3b8" />
+  <!-- MQTT Broker arrows (purple) -->
+  <line x1="430" y1="400" x2="188" y2="438" stroke="#8b5cf6" stroke-width="1.5" />
+  <line x1="480" y1="400" x2="500" y2="438" stroke="#8b5cf6" stroke-width="1.5" />
+  <line x1="530" y1="400" x2="812" y2="438" stroke="#8b5cf6" stroke-width="1.5" />
+  <text x="540" y="425" fill="#7c3aed" font-family="system-ui, sans-serif" font-size="10">MQTT PUB/SUB</text>
 
   <!-- ==================== AGENT RUNTIME BOXES ==================== -->
 
   <!-- Runtime 1: System Agent -->
-  <rect x="30" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-  <text x="147" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="147" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="28" y="440" width="320" height="340" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="188" y="468" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="188" y="486" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="42" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <rect x="42" y="372" width="211" height="26" rx="6" fill="#0ea5e9" />
-  <rect x="42" y="392" width="211" height="6" fill="#0ea5e9" />
-  <text x="147" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">System Agent</text>
-  <text x="147" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.system)</text>
-  <text x="147" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
+  <rect x="40" y="502" width="296" height="60" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <rect x="40" y="502" width="296" height="22" rx="6" fill="#0ea5e9" />
+  <rect x="40" y="515" width="296" height="9" fill="#0ea5e9" />
+  <text x="188" y="518" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">System Agent</text>
+  <text x="188" y="540" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.system)</text>
+  <text x="188" y="555" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
 
-  <g transform="translate(45, 472)">
+  <rect x="40" y="575" width="296" height="38" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <text x="50" y="592" fill="#475569" font-family="system-ui, sans-serif" font-size="11" font-weight="600">I/O adapters</text>
+  <text x="50" y="606" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">MQTT client (rumqttc) · localhost HTTP server (random port)</text>
+
+  <g transform="translate(45, 630)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
     <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
-  <g transform="translate(45, 498)">
+  <g transform="translate(45, 656)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM API</text>
   </g>
-  <g transform="translate(45, 524)">
+  <g transform="translate(45, 682)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec (WASM)</text>
   </g>
-  <g transform="translate(45, 550)">
+  <g transform="translate(45, 708)">
     <text x="0" y="3" fill="#f59e0b" font-family="system-ui, sans-serif" font-size="13">⭐</text>
     <text x="22" y="3" fill="#d97706" font-family="system-ui, sans-serif" font-size="12" font-weight="500">System Privilege</text>
   </g>
+  <text x="45" y="755" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Process spawned by Gateway</text>
 
   <!-- Runtime 2: Senior Engineer Agent -->
-  <rect x="282" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-  <text x="400" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="400" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="340" y="440" width="320" height="340" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="500" y="468" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="500" y="486" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="294" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <rect x="294" y="372" width="211" height="26" rx="6" fill="#8b5cf6" />
-  <rect x="294" y="392" width="211" height="6" fill="#8b5cf6" />
-  <text x="400" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Senior Engineer</text>
-  <text x="400" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.senior-engineer)</text>
-  <text x="400" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
+  <rect x="352" y="502" width="296" height="60" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <rect x="352" y="502" width="296" height="22" rx="6" fill="#8b5cf6" />
+  <rect x="352" y="515" width="296" height="9" fill="#8b5cf6" />
+  <text x="500" y="518" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Senior Engineer</text>
+  <text x="500" y="540" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.senior-engineer)</text>
+  <text x="500" y="555" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
 
-  <g transform="translate(297, 472)">
+  <rect x="352" y="575" width="296" height="38" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <text x="362" y="592" fill="#475569" font-family="system-ui, sans-serif" font-size="11" font-weight="600">I/O adapters</text>
+  <text x="362" y="606" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">MQTT client (rumqttc) · localhost HTTP server (random port)</text>
+
+  <g transform="translate(357, 630)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
     <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
-  <g transform="translate(297, 498)">
+  <g transform="translate(357, 656)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM API</text>
   </g>
-  <g transform="translate(297, 524)">
+  <g transform="translate(357, 682)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec (WASM)</text>
   </g>
+  <text x="357" y="755" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Process spawned by Gateway</text>
 
   <!-- Runtime 3: Project Manager Agent -->
-  <rect x="535" y="310" width="235" height="280" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-  <text x="652" y="338" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
-  <text x="652" y="356" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
+  <rect x="652" y="440" width="320" height="340" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
+  <text x="812" y="468" text-anchor="middle" fill="#334155" font-family="system-ui, sans-serif" font-size="14" font-weight="700">Agent Runtime</text>
+  <text x="812" y="486" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="11">(Single Binary)</text>
 
-  <rect x="547" y="372" width="211" height="85" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
-  <rect x="547" y="372" width="211" height="26" rx="6" fill="#f59e0b" />
-  <rect x="547" y="392" width="211" height="6" fill="#f59e0b" />
-  <text x="652" y="390" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Project Manager</text>
-  <text x="652" y="415" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.project-manager)</text>
-  <text x="652" y="435" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
+  <rect x="664" y="502" width="296" height="60" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <rect x="664" y="502" width="296" height="22" rx="6" fill="#f59e0b" />
+  <rect x="664" y="515" width="296" height="9" fill="#f59e0b" />
+  <text x="812" y="518" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="12" font-weight="600">Project Manager</text>
+  <text x="812" y="540" text-anchor="middle" fill="#64748b" font-family="system-ui, sans-serif" font-size="11">(com.acowork.project-manager)</text>
+  <text x="812" y="555" text-anchor="middle" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">config + prompt + skills</text>
 
-  <g transform="translate(550, 472)">
+  <rect x="664" y="575" width="296" height="38" rx="6" fill="#ffffff" stroke="#e2e8f0" stroke-width="1" />
+  <text x="674" y="592" fill="#475569" font-family="system-ui, sans-serif" font-size="11" font-weight="600">I/O adapters</text>
+  <text x="674" y="606" fill="#64748b" font-family="system-ui, sans-serif" font-size="10">MQTT client (rumqttc) · localhost HTTP server (random port)</text>
+
+  <g transform="translate(669, 630)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
     <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Private Grafeo</text>
   </g>
-  <g transform="translate(550, 498)">
+  <g transform="translate(669, 656)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Direct LLM API</text>
   </g>
-  <g transform="translate(550, 524)">
+  <g transform="translate(669, 682)">
     <rect x="0" y="-8" width="14" height="14" rx="3" fill="#22c55e" />
     <text x="7" y="3" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-size="9" font-weight="bold">✓</text>
-    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec</text>
+    <text x="22" y="3" fill="#475569" font-family="system-ui, sans-serif" font-size="12">Tools Exec (WASM)</text>
   </g>
+  <text x="669" y="755" fill="#94a3b8" font-family="system-ui, sans-serif" font-size="10">Process spawned by Gateway</text>
+
+  <!-- ==================== LEGEND ==================== -->
+  <rect x="20" y="785" width="960" height="0" fill="none" />
 </svg>
