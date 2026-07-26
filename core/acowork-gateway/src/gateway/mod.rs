@@ -13,7 +13,6 @@ use crate::cron::CronStore;
 use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
-use crate::resource_pusher::ResourcePusher;
 use crate::handlers::server::SharedState;
 use crate::lifecycle::manager::LifecycleManager;
 use crate::package_manager::install;
@@ -640,28 +639,17 @@ impl Gateway {
         // Start HTTP server in a separate tokio task (parallel with gRPC)
         let http_state = shared_state.clone();
 
-        // Create unified global resource pusher for hot-push of provider_list,
-        // search_config, MCP catalog, and user profile changes to running agents.
-        let pusher: Option<Arc<ResourcePusher>> = Some(Arc::new(ResourcePusher::new(
-            http_state.clone(),
-            data_dir_path.clone(),
-        )));
-
         // Start the embed supervisor. It watches the embed's SSE event
         // stream, updates `shared_state.embed_process.{active_model_id,
         // active_dimension, ready}` from the embed's state events, and
         // restarts the embed process on heartbeat timeout or connection
         // loss (with exponential backoff and a 5-attempts/5-min cap).
-        // The HTTP API and gRPC pushers read the same `shared_state` via
-        // a separate Arc clone, so updates are visible immediately.
         if let (Some(sup_cfg), Some(shared_arc)) =
             (embed_supervisor_cfg.take(), Some(shared_state.clone()))
         {
-            let supervisor_pusher = pusher.clone();
             crate::lifecycle::embed_supervisor::start_embed_supervisor(
                 sup_cfg,
                 shared_arc,
-                supervisor_pusher,
             );
         }
 
@@ -702,7 +690,6 @@ impl Gateway {
                         data_dir,
                         port: lsp_relay_port,
                         gateway_health_url,
-                        pusher: pusher.clone(),
                     },
                 );
             } else {
@@ -729,7 +716,6 @@ impl Gateway {
                                 data_dir,
                                 port: lsp_relay_port,
                                 gateway_health_url,
-                                pusher: pusher.clone(),
                             },
                         );
                     }
@@ -774,7 +760,6 @@ impl Gateway {
             crate::lifecycle::lsp_relay_supervisor::start_lsp_relay_supervisor(
                 sup_cfg,
                 shared_state.clone(),
-                pusher.clone(),
             );
         }
 
@@ -868,7 +853,6 @@ impl Gateway {
                 http_state,
                 &data_dir_path,
                 log_reload_handle,
-                pusher,
                 mqtt_gw_client,
                 mqtt_publisher_trigger,
                 Some(runtime_http_registry),

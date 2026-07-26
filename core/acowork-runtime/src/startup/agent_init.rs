@@ -31,9 +31,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     use crate::embedding::EmbeddingProvider;
     use crate::package::loader::load_package;
     use crate::package::prompt_builder::build_system_prompt_with_mode;
-    use crate::startup::super_mod::{
-        read_resource_cache,
-    };
+    use crate::agent_config::load_agent_provider_config;
     use crate::tools::builtin;
     use crate::tools::registry::ToolRegistry;
 
@@ -56,6 +54,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // wired through `gateway_loop` to SessionManager.
     let mut identity_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
+    > = None;
+    let mut provider_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
+    > = None;
+    let mut search_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     > = None;
     let mut runtime_http_port: Option<u16> = None;
 
@@ -187,6 +191,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // all active sessions pick up the new identity_context.
         let (identity_update_tx, identity_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<acowork_core::protocol::UserProfile>();
+        let (provider_update_tx, provider_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
+        let (search_update_tx, search_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
@@ -202,6 +210,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 available_cache: cache.clone(),
                 control_tx,
                 identity_update_tx: Some(identity_update_tx),
+                provider_update_tx: Some(provider_update_tx),
+                search_update_tx: Some(search_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
             },
         ).await {
@@ -247,6 +257,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 available_cache = Some(cache);
                 control_rx = Some(ctrl_rx);
                 identity_update_rx = Some(identity_update_chan_rx);
+                provider_update_rx = Some(provider_update_chan_rx);
+                search_update_rx = Some(search_update_chan_rx);
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
         }
@@ -272,7 +284,22 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Step 3: Initialize LLM Provider ─────────────────────────────
     let mut gateway_current_provider_id: Option<String> = None;
-    let resource_cache = read_resource_cache(std::path::Path::new(&config.work_dir));
+    let provider_config = load_agent_provider_config(std::path::Path::new(&config.work_dir))
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                work_dir = %config.work_dir,
+                error = %e,
+                "Failed to load agent_provider.json, starting without cached provider list"
+            );
+            None
+        });
+    if let Some(ref cfg) = provider_config {
+        tracing::info!(
+            provider_count = cfg.providers.len(),
+            version = cfg.version,
+            "Loaded provider config from agent_provider.json"
+        );
+    }
 
     let mut compat_cache: Option<Arc<crate::providers::compat::CompatCache>> = None;
 
@@ -313,7 +340,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         if api_key.is_empty() { None } else { Some(api_key.as_str()) };
                     let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
                     let model_id = prov.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string());
-                    let proto_str = ProtocolType::OpenAI; // MQTT providers are OpenAI-compatible
+                    let proto_str =
+                        acowork_core::protocol::llm_protocol_to_protocol_type(
+                            prov.protocol_type,
+                        );
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
 
                     // Load (or initialize) the per-agent compatibility cache.
@@ -444,9 +474,32 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(std::sync::RwLock::new(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
-    let has_search_providers = false;
-    // ADR-040: gRPC hello_config path removed. search providers + LSP relay
-    // are always unavailable; both features depend on future MQTT-side delivery.
+
+    // Shared search key vault and provider list - same Arcs are injected
+    // into AgentCore (Phase B) so that SessionManager::update_search_config
+    // writes are visible to the WebSearchEngine without re-registration.
+    let search_key_vault: crate::tools::builtin::search_backends::SharedSearchKeyVault =
+        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList =
+        Arc::new(std::sync::RwLock::new(Vec::new()));
+
+    // Pre-populate from agent_search.json catalog (persisted by MQTT handler
+    // on previous run). This determines whether web_search tool is registered.
+    let work_path = std::path::Path::new(&config.work_dir);
+    let has_catalog = crate::agent_config::load_agent_search_config(work_path)
+        .ok()
+        .flatten()
+        .filter(|c| !c.catalog.is_empty());
+    if let Some(search_cfg) = has_catalog {
+        let mut list = search_provider_list.write().unwrap();
+        *list = search_cfg.catalog.clone();
+        tracing::info!(
+            provider_count = list.len(),
+            "Pre-populated search_provider_list from agent_search.json catalog"
+        );
+    }
+
+    // ADR-040: LSP relay endpoint - always unavailable in MQTT-only mode.
     let lsp_relay_endpoint: Option<String> = None;
 
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
@@ -459,7 +512,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         &workspace_resolver,
         &config.agent_id,
         config.timeouts.tool_http_timeout_ms,
-        has_search_providers,
+        search_key_vault.clone(),
+        search_provider_list.clone(),
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
@@ -693,6 +747,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         available_cache,
         control_rx,
         identity_update_rx,
+        provider_update_rx,
+        search_update_rx,
         runtime_http_port,
         provider,
         resolved_model,
@@ -713,7 +769,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         chunk_tx,
         chunk_rx,
         budget,
-        resource_cache,
+        provider_config,
         session_snapshots,
         latest_session,
         agent_id,
@@ -732,6 +788,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_tools_slot,
         agent_config_slot,
         attachment_slot,
+        search_key_vault,
+        search_provider_list,
     })
 }
 

@@ -115,6 +115,8 @@ pub(crate) async fn phase_d_run(
         mcp_runtime_rx,
         ctx.mcp_notifier.subscribe(),
         ctx.identity_update_rx.take(),
+        ctx.provider_update_rx.take(),
+        ctx.search_update_rx.take(),
         &config.work_dir,
     )
     .await;
@@ -326,6 +328,12 @@ async fn mqtt_only_loop(
     mut identity_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
     >,
+    mut provider_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
+    >,
+    mut search_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
+    >,
     work_dir: &str,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
@@ -423,6 +431,50 @@ async fn mqtt_only_loop(
                         "Applying acowork/global/user_profile update to SessionManager"
                     );
                     session_manager.update_user_identity(Some(profile));
+                }
+            }
+
+            // `acowork/global/providers` retained update →
+            // SessionManager::update_global_provider_list → broadcast to all sessions.
+            provider = async {
+                match provider_update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(update) = provider {
+                    tracing::info!(
+                        provider_count = update.provider_list.len(),
+                        version = update.provider_list_version,
+                        key_count = update.provider_key_vault.len(),
+                        "Applying acowork/global/providers update to SessionManager"
+                    );
+                    session_manager.update_global_provider_list(
+                        update.provider_list,
+                        update.provider_list_version,
+                        update.provider_key_vault,
+                    );
+                }
+            }
+
+            // `acowork/global/searches` retained update →
+            // SessionManager::update_search_config → broadcast to all sessions.
+            search = async {
+                match search_update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(update) = search {
+                    tracing::info!(
+                        search_count = update.search_list.len(),
+                        key_count = update.search_key_vault.len(),
+                        "Applying acowork/global/searches update to SessionManager"
+                    );
+                    session_manager.update_search_config(
+                        update.search_key_vault,
+                        update.search_list,
+                    );
                 }
             }
         }

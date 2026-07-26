@@ -151,8 +151,15 @@ impl AgentToolsService for RuntimeAgentToolsService {
         agent_id: &str,
         body: PutSearchConfigBody,
     ) -> Result<SearchConfigResponse, AgentToolsError> {
+        let current = agent_config::load_agent_search_config(&self.work_dir)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to load agent_search.json, using default");
+                None
+            })
+            .unwrap_or_default();
         let cfg = AgentSearchConfig {
             providers: body.providers.clone(),
+            catalog: current.catalog,
         };
         agent_config::save_agent_search_config(&self.work_dir, &cfg)
             .map_err(AgentToolsError::Persistence)?;

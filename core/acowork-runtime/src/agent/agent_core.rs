@@ -107,6 +107,18 @@ pub struct AgentCore {
     pub(crate) provider_list_version: u64,
     /// Provider key vault (in-memory only, never persisted).
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, String>>>,
+    /// Search key vault (in-memory only, never persisted).
+    ///
+    /// Shared with `WebSearchEngine` - when `SessionManager::update_search_config`
+    /// writes to this Arc (triggered by MQTT `acowork/global/searches`), the
+    /// search engine reads the updated keys on the next `search()` call.
+    pub(crate) search_key_vault: Arc<RwLock<HashMap<String, String>>>,
+    /// Shared search provider list.
+    ///
+    /// Same sharing semantics as [`Self::search_key_vault`]. Read by
+    /// `WebSearchEngine` at search time to determine which providers are
+    /// configured and in what order.
+    pub(crate) search_provider_list: Arc<RwLock<Vec<acowork_core::protocol::SearchProviderListItem>>>,
 
     /// Per-agent compatibility cache, shared across all provider instances
     /// (including those rebuilt by `build_provider_for`).  `None` when no
@@ -228,6 +240,8 @@ impl AgentCore {
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: 0,
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
+            search_key_vault: Arc::new(RwLock::new(HashMap::new())),
+            search_provider_list: Arc::new(RwLock::new(Vec::new())),
             compat_cache: None,
             provider_compact_models: HashMap::new(),
             temperature_override: None,
@@ -875,6 +889,8 @@ impl Clone for AgentCore {
             global_provider_list: self.global_provider_list.clone(),
             provider_list_version: self.provider_list_version,
             provider_key_vault: self.provider_key_vault.clone(),
+            search_key_vault: self.search_key_vault.clone(),
+            search_provider_list: self.search_provider_list.clone(),
             compat_cache: self.compat_cache.clone(),
             provider_compact_models: self.provider_compact_models.clone(),
             temperature_override: self.temperature_override,

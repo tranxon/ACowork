@@ -10,7 +10,6 @@ pub mod cron;
 pub mod error;
 pub mod gateway;
 pub mod http;
-pub mod resource_pusher;
 pub mod intent;
 pub mod interaction_store;
 pub mod handlers;

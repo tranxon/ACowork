@@ -142,9 +142,9 @@ pub(crate) async fn phase_b_init_session(
         let is_valid = match (&session_model, &session_provider) {
             (Some(model), Some(provider_id)) => {
                 let in_cache =
-                    ctx.resource_cache
-                        .providers
+                    ctx.provider_config
                         .as_ref()
+                        .map(|c| &c.providers)
                         .is_none_or(|providers| {
                             providers
                                 .iter()
@@ -167,9 +167,9 @@ pub(crate) async fn phase_b_init_session(
 
         if !is_valid {
             let fallback_model = ctx
-                .resource_cache
-                .providers
+                .provider_config
                 .as_ref()
+                .map(|c| &c.providers)
                 .and_then(|p| p.first())
                 .and_then(|p| p.models.first())
                 .map(|m| m.id.clone());
@@ -233,9 +233,9 @@ pub(crate) async fn phase_b_init_session(
         // can wire it into rebuilt providers (429-retry / session-resume).
         c.compat_cache = ctx.compat_cache.take();
 
-        // ADR-040: gRPC hello_config path removed. Provider list is loaded
-        // from the on-disk resource cache (written by a previous Gateway run).
-        let providers_for_init = ctx.resource_cache.providers.as_ref();
+        // Provider list is loaded from agent_provider.json (persisted by the
+        // MQTT handler on receiving acowork/global/providers).
+        let providers_for_init = ctx.provider_config.as_ref().map(|c| &c.providers);
 
         if let Some(providers) = providers_for_init {
             for p in providers {
@@ -274,6 +274,44 @@ pub(crate) async fn phase_b_init_session(
                     provider_count = available.providers.len(),
                     key_count = vault.len(),
                     "Populated AgentCore provider_key_vault from MQTT available cache"
+                );
+            }
+        }
+
+        // Replace AgentCore's internally-created search vault/list with the
+        // shared Arcs from Phase A (same instances held by WebSearchEngine).
+        // This ensures SessionManager::update_search_config writes are visible
+        // to the search engine without re-registration.
+        c.search_key_vault = ctx.search_key_vault.clone();
+        c.search_provider_list = ctx.search_provider_list.clone();
+
+        // Populate search key vault and provider list from MQTT available
+        // cache (mirrors the provider_key_vault pattern above). The
+        // AvailableSearches payload carries SearchRef entries with inline
+        // decrypted API keys.
+        if let Some(ref cache) = ctx.available_cache {
+            let cache_read = cache.read().await;
+            if let Some(searches) = cache_read.searches.as_ref() {
+                let search_refs = &searches.providers;
+                let list_items = crate::mqtt::client::map_search_refs_to_list_items(search_refs);
+                let key_entries = crate::mqtt::client::extract_search_keys(search_refs);
+
+                {
+                    let mut vault = c.search_key_vault.write().unwrap();
+                    vault.clear();
+                    for entry in &key_entries {
+                        vault.insert(entry.provider_id.clone(), entry.api_key.clone());
+                    }
+                }
+                {
+                    let mut list = c.search_provider_list.write().unwrap();
+                    *list = list_items.clone();
+                }
+                tracing::info!(
+                    version = searches.version,
+                    provider_count = list_items.len(),
+                    key_count = key_entries.len(),
+                    "Populated AgentCore search_key_vault + search_provider_list from MQTT available cache"
                 );
             }
         }

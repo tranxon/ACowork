@@ -32,6 +32,6 @@ pub(crate) use subsystems::phase_c_spawn_subsystems;
 // ADR-040: `connect_gateway_client` removed — gRPC path is dead.
 pub(crate) mod super_mod {
     pub(crate) use crate::cli::{
-        read_resource_cache, resolve_skill_mode,
+        resolve_skill_mode,
     };
 }

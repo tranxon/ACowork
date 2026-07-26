@@ -94,6 +94,139 @@ impl From<MqttQoS> for QoS {
     }
 }
 
+/// Provider list update pushed from MQTT poll loop to SessionManager.
+///
+/// Carries both the provider metadata list (for `global_provider_list`)
+/// and the decrypted API keys (for `provider_key_vault`).
+#[derive(Debug, Clone)]
+pub struct ProviderUpdate {
+    pub provider_list: Vec<acowork_core::protocol::ProviderListItem>,
+    pub provider_list_version: u64,
+    pub provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry>,
+}
+
+/// Search provider update pushed from MQTT poll loop to SessionManager.
+///
+/// Carries both the search provider metadata list and the decrypted API keys.
+#[derive(Debug, Clone)]
+pub struct SearchUpdate {
+    pub search_list: Vec<acowork_core::protocol::SearchProviderListItem>,
+    pub search_key_vault: Vec<acowork_core::protocol::SearchKeyEntry>,
+}
+
+// ── MQTT protobuf -> domain mapping helpers ─────────────────────────────
+//
+// Extracted from the inline poll-loop closures so they are independently
+// unit-testable and the poll loop stays readable. These are the Runtime-side
+// counterparts of the Gateway's `build_available_providers` /
+// `build_available_searches` in `global_resources_publisher.rs`.
+
+/// Map MQTT `ProviderRef` list to domain `ProviderListItem` list.
+///
+/// Preserves `protocol_type` from the protobuf `LlmProtocol` field
+/// (previously hardcoded to `ProtocolType::OpenAI` - see C1 fix).
+fn map_provider_refs_to_list_items(
+    refs: &[acowork_core::mqtt_proto::ProviderRef],
+) -> Vec<acowork_core::protocol::ProviderListItem> {
+    refs.iter()
+        .map(|pr| acowork_core::protocol::ProviderListItem {
+            id: pr.id.clone(),
+            base_url: pr.base_url.clone(),
+            protocol_type: acowork_core::protocol::llm_protocol_to_protocol_type(pr.protocol_type),
+            models: pr
+                .models
+                .iter()
+                .map(|m| acowork_core::protocol::ProviderModelEntry {
+                    id: m.id.clone(),
+                    capabilities: acowork_core::protocol::ModelCapabilitiesInfo {
+                        context_window: m
+                            .capabilities
+                            .as_ref()
+                            .map(|c| c.context_window)
+                            .unwrap_or(128_000),
+                        max_output_tokens: m
+                            .capabilities
+                            .as_ref()
+                            .map(|c| c.max_output_tokens)
+                            .unwrap_or(16_384),
+                        max_input_tokens: None,
+                        supports_tool_calling: true,
+                        supports_reasoning: None,
+                        supports_attachment: None,
+                        supports_temperature: None,
+                        cost: None,
+                        modalities: Some(acowork_core::protocol::ModelModalities {
+                            input: m
+                                .capabilities
+                                .as_ref()
+                                .map(|c| c.input_modalities.clone())
+                                .unwrap_or_default(),
+                            output: m
+                                .capabilities
+                                .as_ref()
+                                .map(|c| c.output_modalities.clone())
+                                .unwrap_or_default(),
+                        }),
+                        name: None,
+                        family: None,
+                        knowledge_cutoff: None,
+                        default_reasoning_effort: None,
+                        thinking_mode: None,
+                    },
+                    max_output_tokens_limit: m.max_output_tokens_limit,
+                })
+                .collect(),
+            compact_model: if pr.compact_model.is_empty() {
+                None
+            } else {
+                Some(pr.compact_model.clone())
+            },
+            custom: pr.custom,
+        })
+        .collect()
+}
+
+/// Extract non-empty API keys from MQTT `ProviderRef` list.
+fn extract_provider_keys(
+    refs: &[acowork_core::mqtt_proto::ProviderRef],
+) -> Vec<acowork_core::protocol::ProviderKeyEntry> {
+    refs.iter()
+        .filter(|pr| !pr.api_key.is_empty())
+        .map(|pr| acowork_core::protocol::ProviderKeyEntry {
+            provider_id: pr.id.clone(),
+            api_key: pr.api_key.clone(),
+        })
+        .collect()
+}
+
+/// Map MQTT `SearchRef` list to domain `SearchProviderListItem` list.
+pub fn map_search_refs_to_list_items(
+    refs: &[acowork_core::mqtt_proto::SearchRef],
+) -> Vec<acowork_core::protocol::SearchProviderListItem> {
+    refs.iter()
+        .map(|pr| acowork_core::protocol::SearchProviderListItem {
+            id: pr.id.clone(),
+            name: pr.name.clone(),
+            description: pr.description.clone(),
+            requires_api_key: pr.requires_api_key,
+            base_url: pr.base_url.clone(),
+        })
+        .collect()
+}
+
+/// Extract non-empty API keys from MQTT `SearchRef` list.
+pub fn extract_search_keys(
+    refs: &[acowork_core::mqtt_proto::SearchRef],
+) -> Vec<acowork_core::protocol::SearchKeyEntry> {
+    refs.iter()
+        .filter(|pr| !pr.api_key.is_empty())
+        .map(|pr| acowork_core::protocol::SearchKeyEntry {
+            provider_id: pr.id.clone(),
+            api_key: pr.api_key.clone(),
+        })
+        .collect()
+}
+
 /// Configuration for `RuntimeMqttClient::connect`.
 ///
 /// ADR-034 Phase 8: replaces 11 individual parameters.
@@ -121,6 +254,30 @@ pub struct MqttConnectConfig<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub identity_update_tx: Option<
         tokio::sync::mpsc::UnboundedSender<acowork_core::protocol::UserProfile>,
+    >,
+    /// Sink for provider list updates. The MQTT event loop sends
+    /// `ProviderUpdate` here whenever `acowork/global/providers` retained
+    /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
+    /// forwards to `SessionManager::update_global_provider_list` so all
+    /// sessions pick up the new provider list and API keys.
+    ///
+    /// Optional: when None, the MQTT event loop still updates
+    /// `available_cache` but does not notify SessionManager.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub provider_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<ProviderUpdate>,
+    >,
+    /// Sink for search update updates. The MQTT event loop sends
+    /// `SearchUpdate` here whenever `acowork/global/searches` retained
+    /// is received. The receiver (held by `agent_init.rs` → `gateway_loop`)
+    /// forwards to `SessionManager::update_search_config` so all sessions
+    /// pick up the new search provider list and API keys.
+    ///
+    /// Optional: when None, the MQTT event loop still updates
+    /// `available_cache` but does not notify SessionManager.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub search_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<SearchUpdate>,
     >,
     /// Per-agent workspace directory (`work_dir`). Used by the MQTT poll
     /// task to persist `acowork/global/mcps` into `agent_mcp.json::catalog`
@@ -314,6 +471,8 @@ impl RuntimeMqttClient {
         let poll_cache = cfg.available_cache.clone();
         let poll_control_tx = cfg.control_tx.clone();
         let poll_identity_tx = cfg.identity_update_tx.clone();
+        let poll_provider_tx = cfg.provider_update_tx.clone();
+        let poll_search_tx = cfg.search_update_tx.clone();
         let poll_bootstrap = bootstrap_data.clone();
         let task_shared_client = Arc::clone(&shared_client);
         let task_options = options; // moved into poll task for soft-restart
@@ -446,6 +605,109 @@ impl RuntimeMqttClient {
                                                     catalog_count = defs.len(),
                                                     "Synced MCP catalog from acowork/global/mcps into agent_mcp.json::catalog"
                                                 );
+                                            }
+                                        } else if topic == "acowork/global/providers" {
+                                            // Persist provider list to agent_provider.json
+                                            // so the Runtime can load it on restart.
+                                            // API keys are NOT persisted - they stay in
+                                            // available_cache (in-memory only).
+                                            let (provider_list, version, key_vault) =
+                                                match cache_write.providers.as_ref() {
+                                                    Some(p) => {
+                                                        let list =
+                                                            map_provider_refs_to_list_items(
+                                                                &p.providers,
+                                                            );
+                                                        let keys =
+                                                            extract_provider_keys(&p.providers);
+                                                        (list, p.version, keys)
+                                                    }
+                                                    None => (vec![], 0, vec![]),
+                                                };
+                                            drop(cache_write);
+
+                                            // Persist to agent_provider.json (no API keys)
+                                            if let Err(e) = crate::agent_config::save_agent_provider_config_from_available(
+                                                &poll_work_dir,
+                                                &provider_list,
+                                                version,
+                                            ) {
+                                                tracing::warn!(
+                                                    agent_id = %poll_agent_id,
+                                                    error = %e,
+                                                    "Failed to persist acowork/global/providers to agent_provider.json"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    agent_id = %poll_agent_id,
+                                                    provider_count = provider_list.len(),
+                                                    "Synced provider list from acowork/global/providers into agent_provider.json"
+                                                );
+                                            }
+
+                                            // Forward to SessionManager via channel
+                                            if let Some(ref tx) = poll_provider_tx {
+                                                let update = ProviderUpdate {
+                                                    provider_list,
+                                                    provider_list_version: version,
+                                                    provider_key_vault: key_vault,
+                                                };
+                                                if let Err(e) = tx.send(update) {
+                                                    tracing::warn!(
+                                                        agent_id = %poll_agent_id,
+                                                        error = %e,
+                                                        "Failed to send provider update to SessionManager"
+                                                    );
+                                                }
+                                            }
+                                        } else if topic == "acowork/global/searches" {
+                                            // Persist search provider catalog to agent_search.json
+                                            let (search_list, key_vault) =
+                                                match cache_write.searches.as_ref() {
+                                                    Some(s) => {
+                                                        let list =
+                                                            map_search_refs_to_list_items(
+                                                                &s.providers,
+                                                            );
+                                                        let keys =
+                                                            extract_search_keys(&s.providers);
+                                                        (list, keys)
+                                                    }
+                                                    None => (vec![], vec![]),
+                                                };
+                                            drop(cache_write);
+
+                                            // Persist catalog to agent_search.json
+                                            if let Err(e) = crate::agent_config::save_agent_search_config_catalog(
+                                                &poll_work_dir,
+                                                &search_list,
+                                            ) {
+                                                tracing::warn!(
+                                                    agent_id = %poll_agent_id,
+                                                    error = %e,
+                                                    "Failed to persist acowork/global/searches catalog to agent_search.json"
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    agent_id = %poll_agent_id,
+                                                    search_count = search_list.len(),
+                                                    "Synced search catalog from acowork/global/searches into agent_search.json"
+                                                );
+                                            }
+
+                                            // Forward to SessionManager via channel
+                                            if let Some(ref tx) = poll_search_tx {
+                                                let update = SearchUpdate {
+                                                    search_list,
+                                                    search_key_vault: key_vault,
+                                                };
+                                                if let Err(e) = tx.send(update) {
+                                                    tracing::warn!(
+                                                        agent_id = %poll_agent_id,
+                                                        error = %e,
+                                                        "Failed to send search update to SessionManager"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1568,6 +1830,8 @@ mod tests {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir,
             },
         )
@@ -1654,6 +1918,8 @@ mod tests {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir,
             },
         )

@@ -263,6 +263,13 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/search-config",
             get(proxy_get_search_config).put(proxy_put_search_config),
         )
+        // ADR-040 follow-up: provider list read-through — reads
+        // agent_provider.json on the Runtime side. The frontend calls
+        // this to verify what the Runtime has received via MQTT.
+        .route(
+            "/api/agents/{id}/providers",
+            get(proxy_get_providers),
+        )
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────
@@ -971,6 +978,21 @@ async fn proxy_get_search_config(
     headers: HeaderMap,
 ) -> Response {
     let path = format!("/agents/{}/search-config", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/providers`
+/// to Runtime's `GET /agents/{id}/providers`.
+///
+/// Returns the provider catalog that the Runtime has so far received
+/// from Gateway via MQTT and persisted locally. Useful for the frontend
+/// to verify end-to-end delivery.
+async fn proxy_get_providers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/providers", id);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 

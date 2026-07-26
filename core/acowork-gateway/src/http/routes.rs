@@ -17,7 +17,6 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
-use crate::resource_pusher::ResourcePusher;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
@@ -31,8 +30,6 @@ pub struct AppState {
     pub auth: Arc<HttpAuth>,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
-    /// Unified global resource pusher (provider/model, MCP catalog, …)
-    pub pusher: Option<Arc<ResourcePusher>>,
     /// Whether CORS is enabled (allows any origin for remote Desktop connections)
     pub cors_enabled: bool,
     /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
@@ -56,7 +53,6 @@ impl AppState {
             gateway_state,
             auth,
             log_reload_handle: None,
-            pusher: None,
             cors_enabled: false,
             mqtt_gateway_client: None,
             mqtt_publisher_trigger: None,

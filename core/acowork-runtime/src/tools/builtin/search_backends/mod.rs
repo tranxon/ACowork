@@ -3,9 +3,11 @@
 //! Each provider implements the `SearchBackend` trait.
 //! `WebSearchEngine` manages a fallback chain of backends.
 
-use acowork_core::protocol::{SearchKeyEntry, SearchProviderListItem};
+use acowork_core::protocol::SearchProviderListItem;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub mod brave;
@@ -88,28 +90,43 @@ impl std::fmt::Display for SearchBackendError {
 
 // ── Fallback engine ──
 
-/// Ordered list of backends with API keys for fallback chain execution.
+/// Shared search key vault type (provider_id -> decrypted API key).
+pub type SharedSearchKeyVault = Arc<RwLock<HashMap<String, String>>>;
+
+/// Shared search provider list type.
+pub type SharedSearchProviderList = Arc<RwLock<Vec<SearchProviderListItem>>>;
+
+/// Fallback engine that resolves backends dynamically from shared state.
+///
+/// Holds `Arc` references to the same key vault and provider list stored in
+/// `AgentCore`. When `SessionManager::update_search_config` writes to these
+/// shared Arcs (triggered by MQTT `acowork/global/searches` retained
+/// updates), the engine sees the new state immediately on the next
+/// `search()` call — no explicit refresh needed.
 pub struct WebSearchEngine {
-    backends: Vec<SearchBackendEntry>,
+    key_vault: SharedSearchKeyVault,
+    provider_list: SharedSearchProviderList,
     search_timeout: Duration,
 }
 
-/// A single backend entry in the fallback chain.
-type SearchBackendEntry = (Box<dyn SearchBackend>, Option<SearchKeyEntry>, Option<String>);
-
 impl WebSearchEngine {
-    /// Create a new engine from configured providers.
+    /// Create a new engine bound to shared key vault and provider list.
+    ///
+    /// Both arguments are `Arc<RwLock<…>>` shared with `AgentCore` so that
+    /// runtime MQTT updates are visible without rebuilding the engine.
     ///
     /// # Arguments
-    /// * `backends` - Pre-built backends with their keys and base URLs.
-    ///   Providers are tried in the given order (first = highest priority).
+    /// * `key_vault` - Shared map of `provider_id -> decrypted API key`.
+    /// * `provider_list` - Shared list of configured search providers.
     /// * `search_timeout` - HTTP timeout applied to every search request.
     pub fn new(
-        backends: Vec<SearchBackendEntry>,
+        key_vault: SharedSearchKeyVault,
+        provider_list: SharedSearchProviderList,
         search_timeout: Duration,
     ) -> Self {
         Self {
-            backends,
+            key_vault,
+            provider_list,
             search_timeout,
         }
     }
@@ -147,25 +164,77 @@ impl WebSearchEngine {
 
     /// Execute a search with automatic fallback.
     ///
-    /// Tries each backend in priority order. On failure (no key, API error, network error),
-    /// automatically falls through to the next backend. Returns an error only if ALL backends fail.
+    /// Reads the current provider list and key vault at call time, then
+    /// tries each provider in list order. On failure (no key, API error,
+    /// network error), automatically falls through to the next provider.
+    /// Returns an error only if ALL providers fail (or none are configured).
     pub async fn search(
         &self,
         query: &str,
         count: u32,
     ) -> Result<Vec<SearchResult>, SearchBackendError> {
-        if self.backends.is_empty() {
+        // Snapshot the shared state into locals to avoid holding locks
+        // across the `.await` boundary below.
+        let providers: Vec<SearchProviderListItem> = {
+            let guard = self
+                .provider_list
+                .read()
+                .map_err(|e| SearchBackendError::Api(format!("Provider list lock poisoned: {e}")))?;
+            guard.clone()
+        };
+        if providers.is_empty() {
             return Err(SearchBackendError::NotConfigured);
         }
+
+        let keys: HashMap<String, String> = {
+            let guard = self
+                .key_vault
+                .read()
+                .map_err(|e| SearchBackendError::Api(format!("Key vault lock poisoned: {e}")))?;
+            guard.clone()
+        };
 
         let mut last_error: Option<SearchBackendError> = None;
         let mut errors: Vec<(String, String)> = Vec::new();
 
-        for (backend, key_entry, base_url) in &self.backends {
-            let api_key = key_entry.as_ref().map(|k| k.api_key.as_str()).unwrap_or("");
+        for provider in &providers {
+            // Resolve API key from vault.
+            let api_key: &str = if provider.requires_api_key {
+                match keys.get(&provider.id) {
+                    Some(k) => k.as_str(),
+                    None => {
+                        tracing::warn!(
+                            provider_id = %provider.id,
+                            "Search provider requires API key but none in vault, skipping"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                ""
+            };
+
+            // Build a backend instance for this provider.
+            let backend = match self.build_backend(&provider.id) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!(
+                        provider_id = %provider.id,
+                        "Unknown search provider id, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            // Determine base URL override (empty string -> None).
+            let base_url_override: Option<&str> = if provider.base_url.is_empty() {
+                None
+            } else {
+                Some(provider.base_url.as_str())
+            };
 
             match backend
-                .search(query, count, api_key, base_url.as_deref())
+                .search(query, count, api_key, base_url_override)
                 .await
             {
                 Ok(results) => {
@@ -195,9 +264,12 @@ impl WebSearchEngine {
         Err(last_error.unwrap_or(SearchBackendError::NotConfigured))
     }
 
-    /// Check if the engine has any configured backends.
+    /// Check if the engine has any configured providers.
     pub fn is_empty(&self) -> bool {
-        self.backends.is_empty()
+        self.provider_list
+            .read()
+            .map(|l| l.is_empty())
+            .unwrap_or(true)
     }
 }
 
@@ -269,4 +341,112 @@ pub fn search_provider_catalog() -> Vec<SearchProviderListItem> {
 /// Look up static metadata for a provider.
 pub fn lookup_provider_meta(id: &str) -> Option<SearchProviderListItem> {
     search_provider_catalog().into_iter().find(|p| p.id == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_engine_is_empty_when_no_providers() {
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(Vec::new()));
+        let engine = WebSearchEngine::new(vault, list, Duration::from_secs(10));
+        assert!(engine.is_empty());
+    }
+
+    #[test]
+    fn test_engine_not_empty_with_providers() {
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(vec![SearchProviderListItem {
+            id: "tavily".to_string(),
+            name: "Tavily".to_string(),
+            description: String::new(),
+            requires_api_key: true,
+            base_url: "https://api.tavily.com".to_string(),
+        }]));
+        let engine = WebSearchEngine::new(vault, list, Duration::from_secs(10));
+        assert!(!engine.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_returns_not_configured_when_empty() {
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(Vec::new()));
+        let engine = WebSearchEngine::new(vault, list, Duration::from_secs(10));
+        let result = engine.search("test query", 5).await;
+        assert!(matches!(result, Err(SearchBackendError::NotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_search_skips_provider_without_key() {
+        // Provider requires API key but vault is empty -> should skip and
+        // return NotConfigured (no providers tried).
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(vec![SearchProviderListItem {
+            id: "tavily".to_string(),
+            name: "Tavily".to_string(),
+            description: String::new(),
+            requires_api_key: true,
+            base_url: "https://api.tavily.com".to_string(),
+        }]));
+        let engine = WebSearchEngine::new(vault, list, Duration::from_secs(10));
+        let result = engine.search("test query", 5).await;
+        // All providers were skipped (no key) -> last_error is None -> NotConfigured
+        assert!(matches!(result, Err(SearchBackendError::NotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_search_sees_runtime_vault_update() {
+        // Start with empty vault, then add a key via the shared Arc.
+        // The engine should see the update on the next search() call
+        // without re-registration (this is the core design property).
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(vec![SearchProviderListItem {
+            id: "tavily".to_string(),
+            name: "Tavily".to_string(),
+            description: String::new(),
+            requires_api_key: true,
+            base_url: "https://api.tavily.com".to_string(),
+        }]));
+        let engine = WebSearchEngine::new(vault.clone(), list.clone(), Duration::from_secs(10));
+
+        // First search: no key -> NotConfigured
+        let result = engine.search("test", 5).await;
+        assert!(matches!(result, Err(SearchBackendError::NotConfigured)));
+
+        // Simulate MQTT update: write key to shared vault
+        {
+            let mut v = vault.write().unwrap();
+            v.insert("tavily".to_string(), "test-key".to_string());
+        }
+
+        // Second search: key is now present. The backend will try to
+        // call the real Tavily API and fail with an HTTP error (since
+        // "test-key" is invalid and the endpoint is real). The important
+        // thing is that it does NOT return NotConfigured - it actually
+        // tried the backend.
+        let result = engine.search("test", 5).await;
+        // Should be an HTTP or API error, NOT NotConfigured
+        assert!(
+            !matches!(result, Err(SearchBackendError::NotConfigured)),
+            "Engine should have tried the backend after key was added"
+        );
+    }
+
+    #[test]
+    fn test_build_backend_recognizes_all_catalog_ids() {
+        let vault: SharedSearchKeyVault = Arc::new(RwLock::new(HashMap::new()));
+        let list: SharedSearchProviderList = Arc::new(RwLock::new(Vec::new()));
+        let engine = WebSearchEngine::new(vault, list, Duration::from_secs(10));
+
+        // Every provider in the static catalog should be buildable.
+        for provider in search_provider_catalog() {
+            assert!(
+                engine.build_backend(&provider.id).is_some(),
+                "Unknown backend id: {}",
+                provider.id
+            );
+        }
+    }
 }

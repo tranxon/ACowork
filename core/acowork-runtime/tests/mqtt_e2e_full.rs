@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use acowork_core::mqtt_proto::{
     self, control_command::Command, data_envelope::Payload, AvailableMcps,
-    ChatMessage, ControlCommand, DataEnvelope, McpRef, McpTransport as ProtoMcpTransport,
+    AvailableProviders, AvailableSearches, ChatMessage, ControlCommand, DataEnvelope,
+    LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef, SearchRef,
 };
 use acowork_gateway::mqtt::{start_broker_in_thread, GatewayMqttClient};
 use acowork_runtime::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
@@ -86,6 +87,8 @@ fn integration_gateway_and_runtime_connect() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         )
@@ -134,6 +137,8 @@ fn integration_control_message_flow() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
@@ -217,6 +222,8 @@ fn integration_control_stop_flow() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
@@ -311,6 +318,8 @@ fn integration_multiple_messages() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
@@ -379,6 +388,8 @@ fn integration_lwt_offline_on_disconnect() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
             },
         ).await.unwrap();
@@ -473,6 +484,8 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
                 available_cache: cache,
                 control_tx,
                 identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
                 work_dir: work_dir.clone(),
             },
         ).await.unwrap();
@@ -580,6 +593,291 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
         );
 
         // ── 6. Cleanup ──────────────────────────────────────────────
+        drop(_rt);
+        drop(gw);
+        std::fs::remove_dir_all(&work_dir).ok();
+    });
+    drop(broker);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Provider list retained -> agent_provider.json persistence (C1/I3 regression)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Mirrors `integration_catalog_retained_persists_to_agent_mcp_json` but for
+// `acowork/global/providers`. Verifies:
+//   1. Provider list is persisted to `agent_provider.json`
+//   2. `protocol_type` is correctly mapped from protobuf `LlmProtocol`
+//      (regression test for C1: was hardcoded to `ProtocolType::OpenAI`)
+//   3. API keys are NOT persisted (wire-only, in-memory)
+
+#[test]
+fn integration_providers_retained_persists_to_agent_provider_json() {
+    let port = fresh_broker_port();
+    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        // ── 1. Spin up Runtime with a real work_dir ───────────────────
+        let work_dir = std::env::temp_dir().join(format!(
+            "acowork-provider-e2e-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
+
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _rt = RuntimeMqttClient::connect(
+            MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.providers",
+                agent_name: "Provider Test",
+                agent_version: "1.0.0",
+                avatar: None,
+                builtin_avatar: None,
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+                identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
+                work_dir: work_dir.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // ── 2. Gateway publishes `acowork/global/providers` (retained) ─
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .unwrap();
+
+        let payload = AvailableProviders {
+            version: 42,
+            providers: vec![
+                ProviderRef {
+                    id: "anthropic".into(),
+                    base_url: "https://api.anthropic.com".into(),
+                    protocol_type: LlmProtocol::Anthropic as i32,
+                    models: vec![],
+                    compact_model: String::new(),
+                    custom: false,
+                    api_key: "sk-ant-secret-key".into(), // wire-only; must NOT persist
+                },
+                ProviderRef {
+                    id: "openai".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    protocol_type: LlmProtocol::Openai as i32,
+                    models: vec![],
+                    compact_model: String::new(),
+                    custom: false,
+                    api_key: String::new(),
+                },
+            ],
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AvailableProviders(payload)),
+        };
+        gw.publish_envelope(
+            "acowork/global/providers",
+            &envelope,
+            acowork_gateway::mqtt::MqttQoS::AtLeastOnce,
+            true,
+        )
+        .await
+        .expect("gateway publish should succeed");
+        eprintln!("[test] gateway published available_providers (retained)");
+
+        // ── 3. Wait for Runtime poll loop to persist ──────────────────
+        let provider_path = work_dir.join("config").join("agent_provider.json");
+        let mut written = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if provider_path.exists() {
+                let raw = std::fs::read_to_string(&provider_path).unwrap();
+                if raw.contains("anthropic") && raw.contains("openai") {
+                    written = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            written,
+            "Runtime should have written agent_provider.json containing both providers. \
+             file={} exists={}",
+            provider_path.display(),
+            provider_path.exists(),
+        );
+
+        // ── 4. Verify provider list and protocol_type (C1 regression) ─
+        let cfg =
+            acowork_runtime::agent_config::load_agent_provider_config(&work_dir)
+                .expect("load should succeed")
+                .expect("file should now exist");
+        assert_eq!(cfg.providers.len(), 2, "should have both providers");
+        assert_eq!(cfg.version, 42, "version should match MQTT payload");
+
+        // C1 regression: protocol_type must be mapped from LlmProtocol,
+        // not hardcoded to OpenAI.
+        let anthropic = cfg
+            .providers
+            .iter()
+            .find(|p| p.id == "anthropic")
+            .expect("anthropic provider should exist");
+        assert_eq!(
+            anthropic.protocol_type,
+            acowork_core::protocol::ProtocolType::Anthropic,
+            "C1 regression: anthropic provider protocol_type must be Anthropic, not OpenAI"
+        );
+
+        let openai = cfg
+            .providers
+            .iter()
+            .find(|p| p.id == "openai")
+            .expect("openai provider should exist");
+        assert_eq!(
+            openai.protocol_type,
+            acowork_core::protocol::ProtocolType::OpenAI,
+        );
+
+        // ── 5. API key must NOT be persisted ──────────────────────────
+        let raw_json = std::fs::read_to_string(&provider_path).unwrap();
+        assert!(
+            !raw_json.contains("sk-ant-secret-key"),
+            "API key leaked into agent_provider.json (must be stripped before write); raw={}",
+            raw_json,
+        );
+
+        // ── 6. Cleanup ────────────────────────────────────────────────
+        drop(_rt);
+        drop(gw);
+        std::fs::remove_dir_all(&work_dir).ok();
+    });
+    drop(broker);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Search catalog retained -> agent_search.json persistence (I3)
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn integration_searches_retained_persists_to_agent_search_json() {
+    let port = fresh_broker_port();
+    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        // ── 1. Spin up Runtime with a real work_dir ───────────────────
+        let work_dir = std::env::temp_dir().join(format!(
+            "acowork-search-e2e-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&work_dir).expect("work_dir should be creatable");
+
+        let cache = new_shared_cache();
+        let (control_tx, _control_rx) = tokio::sync::mpsc::unbounded_channel();
+        let _rt = RuntimeMqttClient::connect(
+            MqttConnectConfig {
+                host: "127.0.0.1",
+                port,
+                agent_id: "com.test.searches",
+                agent_name: "Search Test",
+                agent_version: "1.0.0",
+                avatar: None,
+                builtin_avatar: None,
+                config_json: "{}",
+                available_cache: cache,
+                control_tx,
+                identity_update_tx: None,
+                provider_update_tx: None,
+                search_update_tx: None,
+                work_dir: work_dir.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // ── 2. Gateway publishes `acowork/global/searches` (retained) ─
+        let gw = GatewayMqttClient::new_publisher("127.0.0.1", port)
+            .await
+            .unwrap();
+
+        let payload = AvailableSearches {
+            version: 7,
+            providers: vec![
+                SearchRef {
+                    id: "tavily".into(),
+                    name: "Tavily Search".into(),
+                    description: "AI-optimized search".into(),
+                    requires_api_key: true,
+                    base_url: "https://api.tavily.com".into(),
+                    api_key: "tvly-secret-key".into(), // wire-only; must NOT persist
+                },
+                SearchRef {
+                    id: "searxng".into(),
+                    name: "SearXNG".into(),
+                    description: "Self-hosted meta search".into(),
+                    requires_api_key: false,
+                    base_url: "http://localhost:8080".into(),
+                    api_key: String::new(),
+                },
+            ],
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AvailableSearches(payload)),
+        };
+        gw.publish_envelope(
+            "acowork/global/searches",
+            &envelope,
+            acowork_gateway::mqtt::MqttQoS::AtLeastOnce,
+            true,
+        )
+        .await
+        .expect("gateway publish should succeed");
+        eprintln!("[test] gateway published available_searches (retained)");
+
+        // ── 3. Wait for Runtime poll loop to persist ──────────────────
+        let search_path = work_dir.join("config").join("agent_search.json");
+        let mut written = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if search_path.exists() {
+                let raw = std::fs::read_to_string(&search_path).unwrap();
+                if raw.contains("tavily") && raw.contains("searxng") {
+                    written = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            written,
+            "Runtime should have written agent_search.json containing catalog entries. \
+             file={} exists={}",
+            search_path.display(),
+            search_path.exists(),
+        );
+
+        // ── 4. Verify catalog landed on disk ──────────────────────────
+        let cfg =
+            acowork_runtime::agent_config::load_agent_search_config(&work_dir)
+                .expect("load should succeed")
+                .expect("file should now exist");
+        assert_eq!(cfg.catalog.len(), 2, "catalog should have both entries");
+        assert_eq!(cfg.catalog[0].id, "tavily");
+        assert_eq!(cfg.catalog[1].id, "searxng");
+
+        // ── 5. API key must NOT be persisted ──────────────────────────
+        let raw_json = std::fs::read_to_string(&search_path).unwrap();
+        assert!(
+            !raw_json.contains("tvly-secret-key"),
+            "API key leaked into agent_search.json (must be stripped before write); raw={}",
+            raw_json,
+        );
+
+        // ── 6. Cleanup ────────────────────────────────────────────────
         drop(_rt);
         drop(gw);
         std::fs::remove_dir_all(&work_dir).ok();

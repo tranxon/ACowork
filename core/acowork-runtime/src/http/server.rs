@@ -383,6 +383,15 @@ impl RuntimeHttpServer {
                 "/agents/{id}/search-config",
                 get(get_agent_search_config).put(put_agent_search_config),
             )
+            // ADR-040 follow-up: provider list endpoint — reads from
+            // agent_provider.json (persisted by MQTT handler on every
+            // acowork/global/providers retained update). The Gateway
+            // proxies GET /api/agents/{id}/providers here so the
+            // frontend can verify what the Runtime actually has.
+            .route(
+                "/agents/{id}/providers",
+                get(get_agent_providers),
+            )
             .with_state(state);
 
         // Bind to 127.0.0.1:0 for a random port
@@ -2014,6 +2023,57 @@ async fn get_agent_search_config(
         "agent_id": resp.agent_id,
         "providers": resp.providers,
     })))
+}
+
+// ── Provider list endpoint ──────────────────────────────────────────────
+//
+// Read-through endpoint that returns the content of `agent_provider.json`
+// — the provider catalog pushed by Gateway via MQTT
+// (acowork/global/providers) and persisted by the MQTT handler in
+// [`crate::agent_config::save_agent_provider_config_from_available`].
+//
+// Unlike MCP / search / builtin-tools, there is no user-authorable subset
+// of the provider list; the entire file is Gateway-authored. The endpoint
+// exists so the frontend can verify what the Runtime actually has at any
+// given time — a diagnostic / consistency-check tool rather than a
+// user-facing configuration surface.
+
+/// `GET /agents/{id}/providers` — read `agent_provider.json`.
+async fn get_agent_providers(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "agent_id mismatch: path '{}' does not match this runtime '{}'",
+                    id, state.agent_id
+                ),
+            })),
+        ));
+    }
+
+    let cfg = crate::agent_config::load_agent_provider_config(&state.work_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+
+    match cfg {
+        Some(provider_config) => Ok(Json(serde_json::json!({
+            "agent_id": state.agent_id,
+            "providers": provider_config.providers,
+            "version": provider_config.version,
+        }))),
+        None => Ok(Json(serde_json::json!({
+            "agent_id": state.agent_id,
+            "providers": [],
+            "version": 0,
+        }))),
+    }
 }
 
 /// `PUT /agents/{id}/search-config` — write `agent_search.json`.

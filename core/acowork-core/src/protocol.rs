@@ -299,12 +299,35 @@ pub struct AgentSearchProvider {
     pub priority: u32,
 }
 
+/// Per-agent provider configuration — persisted to agent_provider.json.
+///
+/// Contains the Gateway-pushed provider list (with models and capabilities).
+/// API keys are NEVER stored here — they are delivered inline via MQTT
+/// `AvailableProviders.api_key` and held only in memory.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentProviderConfig {
+    /// Gateway-provided provider list (from acowork/global/providers).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderListItem>,
+    /// Monotonic version for diff sync (mirrors AvailableProviders.version).
+    pub version: u64,
+}
+
 /// Per-agent search configuration — persisted to agent_search.json.
+///
+/// Follows the same dual-source pattern as `AgentMcpConfig`:
+/// - `providers`: user-configured active search providers (written by PUT /search-config)
+/// - `catalog`: Gateway-pushed available search providers (written by MQTT handler)
+/// - API keys are NEVER stored here — they come via MQTT `AvailableSearches.api_key`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentSearchConfig {
-    /// Ordered list of active search providers for this agent
+    /// Active search providers for this agent (user-configured, priority ordered)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<AgentSearchProvider>,
+    /// Gateway-provided search provider catalog (from acowork/global/searches).
+    /// Metadata like name, description, base_url — no API keys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub catalog: Vec<SearchProviderListItem>,
 }
 
 /// ── Embedding Model types ──
@@ -579,6 +602,23 @@ pub enum ProtocolType {
     #[default]
     #[serde(alias = "openai-compatible")]
     OpenAI,
+}
+
+/// Convert MQTT protobuf `LlmProtocol` (as i32) to domain `ProtocolType`.
+///
+/// Reverse of `map_protocol_type` in the Gateway's
+/// `mqtt/global_resources_publisher.rs`. Used by the Runtime when
+/// converting `ProviderRef` (protobuf) to `ProviderListItem` (domain)
+/// so that non-OpenAI providers (Anthropic, Google, Ollama) retain
+/// their correct protocol type through the MQTT sync path.
+pub fn llm_protocol_to_protocol_type(proto: i32) -> ProtocolType {
+    match crate::mqtt_proto::LlmProtocol::try_from(proto) {
+        Ok(crate::mqtt_proto::LlmProtocol::Anthropic) => ProtocolType::Anthropic,
+        Ok(crate::mqtt_proto::LlmProtocol::Google) => ProtocolType::Google,
+        Ok(crate::mqtt_proto::LlmProtocol::Ollama) => ProtocolType::Ollama,
+        // Unspecified or unknown -> default to OpenAI-compatible
+        _ => ProtocolType::OpenAI,
+    }
 }
 
 impl std::str::FromStr for ProtocolType {

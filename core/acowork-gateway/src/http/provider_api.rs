@@ -312,11 +312,7 @@ pub async fn add_provider(
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
     drop(gw);
 
-    // 6. Hot-push to running agents.
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_llm_config().await;
-    }
-
+    // 6. Hot-push to running agents — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -350,11 +346,7 @@ pub async fn remove_provider(
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
     drop(gw);
 
-    // 4. Hot-push.
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_llm_config().await;
-    }
-
+    // 4. Hot-push — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -495,11 +487,7 @@ pub async fn update_provider(
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
     drop(gw);
 
-    // 8. Hot-push.
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_llm_config().await;
-    }
-
+    // 8. Hot-push — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -555,11 +543,7 @@ pub async fn add_search_key(
     resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
     drop(gw); // Release write lock before hot-push
 
-    // Hot-push search config change to all connected agents
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_search_config().await;
-    }
-
+    // Hot-push search config change — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -588,10 +572,7 @@ pub async fn remove_search_key(
     resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
     drop(gw);
 
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_search_config().await;
-    }
-
+    // Hot-push handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -635,10 +616,7 @@ pub async fn update_search_key(
     resource_cache::rebuild_and_save_search_cache(&mut gw, &data_dir);
     drop(gw);
 
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_search_config().await;
-    }
-
+    // Hot-push handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();

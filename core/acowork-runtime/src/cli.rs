@@ -4,7 +4,7 @@
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use clap::Parser;
-use acowork_core::protocol::{McpListItem, ProviderListItem};
+
 use std::sync::Arc;
 
 use acowork_core::logging::ChronoLocalTimer;
@@ -210,52 +210,6 @@ fn init_stderr_only(env_filter: EnvFilter) -> Option<LogReloadHandle> {
     Some(reload_handle)
 }
 
-// ── Resource cache (version-driven diff sync) ─────────────────────────
-
-/// Runtime-side resource cache stored in workspace/config/resource_cache.json.
-/// Stores versions (for diff sync) and optionally cached provider/MCP lists
-/// (for use when Gateway reports "same version, no update needed").
-/// API keys are NEVER stored in this file — they come from the live provider_key_vault.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RuntimeResourceCache {
-    #[serde(default)]
-    pub(crate) provider_list_version: u64,
-    #[serde(default)]
-    pub(crate) mcp_list_version: u64,
-    #[serde(default)]
-    pub(crate) search_list_version: u64,
-    #[serde(default)]
-    pub(crate) user_profile_version: u64,
-    /// Cached provider list (without api keys — keys come from vault).
-    /// None when no cache exists yet (first start).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) providers: Option<Vec<ProviderListItem>>,
-    /// Cached MCP server list (without auth tokens — tokens come from vault).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) mcps: Option<Vec<McpListItem>>,
-}
-
-/// Resource cache file path in agent workspace config directory.
-pub(crate) fn resource_cache_path(work_dir: &std::path::Path) -> std::path::PathBuf {
-    work_dir.join("config").join("resource_cache.json")
-}
-
-/// Read the full runtime resource cache (versions + cached lists).
-/// Returns default (versions=0, no lists) if file is missing or corrupt.
-pub(crate) fn read_resource_cache(work_dir: &std::path::Path) -> RuntimeResourceCache {
-    let path = resource_cache_path(work_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str::<RuntimeResourceCache>(&raw).unwrap_or_else(|e| {
-            tracing::warn!(path=%path.display(), error=%e, "Failed to parse resource_cache.json");
-            RuntimeResourceCache::default()
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RuntimeResourceCache::default(),
-        Err(e) => {
-            tracing::warn!(path=%path.display(), error=%e, "Failed to read resource_cache.json");
-            RuntimeResourceCache::default()
-        }
-    }
-}
 /// Async entry point after tokio runtime is initialized.
 ///
 /// Acts as the top-level phase orchestrator.  All logic lives in the

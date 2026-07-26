@@ -313,9 +313,10 @@ Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这
 | PUT | `/api/agents/{id}/mcp-servers` | 写入 MCP 服务配置 | `/agents/{id}/mcp-servers` |
 | GET | `/api/agents/{id}/search-config` | 读取搜索配置 | `/agents/{id}/search-config` |
 | PUT | `/api/agents/{id}/search-config` | 写入搜索配置 | `/agents/{id}/search-config` |
+| GET | `/api/agents/{id}/providers` | 读取 Runtime 端的 Provider 列表（MQTT 同步后的实际数据） | `/agents/{id}/providers` |
 
-> **Win11-MCP-ToolsBugFix (2026-07)**：上述 `mcp-servers` / `search-config` 早期由
-> Gateway stub 返回 200 但不持久化，导致用户在 Tools Tab 切换 MCP server 选择后丢失。
+> **ADR-040 Win11-MCP-ToolsBugFix (2026-07)**：上述 `mcp-servers` / `search-config` / `providers` 
+> 早期由 Gateway stub 返回 200 但不持久化，导致用户在 Tools Tab 切换 MCP server 选择后丢失。
 > 已统一改为反代到 Runtime 端 `get_agent_mcp_servers` / `put_agent_mcp_servers` 等。
 
 ### 5.2 会话只读查询
@@ -649,5 +650,5 @@ Authorization: Bearer <token>
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
 6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /
-   `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。��通过 HTTP POST `/message` /
+   `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。，通过 HTTP POST `/message` /
    `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。

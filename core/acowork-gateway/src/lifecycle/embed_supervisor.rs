@@ -41,8 +41,6 @@ use acowork_core::supervisor::{
 };
 
 use crate::gateway::state::GatewayState;
-use crate::resource_pusher::{build_embed_sidecar_payload, ResourcePusher};
-use acowork_core::protocol::SidecarKind;
 
 use super::embed::spawn_embed_process;
 
@@ -133,11 +131,10 @@ pub type SharedEmbedState = SharedState;
 pub fn start_embed_supervisor(
     cfg: EmbedSupervisorConfig,
     state: SharedEmbedState,
-    pusher: Option<Arc<ResourcePusher>>,
 ) {
     let port = cfg.port;
     tokio::spawn(async move {
-        run_supervisor(cfg, state, pusher, port).await;
+        run_supervisor(cfg, state, port).await;
     });
 }
 
@@ -148,7 +145,6 @@ pub fn start_embed_supervisor(
 async fn run_supervisor(
     cfg: EmbedSupervisorConfig,
     state: SharedEmbedState,
-    pusher: Option<Arc<ResourcePusher>>,
     port: u16,
 ) {
     let mut history = RestartHistory::new();
@@ -199,7 +195,7 @@ async fn run_supervisor(
 
     loop {
         let exit_reason =
-            match run_monitor_session(&cfg, &state, &pusher, port, &mut in_startup_grace).await {
+            match run_monitor_session(&cfg, &state, port, &mut in_startup_grace).await {
                 MonitorExit::Clean => {
                     tracing::info!("Embed monitor session ended cleanly");
                     return;
@@ -344,11 +340,9 @@ async fn run_supervisor(
                         gw.embed_process = None;
                     }
                 });
-                // Push the (now-empty or new-model) embed config to
-                // agents so they can refresh local embedding caches.
-                if let Some(p) = &pusher {
-                    push_embed_sidecar_to_agents(p, &state).await;
-                }
+                // Embed config changes are now propagated via MQTT
+                // SidecarEndpointUpdate in a separate task — the old
+                // ResourcePusher stub was a no-op and has been removed.
             }
             Err(e) => {
                 if let Some(health) = super::embed::check_embed_health(port).await {
@@ -361,9 +355,6 @@ async fn run_supervisor(
                     {
                         let mut gw = state.write().await;
                         gw.embed_process = Some(attached);
-                    }
-                    if let Some(p) = &pusher {
-                        push_embed_sidecar_to_agents(p, &state).await;
                     }
                 } else {
                     tracing::error!(error = %e, "Failed to restart embed process");
@@ -427,7 +418,6 @@ enum MonitorExit {
 async fn run_monitor_session(
     _cfg: &EmbedSupervisorConfig,
     state: &SharedEmbedState,
-    pusher: &Option<Arc<ResourcePusher>>,
     port: u16,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
@@ -469,7 +459,7 @@ async fn run_monitor_session(
     // session was restarted but the embed was fine the whole time).
     // We only do this on session start; later state transitions
     // arrive via the SSE stream.
-    if let Err(e) = bootstrap_state_from_health(port, state, pusher).await {
+    if let Err(e) = bootstrap_state_from_health(port, state).await {
         tracing::warn!(error = %e, "Initial /health bootstrap failed; continuing with SSE only");
     }
 
@@ -528,7 +518,7 @@ async fn run_monitor_session(
                                 Some(SseFrame::State(raw_json)) => {
                                     watchdog.beat();
                                     if let Ok(env) = serde_json::from_str::<StateEventEnvelope>(&raw_json) {
-                                        apply_state_event(state, pusher, env.state).await;
+                                        apply_state_event(state, env.state).await;
                                     }
                                 }
                                 Some(SseFrame::Comment(_)) | None => {
@@ -561,7 +551,6 @@ async fn run_monitor_session(
 async fn bootstrap_state_from_health(
     port: u16,
     state: &SharedEmbedState,
-    pusher: &Option<Arc<ResourcePusher>>,
 ) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/health");
     let client = http_client();
@@ -612,9 +601,6 @@ async fn bootstrap_state_from_health(
             dimension = ?applied.1,
             "Embed state bootstrapped from /health"
         );
-        if let Some(p) = pusher {
-            push_embed_sidecar_to_agents(p, state).await;
-        }
     }
     Ok(())
 }
@@ -689,7 +675,6 @@ async fn try_connect_events(port: u16) -> bool {
 /// the change to running agents so they pick up the new model.
 async fn apply_state_event(
     state: &SharedEmbedState,
-    pusher: &Option<Arc<ResourcePusher>>,
     event: StateEvent,
 ) {
     // Snapshot the new values for the lock, plus the old values for change
@@ -716,36 +701,10 @@ async fn apply_state_event(
             dimension = ?new_dimension,
             "Embed state updated from SSE"
         );
-        if let Some(p) = pusher {
-            push_embed_sidecar_to_agents(p, state).await;
-        }
     }
 }
 
-/// Build the embed sidecar payload from `state` and push it via `pusher`.
-///
-/// This is a local helper for the supervisor's state-transition call
-/// sites. The push channel is the generic `SidecarEndpointUpdate`
-/// introduced in ADR-030 Phase C2 — see `push_sidecar_endpoint` in
-/// `mqtt::sidecar` for the full semantics.
-///
-/// No-op if the embed process has not yet resolved its active model
-/// (`build_embed_sidecar_payload` returns `None`).
-async fn push_embed_sidecar_to_agents(
-    pusher: &ResourcePusher,
-    state: &SharedEmbedState,
-) {
-    let (endpoint, spec_json) = {
-        let gw = state.read().await;
-        match build_embed_sidecar_payload(&gw) {
-            Some(payload) => payload,
-            None => {
-                tracing::warn!("Embed state not ready, skipping sidecar push");
-                return;
-            }
-        }
-    };
-    pusher
-        .push_sidecar_endpoint(SidecarKind::Embed, endpoint, spec_json)
-        .await;
-}
+// Sidecar endpoint updates are now handled via MQTT
+// `acowork/global/sidecar` retained topic in a dedicated publisher
+// task — the old `push_embed_sidecar_to_agents` (which called the
+// no-op `ResourcePusher::push_sidecar_endpoint`) has been removed.

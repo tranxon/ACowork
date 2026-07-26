@@ -6,9 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::cli::RuntimeResourceCache;
 use crate::config::RuntimeConfig;
-use acowork_core::protocol::ProtocolType;
+use acowork_core::protocol::{AgentProviderConfig, ProtocolType};
 use crate::agent::session::SessionManagerConfig;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
 
@@ -35,6 +34,18 @@ pub(crate) struct AgentBootContext {
     /// `SessionManager::update_user_identity`.
     pub identity_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<acowork_core::protocol::UserProfile>,
+    >,
+    /// Receiver for `acowork/global/providers` updates.
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::update_global_provider_list`.
+    pub provider_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::ProviderUpdate>,
+    >,
+    /// Receiver for `acowork/global/searches` updates.
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::update_search_config`.
+    pub search_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
     /// Control command receiver (from MQTT control topics)
     pub control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
@@ -95,8 +106,9 @@ pub(crate) struct AgentBootContext {
     // Budget
     pub budget: acowork_core::Budget,
 
-    // Resource cache (for session validation)
-    pub resource_cache: RuntimeResourceCache,
+    /// Provider config loaded from agent_provider.json (for session validation).
+    /// `None` when no provider config has been persisted yet (first start).
+    pub provider_config: Option<AgentProviderConfig>,
 
     /// Shared session snapshot map, populated by Phase A and consumed by
     /// Phase B (via SessionManagerConfig). The same `Arc` is also held by
@@ -175,6 +187,17 @@ pub(crate) struct AgentBootContext {
     /// (`<work_dir>/files/<document_id>`). Same Phase B pattern as
     /// `agent_tools_slot` / `agent_config_slot`.
     pub attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+
+    /// Shared search key vault (provider_id -> decrypted API key).
+    /// Created in Phase A, passed to `WebSearchEngine` (via
+    /// `all_builtin_tools`) and injected into `AgentCore` in Phase B.
+    /// `SessionManager::update_search_config` writes to this same Arc,
+    /// so the search engine sees updates without re-registration.
+    pub search_key_vault: crate::tools::builtin::search_backends::SharedSearchKeyVault,
+
+    /// Shared search provider list. Same lifecycle as
+    /// [`Self::search_key_vault`].
+    pub search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList,
 }
 
 /// Context produced by Phase B (per-session initialization).

@@ -18,10 +18,7 @@ use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::AppState;
-use crate::gateway::state::AgentMigrationState;
-use crate::resource_pusher::build_embed_sidecar_payload;
 use crate::lifecycle::embed;
-use acowork_core::protocol::SidecarKind;
 
 // ── Response types ─────────────────────────────────────────────────────
 
@@ -445,17 +442,12 @@ pub async fn select_model(
 
             drop(gw);
 
-            // Same dimension — push to all running agents immediately via
-            // the generic sidecar push channel (ADR-030 C2).
-            if let Some(ref pusher) = state.pusher {
-                let gw = state.gateway_state.read().await;
-                if let Some((endpoint, spec_json)) = build_embed_sidecar_payload(&gw) {
-                    drop(gw);
-                    pusher
-                        .push_sidecar_endpoint(SidecarKind::Embed, endpoint, spec_json)
-                        .await;
-                }
-            }
+            // Sidecar endpoint push removed — ResourcePusher was a no-op.
+            // Sidecar endpoint push removed - ResourcePusher was a no-op.
+            // The MQTT publisher trigger below already republishes
+            // `acowork/global/embedding_models` (which includes the active
+            // model ID and dimension), so running agents pick up the change
+            // on the next publish cycle.
 
             tracing::info!(
                 model_id = %model_id,
@@ -765,152 +757,28 @@ pub async fn get_migration_progress(
     }))
 }
 
-/// POST /api/embedding-models/{id}/start-migration — start embedding migration for agents.
+/// POST /api/embedding-models/{id}/start-migration - start embedding migration for agents.
+///
+/// TODO(MQTT-migration): Embedding migration via MQTT is not yet implemented.
+/// The old `ResourcePusher::push_migration_start` was a no-op that always
+/// returned `false`, so migration never actually worked. When MQTT-based
+/// migration is implemented, restore the validation logic (embed process
+/// check, agent enumeration, running-state verification) and replace this
+/// stub with the real implementation.
 pub async fn start_migration(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Path(model_id): Path<String>,
-    Json(req): Json<StartMigrationRequest>,
+    Json(_req): Json<StartMigrationRequest>,
 ) -> impl IntoResponse {
-    // Read embed config
-    let (embed_endpoint, embed_model_id, embed_dimension) = {
-        let gw = state.gateway_state.read().await;
-        let eps = match &gw.embed_process {
-            Some(eps) => eps,
-            None => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(EmbeddingModelActionResponse {
-                        model_id,
-                        status: "error".to_string(),
-                        message: "Embedding service is not running".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-        let endpoint = format!("http://127.0.0.1:{}/v1", eps.port);
-        let mid = eps.active_model_id.clone().unwrap_or_default();
-        let dim = eps.active_dimension.unwrap_or(0);
-        (endpoint, mid, dim)
-    };
-
-    // Determine target agents
-    let target_agents: Vec<String> = if req.agent_ids.is_empty() {
-        // Default: all running agents
-        let gw = state.gateway_state.read().await;
-        gw.running_agents.keys().cloned().collect()
-    } else {
-        req.agent_ids
-    };
-
-    if target_agents.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(EmbeddingModelActionResponse {
-                model_id,
-                status: "error".to_string(),
-                message: "No agents to migrate. Start some agents first.".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    // Verify all target agents are running
-    {
-        let gw = state.gateway_state.read().await;
-        for aid in &target_agents {
-            if !gw.is_running(aid) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(EmbeddingModelActionResponse {
-                        model_id: model_id.clone(),
-                        status: "error".to_string(),
-                        message: format!(
-                            "Agent '{}' is not running. Please start it before migrating.",
-                            aid
-                        ),
-                    }),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    // Send MigrationStart to each agent and update their migration state
-    let mut started = 0u32;
-    let mut errors = Vec::new();
-
-    // ADR-033: MQTT replaces gRPC — migration push works via MQTT
-    // publisher trigger, so the pusher is always available when MQTT is.
-    let pusher = match &state.pusher {
-        Some(p) => p.clone(),
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(EmbeddingModelActionResponse {
-                    model_id,
-                    status: "error".to_string(),
-                    message: "Global resource pusher not available (MQTT not enabled)".to_string(),
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    for aid in &target_agents {
-        let request_id = uuid::Uuid::new_v4().to_string();
-
-        // Mark migration state in RunningAgentInfo
-        {
-            let mut gw = state.gateway_state.write().await;
-            if let Some(info) = gw.running_agents.get_mut(aid) {
-                info.migration = Some(AgentMigrationState {
-                    request_id: request_id.clone(),
-                    target_model_id: embed_model_id.clone(),
-                    target_dimension: embed_dimension,
-                    progress: None,
-                    done: false,
-                    error: None,
-                });
-            }
-        }
-
-        // Send MigrationStart to the agent
-        if pusher
-            .push_migration_start(aid, &request_id, &embed_endpoint, &embed_model_id, embed_dimension)
-            .await
-        {
-            started += 1;
-            tracing::info!(
-                agent_id = %aid,
-                request_id = %request_id,
-                "Sent MigrationStart to agent"
-            );
-        } else {
-            errors.push(format!("{}: push failed", aid));
-        }
-    }
-
-    if errors.is_empty() {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
         Json(EmbeddingModelActionResponse {
             model_id,
-            status: "migration_started".to_string(),
-            message: format!("Migration started for {} agent(s)", started),
-        })
+            status: "error".to_string(),
+            message: "Embedding migration via MQTT not yet implemented (ADR-033)".to_string(),
+        }),
+    )
         .into_response()
-    } else {
-        Json(EmbeddingModelActionResponse {
-            model_id,
-            status: "partial".to_string(),
-            message: format!(
-                "Migration started for {} agent(s), {} errors: {}",
-                started,
-                errors.len(),
-                errors.join("; ")
-            ),
-        })
-        .into_response()
-    }
 }
 
 // ── Router ─────────────────────────────────────────────────────────────

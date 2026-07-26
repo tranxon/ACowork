@@ -62,9 +62,11 @@ use search_backends::WebSearchEngine;
 /// * `resolver` - Workspace directory resolver (single source of truth)
 /// * `agent_id` - Agent ID for memory isolation and identity management
 /// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
-/// * `has_search_providers` - Whether at least one search provider is configured.
-///   When false, the `web_search` tool is skipped to avoid wasting LLM calls on
-///   a tool that always returns "Provider not configured".
+/// * `search_key_vault` - Shared search API key vault. The `web_search`
+///   tool is registered when the provider list is non-empty at call time.
+///   The engine reads from this vault (and `search_provider_list`) at
+///   call time, so MQTT-driven key updates take effect immediately.
+/// * `search_provider_list` - Shared list of configured search providers.
 /// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
@@ -75,7 +77,8 @@ pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
     tool_http_timeout_ms: u64,
-    has_search_providers: bool,
+    search_key_vault: search_backends::SharedSearchKeyVault,
+    search_provider_list: search_backends::SharedSearchProviderList,
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
@@ -133,15 +136,21 @@ pub fn all_builtin_tools(
         Arc::new(context_recall::ContextRecallTool::new(&agent_home)),
     ];
 
-    // Only register web_search when at least one search provider is configured.
-    // Without providers, the tool always fails with "Provider not configured",
-    // wasting LLM inference tokens on doomed calls.
+    // Only register web_search when at least one search provider is configured
+    // (checked from the shared provider list). Without providers, the tool
+    // always fails with "Provider not configured", wasting LLM inference
+    // tokens on doomed calls. The engine reads the vault/list dynamically at
+    // search time, so MQTT-driven updates take effect without re-registration.
+    let has_search_providers = !search_provider_list
+        .read()
+        .map(|l| l.is_empty())
+        .unwrap_or(true);
     if has_search_providers {
-        // Build search engine from agent's configured backends.
-        // Initially empty — backends are populated when search config arrives from Gateway.
-        // The timeout is passed through so that build_backend() creates backends with the configured value.
-        let search_engine =
-            WebSearchEngine::new(Vec::new(), Duration::from_millis(tool_http_timeout_ms));
+        let search_engine = WebSearchEngine::new(
+            search_key_vault,
+            search_provider_list,
+            Duration::from_millis(tool_http_timeout_ms),
+        );
         tools.push(Arc::new(web_search::WebSearchTool::new(search_engine)));
     }
 

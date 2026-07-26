@@ -785,7 +785,10 @@ pub fn save_agent_mcp_config_catalog(
 ) -> Result<(), String> {
     // Load current config to preserve local entries AND active_names.
     let current = load_agent_mcp_config(work_dir)
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to load agent_mcp.json, using default");
+            None
+        })
         .unwrap_or_default();
 
     let updated = AgentMcpConfig {
@@ -803,7 +806,10 @@ pub fn save_agent_mcp_config_catalog(
 /// Returns an empty vec if the file does not exist.
 pub fn load_merged_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
     load_agent_mcp_config(work_dir)
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to load agent_mcp.json for merge, using empty list");
+            None
+        })
         .unwrap_or_default()
         .merged()
 }
@@ -881,6 +887,126 @@ pub fn save_agent_search_config(work_dir: &Path, cfg: &AgentSearchConfig) -> Res
     );
 
     Ok(())
+}
+
+/// Save only the catalog portion of agent search config.
+///
+/// This is the search equivalent of `save_agent_mcp_config_catalog`:
+/// called by the MQTT poll loop when it receives `acowork/global/searches`.
+/// Replaces only the `catalog` field, preserving `providers`.
+pub fn save_agent_search_config_catalog(
+    work_dir: &Path,
+    catalog_providers: &[acowork_core::protocol::SearchProviderListItem],
+) -> Result<(), String> {
+    let current = load_agent_search_config(work_dir)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to load agent_search.json, using default");
+            None
+        })
+        .unwrap_or_default();
+
+    let updated = acowork_core::protocol::AgentSearchConfig {
+        providers: current.providers,
+        catalog: catalog_providers.to_vec(),
+    };
+
+    save_agent_search_config(work_dir, &updated)
+}
+
+// ── Per-agent provider config ────────────────────────────────────────────
+
+/// Filename for per-agent provider config in the workspace config directory.
+const AGENT_PROVIDER_CONFIG_FILE: &str = "agent_provider.json";
+
+/// Build the path to the agent provider config file.
+fn provider_config_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("config").join(AGENT_PROVIDER_CONFIG_FILE)
+}
+
+/// Load per-agent provider config from workspace/config/agent_provider.json.
+///
+/// Returns `None` if the file does not exist (no providers configured yet).
+/// Returns an error if the file exists but cannot be read or parsed.
+pub fn load_agent_provider_config(
+    work_dir: &Path,
+) -> Result<Option<acowork_core::protocol::AgentProviderConfig>, String> {
+    let path = provider_config_path(work_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let cfg: acowork_core::protocol::AgentProviderConfig = serde_json::from_str(&raw)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        provider_count = cfg.providers.len(),
+        version = cfg.version,
+        "Loaded agent provider config from workspace"
+    );
+
+    Ok(Some(cfg))
+}
+
+/// Save per-agent provider config to workspace/config/agent_provider.json.
+///
+/// Uses atomic write-tmp-rename to prevent corruption on crash.
+pub fn save_agent_provider_config(
+    work_dir: &Path,
+    cfg: &acowork_core::protocol::AgentProviderConfig,
+) -> Result<(), String> {
+    let config_dir = work_dir.join("config");
+    std::fs::create_dir_all(&config_dir).map_err(|e| {
+        format!("Failed to create config dir {}: {}", config_dir.display(), e)
+    })?;
+
+    let path = provider_config_path(work_dir);
+    let tmp_path = path.with_extension("tmp");
+
+    let json = serde_json::to_string_pretty(cfg)
+        .map_err(|e| format!("Failed to serialize agent provider config: {}", e))?;
+
+    std::fs::write(&tmp_path, &json)
+        .map_err(|e| format!("Failed to write {}: {}", tmp_path.display(), e))?;
+
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        )
+    })?;
+
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        provider_count = cfg.providers.len(),
+        version = cfg.version,
+        "Saved agent provider config to workspace"
+    );
+
+    Ok(())
+}
+
+/// Save provider config from an MQTT `AvailableProviders` payload.
+///
+/// This is the provider equivalent of `save_agent_mcp_config_catalog`:
+/// called by the MQTT poll loop when it receives `acowork/global/providers`.
+/// Only the `providers` list and `version` are replaced — if the file
+/// exists, the new payload fully replaces the old one.
+pub fn save_agent_provider_config_from_available(
+    work_dir: &Path,
+    providers: &[acowork_core::protocol::ProviderListItem],
+    version: u64,
+) -> Result<(), String> {
+    let cfg = acowork_core::protocol::AgentProviderConfig {
+        providers: providers.to_vec(),
+        version,
+    };
+    save_agent_provider_config(work_dir, &cfg)
 }
 
 #[cfg(test)]

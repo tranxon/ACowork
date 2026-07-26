@@ -1802,6 +1802,21 @@ After installation, ask the user to re-enable the MCP server.",
             key_count = search_key_vault.len(),
             "SessionManager: search config received (keys held in memory, not cached)"
         );
+
+        // Update the shared search key vault so backends can resolve API keys.
+        {
+            let mut vault = self.core.search_key_vault.write().unwrap();
+            vault.clear();
+            for entry in &search_key_vault {
+                vault.insert(entry.provider_id.clone(), entry.api_key.clone());
+            }
+        }
+
+        // Update the shared search provider list.
+        {
+            let mut list = self.core.search_provider_list.write().unwrap();
+            *list = search_list;
+        }
     }
 
     /// Update user identity from Gateway UserProfileUpdate push.

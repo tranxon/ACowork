@@ -223,10 +223,8 @@ pub async fn replace_catalog(
         resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &new_catalog);
     }
 
-    // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_mcp_catalog().await;
-    }
+    // Hot-push MCP config — handled by MQTT publisher trigger.
+    // (The old ResourcePusher stub has been removed.)
 
     // Return masked response
     let sensitive_keywords = ["key", "token", "secret", "password"];
@@ -278,11 +276,7 @@ pub async fn add_catalog_entry(
         resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
     }
 
-    // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_mcp_catalog().await;
-    }
-
+    // Hot-push MCP config to all running agents — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -357,11 +351,7 @@ pub async fn update_catalog_entry(
         resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
     }
 
-    // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_mcp_catalog().await;
-    }
-
+    // Hot-push MCP config — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
@@ -397,11 +387,7 @@ pub async fn remove_catalog_entry(
         resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
     }
 
-    // Hot-push MCP config to all running agents
-    if let Some(ref pusher) = state.pusher {
-        pusher.push_mcp_catalog().await;
-    }
-
+    // Hot-push MCP config — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
