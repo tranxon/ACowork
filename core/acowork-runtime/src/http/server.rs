@@ -1746,6 +1746,62 @@ async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfi
     );
 }
 
+/// Broadcast builtin-tool enabled flags to all active sessions after the
+/// `PUT /agents/{id}/builtin-tools` handler persists `agent_tools.json`.
+///
+/// Without this, the `tool_definitions` in each session's `ContextBuilder`
+/// go stale — the LLM still sees tools that were disabled at runtime, and
+/// cannot see tools that were enabled.
+///
+/// Uses the same `dispatch_tx` → `mqtt_dispatch_rx` → `dispatch_inbound`
+/// path as `broadcast_runtime_overrides`.  `dispatch_inbound` converts
+/// `InboundMessage::UpdateBuiltinTools` into `SessionMessage::UpdateBuiltinTools`
+/// and sends it to the session's inbox channel.
+async fn broadcast_builtin_tools_update(
+    state: &HttpState,
+    entries: &[crate::agent_config::AgentToolEntry],
+) {
+    let session_ids: Vec<String> = state
+        .session_snapshots
+        .read()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+
+    if session_ids.is_empty() {
+        return;
+    }
+
+    let tx_opt = state.dispatch_tx.lock().await.clone();
+    let Some(tx) = tx_opt else {
+        return;
+    };
+
+    let msg = InboundMessage::UpdateBuiltinTools {
+        entries: entries.to_vec(),
+    };
+    let mut sent = 0usize;
+    let mut skipped = 0usize;
+    for sid in session_ids {
+        match tx.send((sid.clone(), msg.clone())) {
+            Ok(()) => sent += 1,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "broadcast_builtin_tools_update: dispatch_tx send failed (session likely closed)"
+                );
+                skipped += 1;
+            }
+        }
+    }
+    tracing::info!(
+        agent_id = %state.agent_id,
+        sent,
+        skipped,
+        "PUT /agents/{{id}}/builtin-tools: live-broadcast UpdateBuiltinTools dispatched"
+    );
+}
+
 /// `GET /agents/{id}/tools` — Tools panel (merged: builtin + mcp + search).
 ///
 /// ADR-034 §7.6.5 defines the merged response schema:
@@ -2108,10 +2164,17 @@ async fn put_agent_builtin_tools(
         builtin_tools: req.builtin_tools,
     };
     match svc.put_builtin_tools(&id, body).await {
-        Ok(resp) => Ok(Json(serde_json::json!({
-            "agent_id": resp.agent_id,
-            "tools": resp.tools,
-        }))),
+        Ok(resp) => {
+            // ADR-029 fix: broadcast the updated tool flags to all active
+            // sessions so the LLM's `tool_definitions` stay in sync.
+            // Without this, toggling a tool in the UI panel would persist
+            // to `agent_tools.json` but never reach the `ContextBuilder`.
+            broadcast_builtin_tools_update(&state, &resp.tools).await;
+            Ok(Json(serde_json::json!({
+                "agent_id": resp.agent_id,
+                "tools": resp.tools,
+            })))
+        }
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -3970,6 +4033,135 @@ mod tests {
         let resp = client.get(&url).send().await.unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["found"], false);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// REGRESSION: `POST /sessions/{sid}/files` with `format=docx`
+    /// must land the blob at `<work_dir>/files/<doc_id>.docx`, NOT
+    /// `<work_dir>/files/<doc_id>.bin` (the pre-fix behaviour from
+    /// the broken `safe_extension` whitelist). The `doc_reader` tool
+    /// keys its extractor dispatch off the file extension, so a
+    /// `.bin` blob makes docx/pptx/xlsx/pdf uploads silently
+    /// un-readable by the LLM.
+    ///
+    /// Also asserts that `GET /files/{document_id}?format=docx`
+    /// returns the right Content-Type so the frontend preview /
+    /// downstream HTTP consumers see the file as the Office document
+    /// they uploaded.
+    #[tokio::test]
+    async fn test_http_upload_file_docx_lands_with_real_extension() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-upload-docx");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            attachment_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+        let session_id = "s-upload-docx";
+
+        // Step 1: Upload a docx blob. The multipart body mirrors what
+        // `apps/acowork-desktop/src-tauri/src/gateway_client.rs` sends:
+        //   - `file` field carrying the raw bytes (the file_name on the
+        //     part is informational only)
+        //   - `format` field carrying the lowercase extension
+        //     ("docx", "pptx", "xlsx", "pdf", …)
+        let docx_bytes: Vec<u8> = b"PK\x03\x04pretend-docx-bytes".to_vec(); // ZIP magic
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(docx_bytes.clone())
+                    .file_name("report.docx".to_string())
+                    .mime_str("application/octet-stream")
+                    .unwrap(),
+            )
+            .text("format", "docx".to_string());
+
+        let url = format!("{}/sessions/{}/files", base, session_id);
+        let resp = client.post(&url).multipart(form).send().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "POST /sessions/{{sid}}/files must accept the docx upload, got {}",
+            resp.status()
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let document_id = body["documentId"].as_str().expect("documentId present").to_string();
+        let format = body["format"].as_str().expect("format echoed back");
+        assert_eq!(format, "docx", "upload response must echo the requested format");
+
+        // Step 2: The blob MUST be on disk with the real .docx extension.
+        // Pre-fix this landed as `<doc_id>.bin`, which `doc_reader`
+        // would reject with "Unsupported document format".
+        let suffixed = temp_dir.join("files").join(format!("{}.docx", document_id));
+        assert!(
+            suffixed.exists(),
+            "docx blob must land at {} (got dir contents: {:?})",
+            suffixed.display(),
+            std::fs::read_dir(temp_dir.join("files"))
+                .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+        // And it MUST NOT be sitting at .bin alongside.
+        let bin_path = temp_dir.join("files").join(format!("{}.bin", document_id));
+        assert!(
+            !bin_path.exists(),
+            "docx must not regress to .bin fallback, but {} exists",
+            bin_path.display()
+        );
+
+        // Step 3: GET /files/{document_id}?format=docx returns the right
+        // MIME so the desktop chip renderer / any HTTP consumer sees the
+        // blob as a Word document, not generic octet-stream.
+        let url = format!("{}/files/{}?format=docx", base, document_id);
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(
+            ct,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "Content-Type for docx download must be the Office Word MIME, got {ct:?}"
+        );
+        let bytes = resp.bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), docx_bytes.as_slice(), "downloaded bytes must match upload");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

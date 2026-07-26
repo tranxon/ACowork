@@ -372,7 +372,8 @@ MQTT PUB `acowork/agents/{id}/sessions/control/chat_message` 的 `attached_items
 ```
 
 `documentId` 是内容哈希 + 随机后缀（沿用旧算法），用于在 `<work_dir>/files/`
-定位 blob。**同一内容二次上传返回同一 `documentId`**（去重语义，磁盘只有一份
+定位 blob。磁盘上 blob 的实际文件名为 `<documentId>.<safe_ext>`（见上文）。
+**同一内容二次上传返回同一 `documentId`**（去重语义，磁盘只有一份
 blob，消息 JSONL 中的引用也指向同一 ID）。
 
 错误码：
@@ -648,4 +649,5 @@ Authorization: Bearer <token>
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
 6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /
+   `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。��通过 HTTP POST `/message` /
    `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。

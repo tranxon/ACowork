@@ -744,52 +744,33 @@ impl SessionTask {
                     let raw_user_message = content.clone();
 
                     // ADR-046: Build a *minimal* prompt-side hint for
-                    // attached workspace files / selections. The full
-                    // attachment metadata is already in the JSONL as separate
-                    // system entries (written above), so the LLM has the
-                    // authoritative record. The prompt hint exists only to
-                    // point the LLM at the right tool call when the user
-                    // asks about an attached file by name.
+                    // attached workspace files / selections AND user-uploaded
+                    // documents. The full attachment metadata is already in
+                    // the JSONL as separate system entries (written above),
+                    // so the LLM has the authoritative record. The prompt
+                    // hint exists only to point the LLM at the right tool
+                    // call when the user asks about an attached file by name.
                     //
                     // No doc_reader pre-extraction (the LLM calls it
                     // itself), no human-readable file list (frontend
                     // renders that from the JSONL entries), no "The
                     // following workspace files..." preamble.
-                    let mut enriched_content = content.clone();
-                    if let Some(ref items) = attached_items
-                        && !items.is_empty() {
-                            let hint_lines: Vec<String> = items.iter()
-                                .filter_map(|item| match item {
-                                    acowork_core::protocol::AttachedItem::AttachedFile { abs_path, .. } => {
-                                        Some(format!("- file: `{}`", abs_path))
-                                    }
-                                    acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, start_line, end_line, .. } => {
-                                        let line_info = if start_line != end_line {
-                                            format!(" (L{}-L{})", start_line, end_line)
-                                        } else {
-                                            format!(" (L{})", start_line)
-                                        };
-                                        Some(format!("- file: `{}`{}", abs_path, line_info))
-                                    }
-                                    // Folders and uploaded files don't need a prompt hint —
-                                    // the LLM can't walk a directory via read_file and
-                                    // uploaded blobs are not filesystem-accessible.
-                                    _ => None,
-                                })
-                                .collect();
-                            if !hint_lines.is_empty() {
-                                let sep = if enriched_content.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("{}\n\n", enriched_content)
-                                };
-                                enriched_content = format!(
-                                    "{}[Attached workspace files — use `read_file` / `doc_reader` on demand]\n{}",
-                                    sep,
-                                    hint_lines.join("\n")
-                                );
-                            }
-                        }
+                    //
+                    // The hint is built by the pure helper
+                    // [`build_attachment_hint`] (kept module-level so the
+                    // tests below can pin the wire shape). Image uploads
+                    // (AttachedItem::ImageUpload) are NOT hinted here —
+                    // they flow into the multimodal `ContentPart::ImageUrl`
+                    // path below, so the LLM sees the picture directly.
+                    // Folders (AttachedFolder) are also intentionally
+                    // unhinted — the LLM has no tool to walk a directory
+                    // tree in one shot.
+                    let agent_home = Some(agent_loop.core.config.work_dir.clone());
+                    let enriched_content = build_attachment_hint(
+                        &content,
+                        attached_items.as_deref(),
+                        agent_home.as_deref(),
+                    );
 
                     // Apply skill instructions to ContextBuilder (system prompt injection).
                     // This replaces the old behavior of prepending skill text to the user message,
@@ -869,8 +850,68 @@ impl SessionTask {
                     // loop run (safety net for idle sessions).
                     agent_loop.core.debug_observer.check_pending_injection();
 
+                    // ── ADR-046: synthesise image content parts from attached_items ──
+                    //
+                    // Pre-ADR-046, the frontend inlined base64 image payloads in
+                    // `params.content_parts`. ADR-046 moved attachment metadata
+                    // into `attached_items` (the `image_upload` variant carries
+                    // document_id / format / dimensions only — never raw bytes).
+                    //
+                    // The Runtime now reads each image blob from the
+                    // `AttachmentService` slot populated in Phase B and emits
+                    // `ContentPart::ImageUrl` entries; any legacy `content_parts`
+                    // sent by the frontend are preserved (text first) and the
+                    // derived images are appended. If `attached_items` is
+                    // None/empty, `content_parts` is forwarded unchanged — the
+                    // legacy pre-046 path stays bit-compatible.
+                    //
+                    // Read errors are not silently dropped — they short-circuit
+                    // the chat turn with the same `ChunkEvent::Error` shape used
+                    // by `agent_loop.run` failures below, so the frontend sees a
+                    // consistent error surface regardless of which stage failed.
+                    let final_content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> =
+                        match attached_items.as_deref() {
+                            Some(items) if !items.is_empty() => {
+                                match crate::agent::attachment_to_image::derive_image_parts(
+                                    agent_loop.core.attachment_service(),
+                                    items,
+                                ).await {
+                                    Ok(derived) => crate::agent::attachment_to_image::merge_content_parts(
+                                        content_parts, derived,
+                                    ),
+                                    Err(e) => {
+                                        tracing::error!(
+                                            session_id = %session_id,
+                                            error = %e,
+                                            "Failed to derive image content_parts from attached_items"
+                                        );
+                                        if let Some(ref tx) = chunk_tx {
+                                            let (user_message, detail, error_type) = e.error_info();
+                                            let event = SessionChunkEvent {
+                                                session_id: session_id.clone(),
+                                                event: ChunkEvent::Error {
+                                                    user_message,
+                                                    detail,
+                                                    error_type,
+                                                    message_id: message_id.clone(),
+                                                },
+                                            };
+                                            if tx.send(event).await.is_err() {
+                                                tracing::warn!(
+                                                    session_id = %session_id,
+                                                    "Failed to send Error chunk event (derive failure)"
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => content_parts,
+                        };
+
                     match agent_loop
-                        .run(&enriched_content, &mut context_builder, content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()))
+                        .run(&enriched_content, &mut context_builder, final_content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()))
                         .await
                     {
                         Ok(response) => {
@@ -1097,6 +1138,14 @@ impl SessionTask {
                         }
                     }
                     agent_loop.core.rebuild_all_tools();
+                    // ADR-029 fix: rebuild tool_definitions for the LLM's
+                    // context builder so the LLM sees the updated tool list.
+                    // Without this, the LLM's tool_definitions go stale when
+                    // tools are enabled/disabled at runtime.
+                    rebuild_context_tool_definitions(
+                        &agent_loop.core.builtin_tools,
+                        &mut context_builder,
+                    );
                 }
                 // ── ADR-030 C3: dynamic builtin tool add/remove ──────
                 //
@@ -1121,6 +1170,10 @@ impl SessionTask {
                         false
                     };
                     agent_loop.core.rebuild_all_tools();
+                    rebuild_context_tool_definitions(
+                        &agent_loop.core.builtin_tools,
+                        &mut context_builder,
+                    );
                     tracing::info!(
                         session_id = %session_id,
                         tool = %tool_name,
@@ -1134,6 +1187,10 @@ impl SessionTask {
                     let removed = agent_loop.core.builtin_tools.len() < before;
                     if removed {
                         agent_loop.core.rebuild_all_tools();
+                        rebuild_context_tool_definitions(
+                            &agent_loop.core.builtin_tools,
+                            &mut context_builder,
+                        );
                     }
                     tracing::info!(
                         session_id = %session_id,
@@ -1445,6 +1502,159 @@ impl SessionTask {
     }
 }
 
+/// Rebuild the LLM-visible tool definitions from `builtin_tools` (enabled
+/// only) and update the `context_builder` so the next LLM call sees the
+/// current tool set.
+///
+/// **Why this is needed:** `UpdateBuiltinTools`, `AddDynamicBuiltinTool`,
+/// and `RemoveDynamicBuiltinTool` all modify `agent_loop.core.builtin_tools`
+/// and call `rebuild_all_tools()` to refresh the dispatch list, but they did
+/// NOT update the `tool_definitions` stored in `ContextBuilder`. This caused
+/// a mismatch between what the LLM *sees* (stale tool_definitions) and what
+/// the runtime can *dispatch* (fresh all_tools):
+///
+/// - Tool enabled at runtime → LLM never sees it → never calls it
+/// - Tool disabled at runtime → LLM still sees it → calls it → "Unknown tool"
+///
+/// See also: `loop_context.rs` MCP injection — MCP tools are injected
+/// separately at the `build_chat_request` level, not in tool_definitions.
+fn rebuild_context_tool_definitions(
+    builtin_tools: &[crate::agent::agent_core::BuiltinToolEntry],
+    context_builder: &mut ContextBuilder,
+) {
+    let new_tool_definitions: Vec<serde_json::Value> = builtin_tools
+        .iter()
+        .filter(|e| e.enabled)
+        .map(|e| {
+            let spec = e.tool.spec();
+            serde_json::to_value(&spec).unwrap_or_default()
+        })
+        .collect();
+    tracing::info!(
+        old_count = context_builder.tool_definitions().map(|t| t.len()).unwrap_or(0),
+        new_count = new_tool_definitions.len(),
+        "Rebuilding context builder tool definitions from builtin_tools"
+    );
+    context_builder.set_tool_definitions(new_tool_definitions);
+}
+
+// ---------------------------------------------------------------------------
+// ADR-046 §2.4 — prompt-side attachment hint builder
+// ---------------------------------------------------------------------------
+//
+// Pure helper, lifted out of the ChatMessage handler so unit tests can pin
+// the exact wire shape the LLM sees. Returns the *enriched* user-message
+// content (i.e. original text + a small bracketed "use `read_file` /
+// `doc_reader`" hint when at least one hintable item is present), or the
+// original content unchanged when nothing is hintable.
+//
+// Hint contract (ADR-046 §2.4 + this revision):
+//
+//   workspace file   → - file: `<abs_path>`
+//   workspace sel    → - file: `<abs_path>` (L10-L25)  (range collapsed when same line)
+//   file_upload      → - file: `<filename>` (id=<doc_id>, format=<fmt>, path=<abs_path>)
+//   image_upload     → (no hint — flows via multimodal ContentPart::ImageUrl)
+//   attached_folder  → (no hint — no single-tool way to enumerate a folder)
+//
+// The on-disk path for `file_upload` mirrors the layout chosen by
+// `RuntimeAttachmentService::safe_extension` and
+// `RuntimeAttachmentService::write_blob_atomic`
+// (`<work_dir>/files/<document_id>.<safe_extension>`). `doc_reader`
+// resolves blobs by absolute path and dispatches on the file extension —
+// so the `<id>.pdf` / `<id>.docx` suffix is the only contract surface
+// between the upload pipeline and the read tool.
+fn build_attachment_hint(
+    user_content: &str,
+    items: Option<&[acowork_core::protocol::AttachedItem]>,
+    work_dir: Option<&str>,
+) -> String {
+    let mut enriched = user_content.to_string();
+    let Some(items) = items else {
+        return enriched;
+    };
+    if items.is_empty() {
+        return enriched;
+    }
+
+    let hint_lines: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            acowork_core::protocol::AttachedItem::AttachedFile { abs_path, .. } => {
+                Some(format!("- file: `{}`", abs_path))
+            }
+            acowork_core::protocol::AttachedItem::AttachedSelection {
+                abs_path,
+                start_line,
+                end_line,
+                ..
+            } => {
+                let line_info = if start_line != end_line {
+                    format!(" (L{}-L{})", start_line, end_line)
+                } else {
+                    format!(" (L{})", start_line)
+                };
+                Some(format!("- file: `{}`{}", abs_path, line_info))
+            }
+            acowork_core::protocol::AttachedItem::FileUpload {
+                document_id,
+                filename,
+                format,
+                ..
+            } => {
+                // The on-disk path mirrors
+                // `RuntimeAttachmentService::write_blob_atomic`:
+                // <work_dir>/files/<document_id>.<safe_extension>. Without
+                // `work_dir` we still emit the hint but mark the path as
+                // `<work_dir>/...` so the LLM knows it can be resolved
+                // once `current_work_dir` is set by the SessionManager.
+                let ext = match format.as_str() {
+                    "pdf" => "pdf",
+                    "docx" => "docx",
+                    "pptx" => "pptx",
+                    "xlsx" => "xlsx",
+                    "png" => "png",
+                    "jpg" | "jpeg" => "jpg",
+                    "gif" => "gif",
+                    "webp" => "webp",
+                    _ => "bin",
+                };
+                let path_str = match work_dir {
+                    Some(wd) => format!(
+                        "{}/files/{}.{}",
+                        wd.trim_end_matches('/'),
+                        document_id,
+                        ext
+                    ),
+                    None => format!("<work_dir>/files/{}.{}", document_id, ext),
+                };
+                Some(format!(
+                    "- file: `{}` (id={}, format={}, path={})",
+                    filename, document_id, format, path_str
+                ))
+            }
+            // Image upload flows through the multimodal
+            // ContentPart::ImageUrl path above — no prompt hint needed.
+            // Folder has no single-tool enumeration in our toolchain.
+            acowork_core::protocol::AttachedItem::ImageUpload { .. }
+            | acowork_core::protocol::AttachedItem::AttachedFolder { .. } => None,
+        })
+        .collect();
+
+    if !hint_lines.is_empty() {
+        let sep = if enriched.is_empty() {
+            String::new()
+        } else {
+            format!("{}\n\n", enriched)
+        };
+        enriched = format!(
+            "{}[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n{}",
+            sep,
+            hint_lines.join("\n")
+        );
+    }
+    enriched
+}
+
 #[cfg(test)]
 mod tests {
     // ADR-046: replaced the old `UploadedDocumentEntry` tests with
@@ -1505,5 +1715,186 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("width"));
         assert!(!json.contains("height"));
+    }
+
+    // -----------------------------------------------------------------
+    // ADR-046 §2.4 — `build_attachment_hint` regression suite
+    //
+    // Pre-revision: `session_task.rs` ChatMessage handler built the
+    // hint inline with a `.filter_map(...)` that returned `None` for
+    // every `AttachedItem::FileUpload`. Result: docx/pptx/xlsx/pdf
+    // uploads landed in `<work_dir>/files/<id>.bin` (broken whitelist)
+    // AND were invisible to the LLM (no hint ⇒ doc_reader never
+    // invoked). These tests pin both halves of the fix.
+    // -----------------------------------------------------------------
+
+    use super::build_attachment_hint;
+
+    /// No attachments → user content returned verbatim (no hint block).
+    #[test]
+    fn test_build_attachment_hint_no_items_returns_verbatim() {
+        let s = build_attachment_hint("hello", None, Some("/work"));
+        assert_eq!(s, "hello");
+    }
+
+    /// Empty vec → same as None (frontend always sends an empty array
+    /// rather than omitting the field for a turn with no attachments).
+    #[test]
+    fn test_build_attachment_hint_empty_vec_returns_verbatim() {
+        let s = build_attachment_hint("hello", Some(&[]), Some("/work"));
+        assert_eq!(s, "hello");
+    }
+
+    /// Workspace `AttachedFile` keeps the pre-046 hint shape exactly
+    /// — no `(id=, format=, path=)` clutter, just the absolute path.
+    /// This protects the chip-renderer / read_file call sites that
+    /// were already wired up before this revision.
+    #[test]
+    fn test_build_attachment_hint_workspace_file_shape_unchanged() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "/work/src/main.rs".to_string(),
+            name: "main.rs".to_string(),
+        }];
+        let s = build_attachment_hint("review this", Some(&items), Some("/work"));
+        assert!(s.contains("- file: `/work/src/main.rs`"));
+        assert!(s.contains("[Attached workspace files & uploads"));
+        // The original user text is preserved verbatim — no [Attached
+        // context:] prefix is allowed per ADR-046 §2.1.
+        assert!(s.starts_with("review this\n\n"));
+    }
+
+    /// `AttachedSelection` with same start/end line → single line
+    /// marker `(L10)`. Different lines → range `(L10-L25)`.
+    #[test]
+    fn test_build_attachment_hint_selection_range() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedSelection {
+            abs_path: "/work/lib.rs".to_string(),
+            name: "lib.rs".to_string(),
+            start_line: 10,
+            end_line: 25,
+        }];
+        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        assert!(s.contains("- file: `/work/lib.rs` (L10-L25)"), "got: {s}");
+
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedSelection {
+            abs_path: "/work/lib.rs".to_string(),
+            name: "lib.rs".to_string(),
+            start_line: 7,
+            end_line: 7,
+        }];
+        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        assert!(s.contains("- file: `/work/lib.rs` (L7)"), "got: {s}");
+    }
+
+    /// REGRESSION: `FileUpload` MUST show up in the hint block with
+    /// `(id, format, path)` triple — pre-revision the filter_map
+    /// returned `None` for this variant, leaving docx/pptx/xlsx/pdf
+    /// uploads invisible to the LLM (no doc_reader call possible).
+    #[test]
+    fn test_build_attachment_hint_file_upload_emits_path_metadata() {
+        let items = vec![acowork_core::protocol::AttachedItem::FileUpload {
+            document_id: "0123456789ab-3".to_string(),
+            filename: "report.pdf".to_string(),
+            format: "pdf".to_string(),
+            size_bytes: 12345,
+        }];
+        let s = build_attachment_hint("summarise this contract", Some(&items), Some("/work"));
+        assert!(s.starts_with("summarise this contract\n\n"));
+        assert!(
+            s.contains("- file: `report.pdf` (id=0123456789ab-3, format=pdf, path=/work/files/0123456789ab-3.pdf)"),
+            "got: {s}"
+        );
+        // The on-disk suffix must come from the format, NOT the old
+        // hardcoded `.bin` (the safe_extension whitelist regression).
+        assert!(s.contains(".pdf)"), "docx should land with real extension, got: {s}");
+        assert!(!s.contains(".bin"), "must not regress to .bin fallback, got: {s}");
+    }
+
+    /// Office docs all emit their real extension in the hint path —
+    /// this is what `doc_reader` keys on. Without real extensions
+    /// the LLM would invoke doc_reader and get an "Unsupported
+    /// document format" error back.
+    #[test]
+    fn test_build_attachment_hint_office_docs_emit_real_extensions() {
+        for (fmt, ext) in [("pdf", "pdf"), ("docx", "docx"), ("pptx", "pptx"), ("xlsx", "xlsx")] {
+            let items = vec![acowork_core::protocol::AttachedItem::FileUpload {
+                document_id: "0123456789ab-3".to_string(),
+                filename: format!("report.{fmt}"),
+                format: fmt.to_string(),
+                size_bytes: 100,
+            }];
+            let s = build_attachment_hint("x", Some(&items), Some("/work"));
+            assert!(
+                s.contains(&format!("path=/work/files/0123456789ab-3.{ext}")),
+                "format={fmt} must yield .{ext} suffix in hint, got: {s}"
+            );
+        }
+    }
+
+    /// Without `work_dir` the path segment becomes the literal
+    /// `<work_dir>/files/<id>.<ext>` so the LLM at least knows the
+    /// shape — better than a fabricated absolute path that points
+    /// nowhere. (CLI / detached sessions may legitimately have no
+    /// `current_work_dir` set.)
+    #[test]
+    fn test_build_attachment_hint_falls_back_to_placeholder_path() {
+        let items = vec![acowork_core::protocol::AttachedItem::FileUpload {
+            document_id: "abc123-0".to_string(),
+            filename: "report.docx".to_string(),
+            format: "docx".to_string(),
+            size_bytes: 1,
+        }];
+        let s = build_attachment_hint("x", Some(&items), None);
+        assert!(
+            s.contains("path=<work_dir>/files/abc123-0.docx"),
+            "without work_dir hint must use placeholder, got: {s}"
+        );
+    }
+
+    /// Mixed attachments preserve order and the prompt hint contains
+    /// every hintable variant — workspace file first, file_upload
+    /// second — while image_upload (multimodal) is silently skipped.
+    #[test]
+    fn test_build_attachment_hint_mixed_items_in_order() {
+        let items = vec![
+            acowork_core::protocol::AttachedItem::AttachedFile {
+                abs_path: "/work/src/lib.rs".to_string(),
+                name: "lib.rs".to_string(),
+            },
+            acowork_core::protocol::AttachedItem::FileUpload {
+                document_id: "0123456789ab-3".to_string(),
+                filename: "report.docx".to_string(),
+                format: "docx".to_string(),
+                size_bytes: 1,
+            },
+            acowork_core::protocol::AttachedItem::ImageUpload {
+                document_id: "img1".to_string(),
+                filename: "screen.png".to_string(),
+                format: "png".to_string(),
+                size_bytes: 1,
+                width: Some(800),
+                height: Some(600),
+            },
+        ];
+        let s = build_attachment_hint("look at these", Some(&items), Some("/work"));
+        let ws_idx = s.find("/work/src/lib.rs").expect("workspace hint present");
+        let doc_idx = s.find("report.docx").expect("file upload hint present");
+        assert!(ws_idx < doc_idx, "workspace hint must come before upload hint, got: {s}");
+        assert!(!s.contains("screen.png"), "image_upload must not appear in hint (multimodal path)");
+    }
+
+    /// `AttachedFolder` (Add to Chat directory attach) gets no hint
+    /// — there is no single tool call the LLM can make to enumerate
+    /// a folder. The JSONL record still shows the user attached it.
+    #[test]
+    fn test_build_attachment_hint_folder_is_silent() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedFolder {
+            abs_path: "/work/src".to_string(),
+            name: "src".to_string(),
+        }];
+        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        // With only a folder (no hintable items) we return verbatim
+        // — the user text must NOT be polluted with an empty hint block.
+        assert_eq!(s, "x");
     }
 }

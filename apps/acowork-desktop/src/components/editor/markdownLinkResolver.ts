@@ -261,6 +261,13 @@ export async function openFirstResolved(
     agentId: string,
     candidates: ResolvedAsset[],
     action: "openFile" | "openPreview",
+    /** Optional 1-based line number to reveal after opening (edit mode only).
+     *  Forwarded to `openFile(..., line)` which sets `cursorLine` on the
+     *  open file; `FileEditorPanel` then `revealLineInCenter(line)` +
+     *  `setPosition({ lineNumber: line, column: 1 })`. Ignored when
+     *  `action === "openPreview"`. ADR-046 § follow-up: extending this to
+     *  carry an `endLine` selection range is deferred to a future change. */
+    line?: number,
 ): Promise<OpenResolutionResult> {
     if (candidates.length === 0) return { opened: false, tried: 0 };
 
@@ -269,7 +276,7 @@ export async function openFirstResolved(
         const exists = await fileExists(agentId, c.workspaceId, c.relPath);
         if (!exists) continue;
         if (action === "openFile") {
-            await store.openFile(agentId, c.workspaceId, c.relPath);
+            await store.openFile(agentId, c.workspaceId, c.relPath, line);
         } else {
             await store.openPreview(agentId, c.workspaceId, c.relPath);
         }

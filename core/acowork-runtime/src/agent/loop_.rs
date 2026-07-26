@@ -661,8 +661,26 @@ impl AgentLoop {
 
             // Persist user message to JSONL with frontend-generated ID
             // so the frontend can deduplicate by ID when polling.
+            //
+            // ADR-046 §2.1: The JSONL `user` entry MUST store the user's
+            // original input verbatim — no `[Attached context:]` prefix,
+            // no `[Attached workspace files & uploads …]` hint block, no
+            // inlined document body. `user_message` carries those
+            // enrichments because we also feed it to the LLM via
+            // `history.append(...)` below; `raw_user_message` (when the
+            // caller supplied it, see `session_task.rs:741-742`) is the
+            // clean copy. Pre-046 call sites that pass `None` for
+            // `raw_user_message` fall back to `user_message` so the
+            // binary contract for legacy tests stays intact.
+            let persisted_user_message: &str =
+                raw_user_message.unwrap_or(user_message);
             if let Some(ref conversation) = self.session.conversation {
-                conversation.append_message_with_id("user", user_message, None, message_id);
+                conversation.append_message_with_id(
+                    "user",
+                    persisted_user_message,
+                    None,
+                    message_id,
+                );
             }
 
             // Async: generate session title from first user message using
@@ -3232,5 +3250,174 @@ mod tests {
         assert!(!session_core.try_send_chunk(ChunkEvent::Stopped {
             content: "stopped".to_string(),
         }));
+    }
+
+    /// ADR-046 §2.1: `run()` persists the raw (un-enriched) user message
+    /// to JSONL when `raw_user_message` is provided. The enriched version
+    /// (with `[Attached workspace files & uploads …]` hints) goes to the
+    /// LLM via `history.append()` but MUST NOT land in the JSONL.
+    #[tokio::test]
+    async fn test_run_persists_raw_user_message_not_enriched() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-raw-user-msg";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _meta_rx) = ConversationSession::new(
+            work_dir,
+            session_id,
+            config,
+            0, // max_sessions
+            committed,
+        )
+        .unwrap();
+
+        let manifest = test_manifest();
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools = entries(vec![]);
+        let budget = test_budget();
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            manifest,
+            provider,
+            tools,
+            budget,
+            None,
+            Some(conversation),
+        );
+
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let enriched = "帮我看看这个文件\n\n[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n- file: `buglist.docx` (id=abc123, format=docx)";
+        let raw = "帮我看看这个文件";
+        let result = agent_loop
+            .run(
+                enriched,
+                &mut context_builder,
+                None,
+                Some("msg-1".to_string()),
+                Some(raw),
+            )
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+
+        // Read the JSONL file and verify the user entry is the raw message
+        let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
+        let mut content = String::new();
+        std::fs::File::open(&jsonl_path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+
+        let user_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""role":"user""#))
+            .collect();
+
+        assert_eq!(
+            user_lines.len(),
+            1,
+            "Expected exactly one user entry in JSONL, got {}: {user_lines:?}",
+            user_lines.len(),
+        );
+        let user_entry = user_lines[0];
+        // The user entry MUST contain the raw message
+        assert!(
+            user_entry.contains(raw),
+            "JSONL user entry should contain raw message, got: {user_entry}",
+        );
+        // The user entry MUST NOT contain the enriched hint
+        assert!(
+            !user_entry.contains("Attached workspace files"),
+            "JSONL user entry should NOT contain enriched hint, got: {user_entry}",
+        );
+        // The message_id should be present
+        assert!(
+            user_entry.contains(r#""id":"msg-1""#),
+            "JSONL user entry should have the correct message id, got: {user_entry}",
+        );
+    }
+
+    /// When `raw_user_message` is None (legacy callers), `run()` falls back
+    /// to `user_message` for JSONL persistence — backward-compatible.
+    #[tokio::test]
+    async fn test_run_falls_back_to_user_message_when_raw_is_none() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-raw-none-fallback";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _meta_rx) = ConversationSession::new(
+            work_dir,
+            session_id,
+            config,
+            0,
+            committed,
+        )
+        .unwrap();
+
+        let manifest = test_manifest();
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools = entries(vec![]);
+        let budget = test_budget();
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            manifest,
+            provider,
+            tools,
+            budget,
+            None,
+            Some(conversation),
+        );
+
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let enriched = "帮我看看这个文件\n\n[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n- file: `buglist.docx` (id=abc123, format=docx)";
+        let result = agent_loop
+            .run(
+                enriched,           // no raw_user_message → user_message is used as-is
+                &mut context_builder,
+                None,
+                Some("msg-2".to_string()),
+                None,               // raw_user_message = None
+            )
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+
+        let jsonl_path = work_dir.join("conversations").join(format!("{session_id}.jsonl"));
+        let mut content = String::new();
+        std::fs::File::open(&jsonl_path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+
+        let user_lines: Vec<&str> = content
+            .lines()
+            .filter(|l| l.contains(r#""role":"user""#))
+            .collect();
+
+        assert_eq!(user_lines.len(), 1, "Expected one user entry, got: {user_lines:?}");
+        let user_entry = user_lines[0];
+        // Without raw_user_message, the enriched content is used as-is (backward compat)
+        assert!(
+            user_entry.contains("Attached workspace files"),
+            "When raw_user_message=None, JSONL should contain enriched hint, got: {user_entry}",
+        );
     }
 }

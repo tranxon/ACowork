@@ -15,6 +15,8 @@ import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
+import type { AttachedItem } from "../../lib/types";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -235,6 +237,24 @@ const MessageBubble = React.memo(function MessageBubble({
   // profile changes (name/avatar edits update all rendered bubbles instantly).
   const liveUserName = liveUserNameProp ?? message.senderDisplayName;
 
+  // ── Attachment chip handlers ────────────────────────────────────────
+  // Stable per (currentSessionId) so re-renders don't churn React.memo
+  // peers. Reads agentId / workspaceId via `getState()` to avoid wiring
+  // every store into the bubble's reactive deps — same pattern used by
+  // the `<a>` markdown-link handler further down.
+  const handleChipClick = useCallback((item: AttachedItem) => {
+    const agentId = useAgentStore.getState().selectedAgentId;
+    if (!agentId) return;
+    const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(currentSessionId);
+    void openAttachedRef({ item, agentId, currentWorkspaceId: workspaceId });
+  }, [currentSessionId]);
+
+  const handleChipRemove = useCallback(() => {
+    const agentId = useAgentStore.getState().selectedAgentId;
+    if (!agentId) return;
+    useChatStore.getState().removeMessageAttachment(agentId, currentSessionId, message.id);
+  }, [currentSessionId, message.id]);
+
   if (message.type === "user") {
     return (
       <MessageContentWrapper>
@@ -362,6 +382,7 @@ const MessageBubble = React.memo(function MessageBubble({
                 sizeBytes: (meta.size_bytes as number) ?? 0,
               }}
               compact
+              onRemove={handleChipRemove}
             />
           </div>
         </MessageContentWrapper>
@@ -387,6 +408,7 @@ const MessageBubble = React.memo(function MessageBubble({
               }}
               agentId={selectedAgentId}
               compact
+              onRemove={handleChipRemove}
             />
           </div>
         </MessageContentWrapper>
@@ -404,6 +426,8 @@ const MessageBubble = React.memo(function MessageBubble({
                 name: (meta.name as string) ?? (meta.abs_path as string) ?? "",
               }}
               compact
+              onChipClick={handleChipClick}
+              onRemove={handleChipRemove}
             />
           </div>
         </MessageContentWrapper>
@@ -423,6 +447,8 @@ const MessageBubble = React.memo(function MessageBubble({
                 endLine: (meta.end_line as number) ?? 1,
               }}
               compact
+              onChipClick={handleChipClick}
+              onRemove={handleChipRemove}
             />
           </div>
         </MessageContentWrapper>
@@ -440,6 +466,8 @@ const MessageBubble = React.memo(function MessageBubble({
                 name: (meta.name as string) ?? (meta.abs_path as string) ?? "",
               }}
               compact
+              onChipClick={handleChipClick}
+              onRemove={handleChipRemove}
             />
           </div>
         </MessageContentWrapper>

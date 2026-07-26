@@ -687,6 +687,18 @@ interface ChatStore {
   clearAttachedContext: (agentId: string, sessionId: string) => void;
   /** Add a message to the per-session queue (typed during streaming) */
   addQueuedMessage: (agentId: string, sessionId: string, message: string) => void;
+  /** Remove a single attachment entry from the in-memory message list.
+   *
+   *  Each ADR-046 attachment (file_upload / image_upload / attached_*)
+   *  is rendered as a standalone system entry with its own `message.id`.
+   *  Calling this with that id drops the entry from `messages[]`.
+   *
+   *  MVP scope: in-memory only. The corresponding JSONL line is NOT
+   *  removed — a session reload will bring the attachment back, and
+   *  runtime token accounting already reflects the attached item.
+   *  Bidirectional sync (delete from JSONL + tell the runtime) is
+   *  deferred to a follow-up; see ADR-046 follow-ups. */
+  removeMessageAttachment: (agentId: string, sessionId: string, messageId: string) => void;
   /** Remove a message from the per-session queue by index */
   removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
   /** Replace the entire per-session queue (e.g. after sending all) */
@@ -1887,6 +1899,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const ss = getSessionState(state, agentId, sessionId);
       return updateSessionState(state, agentId, sessionId, {
         queuedMessages: ss.queuedMessages.filter((_, i) => i !== index),
+      });
+    });
+  },
+
+  removeMessageAttachment: (agentId: string, sessionId: string, messageId: string) => {
+    set((state) => {
+      const ss = getSessionState(state, agentId, sessionId);
+      return updateSessionState(state, agentId, sessionId, {
+        messages: ss.messages.filter((m) => m.id !== messageId),
       });
     });
   },

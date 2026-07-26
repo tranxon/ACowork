@@ -180,6 +180,15 @@ pub enum InboundMessage {
     },
     /// ADR-034 Phase 7: Per-session compact context.
     CompactContextAction,
+    /// ADR-029 fix: broadcast builtin-tool enabled flags to all sessions.
+    /// The HTTP handler `put_agent_builtin_tools` persists to
+    /// `agent_tools.json` but must also push the update to active sessions
+    /// so the LLM's `tool_definitions` stay in sync.  `dispatch_inbound`
+    /// routes this to `SessionManager::send_to_session` as
+    /// `SessionMessage::UpdateBuiltinTools`.
+    UpdateBuiltinTools {
+        entries: Vec<crate::agent_config::AgentToolEntry>,
+    },
 }
 
 impl InboundMessage {
@@ -274,6 +283,7 @@ impl InboundMessage {
             InboundMessage::ReasoningEffortAction { .. } => {}
             InboundMessage::WorkspaceSwitchAction { .. } => {}
             InboundMessage::CompactContextAction => {}
+            InboundMessage::UpdateBuiltinTools { .. } => {}
         }
         (self, truncated)
     }

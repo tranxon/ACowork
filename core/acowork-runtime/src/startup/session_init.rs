@@ -216,6 +216,17 @@ pub(crate) async fn phase_b_init_session(
         active_tools,
     ));
 
+    // ADR-046: build the attachment blob store up front so we can both
+    // inject it into `AgentCore` (so SessionTask's image-derivation
+    // pipeline can read image bytes — see `attachment_to_image.rs`) and
+    // publish it to the HTTP server's `attachment_slot` (so
+    // `POST /sessions/{sid}/files` and `GET /files/{document_id}` work).
+    // `RuntimeAttachmentService` only needs the boot-time `work_dir`;
+    // no async resource dependency, so the construction is sync.
+    let attach_svc: Arc<dyn crate::usecases::AttachmentService> = Arc::new(
+        crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
+    );
+
     // Inject global provider list, key vault, and memory into AgentCore.
     if let Some(c) = Arc::get_mut(&mut core) {
         // Inject the per-agent compatibility cache so `build_provider_for`
@@ -353,16 +364,15 @@ pub(crate) async fn phase_b_init_session(
             *slot = Some(config_svc);
         }
 
-        // ADR-046: Publish attachment blob store. Same sync-work_dir
-        // pattern — `RuntimeAttachmentService` only needs the
-        // boot-time `work_dir`.
-        {
-            let attach_svc: Arc<dyn crate::usecases::AttachmentService> = Arc::new(
-                crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
-            );
-            let mut slot = ctx.attachment_slot.lock().await;
-            *slot = Some(attach_svc);
-        }
+        // ADR-046: Inject attachment blob store into AgentCore so that
+        // `SessionTask` can derive multimodal image parts from
+        // `AttachedItem::ImageUpload` (see
+        // `crate::agent::attachment_to_image::derive_image_parts`).
+        // Without this injection, the slot stays `None` and every
+        // image-attached chat turn degrades to plain text. The HTTP
+        // server sees the same Arc via `ctx.attachment_slot`, published
+        // outside this `if let` block below.
+        c.set_attachment_service(attach_svc.clone());
 
         // ── Resolve & persist agent_config.json defaults ─────────────
         //
@@ -460,6 +470,17 @@ pub(crate) async fn phase_b_init_session(
                 }
             }
         }
+
+        // ADR-046: Publish attachment blob store to the HTTP server's
+        // late-bind slot. The same `Arc` instance is shared with
+        // `AgentCore::attachment_service` (set above), so any upload
+        // posted to `POST /sessions/{sid}/files` becomes visible to
+        // `derive_image_parts` in the same session turn. Must run
+        // AFTER the `if let Some(c)` block because the slot write
+        // borrows `ctx` for `.lock().await`, which conflicts with the
+        // mutable `Arc::get_mut` borrow.
+        let mut slot = ctx.attachment_slot.lock().await;
+        *slot = Some(attach_svc);
     }
 
     // Reload agent_cfg from disk to pick up resolved defaults that were

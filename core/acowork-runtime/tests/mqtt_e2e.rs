@@ -528,3 +528,144 @@ fn test_session_lifecycle_state_machine_enum() {
     assert_eq!(O::ResumedFromDisk, O::ResumedFromDisk);
     assert_ne!(O::AlreadyActive, O::ResumedFromDisk);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// ADR-046: ChatMessage shape after image-pipeline merge
+// ═══════════════════════════════════════════════════════════════════════
+//
+// `phase9_chat_message_rich_fields_via_params_json` (above) verifies that
+// the wire-level `params_json` survives encode → decode → dispatch. That
+// covers the bytes path. This test covers the *shape* path that the LLM
+// actually consumes: when the desktop sends only `attached_items` (no
+// inline `content_parts` — the ADR-046 default), the Runtime's
+// `derive_image_parts` + `merge_content_parts` pipeline must produce a
+// `ChatMessage` carrying `ContentPart::ImageUrl` entries with valid data
+// URLs. If this test fails, the LLM would receive a plain text message
+// and have no way to see the picture — exactly the user-reported bug.
+
+#[tokio::test]
+async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
+    use acowork_core::providers::traits::{ChatMessage as CoreChatMessage, ContentPart};
+    use acowork_core::protocol::AttachedItem;
+    use acowork_runtime::agent::attachment_to_image::{
+        derive_image_parts, merge_content_parts,
+    };
+    use std::sync::Arc;
+
+    // Stub AttachmentService: returns the fake bytes for `img-1` /
+    // `img-2` and errors otherwise. Mirrors the shape used by
+    // `attachment_to_image.rs` unit tests, lifted to a top-level
+    // integration test so the public API surface stays pinned.
+    struct FakeAttachment;
+    #[async_trait::async_trait]
+    impl acowork_runtime::usecases::AttachmentService for FakeAttachment {
+        async fn upload_file(
+            &self,
+            _params: acowork_runtime::usecases::attachment::UploadFileParams,
+        ) -> Result<
+            acowork_runtime::usecases::attachment::UploadedFileResponse,
+            acowork_runtime::usecases::attachment::AttachmentError,
+        > {
+            unimplemented!()
+        }
+        async fn read_file(
+            &self,
+            document_id: &str,
+        ) -> Result<
+            Vec<u8>,
+            acowork_runtime::usecases::attachment::AttachmentError,
+        > {
+            match document_id {
+                "img-1" => Ok(b"\x89PNG\r\n\x1a\nfake-png".to_vec()),
+                "img-2" => Ok(b"\xff\xd8\xff\xe0fake-jpg".to_vec()),
+                other => Err(
+                    acowork_runtime::usecases::attachment::AttachmentError::NotFound(
+                        other.to_string(),
+                    ),
+                ),
+            }
+        }
+    }
+    let svc: Arc<dyn acowork_runtime::usecases::AttachmentService> = Arc::new(FakeAttachment);
+
+    // Simulated desktop chat_send payload: user typed "see these:" and
+    // attached two images (no inline content_parts — this is the
+    // ADR-046 default that triggers the bug if the pipeline is missing).
+    let user_text = "see these:";
+    let attached_items = vec![
+        AttachedItem::ImageUpload {
+            document_id: "img-1".into(),
+            filename: "a.png".into(),
+            format: "png".into(),
+            size_bytes: 9,
+            width: Some(640),
+            height: Some(480),
+        },
+        AttachedItem::ImageUpload {
+            document_id: "img-2".into(),
+            filename: "b.jpg".into(),
+            format: "jpg".into(),
+            size_bytes: 12,
+            width: None,
+            height: None,
+        },
+    ];
+    let frontend_content_parts: Option<Vec<ContentPart>> = None;
+
+    // Run the same derivation SessionTask does:
+    let derived = derive_image_parts(Some(&svc), &attached_items)
+        .await
+        .expect("derive_image_parts succeeds");
+    let merged = merge_content_parts(frontend_content_parts, derived);
+
+    // Build the exact ChatMessage shape the agent loop will pass to the
+    // LLM. `user_multimodal` takes (text_for_logging, parts).
+    let msg = CoreChatMessage::user_multimodal(user_text, merged.expect("merged must be Some"));
+
+    // ── Assertions ──
+    let parts = msg
+        .content_parts
+        .as_ref()
+        .expect("user_multimodal must populate content_parts");
+    assert_eq!(parts.len(), 2, "expected exactly 2 image parts");
+
+    // Order must match attached_items order.
+    match &parts[0] {
+        ContentPart::ImageUrl { image_url } => {
+            assert!(
+                image_url.url.starts_with("data:image/png;base64,"),
+                "first part must be PNG, got prefix {:?}",
+                &image_url.url[..32.min(image_url.url.len())]
+            );
+            assert_eq!(image_url.width, Some(640));
+            assert_eq!(image_url.height, Some(480));
+        }
+        other => panic!("expected ImageUrl for img-1, got {other:?}"),
+    }
+    match &parts[1] {
+        ContentPart::ImageUrl { image_url } => {
+            assert!(
+                image_url.url.starts_with("data:image/jpeg;base64,"),
+                "second part must be JPEG, got prefix {:?}",
+                &image_url.url[..32.min(image_url.url.len())]
+            );
+            assert_eq!(image_url.width, None);
+            assert_eq!(image_url.height, None);
+        }
+        other => panic!("expected ImageUrl for img-2, got {other:?}"),
+    }
+
+    // Regression guard against the `build_data_url` `;`-bug: the URL
+    // MUST contain ";base64," (not "base64," without the semicolon).
+    // This is the exact failure mode that made the LLM reject the data
+    // URI as malformed even when the rest of the pipeline worked.
+    for (i, part) in parts.iter().enumerate() {
+        if let ContentPart::ImageUrl { image_url } = part {
+            assert!(
+                image_url.url.contains(";base64,"),
+                "part[{i}] data URL must use ';base64,' (RFC 2397); got {:?}",
+                &image_url.url[..32.min(image_url.url.len())]
+            );
+        }
+    }
+}

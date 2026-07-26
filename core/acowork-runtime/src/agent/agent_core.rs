@@ -157,6 +157,12 @@ pub struct AgentCore {
     pub(crate) memory_store: Option<Arc<GrafeoStore>>,
     /// Debug observer slot — Production (no-op) or Dev (real observer).
     pub(crate) debug_observer: DebugObserverSlot,
+    /// ADR-046: blob store for `file_upload` / `image_upload` items
+    /// (uploaded PDFs, images, …). Populated in Phase B of `session_init`
+    /// via [`AgentCore::set_attachment_service`]; the agent loop reads
+    /// this slot to convert `image_upload` items into multimodal
+    /// `ContentPart::ImageUrl` payloads before the LLM call.
+    pub(crate) attachment_service: Option<Arc<dyn crate::usecases::AttachmentService>>,
     /// Approval gate for shell command risk confirmation.
     pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// Shell approval threshold: Low / Medium / High / Never.
@@ -244,6 +250,11 @@ impl AgentCore {
             ))),
             consolidation_scheduler: None,
             consolidation_bg_task: None,
+            // ADR-046: blob store slot is empty by default; Phase B
+            // populates it via `set_attachment_service` once the work_dir
+            // is known. Until then, multimodal image parts cannot be
+            // derived — chat messages fall back to plain text.
+            attachment_service: None,
             // ADR-028: counters start at 0; the next `list_sessions` scan
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
@@ -740,6 +751,21 @@ impl AgentCore {
     pub fn is_dev_mode(&self) -> bool { self.debug_observer.is_dev_mode() }
     pub fn approval_gate(&self) -> Option<&Arc<dyn ApprovalGate>> { self.approval_gate.as_ref() }
     pub fn set_approval_gate(&mut self, gate: Arc<dyn ApprovalGate>) { self.approval_gate = Some(gate); }
+
+    /// ADR-046: bind the blob store used to read uploaded files. Called
+    /// from Phase B of `session_init` once the workspace services are
+    /// in place. `None` means image uploads are silently dropped at the
+    /// multimodal layer (the metadata system entry is still written to
+    /// JSONL — the agent will see the filename but not the picture).
+    pub fn attachment_service(&self) -> Option<&Arc<dyn crate::usecases::AttachmentService>> {
+        self.attachment_service.as_ref()
+    }
+    pub fn set_attachment_service(
+        &mut self,
+        svc: Arc<dyn crate::usecases::AttachmentService>,
+    ) {
+        self.attachment_service = Some(svc);
+    }
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
     /// ADR-032: resolve the effective `keep_recent_n` for `compress_tool_results`.
@@ -869,6 +895,7 @@ impl Clone for AgentCore {
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_scheduler: self.consolidation_scheduler.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
+            attachment_service: self.attachment_service.clone(),
             // ADR-028: agent-scoped counters are intentionally SHARED across
             // clones. Cloning an `AtomicU64` snapshots the *current value*
             // (good — every session sees the latest), and updates from any

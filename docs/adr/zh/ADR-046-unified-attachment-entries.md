@@ -54,16 +54,37 @@
 
 ### 2.2 文件存储统一
 
-**所有上传文件（PDF + 图片）落到 `<work_dir>/files/<doc_id>`**，与 `conversations/` 同级：
+**所有上传文件（PDF/DOCX/图片等）落到 `<work_dir>/files/<doc_id>.<safe_ext>`**，与 `conversations/` 同级。
+
+扩展名由 [`safe_extension`] 白名单函数决定：白名单内的格式保留真扩展名，白名单外统一回退到 `bin`。
 
 ```
 <work_dir>/
 ├── conversations/
-│   ├── <sid>.jsonl
+│   ├── <sid>.jsonl          # 附件元数据在 JSONL system 条目里
 │   └── meta/<sid>.json
 └── files/
-    └── <doc_id>          # 无扩展名 — format 在 JSONL 元数据里
+    ├── 0123456789ab-3.pdf   # PDF — 白名单保真
+    ├── 0123456789ac-7.docx  # DOCX — 白名单保真
+    ├── 0123456789ad-1.png   # 图片 — 白名单保真
+    └── 0123456789ae-9.bin   # 未知格式（exe/html/…）→ 回退到 bin
 ```
+
+**白名单**（完整列表，见 `attachment_impl.rs::safe_extension`）：
+
+| 类别 | 格式 | 落盘扩展名 |
+|------|------|-----------|
+| 文档 | PDF | `pdf` |
+| 文档 | DOCX | `docx` |
+| 文档 | PPTX | `pptx` |
+| 文档 | XLSX | `xlsx` |
+| 图片 | PNG | `png` |
+| 图片 | JPG / JPEG | `jpg` |
+| 图片 | GIF | `gif` |
+| 图片 | WebP | `webp` |
+| 回退 | 其它 | `bin` |
+
+白名单逻辑必须与 `doc_reader` 工具的 `detect_format` 保持锁步（见 `tools/builtin/doc_reader/mod.rs`）。如果 `docx` 落盘成 `.bin`，`doc_reader` 会因无法按扩展名分发而报"不支持的文档格式"。
 
 **删除**：`sessions/<sid>/documents/` 目录、`sessions/<sid>/documents.json` 旁路索引。`load_documents_index` / `save_documents_index` / `documents_dir` / `compute_doc_id` 全部移除。文件元数据不再有 sidecar，**JSONL 是唯一真相**。
 
@@ -127,8 +148,33 @@ if (message.type === "system" && message.metadata?.type === "attached_folder")
 
 | 端点 | 用途 |
 |---|---|
-| `POST /sessions/{sid}/files` | 上传任意文件（PDF/DOCX/PPTX/XLSX/PNG/JPG/...）。`multipart` form `{file, content_type?, width?, height?}`（`width`/`height` 为可选，desktop 当前必传，CLI 可能省略）。返回 `{document_id, filename, format, size_bytes, [width, height]}`（服务端把收到的 width/height 原样回传，未传则不出现）。**保存到 `<work_dir>/files/<document_id>`**。后端不做图片识别、不读 header、不依赖 `image` crate —— 完全信任前端传入的元数据 |
-| `GET /files/{document_id}` | 下载文件（auth 通过 Gateway 代理；Tauri 端用此接口加载缩略图） |
+| `POST /sessions/{sid}/files` | 上传任意文件（PDF/DOCX/PPTX/XLSX/PNG/JPG/...）。`multipart` form `{file, content_type?, width?, height?}`（`width`/`height` 为可选，desktop 当前必传，CLI 可能省略）。返回 `{document_id, filename, format, size_bytes, [width, height]}`（服务端把收到的 width/height 原样回传，未传则不出现）。**保存到 `<work_dir>/files/<document_id>.<safe_ext>`**（扩展名白名单见 §2.8）。后端不做图片识别、不读 header、不依赖 `image` crate —— 完全信任前端传入的元数据 |
+| `GET /files/{document_id}` | 下载文件（auth 通过 Gateway 代理；Tauri 端用此接口加载缩略图）。实现同时回退读 `<document_id>`（不带扩展名的 legacy 文件）以保证历史数据可读，新写不再使用 legacy 路径 |
+
+### 2.8 扩展名白名单（`<safe_ext>` 解析规则）
+
+`upload_file` 的 `format` 字段是用户可控的小写字符串（来自桌面端 dialog
+filter 取到的扩展名）。直接拼接成 `<doc_id>.<format>` 落地会让一个 hostile 或
+意外的 `format="exe"` 在 Finder/Explorer 里被当作可执行文件处理，这是绝对要
+避免的。
+
+`RuntimeAttachmentService::safe_extension` 把 `format` 显式映射到一个白名单：
+
+| 输入 `format` | 落盘扩展名 |
+|---|---|
+| `pdf` | `pdf` |
+| `png` | `png` |
+| `jpg` / `jpeg` | `jpg` |
+| `gif` | `gif` |
+| `webp` | `webp` |
+| 其他（含 `""`、未知、含 `/`、含 `..`） | `bin` |
+
+**关键约束**：
+- 扩展名永远是 `RuntimeAttachmentService` 自己挑的，**从不信任**用户传入
+  的字符串原值
+- 落盘文件可读性、回放性、`open -t` 预览都按这个白名单走
+- `read_file` 实现接受 `documents/<doc_id>.<safe_ext>` 和历史 `<doc_id>`
+  两种文件名（legacy fallback），保证旧的 developer-disk 数据可读
 
 ---
 
@@ -142,7 +188,7 @@ if (message.type === "system" && message.metadata?.type === "attached_folder")
 │   └── meta/
 │       └── <sid>.json    # ADR-024 per-session meta
 └── files/
-    └── <doc_id>          # 所有上传文件，无扩展名
+    └── <doc_id>.<safe_ext>  # 所有上传文件（扩展名白名单见 §2.6）
 ```
 
 ---
@@ -161,7 +207,7 @@ if (message.type === "system" && message.metadata?.type === "attached_folder")
 
 | 风险 | 缓解 |
 |---|---|
-| 大量并发上传的文件落盘命名冲突 | `<doc_id>` 是内容 hash 12-hex + 4-hex suffix（沿用现有算法），冲突概率 ~10⁻⁹ |
+| 大量并发上传的文件落盘命名冲突 | `<doc_id>` = `SHA-256(bytes)` 的前 6 字节（12-hex prefix）+ 第 6..8 字节（4-hex suffix），**完全内容派生，跨进程/重启稳定**。48-bit prefix 的生日碰撞界 ≈ 2²⁴ ≈ 16M 个 blob 才 ~50%，现实使用下不构成风险；若真发生，read 路径返回 `ambiguous on-disk match` 错误而不是猜测 |
 | `files/` 目录随时间无限增长 | **本轮不管**，由未来的文档管理功能统一处理 |
 | `MessageBubble` 多分支回归 | 5 个 metadata.type 各一个 React 测试快照 |
 
@@ -199,4 +245,4 @@ if (message.type === "system" && message.metadata?.type === "attached_folder")
 - ✅ 用户消息永远只含原话
 - ✅ 图片宽高是**可选字段**（`Option<u32>`）：desktop 当前必传，CLI 未来可能省略；JSONL 用 `skip_serializing_if = "Option::is_none"` 容错存储，渲染层缺字段时由 `<img onLoad>` 自然读取 fallback
 - ✅ `files/` 目录清理属于未来文档管理功能，本轮不实现
-- ✅ 不实现 `DELETE /files/<doc_id>` 端点，留给未来文档管理功能
+- ✅ 不实现 `DELETE /files/<doc_id>` 端点，留给未来文档管理功能E /files/<doc_id>` 端点，留给未来文档管理功能

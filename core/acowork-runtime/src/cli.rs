@@ -304,6 +304,18 @@ async fn async_main(
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 
+        // ADR-046: Mirror the Phase B attachment injection for the
+        // standalone (CLI) path. Gateway mode runs through
+        // `phase_b_init_session` which already wires the same
+        // `RuntimeAttachmentService`; this branch only runs when
+        // there is no MQTT client, so it must wire the blob store
+        // itself. Without this, image-upload items received via the
+        // standalone chat loop degrade silently to plain text.
+        let attach_svc: Arc<dyn crate::usecases::AttachmentService> = Arc::new(
+            crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
+        );
+        agent_loop.core.set_attachment_service(attach_svc);
+
         let _ = &agent_ctx.gateway_current_provider_id; // unused in standalone
         let mut ctx_builder = agent_ctx
             .context_builder

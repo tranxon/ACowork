@@ -19,8 +19,8 @@
 //!
 //! | HTTP endpoint | Trait method | On-disk location |
 //! |---|---|---|
-//! | `POST /sessions/{sid}/files` (multipart) | [`AttachmentService::upload_file`] | `<work_dir>/files/<document_id>` |
-//! | `GET  /files/{document_id}`            | [`AttachmentService::read_file`]   | `<work_dir>/files/<document_id>` |
+//! | `POST /sessions/{sid}/files` (multipart) | [`AttachmentService::upload_file`] | `<work_dir>/files/<document_id>.<safe_ext>` |
+//! | `GET  /files/{document_id}`            | [`AttachmentService::read_file`]   | `<work_dir>/files/<document_id>.<safe_ext>` (legacy: bare `<document_id>`) |
 //!
 //! `DELETE /files/{document_id}` is intentionally **out of scope** —
 //! ADR-046 §5 defers file lifecycle management (cleanup, dedup

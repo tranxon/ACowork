@@ -755,6 +755,16 @@ async fn dispatch_inbound(
                 .map_err(|e| RuntimeError::Config(format!("CompressAction: {}", e)))
         }
 
+        // ⑫b UpdateBuiltinTools — ADR-029 fix: broadcast builtin-tool
+        // enabled flags from the HTTP `put_agent_builtin_tools` handler to
+        // the active session so the LLM's `tool_definitions` stay in sync.
+        // `session_task.rs` handles `SessionMessage::UpdateBuiltinTools` by
+        // updating `agent_loop.core.builtin_tools` and calling
+        // `rebuild_context_tool_definitions()` to refresh the `ContextBuilder`.
+        InboundMessage::UpdateBuiltinTools { entries } => session_manager
+            .send_to_session(&session_id, SessionMessage::UpdateBuiltinTools { entries })
+            .map_err(|e| RuntimeError::Config(format!("UpdateBuiltinTools: {}", e))),
+
         // ⑬ CreateSession (session-level DeleteSession)
         InboundMessage::DeleteSession { session_id: sid } => {
             session_manager.delete_session(&sid).await;

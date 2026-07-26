@@ -1,6 +1,7 @@
 //! Agent module
 
 pub mod agent_core;
+pub mod attachment_to_image;
 pub mod budget_guard;
 pub mod context;
 pub mod history;
