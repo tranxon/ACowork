@@ -87,23 +87,17 @@ impl super::loop_::AgentLoop {
             );
         }
 
-        // Emit chunk event to Gateway → frontend
-        //
-        // ADR-039: only runtime fields (status, ratio, context_usage) are
-        // included. Persistent fields are broadcast through the `session_meta`
-        // MQTT channel (see SessionManager::publish_session_meta).
-        if !self
-            .session_core
-            .try_send_chunk(super::loop_::ChunkEvent::SessionStateChanged {
-                status: status.clone(),
-                ratio: self.session.model_ratio(),
-                context_usage: context_usage_json.clone(),
-            })
-        {
-            tracing::debug!(
-                "SessionStateChanged event dropped (channel full/closed), status={:?}. Pull repair will correct frontend.",
-                status
-            );
+        // ADR-043: Update the runtime state cache on ConversationSession
+        // and notify the state relay. The relay publishes a retained
+        // SessionState snapshot to `sessions/{sid}/state` (throttled).
+        // This replaces the old ChunkEvent::SessionStateChanged path.
+        if let Some(ref conv) = self.session.conversation {
+            let status_json = serde_json::to_string(&status)
+                .unwrap_or_else(|_| r#""idle""#.to_string());
+            let ratio = self.session.model_ratio().unwrap_or(0.0);
+            let cu = context_usage_json.clone().unwrap_or_default();
+            conv.update_runtime_state_cache(&status_json, ratio, &cu);
+            conv.notify_state_change();
         }
         // Update watch channel for SessionHandle reads.
         // Use `send_modify` instead of `send` because `send` silently

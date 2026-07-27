@@ -244,7 +244,7 @@ interface SessionChatState {
   iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
   /** Loop detected pause — populated from loop_detected_paused event */
   loopDetectedPaused: { message: string } | null;
-  /** 429 retry wait info — populated from session_state_changed when the provider is rate-limited */
+  /** 429 retry wait info — populated from session_state when the provider is rate-limited */
   retryWaitInfo: {
     waitMs: number;
     attempt: number;
@@ -2104,11 +2104,11 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
 const CONTENT_EVENT_TYPES = new Set([
   "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
   "loop_detected_paused",
-  "context_usage", "session_state_changed", "stopped", "todo_list_updated",
+  "context_usage", "session_state", "stopped", "todo_list_updated",
   "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
   "reasoning_started", "reasoning_ended",
   "memory_updated", "skill_executed",
-  "session_meta", "session_config",
+  "session_config", "session_state",
   "stream_delta", "record_complete",
 ]);
 
@@ -2505,7 +2505,7 @@ function handleMessageEvent(
       // replacements haven't arrived yet, so the last few
       // toolcall/thought/assistant segments vanish.
       //
-      // Instead, session_state_changed → idle does a single definitive
+      // Instead, session_state → idle does a single definitive
       // final incremental poll before stopping the poll cycle.  Idle
       // guarantees the backend has flushed everything, so the final
       // poll always gets complete data.
@@ -2745,100 +2745,6 @@ function handleMessageEvent(
       break;
     }
 
-    // ADR-014: Session lifecycle status changed — source of truth from backend
-    case "session_state_changed": {
-      if (sid) {
-        const status = data.status as SessionStatus | undefined;
-        if (status) {
-          // DEBUG: log status transitions
-          const prev = getSessionState(get(), agentId, sid!);
-          log.debug(
-            `[ChatStore:DEBUG] session_state_changed for ${agentId}/${sid}: ` +
-            `prev=${prev.sessionStatus?.status} → next=${status.status}, ` +
-            `messageCount=${prev.messages.length}`,
-          );
-          set((state) => {
-            const sessionPatch: Partial<SessionChatState> = { sessionStatus: status };
-
-            // ADR-039: persistent fields (model, provider, reasoning_effort,
-            // temperature, workspace_id) are delivered through the
-            // `session_meta` MQTT channel, not here. Only runtime fields
-            // (ratio, context_usage) are included in this event.
-            // Model chars/token ratio from API calibration (for status panel display).
-            if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
-            // ADR-028: Context usage snapshot from persisted session tokens.
-            // The backend includes this on session activation/resume so the
-            // frontend can show token counts before the first LLM call
-            // triggers a dedicated context_usage event.
-            if (data.context_usage && typeof data.context_usage === "object") {
-              sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
-            }
-
-            // ADR-021: Start/stop polling based on status transitions.
-            // When entering streaming/waiting_approval/paused → start polling.
-            // ADR-035 Phase 3: prevActive/nextActive removed — push drives streaming.
-            const prev = getSessionState(state, agentId, sid);
-
-            // ADR-035 Phase 3: streaming driven by push; no HTTP polling on status transitions.
-
-            // When status transitions TO Idle from non-Idle, clear pending flags
-            if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
-              sessionPatch.pendingApproval = {};
-              sessionPatch.pendingQuestions = [];
-              sessionPatch.iterationLimitPaused = null;
-              sessionPatch.loopDetectedPaused = null;
-              sessionPatch.isAssistantReplying = false;
-
-              // ADR-035 C2/O2: if activeStream still has unfrozen content at
-              // idle, record_complete was lost (QoS edge case). Trigger HTTP
-              // full realignment to recover — this is the only HTTP pull-back
-              // scenario, fires only when push delivery is suspected incomplete.
-              // assistant content is NEVER truncated; we recover the full
-              // message from JSONL via the HTTP reload.
-              const activeStream = activeStreams.get(sid);
-              if (activeStream) {
-                log.warn(
-                  `[ChatStore] ADR-035 C2: activeStream still present at idle` +
-                  ` (messageId=${activeStream.messageId}, role=${activeStream.role},` +
-                  ` lines=${activeStream.lines.length}) — record_complete likely lost,` +
-                  ` triggering HTTP realignment`,
-                );
-                activeStreams.delete(sid);
-                // Defer the HTTP reload to after the state update completes.
-                queueMicrotask(() => {
-                  get().loadSessionMessages(agentId, sid);
-                });
-              }
-            }
-
-            // 429 retry UX: populate retryWaitInfo when paused with retry_info
-            if (status.status === "paused" && status.detail?.retry_info) {
-              sessionPatch.retryWaitInfo = {
-                waitMs: status.detail.retry_info.wait_ms,
-                attempt: status.detail.retry_info.attempt,
-                maxAttempts: status.detail.retry_info.max_attempts,
-                provider: status.detail.retry_info.provider,
-                startedAt: Date.now(),
-              };
-            } else if (prev.sessionStatus?.status === "paused" && status.status !== "paused") {
-              // Clear retry wait info and loop detection when leaving paused state
-              sessionPatch.retryWaitInfo = null;
-              sessionPatch.loopDetectedPaused = null;
-            }
-
-            // Update session state (status) then agent-level defaults
-            const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
-            let agentStates = sessionResult.agentStates;
-
-            // ADR-039: model, provider, workspace_id are delivered through
-            // the `session_meta` MQTT channel, not here.
-            return { agentStates };
-          });
-        }
-      }
-      break;
-    }
-
     // Todo list updated — from todo_write built-in tool
     case "todo_list_updated": {
       if (sid) {
@@ -2881,7 +2787,7 @@ function handleMessageEvent(
     // Flips `isSessionReady` so the UI unlocks the input box and
     // applies the runtime's authoritative model/provider/last_active_at
     // (defensive — applySessionMeta already covers most of this from
-    // session_state_changed events, but having both paths makes the
+    // session_state events, but having both paths makes the
     // contract observable in the store alone).
     case "session_opened": {
       const sid = data.session_id as string | undefined;
@@ -2968,9 +2874,9 @@ function handleMessageEvent(
       break;
     }
 
-    // ── Session meta (model_id, provider_id, tokens, title, message_count) ──
-    case "session_meta": {
-      log.debug("[ChatStore:DEBUG] session_meta RECEIVED", {
+    // ── Session config (ADR-043: user-configurable fields only) ──
+    case "session_config": {
+      log.debug("[ChatStore:DEBUG] session_config RECEIVED", {
         sid,
         agentId,
         model_id: data.model_id,
@@ -2979,19 +2885,16 @@ function handleMessageEvent(
         reasoning_effort: data.reasoning_effort,
         temperature: data.temperature,
         title: data.title,
-        hasSessionId: !!data.session_id,
       });
       if (!sid) break;
       // Title goes into the agent-level sessions[] list (used by the
-      // sidebar) so it shows up the moment the retained MQTT message arrives,
-      // not only after a manual fetchSessions.
+      // sidebar) so it shows up the moment the retained MQTT message arrives.
       if (typeof data.title === "string" && data.title) {
         useAgentStore.getState().updateSessionTitle(sid, data.title);
       }
       const patch: Partial<SessionChatState> = {};
       if (typeof data.model_id === "string" && data.model_id) patch.model = data.model_id;
       if (typeof data.provider_id === "string" && data.provider_id) patch.provider = data.provider_id;
-      if (typeof data.message_count === "number") patch.messageTotal = data.message_count;
       if (typeof data.reasoning_effort === "string" && data.reasoning_effort) {
         patch.reasoningEffort = data.reasoning_effort;
       }
@@ -3000,13 +2903,89 @@ function handleMessageEvent(
         patch.temperature = data.temperature;
       }
       if (Object.keys(patch).length > 0) {
-        log.debug("[ChatStore:DEBUG] session_meta applying patch", { sid, patch });
+        log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof data.workspace_id === "string" && data.workspace_id) {
-        log.debug("[ChatStore:DEBUG] session_meta setting workspace", { sid, workspace_id: data.workspace_id });
+        log.debug("[ChatStore:DEBUG] session_config setting workspace", { sid, workspace_id: data.workspace_id });
         useWorkspaceStore.getState().setSessionWorkspaceLocal(sid, data.workspace_id);
+      }
+      break;
+    }
+
+    // ── Session state (ADR-043: runtime telemetry only) ──
+    // Replaces the deleted "session_state" event. Carries status,
+    // ratio, context_usage, message_count, tokens, and updated_at.
+    // The retained topic ensures reconnecting clients immediately receive
+    // the latest state.
+    case "session_state": {
+      if (sid) {
+        const status = data.status as SessionStatus | undefined;
+        if (status) {
+          const prev = getSessionState(get(), agentId, sid!);
+          log.debug(
+            `[ChatStore:DEBUG] session_state for ${agentId}/${sid}: ` +
+            `prev=${prev.sessionStatus?.status} -> next=${status.status}, ` +
+            `messageCount=${prev.messages.length}`,
+          );
+          set((state) => {
+            const sessionPatch: Partial<SessionChatState> = { sessionStatus: status };
+
+            // Runtime fields from SessionState proto.
+            if (typeof data.ratio === "number") sessionPatch.ratio = data.ratio as number;
+            if (data.context_usage && typeof data.context_usage === "object") {
+              sessionPatch.contextUsage = data.context_usage as ContextUsageInfo;
+            }
+
+            // ADR-021: Start/stop polling based on status transitions.
+            const prev = getSessionState(state, agentId, sid);
+
+            // When status transitions TO Idle from non-Idle, clear pending flags
+            if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
+              sessionPatch.pendingApproval = {};
+              sessionPatch.pendingQuestions = [];
+              sessionPatch.iterationLimitPaused = null;
+              sessionPatch.loopDetectedPaused = null;
+              sessionPatch.isAssistantReplying = false;
+
+              // ADR-035 C2/O2: if activeStream still has unfrozen content at
+              // idle, record_complete was lost (QoS edge case). Trigger HTTP
+              // full realignment to recover.
+              const activeStream = activeStreams.get(sid);
+              if (activeStream) {
+                log.warn(
+                  `[ChatStore] ADR-035 C2: activeStream still present at idle` +
+                  ` (messageId=${activeStream.messageId}, role=${activeStream.role},` +
+                  ` lines=${activeStream.lines.length}) - record_complete likely lost,` +
+                  ` triggering HTTP realignment`,
+                );
+                activeStreams.delete(sid);
+                queueMicrotask(() => {
+                  get().loadSessionMessages(agentId, sid);
+                });
+              }
+            }
+
+            // 429 retry UX: populate retryWaitInfo when paused with retry_info
+            if (status.status === "paused" && status.detail?.retry_info) {
+              sessionPatch.retryWaitInfo = {
+                waitMs: status.detail.retry_info.wait_ms,
+                attempt: status.detail.retry_info.attempt,
+                maxAttempts: status.detail.retry_info.max_attempts,
+                provider: status.detail.retry_info.provider,
+                startedAt: Date.now(),
+              };
+            } else if (prev.sessionStatus?.status === "paused" && status.status !== "paused") {
+              sessionPatch.retryWaitInfo = null;
+              sessionPatch.loopDetectedPaused = null;
+            }
+
+            const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);
+            let agentStates = sessionResult.agentStates;
+            return { agentStates };
+          });
+        }
       }
       break;
     }
@@ -3065,13 +3044,6 @@ function handleMessageEvent(
         endpoint: data.endpoint,
         ready: data.ready,
       });
-      break;
-    }
-
-    case "session_config": {
-      if (sid && typeof data.config_json === "string") {
-        log.debug("[ChatStore] Session config updated:", sid, data.config_json.slice(0, 120));
-      }
       break;
     }
 

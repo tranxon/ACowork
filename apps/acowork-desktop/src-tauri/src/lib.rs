@@ -512,10 +512,6 @@ fn init_desktop_tracing() {
         }
     };
 
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("WARN: failed to create log dir {:?}: {}", log_dir, e);
-    }
-
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_appender)
         .with_ansi(false)

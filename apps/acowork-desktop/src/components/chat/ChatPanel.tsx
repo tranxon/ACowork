@@ -374,7 +374,7 @@ export function ChatPanel() {
   const isAssistantReplying = sessionState?.isAssistantReplying ?? false;
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
-  // No optimistic flags — the backend pushes session_state_changed within ~50ms.
+  // No optimistic flags — the backend pushes session_state within ~50ms.
   const sending = sessionStatus
     ? (sessionStatus.status === "streaming"
       || sessionStatus.status === "waiting_approval"
@@ -513,7 +513,7 @@ export function ChatPanel() {
   //
   // ADR-035 D5/Race: the previous gate `sending && !hasStreamingPlaceholder`
   // flickered between `record_complete` (assistant.isStreaming: true→false)
-  // and the follow-up `session_state_changed(idle)` (sending: true→false),
+  // and the follow-up `session_state(idle)` (sending: true→false),
   // because the backend emits them in order on the same chunk channel
   // (`poll_stop()` → `transition_status(Idle)` at loop_.rs:912-914).  In
   // that ~tens-of-ms window the working indicator reappeared above the

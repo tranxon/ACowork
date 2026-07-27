@@ -430,35 +430,51 @@ pub struct ConversationSession {
     session_file_path: PathBuf,
     /// Path to the conversations directory (for meta file writes).
     conversations_dir: PathBuf,
-    /// Channel for emitting `MetaChangeKind` notifications after each
-    /// `write_meta()`. The session_task clones the receiver and runs a
-    /// background relay task that forwards `ChunkEvent::SessionMetaChanged`
-    /// to the MQTT chunk publisher.
+    /// Channel for emitting config-change notifications.
     ///
-    /// This is the **only** path that triggers SessionMeta publish — every
-    /// update_* method calls `write_meta()` and then notifies this channel.
-    /// Cold fields publish immediately; hot fields (tokens, message_count)
-    /// are coalesced by the relay task with a cooldown so we don't flood
-    /// MQTT on every LLM round-trip / message append.
-    meta_change_tx: mpsc::UnboundedSender<MetaChangeKind>,
+    /// Config mutators send a `ConfigChange` snapshot through this channel
+    /// after `write_meta()`. The relay publishes immediately (no throttle)
+    /// to the retained `sessions/{sid}/config` MQTT topic.
+    config_change_tx: mpsc::UnboundedSender<ConfigChange>,
+    /// Channel for emitting state-change notifications.
+    ///
+    /// State mutators (message_count, tokens) and `emit_session_state()`
+    /// send a `StateChange` snapshot through this channel. The relay
+    /// coalesces behind a 3 s cooldown and publishes to the retained
+    /// `sessions/{sid}/state` MQTT topic.
+    state_change_tx: mpsc::UnboundedSender<StateChange>,
+    /// Cached runtime-only fields sourced from `SessionRuntimeSnapshot`
+    /// via `update_runtime_state_cache()`. `ConversationSession` does not
+    /// own `SessionRuntimeSnapshot` (it lives on `SessionState`), so
+    /// these are cached here whenever `emit_session_state()` runs.
+    /// `build_session_state_snapshot()` reads them to produce a complete
+    /// `SessionState` proto.
+    last_status_json: std::sync::Mutex<String>,
+    last_ratio: std::sync::Mutex<f64>,
+    last_context_usage_json: std::sync::Mutex<String>,
 }
 
-/// Which field group just got persisted to the meta file.
+/// Config-change notification carrying the full proto snapshot.
 ///
-/// The session_task's meta relay decides whether to publish immediately
-/// (`Cold`) or coalesce behind a cooldown (`Hot`). See
-/// `crate::agent::session::session_task` for the receiver side.
-///
-/// ADR-039+FIX: The variant now carries the full `mqtt_proto::SessionMeta`
-/// snapshot so the relay does NOT need to call
-/// `conv.build_session_meta_snapshot()` on its own (potentially stale) clone.
+/// ADR-043: replaces the config portion of the deleted `MetaChangeKind`.
+/// Always published immediately by the relay (no throttle) - config
+/// changes are low-frequency user actions.
 #[derive(Debug, Clone)]
-pub enum MetaChangeKind {
-    /// Persisted per-session config field (title, model, provider,
-    /// reasoning_effort, temperature, workspace_id).
-    Cold(acowork_core::mqtt_proto::SessionMeta),
-    /// Persisted runtime statistics (tokens, message_count).
-    Hot(acowork_core::mqtt_proto::SessionMeta),
+pub struct ConfigChange {
+    /// The snapshot built by the mutator on the ORIGINAL ConversationSession.
+    pub snapshot: acowork_core::mqtt_proto::SessionConfig,
+}
+
+/// State-change notification carrying the full proto snapshot.
+///
+/// ADR-043: replaces the runtime portion of the deleted `MetaChangeKind`
+/// and the deleted `ChunkEvent::SessionStateChanged`. Coalesced by the
+/// relay behind a 3 s cooldown - state changes are high-frequency
+/// telemetry (message_count, tokens, status).
+#[derive(Debug, Clone)]
+pub struct StateChange {
+    /// The snapshot built by the mutator on the ORIGINAL ConversationSession.
+    pub snapshot: acowork_core::mqtt_proto::SessionState,
 }
 
 /// Minimum interval between meta file writes triggered by `append_message`.
@@ -492,7 +508,7 @@ impl ConversationSession {
         }
     }
 
-    /// Build the on-the-wire `acowork_core::mqtt_proto::SessionMeta` snapshot
+    /// Build the on-the-wire `SessionConfig` proto snapshot
     /// for MQTT publish.
     ///
     /// Differs from the disk-side `SessionMeta` (built by `build_meta`) by:
@@ -503,26 +519,106 @@ impl ConversationSession {
     ///   - flattening `Option<SessionTokens>` to the four scalar token fields
     ///   - dropping disk-only fields (version, created_at, last_compaction_offset,
     ///     corrupted)
-    pub fn build_session_meta_snapshot(&self) -> acowork_core::mqtt_proto::SessionMeta {
-        // Reuse build_meta so the on-disk file and the MQTT payload cannot drift.
+    /// Build a `SessionConfig` proto snapshot from the current in-memory state.
+    ///
+    /// ADR-043: carries only user-configurable fields (title, provider,
+    /// model, reasoning_effort, temperature, workspace_id). Runtime
+    /// telemetry is in `build_session_state_snapshot()`.
+    pub fn build_session_config_snapshot(&self) -> acowork_core::mqtt_proto::SessionConfig {
         let full = self.build_meta();
-        let tokens = full.tokens.clone();
-        acowork_core::mqtt_proto::SessionMeta {
+        acowork_core::mqtt_proto::SessionConfig {
             agent_id: full.agent_id,
             session_id: full.session_id,
             title: full.title.unwrap_or_default(),
-            message_count: full.message_count,
             provider_id: full.provider.unwrap_or_default(),
             model_id: full.model.unwrap_or_default(),
-            input_tokens: tokens.as_ref().map(|t| t.last_input).unwrap_or(0),
-            output_tokens: tokens.as_ref().map(|t| t.last_output).unwrap_or(0),
-            total_input_tokens: tokens.as_ref().map(|t| t.total_input).unwrap_or(0),
-            total_output_tokens: tokens.as_ref().map(|t| t.total_output).unwrap_or(0),
-            updated_at: full.last_active_at,
             reasoning_effort: full.reasoning_effort.unwrap_or_default(),
             temperature: full.temperature.unwrap_or(f32::NAN),
             workspace_id: full.workspace_id.unwrap_or_default(),
         }
+    }
+
+    /// Build a `SessionState` proto snapshot from the current in-memory state.
+    ///
+    /// ADR-043: carries only runtime telemetry (status, message_count,
+    /// tokens, ratio, context_usage, updated_at). The runtime-only fields
+    /// (status_json, ratio, context_usage_json) are read from the cached
+    /// values updated by `update_runtime_state_cache()`.
+    pub fn build_session_state_snapshot(&self) -> acowork_core::mqtt_proto::SessionState {
+        let full = self.build_meta();
+        let tokens = full.tokens.clone();
+        let status_json = self
+            .last_status_json
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let ratio = self.last_ratio.lock().map(|r| *r).unwrap_or(0.0);
+        let context_usage_json = self
+            .last_context_usage_json
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        acowork_core::mqtt_proto::SessionState {
+            agent_id: full.agent_id,
+            session_id: full.session_id,
+            status_json,
+            message_count: full.message_count,
+            input_tokens: tokens.as_ref().map(|t| t.last_input).unwrap_or(0),
+            output_tokens: tokens.as_ref().map(|t| t.last_output).unwrap_or(0),
+            total_input_tokens: tokens.as_ref().map(|t| t.total_input).unwrap_or(0),
+            total_output_tokens: tokens.as_ref().map(|t| t.total_output).unwrap_or(0),
+            ratio,
+            context_usage_json,
+            updated_at: full.last_active_at,
+        }
+    }
+
+    /// Cache runtime-only fields from `SessionRuntimeSnapshot`.
+    ///
+    /// Called by `AgentLoopSession::emit_session_state()` after it updates
+    /// the `SessionRuntimeSnapshot`. This allows `build_session_state_snapshot()`
+    /// to produce a complete `SessionState` proto without needing the caller
+    /// to pass in the runtime fields.
+    pub fn update_runtime_state_cache(
+        &self,
+        status_json: &str,
+        ratio: f64,
+        context_usage_json: &str,
+    ) {
+        if let Ok(mut s) = self.last_status_json.lock() {
+            *s = status_json.to_string();
+        }
+        if let Ok(mut r) = self.last_ratio.lock() {
+            *r = ratio;
+        }
+        if let Ok(mut c) = self.last_context_usage_json.lock() {
+            *c = context_usage_json.to_string();
+        }
+    }
+
+    /// Notify the config relay of a config field change.
+    ///
+    /// Builds a `SessionConfig` snapshot and sends it through
+    /// `config_change_tx`. Called by config mutators after `write_meta()`.
+    pub fn notify_config_change(&self) {
+        let _ = self
+            .config_change_tx
+            .send(ConfigChange {
+                snapshot: self.build_session_config_snapshot(),
+            });
+    }
+
+    /// Notify the state relay of a runtime state change.
+    ///
+    /// Builds a `SessionState` snapshot and sends it through
+    /// `state_change_tx`. Called by state mutators (message_count, tokens)
+    /// and by `emit_session_state()` (status, ratio, context_usage).
+    pub fn notify_state_change(&self) {
+        let _ = self
+            .state_change_tx
+            .send(StateChange {
+                snapshot: self.build_session_state_snapshot(),
+            });
     }
 
     /// Write the current in-memory state to the per-session meta file.
@@ -558,7 +654,7 @@ impl ConversationSession {
         config: SessionConfig,
         max_sessions: usize,
         committed_lines: Arc<AtomicUsize>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<MetaChangeKind>)> {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<ConfigChange>, mpsc::UnboundedReceiver<StateChange>)> {
         let conversations_dir = work_dir.join("conversations");
         std::fs::create_dir_all(&conversations_dir)?;
 
@@ -581,7 +677,14 @@ impl ConversationSession {
         // session_task's relay task (see `session_task.rs::spawn_meta_relay`).
         // We create it here so callers of `ConversationSession::new` can
         // extract it before handing ownership to the session_task.
-        let (meta_tx, meta_rx) = mpsc::unbounded_channel::<MetaChangeKind>();
+        // Config + state change notification channels (ADR-043).
+        // The receivers are consumed by the session_task's relay tasks
+        // (see `subsystems.rs::spawn_config_change_relay` and
+        // `spawn_state_change_relay`). We create them here so callers of
+        // `ConversationSession::new` can extract them before handing
+        // ownership to the session_task.
+        let (config_tx, config_rx) = mpsc::unbounded_channel::<ConfigChange>();
+        let (state_tx, state_rx) = mpsc::unbounded_channel::<StateChange>();
 
         let session = Self {
             session_id: session_id.to_string(),
@@ -600,7 +703,11 @@ impl ConversationSession {
             sender: tx,
             session_file_path: file_path,
             conversations_dir: conversations_dir.clone(),
-            meta_change_tx: meta_tx,
+            config_change_tx: config_tx,
+            state_change_tx: state_tx,
+            last_status_json: std::sync::Mutex::new(String::new()),
+            last_ratio: std::sync::Mutex::new(0.0),
+            last_context_usage_json: std::sync::Mutex::new(String::new()),
         };
 
         // ADR-024: write per-session meta file (replaces index.json update).
@@ -612,7 +719,7 @@ impl ConversationSession {
             prune_excess_sessions(&conversations_dir, max_sessions);
         }
 
-        Ok((session, meta_rx))
+        Ok((session, config_rx, state_rx))
     }
 
     /// Resume an existing session.
@@ -627,7 +734,7 @@ impl ConversationSession {
         work_dir: &Path,
         session_id: &str,
         committed_lines: Arc<AtomicUsize>,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<MetaChangeKind>)> {
+    ) -> Result<(Self, mpsc::UnboundedReceiver<ConfigChange>, mpsc::UnboundedReceiver<StateChange>)> {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
@@ -654,7 +761,8 @@ impl ConversationSession {
         let writer = ConversationWriter::new(file, rx, committed_lines);
         std::thread::spawn(move || writer.run());
 
-        let (meta_tx, meta_rx) = mpsc::unbounded_channel::<MetaChangeKind>();
+        let (config_tx, config_rx) = mpsc::unbounded_channel::<ConfigChange>();
+        let (state_tx, state_rx) = mpsc::unbounded_channel::<StateChange>();
 
         Ok((
             Self {
@@ -674,9 +782,14 @@ impl ConversationSession {
                 sender: tx,
                 session_file_path: file_path,
                 conversations_dir,
-                meta_change_tx: meta_tx,
+                config_change_tx: config_tx,
+                state_change_tx: state_tx,
+                last_status_json: std::sync::Mutex::new(String::new()),
+                last_ratio: std::sync::Mutex::new(0.0),
+                last_context_usage_json: std::sync::Mutex::new(String::new()),
             },
-            meta_rx,
+            config_rx,
+            state_rx,
         ))
     }
 
@@ -717,7 +830,7 @@ impl ConversationSession {
         // active-at timestamp without a directory scan.
         self.message_count.fetch_add(1, Ordering::Relaxed);
         // ADR-024: throttle meta writes on the high-frequency append path.
-        // ADR-039+FIX: Always send MetaChangeKind::Hot even when the meta
+        // ADR-043: Always send a state change notification even when the meta
         // file write is skipped, so the relay always has the latest in-memory
         // snapshot. This ensures that a workspace_id / reasoning_effort /
         // temperature change made during streaming (via update_workspace_id /
@@ -730,14 +843,14 @@ impl ConversationSession {
         {
             // Meta file write skipped (cooldown active), but still notify
             // the relay with the latest in-memory snapshot.
-            let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
+            self.notify_state_change();
             return;
         }
         self.write_meta();
         // Hot field — the relay task coalesces these behind a 3 s cooldown
         // (same cadence as the meta write itself, so we never publish more
         // often than we persist).
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
+        self.notify_state_change();
     }
 
     /// Append a compaction event to the JSONL.
@@ -804,39 +917,21 @@ impl ConversationSession {
 
     /// Set the session title from the first user message.
     ///
-    /// Truncates to [`crate::prompt::SESSION_TITLE_MAX_CHARS`] characters. Only sets title once —
-    /// subsequent calls are no-ops.
+    /// Truncates via [`crate::prompt::truncate_title_for_display`] (which
+    /// prefers natural break points over a blind cut). Only sets the title
+    /// once — subsequent calls are no-ops.
     pub fn set_title(&self, content: &str) {
         if self.title_set.swap(true, Ordering::Relaxed) {
             return;
         }
-        let title = {
-            let chars: Vec<char> = content.chars().collect();
-            if chars.len() <= crate::prompt::SESSION_TITLE_MAX_CHARS {
-                content.to_string()
-            } else {
-                // Find the last natural break point within first N chars
-                let break_chars = [',', '，', '.', '。', '!', '！', '?', '？', ';', '；', '\n'];
-                if let Some(pos) = chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().rposition(|c| break_chars.contains(c)) {
-                    let truncated: String = chars[..=pos].iter().collect();
-                    if pos < crate::prompt::SESSION_TITLE_MAX_CHARS - 1 {
-                        truncated
-                    } else {
-                        format!("{}...", truncated)
-                    }
-                } else {
-                    let truncated: String = chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().collect();
-                    format!("{}...", truncated)
-                }
-            }
-        };
+        let title = crate::prompt::truncate_title_for_display(content);
         // Track current title for dedup
         if let Ok(mut current) = self.current_title.lock() {
             *current = Some(title);
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
+        self.notify_config_change();
         tracing::info!(session_id = %self.session_id, "Session title set");
     }
 
@@ -852,14 +947,7 @@ impl ConversationSession {
         {
             return false;
         }
-        let truncated = {
-            let chars: Vec<char> = title.chars().collect();
-            if chars.len() <= crate::prompt::SESSION_TITLE_MAX_CHARS {
-                title.to_string()
-            } else {
-                format!("{}...", chars[..crate::prompt::SESSION_TITLE_MAX_CHARS].iter().collect::<String>())
-            }
-        };
+        let truncated = crate::prompt::truncate_title_for_display(title);
         self.title_set.store(true, Ordering::Relaxed);
         // Track current title for dedup
         if let Ok(mut current) = self.current_title.lock() {
@@ -867,7 +955,7 @@ impl ConversationSession {
         }
         // ADR-024: write entire meta file instead of rewrite_metadata + update_index_entry
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
+        self.notify_config_change();
         tracing::info!(session_id = %self.session_id, title = %truncated, "Session title force-updated via API");
         true
     }
@@ -883,11 +971,11 @@ impl ConversationSession {
             *w = Some(workspace_id.to_string());
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
+        self.notify_config_change();
         tracing::info!(
             session_id = %self.session_id,
             workspace_id = %workspace_id,
-            "Session workspace_id persisted to meta file + meta_change_tx notified"
+            "Session workspace_id persisted to meta file + config_change_tx notified"
         );
     }
 
@@ -920,14 +1008,12 @@ impl ConversationSession {
             *p = provider.map(|s| s.to_string());
         }
         self.write_meta();
-        let snapshot = self.build_session_meta_snapshot();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(snapshot.clone()));
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(snapshot));
+        self.notify_config_change();
         tracing::info!(
             session_id = %self.session_id,
             model = %model,
             provider = ?provider,
-            "Session model/provider persisted to meta file + meta_change_tx notified"
+            "Session model/provider persisted to meta file + config_change_tx notified"
         );
     }
 
@@ -944,7 +1030,7 @@ impl ConversationSession {
             *r = effort;
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
+        self.notify_config_change();
         tracing::info!(
             session_id = %self.session_id,
             "Session reasoning_effort persisted to meta file"
@@ -962,7 +1048,7 @@ impl ConversationSession {
             *t = temperature;
         }
         self.write_meta();
-        let _ = self.meta_change_tx.send(MetaChangeKind::Cold(self.build_session_meta_snapshot()));
+        self.notify_config_change();
         tracing::info!(
             session_id = %self.session_id,
             "Session temperature persisted to meta file"
@@ -1025,7 +1111,7 @@ impl ConversationSession {
         }
         self.write_meta();
         // Hot field — the relay task coalesces these behind a 3 s cooldown.
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(self.build_session_meta_snapshot()));
+        self.notify_state_change();
     }
 }
 
@@ -1076,7 +1162,17 @@ impl Clone for ConversationSession {
             sender: self.sender.clone(),
             session_file_path: self.session_file_path.clone(),
             conversations_dir: self.conversations_dir.clone(),
-            meta_change_tx: self.meta_change_tx.clone(),
+            config_change_tx: self.config_change_tx.clone(),
+            state_change_tx: self.state_change_tx.clone(),
+            last_status_json: std::sync::Mutex::new(
+                self.last_status_json.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+            ),
+            last_ratio: std::sync::Mutex::new(
+                self.last_ratio.lock().ok().map(|r| *r).unwrap_or(0.0),
+            ),
+            last_context_usage_json: std::sync::Mutex::new(
+                self.last_context_usage_json.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+            ),
         }
     }
 }
@@ -1087,12 +1183,17 @@ impl Drop for ConversationSession {
         // the correct message_count and last_active_at even if the last
         // `append_message` fell within the cooldown window.
         self.write_meta();
-        // Notify the relay task so the final snapshot is published before
-        // the channel is dropped. Best-effort — the receiver may already
-        // be gone, in which case `send` is a silent no-op.
-        let _ = self.meta_change_tx.send(MetaChangeKind::Hot(
-            acowork_core::mqtt_proto::SessionMeta::default(),
-        ));
+        // ADR-043: notify both relays so the final snapshots are published
+        // before the channels are dropped. Best-effort - the receivers may
+        // already be gone, in which case `send` is a silent no-op.
+        // Empty session_id acts as a Drop sentinel - the relay falls back
+        // to its own ConversationSession clone for the real snapshot.
+        let _ = self.config_change_tx.send(ConfigChange {
+            snapshot: acowork_core::mqtt_proto::SessionConfig::default(),
+        });
+        let _ = self.state_change_tx.send(StateChange {
+            snapshot: acowork_core::mqtt_proto::SessionState::default(),
+        });
     }
 }
 
@@ -1896,7 +1997,7 @@ mod tests {
         let agent_id = "com.test.agent";
 
         // Create session and write messages
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             work_dir,
             &session_id,
             SessionConfig {
@@ -2120,7 +2221,7 @@ mod tests {
         let agent_id = "com.test.resume";
 
         // Create initial session
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             work_dir,
             session_id,
             SessionConfig {
@@ -2141,7 +2242,7 @@ mod tests {
         });
 
         // Resume session
-        let (resumed, _meta_rx2) = ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0))).unwrap();
+        let (resumed, _config_rx2, _state_rx2) = ConversationSession::resume(work_dir, session_id, Arc::new(AtomicUsize::new(0))).unwrap();
         assert_eq!(resumed.session_id(), session_id);
         assert_eq!(resumed.agent_id(), agent_id);
 
@@ -2259,7 +2360,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let (session, _meta_rx) =
+            let (session, _config_rx, _state_rx) =
                 ConversationSession::new(&dir, "tok_acc_basic", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {
@@ -2296,7 +2397,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let (session, _meta_rx) =
+            let (session, _config_rx, _state_rx) =
                 ConversationSession::new(&dir, "tok_acc_zero", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {
@@ -2345,7 +2446,7 @@ mod tests {
                 provider: None,
             };
             let committed = Arc::new(AtomicUsize::new(0));
-            let (session, _meta_rx) =
+            let (session, _config_rx, _state_rx) =
                 ConversationSession::new(&dir, "tok_acc_overflow", cfg, 0, committed).unwrap();
 
             session.accumulate_llm_usage(&UsageInfo {

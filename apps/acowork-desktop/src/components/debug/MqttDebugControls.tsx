@@ -6,7 +6,7 @@
 // The Gateway broker runs in-process (rumqttd). To exercise the
 // reconnection paths in:
 //   - Desktop's MqttClient (force_reconnect + soft-restart)
-//   - Runtime's retained `session_state_changed` recovery
+//   - Runtime's retained `session_state` recovery
 // we need a way to cleanly stop the broker without killing the whole
 // Gateway. The Gateway exposes two debug HTTP endpoints
 // (`POST /api/debug/mqtt/{shutdown,start}`) for this.

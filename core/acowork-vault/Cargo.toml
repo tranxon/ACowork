@@ -7,6 +7,13 @@ rust-version.workspace = true
 
 description = "Encrypted API key storage for ACowork.AI Gateway"
 
+[features]
+# Use weak Argon2id parameters for fast test execution. Enable this feature
+# in `dev-dependencies` of downstream crates so their test suites also get
+# fast key derivation. Cannot use `cfg(test)` because that flag does not
+# propagate to dependencies.
+fast-derivation = []
+
 [dependencies]
 acowork-core.workspace = true
 chacha20poly1305.workspace = true
@@ -19,3 +26,6 @@ serde_json.workspace = true
 directories.workspace = true
 argon2 = "0.5"
 zeroize = "1.8"
+[dev-dependencies]
+# Self-dependency with fast-derivation so acowork-vault's own tests run fast.
+acowork-vault = { path = ".", features = ["fast-derivation"] }

@@ -225,7 +225,7 @@ if (profile.toolResultCompressionMode !== undefined) {
 
       // Immediately sync the new temperature into the chat store so the
       // ResultsPanel status tab shows the updated value right away,
-      // without waiting for the next WebSocket session_state_changed event
+      // without waiting for the next WebSocket session_state event
       // (which may be delayed if the agent is mid-streaming).
       if (selectedAgentId) {
         const chatStore = useChatStore.getState();

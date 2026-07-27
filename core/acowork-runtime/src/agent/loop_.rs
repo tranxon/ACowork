@@ -148,24 +148,6 @@ pub enum ChunkEvent {
         /// LLM-supplied values are no longer accepted as tool input.
         timeout_seconds: Option<u32>,
     },
-    /// Session lifecycle status changed (ADR-014).
-    /// Emitted whenever SessionState::status transitions, so the frontend
-    /// can stay in sync without optimistic local writes.
-    ///
-    /// ADR-039: persistent per-session fields (model, provider, workspace_id,
-    /// reasoning_effort, temperature) are no longer carried in this event.
-    /// They are broadcast through the `session_meta` MQTT channel which
-    /// sources them from `data/meta/{session_id}.json`.
-    SessionStateChanged {
-        status: SessionStatus,
-        /// Current model chars/token ratio from API calibration.
-        /// `None` before the first calibration.
-        ratio: Option<f64>,
-        /// ADR-028: JSON-serialized ContextUsageInfo snapshot from persisted
-        /// session tokens. Set on session activation/resume so the frontend
-        /// can show token counts without waiting for the first LLM call.
-        context_usage: Option<String>,
-    },
     /// Todo list updated — emitted after a `todo_write` tool call mutates
     /// SessionState.todos, so the frontend can render the current task list.
     TodoListUpdated {
@@ -263,26 +245,17 @@ pub enum ChunkEvent {
         /// between the assistant that owned them and the next round.
         seq: u64,
     },
-
-    /// Per-session persisted metadata changed (title, model, provider,
-    /// reasoning_effort, temperature, workspace_id, message_count, tokens).
-    ///
-    /// Triggered by `ConversationSession::write_meta()` — every code path
-    /// that persists the per-session meta file ends up here. The payload
-    /// is always the **latest complete** `SessionMeta` snapshot, never a
-    /// diff; the MQTT broker retains it so a (re)connecting Desktop sees
-    /// the current state without an HTTP fetch.
-    ///
-    /// Distinction from `SessionStateChanged`:
-    ///   - `SessionMetaChanged`  → persisted per-session config
-    ///   - `SessionStateChanged` → runtime state (status, context_usage)
-    SessionMetaChanged {
-        /// Snapshot of the just-written ConversationSession state, already
-        /// flattened into the on-the-wire `mqtt_proto::SessionMeta` shape.
-        meta: acowork_core::mqtt_proto::SessionMeta,
-        /// Human-readable field names that triggered this emit (used for
-        /// relay-side debug logging only — payload is the full snapshot).
-        fields_changed: Vec<&'static str>,
+    /// ADR-043: config fields changed (title, model, provider, workspace,
+    /// reasoning_effort, temperature). Published Retained to sessions/{sid}/config.
+    SessionConfigChanged {
+        config: acowork_core::mqtt_proto::SessionConfig,
+    },
+    /// ADR-043: runtime state changed (status, message_count, tokens, ratio,
+    /// context_usage). Published Retained to sessions/{sid}/state.
+    /// Replaces the deleted ChunkEvent::SessionStateChanged (status/ratio/
+    /// context_usage) and the runtime portion of SessionMetaChanged.
+    SessionStateChanged {
+        state: acowork_core::mqtt_proto::SessionState,
     },
 }
 
@@ -701,7 +674,7 @@ impl AgentLoop {
                     .as_ref()
                     .and_then(|conv| conv.title())
                 {
-                    let trimmed: String = existing_title.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
+                    let trimmed = crate::prompt::truncate_title_for_display(&existing_title);
                     *self.session_core.title.write().unwrap() = Some(trimmed);
                 } else {
                     let lang = self
@@ -754,11 +727,16 @@ impl AgentLoop {
                     };
             
                     tokio::spawn(async move {
+                        // max_tokens=120 leaves room for a 60-char Chinese title
+                        // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
+                        // budget and would silently cap LLM output for Chinese
+                        // sessions, leaving our display truncation with a
+                        // half-sentence title.
                         match crate::episode_distill::compact_session_title_with_llm(
                             &prompt,
                             provider.as_ref(),
                             &compact_model,
-                            64,
+                            120,
                         )
                         .await
                         {
@@ -772,14 +750,17 @@ impl AgentLoop {
                                 // counters so the agent-total line in the
                                 // Results Panel accounts for this call.
                                 core_clone.accumulate_llm_usage(&usage);
-                                let trimmed: String = title.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
+                                // Prefer natural break points over a blind cut so
+                                // the user sees a complete sentence (or "…") rather
+                                // than a half-word. See prompt.rs for details.
+                                let trimmed = crate::prompt::truncate_title_for_display(&title);
                                 *session_core_title.write().unwrap() = Some(trimmed);
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     "LLM session title generation failed (non-fatal): {e}"
                                 );
-                                let fallback: String = fallback_msg.chars().take(crate::prompt::SESSION_TITLE_MAX_CHARS).collect();
+                                let fallback = crate::prompt::truncate_title_for_display(&fallback_msg);
                                 *session_core_title.write().unwrap() = Some(fallback);
                             }
                         }
@@ -3272,7 +3253,7 @@ mod tests {
             model: None,
             provider: None,
         };
-        let (conversation, _meta_rx) = ConversationSession::new(
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
             work_dir,
             session_id,
             config,
@@ -3364,7 +3345,7 @@ mod tests {
             model: None,
             provider: None,
         };
-        let (conversation, _meta_rx) = ConversationSession::new(
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
             work_dir,
             session_id,
             config,

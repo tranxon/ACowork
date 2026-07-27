@@ -210,12 +210,18 @@ impl ReliableProvider {
                 .and_then(|l| l.read().ok())
                 .map(|g| g.clone())
                 .unwrap_or(SessionStatus::Idle);
+            let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
+            // ADR-043: emit a minimal SessionState with just status_json.
+            // Other fields (message_count, tokens) are 0 - this is a transient
+            // status that will be corrected on the next emit_session_state().
             let _ = tx.try_send(SessionChunkEvent {
                 session_id: sid.clone(),
                 event: ChunkEvent::SessionStateChanged {
-                    status,
-                    ratio: None,
-                    context_usage: None,
+                    state: acowork_core::mqtt_proto::SessionState {
+                        session_id: sid.clone(),
+                        status_json,
+                        ..Default::default()
+                    },
                 },
             });
         }
@@ -237,12 +243,15 @@ impl ReliableProvider {
                 .and_then(|l| l.read().ok())
                 .map(|g| g.clone())
                 .unwrap_or(SessionStatus::Idle);
+            let status_json = serde_json::to_string(&status).unwrap_or_else(|_| r#""idle""#.to_string());
             let _ = tx.try_send(SessionChunkEvent {
                 session_id: sid.clone(),
                 event: ChunkEvent::SessionStateChanged {
-                    status,
-                    ratio: None,
-                    context_usage: None,
+                    state: acowork_core::mqtt_proto::SessionState {
+                        session_id: sid.clone(),
+                        status_json,
+                        ..Default::default()
+                    },
                 },
             });
         }

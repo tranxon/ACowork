@@ -36,7 +36,7 @@ fn make_session(dir: &TempDir, session_id: &str) -> ConversationSession {
         provider: Some("openai".to_string()),
     };
     let committed = Arc::new(AtomicUsize::new(0));
-    let (session, _meta_rx) =
+    let (session, _config_rx, _state_rx) =
         ConversationSession::new(dir.path(), session_id, cfg, 0, committed).expect("new");
     session
 }

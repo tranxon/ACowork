@@ -413,7 +413,7 @@ mod tests {
     fn restore_simple_user_assistant_roundtrip() {
         let work = temp_workdir("simple");
         let session_id = "sess-simple";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {
@@ -443,7 +443,7 @@ mod tests {
     fn restore_drops_thought_lines() {
         let work = temp_workdir("thought");
         let session_id = "sess-thought";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {
@@ -471,7 +471,7 @@ mod tests {
     fn restore_merges_tool_calls_onto_assistant() {
         let work = temp_workdir("tools");
         let session_id = "sess-tools";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {
@@ -529,7 +529,7 @@ mod tests {
     fn restore_drops_orphan_tool_result() {
         let work = temp_workdir("orphan");
         let session_id = "sess-orphan";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {
@@ -562,7 +562,7 @@ mod tests {
     fn restore_anchors_at_last_compaction() {
         let work = temp_workdir("compact");
         let session_id = "sess-compact";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {
@@ -617,7 +617,7 @@ mod tests {
     fn restore_skips_corrupt_lines() {
         let work = temp_workdir("corrupt");
         let session_id = "sess-corrupt";
-        let (session, _meta_rx) = ConversationSession::new(
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
             SessionConfig {

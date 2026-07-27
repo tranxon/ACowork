@@ -57,16 +57,19 @@ pub(crate) async fn phase_b_init_session(
                 &latest_id,
                 committed_lines.clone(),
             ) {
-                Ok((conv, meta_rx)) => {
-                    // Spawn the meta-change relay so persisted-session updates
-                    // (title / model / tokens / etc.) flow through MQTT to the
-                    // Desktop. See subsystems::spawn_meta_change_relay.
-                    // We pass an Arc-cloneable `ConvSession` clone to the
-                    // relay; the canonical session is moved into the
-                    // SessionState below.
+                Ok((conv, config_rx, state_rx)) => {
+                    // ADR-043: Spawn config + state change relays so
+                    // persisted-session updates flow through MQTT to the
+                    // Desktop.
                     if let Some(chunk_tx) = ctx.chunk_tx.clone() {
-                        crate::startup::subsystems::spawn_meta_change_relay(
-                            meta_rx,
+                        crate::startup::subsystems::spawn_config_change_relay(
+                            config_rx,
+                            chunk_tx.clone(),
+                            conv.clone(),
+                            latest_id.clone(),
+                        );
+                        crate::startup::subsystems::spawn_state_change_relay(
+                            state_rx,
                             chunk_tx,
                             conv.clone(),
                             latest_id.clone(),
@@ -89,7 +92,7 @@ pub(crate) async fn phase_b_init_session(
         } else {
             let new_id = crate::conversation::generate_session_id();
             tracing::info!(session_id = %new_id, "Creating new conversation session");
-            let (conv, meta_rx) = crate::conversation::ConversationSession::new(
+            let (conv, config_rx, state_rx) = crate::conversation::ConversationSession::new(
                 work_dir_path,
                 &new_id,
                 crate::conversation::SessionConfig {
@@ -108,7 +111,8 @@ pub(crate) async fn phase_b_init_session(
             // here would silently buffer `UnboundedSender`s and prevent
             // Drop-time notifications from being observed. Dropping is
             // the explicit "I don't care" signal.
-            drop(meta_rx);
+            drop(config_rx);
+            drop(state_rx);
             Some(conv)
         };
 

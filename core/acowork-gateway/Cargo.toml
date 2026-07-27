@@ -66,6 +66,11 @@ dialoguer = { workspace = true, optional = true }
 acowork-sign = { workspace = true }
 acowork-memory = { workspace = true }
 acowork-grafeo = { workspace = true }
+# Re-declare with fast-derivation feature so test runs use weak Argon2id
+# params (8 KiB / 1 iter / 1 thread) instead of production-grade (64 MB /
+# 3 iter / 4 threads). Without this feature flag, `cfg(test)` would not
+# propagate and vault tests would take ~4 s each due to Argon2id cost.
+acowork-vault = { workspace = true, features = ["fast-derivation"] }
 grafeo-common = { workspace = true }
 zip = { workspace = true }
 tempfile = { workspace = true }

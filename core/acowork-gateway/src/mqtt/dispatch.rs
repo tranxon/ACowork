@@ -130,7 +130,7 @@ mod tests {
         assert!(topic_matches("acowork/agents/+/status", "acowork/agents/com.example/status"));
         assert!(topic_matches("acowork/agents/+/status", "acowork/agents/foo/status"));
         assert!(!topic_matches("acowork/agents/+/status", "acowork/agents/foo/meta"));
-        assert!(!topic_matches("acowork/agents/+/status", "acowork/agents/foo/sessions/s1/meta"));
+        assert!(!topic_matches("acowork/agents/+/status", "acowork/agents/foo/sessions/s1/config"));
     }
 
     #[test]

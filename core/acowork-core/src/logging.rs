@@ -55,17 +55,23 @@ impl SizeRollingFileAppender {
     /// `max_count` — maximum number of log files to keep (0 = unlimited).
     /// The initial file is named `YYYYMMDD_HHMMSS.log` based on current time.
     ///
+    /// Creates `dir` (and any missing parents) if it does not already exist,
+    /// so callers can point at a freshly-installed workspace without a prior
+    /// bootstrap step.
+    ///
     /// Returns `Err(io::Error)` if neither `OpenOptions::create+append` nor
     /// `File::create` can produce the initial log file. Callers are expected
     /// to fall back to a stderr-only subscriber rather than panic, so that
     /// transient filesystem failures (e.g. sandbox EPERM, full disk, missing
-    /// parent directory) do not abort process startup.
+    /// parent directory AFTER the create_dir_all call) do not abort process
+    /// startup.
     pub fn new(
         dir: std::path::PathBuf,
         max_mb: u64,
         max_count: usize,
     ) -> std::io::Result<Self> {
         let max_bytes = max_mb * 1024 * 1024;
+        std::fs::create_dir_all(&dir)?;
         let now = chrono::Local::now();
         let filename = format!("{}.log", now.format("%Y%m%d_%H%M%S"));
         let path = dir.join(&filename);

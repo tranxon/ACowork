@@ -8,7 +8,7 @@
 //!   - Send workspace config snapshot to Gateway
 
 use crate::config::RuntimeConfig;
-use crate::conversation::{ConversationSession, MetaChangeKind};
+use crate::conversation::{ConfigChange, ConversationSession, StateChange};
 use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
 use acowork_core::mqtt_proto::StreamLine;
@@ -232,22 +232,8 @@ async fn relay_chunk_event_mqtt(
             publisher.publish_stopped(sid, "").await;
         }
 
-        ChunkEvent::SessionStateChanged {
-            status,
-            ratio,
-            context_usage,
-        } => {
-            let status_json = serde_json::to_string(&status).unwrap_or_default();
-            publisher
-                .publish_session_state_changed(
-                    crate::mqtt::client::SessionStateChangeEvent {
-                        session_id: sid,
-                        status_json: &status_json,
-                        ratio,
-                        context_usage_json: context_usage.as_deref(),
-                    },
-                )
-                .await;
+        ChunkEvent::SessionStateChanged { state } => {
+            publisher.publish_session_state(sid, &state).await;
         }
 
         ChunkEvent::TodoListUpdated { todos } => {
@@ -356,18 +342,16 @@ async fn relay_chunk_event_mqtt(
         // ADR-XXX: per-session persisted metadata changed. Published
         // with Retained=true so a (re)connecting Desktop immediately
         // receives the current state via the broker's retained store.
-        ChunkEvent::SessionMetaChanged { meta, fields_changed } => {
+        ChunkEvent::SessionConfigChanged { config } => {
             tracing::info!(
                 sid = %sid,
-                fields = ?fields_changed,
-                title = %meta.title,
-                model_id = %meta.model_id,
-                provider_id = %meta.provider_id,
-                workspace_id = %meta.workspace_id,
-                message_count = meta.message_count,
-                "Publishing session_meta (retained)"
+                title = %config.title,
+                model_id = %config.model_id,
+                provider_id = %config.provider_id,
+                workspace_id = %config.workspace_id,
+                "Publishing session_config (retained)"
             );
-            publisher.publish_session_meta(sid, &meta).await;
+            publisher.publish_session_config(sid, &config).await;
         }
 
         ChunkEvent::LoopDetectedPaused {
@@ -378,99 +362,140 @@ async fn relay_chunk_event_mqtt(
     }
 }
 
-/// Minimum interval between MQTT publishes for hot meta fields (tokens,
-/// message_count). Matches `ConversationSession::META_WRITE_COOLDOWN_MS`
+/// Minimum interval between MQTT publishes for state changes (tokens,
+/// message_count, status). Matches `ConversationSession::META_WRITE_COOLDOWN_MS`
 /// so we never publish more often than we persist.
-const META_HOT_PUBLISH_COOLDOWN_MS: u64 = 3000;
+const STATE_PUBLISH_COOLDOWN_MS: u64 = 3000;
 
-/// Spawn the per-session meta-change relay.
+/// Spawn the per-session config-change relay (ADR-043).
 ///
-/// `ConversationSession` notifies `meta_rx` on every `write_meta()` with
-/// either `Cold(field)` (publish immediately) or `Hot(field)` (coalesce
-/// behind `META_HOT_PUBLISH_COOLDOWN_MS`).  This task converts each
-/// notification into a `ChunkEvent::SessionMetaChanged` on the shared
-/// chunk channel, where `relay_chunk_event_mqtt` picks it up and
-/// publishes to MQTT via `MqttChunkPublisher::publish_session_meta`
-/// (Retained, QoS 1).
-///
-/// The relay terminates when `meta_rx` closes (i.e. when the last
-/// `ConversationSession` clone is dropped — which happens when the
-/// session_task shuts down and SessionManager drops its conv clone).
-pub(crate) fn spawn_meta_change_relay(
-    mut meta_rx: tokio::sync::mpsc::UnboundedReceiver<MetaChangeKind>,
+/// Config changes (title, model, provider, workspace_id, reasoning_effort,
+/// temperature) are low-frequency user actions. The relay publishes
+/// immediately with no throttle.
+pub(crate) fn spawn_config_change_relay(
+    mut config_rx: tokio::sync::mpsc::UnboundedReceiver<ConfigChange>,
     chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
     conv: ConversationSession,
     session_id: String,
 ) {
     tokio::spawn(async move {
         use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
-        use std::time::Instant;
 
-        let mut last_hot_publish: Option<Instant> = None;
-        let cooldown = Duration::from_millis(META_HOT_PUBLISH_COOLDOWN_MS);
-
-        while let Some(kind) = meta_rx.recv().await {
-            let (should_publish, is_hot) = match kind {
-                MetaChangeKind::Cold(_) => (true, false),
-                MetaChangeKind::Hot(_) => {
-                    let ok = match last_hot_publish {
-                        None => true,
-                        Some(t) if t.elapsed() >= cooldown => true,
-                        Some(_) => false,
-                    };
-                    (ok, true)
-                }
+        while let Some(change) = config_rx.recv().await {
+            // Drop sentinel: empty session_id means the ConversationSession
+            // is being dropped. Fall back to the relay's own clone.
+            let config = if change.snapshot.session_id.is_empty()
+                && change.snapshot.agent_id.is_empty()
+            {
+                conv.build_session_config_snapshot()
+            } else {
+                change.snapshot
             };
-            if !should_publish {
-                continue;
-            }
-            if is_hot {
-                last_hot_publish = Some(Instant::now());
-            }
 
-            // ADR-039+FIX: Use the snapshot from MetaChangeKind (built by
-            // the mutator on the ORIGINAL ConversationSession), so we always
-            // publish the latest values regardless of relay's own clone.
-            // If the proto is all-zeros (Drop signal), fall back to the
-            // relay's own (potentially stale) snapshot rather than publishing
-            // an empty message.
-            let meta = match kind {
-                MetaChangeKind::Cold(ref snapshot) | MetaChangeKind::Hot(ref snapshot) => {
-                    if snapshot.session_id.is_empty() && snapshot.agent_id.is_empty() {
-                        conv.build_session_meta_snapshot()
-                    } else {
-                        snapshot.clone()
-                    }
-                }
-            };
             tracing::info!(
                 session_id = %session_id,
-                model_id = %meta.model_id,
-                provider_id = %meta.provider_id,
-                workspace_id = %meta.workspace_id,
-                "meta relay: sending SessionMetaChanged to chunk channel"
+                model_id = %config.model_id,
+                provider_id = %config.provider_id,
+                workspace_id = %config.workspace_id,
+                "config relay: sending SessionConfigChanged to chunk channel"
             );
 
             let event = SessionChunkEvent {
                 session_id: session_id.clone(),
-                event: ChunkEvent::SessionMetaChanged {
-                    meta,
-                    fields_changed: vec!["meta"],
-                },
+                event: ChunkEvent::SessionConfigChanged { config },
             };
             if chunk_tx.try_send(event).is_err() {
-                // Channel full or closed — drop. The retained MQTT message
-                // already holds the previous snapshot, so a missed push is
-                // self-healing on the next successful one.
                 tracing::debug!(
                     session_id = %session_id,
-                    "meta relay: chunk channel full/closed, dropping notification"
+                    "config relay: chunk channel full/closed, dropping notification"
                 );
             }
         }
         tracing::debug!(
             session_id = %session_id,
-            "meta relay: meta_rx closed, exiting"
+            "config relay: config_rx closed, exiting"
+        );
+    });
+}
+
+/// Spawn the per-session state-change relay (ADR-043).
+///
+/// State changes (message_count, tokens, status, ratio, context_usage)
+/// are high-frequency telemetry. The relay coalesces behind a 3 s cooldown
+/// to avoid flooding MQTT on every LLM round-trip.
+pub(crate) fn spawn_state_change_relay(
+    mut state_rx: tokio::sync::mpsc::UnboundedReceiver<StateChange>,
+    chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
+    _conv: ConversationSession,
+    session_id: String,
+) {
+    tokio::spawn(async move {
+        use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
+        use std::time::Instant;
+
+        let mut last_publish: Option<Instant> = None;
+        let cooldown = Duration::from_millis(STATE_PUBLISH_COOLDOWN_MS);
+        let mut last_state: Option<acowork_core::mqtt_proto::SessionState> = None;
+
+        while let Some(change) = state_rx.recv().await {
+            // Drop sentinel: empty session_id means the ConversationSession
+            // is being dropped. Force-publish the last known state (bypass
+            // throttle) if we have one.
+            if change.snapshot.session_id.is_empty()
+                && change.snapshot.agent_id.is_empty()
+            {
+                if let Some(state) = last_state.take() {
+                    let event = SessionChunkEvent {
+                        session_id: session_id.clone(),
+                        event: ChunkEvent::SessionStateChanged { state },
+                    };
+                    let _ = chunk_tx.try_send(event);
+                }
+                continue;
+            }
+
+            let state = change.snapshot;
+            last_state = Some(state.clone());
+
+            // Throttle: skip if within cooldown.
+            let should_publish = match last_publish {
+                None => true,
+                Some(t) if t.elapsed() >= cooldown => true,
+                Some(_) => false,
+            };
+            if !should_publish {
+                continue;
+            }
+            last_publish = Some(Instant::now());
+
+            tracing::info!(
+                session_id = %session_id,
+                message_count = state.message_count,
+                "state relay: sending SessionStateChanged to chunk channel"
+            );
+
+            let event = SessionChunkEvent {
+                session_id: session_id.clone(),
+                event: ChunkEvent::SessionStateChanged { state },
+            };
+            if chunk_tx.try_send(event).is_err() {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "state relay: chunk channel full/closed, dropping notification"
+                );
+            }
+        }
+        // Channel closed: force-publish the last known state if pending.
+        if let Some(state) = last_state {
+            let event = SessionChunkEvent {
+                session_id: session_id.clone(),
+                event: ChunkEvent::SessionStateChanged { state },
+            };
+            let _ = chunk_tx.try_send(event);
+        }
+        tracing::debug!(
+            session_id = %session_id,
+            "state relay: state_rx closed, exiting"
         );
     });
 }

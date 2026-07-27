@@ -28,7 +28,7 @@ use acowork_core::mqtt_proto::{
     ContextUsagePayload, DataEnvelope, DonePayload, ErrorPayload,
     IterationLimitPausedPayload, LoopDetectedPausedPayload, McpTransport as ProtoMcpTransport,
     NewDataAvailablePayload, RecordCompletePayload,
-    SessionMessage, SessionStateChangedPayload, StoppedPayload, StreamDeltaPayload,
+    SessionMessage, StoppedPayload, StreamDeltaPayload,
     StreamLine, TodoUpdatedPayload, ToolApprovalNeededPayload,
 };
 use acowork_mqtt_session::{
@@ -287,20 +287,6 @@ pub struct MqttConnectConfig<'a> {
     /// catalog sync as MQTT-only — see startup/subsystems.rs §MCP for the
     /// rationale and the on-disk contract).
     pub work_dir: std::path::PathBuf,
-}
-
-/// Event payload for `publish_session_state_changed`.
-///
-/// ADR-034 Phase 8: replaces the legacy positional `Option<&str>` arguments.
-/// ADR-039: persistent fields (model, provider, workspace_id, reasoning_effort,
-/// temperature) are broadcast through the `session_meta` MQTT channel sourced
-/// from `data/meta/{session_id}.json`. This struct therefore only carries
-/// *runtime* state.
-pub struct SessionStateChangeEvent<'a> {
-    pub session_id: &'a str,
-    pub status_json: &'a str,
-    pub ratio: Option<f64>,
-    pub context_usage_json: Option<&'a str>,
 }
 
 /// Event payload for `publish_tool_approval_needed`.
@@ -1220,19 +1206,25 @@ impl MqttChunkPublisher {
     /// message, so hot-field flooding (tokens / message_count changing on
     /// every LLM round-trip) cannot leak stale snapshots — the Desktop
     /// always sees the latest one on (re)connect.
-    pub async fn publish_session_meta(
+    /// Publish a SessionConfig snapshot to the retained `sessions/{sid}/config`
+    /// topic (ADR-043).
+    ///
+    /// Config fields (title, model, provider, workspace_id, reasoning_effort,
+    /// temperature) are low-frequency user actions - published immediately
+    /// with no throttle.
+    pub async fn publish_session_config(
         &self,
         session_id: &str,
-        meta: &acowork_core::mqtt_proto::SessionMeta,
+        config: &acowork_core::mqtt_proto::SessionConfig,
     ) {
         let topic = format!(
-            "acowork/agents/{}/sessions/{}/meta",
+            "acowork/agents/{}/sessions/{}/config",
             self.agent_id, session_id
         );
         let envelope = DataEnvelope {
             version: 1,
-            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionMeta(
-                meta.clone(),
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionConfig(
+                config.clone(),
             )),
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
@@ -1246,7 +1238,44 @@ impl MqttChunkPublisher {
                 agent_id = %self.agent_id,
                 session_id = %session_id,
                 error = %e,
-                "Failed to publish session_meta"
+                "Failed to publish session_config"
+            );
+        }
+    }
+
+    /// Publish a SessionState snapshot to the retained `sessions/{sid}/state`
+    /// topic (ADR-043).
+    ///
+    /// Runtime telemetry (status, message_count, tokens, ratio,
+    /// context_usage) is high-frequency - the state relay coalesces behind
+    /// a 3 s cooldown before calling this method.
+    pub async fn publish_session_state(
+        &self,
+        session_id: &str,
+        state: &acowork_core::mqtt_proto::SessionState,
+    ) {
+        let topic = format!(
+            "acowork/agents/{}/sessions/{}/state",
+            self.agent_id, session_id
+        );
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionState(
+                state.clone(),
+            )),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        if let Err(e) = self
+            .client()
+            .await
+            .publish(topic, QoS::AtLeastOnce, /* retain */ true, bytes)
+            .await
+        {
+            tracing::warn!(
+                agent_id = %self.agent_id,
+                session_id = %session_id,
+                error = %e,
+                "Failed to publish session_state"
             );
         }
     }
@@ -1388,42 +1417,6 @@ impl MqttChunkPublisher {
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.publish(&sid, "stopped", &bytes).await;
-    }
-
-    /// Publish a session_state_changed event via MQTT (QoS 1).
-    ///
-    /// ADR-034 Phase 8: takes a single `SessionStateChangeEvent` struct.
-    ///
-    /// ADR-039: only runtime fields (status, ratio, context_usage) are
-    /// transmitted here. Persistent per-session fields are broadcast through
-    /// the `session_meta` channel.
-    pub(crate) async fn publish_session_state_changed(
-        &self,
-        ev: SessionStateChangeEvent<'_>,
-    ) {
-        let sid = ev.session_id.to_string();
-        let sjson = ev.status_json.to_string();
-        let r = ev.ratio.unwrap_or(0.0);
-        let cu = ev.context_usage_json.map(|s| s.to_string()).unwrap_or_default();
-        let agent_id = self.agent_id.clone();
-        let event = SessionMessage {
-            agent_id,
-            session_id: sid.clone(),
-            event: Some(session_message::Event::SessionStateChanged(
-                SessionStateChangedPayload {
-                    session_id: sid.clone(),
-                    status_json: sjson,
-                    ratio: r,
-                    context_usage_json: cu,
-                },
-            )),
-        };
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(data_envelope::Payload::SessionMessage(event)),
-        };
-        let bytes = prost::Message::encode_to_vec(&envelope);
-        self.publish_with_qos(&sid, "session_state_changed", &bytes, QoS::AtLeastOnce, true).await;
     }
 
     /// Publish a context_usage event via MQTT (QoS 0).

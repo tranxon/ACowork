@@ -190,11 +190,13 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     ("acowork/agents/+/config", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/created", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/deleted", MqttQoS::AtLeastOnce),
-    // Retained per-session meta: Runtime publishes the latest complete
-    // title/model/provider/etc. snapshot on every meta-file write. Broker
-    // stores the last value, so (re)connect immediately receives the
-    // current state for any session the Desktop cares about.
-    ("acowork/agents/+/sessions/+/meta", MqttQoS::AtLeastOnce),
+    // ADR-043: Retained per-session config + state. Runtime publishes
+    // config (title/model/provider/workspace/reasoning_effort/temperature)
+    // and state (status/message_count/tokens/ratio/context_usage) on
+    // separate retained topics. Broker stores the last value, so
+    // (re)connect immediately receives the current state.
+    ("acowork/agents/+/sessions/+/config", MqttQoS::AtLeastOnce),
+    ("acowork/agents/+/sessions/+/state", MqttQoS::AtLeastOnce),
     ("acowork/sidecar/+/status", MqttQoS::AtLeastOnce),
     // ── Session message events ──
     // ADR-033: Subscribe to all session message topics (streaming chunks,

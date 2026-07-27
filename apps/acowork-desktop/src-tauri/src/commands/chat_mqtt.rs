@@ -131,34 +131,65 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("agent-event", event);
             }
 
-            // ── Session meta (model_confirmed usage etc.) ──
-            data_envelope::Payload::SessionMeta(meta) => {
+            // ── Session config (ADR-043: user-configurable fields only) ──
+            data_envelope::Payload::SessionConfig(config) => {
                 let event = serde_json::json!({
-                    "type": "session_meta",
-                    "agent_id": meta.agent_id,
-                    "session_id": meta.session_id,
-                    "title": meta.title,
-                    "message_count": meta.message_count,
-                    "provider_id": meta.provider_id,
-                    "model_id": meta.model_id,
-                    "input_tokens": meta.input_tokens,
-                    "output_tokens": meta.output_tokens,
-                    "total_input_tokens": meta.total_input_tokens,
-                    "total_output_tokens": meta.total_output_tokens,
-                    "reasoning_effort": meta.reasoning_effort,
-                    "temperature": meta.temperature,
-                    "workspace_id": meta.workspace_id,
-                    "updated_at": meta.updated_at,
+                    "type": "session_config",
+                    "agent_id": config.agent_id,
+                    "session_id": config.session_id,
+                    "title": config.title,
+                    "provider_id": config.provider_id,
+                    "model_id": config.model_id,
+                    "reasoning_effort": config.reasoning_effort,
+                    "temperature": config.temperature,
+                    "workspace_id": config.workspace_id,
                 });
                 tracing::info!(
-                    agent_id = %meta.agent_id,
-                    session_id = %meta.session_id,
-                    model_id = %meta.model_id,
-                    provider_id = %meta.provider_id,
-                    workspace_id = %meta.workspace_id,
-                    "DESKTOP: emitting session_meta agent-event"
+                    agent_id = %config.agent_id,
+                    session_id = %config.session_id,
+                    model_id = %config.model_id,
+                    provider_id = %config.provider_id,
+                    workspace_id = %config.workspace_id,
+                    "DESKTOP: emitting session_config agent-event"
                 );
                 let _ = app_handle.emit("agent-event", event);
+            }
+
+            // ── Session state (ADR-043: runtime telemetry only) ──
+            data_envelope::Payload::SessionState(state) => {
+                let event = serde_json::json!({
+                    "type": "session_state",
+                    "agent_id": state.agent_id,
+                    "session_id": state.session_id,
+                    "message_count": state.message_count,
+                    "input_tokens": state.input_tokens,
+                    "output_tokens": state.output_tokens,
+                    "total_input_tokens": state.total_input_tokens,
+                    "total_output_tokens": state.total_output_tokens,
+                    "ratio": state.ratio,
+                    "updated_at": state.updated_at,
+                });
+                // Parse status_json and context_usage_json inline
+                let mut m = event.as_object().unwrap().clone();
+                if !state.status_json.is_empty() {
+                    match serde_json::from_str::<serde_json::Value>(&state.status_json) {
+                        Ok(val) => { m.insert("status".into(), val); }
+                        Err(_) => { m.insert("status_json".into(), serde_json::Value::String(state.status_json.clone())); }
+                    }
+                }
+                if !state.context_usage_json.is_empty() {
+                    match serde_json::from_str::<serde_json::Value>(&state.context_usage_json) {
+                        Ok(val) => { m.insert("context_usage".into(), val); }
+                        Err(_) => { m.insert("context_usage_json".into(), serde_json::Value::String(state.context_usage_json.clone())); }
+                    }
+                }
+                tracing::info!(
+                    agent_id = %state.agent_id,
+                    session_id = %state.session_id,
+                    message_count = state.message_count,
+                    "DESKTOP: emitting session_state agent-event"
+                );
+                let _ = app_handle.emit("agent-event", serde_json::Value::Object(m));
             }
 
             // ── Agent lifecycle ──
@@ -197,17 +228,6 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "kind": sc.kind,
                     "endpoint": sc.endpoint,
                     "ready": sc.ready,
-                });
-                let _ = app_handle.emit("agent-event", event);
-            }
-
-            // ── Session config ──
-            data_envelope::Payload::SessionConfig(config) => {
-                let event = serde_json::json!({
-                    "type": "session_config",
-                    "agent_id": config.agent_id,
-                    "session_id": config.session_id,
-                    "config_json": config.config_json,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }
@@ -827,31 +847,12 @@ fn session_message_to_flat(
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("skill_executed".into()));
             m.insert("skill_name".into(), serde_json::Value::String(p.skill_name.clone()));
-            m.insert("success".into(), serde_json::Value::Bool(p.success));
+             m.insert("success".into(), serde_json::Value::Bool(p.success));
             Some(serde_json::Value::Object(m))
         }
-        session_message::Event::SessionStateChanged(p) => {
-            let mut m = base.as_object().unwrap().clone();
-            m.insert("type".into(), serde_json::Value::String("session_state_changed".into()));
-            // ADR-039: persistent fields (model, provider, workspace_id,
-            // reasoning_effort, temperature) are delivered through the
-            // `session_meta` MQTT channel, not here. Only runtime fields
-            // (ratio, status, context_usage) are included.
-            m.insert("ratio".into(), serde_json::json!(p.ratio));
-            if !p.status_json.is_empty() {
-                match serde_json::from_str::<serde_json::Value>(&p.status_json) {
-                    Ok(val) => { m.insert("status".into(), val); }
-                    Err(_) => { m.insert("status_json".into(), serde_json::Value::String(p.status_json.clone())); }
-                }
-            }
-            if !p.context_usage_json.is_empty() {
-                match serde_json::from_str::<serde_json::Value>(&p.context_usage_json) {
-                    Ok(val) => { m.insert("context_usage".into(), val); }
-                    Err(_) => { m.insert("context_usage_json".into(), serde_json::Value::String(p.context_usage_json.clone())); }
-                }
-            }
-            Some(serde_json::Value::Object(m))
-        }
+        // ADR-043: SessionStateChanged payload deleted from SessionMessage.
+        // Runtime state (status, ratio, context_usage) now flows through
+        // the retained `sessions/{sid}/state` topic (Payload::SessionState).
         session_message::Event::LoopDetectedPaused(p) => {
             let mut m = base.as_object().unwrap().clone();
             m.insert("type".into(), serde_json::Value::String("loop_detected_paused".into()));

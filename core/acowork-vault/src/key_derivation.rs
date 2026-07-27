@@ -20,9 +20,24 @@ pub const KEY_LEN: usize = 32;
 ///
 /// These are conservative parameters suitable for a desktop application.
 /// The memory cost of 64MB provides good resistance against GPU attacks.
+///
+/// Enable the `fast-derivation` feature to use weak parameters for fast
+/// test execution. Cannot use `cfg(test)` because that flag does not
+/// propagate to downstream crates that depend on this one.
+#[cfg(not(feature = "fast-derivation"))]
 const ARGON2_MEMORY_COST: u32 = 65536; // 64 MB in KiB
+#[cfg(feature = "fast-derivation")]
+const ARGON2_MEMORY_COST: u32 = 8;     // 8 KiB - fast enough for tests
+
+#[cfg(not(feature = "fast-derivation"))]
 const ARGON2_TIME_COST: u32 = 3;
+#[cfg(feature = "fast-derivation")]
+const ARGON2_TIME_COST: u32 = 1;
+
+#[cfg(not(feature = "fast-derivation"))]
 const ARGON2_PARALLELISM: u32 = 4;
+#[cfg(feature = "fast-derivation")]
+const ARGON2_PARALLELISM: u32 = 1;
 
 /// Derive master key from password using Argon2id
 ///

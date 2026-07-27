@@ -719,7 +719,7 @@ impl SessionManager {
         .max_sessions
         .unwrap_or(self.core.config.max_sessions);
 
-        let (conv, meta_rx) = crate::conversation::ConversationSession::new(
+        let (conv, config_rx, state_rx) = crate::conversation::ConversationSession::new(
             std::path::Path::new(&self.core.config.work_dir),
             &session_id,
             crate::conversation::SessionConfig {
@@ -732,12 +732,16 @@ impl SessionManager {
             committed_lines.clone(),
         )?;
 
-        // Spawn the meta-change relay: forwards `ConversationSession::write_meta`
-        // notifications through the chunk channel as `ChunkEvent::SessionMetaChanged`,
-        // which subsystems.rs then publishes to MQTT (Retained, QoS 1).
+        // ADR-043: Spawn config + state change relays.
         if let Some(chunk_tx) = self.config.chunk_tx.clone() {
-            crate::startup::subsystems::spawn_meta_change_relay(
-                meta_rx,
+            crate::startup::subsystems::spawn_config_change_relay(
+                config_rx,
+                chunk_tx.clone(),
+                conv.clone(),
+                session_id.clone(),
+            );
+            crate::startup::subsystems::spawn_state_change_relay(
+                state_rx,
                 chunk_tx,
                 conv.clone(),
                 session_id.clone(),
@@ -1292,7 +1296,7 @@ impl SessionManager {
         // The writer thread (inside ConversationSession) increments it;
         // the session's AgentCore reads it via clone_for_session.
         let committed_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (conv, meta_rx) = ConversationSession::resume(work_dir, session_id, committed_lines.clone())
+        let (conv, config_rx, state_rx) = ConversationSession::resume(work_dir, session_id, committed_lines.clone())
             .map_err(|e| {
                 RuntimeError::Config(format!(
                     "Session not found on disk: {} ({})",
@@ -1300,10 +1304,16 @@ impl SessionManager {
                 ))
             })?;
 
-        // Spawn the meta-change relay — same pattern as the create path above.
+        // ADR-043: Spawn config + state change relays.
         if let Some(chunk_tx) = self.config.chunk_tx.clone() {
-            crate::startup::subsystems::spawn_meta_change_relay(
-                meta_rx,
+            crate::startup::subsystems::spawn_config_change_relay(
+                config_rx,
+                chunk_tx.clone(),
+                conv.clone(),
+                session_id.to_string(),
+            );
+            crate::startup::subsystems::spawn_state_change_relay(
+                state_rx,
                 chunk_tx,
                 conv.clone(),
                 session_id.to_string(),

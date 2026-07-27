@@ -47,11 +47,15 @@ message DataEnvelope {
     // ── Session lifecycle (Runtime → Desktop) ──
     SessionCreated           session_created           = 30;
     SessionDeleted           session_deleted           = 31;
-    SessionMeta              session_meta              = 32;
+    // ADR-043: SessionMeta (field 32) removed. Split into SessionConfig
+    // (field 33) for user-configurable fields and SessionState (field 37)
+    // for runtime telemetry, eliminating stale-value races where Hot meta
+    // updates carried outdated config field values.
     SessionConfig            session_config            = 33;
     SessionMessage           session_message           = 34;
     SessionOpened            session_opened            = 35;
     SessionNotOpened         session_not_opened        = 36;
+    SessionState             session_state             = 37;
 
     // ── Control commands (Desktop → Runtime) ──
     ControlCommand           control_command           = 40;
@@ -331,33 +335,50 @@ message SessionDeleted {
   string deleted_at = 3;  // ISO 8601
 }
 
-/// Session metadata (always latest complete value).
-/// Topic: acowork/agents/{id}/sessions/{sid}/meta (Retained)
-message SessionMeta {
-  string agent_id = 1;
-  string session_id = 2;
-  string title = 3;
-  uint64 message_count = 5;
-  string provider_id = 6;
-  string model_id = 7;
-  // Usage fields
-  uint64 input_tokens = 10;
-  uint64 output_tokens = 11;
-  uint64 total_input_tokens = 12;
-  uint64 total_output_tokens = 13;
-  string updated_at = 14;  // ISO 8601 (mirrors SessionMeta.last_active_at)
-  // Per-session overrides (persisted in JSONL meta, republished on change).
-  string reasoning_effort = 15;  // "" = no override
-  float  temperature     = 16;   // NaN-sentinel where prost encodes 0; client treats 0 as "no override"
-  string workspace_id    = 17;
-}
-
 /// Session config (always latest complete value).
 /// Topic: acowork/agents/{id}/sessions/{sid}/config (Retained)
+///
+/// ADR-043: carries only user-configurable fields. Runtime telemetry
+/// (status, tokens, message_count) is published separately via SessionState
+/// on the `sessions/{sid}/state` topic. This split eliminates stale-value
+/// races where Hot meta updates (triggered by message_count changes during
+/// LLM streaming) carried outdated config field values and reverted
+/// frontend optimistic updates.
 message SessionConfig {
   string agent_id = 1;
   string session_id = 2;
-  string config_json = 3;  // full session config as JSON
+  string title = 3;
+  string provider_id = 4;
+  string model_id = 5;
+  string reasoning_effort = 6;  // "" = no override
+  float  temperature = 7;       // NaN = no override (prost encodes float without Option)
+  string workspace_id = 8;
+}
+
+/// Session runtime state (always latest complete value).
+/// Topic: acowork/agents/{id}/sessions/{sid}/state (Retained)
+///
+/// ADR-043: carries only runtime telemetry. User-configurable fields
+/// (model, workspace, reasoning_effort, temperature, title) are published
+/// separately via SessionConfig on the `sessions/{sid}/config` topic.
+///
+/// This message absorbs the fields previously carried by the deleted
+/// SessionStateChangedPayload (status_json, ratio, context_usage_json).
+/// The retained topic replaces the old non-retained
+/// `messages/session_state_changed` event, ensuring reconnecting clients
+/// immediately receive the latest state.
+message SessionState {
+  string agent_id = 1;
+  string session_id = 2;
+  string status_json = 3;
+  uint64 message_count = 4;
+  uint64 input_tokens = 5;
+  uint64 output_tokens = 6;
+  uint64 total_input_tokens = 7;
+  uint64 total_output_tokens = 8;
+  double ratio = 9;
+  string context_usage_json = 10;
+  string updated_at = 11;  // ISO 8601
 }
 
 /// Session message event (incremental, QoS 0).
@@ -381,7 +402,9 @@ message SessionMessage {
     ContextUsagePayload   context_usage   = 22;
     MemoryUpdatedPayload  memory_updated  = 23;
     SkillExecutedPayload       skill_executed          = 24;
-    SessionStateChangedPayload session_state_changed   = 25;
+    // ADR-043: SessionStateChangedPayload (field 25) removed. Its fields
+    // (status_json, ratio, context_usage_json) are now carried by the
+    // retained SessionState topic (sessions/{sid}/state).
     IterationLimitPausedPayload iteration_limit_paused = 26;
     ToolApprovalNeededPayload   tool_approval_needed    = 27;
     // DEPRECATED (ADR-035): superseded by `stream_delta`, which carries the
@@ -481,18 +504,10 @@ message SkillExecutedPayload {
   bool success = 3;
 }
 
-// SessionStateChangedPayload carries ONLY runtime state.
-// ADR-024/035: persistent fields (model, provider, workspace_id,
-// reasoning_effort, temperature) flow through `SessionMeta` (retained
-// MQTT) and `meta.json` (HTTP pull).  Mixing them here caused
-// stale-value races between emit_session_state() and meta_change_tx
-// relays.  See ADR-024 §session_meta_runtime_split for the full rationale.
-message SessionStateChangedPayload {
-  string session_id = 1;
-  string status_json = 2;
-  double ratio = 3;
-  string context_usage_json = 4;
-}
+// ADR-043: SessionStateChangedPayload removed. Its fields (status_json,
+// ratio, context_usage_json) are now carried by the retained SessionState
+// topic (sessions/{sid}/state), replacing the old non-retained
+// `messages/session_state_changed` event.
 
 message IterationLimitPausedPayload {
   string session_id = 1;
