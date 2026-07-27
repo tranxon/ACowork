@@ -110,7 +110,7 @@ impl AgentLoop {
                 // ChatResponse so the upstream loop sees the same control
                 // flow shape it would after a mid-stream Stop.
                 self.session_core
-                    .flush_streaming_line(self.session.conversation.as_ref());
+                    .flush_streaming_line(self.session.conversation.as_deref());
                 let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                     content: String::new(),
                 });
@@ -171,7 +171,7 @@ impl AgentLoop {
                                 ControlDecision::Stop => {
                                     tracing::info!("LLM stream stopped by user — aborting");
                                     // ADR-021: Flush partial content to JSONL before stopping
-                                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                                    self.session_core.flush_streaming_line(self.session.conversation.as_deref());
                                     let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                                         content: accumulated_content.clone(),
                                     });
@@ -184,7 +184,7 @@ impl AgentLoop {
                                     tracing::info!("LLM stream paused by debug — aborting");
                                     self.pending_interrupt = Some(ControlDecision::Pause);
                                     // ADR-021: Flush partial content to JSONL before pausing
-                                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                                    self.session_core.flush_streaming_line(self.session.conversation.as_deref());
                                     let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                                         content: accumulated_content.clone(),
                                     });
@@ -210,7 +210,7 @@ impl AgentLoop {
                     // tags into separate ReasoningContent events, so a Content
                     // event here means we are in assistant mode.
                     self.session_core.flush_and_new_streaming_line(
-                        "assistant", self.session.conversation.as_ref(),
+                        "assistant", self.session.conversation.as_deref(),
                     );
                     self.session_core.append_streaming_delta("assistant", &chunk);
                     self.session_core.notify_new_data_available();
@@ -227,7 +227,7 @@ impl AgentLoop {
                     // streaming line, flush it to JSONL and start a new
                     // thought line.
                     self.session_core.flush_and_new_streaming_line(
-                        "thought", self.session.conversation.as_ref(),
+                        "thought", self.session.conversation.as_deref(),
                     );
                     self.session_core.append_streaming_delta("thought", &chunk);
                     self.session_core.notify_new_data_available();
@@ -352,7 +352,7 @@ impl AgentLoop {
                     // `streaming_lines` is already empty — no duplicate
                     // JSONL write and no duplicate record_complete push.
                     self.session_core.force_flush_stream_delta();
-                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                    self.session_core.flush_streaming_line(self.session.conversation.as_deref());
 
                     // Diagnostic: log stream completion summary
                     tracing::info!(
@@ -368,7 +368,7 @@ impl AgentLoop {
                 StreamEvent::Error(e) => {
                     // ADR-021: Flush partial content to JSONL on error
                     // so the user can see what the AI was trying to say
-                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                    self.session_core.flush_streaming_line(self.session.conversation.as_deref());
 
                     // Check for context overflow and attempt recovery.
                     // Use structured error_type instead of string matching.
@@ -451,7 +451,7 @@ impl AgentLoop {
                         ControlDecision::Continue => {}
                     }
                     // ADR-021: Flush partial content to JSONL before stopping
-                    self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                    self.session_core.flush_streaming_line(self.session.conversation.as_deref());
                     let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                         content: accumulated_content.clone(),
                     });
@@ -471,7 +471,7 @@ impl AgentLoop {
                                 "LLM stream stopped by user during idle period — aborting"
                             );
                             // ADR-021: Flush partial content to JSONL before stopping
-                            self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                            self.session_core.flush_streaming_line(self.session.conversation.as_deref());
                             let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                                 content: accumulated_content.clone(),
                             });
@@ -484,7 +484,7 @@ impl AgentLoop {
                             tracing::info!("LLM stream paused during idle period — aborting");
                             self.pending_interrupt = Some(ControlDecision::Pause);
                             // ADR-021: Flush partial content to JSONL before pausing
-                            self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+                            self.session_core.flush_streaming_line(self.session.conversation.as_deref());
                             let _ = self.session_core.try_send_chunk(ChunkEvent::Stopped {
                                 content: accumulated_content.clone(),
                             });

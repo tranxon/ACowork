@@ -168,6 +168,12 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/state",
             get(proxy_get_session_state),
         )
+        // ADR-047: Session config read/write proxy. Runtime exposes
+        // `GET/PUT /sessions/{sid}/config` via `SessionConfigService`.
+        .route(
+            "/api/agents/{id}/sessions/{sid}/config",
+            get(proxy_get_session_config).put(proxy_put_session_config),
+        )
         // ADR-046: File upload/download proxy. Replaces the legacy
         // `/documents` routes (4 handlers deleted). The Runtime now
         // exposes `POST /sessions/{sid}/files` (multipart upload) and
@@ -542,6 +548,30 @@ async fn proxy_get_session(
 ) -> Response {
     let path = format!("/sessions/{}", sid);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/config`
+/// to Runtime's `GET /sessions/{sid}/config` (ADR-047).
+async fn proxy_get_session_config(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/config", sid);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/sessions/{sid}/config`
+/// to Runtime's `PUT /sessions/{sid}/config` (ADR-047).
+async fn proxy_put_session_config(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/config", sid);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }
 
 /// Reverse-proxy `POST /api/agents/{id}/workspaces`

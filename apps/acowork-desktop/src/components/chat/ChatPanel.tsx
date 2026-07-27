@@ -735,7 +735,7 @@ export function ChatPanel() {
       // top of the conversation).
       session.scope.current.isInitialLoad = currentSessId;
       chatStore.ensureLatestInCache(selectedAgentId, currentSessId)
-        .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessId))
+        .then(() => chatStore.loadSession(selectedAgentId, currentSessId))
         .finally(() => {
           session.scope.current.isInitialLoad = null;
           log.debug("[ChatPanel:mount] atomized restore done (full)", {
@@ -747,7 +747,7 @@ export function ChatPanel() {
     } else {
       // 2b. Messages already in store (nav-back: same agent, same session).
       //     No reload needed — messages survive in zustand across unmount.
-      chatStore.fetchSessionState(selectedAgentId, currentSessId);
+      chatStore.loadSession(selectedAgentId, currentSessId);
       log.debug("[ChatPanel:mount] atomized restore done (incremental)", {
         agentId: selectedAgentId,
         sessionId: currentSessId,
@@ -774,7 +774,7 @@ export function ChatPanel() {
     const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messages;
     if (existingMessages && existingMessages.length > 0) {
       // Messages already cached — just refresh session state.
-      chatStore.fetchSessionState(selectedAgentId, currentSessionId);
+      chatStore.loadSession(selectedAgentId, currentSessionId);
       return;
     }
 
@@ -785,7 +785,7 @@ export function ChatPanel() {
 
     session.scope.current.isInitialLoad = currentSessionId;
     chatStore.ensureLatestInCache(selectedAgentId, currentSessionId)
-      .then(() => chatStore.fetchSessionState(selectedAgentId, currentSessionId))
+      .then(() => chatStore.loadSession(selectedAgentId, currentSessionId))
       .finally(() => {
         session.scope.current.isInitialLoad = null;
       });
@@ -1266,7 +1266,7 @@ export function ChatPanel() {
   // finishing its atomic initSessionForAgent chain (fetchLatestSession +
   // fetchSessions + openSession (ADR-038: was `activateSession`, now
   // `chatStore.openSession` which fires MQTT `open_session` + HTTP reload)
-  // + fetchSessionState + ensureLatestInCache).
+  // + loadSession + ensureLatestInCache).
   // During this brief window activeSessionId is still null, so without this
   // gate the chat view would mount with no session and surface the
   // "Start a conversation" placeholder for a few hundred ms — a misleading

@@ -116,6 +116,12 @@ pub(crate) struct AgentBootContext {
     /// immediately visible to HTTP GET /sessions/{sid}/state.
     pub session_snapshots: SharedSessionSnapshots,
 
+    /// ADR-047: Shared session config map for `SessionConfigService`.
+    /// SessionManager populates this on session create/remove; the
+    /// `RuntimeSessionConfigService` reads from it to serve
+    /// `GET/PUT /sessions/{sid}/config`.
+    pub session_configs: crate::usecases::SharedSessionConfigs,
+
     /// Shared latest session Arc, populated by Phase A and consumed by
     /// Phase B (via SessionManagerConfig). SessionManager writes to it on
     /// every session creation; the HTTP server reads from it for
@@ -187,6 +193,9 @@ pub(crate) struct AgentBootContext {
     /// (`<work_dir>/files/<document_id>`). Same Phase B pattern as
     /// `agent_tools_slot` / `agent_config_slot`.
     pub attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+    /// ADR-047: Late-bind slot for session config service
+    /// (`GET/PUT /sessions/{sid}/config`). Populated in Phase B.
+    pub session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
 
     /// Shared search key vault (provider_id -> decrypted API key).
     /// Created in Phase A, passed to `WebSearchEngine` (via
@@ -233,5 +242,6 @@ pub(crate) fn build_session_manager_config(
         protocol_type: ctx.protocol_type.clone(),
         session_snapshots: Some(ctx.session_snapshots.clone()),
         latest_session: Some(ctx.latest_session.clone()),
+        session_configs: Some(ctx.session_configs.clone()),
     }
 }

@@ -685,7 +685,7 @@ impl AgentLoop {
         // This final flush captures any remaining content in the last
         // streaming line (e.g., the assistant text that preceded the
         // tool_call).
-        let flushed = self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+        let flushed = self.session_core.flush_streaming_line(self.session.conversation.as_deref());
         tracing::info!(
             flushed_role = flushed.as_ref().map(|c| {
                 // We can't easily get the role here, but we can log content length

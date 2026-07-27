@@ -37,20 +37,25 @@ pub struct SessionsListResponse {
 
 /// Detail view of a single session (panel-4 endpoint).
 ///
+/// ADR-047: config fields (model, provider, workspace_id,
+/// reasoning_effort, temperature, title) have been moved to
+/// `GET /sessions/{sid}/config` (served by `SessionConfigService`).
+/// This struct now carries only state + metadata fields.
+///
 /// `live_state` is an optional JSON object carrying the runtime
 /// snapshot fields (status, model, provider, ratio, todos,
 /// context_usage). The impl constructs this from
 /// `SharedSessionSnapshots`; `None` means no live snapshot exists.
+///
+/// Note: `model` and `provider` in `live_state` are runtime telemetry
+/// (which model the LLM is currently using), not config. Config-level
+/// model/provider are in `SessionConfigSnapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub session_id: String,
-    pub title: Option<String>,
     pub created_at: String,
     pub last_active_at: String,
     pub message_count: u32,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_state: Option<serde_json::Value>,
 }

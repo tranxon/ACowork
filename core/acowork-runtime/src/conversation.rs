@@ -443,6 +443,13 @@ pub struct ConversationSession {
     /// coalesces behind a 3 s cooldown and publishes to the retained
     /// `sessions/{sid}/state` MQTT topic.
     state_change_tx: mpsc::UnboundedSender<StateChange>,
+    /// ADR-047: monotonic config version counter.
+    ///
+    /// Incremented every time `apply_config()` mutates a config field.
+    /// `SessionTask` polls this at turn boundaries to detect config
+    /// changes that occurred during the previous inference turn and
+    /// applies deferred LLM-side effects.
+    config_version: AtomicU64,
     /// Cached runtime-only fields sourced from `SessionRuntimeSnapshot`
     /// via `update_runtime_state_cache()`. `ConversationSession` does not
     /// own `SessionRuntimeSnapshot` (it lives on `SessionState`), so
@@ -452,6 +459,16 @@ pub struct ConversationSession {
     last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
     last_context_usage: std::sync::Mutex<String>,
+}
+
+impl std::fmt::Debug for ConversationSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConversationSession")
+            .field("session_id", &self.session_id)
+            .field("agent_id", &self.agent_id)
+            .field("config_version", &self.config_version)
+            .finish()
+    }
 }
 
 /// Config-change notification carrying the full proto snapshot.
@@ -508,22 +525,19 @@ impl ConversationSession {
         }
     }
 
-    /// Build the on-the-wire `SessionConfig` proto snapshot
-    /// for MQTT publish.
-    ///
-    /// Differs from the disk-side `SessionMeta` (built by `build_meta`) by:
-    ///   - flattening `Option<String>` to `""` for empty values
-    ///   - flattening `Option<f32>` (temperature) to `f32::NAN` for the
-    ///     "no override" sentinel (prost encodes `float` without an Option;
-    ///     NaN lets the client distinguish "missing" from "0.0")
-    ///   - flattening `Option<SessionTokens>` to the four scalar token fields
-    ///   - dropping disk-only fields (version, created_at, last_compaction_offset,
-    ///     corrupted)
     /// Build a `SessionConfig` proto snapshot from the current in-memory state.
     ///
     /// ADR-043: carries only user-configurable fields (title, provider,
     /// model, reasoning_effort, temperature, workspace_id). Runtime
     /// telemetry is in `build_session_state_snapshot()`.
+    ///
+    /// Differs from the disk-side `SessionMeta` (built by `build_meta`) by:
+    /// - flattening `Option<String>` to `""` for empty values
+    /// - flattening `Option<f32>` (temperature) to `f32::NAN` for the
+    ///   "no override" sentinel (prost encodes `float` without an Option;
+    ///   NaN lets the client distinguish "missing" from "0.0")
+    /// - dropping disk-only fields (version, created_at, last_compaction_offset,
+    ///   corrupted)
     pub fn build_session_config_snapshot(&self) -> acowork_core::mqtt_proto::SessionConfig {
         let full = self.build_meta();
         acowork_core::mqtt_proto::SessionConfig {
@@ -705,6 +719,7 @@ impl ConversationSession {
             conversations_dir: conversations_dir.clone(),
             config_change_tx: config_tx,
             state_change_tx: state_tx,
+            config_version: AtomicU64::new(0),
             last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(0.0),
             last_context_usage: std::sync::Mutex::new(String::new()),
@@ -784,6 +799,7 @@ impl ConversationSession {
                 conversations_dir,
                 config_change_tx: config_tx,
                 state_change_tx: state_tx,
+                config_version: AtomicU64::new(0),
                 last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(0.0),
                 last_context_usage: std::sync::Mutex::new(String::new()),
@@ -1055,6 +1071,86 @@ impl ConversationSession {
         );
     }
 
+    /// THE single entry point for ALL config changes (ADR-047).
+    ///
+    /// Synchronous: memory + meta.json + MQTT notification.
+    /// Called from SessionManager / SessionConfigService, NOT from SessionTask.
+    ///
+    /// After mutation, `config_version` is incremented so `SessionTask`
+    /// can detect the change at the next turn boundary and apply
+    /// deferred LLM-side effects via `llm_effects::apply_llm_effects`.
+    pub fn apply_config(&self, delta: &crate::agent::session_config::SessionConfigDelta) {
+        let mut changed = false;
+
+        if let Some(ref model) = delta.model {
+            if let Ok(mut m) = self.model.lock() {
+                *m = Some(model.clone());
+            }
+            changed = true;
+        }
+        if let Some(ref provider) = delta.provider {
+            if let Ok(mut p) = self.provider.lock() {
+                *p = Some(provider.clone());
+            }
+            changed = true;
+        }
+        if let Some(ref workspace_id) = delta.workspace_id {
+            if let Ok(mut w) = self.workspace_id.lock() {
+                *w = Some(workspace_id.clone());
+            }
+            changed = true;
+        }
+        if let Some(ref effort) = delta.reasoning_effort {
+            if let Ok(mut r) = self.reasoning_effort.lock() {
+                *r = Some(effort.clone());
+            }
+            changed = true;
+        }
+        if let Some(temp) = delta.temperature {
+            if let Ok(mut t) = self.temperature.lock() {
+                *t = Some(temp);
+            }
+            changed = true;
+        }
+        if let Some(ref title) = delta.title {
+            let truncated = crate::prompt::truncate_title_for_display(title);
+            if let Ok(mut current) = self.current_title.lock() {
+                *current = Some(truncated);
+            }
+            self.title_set.store(true, Ordering::Relaxed);
+            changed = true;
+        }
+
+        if changed {
+            self.write_meta();
+            self.notify_config_change();
+            self.config_version.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Monotonic config version counter (ADR-047).
+    ///
+    /// `SessionTask` polls this at turn boundaries. A change since the
+    /// last poll indicates config was mutated during the previous
+    /// inference turn; the task should apply deferred LLM-side effects.
+    pub fn config_version(&self) -> u64 {
+        self.config_version.load(Ordering::Acquire)
+    }
+
+    /// Read-only snapshot of current session config (ADR-047).
+    ///
+    /// Used by HTTP GET, MQTT retained, and LLM-side effect application.
+    pub fn config_snapshot(&self) -> crate::agent::session_config::SessionConfigSnapshot {
+        crate::agent::session_config::SessionConfigSnapshot {
+            model: self.model.lock().ok().and_then(|m| m.clone()),
+            provider: self.provider.lock().ok().and_then(|p| p.clone()),
+            workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
+            reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
+            temperature: self.temperature.lock().ok().and_then(|t| *t),
+            title: self.current_title.lock().ok().and_then(|t| t.clone()),
+        }
+    }
+
     /// Return the full [`SessionTokens`] (last + totals), if any LLM call
     /// has been recorded yet.
     ///
@@ -1164,6 +1260,7 @@ impl Clone for ConversationSession {
             conversations_dir: self.conversations_dir.clone(),
             config_change_tx: self.config_change_tx.clone(),
             state_change_tx: self.state_change_tx.clone(),
+            config_version: AtomicU64::new(self.config_version.load(Ordering::Relaxed)),
             last_status: std::sync::Mutex::new(
                 self.last_status.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
@@ -3739,5 +3836,201 @@ mod tests {
         let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, 0).unwrap();
         assert_eq!(r.messages.len(), 0);
         assert!(!r.has_more);
+    }
+
+    // ── ADR-047 tests ──────────────────────────────────────────────────
+
+    /// Helper: create a ConversationSession for testing.
+    fn make_test_session() -> ConversationSession {
+        let temp_dir = TempDir::new().unwrap();
+        let work_dir = temp_dir.path();
+        let session_id = generate_session_id();
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        // Leak the temp_dir so it stays alive for the session's lifetime.
+        std::mem::forget(temp_dir);
+        session
+    }
+
+    /// ADR-047 acceptance #2: apply_config writes to meta.json immediately.
+    #[test]
+    fn test_apply_config_persists_model_to_meta() {
+        let session = make_test_session();
+
+        let delta = crate::agent::session_config::SessionConfigDelta {
+            model: Some("gpt-4o".to_string()),
+            provider: Some("openai".to_string()),
+            ..Default::default()
+        };
+        session.apply_config(&delta);
+
+        // Verify in-memory state
+        let snapshot = session.config_snapshot();
+        assert_eq!(snapshot.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(snapshot.provider.as_deref(), Some("openai"));
+
+        // Verify meta.json on disk reflects the new values
+        let meta_path = session
+            .conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session.session_id));
+        let meta: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(meta.provider.as_deref(), Some("openai"));
+    }
+
+    /// ADR-047 acceptance #2: apply_config writes temperature to meta.json.
+    #[test]
+    fn test_apply_config_persists_temperature_to_meta() {
+        let session = make_test_session();
+
+        let delta = crate::agent::session_config::SessionConfigDelta {
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        session.apply_config(&delta);
+
+        let snapshot = session.config_snapshot();
+        assert_eq!(snapshot.temperature, Some(0.7));
+
+        let meta_path = session
+            .conversations_dir
+            .join("meta")
+            .join(format!("{}.json", session.session_id));
+        let meta: SessionMeta =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta.temperature, Some(0.7));
+    }
+
+    /// ADR-047 acceptance #4: config_version increments after apply_config.
+    #[test]
+    fn test_config_version_increments() {
+        let session = make_test_session();
+        let v0 = session.config_version();
+        assert_eq!(v0, 0);
+
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            model: Some("test-model".to_string()),
+            ..Default::default()
+        });
+        let v1 = session.config_version();
+        assert_eq!(v1, 1);
+
+        // Empty delta (all None) should NOT increment version
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta::default());
+        let v2 = session.config_version();
+        assert_eq!(v2, 1, "empty delta must not increment config_version");
+
+        // Another change increments again
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            temperature: Some(0.5),
+            ..Default::default()
+        });
+        let v3 = session.config_version();
+        assert_eq!(v3, 2);
+    }
+
+    /// ADR-047 acceptance #3: apply_config triggers config_change_tx.
+    #[test]
+    fn test_apply_config_notifies_config_change() {
+        let (session, mut config_rx) = {
+            let temp_dir = TempDir::new().unwrap();
+            let work_dir = temp_dir.path();
+            let session_id = generate_session_id();
+            let (s, config_rx, _state_rx) = ConversationSession::new(
+                work_dir,
+                &session_id,
+                SessionConfig {
+                    agent_id: "com.test.agent".to_string(),
+                    workspace_id: None,
+                    model: None,
+                    provider: None,
+                },
+                0,
+                Arc::new(AtomicUsize::new(0)),
+            )
+            .unwrap();
+            std::mem::forget(temp_dir);
+            (s, config_rx)
+        };
+
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            model: Some("notify-test".to_string()),
+            ..Default::default()
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let change = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                config_rx.recv(),
+            )
+            .await
+        });
+        assert!(change.is_ok(), "config_change_tx should have sent a notification");
+        let change = change.unwrap().unwrap();
+        assert_eq!(change.snapshot.model_id, "notify-test");
+    }
+
+    /// ADR-047 acceptance #1: config_snapshot returns current state after multiple apply_config calls.
+    #[test]
+    fn test_config_snapshot_reflects_all_fields() {
+        let session = make_test_session();
+
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            model: Some("claude-3".to_string()),
+            ..Default::default()
+        });
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            workspace_id: Some("ws-123".to_string()),
+            ..Default::default()
+        });
+        session.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            reasoning_effort: Some("high".to_string()),
+            temperature: Some(0.3),
+            title: Some("Test Title".to_string()),
+            ..Default::default()
+        });
+
+        let snapshot = session.config_snapshot();
+        assert_eq!(snapshot.model.as_deref(), Some("claude-3"));
+        assert_eq!(snapshot.workspace_id.as_deref(), Some("ws-123"));
+        assert_eq!(snapshot.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(snapshot.temperature, Some(0.3));
+        assert_eq!(snapshot.title.as_deref(), Some("Test Title"));
+    }
+
+    /// ADR-047 acceptance #5: SessionConfigDelta supports partial construction.
+    #[test]
+    fn test_session_config_delta_partial_construction() {
+        let d1 = crate::agent::session_config::SessionConfigDelta {
+            model: Some("m1".to_string()),
+            ..Default::default()
+        };
+        assert!(d1.model.is_some());
+        assert!(d1.provider.is_none());
+        assert!(d1.temperature.is_none());
+
+        let d2 = crate::agent::session_config::SessionConfigDelta {
+            temperature: Some(0.8),
+            ..Default::default()
+        };
+        assert!(d2.model.is_none());
+        assert!(d2.temperature.is_some());
+
+        let d3 = crate::agent::session_config::SessionConfigDelta::default();
+        assert!(d3.model.is_none());
     }
 }

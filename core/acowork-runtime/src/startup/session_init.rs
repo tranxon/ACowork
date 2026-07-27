@@ -564,6 +564,17 @@ pub(crate) async fn phase_b_init_session(
             let mut slot = ctx.session_metadata_slot.lock().await;
             *slot = Some(session_metadata);
         }
+
+        // ADR-047: Build the SessionConfigService.
+        let session_config: Arc<dyn crate::usecases::SessionConfigService> =
+            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
+                ctx.session_configs.clone(),
+                Some(ctx.workspace_resolver.clone()),
+            ));
+        {
+            let mut slot = ctx.session_config_slot.lock().await;
+            *slot = Some(session_config);
+        }
     }
 
     let mut session_manager = SessionManager::new(core, session_manager_config);

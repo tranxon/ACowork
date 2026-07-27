@@ -177,15 +177,6 @@ impl super::loop_::AgentLoop {
             .map(|conv| conv.update_title_force(title))
     }
 
-    /// Persist the per-session workspace selection to the JSONL conversation file.
-    ///
-    /// Only effective when the session has an active `ConversationSession`.
-    pub fn update_session_workspace_id(&mut self, workspace_id: &str) {
-        if let Some(ref conv) = self.session.conversation {
-            conv.update_workspace_id(workspace_id);
-        }
-    }
-
     /// Lazy-persist any async-generated session title to the conversation
     /// JSONL metadata and index.json.
     ///
@@ -409,7 +400,7 @@ impl super::loop_::AgentLoop {
         if streamed {
             // Path 1: Content was already flushed on role transitions.
             // Flush the last streaming line (e.g., final assistant segment).
-            self.session_core.flush_streaming_line(self.session.conversation.as_ref());
+            self.session_core.flush_streaming_line(self.session.conversation.as_deref());
             tracing::debug!(
                 iteration,
                 "ADR-022: streaming flush path — skipping legacy persistence"

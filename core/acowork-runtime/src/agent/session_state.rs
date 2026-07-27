@@ -16,7 +16,6 @@ use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_detector::LoopDetector;
 use crate::conversation::ConversationSession;
 use acowork_core::providers::traits::ReasoningEffort;
-
 /// Shared map of session runtime snapshots, keyed by session_id.
 ///
 /// ADR-039: persisted per-session config (title/model/provider/etc.) now lives
@@ -166,8 +165,13 @@ impl SessionStatus {
 pub struct SessionState {
     /// Conversation history manager (message list + token tracking + trimming)
     pub(crate) history: HistoryManager,
-    /// Optional conversation session for JSONL persistence
-    pub(crate) conversation: Option<ConversationSession>,
+    /// Optional conversation session for JSONL persistence.
+    ///
+    /// ADR-047: wrapped in `Arc` so it can be shared between `SessionState`
+    /// (owned by the SessionTask / AgentLoop) and `SessionHandle` (owned by
+    /// SessionManager). This allows config mutations to bypass the serial
+    /// inference queue.
+    pub(crate) conversation: Option<Arc<ConversationSession>>,
     /// Loop detector (per-session to avoid cross-session false positives)
     pub(crate) loop_detector: LoopDetector,
     /// Budget guard (per-session for independent token accounting)
@@ -244,7 +248,7 @@ impl SessionState {
     pub fn new(
         max_tokens: u64,
         budget: acowork_core::Budget,
-        conversation: Option<ConversationSession>,
+        conversation: Option<Arc<ConversationSession>>,
     ) -> Self {
         let status = serde_json::to_string(&SessionStatus::Idle)
             .unwrap_or_else(|_| r#""idle""#.to_string());
@@ -287,13 +291,12 @@ impl SessionState {
     }
 
     /// Access the conversation session.
-    pub fn conversation(&self) -> Option<&ConversationSession> {
+    ///
+    /// ADR-047: returns `Option<&Arc<ConversationSession>>` so callers
+    /// can also clone the Arc if needed. Method calls on the inner
+    /// `ConversationSession` work through auto-deref.
+    pub fn conversation(&self) -> Option<&Arc<ConversationSession>> {
         self.conversation.as_ref()
-    }
-
-    /// Access the conversation session (mutable).
-    pub fn conversation_mut(&mut self) -> &mut Option<ConversationSession> {
-        &mut self.conversation
     }
 
     /// Access the loop detector.

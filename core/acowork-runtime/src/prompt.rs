@@ -347,7 +347,7 @@ mod tests {
         // If the budget starts with a break char (pos 0), the break
         // candidate is filtered out (we require pos > 0). Otherwise we
         // would return an empty string for inputs starting with `,`.
-        let mut input = String::from(",rest of title that is also quite long and goes way past sixty characters in total really");
+        let input = String::from(",rest of title that is also quite long and goes way past sixty characters in total really");
         // Make sure it's longer than the budget.
         assert!(input.chars().count() > SESSION_TITLE_MAX_CHARS);
         let out = truncate_title_for_display(&input);

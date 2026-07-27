@@ -136,15 +136,16 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             }
         };
 
+        // ADR-047: SessionDetail no longer carries config fields
+        // (model, provider, workspace_id, title). Config is served
+        // separately by `GET /sessions/{sid}/config` via
+        // `SessionConfigService`, which reads from the in-memory
+        // `Arc<ConversationSession>` for authoritative values.
         Ok(SessionDetail {
             session_id: meta.session_id,
-            title: meta.title,
             created_at: meta.created_at,
             last_active_at: meta.last_active_at,
             message_count: meta.message_count as u32,
-            model: meta.model,
-            provider: meta.provider,
-            workspace_id: meta.workspace_id,
             live_state,
         })
     }

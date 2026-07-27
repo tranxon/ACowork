@@ -413,8 +413,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // ADR-038: opening from the agent sidebar is a "first-open" scenario,
         // so we use the full openSession (UI + MQTT + load) instead of the
         // strict setActiveTab.
+        // ADR-047: openSession now internally calls loadSession (config + state).
         await chat.openSession(id, latest.session_id);
-        await useChatStore.getState().fetchSessionState(id, latest.session_id);
         // Populate the sessions array so the session tab bar and panel
         // display the correct title instead of "Untitled" until the user
         // manually opens the session list (which triggers fetchSessions).
@@ -664,10 +664,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   // + HTTP messages reload). Idempotent: re-invocations on an already-open
   // session no-op the MQTT side and only refresh the message cache.
   activateNewlyCreatedSession: async (sessionId: string, agentId: string) => {
+    // ADR-047: openSession now internally calls loadSession (config + state),
+    // so the fresh session's backend `idle` state and config are reflected
+    // in the UI before the user types anything.
     await useChatStore.getState().openSession(agentId, sessionId);
-    // Refresh status pull so the fresh session's backend `idle` state
-    // is reflected in the UI before the user types anything.
-    useChatStore.getState().fetchSessionState(agentId, sessionId);
     // ADR-014: Refresh the session list so the freshly-created entry is
     // visible in the sidebar/session dropdown.
     get().fetchSessions(agentId);

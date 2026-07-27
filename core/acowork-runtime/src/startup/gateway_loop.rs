@@ -10,6 +10,8 @@ use crate::error::Result;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
 use crate::startup::subsystems::SubsystemHandles;
 
+use std::sync::Arc;
+
 /// Phase D: notify Gateway that the agent is ready, then run the message loop.
 ///
 /// This is the last phase of the startup sequence.  It runs until the
@@ -118,6 +120,7 @@ pub(crate) async fn phase_d_run(
         ctx.provider_update_rx.take(),
         ctx.search_update_rx.take(),
         &config.work_dir,
+        ctx.session_config_slot.clone(),
     )
     .await;
 
@@ -335,6 +338,7 @@ async fn mqtt_only_loop(
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
     work_dir: &str,
+    session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
     let work_dir = std::path::PathBuf::from(work_dir);
@@ -351,6 +355,7 @@ async fn mqtt_only_loop(
                             session_id,
                             msg,
                             &work_dir,
+                            &session_config_slot,
                         ).await {
                             tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
@@ -508,6 +513,7 @@ async fn dispatch_inbound(
     session_id: String,
     msg: crate::agent::inbound::InboundMessage,
     work_dir: &std::path::Path,
+    session_config_slot: &Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::InboundMessage;
     use crate::agent::loop_::CompressionAction;
@@ -910,14 +916,41 @@ async fn dispatch_inbound(
         InboundMessage::ModelSwitchAction {
             model_id,
             provider_id,
-        } => session_manager
-            .route_model_switch(&session_id, model_id, provider_id)
-            .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction: {}", e))),
+        } => {
+            let delta = crate::agent::session_config::SessionConfigDelta {
+                model: Some(model_id),
+                provider: provider_id,
+                ..Default::default()
+            };
+            let slot = session_config_slot.lock().await;
+            if let Some(ref svc) = *slot {
+                svc.apply_config(&session_id, delta)
+                    .await
+                    .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction: {}", e)))
+            } else {
+                session_manager
+                    .route_model_switch(&session_id, delta.model.unwrap_or_default(), delta.provider)
+                    .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction (fallback): {}", e)))
+            }
+        }
 
         // ⑯ ReasoningEffortAction → SessionManager::route_reasoning_effort
-        InboundMessage::ReasoningEffortAction { effort } => session_manager
-            .route_reasoning_effort(&session_id, effort)
-            .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction: {}", e))),
+        InboundMessage::ReasoningEffortAction { effort } => {
+            let delta = crate::agent::session_config::SessionConfigDelta {
+                reasoning_effort: Some(effort),
+                ..Default::default()
+            };
+            let slot = session_config_slot.lock().await;
+            if let Some(ref svc) = *slot {
+                svc.apply_config(&session_id, delta)
+                    .await
+                    .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction: {}", e)))
+            } else {
+                session_manager
+                    .route_reasoning_effort(&session_id, delta.reasoning_effort.unwrap_or_default())
+                    .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction (fallback): {}", e)))
+            }
+        }
 
         // ⑰ WorkspaceSwitchAction → SessionManager::route_workspace_switch
         InboundMessage::WorkspaceSwitchAction { workspace_id } => {

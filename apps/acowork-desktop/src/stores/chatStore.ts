@@ -703,8 +703,18 @@ interface ChatStore {
   removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
   /** Replace the entire per-session queue (e.g. after sending all) */
   setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => void;
-  /** ADR-015 Phase 5: Pull initial session state from backend (model/provider/status/ratio/etc.) */
+  /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
+   *  Config fields (model/provider/workspace_id/reasoning_effort/temperature)
+   *  are NOT applied here - use `fetchSessionConfig` or `loadSession`. */
   fetchSessionState: (agentId: string, sessionId: string) => Promise<void>;
+  /** ADR-047: Pull session config (model/provider/workspace_id/reasoning_effort/
+   *  temperature/title) from backend `GET /sessions/{sid}/config`. */
+  fetchSessionConfig: (agentId: string, sessionId: string) => Promise<void>;
+  /** ADR-047 §3.5.2: Combined cold-load function. Must be used in all
+   *  switch/open/first-start scenarios. Encapsulates `Promise.all` of
+   *  `fetchSessionState` + `fetchSessionConfig` so callers cannot
+   *  accidentally skip one. */
+  loadSession: (agentId: string, sessionId: string) => Promise<void>;
 }
 
 // ADR-033 / ADR-036: Initialize MQTT event listeners.
@@ -1135,13 +1145,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       log.warn("[chatStore] open_session MQTT failed:", err);
     }
 
-    // 3. Local cache: load conversation history (initial-load semantics).
-    // Failures are non-fatal; the user can retry or wait for incremental
-    // MQTT patches.
+    // 3. Local cache: load conversation history + session config/state.
+    // ADR-047 §3.5.2: openSession MUST fetch config + state alongside
+    // messages so every caller gets a complete session snapshot without
+    // relying on React useEffect to trigger loadSession indirectly.
+    // Failures are non-fatal; the user can retry or wait for MQTT patches.
     try {
       await get().loadSessionMessages(agentId, sessionId);
     } catch (err) {
       log.warn("[chatStore] loadSessionMessages after openSession failed:", err);
+    }
+    try {
+      await get().loadSession(agentId, sessionId);
+    } catch (err) {
+      log.warn("[chatStore] loadSession after openSession failed:", err);
     }
   },
 
@@ -1916,15 +1933,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
   },
 
-  // ADR-015 Phase 5: Pull initial session state from backend.
-  // Maps the /api/agents/{id}/sessions/{sid} response to SessionChatState fields.
+  // ADR-047: Pull session state (runtime telemetry only) from backend.
   //
-  // ADR-039: The Runtime returns `{ session_id, meta, live_state }` where:
-  //   - `meta` = authoritative per-session config from data/meta/{session_id}.json
-  //     (model, provider, workspace_id, reasoning_effort, temperature, tokens, etc.)
+  // The Runtime returns `{ session_id, meta, live_state }` where:
+  //   - `meta` = state-level metadata (created_at, last_active_at, message_count)
   //   - `live_state` = runtime snapshot (status, ratio, todos, context_usage)
   //     or `null` when no live session is running.
-  // Errors are non-fatal — warns and returns without blocking startup.
+  //
+  // ADR-047: config fields (model, provider, workspace_id, reasoning_effort,
+  // temperature, title) are NO LONGER included in this response. Use
+  // `fetchSessionConfig` or `loadSession` to get config.
+  // Errors are non-fatal - warns and returns without blocking startup.
   fetchSessionState: async (agentId: string, sessionId: string) => {
     try {
       const resp = await fetch(
@@ -1944,23 +1963,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       const sessionPatch: Partial<SessionChatState> = {};
 
-      // ── From meta.json (authoritative persistent fields) ──
+      // From meta (state-level metadata only)
       if (meta) {
-        if (typeof meta.model === "string" && meta.model) sessionPatch.model = meta.model as string;
-        if (typeof meta.provider === "string" && meta.provider) sessionPatch.provider = meta.provider as string;
-        if (typeof meta.reasoning_effort === "string" && meta.reasoning_effort) {
-          sessionPatch.reasoningEffort = meta.reasoning_effort as string;
-        }
-        // NaN is the Runtime "no override" sentinel for temperature.
-        if (typeof meta.temperature === "number" && !Number.isNaN(meta.temperature)) {
-          sessionPatch.temperature = meta.temperature as number;
-        }
         if (typeof meta.message_count === "number") {
           sessionPatch.messageTotal = meta.message_count as number;
         }
       }
 
-      // ── From live_state (runtime fields) ──
+      // From live_state (runtime fields)
       if (liveState) {
         // Status: parse from JSON
         if (liveState.status && typeof liveState.status === "object") {
@@ -1981,13 +1991,98 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (Object.keys(sessionPatch).length > 0) {
         set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
       }
-      // Workspace selection is owned by workspaceStore, not SessionChatState.
-      if (meta && typeof meta.workspace_id === "string" && meta.workspace_id) {
-        useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, meta.workspace_id as string);
-      }
     } catch (e) {
       log.warn("[ChatStore] fetchSessionState failed:", e);
     }
+  },
+
+  // ADR-047: Pull session config from backend GET /sessions/{sid}/config.
+  //
+  // The Runtime returns a SessionConfigSnapshot JSON:
+  //   { model, provider, workspace_id, reasoning_effort, temperature, title }
+  // All fields are optional (null means "not set / no override").
+  //
+  // This is the authoritative config source - it reads from the in-memory
+  // Arc<ConversationSession> which is mutated by apply_config().
+  // fetchSessionState does NOT apply config fields; this function does.
+  fetchSessionConfig: async (agentId: string, sessionId: string) => {
+    try {
+      const resp = await fetch(
+        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`,
+      );
+      if (!resp.ok) {
+        log.warn(`[ChatStore] fetchSessionConfig HTTP ${resp.status} for session ${sessionId}`);
+        return;
+      }
+      const config = await resp.json() as {
+        model?: string | null;
+        provider?: string | null;
+        workspace_id?: string | null;
+        reasoning_effort?: string | null;
+        temperature?: number | null;
+        title?: string | null;
+      };
+
+      // ADR-047 P1: Explicitly handle null/empty values to clear stale
+      // config from a previous session. Without this, switching to a
+      // session with no model set would retain the previous session's
+      // model in the UI until the next MQTT push.
+      const sessionPatch: Partial<SessionChatState> = {};
+
+      // model: null -> clear, string -> set
+      if (typeof config.model === "string" && config.model) {
+        sessionPatch.model = config.model;
+      } else {
+        sessionPatch.model = null;
+      }
+      // provider: null -> clear, string -> set
+      if (typeof config.provider === "string" && config.provider) {
+        sessionPatch.provider = config.provider;
+      } else {
+        sessionPatch.provider = null;
+      }
+      // reasoning_effort: null -> clear, string -> set
+      if (typeof config.reasoning_effort === "string" && config.reasoning_effort) {
+        sessionPatch.reasoningEffort = config.reasoning_effort;
+      } else {
+        sessionPatch.reasoningEffort = null;
+      }
+      // temperature: null/NaN -> clear, number -> set
+      if (typeof config.temperature === "number" && !Number.isNaN(config.temperature)) {
+        sessionPatch.temperature = config.temperature;
+      } else {
+        sessionPatch.temperature = null;
+      }
+
+      set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
+
+      // ADR-047 P2: Apply title from config snapshot. Title lives in
+      // agentStore (not SessionChatState) because it's displayed in the
+      // sidebar/session list, not the chat panel.
+      if (typeof config.title === "string" && config.title) {
+        useAgentStore.getState().updateSessionTitle(sessionId, config.title);
+      }
+
+      // Workspace selection is owned by workspaceStore, not SessionChatState.
+      if (typeof config.workspace_id === "string" && config.workspace_id) {
+        useWorkspaceStore.getState().setSessionWorkspaceLocal(sessionId, config.workspace_id);
+      }
+    } catch (e) {
+      log.warn("[ChatStore] fetchSessionConfig failed:", e);
+    }
+  },
+
+  // ADR-047 section 3.5.2: Combined cold-load function.
+  //
+  // MUST be used in all switch/open/first-start scenarios.
+  // Encapsulates Promise.all of fetchSessionState + fetchSessionConfig
+  // so callers cannot accidentally skip one (which would cause config
+  // vacuum and bounce-back bug recurrence).
+  loadSession: async (agentId: string, sessionId: string) => {
+    await Promise.all([
+      get().fetchSessionState(agentId, sessionId),
+      get().fetchSessionConfig(agentId, sessionId),
+    ]);
   },
 }));
 

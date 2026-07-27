@@ -197,6 +197,8 @@ struct HttpState {
     /// every other UseCase service. Populated in Phase B (sync —
     /// requires only the boot-time `work_dir`).
     attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+    /// ADR-047: Session config service for GET/PUT /sessions/{sid}/config.
+    session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
 }
 
 /// Handle to the running HTTP server.
@@ -236,6 +238,7 @@ impl RuntimeHttpServer {
         agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
         agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
         attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+        session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -253,6 +256,7 @@ impl RuntimeHttpServer {
             agent_tools,
             agent_config,
             attachment,
+            session_config,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -264,6 +268,12 @@ impl RuntimeHttpServer {
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
             .route("/sessions/{sid}", get(get_session))
             .route("/sessions/{sid}/messages", get(get_messages))
+            // ADR-047: session config endpoint - read/write config
+            // without going through the serial inference queue.
+            .route(
+                "/sessions/{sid}/config",
+                get(get_session_config).put(put_session_config),
+            )
             // ADR-046: 2 attachment routes — POST is session-scoped (the desktop
             // knows which session is sending the upload), GET is
             // global-scoped (the desktop knows `document_id` from the
@@ -520,7 +530,57 @@ struct GetMessagesQuery {
     limit: Option<u32>,
 }
 
-/// `GET /sessions/{sid}/messages` — paginated message list for a session.
+// ── Session config (ADR-047) ───────────────────────────────────
+
+/// `GET /sessions/{sid}/config` - read current session config.
+///
+/// ADR-047: returns a `SessionConfigSnapshot` containing model, provider,
+/// workspace_id, reasoning_effort, temperature, and title.
+async fn get_session_config(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.session_config.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "session config service not ready"})),
+    ))?;
+    let snapshot = svc.get_config(&sid).await.map_err(|e| {
+        tracing::warn!(session_id = %sid, error = %e, "Failed to read session config");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(serde_json::to_value(&snapshot).unwrap_or_default()))
+}
+
+/// `PUT /sessions/{sid}/config` - apply a config change.
+///
+/// ADR-047: accepts a `SessionConfigDelta` as JSON body. Each field is
+/// optional (null or omitted means "unchanged"). Persistence is immediate;
+/// LLM-side effects are deferred to the next inference turn.
+async fn put_session_config(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+    Json(delta): Json<crate::agent::session_config::SessionConfigDelta>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.session_config.lock().await;
+    let svc = svc.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"error": "session config service not ready"})),
+    ))?;
+    svc.apply_config(&sid, delta).await.map_err(|e| {
+        tracing::warn!(session_id = %sid, error = %e, "Failed to apply session config");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// `GET /sessions/{sid}/messages` - paginated message list for a session. — paginated message list for a session.
 ///
 /// `GET /sessions/{sid}/messages` - paginated message list for a session.
 ///
@@ -862,27 +922,22 @@ async fn get_session(
     // 404 only when both meta and live_state are absent - either
     // present is enough to return 200 (the meta card alone is useful
     // for sessions that have been written but never observed).
-    if detail.title.is_none()
-        && detail.created_at.is_empty()
-        && detail.live_state.is_none()
-    {
+    if detail.created_at.is_empty() && detail.live_state.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "session not found"})),
         ));
     }
 
-    // Build the response envelope: meta fields + live_state as a
-    // nested object (matches the pre-ADR-040 shape the desktop expects).
+    // ADR-047: response no longer includes config fields (model,
+    // provider, workspace_id, title, reasoning_effort, temperature).
+    // Config is served by `GET /sessions/{sid}/config`. The `meta`
+    // object here carries only state-level metadata.
     let meta = serde_json::json!({
         "session_id": detail.session_id,
-        "title": detail.title,
         "created_at": detail.created_at,
         "last_active_at": detail.last_active_at,
         "message_count": detail.message_count,
-        "model": detail.model,
-        "provider": detail.provider,
-        "workspace_id": detail.workspace_id,
     });
     Ok(Json(serde_json::json!({
         "session_id": sid,
@@ -2422,6 +2477,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2520,6 +2576,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .unwrap();
@@ -2671,6 +2728,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2728,6 +2786,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2866,6 +2925,7 @@ mod tests {
             agent_tools_slot,
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3020,6 +3080,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3200,6 +3261,8 @@ mod tests {
         // and GET /files/{document_id} through the trait path.
         let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
+        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -3217,6 +3280,7 @@ mod tests {
             agent_tools_slot,
             agent_config_slot,
             attachment_slot,
+            session_config_slot,
         )
         .await
         .expect("server should start");
@@ -3400,6 +3464,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(agent_config_svc)));
         let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
+        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -3417,6 +3483,7 @@ mod tests {
             agent_tools_slot,
             agent_config_slot,
             attachment_slot,
+            session_config_slot,
         )
         .await
         .expect("server should start");
@@ -3559,6 +3626,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4028,6 +4096,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4128,6 +4197,8 @@ mod tests {
 
         let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
             std::sync::Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone()))));
+        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
 
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
@@ -4145,6 +4216,7 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             attachment_slot,
+            session_config_slot,
         )
         .await
         .expect("server should start");
@@ -4222,6 +4294,394 @@ mod tests {
         );
         let bytes = resp.bytes().await.unwrap();
         assert_eq!(bytes.as_ref(), docx_bytes.as_slice(), "downloaded bytes must match upload");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    // ── ADR-047 integration tests ──────────────────────────────────────
+
+    /// Helper: create a real ConversationSession and register it in a
+    /// SharedSessionConfigs map for use with SessionConfigService.
+    fn make_test_session_config_service(
+        work_dir: &std::path::Path,
+        session_id: &str,
+    ) -> (
+        Arc<dyn crate::usecases::SessionConfigService>,
+        Arc<crate::conversation::ConversationSession>,
+    ) {
+        use crate::conversation::{ConversationSession, SessionConfig};
+        use std::sync::atomic::AtomicUsize;
+
+        let (conv, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        let conv_arc = Arc::new(conv);
+        let mut map = std::collections::HashMap::new();
+        map.insert(session_id.to_string(), conv_arc.clone());
+
+        let shared_configs: crate::usecases::SharedSessionConfigs =
+            Arc::new(std::sync::RwLock::new(map));
+
+        let svc: Arc<dyn crate::usecases::SessionConfigService> =
+            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
+                shared_configs,
+                None, // no resolver for basic tests
+            ));
+
+        (svc, conv_arc)
+    }
+
+    /// ADR-047 acceptance #2: GET /sessions/{sid}/config returns current config.
+    /// ADR-047 acceptance #2: PUT /sessions/{sid}/config persists and is
+    /// immediately readable via GET.
+    #[tokio::test]
+    async fn test_session_config_get_and_put() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-config-get-put");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let session_id = "20260101_120000_cfg";
+
+        let (config_svc, _conv) =
+            make_test_session_config_service(&temp_dir, session_id);
+
+        let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
+            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            session_config_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // 1. GET initial config (all fields null/empty)
+        let resp = client
+            .get(format!("{}/sessions/{}/config", base, session_id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("model").is_none() || body["model"].is_null());
+
+        // 2. PUT model + provider
+        let resp = client
+            .put(format!("{}/sessions/{}/config", base, session_id))
+            .json(&serde_json::json!({
+                "model": "gpt-4o",
+                "provider": "openai",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        // 3. GET again - should reflect the new values
+        let resp = client
+            .get(format!("{}/sessions/{}/config", base, session_id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["provider"], "openai");
+
+        // 4. PUT temperature
+        let resp = client
+            .put(format!("{}/sessions/{}/config", base, session_id))
+            .json(&serde_json::json!({
+                "temperature": 0.7,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        // 5. GET - model/provider preserved, temperature added
+        let resp = client
+            .get(format!("{}/sessions/{}/config", base, session_id))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["provider"], "openai");
+        assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
+
+        // 6. Verify meta.json on disk has all persisted values
+        let meta_path = temp_dir
+            .join("conversations")
+            .join("meta")
+            .join(format!("{}.json", session_id));
+        assert!(meta_path.exists(), "meta.json must exist after PUT");
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
+        assert_eq!(meta["model"], "gpt-4o");
+        assert_eq!(meta["provider"], "openai");
+        assert!((meta["temperature"].as_f64().unwrap() - 0.7).abs() < 0.01);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-047: GET /sessions/{sid}/config returns 500 for unknown session.
+    #[tokio::test]
+    async fn test_session_config_get_unknown_session() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-config-unknown");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let shared_configs: crate::usecases::SharedSessionConfigs =
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let config_svc: Arc<dyn crate::usecases::SessionConfigService> =
+            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
+                shared_configs,
+                None,
+            ));
+        let session_config_slot =
+            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            session_config_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let resp = reqwest::get(format!("{}/sessions/nonexistent/config", base))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-047: PUT /sessions/{sid}/config with workspace validation.
+    /// When a resolver is configured, invalid workspace_id should be rejected.
+    #[tokio::test]
+    async fn test_session_config_put_invalid_workspace_rejected() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-config-ws");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let session_id = "20260101_120000_ws";
+
+        // Create a ConversationSession
+        use crate::conversation::{ConversationSession, SessionConfig};
+        use std::sync::atomic::AtomicUsize;
+        let (conv, _config_rx, _state_rx) = ConversationSession::new(
+            &temp_dir,
+            session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conv_arc = Arc::new(conv);
+        let mut map = std::collections::HashMap::new();
+        map.insert(session_id.to_string(), conv_arc.clone());
+
+        let shared_configs: crate::usecases::SharedSessionConfigs =
+            Arc::new(std::sync::RwLock::new(map));
+
+        // Create a resolver with an empty allowed_dirs (no workspaces)
+        let resolver = Arc::new(std::sync::RwLock::new(
+            crate::tools::workspace_resolver::WorkspaceResolver::new(
+                temp_dir.to_str().unwrap(),
+            ),
+        ));
+
+        let config_svc: Arc<dyn crate::usecases::SessionConfigService> =
+            Arc::new(crate::usecases::RuntimeSessionConfigService::new(
+                shared_configs,
+                Some(resolver),
+            ));
+        let session_config_slot =
+            Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            session_config_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // PUT with invalid workspace_id should fail
+        let resp = client
+            .put(format!("{}/sessions/{}/config", base, session_id))
+            .json(&serde_json::json!({
+                "workspace_id": "non-existent-workspace",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid workspace_id should be rejected"
+        );
+
+        // __agent_home__ should always be accepted
+        let resp = client
+            .put(format!("{}/sessions/{}/config", base, session_id))
+            .json(&serde_json::json!({
+                "workspace_id": "__agent_home__",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-047: GET /sessions/{sid} response must NOT contain config fields.
+    /// Verifies the HTTP response split: state in /sessions/{sid}, config in
+    /// /sessions/{sid}/config.
+    #[tokio::test]
+    async fn test_get_session_excludes_config_fields() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-no-config");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let session_id = "20260101_120000_ncfg";
+
+        // Create a session with model set in meta
+        use crate::conversation::{write_session_meta, SessionMeta};
+        let meta_dir = temp_dir.join("conversations").join("meta");
+        std::fs::create_dir_all(&meta_dir).unwrap();
+        let meta = SessionMeta {
+            version: 3, // CONVERSATION_FORMAT_VERSION
+            session_id: session_id.to_string(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T12:00:00Z".to_string(),
+            title: Some("Test".to_string()),
+            workspace_id: Some("ws-1".to_string()),
+            model: Some("gpt-4o".to_string()),
+            provider: Some("openai".to_string()),
+            reasoning_effort: None,
+            temperature: Some(0.5),
+            message_count: 0,
+            last_active_at: "2026-01-01T12:00:00Z".to_string(),
+            tokens: None,
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession =
+            Arc::new(std::sync::RwLock::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots, latest);
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+
+        // GET /sessions/{sid} - should NOT contain model/provider/temperature
+        let resp = reqwest::get(format!("{}/sessions/{}", base, session_id))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+
+        // meta should have session_id, created_at, last_active_at, message_count
+        let meta_obj = &body["meta"];
+        assert_eq!(meta_obj["session_id"], session_id);
+        assert!(meta_obj.get("model").is_none() || meta_obj["model"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain model");
+        assert!(meta_obj.get("provider").is_none() || meta_obj["provider"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain provider");
+        assert!(meta_obj.get("temperature").is_none() || meta_obj["temperature"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain temperature");
+        assert!(meta_obj.get("workspace_id").is_none() || meta_obj["workspace_id"].is_null(),
+            "GET /sessions/{{sid}} meta must NOT contain workspace_id");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

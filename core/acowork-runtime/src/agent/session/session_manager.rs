@@ -97,6 +97,14 @@ pub struct SessionManagerConfig {
     /// `GET /sessions/latest` always returns the authoritative answer
     /// without file-system scanning.
     pub latest_session: Option<SharedLatestSession>,
+
+    /// ADR-047: Shared session config map for `SessionConfigService`.
+    /// When `Some`, SessionManager registers each session's
+    /// `Arc<ConversationSession>` here on creation and removes it on
+    /// session destruction, so the HTTP server can serve
+    /// `GET/PUT /sessions/{sid}/config` without going through the
+    /// serial inference queue.
+    pub session_configs: Option<crate::usecases::SharedSessionConfigs>,
 }
 
 impl Default for SessionManagerConfig {
@@ -119,6 +127,7 @@ impl Default for SessionManagerConfig {
             protocol_type: ProtocolType::default(),
             session_snapshots: None,
             latest_session: None,
+            session_configs: None,
         }
     }
 }
@@ -387,6 +396,8 @@ pub struct SessionManager {
     /// (by `last_active_at` descending). Set once after the background scan
     /// completes; `None` until the scan finishes or if no sessions exist.
     latest_session: SharedLatestSession,
+    /// ADR-047: Shared session config map for `SessionConfigService`.
+    session_configs: crate::usecases::SharedSessionConfigs,
 }
 
 impl SessionManager {
@@ -397,6 +408,11 @@ impl SessionManager {
             .latest_session
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(None)));
+
+        let session_configs = config
+            .session_configs
+            .clone()
+            .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(HashMap::new())));
 
         Self {
             core,
@@ -417,6 +433,7 @@ impl SessionManager {
             session_delivery_cursors: std::sync::RwLock::new(HashMap::new()),
             streaming_lines: Arc::new(std::sync::RwLock::new(HashMap::new())),
             latest_session,
+            session_configs,
         }
     }
 
@@ -472,11 +489,17 @@ impl SessionManager {
         let (inbound_tx, inbound_rx) = mpsc::channel(self.config.inbound_channel_capacity);
 
         // Snapshot the title (and other resume-only fields) before `conversation`
-                // is moved into `build_initial_session_state`. We need it after the
-                // move to seed `latest_session`.
+        // is moved into `build_initial_session_state`. We need it after the
+        // move to seed `latest_session`.
         let resumed_title = conversation.as_ref().and_then(|c| c.title());
 
-        let session_state = self.build_initial_session_state(conversation);
+        // ADR-047: wrap conversation in Arc so it can be shared between
+        // SessionState (owned by SessionTask/AgentLoop) and SessionHandle
+        // (owned by SessionManager). This enables config mutations to bypass
+        // the serial inference queue.
+        let conversation_arc = conversation.map(Arc::new);
+
+        let session_state = self.build_initial_session_state(conversation_arc.clone());
 
         // Shared channel for bypass-injecting debug handles into AgentCore
         // while the agent loop is running (its message channel is blocked).
@@ -628,6 +651,17 @@ impl SessionManager {
             }
         });
 
+        // ADR-047: Register the session's ConversationSession Arc in the
+        // shared config map so SessionConfigService can apply config
+        // changes without going through the serial inference queue.
+        // Must happen before `conversation_arc` is moved into SessionHandle.
+        if let Some(conv) = &conversation_arc {
+            self.session_configs
+                .write()
+                .unwrap()
+                .insert(session_id.clone(), conv.clone());
+        }
+
         let handle = SessionHandle {
             session_id: session_id.clone(),
             inbound_tx,
@@ -639,6 +673,7 @@ impl SessionManager {
             snapshot: snapshot_arc.clone(),
             workspace_id,
             current_work_dir,
+            conversation: conversation_arc,
         };
 
         self.sessions.insert(session_id.clone(), handle);
@@ -767,7 +802,7 @@ impl SessionManager {
     /// Caller must hold an Arc<AgentCore> with global_provider_list populated.
     fn build_initial_session_state(
         &self,
-        conversation: Option<ConversationSession>,
+        conversation: Option<Arc<ConversationSession>>,
     ) -> SessionState {
         let mut initial_model = conversation.as_ref().and_then(|c| c.model());
         let mut initial_provider = conversation.as_ref().and_then(|c| c.provider());
@@ -1095,6 +1130,8 @@ impl SessionManager {
             if let Some(ref snapshots) = self.config.session_snapshots {
                 snapshots.write().unwrap().remove(session_id);
             }
+            // ADR-047: Remove from shared config map.
+            self.session_configs.write().unwrap().remove(session_id);
             // ADR-035 Phase 3: DisableNotify removed.
             let _ = handle.inbound_tx.send(SessionMessage::Close).await;
 
@@ -1216,6 +1253,7 @@ impl SessionManager {
                     if let Some(ref snapshots) = self.config.session_snapshots {
                         snapshots.write().unwrap().remove(session_id);
                     }
+                    self.session_configs.write().unwrap().remove(session_id);
                     self.urgent_stops.remove(session_id);
                     self.session_committed_lines.remove(session_id);
                     self.session_delivery_cursors.write().unwrap().remove(session_id);
@@ -1415,6 +1453,30 @@ impl SessionManager {
         // session_meta MQTT channel. The Gateway pull API reads from
         // data/meta/{session_id}.json so the new value is reflected on the
         // next fetchSessionState (or immediately via the live MQTT message).
+
+        // ADR-047 3.3.3: temperature is a config field that must be
+        // persisted to meta.json + trigger MQTT config notification.
+        // The runtime override path above only sets the transient
+        // AgentCore.temperature_override (not persisted). Here we also
+        // route temperature through apply_config() so it lands in
+        // ConversationSession (persisted) + config_version increment +
+        // MQTT session/config retained message.
+        if let Some(temp) = overrides.temperature {
+            for (session_id, handle) in &self.sessions {
+                if let Some(ref conv) = handle.conversation {
+                    let delta = crate::agent::session_config::SessionConfigDelta {
+                        temperature: Some(temp),
+                        ..Default::default()
+                    };
+                    conv.apply_config(&delta);
+                    tracing::info!(
+                        session_id = %session_id,
+                        temperature = temp,
+                        "ADR-047: temperature persisted via apply_config (UpdateRuntimeConfig split)"
+                    );
+                }
+            }
+        }
 
         sessions
     }
@@ -1762,11 +1824,12 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Route a model switch to a specific session (ADR-012: per-session model).
     ///
-    /// Only sends the ModelSwitch message to the targeted session.
-    /// Model persistence is handled by the SessionTask itself (via
-    /// `ConversationSession::update_model_provider`).
+    /// ADR-047: config persistence is now synchronous via `apply_config()`,
+    /// bypassing the serial inference queue. LLM-side effects (provider
+    /// rebuild, context builder update) are deferred to the next turn
+    /// boundary via version polling in SessionTask.
     pub fn route_model_switch(
-        &mut self,
+        &self,
         session_id: &str,
         model: String,
         provider: Option<String>,
@@ -1775,26 +1838,50 @@ After installation, ask the user to re-enable the MCP server.",
             session_id = %session_id,
             model = %model,
             provider = ?provider,
-            "SessionManager: routing model_switch to session (ADR-012: per-session)"
+            "SessionManager: routing model_switch (ADR-047: synchronous apply_config)"
         );
-        self.send_to_session(session_id, SessionMessage::ModelSwitch { model, provider })
+        let handle = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
+        if let Some(ref conv) = handle.conversation {
+            let delta = crate::agent::session_config::SessionConfigDelta {
+                model: Some(model),
+                provider,
+                ..Default::default()
+            };
+            conv.apply_config(&delta);
+        }
+        Ok(())
     }
 
     /// Route per-session reasoning effort override to the target session.
     ///
-    /// Sends a ReasoningEffort message to the session task, which updates
-    /// the SessionState and persists the change.
+    /// ADR-047: config persistence is now synchronous via `apply_config()`,
+    /// bypassing the serial inference queue. LLM-side effects are deferred
+    /// to the next turn boundary.
     pub fn route_reasoning_effort(
-        &mut self,
+        &self,
         session_id: &str,
         effort: String,
     ) -> Result<()> {
         tracing::info!(
             session_id = %session_id,
             effort = %effort,
-            "SessionManager: routing reasoning_effort to session"
+            "SessionManager: routing reasoning_effort (ADR-047: synchronous apply_config)"
         );
-        self.send_to_session(session_id, SessionMessage::ReasoningEffort { effort })
+        let handle = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
+        if let Some(ref conv) = handle.conversation {
+            let delta = crate::agent::session_config::SessionConfigDelta {
+                reasoning_effort: Some(effort),
+                ..Default::default()
+            };
+            conv.apply_config(&delta);
+        }
+        Ok(())
     }
 
     /// Update web search config from Gateway SearchConfigDelivery hot-push.
@@ -1986,6 +2073,16 @@ After installation, ask the user to re-enable the MCP server.",
         self.streaming_lines.clone()
     }
 
+    /// ADR-047: Shared session config map for `SessionConfigService`.
+    pub fn session_configs(&self) -> crate::usecases::SharedSessionConfigs {
+        self.session_configs.clone()
+    }
+
+    /// ADR-047: Shared workspace resolver (for SessionConfigService).
+    pub fn resolver(&self) -> Option<Arc<std::sync::RwLock<WorkspaceResolver>>> {
+        self.resolver.clone()
+    }
+
     /// ADR-022: Per-session committed line count — updated by writer thread
     /// after each disk write. Returns 0 if the session has no conversation
     /// (no writer thread, e.g. ephemeral test sessions).
@@ -2155,6 +2252,7 @@ After installation, ask the user to re-enable the MCP server.",
             if let Some(ref snapshots) = self.config.session_snapshots {
                 snapshots.write().unwrap().remove(&id);
             }
+            self.session_configs.write().unwrap().remove(&id);
             self.session_committed_lines.remove(&id);
             self.session_delivery_cursors.write().unwrap().remove(&id);
         }
@@ -2214,6 +2312,7 @@ After installation, ask the user to re-enable the MCP server.",
                 if let Some(ref snapshots) = self.config.session_snapshots {
                     snapshots.write().unwrap().remove(session_id);
                 }
+                self.session_configs.write().unwrap().remove(session_id);
                 self.urgent_stops.remove(session_id);
                 self.session_committed_lines.remove(session_id);
                 self.session_delivery_cursors.write().unwrap().remove(session_id);
@@ -2266,10 +2365,16 @@ After installation, ask the user to re-enable the MCP server.",
                 *handle.current_work_dir.write().unwrap() = Some(resolved_path);
             }
 
-            // Persist to JSONL (async, non-blocking)
-            let _ = handle.send(SessionMessage::SetWorkspaceId {
-                workspace_id: workspace_id.to_string(),
-            });
+            // ADR-047: persist workspace_id to meta.json + notify MQTT
+            // synchronously via apply_config(). No longer goes through
+            // the serial inference queue.
+            if let Some(ref conv) = handle.conversation {
+                let delta = crate::agent::session_config::SessionConfigDelta {
+                    workspace_id: Some(workspace_id.to_string()),
+                    ..Default::default()
+                };
+                conv.apply_config(&delta);
+            }
         }
     }
 
@@ -2431,11 +2536,16 @@ After installation, ask the user to re-enable the MCP server.",
             if let Some(handle) = self.sessions.get(&sid) {
                 *handle.workspace_id.write().unwrap() = "__agent_home__".to_string();
                 *handle.current_work_dir.write().unwrap() = Some(resolver.agent_home().to_string());
-                // Persist the fallback to JSONL so cold restarts don't
-                // re-read the deleted workspace_id from metadata.
-                let _ = handle.send(SessionMessage::SetWorkspaceId {
-                    workspace_id: "__agent_home__".to_string(),
-                });
+                // ADR-047: persist the fallback to meta.json synchronously
+                // via apply_config() so cold restarts don't re-read the
+                // deleted workspace_id from metadata.
+                if let Some(ref conv) = handle.conversation {
+                    let delta = crate::agent::session_config::SessionConfigDelta {
+                        workspace_id: Some("__agent_home__".to_string()),
+                        ..Default::default()
+                    };
+                    conv.apply_config(&delta);
+                }
             }
             tracing::info!(
                 session_id = %sid,

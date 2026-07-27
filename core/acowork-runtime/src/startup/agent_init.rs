@@ -74,6 +74,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let latest_session: crate::agent::session_state::SharedLatestSession =
         Arc::new(std::sync::RwLock::new(None));
 
+    // ADR-047: Shared session config map for SessionConfigService.
+    let session_configs: crate::usecases::SharedSessionConfigs =
+        Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+
     // ADR-033: Dispatch channel for Runtime HTTP → agent loop write operations.
     // HTTP handlers send (session_id, InboundMessage) tuples; the gateway loop
     // forwards them to the right session's AgentLoop via send_inbound().
@@ -147,6 +151,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let attachment_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // ADR-047: session config service for GET/PUT /sessions/{sid}/config.
+    let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -172,6 +180,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             agent_tools_slot.clone(),
             agent_config_slot.clone(),
             attachment_slot.clone(),
+            session_config_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -788,8 +797,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_tools_slot,
         agent_config_slot,
         attachment_slot,
+        session_config_slot,
         search_key_vault,
         search_provider_list,
+        session_configs,
     })
 }
 

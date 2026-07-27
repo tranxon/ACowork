@@ -375,7 +375,7 @@ impl AgentLoop {
         builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
-        conversation: Option<ConversationSession>,
+        conversation: Option<Arc<ConversationSession>>,
         observer: crate::debug::DebugObserverSlot,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel(64);
@@ -444,7 +444,7 @@ impl AgentLoop {
         builtin_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
         budget: acowork_core::Budget,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
-        conversation: Option<ConversationSession>,
+        conversation: Option<Arc<ConversationSession>>,
     ) -> (Self, tokio::sync::mpsc::Sender<InboundMessage>) {
         Self::new_with_observer(
             config,
@@ -3273,7 +3273,7 @@ mod tests {
             tools,
             budget,
             None,
-            Some(conversation),
+            Some(Arc::new(conversation)),
         );
 
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
@@ -3365,7 +3365,7 @@ mod tests {
             tools,
             budget,
             None,
-            Some(conversation),
+            Some(Arc::new(conversation)),
         );
 
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());

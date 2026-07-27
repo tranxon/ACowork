@@ -52,9 +52,9 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     //
     //   1. fetchSessions         — populate agentStore.sessions (sidebar list).
     //   2. fetchSessionState     — pulls model/provider/workspace_id and
-    //                              context usage via applySessionMeta so the
-    //                              header bar and metadata don't pop in
-    //                              piecewise.
+    //                              and state (status/ratio/todos/context_usage)
+    //                              via parallel HTTP calls so the header bar
+    //                              and metadata don't pop in piecewise.
     //   3. ensureLatestInCache   — loads the latest message window into the
     //                              cache so messages are available when
     //                              ChatPanel first renders.
@@ -71,9 +71,8 @@ async function initSessionForAgent(agentId: string): Promise<void> {
     // re-ran fetchSessions — both are either no-ops or double-work on
     // first launch.
     await useAgentStore.getState().fetchSessions(agentId);
-    await useChatStore
-        .getState()
-        .fetchSessionState(agentId, targetSessionId);
+    // ADR-047: loadSession (config + state) is now called inside
+    // openSession, so we only need ensureLatestInCache before it.
     await useChatStore
         .getState()
         .ensureLatestInCache(agentId, targetSessionId);

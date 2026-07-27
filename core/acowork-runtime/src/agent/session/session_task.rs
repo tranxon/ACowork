@@ -47,20 +47,6 @@ pub enum SessionMessage {
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
-    /// Switch the LLM model at runtime (ADR-012: per-session, carries provider).
-    /// When `provider` is set, the SessionTask rebuilds the LLM Provider
-    /// instance from `AgentCore.build_provider_for(provider_id)`, using
-    /// the global provider list + key vault populated at startup.
-    ModelSwitch {
-        model: String,
-        provider: Option<String>,
-    },
-    /// Set per-session reasoning effort override (from frontend toggle).
-    /// When set, overrides the model's default_reasoning_effort.
-    /// Set to "none"/"off" to disable reasoning for this session.
-    ReasoningEffort {
-        effort: String,
-    },
     /// Apply runtime config overrides from Gateway
     UpdateRuntimeConfig(RuntimeConfigOverrides),
     /// Update workspace context text
@@ -96,8 +82,6 @@ pub enum SessionMessage {
     },
     /// Update the title of the session's conversation
     UpdateSessionTitle { title: String },
-    /// Persist the per-session workspace_id to the JSONL conversation file
-    SetWorkspaceId { workspace_id: String },
     /// Update the workspace directory path for tool execution.
     /// Carries the fully-resolved absolute path from SessionManager.
     SetWorkDir { path: String },
@@ -168,15 +152,6 @@ impl std::fmt::Debug for SessionMessage {
                 .field("has_content_parts", &content_parts.is_some())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
-            SessionMessage::ModelSwitch { model, provider } => f
-                .debug_struct("ModelSwitch")
-                .field("model", model)
-                .field("provider", provider)
-                .finish(),
-            SessionMessage::ReasoningEffort { effort } => f
-                .debug_struct("ReasoningEffort")
-                .field("effort", effort)
-                .finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
                 .debug_struct("UpdateRuntimeConfig")
                 .field("max_output_tokens", &overrides.max_output_tokens)
@@ -227,10 +202,6 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::UpdateSessionTitle { title } => f
                 .debug_struct("UpdateSessionTitle")
                 .field("title", title)
-                .finish(),
-            SessionMessage::SetWorkspaceId { workspace_id } => f
-                .debug_struct("SetWorkspaceId")
-                .field("workspace_id", workspace_id)
                 .finish(),
             SessionMessage::SetWorkDir { path } => {
                 f.debug_struct("SetWorkDir").field("path", path).finish()
@@ -590,7 +561,49 @@ impl SessionTask {
         // replays the agent loop with this saved message.
         let mut last_user_message: Option<(String, String)> = None;
 
+        // ADR-047: config version polling state.
+        //
+        // SessionTask polls the config version at turn boundaries.
+        // If config was mutated during the previous inference turn
+        // (via SessionManager -> ConversationSession::apply_config),
+        // the version will have changed and we apply deferred LLM-side
+        // effects before processing the next message.
+        let mut last_config_version = agent_loop
+            .session
+            .conversation
+            .as_ref()
+            .map(|c| c.config_version())
+            .unwrap_or(0);
+        let mut last_config_snapshot = agent_loop
+            .session
+            .conversation
+            .as_ref()
+            .map(|c| c.config_snapshot())
+            .unwrap_or_default();
+
         loop {
+            // ── ADR-047: Check if config was mutated during previous turn ──
+            if let Some(conv) = agent_loop.session.conversation.as_ref() {
+                let current_version = conv.config_version();
+                if current_version != last_config_version {
+                    let snapshot = conv.config_snapshot();
+                    tracing::info!(
+                        session_id = %session_id,
+                        old_version = last_config_version,
+                        new_version = current_version,
+                        "SessionTask: config version changed, applying LLM-side effects"
+                    );
+                    crate::agent::session_config::llm_effects::apply_llm_effects(
+                        &mut agent_loop,
+                        &mut context_builder,
+                        &snapshot,
+                        &last_config_snapshot,
+                    );
+                    last_config_snapshot = snapshot;
+                    last_config_version = current_version;
+                }
+            }
+
             // Use tokio::select! to await inbound messages, rewind
             // notifications, and resume notifications — all sourced
             // from the debug observer slot (ADR-013).
@@ -995,90 +1008,6 @@ impl SessionTask {
                         })
                         .await;
                 }
-                Some(SessionMessage::ModelSwitch { model, provider }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        model = %model,
-                        provider = ?provider,
-                        "SessionTask: model switch requested (ADR-012: per-session)"
-                    );
-                    // Update in-memory SessionState
-                    agent_loop.session.set_model(model.clone());
-                    if let Some(ref p) = provider {
-                        agent_loop.session.set_provider(p.clone());
-                    }
-                    // Persist to JSONL conversation file
-                    if let Some(conv) = agent_loop.session.conversation() {
-                        conv.update_model_provider(&model, provider.as_deref());
-                    }
-                    // If the provider also changed, rebuild the LLM Provider
-                    // instance from the shared global cache (set by
-                    // ProviderListUpdate / AgentHello). No per-session vault.
-                    if let Some(ref provider_id) = provider {
-                        if let Some(new_provider) = agent_loop.session_core.build_provider_for(
-                            provider_id,
-                            &agent_loop.core.config,
-                            &agent_loop.core.global_provider_list,
-                            &agent_loop.core.provider_key_vault,
-                            agent_loop.core.compat_cache.as_ref(),
-                        )
-                        {
-                            agent_loop.update_provider(
-                                new_provider,
-                                model.clone(),
-                                Some(provider_id.clone()),
-                            );
-                        } else {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                provider_id = %provider_id,
-                                "ModelSwitch: provider not found in global cache, keeping current Provider instance"
-                            );
-                        }
-                    }
-                    // Update context builder for next iteration
-                    context_builder.set_override_model(model.clone());
-                    // Reset reasoning_effort to new model's default (clear user override).
-                    // Three-level priority chain:
-                    // 1. provider capabilities default_reasoning_effort
-                    // 2. Auto (if supports_reasoning is true)
-                    // 3. None (provider does not support thinking control)
-                    // No persisted session value applies on model switch — the model changed.
-                    let caps = agent_loop.core.get_model_capabilities(&model);
-                    let provider_default = caps
-                        .as_ref()
-                        .and_then(|c| c.default_reasoning_effort.clone());
-                    let default_effort = provider_default
-                        .as_deref()
-                        .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
-                        .or_else(|| {
-                            if caps.as_ref().and_then(|c| c.supports_reasoning).unwrap_or(false) {
-                                Some(acowork_core::providers::traits::ReasoningEffort::Auto)
-                            } else {
-                                None
-                            }
-                        });
-                    agent_loop.session.set_reasoning_effort(default_effort.clone());
-                    // Persist new effort to ConversationSession so resume is consistent.
-                    if let Some(conv) = agent_loop.session.conversation() {
-                        let effort_str = default_effort.as_ref().map(|e| e.to_string());
-                        conv.update_reasoning_effort(effort_str);
-                    }
-                }
-                Some(SessionMessage::ReasoningEffort { effort }) => {
-                    let parsed = acowork_core::providers::traits::ReasoningEffort::from_str_loose(&effort);
-                    tracing::info!(
-                        session_id = %session_id,
-                        effort = %effort,
-                        parsed = ?parsed,
-                        "SessionTask: reasoning effort override"
-                    );
-                    agent_loop.session.set_reasoning_effort(parsed);
-                    // Persist to JSONL so the override survives session resume.
-                    if let Some(conv) = agent_loop.session.conversation() {
-                        conv.update_reasoning_effort(Some(effort));
-                    }
-                }
                 Some(SessionMessage::UpdateRuntimeConfig(overrides)) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -1206,14 +1135,6 @@ impl SessionTask {
                         "SessionTask: updating session title"
                     );
                     let _ = agent_loop.update_session_title(&title);
-                }
-                Some(SessionMessage::SetWorkspaceId { workspace_id }) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        workspace_id = %workspace_id,
-                        "SessionTask: persisting workspace_id to JSONL (SessionCore already updated by SessionManager)"
-                    );
-                    agent_loop.update_session_workspace_id(&workspace_id);
                 }
                 Some(SessionMessage::SetWorkDir { path }) => {
                     tracing::debug!(

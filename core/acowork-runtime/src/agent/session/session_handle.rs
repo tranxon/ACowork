@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use super::session_task::SessionMessage;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+use crate::conversation::ConversationSession;
 use crate::debug::DebugHandles;
 
 /// External handle for interacting with a running SessionTask.
@@ -65,6 +66,12 @@ pub struct SessionHandle {
     /// Written synchronously by SessionManager alongside `workspace_id`,
     /// read by the HTTP tree/find handlers.
     pub(crate) current_work_dir: Arc<RwLock<Option<String>>>,
+    /// ADR-047: shared conversation session handle.
+    ///
+    /// Allows `SessionManager` to call `ConversationSession::apply_config()`
+    /// directly, bypassing the serial inference queue. `None` for sessions
+    /// without persistent conversation (e.g. ephemeral sessions).
+    pub(crate) conversation: Option<Arc<ConversationSession>>,
 }
 
 impl SessionHandle {
