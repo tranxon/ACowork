@@ -277,7 +277,7 @@ function LspIndicator({ status, statusMessage, language }: { status: LspStatus; 
 
             {/* Install hint popover */}
             {showPopover && hint && (
-                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800 text-xs">
+                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 text-xs">
                     <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
                         Install {hint.name}
                     </div>
@@ -1326,11 +1326,11 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     return (
         <div
-            className="relative flex flex-col shrink-0 bg-[#FAFAFA] dark:border-zinc-800 dark:bg-zinc-900 rounded-xl overflow-hidden"
+            className="relative flex flex-col shrink-0 bg-chat-area dark:border-zinc-800 rounded-xl overflow-hidden"
             style={{ width }}
         >
             {/* Tab bar */}
-            <div className="flex bg-[#FAFAFA] dark:bg-zinc-900 select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
+            <div className="flex bg-chat-area select-none px-0.5 gap-0.5 mt-[5px] border-b border-zinc-200 dark:border-zinc-800">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}
@@ -1453,11 +1453,14 @@ export function FileEditorPanel({ width }: { width: number }) {
                 ) : activeFile.kind === "url" ? (
                     <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
-                    // Match the text/Markdown/HTML preview surface (Monaco `vs`/`vs-dark` ~#FFFFFF/#1E1E1E
-                    // and HtmlPreviewView iframe bg-white) so the panel reads as one "editor canvas"
-                    // distinct from the surrounding chat-area bg (`#FAFAFA` / zinc-900). zinc-50/zinc-900
-                    // previously collapsed into the chat surface and the image looked unframed.
-                    <div className="flex h-full w-full items-center justify-center bg-white dark:bg-zinc-800">
+                    // `bg-editor-canvas` paints the wrapper with the same Monaco `vs` / `vs-dark`
+                    // background the source editor uses, so the right-hand preview column reads
+                    // as one "editor canvas" distinct from the left ChatPanel bg (`#FAFAFA` /
+                    // zinc-900). Previously this used zinc-50/zinc-900 (and then zinc-800),
+                    // which collapsed into the chat surface and made the image look unframed.
+                    // Token is registered in globals.css @theme + .dark block; keep it in sync
+                    // with Monaco — do not hard-code #FFFFFF / #1E1E1E here.
+                    <div className="flex h-full w-full items-center justify-center bg-editor-canvas">
                         <img
                             src={"data:" + activeFile.mimeType + ";base64," + activeFile.content}
                             alt={activeFile.fileName}
@@ -1519,7 +1522,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </button>
                         )}
                         {activeFile.loading && (
-                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-[#FAFAFA]/80 text-xs text-zinc-400 dark:bg-zinc-900/80">
+                            <div className="absolute inset-0 flex items-center justify-center gap-2 bg-chat-area/80 text-xs text-zinc-400">
                                 <Loader2 className="h-4 w-4 animate-spin" />
                                 Loading...
                             </div>
@@ -1534,7 +1537,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 cursor/LSP indicators with the file MIME type and (for URL
                 previews) the remote host. */}
             {activeFile && !activeFile.loading && (
-                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-[#FAFAFA] px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-chat-area px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:text-zinc-400">
                     {activeFile.mode === "edit" ? (
                         <>
                             <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
@@ -1571,11 +1574,11 @@ export function FileEditorPanel({ width }: { width: number }) {
             {/* Close confirmation dialog */}
             {closingFileId && (
                 <div
-                    className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
+                    className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay"
                     onClick={() => setClosingFileId(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
@@ -1743,11 +1746,11 @@ export function FileEditorPanel({ width }: { width: number }) {
             {/* Batch close confirmation (Close Others / Close All with dirty files) */}
             {batchCloseRequest && (
                 <div
-                    className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
+                    className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay"
                     onClick={() => setBatchCloseRequest(null)}
                 >
                     <div
-                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-5 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+                        className="mx-4 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-5 shadow-xl dark:border-zinc-700"
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">

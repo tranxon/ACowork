@@ -142,7 +142,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 </button>
 
                 {/* Editable URL bar — now an <input> that can be focused and edited */}
-                <div className="mx-1 flex-1 overflow-hidden rounded bg-white dark:bg-zinc-900">
+                <div className="mx-1 flex-1 overflow-hidden rounded bg-modal-surface">
                     <input
                         type="text"
                         value={isEditingUrl ? urlInputValue : currentUrl}
@@ -171,7 +171,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
             <div className="relative flex-1">
                 {/* Loading spinner */}
                 {loading && (
-                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white dark:bg-zinc-900">
+                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-chat-area">
                         <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
                         <span className="text-sm text-zinc-500">{t("fileEditor.loadingUrl")}</span>
                     </div>
@@ -198,7 +198,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                     ref={iframeRef}
                     key={currentUrl}
                     src={currentUrl}
-                    className="h-full w-full border-0 bg-white"
+                    className="h-full w-full border-0 bg-modal-surface"
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                     title={fileName}
                     onLoad={handleLoad}

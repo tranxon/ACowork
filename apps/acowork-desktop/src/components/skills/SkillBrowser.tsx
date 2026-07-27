@@ -122,7 +122,7 @@ export function SkillBrowser() {
   // ── Empty state: no agent selected ──
   if (!selectedAgentId) {
     return (
-      <div className="flex flex-1 items-center justify-center bg-white dark:bg-zinc-900">
+      <div className="flex flex-1 items-center justify-center bg-chat-area">
         <div className="text-center">
           <Wrench className="mx-auto h-12 w-12 text-zinc-300 dark:text-zinc-600" />
           <p className="mt-3 text-sm text-zinc-400 dark:text-zinc-500">
@@ -134,7 +134,7 @@ export function SkillBrowser() {
   }
 
   return (
-    <div className="flex flex-1 flex-col bg-white dark:bg-zinc-900">
+    <div className="flex flex-1 flex-col bg-chat-area">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
         <h1 className="text-xl font-semibold">{t("skillsPanel.title")}</h1>
@@ -177,7 +177,7 @@ export function SkillBrowser() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t("skillsPanel.searchPlaceholder")}
-                className="bg-white dark:bg-zinc-800"
+                className="bg-modal-surface"
               />
             </div>
 
@@ -265,8 +265,8 @@ export function SkillBrowser() {
 
       {/* Import Dialog */}
       {importDialogOpen && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50">
-          <div className="w-96 rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-modal-overlay">
+          <div className="w-96 rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">

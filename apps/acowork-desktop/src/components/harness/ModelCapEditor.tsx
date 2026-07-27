@@ -130,7 +130,7 @@ export function ModelCapEditor({
               <select
                 value={caps.default_reasoning_effort ?? "auto"}
                 onChange={(e) => onUpdate("default_reasoning_effort", e.target.value)}
-                className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
               >
                 <option value="auto">Auto</option>
                 <option value="off">Off</option>

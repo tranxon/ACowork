@@ -272,12 +272,12 @@ export function PublishWizard({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/40"
+        className="absolute inset-0 bg-modal-overlay"
         onClick={busy ? undefined : onClose}
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
           <Package className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
@@ -751,7 +751,7 @@ function ModeTab({
       className={cn(
         "rounded-md px-2 py-1 font-medium transition-colors disabled:opacity-50",
         active
-          ? "bg-white text-zinc-800 shadow-sm dark:bg-zinc-700 dark:text-zinc-100"
+          ? "bg-modal-surface text-zinc-800 shadow-sm dark:text-zinc-100"
           : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200",
       )}
     >

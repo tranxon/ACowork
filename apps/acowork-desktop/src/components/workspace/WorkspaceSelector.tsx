@@ -185,7 +185,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
         {/* Dropdown menu */}
         {open && (
           <div className={cn(
-            "absolute left-0 w-60 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800",
+            "absolute left-0 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700",
             dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
           )} style={{ zIndex: 100 }}>
             {/* Workspace list */}

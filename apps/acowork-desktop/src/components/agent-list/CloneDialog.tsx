@@ -97,10 +97,10 @@ export function CloneDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
 
       {/* Dialog */}
-      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="relative z-10 w-full max-w-md rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
           <Copy className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
@@ -140,7 +140,7 @@ export function CloneDialog({
                 if (e.key === "Enter") void handleClone();
               }}
               placeholder={t("cloneDialog.newAgentIdPlaceholder")}
-              className="bg-white dark:bg-zinc-700"
+              className="bg-modal-surface"
             />
           </div>
 

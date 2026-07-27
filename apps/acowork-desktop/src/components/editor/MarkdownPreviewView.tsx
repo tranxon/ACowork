@@ -311,9 +311,18 @@ export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     }
 
     return (
+        // `bg-editor-canvas` on the preview root paints the surface
+        // with the same Monaco `vs` / `vs-dark` background the editor
+        // uses, so the right-hand preview column reads as one unified
+        // "editor canvas" distinct from the left ChatPanel bg (`#FAFAFA`
+        // / zinc-900). Without it, the preview inherits the
+        // FileEditorPanel wrapper's bg and becomes visually
+        // indistinguishable from the chat panel.
+        // Token is registered in globals.css @theme + .dark block; do
+        // not hard-code #FFFFFF / #1E1E1E here — keep in sync with Monaco.
         <div
             className={cn(
-                "markdown-preview prose prose-sm prose-zinc max-w-none h-full overflow-y-auto px-5 py-4",
+                "markdown-preview prose prose-sm prose-zinc max-w-none h-full overflow-y-auto px-5 py-4 bg-editor-canvas",
                 "dark:prose-invert",
             )}
             onDoubleClick={handleOpenAsEditor}

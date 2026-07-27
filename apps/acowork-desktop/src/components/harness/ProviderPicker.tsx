@@ -141,7 +141,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom }: Prov
                   value={providerSearchTerm}
                   onChange={(e) => setProviderSearchTerm(e.target.value)}
                   placeholder={t("harness.searchProviders")}
-                  className="w-[180px] bg-white pl-7 pr-2 placeholder-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder-zinc-500"
+                  className="w-[180px] bg-modal-surface pl-7 pr-2 placeholder-zinc-400 dark:border-zinc-600 dark:placeholder-zinc-500"
                 />
                 <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400" />
               </div>

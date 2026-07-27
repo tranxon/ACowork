@@ -139,12 +139,12 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/40"
+        className="absolute inset-0 bg-modal-overlay"
         onClick={busy ? undefined : onClose}
       />
 
       {/* Dialog */}
-      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-white shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="relative z-10 flex w-full max-w-2xl flex-col rounded-md border border-zinc-200 bg-modal-surface shadow-xl dark:border-zinc-700">
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-200 px-5 py-3.5 dark:border-zinc-700">
           <Sparkles className="h-5 w-5 text-zinc-500 dark:text-zinc-400" />
@@ -207,7 +207,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   value={form.agent_id}
                   onChange={(e) => update({ agent_id: e.target.value })}
                   placeholder="com.example.myagent"
-                  className="bg-white dark:bg-zinc-700"
+                  className="bg-modal-surface"
                 />
               </div>
               <div>
@@ -219,7 +219,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   value={form.name}
                   onChange={(e) => update({ name: e.target.value })}
                   placeholder={t("createWizard.placeholderAgentName")}
-                  className="bg-white dark:bg-zinc-700"
+                  className="bg-modal-surface"
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -232,7 +232,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     value={form.version}
                     onChange={(e) => update({ version: e.target.value })}
                     placeholder="0.1.0"
-                    className="bg-white dark:bg-zinc-700"
+                    className="bg-modal-surface"
                   />
                 </div>
                 <div>
@@ -244,7 +244,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     value={form.author}
                     onChange={(e) => update({ author: e.target.value })}
                     placeholder={t("createWizard.placeholderYourName")}
-                    className="bg-white dark:bg-zinc-700"
+                    className="bg-modal-surface"
                   />
                 </div>
               </div>
@@ -257,7 +257,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                   onChange={(e) => update({ description: e.target.value })}
                   placeholder={t("createWizard.placeholderDescribe")}
                   rows={3}
-                  className="resize-none bg-white dark:bg-zinc-700"
+                  className="resize-none bg-modal-surface"
                 />
               </div>
             </div>

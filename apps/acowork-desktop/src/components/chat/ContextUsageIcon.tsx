@@ -150,7 +150,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
           onMouseLeave={handleMouseLeave}
           className={cn(
             "absolute bottom-full right-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
+            "border-zinc-200 bg-modal-surface dark:border-zinc-700",
           )}
         >
           {/* Line 1: usage percentage + token stats */}

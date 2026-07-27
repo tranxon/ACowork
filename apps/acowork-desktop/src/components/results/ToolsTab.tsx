@@ -221,13 +221,13 @@ export function ToolsTab() {
           {t("agentSetup.builtinTools")}
         </label>
         {builtinToolsAll.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noBuiltinTools")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {builtinToolsAll.map((entry) => (
                 <label
@@ -260,13 +260,13 @@ export function ToolsTab() {
           {t("agentSetup.webSearchProviders")}
         </label>
         {searchProviders.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noSearchKeys")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {searchProviders.map((sp) => {
                 const active = activeSearch.find((p) => p.provider === sp.id);
@@ -343,13 +343,13 @@ export function ToolsTab() {
           {t("agentSetup.mcpServers")}
         </label>
         {catalog.length === 0 ? (
-          <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
               {t("agentSetup.noMcpInCatalog")}
             </span>
           </div>
         ) : (
-          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {catalog.map((server) => {
                 const isChecked = activeServers.includes(server.name);

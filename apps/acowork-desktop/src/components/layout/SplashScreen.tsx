@@ -249,7 +249,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     };
 
     return (
-        <div className="relative flex h-screen w-screen flex-col items-center justify-center overflow-hidden bg-zinc-50 dark:bg-zinc-900">
+        <div className="relative flex h-screen w-screen flex-col items-center justify-center overflow-hidden bg-chat-area">
             <div
                 className={`relative z-10 flex flex-col items-center gap-10 transition-all duration-700 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
                     }`}

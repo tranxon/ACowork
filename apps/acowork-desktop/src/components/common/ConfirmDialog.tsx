@@ -38,11 +38,11 @@ export function ConfirmDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={onCancel} />
+      <div className="absolute inset-0 bg-modal-overlay" onClick={onCancel} />
 
       {/* Dialog */}
       <div
-        className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800"
+        className="relative z-10 w-full max-w-sm rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-title"

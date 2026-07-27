@@ -1678,7 +1678,7 @@ export function ChatPanel() {
         )}
 
         {/* Unified input container with toolbar */}
-        <div className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-[#FAFAFA] dark:bg-zinc-900">
+        <div className="mx-3 mb-3 rounded-md border border-zinc-200 dark:border-zinc-700 bg-chat-area">
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
@@ -1975,9 +1975,9 @@ function UnsupportedImageDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-modal-overlay" onClick={onClose}>
       <div
-        className="w-[400px] overflow-hidden rounded-md bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
+        className="w-[400px] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="shrink-0 px-6 pt-6 pb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
@@ -2115,7 +2115,7 @@ function ModelMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
+            "border-zinc-200 bg-modal-surface dark:border-zinc-700",
           )}
           style={{ width: `${menuWidth}px` }}
         >
@@ -2256,7 +2256,7 @@ function ReasoningEffortMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
+            "border-zinc-200 bg-modal-surface dark:border-zinc-700",
           )}
           style={{ width: "140px" }}
         >

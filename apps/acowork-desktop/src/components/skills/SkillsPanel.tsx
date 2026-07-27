@@ -130,7 +130,7 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
       >
         {/* Dropdown menu */}
         {open && (
-          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800" style={{ zIndex: 100 }}>
+          <div className="absolute bottom-full left-0 mb-1 w-60 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700" style={{ zIndex: 100 }}>
             {/* Skills list */}
             <div className="max-h-56 overflow-y-auto py-1">
               {loading && skills.length === 0 ? (
@@ -201,8 +201,8 @@ export function SkillsPanel({ textHidden }: { textHidden?: boolean } = {}) {
 
       {/* Import Dialog */}
       {importDialogOpen && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50">
-          <div className="w-96 rounded-md border border-zinc-200 bg-white p-6 shadow-xl dark:border-zinc-700 dark:bg-zinc-800">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-modal-overlay">
+          <div className="w-96 rounded-md border border-zinc-200 bg-modal-surface p-6 shadow-xl dark:border-zinc-700">
             {/* Header */}
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">

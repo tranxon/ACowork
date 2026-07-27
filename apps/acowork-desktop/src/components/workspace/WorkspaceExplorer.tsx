@@ -721,7 +721,7 @@ export function WorkspaceExplorer() {
 
                 {/* Dropdown results */}
                 {showDropdown && (
-                    <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                    <div className="absolute left-0 right-0 top-full z-50 mt-1 rounded-lg border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700">
                         {/* Header with count */}
                         <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-1.5 text-[11px] text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
                             {searchLoading ? (

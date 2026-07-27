@@ -284,7 +284,7 @@ export function AgentList({ width }: AgentListProps) {
 
   return (
     <div
-      className="flex flex-col shrink-0 bg-[#EEEEF0] dark:bg-[#2F2F30] rounded-xl"
+      className="flex flex-col shrink-0 bg-nav-surface rounded-xl"
       style={{ width: width ?? 240 }}
     >
       {/* Header — search input */}
@@ -300,7 +300,7 @@ export function AgentList({ width }: AgentListProps) {
             placeholder={isCollapsed ? "" : t("agentList.searchPlaceholder")}
             aria-label={t("agentList.searchPlaceholder")}
             className={cn(
-              "rounded-md bg-[#D8D9DC] pl-7 dark:bg-[#3D3D3F] py-1.5",
+              "rounded-md bg-nav-control pl-7 py-1.5",
               isCollapsed ? "min-w-0 pr-0" : "pr-2",
             )}
           />
@@ -327,8 +327,8 @@ export function AgentList({ width }: AgentListProps) {
                 isCollapsed ? "gap-0" : "gap-3",
                 selectedAgentId === agent.agent_id
                   ? "bg-[var(--color-accent)]/90 text-white"
-                  : "hover:bg-[#E2E3E6] dark:hover:bg-[#38383A]",
-                index < filteredAgents.length - 1 && (isCollapsed ? "after:absolute after:bottom-0 after:left-1 after:right-1 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40" : "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-[#C8C8C8]/40 dark:after:border-zinc-600/40")
+                  : "hover:bg-nav-item-hover",
+                index < filteredAgents.length - 1 && (isCollapsed ? "after:absolute after:bottom-0 after:left-1 after:right-1 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40" : "after:absolute after:bottom-0 after:left-1.5 after:right-1.5 after:border-b after:border-nav-divider/40 dark:after:border-zinc-600/40")
               )}
               onClick={() => selectAgent(agent.agent_id)}
               onDoubleClick={() => {
@@ -403,7 +403,7 @@ export function AgentList({ width }: AgentListProps) {
                           className={cn(
                             "block h-2.5 w-2/3 animate-pulse rounded",
                             selectedAgentId === agent.agent_id
-                              ? "bg-white/40"
+                              ? "bg-modal-surface/40"
                               : "bg-zinc-300/60 dark:bg-zinc-600/60",
                           )}
                         />
@@ -469,13 +469,13 @@ export function AgentList({ width }: AgentListProps) {
       <div ref={addMenuRef} className="relative p-1.5">
         <button
           onClick={() => setAddMenuOpen(!addMenuOpen)}
-          className="flex w-full items-center justify-center rounded-md bg-[#D8D9DC] px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-[#C8C9CC] dark:bg-[#3D3D3F] dark:text-zinc-300 dark:hover:bg-[#474749]"
+          className="flex w-full items-center justify-center rounded-md bg-nav-control px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-nav-control-hover dark:text-zinc-300"
           aria-label={t("agentList.ariaLabelAddAgent")}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
         {addMenuOpen && (
-          <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-white py-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+          <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700">
             <button
               onClick={() => {
                 setAddMenuOpen(false);

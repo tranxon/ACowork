@@ -109,7 +109,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
 
       {/* Dropdown menu */}
       {open && (
-        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-800 z-50">
+        <div className="absolute bottom-full left-0 mb-2 w-72 rounded-md border border-zinc-200 bg-modal-surface shadow-lg dark:border-zinc-700 z-50">
           {/* Session list */}
           <div ref={listRef} className="max-h-80 overflow-y-auto py-1">
             {isLoading && sessions.length === 0 && (

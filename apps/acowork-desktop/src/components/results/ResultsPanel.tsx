@@ -297,7 +297,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
           ) : (
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
               {/* ── Controls card ──────────────────────────────────── */}
-              <div className="rounded-md border border-zinc-200 bg-white p-2 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-modal-surface p-2 dark:border-zinc-700">
                 <div className="flex items-center gap-1">
                   <ControlButton
                     onClick={() => {
@@ -352,7 +352,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               </div>
 
               {/* ── State card ─────────────────────────────────────── */}
-              <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
                   <StateLabel label={t("resultsPanel.iteration")} value={`#${iteration}`} />
                   <StateLabel label={t("resultsPanel.phase")} value={phase} highlight />
@@ -366,7 +366,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
               </div>
 
               {/* ── Context snapshots card ─────────────────────────── */}
-              <div className="rounded-md border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="rounded-md border border-zinc-200 bg-modal-surface p-3 dark:border-zinc-700">
                 <div className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
                   {t("resultsPanel.contextSnapshots", { count: snapshots.length })}
                 </div>
@@ -416,7 +416,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
             <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
               {t("resultsPanel.sessionStatus")}
             </h3>
-            <div className="rounded-md bg-white p-3 text-xs dark:bg-zinc-800">
+            <div className="rounded-md bg-modal-surface p-3 text-xs">
               {/* Context usage progress bar */}
               {contextUsage ? (
                 <div className="mb-3">
@@ -500,7 +500,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
             <h3 className="mb-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
               {t("resultsPanel.agentStatus")}
             </h3>
-            <div className="rounded-md bg-white p-3 text-xs dark:bg-zinc-800">
+            <div className="rounded-md bg-modal-surface p-3 text-xs">
               {selectedAgent ? (
                 <>
                   <div className="flex justify-between py-1">

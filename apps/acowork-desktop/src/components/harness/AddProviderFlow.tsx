@@ -279,9 +279,9 @@ export function AddProviderFlow({
 
   // ── Render ──
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay" onClick={onClose}>
       <div
-        className="w-[440px] max-h-[85vh] overflow-hidden rounded-md bg-white shadow-xl dark:bg-zinc-800 flex flex-col"
+        className="w-[440px] max-h-[85vh] overflow-hidden rounded-md bg-modal-surface shadow-xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header with optional back button */}

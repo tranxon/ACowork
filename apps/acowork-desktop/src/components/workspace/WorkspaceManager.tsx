@@ -121,8 +121,8 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
   const readWriteCount = workspaces.filter(w => w.access === "read-write").length;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-2xl rounded-md bg-white shadow-xl dark:bg-zinc-900">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+      <div className="w-full max-w-2xl rounded-md bg-modal-surface shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
@@ -293,8 +293,8 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-lg rounded-md bg-white shadow-xl dark:bg-zinc-900">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+      <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl">
         <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4 dark:border-zinc-700">
           <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Add Workspace</h3>
           <button onClick={onClose} className="rounded-md p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800">
@@ -313,7 +313,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                 value={path}
                 onChange={(e) => setPath(e.target.value)}
                 placeholder="e.g. F:/work/project"
-                className="flex-1 border-zinc-300 bg-white py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+                className="flex-1 border-zinc-300 bg-modal-surface py-2 text-sm dark:border-zinc-600"
               />
               <button
                 onClick={handleBrowse}
@@ -333,7 +333,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               value={alias}
               onChange={(e) => setAlias(e.target.value)}
               placeholder="e.g. my-project"
-              className="border-zinc-300 bg-white py-2 text-sm dark:border-zinc-600 dark:bg-zinc-800"
+              className="border-zinc-300 bg-modal-surface py-2 text-sm dark:border-zinc-600"
             />
           </div>
 
@@ -445,8 +445,8 @@ function ConfirmPermissionChange({
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-md rounded-md bg-white shadow-xl dark:bg-zinc-900">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+      <div className="w-full max-w-md rounded-md bg-modal-surface shadow-xl">
         <div className="flex items-start gap-3 px-6 py-5">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-orange-100 dark:bg-orange-900/30">
             <AlertCircle className="h-5 w-5 text-orange-600 dark:text-orange-400" />

@@ -341,7 +341,7 @@ export function LspTab() {
   return (
     <div className="max-w-2xl space-y-4">
       {/* Header */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harnessLsp.lspServerManagement")}</h2>
           <button
@@ -399,8 +399,8 @@ export function LspTab() {
 
       {/* Install script dialog */}
       {scriptDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[600px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[600px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold">
                 {t("harnessLsp.scriptContent")} — {LANGUAGE_LABELS[scriptDialog.language] ?? scriptDialog.language}
@@ -426,8 +426,8 @@ export function LspTab() {
 
       {/* Script loading overlay */}
       {scriptLoading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-          <div className="rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="rounded-md bg-modal-surface p-6 shadow-xl">
             <Loader2 className="mx-auto h-6 w-6 animate-spin text-zinc-400" />
             <p className="mt-2 text-xs text-zinc-500">{t("harnessLsp.loading")}</p>
           </div>
@@ -467,7 +467,7 @@ function LspServerCard({
   const langLabel = LANGUAGE_LABELS[language] ?? language;
 
   return (
-    <div className="rounded-md border border-zinc-100 bg-white p-3 dark:border-zinc-600 dark:bg-zinc-800/50">
+    <div className="rounded-md border border-zinc-100 bg-modal-surface p-3 dark:border-zinc-600/50">
       {/* Header row */}
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">

@@ -334,7 +334,7 @@ export function EmbeddingModelTab() {
     return (
         <div className="max-w-2xl space-y-4">
             {/* Service status */}
-            <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
                 <h2 className="mb-3 text-xs font-medium">{t("embedding.serviceStatus")}</h2>
                 <div className="flex items-center gap-2 text-xs">
                     <span className="text-zinc-500">{t("embedding.status")}</span>
@@ -420,7 +420,7 @@ export function EmbeddingModelTab() {
             )}
 
             {/* Model list */}
-            <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+            <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
                 <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-xs font-medium">{t("embedding.availableModels")}</h2>
                     <button
@@ -541,7 +541,7 @@ function MigrationPanel({
                     return (
                         <div
                             key={agent.agent_id}
-                            className="flex items-center gap-2 rounded border border-amber-200 bg-white px-3 py-2 text-xs dark:border-amber-700 dark:bg-zinc-800"
+                            className="flex items-center gap-2 rounded border border-amber-200 bg-modal-surface px-3 py-2 text-xs dark:border-amber-700"
                         >
                             {/* Checkbox (only before migration starts) */}
                             {!migrationStarted && (
@@ -679,7 +679,7 @@ function ModelCard({
                 "rounded-md border p-3 transition-colors",
                 isActive
                     ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/5 dark:border-[var(--color-accent)]/20 dark:bg-[var(--color-accent)]/5"
-                    : "border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-800",
+                    : "border-zinc-200 bg-modal-surface dark:border-zinc-700",
             )}
         >
             {/* Header: name + badges */}
@@ -713,7 +713,7 @@ function ModelCard({
                             value={selectedVariant}
                             onChange={(e) => setSelectedVariant(e.target.value)}
                             disabled={isBusy}
-                            className="h-7 appearance-none rounded-md border border-zinc-200 bg-white px-1.5 text-[11px] text-zinc-700 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                            className="h-7 appearance-none rounded-md border border-zinc-200 bg-modal-surface px-1.5 text-[11px] text-zinc-700 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-600 dark:text-zinc-300"
                             style={{
                                 backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                                 backgroundPosition: 'right 0.25rem center',

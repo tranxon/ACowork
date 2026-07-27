@@ -148,7 +148,7 @@ export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
         {/* Other textarea */}
         {isOtherSelected && !submitted && (
           <StyledTextarea
-            className="mt-1 ml-4 border-zinc-300 bg-white dark:border-zinc-600 dark:bg-zinc-800"
+            className="mt-1 ml-4 border-zinc-300 bg-modal-surface dark:border-zinc-600"
             rows={1}
             placeholder={t("askQuestionCard.placeholder")}
             value={otherText}

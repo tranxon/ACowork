@@ -69,7 +69,7 @@ export function HtmlPreviewView({ content, gatewayUrl, agentId, workspaceId, rel
                 </div>
             )}
             {loading && (
-                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white dark:bg-zinc-900">
+                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-chat-area">
                     <Loader2 className="h-8 w-8 animate-spin text-zinc-400" />
                     <span className="text-sm text-zinc-500">{t("fileEditor.loadingUrl")}</span>
                 </div>
@@ -77,7 +77,7 @@ export function HtmlPreviewView({ content, gatewayUrl, agentId, workspaceId, rel
             {blobUrl && (
                 <iframe
                     src={blobUrl}
-                    className="h-full w-full border-0 bg-white"
+                    className="h-full w-full border-0 bg-modal-surface"
                     sandbox="allow-scripts allow-same-origin"
                     title={fileName}
                     onLoad={handleLoad}

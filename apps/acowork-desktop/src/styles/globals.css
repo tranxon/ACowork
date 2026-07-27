@@ -31,7 +31,63 @@
   /* = accent 50% — user message bubble */
   --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
+  /* Editor canvas — background of the right-hand FileEditorPanel surface
+     (markdown preview, image preview, HTML preview). Matches Monaco
+     `vs` / `vs-dark` background so the panel reads as one unified
+     "editor canvas" distinct from the left chat area (`#FAFAFA` /
+     zinc-900). Without this token the preview wrappers would either
+     inherit the chat-area bg (collapsing into ChatPanel visually) or
+     drift to a third color (zinc-50/100/800/900 — each tested and
+     rejected as either too low-contrast or visually inconsistent with
+     Monaco). The .dark block below overrides the value so consumers
+     just write `bg-editor-canvas` with no `dark:` prefix needed.
 
+     Keep in sync with Monaco's `vs` / `vs-dark` background:
+       - light: #FFFFFF
+       - dark:  #1E1E1E
+     If you change one, change the other. */
+  --color-editor-canvas: #FFFFFF;
+  /* = Monaco `vs` background — file editor / preview surface (light) */
+  /* App-wide surface palette — the large empty planes users see first:
+        - chat-area     : main working surface (chat panel, settings/harness
+                          page background, full-screen pages). Light = #FAFAFA
+                          (zinc-50, a hair below pure white to reduce eye
+                          strain in long sessions); dark = zinc-900.
+        - modal-surface : content card inside dialogs, dropdowns, popovers,
+                          and the "card inside a page" pattern (Harness /
+                          Settings / Results tabs). Always opaque to clearly
+                          distinguish from the chat-area backdrop.
+        - modal-overlay : the scrim behind modals. Theme-independent —
+                          the same `black/50` works in both modes.
+     Both light & dark values are auto-flipped in the .dark block, so
+     consumers just write `bg-chat-area` / `bg-modal-surface` /
+     `bg-modal-overlay` with no `dark:` prefix needed. */
+  --color-chat-area: hsl(0 0% 98%);
+  /* = #FAFAFA, zinc-50 — main working surface (light) */
+  --color-modal-surface: hsl(0 0% 100%);
+  /* = #FFFFFF — dialog / dropdown / card content surface (light) */
+  --color-modal-overlay: hsl(0 0% 0% / 0.5);
+  /* = black/50 — modal scrim (theme-independent) */
+  /* NavBar / AgentList warm-tint palette — a subtly cooler-gray shift
+     away from pure zinc, giving the sidebar a distinct visual identity
+     from the chat area. Used by:
+        - nav-surface          : sidebar container (AgentList outer wrap)
+        - nav-control          : static bg of input/button (search input,
+                                 Add-Agent button, NavButton hover)
+        - nav-control-hover    : stronger hover for primary actions
+        - nav-item-hover       : agent list-item row hover
+        - nav-divider          : list-item separator (between agents)
+     Auto-flipped in .dark; consumers write `bg-nav-*` directly. */
+  --color-nav-surface: hsl(240 8% 94%);
+  /* = #EEEEF0 — sidebar container (light) */
+  --color-nav-control: hsl(240 5% 87%);
+  /* = #D8D9DC — input/button static bg (light) */
+  --color-nav-control-hover: hsl(240 5% 82%);
+  /* = #C8C9CC — primary action hover (light) */
+  --color-nav-item-hover: hsl(240 6% 90%);
+  /* = #E2E3E6 — list-item row hover (light) */
+  --color-nav-divider: hsl(0 0% 78%);
+  /* = #C8C8C8 — list separator (light) */
   /* Border radius — 4-tier unified scale
      sm (4px): buttons, inputs, labels, badges
      md (6px): card containers, dialogs, message boxes
@@ -214,7 +270,27 @@
   /* = accent 50% — user message bubble */
   --color-chat-user-text: hsl(240 5.9% 10% / 0.9);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
-
+  /* Editor canvas (dark) — auto-flips the @theme light value. */
+  --color-editor-canvas: #1E1E1E;
+  /* = Monaco `vs-dark` background — file editor / preview surface (dark) */
+  /* App-wide surface palette (dark) — auto-flips the @theme light values. */
+  --color-chat-area: hsl(240 5.9% 10%);
+  /* = zinc-900, #18181b — main working surface (dark) */
+  --color-modal-surface: hsl(240 3.8% 15.7%);
+  /* = zinc-800, #27272a — dialog / dropdown / card content surface (dark) */
+  /* modal-overlay is theme-independent (black/50 in both modes) */
+  /* NavBar / AgentList warm-tint palette (dark) — auto-flips the @theme
+     light values. Same hue, swapped lightness. */
+  --color-nav-surface: hsl(0 0% 18%);
+  /* = #2F2F30 — sidebar container (dark) */
+  --color-nav-control: hsl(0 0% 24%);
+  /* = #3D3D3F — input/button static bg (dark) */
+  --color-nav-control-hover: hsl(0 0% 28%);
+  /* = #474749 — primary action hover (dark) */
+  --color-nav-item-hover: hsl(0 0% 22%);
+  /* = #38383A — list-item row hover (dark) */
+  --color-nav-divider: hsl(240 4% 35%);
+  /* ≈ zinc-600, #52525b — list separator (dark) */
   /* Shimmer gradient stops (dark) */
   --shimmer-from: hsl(240 5% 40%);
   --shimmer-mid: hsl(240 5% 52%);

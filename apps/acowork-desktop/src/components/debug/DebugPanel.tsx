@@ -522,7 +522,7 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-white px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:bg-zinc-800 dark:text-zinc-300"
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-modal-surface px-2 py-1 font-mono text-[10px] leading-relaxed text-zinc-700 outline-none dark:border-[var(--color-accent)]/50 dark:text-zinc-300"
                           autoFocus
                         />
                         <div className="flex items-center gap-1">

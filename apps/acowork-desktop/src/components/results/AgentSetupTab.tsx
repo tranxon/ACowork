@@ -387,7 +387,7 @@ if (profile.toolResultCompressionMode !== undefined) {
                 className="fixed inset-0 z-40"
                 onClick={() => setAvatarPopupOpen(false)}
               />
-              <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+              <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700">
                 {/* Tabs */}
                 <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
                   <button
@@ -505,7 +505,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             setProfile(selectedAgentId, { displayName: e.target.value || undefined })
           }
           placeholder={selectedAgent.name ?? "Agent name"}
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
       </div>
 
@@ -527,7 +527,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             });
           }}
           placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.leaveEmptyDefault")}
@@ -551,7 +551,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             });
           }}
           placeholder={t("agentSetup.defaultIterations")}
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
       </div>
 
@@ -572,7 +572,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             });
           }}
           placeholder="2000 (default)"
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.maxSessionsDesc")}
@@ -604,7 +604,7 @@ if (profile.toolResultCompressionMode !== undefined) {
                 }
               }
             }}
-            className="w-32 rounded-md bg-white dark:bg-zinc-800"
+            className="w-32 rounded-md bg-modal-surface"
           />
           <span className="text-[10px] text-zinc-400 dark:text-zinc-500">
             {t("agentSetup.tokens")}
@@ -631,7 +631,7 @@ if (profile.toolResultCompressionMode !== undefined) {
               toolResultCompressionMode: e.target.value,
             })
           }
-          className="w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-700
+          className="w-full rounded-md border border-zinc-300 bg-modal-surface px-2 py-1.5 text-xs text-zinc-700
                      dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200"
         >
           <option value="auto">{t("agentSetup.compressionAuto")}</option>
@@ -669,7 +669,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             });
           }}
           placeholder="2048 (default)"
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.compressionSoftThresholdDesc")}
@@ -694,7 +694,7 @@ if (profile.toolResultCompressionMode !== undefined) {
             });
           }}
           placeholder="300 (5 min)"
-          className="rounded-md bg-white dark:bg-zinc-800"
+          className="rounded-md bg-modal-surface"
         />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalTimeoutDesc")}
@@ -714,7 +714,7 @@ if (profile.toolResultCompressionMode !== undefined) {
               shellApprovalThreshold: v,
             });
           }}
-          className="w-full appearance-none rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+          className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
           style={{
             backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
             backgroundPosition: 'right 0.5rem center',

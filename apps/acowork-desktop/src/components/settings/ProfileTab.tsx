@@ -224,7 +224,7 @@ export function ProfileTab() {
   return (
     <div className="max-w-lg space-y-4">
       {/* ── Avatar & Display Name ────────────────────────────────── */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <h2 className="mb-3 text-xs font-medium">{t("settings.profileTitle")}</h2>
 
         {/* Avatar preview — click to open picker popup */}
@@ -255,7 +255,7 @@ export function ProfileTab() {
                   className="fixed inset-0 z-40"
                   onClick={() => setAvatarPopupOpen(false)}
                 />
-                <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-700 dark:bg-zinc-800">
+                <div className="absolute left-0 top-full z-50 mt-2 w-72 rounded-lg border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700">
                   {/* Tabs */}
                   <div className="mb-3 flex gap-1 border-b border-zinc-200 dark:border-zinc-700">
                     <button
@@ -375,13 +375,13 @@ export function ProfileTab() {
               }
             }}
             placeholder={t("settings.displayNamePlaceholder")}
-            className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+            className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
           />
         </div>
       </div>
 
       {/* ── Backend Identity Fields ───────────────────────────────── */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("settings.identityTitle")}</h2>
           {savedMsg && (
@@ -412,7 +412,7 @@ export function ProfileTab() {
                     saveField(backendUser.user_id, "language", lng);
                   }
                 }}
-                className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
                 style={{
                   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                   backgroundPosition: 'right 0.5rem center',
@@ -439,7 +439,7 @@ export function ProfileTab() {
                   setTimezone(e.target.value);
                   saveField(backendUser.user_id, "timezone", e.target.value);
                 }}
-                className="w-full rounded border border-zinc-200 bg-white px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
                 style={{
                   backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
                   backgroundPosition: 'right 0.5rem center',
@@ -472,7 +472,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.cityPlaceholder")}
-                className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
               />
             </div>
 
@@ -491,7 +491,7 @@ export function ProfileTab() {
                   }
                 }}
                 placeholder={t("settings.occupationPlaceholder")}
-                className="rounded border-zinc-300 bg-white py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-800 dark:placeholder:text-zinc-500"
+                className="rounded border-zinc-300 bg-modal-surface py-2 text-zinc-800 placeholder:text-zinc-400 dark:border-zinc-600 dark:placeholder:text-zinc-500"
               />
             </div>
           </div>

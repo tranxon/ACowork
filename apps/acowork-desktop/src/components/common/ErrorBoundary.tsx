@@ -26,7 +26,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
   const { t } = useTranslation();
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-zinc-50 dark:bg-zinc-900">
+    <div className="flex h-screen w-screen items-center justify-center bg-chat-area">
       <div className="mx-auto max-w-md text-center">
         <AlertTriangle className="mx-auto h-12 w-12 text-amber-500" />
         <h2 className="mt-4 text-lg font-semibold text-zinc-900 dark:text-zinc-100">

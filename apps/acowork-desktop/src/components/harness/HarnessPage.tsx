@@ -36,7 +36,7 @@ export function HarnessPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-zinc-50 dark:bg-zinc-900">
+    <div className="flex flex-1 flex-col bg-chat-area">
       {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-200 px-6 pt-2 dark:border-zinc-800">
         {tabs.map((tab) => (
@@ -241,7 +241,7 @@ function ProvidersTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harness.providerManagement")}</h2>
         </div>
@@ -332,7 +332,7 @@ function ProvidersTab() {
 
       </div>
 
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
 
         {/* Available Providers — uses shared ProviderPicker component */}
         <div>
@@ -379,8 +379,8 @@ function ProvidersTab() {
 
       {/* Edit key dialog */}
       {showEditDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
             <h3 className="mb-3 text-sm font-semibold">{t("harness.editProvider")} {showEditDialog}</h3>
 
             <div className="space-y-2">
@@ -585,7 +585,7 @@ function McpTab() {
   return (
     <div className="max-w-2xl space-y-4">
       {/* Catalog servers */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <div className="flex items-center justify-between">
           <h2 className="text-xs font-medium">{t("harnessMcp.mcpServerCatalog")}</h2>
           <button
@@ -687,7 +687,7 @@ function McpTab() {
       </div>
 
       {/* Presets gallery — always visible */}
-      <div className="rounded-md border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-800">
+      <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <h2 className="text-xs font-medium mb-3">{t("harnessMcp.recommendedMcpServers")}</h2>
         <div className="grid grid-cols-2 gap-2">
           {MCP_PRESETS.map((preset) => {
@@ -737,8 +737,8 @@ function McpTab() {
 
       {/* Add Server dialog */}
       {showAddForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
             <h3 className="mb-3 text-sm font-semibold">{t("harnessMcp.addCustomMcpServer")}</h3>
             <div className="space-y-2">
               <div>
@@ -825,7 +825,7 @@ function McpTab() {
 
       {/* Preset env form (for servers requiring API keys) */}
       {activePreset && (
-        <div className="rounded-md border border-[var(--color-accent)]/40 bg-white p-4 dark:bg-zinc-800">
+        <div className="rounded-md border border-[var(--color-accent)]/40 bg-modal-surface p-4">
           <h2 className="text-xs font-medium mb-1">{t("harnessMcp.configure")}{activePreset.name}</h2>
           <p className="text-[10px] text-zinc-400 mb-3">{activePreset.installHint}</p>
           <div className="space-y-2">
@@ -863,8 +863,8 @@ function McpTab() {
 
       {/* Probe result dialog */}
       {probeResult && pendingConfig && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[400px] rounded-md bg-white p-6 shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[400px] rounded-md bg-modal-surface p-6 shadow-xl">
             {probeResult.success ? (
               <>
                 <div className="flex items-center gap-2 mb-3">
@@ -927,8 +927,8 @@ function McpTab() {
 
       {/* Probing spinner overlay (shown while probe is in progress) */}
       {pendingConfig && !probeResult && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-          <div className="w-[300px] rounded-md bg-white p-6 text-center shadow-xl dark:bg-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
+          <div className="w-[300px] rounded-md bg-modal-surface p-6 text-center shadow-xl">
             <div className="mx-auto mb-3 h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-[var(--color-accent)]" />
             <p className="text-xs text-zinc-500">{t("harnessMcp.testing")}</p>
             <p className="mt-1 text-[10px] text-zinc-400">{pendingConfig.name}</p>

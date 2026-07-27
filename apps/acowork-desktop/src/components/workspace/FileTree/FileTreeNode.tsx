@@ -389,7 +389,7 @@ export const FileTreeNode = memo(function FileTreeNode({
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.stopPropagation()}
-            className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-white px-1 text-zinc-700 outline-none dark:bg-zinc-900 dark:text-zinc-300"
+            className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-zinc-700 outline-none dark:bg-zinc-900 dark:text-zinc-300"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           />
         ) : (
