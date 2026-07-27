@@ -1443,7 +1443,7 @@ export function ChatPanel() {
             )}
             {loopDetectedPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-destructive)]/30 bg-[var(--color-destructive)]/10 px-4 py-2 text-[var(--color-destructive)] select-none dark:border-[var(--color-destructive)]/40 dark:bg-[var(--color-destructive)]/15 dark:text-[var(--color-destructive)]">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -1456,7 +1456,7 @@ export function ChatPanel() {
                         continueExecution(selectedAgentId);
                       }
                     }}
-                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-destructive)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <Play className="h-3 w-3" />
