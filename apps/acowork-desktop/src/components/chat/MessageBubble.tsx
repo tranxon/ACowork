@@ -11,6 +11,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
 import { useStreamingContent } from "./useStreamingContent";
 import { CodeBlock } from "./CodeBlock";
+import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
@@ -123,6 +124,10 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
   const { t } = useTranslation();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
+  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
+    pointer: contextMenu,
+  });
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -188,9 +193,9 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
       <div ref={wrapperRef} onContextMenu={handleContextMenu}>{children}</div>
       {contextMenu && (
         <div
-          ref={wrapperRef}
+          ref={menuRef}
           className="context-menu context-menu--compact"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={contextMenuStyle}
           onContextMenu={(e) => e.stopPropagation()}
         >
           <button

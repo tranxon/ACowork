@@ -642,7 +642,13 @@
     "batchCloseAllConfirm": "{{count}} 個のタブに未保存の変更があります。破棄してすべて閉じますか？",
     "save": "保存 (Ctrl+S)",
     "locateInTree": "ファイルツリーで位置を表示",
-    "locateDisabled": { "no-file": "ファイルが開かれていません", "loading": "ファイルを読込中です", "url-preview": "URL プレビューはワークスペースの一部ではありません", "wrong-agent": "このファイルは別のエージェントに属しています", "wrong-workspace": "このファイルは別のワークスペースに属しています" },
+    "locateDisabled": {
+      "no-file": "ファイルが開かれていません",
+      "loading": "ファイルを読込中です",
+      "url-preview": "URL プレビューはワークスペースの一部ではありません",
+      "wrong-agent": "このファイルは別のエージェントに属しています",
+      "wrong-workspace": "このファイルは別のワークスペースに属しています"
+    },
     "copy": "コピー",
     "previewBadge": "プレビュー",
     "previewLoading": "プレビューを読み込み中...",
@@ -657,6 +663,26 @@
     "navRefresh": "更新",
     "iframeBlockedHint": "このサイトはアプリ内プレビューに対応していません",
     "htmlPreviewTsModuleWarning": "TypeScript/TSX モジュールのエントリファイルを検出しました。Static Preview はファイルを読み込めますが、TS/TSX をコンパイルできません。Vite/React アプリでは dev server を起動し、localhost の URL プレビューを開いてください。"
+  },
+  "fileStatus": {
+    "languageFallback": "プレーンテキスト",
+    "previewKind": {
+      "url": "URL"
+    },
+    "cursorPosition": "{{line}} 行目, {{column}} 列目",
+    "selectionCount": "({{count}} 文字選択中)",
+    "lsp": {
+      "unavailable": "{{language}} LSP 無効",
+      "connecting": "{{language}} LSP 接続中...",
+      "indexing": "{{language}} {{statusMessage}}",
+      "indexingDefault": "{{language}} LSP インデックス作成中...",
+      "connected": "{{language}} LSP 接続済み",
+      "ready": "{{language}} LSP 準備完了",
+      "installTitle": "{{name}} をインストール",
+      "runInstall": "インストールスクリプトを実行",
+      "installing": "インストール中...",
+      "docsLink": "ドキュメント →"
+    }
   },
   "sessionPanel": {
     "loadingSessions": "セッションを読み込み中...",
@@ -748,7 +774,6 @@
   },
   "statusBar": {
     "agent": "agent",
-    "sessions": "sessions",
     "context": "context",
     "mqttDisconnected": "リアルタイム接続が切断されました{{reason}}。再接続中…"
   },
@@ -781,28 +806,94 @@
     "showingLatest": "最新のみ表示"
   },
   "tools": {
-    "memory_recall": { "running": "記憶を思い出し中", "done": "記憶を思い出した" },
-    "context_recall": { "running": "コンテキストを思い出し中", "done": "コンテキストを思い出した" },
-    "memory_store": { "running": "保存中", "done": "保存済み" },
-    "http_request": { "running": "リクエスト中", "done": "リクエスト済み" },
-    "web_fetch": { "running": "ウェブページ取得中", "done": "ウェブページ取得済み" },
-    "web_search": { "running": "ウェブ検索中", "done": "ウェブ検索済み" },
-    "file_read": { "running": "ファイル読み込み中", "done": "ファイル読み込み済み" },
-    "file_write": { "running": "ファイル書き込み中", "done": "ファイル書き込み済み" },
-    "file_edit": { "running": "ファイル編集中", "done": "ファイル編集済み" },
-    "doc_reader": { "running": "文書読み込み中", "done": "文書読み込み済み" },
-    "glob_search": { "running": "ファイルパターンマッチ中", "done": "ファイルパターンマッチ済み" },
-    "content_search": { "running": "コンテンツ検索中", "done": "コンテンツ検索済み" },
-    "intent_send": { "running": "インテント送信中", "done": "インテント送信済み" },
-    "ask_user_question": { "running": "質問中", "done": "質問済み" },
-    "todo_write": { "running": "TODO 更新中", "done": "TODO 更新済み" },
-    "mcp_install": { "running": "MCP インストール中", "done": "MCP インストール済み" },
-    "mcp_uninstall": { "running": "MCP アンインストール中", "done": "MCP アンインストール済み" },
-    "rag_query": { "running": "知識庫検索中", "done": "知識庫検索済み" },
-    "codebase": { "running": "コード検索中", "done": "コード検索済み" },
-    "bash": { "running": "Git Bash で実行中", "done": "Git Bash で実行済み" },
-    "powershell": { "running": "PowerShell で実行中", "done": "PowerShell で実行済み" },
-    "shell": { "running": "実行中", "done": "実行済み" }
+    "memory_recall": {
+      "running": "記憶を思い出し中",
+      "done": "記憶を思い出した"
+    },
+    "context_recall": {
+      "running": "コンテキストを思い出し中",
+      "done": "コンテキストを思い出した"
+    },
+    "memory_store": {
+      "running": "保存中",
+      "done": "保存済み"
+    },
+    "http_request": {
+      "running": "リクエスト中",
+      "done": "リクエスト済み"
+    },
+    "web_fetch": {
+      "running": "ウェブページ取得中",
+      "done": "ウェブページ取得済み"
+    },
+    "web_search": {
+      "running": "ウェブ検索中",
+      "done": "ウェブ検索済み"
+    },
+    "file_read": {
+      "running": "ファイル読み込み中",
+      "done": "ファイル読み込み済み"
+    },
+    "file_write": {
+      "running": "ファイル書き込み中",
+      "done": "ファイル書き込み済み"
+    },
+    "file_edit": {
+      "running": "ファイル編集中",
+      "done": "ファイル編集済み"
+    },
+    "doc_reader": {
+      "running": "文書読み込み中",
+      "done": "文書読み込み済み"
+    },
+    "glob_search": {
+      "running": "ファイルパターンマッチ中",
+      "done": "ファイルパターンマッチ済み"
+    },
+    "content_search": {
+      "running": "コンテンツ検索中",
+      "done": "コンテンツ検索済み"
+    },
+    "intent_send": {
+      "running": "インテント送信中",
+      "done": "インテント送信済み"
+    },
+    "ask_user_question": {
+      "running": "質問中",
+      "done": "質問済み"
+    },
+    "todo_write": {
+      "running": "TODO 更新中",
+      "done": "TODO 更新済み"
+    },
+    "mcp_install": {
+      "running": "MCP インストール中",
+      "done": "MCP インストール済み"
+    },
+    "mcp_uninstall": {
+      "running": "MCP アンインストール中",
+      "done": "MCP アンインストール済み"
+    },
+    "rag_query": {
+      "running": "知識庫検索中",
+      "done": "知識庫検索済み"
+    },
+    "codebase": {
+      "running": "コード検索中",
+      "done": "コード検索済み"
+    },
+    "bash": {
+      "running": "Git Bash で実行中",
+      "done": "Git Bash で実行済み"
+    },
+    "powershell": {
+      "running": "PowerShell で実行中",
+      "done": "PowerShell で実行済み"
+    },
+    "shell": {
+      "running": "実行中",
+      "done": "実行済み"
+    }
   },
   "askQuestionCard": {
     "other": "その他",

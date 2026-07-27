@@ -662,6 +662,26 @@
     "iframeBlockedHint": "이 사이트는 앱 내 미리보기를 지원하지 않습니다",
     "htmlPreviewTsModuleWarning": "TypeScript/TSX 모듈 엔트리 파일이 감지되었습니다. Static Preview는 파일을 로드할 수 있지만 TS/TSX를 컴파일할 수 없습니다. Vite/React 앱은 dev server를 실행한 뒤 localhost URL 미리보기를 여세요."
   },
+  "fileStatus": {
+    "languageFallback": "일반 텍스트",
+    "previewKind": {
+      "url": "URL"
+    },
+    "cursorPosition": "{{line}}행, {{column}}열",
+    "selectionCount": "({{count}}자 선택됨)",
+    "lsp": {
+      "unavailable": "{{language}} LSP 사용 불가",
+      "connecting": "{{language}} LSP 연결 중...",
+      "indexing": "{{language}} {{statusMessage}}",
+      "indexingDefault": "{{language}} LSP 인덱싱 중...",
+      "connected": "{{language}} LSP 연결됨",
+      "ready": "{{language}} LSP 준비 완료",
+      "installTitle": "{{name}} 설치",
+      "runInstall": "설치 스크립트 실행",
+      "installing": "설치 중...",
+      "docsLink": "문서 →"
+    }
+  },
   "sessionPanel": {
     "loadingSessions": "세션 로딩 중...",
     "noSessions": "세션 없음",
@@ -752,7 +772,6 @@
   },
   "statusBar": {
     "agent": "agent",
-    "sessions": "sessions",
     "context": "context",
     "mqttDisconnected": "실시간 연결이 끊겼습니다{{reason}}. 자동 재연결 중…"
   },

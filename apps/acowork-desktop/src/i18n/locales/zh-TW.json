@@ -640,7 +640,13 @@
     "batchCloseAllConfirm": "{{count}} 個分頁有未儲存的變更。放棄並全部關閉？",
     "save": "儲存 (Ctrl+S)",
     "locateInTree": "在檔案樹中定位",
-    "locateDisabled": { "no-file": "目前未開啟任何檔案", "loading": "檔案正在載入中", "url-preview": "URL 預覽不屬於工作區", "wrong-agent": "此檔案屬於其他 Agent", "wrong-workspace": "此檔案屬於其他工作區" },
+    "locateDisabled": {
+      "no-file": "目前未開啟任何檔案",
+      "loading": "檔案正在載入中",
+      "url-preview": "URL 預覽不屬於工作區",
+      "wrong-agent": "此檔案屬於其他 Agent",
+      "wrong-workspace": "此檔案屬於其他工作區"
+    },
     "copy": "複製",
     "previewBadge": "預覽",
     "previewLoading": "正在載入預覽...",
@@ -655,6 +661,26 @@
     "navRefresh": "重新整理",
     "iframeBlockedHint": "此網站不支援在應用程式內預覽",
     "htmlPreviewTsModuleWarning": "偵測到 TypeScript/TSX 模組入口。靜態 Preview 可以載入檔案，但不能編譯 TS/TSX。對於 Vite/React 專案，請執行 dev server 後開啟 localhost URL 預覽。"
+  },
+  "fileStatus": {
+    "languageFallback": "純文字",
+    "previewKind": {
+      "url": "URL"
+    },
+    "cursorPosition": "第 {{line}} 行，第 {{column}} 列",
+    "selectionCount": "（已選 {{count}} 個字元）",
+    "lsp": {
+      "unavailable": "{{language}} LSP 無法使用",
+      "connecting": "{{language}} LSP 連線中...",
+      "indexing": "{{language}} {{statusMessage}}",
+      "indexingDefault": "{{language}} LSP 索引中...",
+      "connected": "{{language}} LSP 已連線",
+      "ready": "{{language}} LSP 已就絰",
+      "installTitle": "安裝 {{name}}",
+      "runInstall": "執行安裝膚本",
+      "installing": "安裝中...",
+      "docsLink": "說明文件 →"
+    }
   },
   "sessionPanel": {
     "loadingSessions": "載入工作階段中...",
@@ -746,7 +772,6 @@
   },
   "statusBar": {
     "agent": "agent",
-    "sessions": "sessions",
     "context": "context",
     "mqttDisconnected": "實時連線已中斷{{reason}}，正在自動重新連線…"
   },
@@ -779,28 +804,94 @@
     "showingLatest": "僅顯示最新內容"
   },
   "tools": {
-    "memory_recall": { "running": "回憶中", "done": "已回憶" },
-    "context_recall": { "running": "回溯上下文中", "done": "已回溯上下文" },
-    "memory_store": { "running": "記憶中", "done": "已記憶" },
-    "http_request": { "running": "請求中", "done": "已請求" },
-    "web_fetch": { "running": "取得網頁", "done": "已取得網頁" },
-    "web_search": { "running": "搜尋網頁", "done": "已搜尋網頁" },
-    "file_read": { "running": "讀取檔案", "done": "已讀取檔案" },
-    "file_write": { "running": "寫入檔案", "done": "已寫入檔案" },
-    "file_edit": { "running": "編輯檔案", "done": "已編輯檔案" },
-    "doc_reader": { "running": "讀取文件", "done": "已讀取文件" },
-    "glob_search": { "running": "匹配檔案", "done": "已匹配檔案" },
-    "content_search": { "running": "搜尋內容", "done": "已搜尋內容" },
-    "intent_send": { "running": "發送意圖", "done": "已發送意圖" },
-    "ask_user_question": { "running": "詢問中", "done": "已詢問" },
-    "todo_write": { "running": "更新待辦", "done": "已更新待辦" },
-    "mcp_install": { "running": "安裝MCP", "done": "已安裝MCP" },
-    "mcp_uninstall": { "running": "解除安裝MCP", "done": "已解除安裝MCP" },
-    "rag_query": { "running": "檢索知識庫", "done": "已檢索知識庫" },
-    "codebase": { "running": "搜尋程式碼", "done": "已搜尋程式碼" },
-    "bash": { "running": "在 Git Bash 中執行", "done": "已在 Git Bash 中執行" },
-    "powershell": { "running": "在 PowerShell 中執行", "done": "已在 PowerShell 中執行" },
-    "shell": { "running": "執行命令", "done": "已執行命令" }
+    "memory_recall": {
+      "running": "回憶中",
+      "done": "已回憶"
+    },
+    "context_recall": {
+      "running": "回溯上下文中",
+      "done": "已回溯上下文"
+    },
+    "memory_store": {
+      "running": "記憶中",
+      "done": "已記憶"
+    },
+    "http_request": {
+      "running": "請求中",
+      "done": "已請求"
+    },
+    "web_fetch": {
+      "running": "取得網頁",
+      "done": "已取得網頁"
+    },
+    "web_search": {
+      "running": "搜尋網頁",
+      "done": "已搜尋網頁"
+    },
+    "file_read": {
+      "running": "讀取檔案",
+      "done": "已讀取檔案"
+    },
+    "file_write": {
+      "running": "寫入檔案",
+      "done": "已寫入檔案"
+    },
+    "file_edit": {
+      "running": "編輯檔案",
+      "done": "已編輯檔案"
+    },
+    "doc_reader": {
+      "running": "讀取文件",
+      "done": "已讀取文件"
+    },
+    "glob_search": {
+      "running": "匹配檔案",
+      "done": "已匹配檔案"
+    },
+    "content_search": {
+      "running": "搜尋內容",
+      "done": "已搜尋內容"
+    },
+    "intent_send": {
+      "running": "發送意圖",
+      "done": "已發送意圖"
+    },
+    "ask_user_question": {
+      "running": "詢問中",
+      "done": "已詢問"
+    },
+    "todo_write": {
+      "running": "更新待辦",
+      "done": "已更新待辦"
+    },
+    "mcp_install": {
+      "running": "安裝MCP",
+      "done": "已安裝MCP"
+    },
+    "mcp_uninstall": {
+      "running": "解除安裝MCP",
+      "done": "已解除安裝MCP"
+    },
+    "rag_query": {
+      "running": "檢索知識庫",
+      "done": "已檢索知識庫"
+    },
+    "codebase": {
+      "running": "搜尋程式碼",
+      "done": "已搜尋程式碼"
+    },
+    "bash": {
+      "running": "在 Git Bash 中執行",
+      "done": "已在 Git Bash 中執行"
+    },
+    "powershell": {
+      "running": "在 PowerShell 中執行",
+      "done": "已在 PowerShell 中執行"
+    },
+    "shell": {
+      "running": "執行命令",
+      "done": "已執行命令"
+    }
   },
   "askQuestionCard": {
     "other": "其他",

@@ -370,14 +370,14 @@ message SessionConfig {
 message SessionState {
   string agent_id = 1;
   string session_id = 2;
-  string status_json = 3;
+  string status = 3;
   uint64 message_count = 4;
   uint64 input_tokens = 5;
   uint64 output_tokens = 6;
   uint64 total_input_tokens = 7;
   uint64 total_output_tokens = 8;
   double ratio = 9;
-  string context_usage_json = 10;
+  string context_usage = 10;
   string updated_at = 11;  // ISO 8601
 }
 

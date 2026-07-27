@@ -363,10 +363,6 @@ async fn relay_chunk_event_mqtt(
 }
 
 /// Minimum interval between MQTT publishes for state changes (tokens,
-/// message_count, status). Matches `ConversationSession::META_WRITE_COOLDOWN_MS`
-/// so we never publish more often than we persist.
-const STATE_PUBLISH_COOLDOWN_MS: u64 = 3000;
-
 /// Spawn the per-session config-change relay (ADR-043).
 ///
 /// Config changes (title, model, provider, workspace_id, reasoning_effort,
@@ -420,15 +416,10 @@ pub(crate) fn spawn_config_change_relay(
 
 /// Spawn the per-session state-change relay (ADR-043).
 ///
-/// State changes (message_count, tokens, status, ratio, context_usage)
-/// are high-frequency telemetry. The relay coalesces behind a 3 s cooldown
-/// to avoid flooding MQTT on every LLM round-trip.
-///
-/// **Cooldown correctness**: when a state change arrives within the cooldown
-/// window, the relay stores it in `last_state` and schedules a delayed
-/// publish after the cooldown expires. This ensures the *last* state change
-/// (e.g. `Idle`) is always published even if no subsequent events arrive,
-/// preventing the frontend from being stuck in a "busy" state indefinitely.
+/// Every state change is published immediately — no cooldown. The retained
+/// SessionState topic (`sessions/{sid}/state`) ensures the broker overwrites
+/// the previous value, so even if a Desktop client is momentarily
+/// disconnected, it receives the latest snapshot on reconnect.
 pub(crate) fn spawn_state_change_relay(
     mut state_rx: tokio::sync::mpsc::UnboundedReceiver<StateChange>,
     chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
@@ -437,115 +428,33 @@ pub(crate) fn spawn_state_change_relay(
 ) {
     tokio::spawn(async move {
         use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
-        use std::pin::Pin;
-        use std::time::Instant;
-        use tokio::time::{sleep, Sleep};
 
-        let cooldown = Duration::from_millis(STATE_PUBLISH_COOLDOWN_MS);
-        let mut last_publish: Option<Instant> = None;
-        let mut last_state: Option<acowork_core::mqtt_proto::SessionState> = None;
-        let mut timer: Option<Pin<Box<Sleep>>> = None;
+        while let Some(change) = state_rx.recv().await {
+            // Drop sentinel: empty session_id means the ConversationSession
+            // is being dropped. Skip publishing — the last real state has
+            // already been sent before the drop.
+            if change.snapshot.session_id.is_empty()
+                && change.snapshot.agent_id.is_empty()
+            {
+                continue;
+            }
 
-        loop {
-            tokio::select! {
-                biased;
+            let state = change.snapshot;
+            tracing::info!(
+                session_id = %session_id,
+                message_count = state.message_count,
+                "state relay: sending SessionStateChanged to chunk channel"
+            );
 
-                change = state_rx.recv() => {
-                    match change {
-                        Some(change) => {
-                            // Drop sentinel: empty session_id means the
-                            // ConversationSession is being dropped. Force-publish
-                            // the last known state (bypass throttle) if we have one.
-                            if change.snapshot.session_id.is_empty()
-                                && change.snapshot.agent_id.is_empty()
-                            {
-                                if let Some(state) = last_state.take() {
-                                    let event = SessionChunkEvent {
-                                        session_id: session_id.clone(),
-                                        event: ChunkEvent::SessionStateChanged { state },
-                                    };
-                                    let _ = chunk_tx.try_send(event);
-                                }
-                                timer = None;
-                                continue;
-                            }
-
-                            let state = change.snapshot;
-                            last_state = Some(state.clone());
-
-                            // Check if the cooldown has expired since the last publish.
-                            let should_publish = match last_publish {
-                                None => true,
-                                Some(t) if t.elapsed() >= cooldown => true,
-                                Some(_) => false,
-                            };
-
-                            if should_publish {
-                                // Publish immediately.
-                                last_publish = Some(Instant::now());
-                                timer = None;
-
-                                tracing::info!(
-                                    session_id = %session_id,
-                                    message_count = state.message_count,
-                                    "state relay: sending SessionStateChanged to chunk channel"
-                                );
-
-                                let event = SessionChunkEvent {
-                                    session_id: session_id.clone(),
-                                    event: ChunkEvent::SessionStateChanged { state },
-                                };
-                                if chunk_tx.try_send(event).is_err() {
-                                    tracing::debug!(
-                                        session_id = %session_id,
-                                        "state relay: chunk channel full/closed, dropping notification"
-                                    );
-                                }
-                            } else {
-                                // Within cooldown: schedule a delayed publish.
-                                let elapsed = last_publish.unwrap().elapsed();
-                                let remaining = cooldown.checked_sub(elapsed).unwrap_or(Duration::ZERO);
-                                timer = Some(Box::pin(sleep(remaining)));
-                            }
-                        }
-                        None => {
-                            // Channel closed: force-publish the last known state.
-                            if let Some(state) = last_state.take() {
-                                let event = SessionChunkEvent {
-                                    session_id: session_id.clone(),
-                                    event: ChunkEvent::SessionStateChanged { state },
-                                };
-                                let _ = chunk_tx.try_send(event);
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                _ = timer.as_mut().unwrap(), if timer.is_some() => {
-                    // Cooldown expired: publish the last known state.
-                    if let Some(state) = last_state.take() {
-                        last_publish = Some(Instant::now());
-
-                        tracing::info!(
-                            session_id = %session_id,
-                            message_count = state.message_count,
-                            "state relay: cooldown expired, publishing last state"
-                        );
-
-                        let event = SessionChunkEvent {
-                            session_id: session_id.clone(),
-                            event: ChunkEvent::SessionStateChanged { state },
-                        };
-                        if chunk_tx.try_send(event).is_err() {
-                            tracing::debug!(
-                                session_id = %session_id,
-                                "state relay: chunk channel full/closed, dropping notification"
-                            );
-                        }
-                    }
-                    timer = None;
-                }
+            let event = SessionChunkEvent {
+                session_id: session_id.clone(),
+                event: ChunkEvent::SessionStateChanged { state },
+            };
+            if chunk_tx.try_send(event).is_err() {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "state relay: chunk channel full/closed, dropping notification"
+                );
             }
         }
         tracing::debug!(

@@ -662,7 +662,13 @@
     "batchCloseAllConfirm": "{{count}} 个标签有未保存的更改。放弃并全部关闭？",
     "save": "保存 (Ctrl+S)",
     "locateInTree": "在文件树中定位",
-    "locateDisabled": { "no-file": "当前未打开任何文件", "loading": "文件正在加载中", "url-preview": "URL 预览不属于工作区", "wrong-agent": "此文件属于其他 Agent", "wrong-workspace": "此文件属于其他工作区" },
+    "locateDisabled": {
+      "no-file": "当前未打开任何文件",
+      "loading": "文件正在加载中",
+      "url-preview": "URL 预览不属于工作区",
+      "wrong-agent": "此文件属于其他 Agent",
+      "wrong-workspace": "此文件属于其他工作区"
+    },
     "copy": "复制",
     "previewBadge": "预览",
     "openPreview": "预览",
@@ -679,6 +685,26 @@
     "navRefresh": "刷新",
     "iframeBlockedHint": "此网站不支持在应用内预览",
     "htmlPreviewTsModuleWarning": "检测到 TypeScript/TSX 模块入口。静态 Preview 可以加载文件，但不能编译 TS/TSX。对于 Vite/React 项目，请运行 dev server 后打开 localhost URL 预览。"
+  },
+  "fileStatus": {
+    "languageFallback": "纯文本",
+    "previewKind": {
+      "url": "URL"
+    },
+    "cursorPosition": "第 {{line}} 行，第 {{column}} 列",
+    "selectionCount": "（已选 {{count}} 个字符）",
+    "lsp": {
+      "unavailable": "{{language}} LSP 不可用",
+      "connecting": "{{language}} LSP 连接中...",
+      "indexing": "{{language}} {{statusMessage}}",
+      "indexingDefault": "{{language}} LSP 索引中...",
+      "connected": "{{language}} LSP 已连接",
+      "ready": "{{language}} LSP 就绪",
+      "installTitle": "安装 {{name}}",
+      "runInstall": "运行安装脚本",
+      "installing": "安装中...",
+      "docsLink": "文档 →"
+    }
   },
   "sessionPanel": {
     "loadingSessions": "加载会话中...",
@@ -770,7 +796,6 @@
   },
   "statusBar": {
     "agent": "agent",
-    "sessions": "sessions",
     "context": "context",
     "mqttDisconnected": "实时连接已断开{{reason}}，正在自动重连…"
   },
@@ -803,28 +828,94 @@
     "showingLatest": "仅显示最新内容"
   },
   "tools": {
-    "memory_recall": { "running": "回忆中", "done": "已回忆" },
-    "context_recall": { "running": "回溯上下文中", "done": "已回溯上下文" },
-    "memory_store": { "running": "记忆中", "done": "已记忆" },
-    "http_request": { "running": "正在请求", "done": "已请求" },
-    "web_fetch": { "running": "获取网页", "done": "已获取网页" },
-    "web_search": { "running": "搜索网页", "done": "已搜索" },
-    "file_read": { "running": "读取文件", "done": "已读取" },
-    "file_write": { "running": "写入文件", "done": "已写入" },
-    "file_edit": { "running": "修改文件", "done": "已修改" },
-    "doc_reader": { "running": "读取文档", "done": "已读取" },
-    "glob_search": { "running": "匹配文件", "done": "已匹配" },
-    "content_search": { "running": "搜索内容", "done": "已搜索" },
-    "intent_send": { "running": "发送意图", "done": "已发送意图" },
-    "ask_user_question": { "running": "询问用户", "done": "已询问" },
-    "todo_write": { "running": "更新待办", "done": "已更新待办" },
-    "mcp_install": { "running": "安装MCP", "done": "已安装MCP" },
-    "mcp_uninstall": { "running": "卸载MCP", "done": "已卸载MCP" },
-    "rag_query": { "running": "检索知识库", "done": "已检索知识库" },
-    "codebase": { "running": "搜索代码", "done": "已搜索代码" },
-    "bash": { "running": "执行命令", "done": "已执行命令" },
-    "powershell": { "running": "执行命令", "done": "已执行命令" },
-    "shell": { "running": "执行命令", "done": "已执行命令" }
+    "memory_recall": {
+      "running": "回忆中",
+      "done": "已回忆"
+    },
+    "context_recall": {
+      "running": "回溯上下文中",
+      "done": "已回溯上下文"
+    },
+    "memory_store": {
+      "running": "记忆中",
+      "done": "已记忆"
+    },
+    "http_request": {
+      "running": "正在请求",
+      "done": "已请求"
+    },
+    "web_fetch": {
+      "running": "获取网页",
+      "done": "已获取网页"
+    },
+    "web_search": {
+      "running": "搜索网页",
+      "done": "已搜索"
+    },
+    "file_read": {
+      "running": "读取文件",
+      "done": "已读取"
+    },
+    "file_write": {
+      "running": "写入文件",
+      "done": "已写入"
+    },
+    "file_edit": {
+      "running": "修改文件",
+      "done": "已修改"
+    },
+    "doc_reader": {
+      "running": "读取文档",
+      "done": "已读取"
+    },
+    "glob_search": {
+      "running": "匹配文件",
+      "done": "已匹配"
+    },
+    "content_search": {
+      "running": "搜索内容",
+      "done": "已搜索"
+    },
+    "intent_send": {
+      "running": "发送意图",
+      "done": "已发送意图"
+    },
+    "ask_user_question": {
+      "running": "询问用户",
+      "done": "已询问"
+    },
+    "todo_write": {
+      "running": "更新待办",
+      "done": "已更新待办"
+    },
+    "mcp_install": {
+      "running": "安装MCP",
+      "done": "已安装MCP"
+    },
+    "mcp_uninstall": {
+      "running": "卸载MCP",
+      "done": "已卸载MCP"
+    },
+    "rag_query": {
+      "running": "检索知识库",
+      "done": "已检索知识库"
+    },
+    "codebase": {
+      "running": "搜索代码",
+      "done": "已搜索代码"
+    },
+    "bash": {
+      "running": "执行命令",
+      "done": "已执行命令"
+    },
+    "powershell": {
+      "running": "执行命令",
+      "done": "已执行命令"
+    },
+    "shell": {
+      "running": "执行命令",
+      "done": "已执行命令"
+    }
   },
   "askQuestionCard": {
     "other": "其他",

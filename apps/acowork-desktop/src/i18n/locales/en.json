@@ -740,7 +740,13 @@
     "batchCloseAllConfirm": "{{count}} tab(s) have unsaved changes. Discard and close all?",
     "save": "Save (Ctrl+S)",
     "locateInTree": "Locate in file tree",
-    "locateDisabled": { "no-file": "No file is open", "loading": "File is still loading", "url-preview": "URL previews are not part of the workspace", "wrong-agent": "This file belongs to a different agent", "wrong-workspace": "This file belongs to a different workspace" },
+    "locateDisabled": {
+      "no-file": "No file is open",
+      "loading": "File is still loading",
+      "url-preview": "URL previews are not part of the workspace",
+      "wrong-agent": "This file belongs to a different agent",
+      "wrong-workspace": "This file belongs to a different workspace"
+    },
     "copy": "Copy",
     "previewBadge": "Preview",
     "openPreview": "Preview",
@@ -757,6 +763,26 @@
     "navRefresh": "Refresh",
     "iframeBlockedHint": "This site does not support in-app preview",
     "htmlPreviewTsModuleWarning": "This HTML references TypeScript/TSX module entry files. Static Preview can load files but cannot compile TS/TSX. For Vite/React apps, run the dev server and open the localhost URL preview instead."
+  },
+  "fileStatus": {
+    "languageFallback": "plain text",
+    "previewKind": {
+      "url": "URL"
+    },
+    "cursorPosition": "Ln {{line}}, Col {{column}}",
+    "selectionCount": "({{count}} selected)",
+    "lsp": {
+      "unavailable": "{{language}} LSP unavailable",
+      "connecting": "{{language}} LSP connecting...",
+      "indexing": "{{language}} {{statusMessage}}",
+      "indexingDefault": "{{language}} LSP indexing...",
+      "connected": "{{language}} LSP connected",
+      "ready": "{{language}} LSP ready",
+      "installTitle": "Install {{name}}",
+      "runInstall": "Run Install Script",
+      "installing": "Installing...",
+      "docsLink": "Documentation →"
+    }
   },
   "sessionPanel": {
     "loadingSessions": "Loading sessions...",
@@ -837,7 +863,6 @@
   },
   "statusBar": {
     "agent": "agent",
-    "sessions": "sessions",
     "context": "context",
     "mqttDisconnected": "Realtime connection lost{{reason}}, retrying…"
   },
@@ -855,28 +880,94 @@
     "showingLatest": "Showing latest"
   },
   "tools": {
-    "memory_recall": { "running": "Recalling", "done": "Recalled" },
-    "context_recall": { "running": "Recalling context", "done": "Context recalled" },
-    "memory_store": { "running": "Storing", "done": "Stored" },
-    "http_request": { "running": "Requesting", "done": "Requested" },
-    "web_fetch": { "running": "Fetching", "done": "Fetched" },
-    "web_search": { "running": "Searching", "done": "Searched" },
-    "file_read": { "running": "Reading", "done": "Read" },
-    "file_write": { "running": "Writing", "done": "Written" },
-    "file_edit": { "running": "Editing", "done": "Edited" },
-    "doc_reader": { "running": "Reading document", "done": "Read document" },
-    "glob_search": { "running": "Globbing", "done": "Globbed" },
-    "content_search": { "running": "Searching", "done": "Searched" },
-    "intent_send": { "running": "Sending intent", "done": "Sent intent" },
-    "ask_user_question": { "running": "Asking", "done": "Asked" },
-    "todo_write": { "running": "Updating todos", "done": "Updated todos" },
-    "mcp_install": { "running": "Installing", "done": "Installed" },
-    "mcp_uninstall": { "running": "Uninstalling", "done": "Uninstalled" },
-    "rag_query": { "running": "Querying", "done": "Queried" },
-    "codebase": { "running": "Searching code", "done": "Searched code" },
-    "bash": { "running": "Running command", "done": "Ran command" },
-    "powershell": { "running": "Running command", "done": "Ran command" },
-    "shell": { "running": "Running command", "done": "Ran command" }
+    "memory_recall": {
+      "running": "Recalling",
+      "done": "Recalled"
+    },
+    "context_recall": {
+      "running": "Recalling context",
+      "done": "Context recalled"
+    },
+    "memory_store": {
+      "running": "Storing",
+      "done": "Stored"
+    },
+    "http_request": {
+      "running": "Requesting",
+      "done": "Requested"
+    },
+    "web_fetch": {
+      "running": "Fetching",
+      "done": "Fetched"
+    },
+    "web_search": {
+      "running": "Searching",
+      "done": "Searched"
+    },
+    "file_read": {
+      "running": "Reading",
+      "done": "Read"
+    },
+    "file_write": {
+      "running": "Writing",
+      "done": "Written"
+    },
+    "file_edit": {
+      "running": "Editing",
+      "done": "Edited"
+    },
+    "doc_reader": {
+      "running": "Reading document",
+      "done": "Read document"
+    },
+    "glob_search": {
+      "running": "Globbing",
+      "done": "Globbed"
+    },
+    "content_search": {
+      "running": "Searching",
+      "done": "Searched"
+    },
+    "intent_send": {
+      "running": "Sending intent",
+      "done": "Sent intent"
+    },
+    "ask_user_question": {
+      "running": "Asking",
+      "done": "Asked"
+    },
+    "todo_write": {
+      "running": "Updating todos",
+      "done": "Updated todos"
+    },
+    "mcp_install": {
+      "running": "Installing",
+      "done": "Installed"
+    },
+    "mcp_uninstall": {
+      "running": "Uninstalling",
+      "done": "Uninstalled"
+    },
+    "rag_query": {
+      "running": "Querying",
+      "done": "Queried"
+    },
+    "codebase": {
+      "running": "Searching code",
+      "done": "Searched code"
+    },
+    "bash": {
+      "running": "Running command",
+      "done": "Ran command"
+    },
+    "powershell": {
+      "running": "Running command",
+      "done": "Ran command"
+    },
+    "shell": {
+      "running": "Running command",
+      "done": "Ran command"
+    }
   },
   "askQuestionCard": {
     "other": "Other",

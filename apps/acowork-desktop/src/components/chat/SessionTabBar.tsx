@@ -5,6 +5,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isSessionActive } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
@@ -251,7 +252,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const [listOpen, setListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
   const [tabContextMenu, setTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
-  const tabMenuRef = useRef<HTMLDivElement>(null);
+  // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
+  const { menuRef: tabMenuRef, style: tabMenuStyle } = useContextMenuPosition({
+    pointer: tabContextMenu ? { x: tabContextMenu.x, y: tabContextMenu.y } : null,
+  });
   const scrollableRef = useRef<ScrollableTabBarHandle>(null);
 
   // Get title for a session
@@ -550,7 +554,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
         <div
           ref={tabMenuRef}
           className="context-menu"
-          style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+          style={tabMenuStyle}
           onContextMenu={(e) => e.preventDefault()}
         >
           <button

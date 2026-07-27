@@ -8,6 +8,7 @@ import { useChatStore } from "../../../stores/chatStore";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
+import { useContextMenuPosition } from "../../../hooks/useContextMenuPosition";
 import type { TreeEntry } from "../../../stores/workspaceStore";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
@@ -109,9 +110,14 @@ export const FileTreeNode = memo(function FileTreeNode({
   // Preview is available for Markdown (.md), HTML (.html/.htm), and image files.
   const isPreviewable = !isDir && /\.(md|html?)$/i.test(entry.name);
 
-  // Context menu state
+  // Context menu state — viewport-aware positioning via shared hook
+  // (see src/hooks/useContextMenuPosition) so the menu flips above the
+  // cursor and stays inside the viewport when right-clicked near the
+  // bottom/right edge.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
+    pointer: contextMenu,
+  });
 
   // Inline rename state — controlled by the parent via `renameTarget`.
   // When `renameTarget === relPath` the name span is replaced by an
@@ -412,7 +418,7 @@ export const FileTreeNode = memo(function FileTreeNode({
         <div
           ref={menuRef}
           className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={contextMenuStyle}
         >
           <button
             type="button"

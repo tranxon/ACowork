@@ -16,6 +16,7 @@ import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isSessionActive, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
+import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 
 interface AgentListProps {
   width?: number;
@@ -58,7 +59,11 @@ export function AgentList({ width }: AgentListProps) {
   const { addToast } = useToast();
   const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
   const [installing, setInstalling] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  // Viewport-aware positioning for the agent right-click menu: shared hook
+  // flips above when near the bottom and clamps inside the viewport.
+  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
+    pointer: contextMenu ? { x: contextMenu.x, y: contextMenu.y } : null,
+  });
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -506,7 +511,7 @@ export function AgentList({ width }: AgentListProps) {
         <div
           ref={menuRef}
           className="context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={contextMenuStyle}
         >
           {contextAgent && !contextAgent.running && (
             <>
