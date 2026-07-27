@@ -18,6 +18,7 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
 import { useChatListAdapter } from "./useChatListAdapter";
+import { useScrollController } from "./useScrollController";
 
 /**
  * Measure natural dimensions of an image whose src is already settable in the
@@ -71,10 +72,8 @@ import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
-// Generous threshold used ONLY for scroll snapshot on unmount (nav-back).
-// Real-time pinned-to-bottom detection in handleScroll uses a strict 5px
-// to let the user escape auto-scroll with a tiny upward flick.
-const CHAT_BOTTOM_THRESHOLD_PX = 120;
+// CHAT_BOTTOM_THRESHOLD_PX removed - pinned-to-bottom detection is now
+// owned by useScrollController's state machine (PIN_THRESHOLD_PX).
 
 // Stable empty array reference for the `messages` Zustand selector.
 // Returning `[]` literals from a selector creates a new reference on every
@@ -423,14 +422,9 @@ export function ChatPanel() {
   // sticky-bottom state, and ensure-renderable (onLayout).
   const adapter = useChatListAdapter(selectedAgentId, currentSessionId);
 
-  // Ref mirror of adapter - updated on every render so handleScroll (a stable
-  // callback with zero deps) always reads the latest values. This eliminates
-  // the stale-closure bug where onScroll fires during useLayoutEffect before
-  // React has updated the event handler.
-  const adapterRef = useRef(adapter);
-  adapterRef.current = adapter;
-  const sessionRef = useRef(session);
-  sessionRef.current = session;
+  // adapterRef/sessionRef no longer needed - handleScroll and pagination
+  // timer are owned by useScrollController, which has direct access to
+  // adapter and containerRef.
 
   const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
 
@@ -607,6 +601,22 @@ export function ChatPanel() {
   if (showCompactingItem) extraItems++;
   const virtualCount = messageBlocks.length + extraItems;
 
+  // ── ScrollController ─────────────────────────────────────────────
+  // Centralized scroll state machine. Owns: init scroll, scrollHeight
+  // delta (prepend adjustment), sticky-bottom (auto-scroll + arrow
+  // buttons), ensureRenderable, jump target, pagination timer.
+  // Replaces all previously scattered scroll effects in VML and ChatPanel.
+  const scrollController = useScrollController({
+    containerRef: messagesContainerRef,
+    adapter,
+    vmlRef,
+    sending,
+    virtualCount,
+    messageBlocks,
+    initialScrollOffset,
+    sessionKey: currentScrollKey,
+  });
+
   // Load available models: configured providers (from vault) + capabilities (from models API)
   const loadModels = useCallback(async () => {
     try {
@@ -683,11 +693,10 @@ export function ChatPanel() {
         //
         // During streaming we ALWAYS record pinnedToBottom=true, because the
         // message list is growing on every poll and the saved scrollOffset
-        // would point to stale (or prepended) content after nav-back.  This
-        // also prevents the "nav-back lands on the top of the conversation"
-        // bug where a transient stale read would otherwise restore a small
-        // scrollOffset.
-        pinnedToBottom: sending || distFromBottom <= CHAT_BOTTOM_THRESHOLD_PX,
+        // would point to stale (or prepended) content after nav-back.
+        // Otherwise, use the ScrollController's state machine as the source
+        // of truth for whether the user is pinned to the bottom.
+        pinnedToBottom: sending || scrollController.isPinnedToBottom(),
       });
     };
   }, [currentScrollKey]);
@@ -791,29 +800,10 @@ export function ChatPanel() {
       });
   }, [currentSessionId, selectedAgentId]);
 
-  // ── Scroll restoration ───────────────────────────────────────────
-  // ChatPanel is conditionally rendered — navigating to Settings/Harness
-  // unmounts the entire chat subtree.  On remount the VirtualMessageList
-  // is brand-new; its internal scroll-to-bottom (useLayoutEffect + [])
-  // fires before the virtualizer has measured all items.
-  //
-  // We handle restoration explicitly here in a useLayoutEffect so scroll
-  // is set before the first paint.  This eliminates the "flash of top
-  // position" that would occur with a useEffect-based approach.
-  useLayoutEffect(() => {
-    if (!currentScrollKey || virtualCount === 0) return;
-    const snapshot = chatScrollSnapshots.get(currentScrollKey);
-    if (!snapshot) return;
-
-    const container = messagesContainerRef.current;
-    if (!container) return;
-
-    if (snapshot.pinnedToBottom) {
-      container.scrollTop = container.scrollHeight;
-    } else if (snapshot.scrollOffset > 0) {
-      container.scrollTop = snapshot.scrollOffset;
-    }
-  }, [currentScrollKey, virtualCount, scrollSnapshot?.pinnedToBottom]);
+  // ── Scroll restoration ──
+  // Handled by ScrollController's init scroll effect (section 1).
+  // The controller uses `initialScrollOffset` (derived from the snapshot
+  // above) to restore the scroll position on the first data arrival.
 
   // ── Retry session load ──────────────────────────────────────────
   // Called from VirtualMessageList when user clicks retry on load error.
@@ -827,81 +817,13 @@ export function ChatPanel() {
   // adapter. ChatPanel no longer reads messageOffset/messageLimit/messageTotal
   // or defines handleNeedMore.
 
-  // ── Scroll-to-bottom ─────────────────────────────────────────
-  // ADR-041 C4: Delegates to adapter.jumpToLatest(), which replaces the
-  // cache with the latest page and sets jumpTarget='bottom'.
-  // VML consumes the target and scrolls to the last block.
-  const scrollToBottom = useCallback(async () => {
-    if (!selectedAgentId || !currentSessionId) return;
-    await adapter.jumpToLatest();
-    // Also call vmlRef.scrollToBottom for immediate DOM scroll (the
-    // jumpTarget effect handles the data-driven path, but
-    // this gives instant feedback if the cache was already at latest).
-    vmlRef.current?.scrollToBottom();
-  }, [selectedAgentId, currentSessionId, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Scroll-to-top ──────────────────────────────────────────────
-  // Symmetric to scrollToBottom: calls adapter.jumpToOldest() which
-  // loads the oldest page from the server (offset=total-limit) and sets
-  // jumpTarget='top' so VML scrolls to the first block.
-  const scrollToTop = useCallback(async () => {
-    if (!selectedAgentId || !currentSessionId) return;
-    await adapter.jumpToOldest();
-  }, [selectedAgentId, currentSessionId, adapter]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Scroll handler ────────────────────────────────────────────────
-  // Only handles the up/down arrow button visibility (state-driven).
-  // Auto-scroll-to-bottom on new messages is gated by `distFromBottom >
-  // clientHeight` directly inside VirtualMessageList's sticky-bottom
-  // effect, evaluated against the live DOM — no shared ref channel to
-  // keep in sync. Pagination is handled exclusively by the 150ms timer
-  // below.
-  const handleScroll = useCallback(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const sess = sessionRef.current;
-
-    const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    sess.setShowScrollToBottom(distFromBottom > container.clientHeight);
-    sess.setShowScrollToTop(container.scrollTop > container.clientHeight);
-  }, []);
-
-  // ── Pagination timer ─────────────────────────────────────────────
-  //
-  // The SOLE pagination trigger. A 150ms interval that reads scrollTop
-  // from the DOM and pagination state from the adapter ref. No dependency
-  // on onScroll events, React effect ordering, or closure freshness.
-  //
-  // Why a timer: after loadBefore prepends data, VML's scrollHeight delta
-  // effect adjusts scrollTop. We need to re-check whether scrollTop is
-  // still near the edge. onScroll from that adjustment may fire at an
-  // unpredictable time relative to React's render cycle. The timer
-  // sidesteps all timing issues: it reads the FINAL state at each tick.
-  //
-  // The check is cheap (a few property reads + comparisons). 150ms gives
-  // responsive feel (< 1 frame at 60fps is 16ms, but data loading itself
-  // takes 100-500ms, so 150ms overhead is negligible).
-  useEffect(() => {
-    if (!selectedAgentId || !currentSessionId) return;
-    const interval = setInterval(() => {
-      const container = messagesContainerRef.current;
-      if (!container) return;
-      const ad = adapterRef.current;
-      if (ad.isLoading) return;
-
-      const distFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-
-      if (container.scrollTop < 50 && ad.hasOlder) {
-        log.debug('[timer] loadBefore', { scrollTop: container.scrollTop, hasOlder: ad.hasOlder, blocks: ad.blocks.length });
-        void ad.loadBefore();
-      } else if (distFromBottom < 50 && ad.hasNewer) {
-        log.debug('[timer] loadAfter', { distFromBottom, hasNewer: ad.hasNewer, blocks: ad.blocks.length });
-        void ad.loadAfter();
-      }
-    }, 150);
-    return () => clearInterval(interval);
-  }, [selectedAgentId, currentSessionId]);
-
+  // ── Scroll actions ──
+  // scrollToBottom, scrollToTop, handleScroll, and the pagination timer
+  // are all owned by useScrollController.  The controller's jumpToBottom
+  // and jumpToTop set the state machine to 'jumping' (preventing
+  // concurrent scroll operations) and delegate to adapter.jumpToLatest/
+  // jumpToOldest.  The jump target effect in the controller handles the
+  // actual scroll after data arrives.
 
   const handleSend = () => {
     const content = session.inputValue.trim();
@@ -1313,13 +1235,13 @@ export function ChatPanel() {
         <div className="relative flex-1 overflow-hidden">
           <div
             ref={messagesContainerRef}
-            onScroll={handleScroll}
+            onScroll={scrollController.handleScroll}
             className="h-full overflow-y-auto px-4 py-3 select-text cursor-text"
             role="log"
             aria-label={t("chatPanel.ariaLabelChatMessages")}
           >
             {/* VirtualMessageList — owns useVirtualizer and handles all virtual
-                scrolling, loading states, and scroll-to-bottom.
+                scrolling rendering. Scroll behavior is owned by useScrollController.
                 key={currentScrollKey} forces React to unmount/remount the entire
                 component on session/agent switch.  This creates a fresh Virtualizer
                 instance with scrollOffset=0, eliminating the white-screen bug where
@@ -1529,9 +1451,9 @@ export function ChatPanel() {
               affordance. The existing `transition-all` covers the opacity
               animation, and the `hover:bg-zinc-200` background change is
               independent of the opacity change so both compose cleanly. */}
-          {session.showScrollToTop && (
+          {scrollController.showScrollToTop && (
             <button
-              onClick={scrollToTop}
+              onClick={scrollController.jumpToTop}
               className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label="Scroll to top"
             >
@@ -1541,9 +1463,9 @@ export function ChatPanel() {
           {/* Scroll-to-bottom button — visible when scrolled up > 1 screen.
               Same default-reduced / hover-full-opacity treatment as the
               scroll-to-top button for visual consistency. */}
-          {session.showScrollToBottom && (
+          {scrollController.showScrollToBottom && (
             <button
-              onClick={scrollToBottom}
+              onClick={scrollController.jumpToBottom}
               className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
               aria-label={t("chatPanel.ariaLabelScrollToBottom")}
             >

@@ -33,14 +33,12 @@ export interface ChatListAdapter {
   jumpToOldest: () => Promise<void>;
   readonly jumpTarget: "top" | "bottom" | null;
   clearJumpTarget: () => void;
-  onLayout: (totalHeight: number, viewportHeight: number) => void;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
 const PAGINATION_PAGE_SIZE = 50;
 const EMPTY_MESSAGES: ChatMessage[] = [];
-const MAX_ENSURE_RENDERABLE_PAGES = 10;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -130,8 +128,7 @@ export function useChatListAdapter(
   }, []);
 
   // ── Ensure-renderable guard ──
-
-  const ensureRenderableCountRef = useRef(0);
+  // Removed: ensureRenderable logic is now owned by useScrollController.
 
   // ── Pagination actions ──
   //
@@ -191,31 +188,21 @@ export function useChatListAdapter(
   }, [agentId, sessionId]);
 
   // ── onLayout ──
-
-  const onLayout = useCallback(
-    (totalHeight: number, viewportHeight: number) => {
-      if (!agentId || !sessionId) return;
-      if (isLoadingMore) return;
-      if (totalHeight >= viewportHeight) return;
-      if (ensureRenderableCountRef.current >= MAX_ENSURE_RENDERABLE_PAGES) return;
-      ensureRenderableCountRef.current += 1;
-      if (hasNewer) { void loadAfter(); return; }
-      if (hasOlder) { void loadBefore(); return; }
-    },
-    [agentId, sessionId, isLoadingMore, hasNewer, hasOlder, loadAfter, loadBefore],
-  );
+  // Removed: ensureRenderable logic is now owned by useScrollController.
+  // The controller checks totalHeight vs viewportHeight and calls
+  // loadBefore/loadAfter directly, with state machine guards.
 
   return useMemo<ChatListAdapter>(
     () => ({
       blocks, hasOlder, hasNewer, isLoading: isLoadingMore,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
-      jumpTarget, clearJumpTarget, onLayout,
+      jumpTarget, clearJumpTarget,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       blocks, hasOlder, hasNewer, isLoadingMore,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
-      jumpTarget, clearJumpTarget, onLayout,
+      jumpTarget, clearJumpTarget,
       jumpVersion,
     ],
   );

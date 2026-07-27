@@ -7,7 +7,6 @@ import { MessageBubble } from "./MessageBubble";
 import type { MessageBlock } from "./messageFolder";
 import type { ChatListAdapter } from "./useChatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
-import { log } from "../../lib/logger";
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
@@ -85,9 +84,9 @@ interface VirtualMessageListProps {
 // from the rendered MessageBlock array and the virtualizer's measured
 // layout** — no scrollTop pixel guessing, no estimateSize-based heuristics.
 //
-// Used by ChatPanel to:
-//   - compute `pinnedToBottom` for nav-back snapshots without trusting
-//     scrollTop pixel arithmetic.
+// Used by ScrollController (in ChatPanel) to:
+//   - scroll to top/bottom via scrollToTop/scrollToBottom (used for
+//     init scroll, sticky-bottom, and jump target).
 
 export interface VirtualMessageListHandle {
   /**
@@ -102,14 +101,14 @@ export interface VirtualMessageListHandle {
   getLastVisibleBlockIndex: () => number | null;
   /**
    * Scroll to the last virtual item, using virtualizer.scrollToIndex
-   * (data-driven — the virtualizer computes the exact pixel offset from
-   * measured item sizes).  Re-scrolls on the next animation frame so the
-   * user lands on the *measured* bottom, not the estimateSize-derived
-   * bottom (which undershoots when many items haven't been measured yet,
-   * e.g. right after a load-older that prepended a long stretch of
-   * un-rendered older blocks).  No-op if there are zero virtual items.
+   * (data-driven).  No-op if there are zero virtual items.
    */
   scrollToBottom: () => void;
+  /**
+   * Scroll to the first virtual item, using virtualizer.scrollToIndex
+   * with align: "start".  No-op if there are zero virtual items.
+   */
+  scrollToTop: () => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -164,11 +163,11 @@ export const VirtualMessageList = React.forwardRef<
   // in ChatPanel's JSX, so its ref is available in useLayoutEffect.
   //
   // React guarantees that setState inside useLayoutEffect is flushed
-  // synchronously before the browser paints.  This means the init-scroll
-  // effect (registered below) will skip on the first invocation
-  // (containerWidth is still 0, didInitialScrollRef stays false), then
-  // fire on the synchronous re-render (containerWidth > 0), all before
-  // the first paint.  No flushSync, no rAF, no force-overscan.
+  // synchronously before the browser paints.  This means the
+  // ScrollController's init-scroll effect (in ChatPanel) will skip on
+  // the first invocation (containerWidth is still 0), then fire on the
+  // synchronous re-render (containerWidth > 0), all before the first
+  // paint.  No flushSync, no rAF, no force-overscan.
   const [containerWidth, setContainerWidth] = useState(0);
 
   useLayoutEffect(() => {
@@ -358,13 +357,10 @@ export const VirtualMessageList = React.forwardRef<
   }, []);
 
   // ── Imperative handle ─────────────────────────────────────
-  // Expose three data-derived queries to the parent. None of them rely on
-  // scrollTop pixel math or estimateSize-based heuristics; everything comes
-  // from virtualizer.getVirtualItems() intersecting the messageBlocks array.
-  //
-  // These powers the "strict intermediate layer" architecture: ChatPanel
-  // Used by handleScroll to get first/last visible block indices
-  // for pagination triggers.
+  // Exposes data-derived queries and scroll actions to the parent
+  // (ScrollController). None of the queries rely on scrollTop pixel math
+  // or estimateSize-based heuristics; everything comes from
+  // virtualizer.getVirtualItems() intersecting the messageBlocks array.
   React.useImperativeHandle(
     ref,
     () => ({
@@ -381,182 +377,20 @@ export const VirtualMessageList = React.forwardRef<
         if (count === 0) return;
         virtualizer.scrollToIndex(count - 1, { align: "end" });
       },
+      scrollToTop: () => {
+        const count = virtualizer.options.count;
+        if (count === 0) return;
+        virtualizer.scrollToIndex(0, { align: "start" });
+      },
     }),
     [virtualizer, messageBlocks],
   );
 
-  // ── Initialization: scroll to bottom on first data arrival ───────
-  //
-  // Uses useLayoutEffect so scroll offset is set before the first paint
-  // (no flash of top position).
-  //
-  // containerWidth is measured synchronously (useLayoutEffect + flushSync)
-  // by the width-measurement effect above, so by the time this effect fires
-  // with containerWidth > 0, estimateSize produces accurate per-block
-  // heights — scrollToIndex(end) lands on the real bottom on the first
-  // call.  Same code path as the arrow button's scrollToBottom().
-  //
-  // No force-overscan, no rAF.
-  //
-  // didInitialScrollRef gates against re-initialization (e.g. prepends from
-  // ensureRenderable).  The parent's key={currentScrollKey} resets the ref
-  // on every session switch.
-  const didInitialScrollRef = useRef(false);
-  useLayoutEffect(() => {
-    if (didInitialScrollRef.current) return;
-    if (virtualCount === 0) return; // wait for data
-    if (containerWidth <= 0) return; // wait for ResizeObserver measurement
-
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    didInitialScrollRef.current = true;
-
-    if (initialScrollOffset !== undefined && initialScrollOffset >= 0) {
-      container.scrollTop = initialScrollOffset;
-      return;
-    }
-
-    virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-  }, [virtualCount, initialScrollOffset, containerWidth]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── scrollHeight delta: maintain scroll position after prepend ───────
-  //
-  // Classic infinite-scroll technique. When loadBefore prepends data:
-  //   1. Before prepend: scrollHeight = H_old (recorded in prevScrollHeightRef)
-  //   2. After prepend:  scrollHeight = H_new (current container.scrollHeight)
-  //   3. delta = H_new - H_old = height of prepended content
-  //   4. scrollTop += delta -> user's viewport stays on the same content
-  //   5. onScroll fires -> handleScroll checks -> scrollTop > threshold -> stop
-  //
-  // For append (loadAfter): no adjustment needed, new content extends below.
-  //
-  // Detection: compare first block's blockId. If it changed AND the old
-  // first block still exists in the new array, it was a prepend.
-  const prevScrollHeightRef = useRef(0);
-  const prevFirstBlockIdRef = useRef<string | null>(null);
-
-  useLayoutEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const currentFirstBlockId = messageBlocks[0]?.blockId ?? null;
-
-    const wasPrepend =
-      prevFirstBlockIdRef.current !== null &&
-      prevFirstBlockIdRef.current !== currentFirstBlockId &&
-      messageBlocks.some((b) => b.blockId === prevFirstBlockIdRef.current);
-
-    // Diagnostic: log EVERY run
-    log.debug('[VML:scrollDelta]', {
-      wasPrepend,
-      prevFirstId: prevFirstBlockIdRef.current?.slice(0, 20),
-      currFirstId: currentFirstBlockId?.slice(0, 20),
-      oldFirstStillExists: prevFirstBlockIdRef.current
-        ? messageBlocks.some((b) => b.blockId === prevFirstBlockIdRef.current)
-        : 'N/A',
-      prevHeight: prevScrollHeightRef.current,
-      currHeight: container.scrollHeight,
-      delta: wasPrepend ? container.scrollHeight - prevScrollHeightRef.current : 0,
-      scrollTop: container.scrollTop,
-      blocksCount: messageBlocks.length,
-    });
-
-    if (wasPrepend && prevScrollHeightRef.current > 0) {
-      const delta = container.scrollHeight - prevScrollHeightRef.current;
-      if (delta > 0) {
-        container.scrollTop += delta;
-        log.debug('[VML:scrollDelta] ADJUSTED scrollTop to', container.scrollTop);
-      } else {
-        log.debug('[VML:scrollDelta] delta <= 0, no adjustment');
-      }
-    }
-
-    prevFirstBlockIdRef.current = currentFirstBlockId;
-    prevScrollHeightRef.current = container.scrollHeight;
-  }, [messageBlocks, scrollContainerRef]);
-
-  // ── Jump target: scroll to top/bottom after jumpToLatest/jumpToOldest ──
-  useLayoutEffect(() => {
-    const target = adapter.jumpTarget;
-    if (!target) return;
-    adapter.clearJumpTarget();
-
-    if (target === "bottom" && virtualCount > 0) {
-      virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-    } else if (target === "top" && virtualCount > 0) {
-      virtualizer.scrollToIndex(0, { align: "start" });
-    }
-  }, [adapter, virtualizer, virtualCount]);
-
-  // ── Sticky-bottom: keep pinned when new items are appended ─────────
-  //
-  // Single source of truth: the actual DOM scroll position.
-  //
-  // The "auto-scroll-to-bottom" decision is the EXACT logical
-  // complement of the down-arrow button's visibility. They share one
-  // condition (`distFromBottom > clientHeight`) and one source
-  // (`container.scrollTop / scrollHeight / clientHeight`):
-  //
-  //   distFromBottom >  clientHeight   →  down-arrow visible  →  do NOT auto-scroll
-  //   distFromBottom <= clientHeight   →  down-arrow hidden   →  auto-scroll to bottom
-  //
-  // Unifying the two means there is no separate `pinnedToBottom` ref
-  // channel to keep in sync, no stale snapshot to read, and no race
-  // between "the button rendered" and "this effect fired". They cannot
-  // disagree because they are evaluated against the same DOM read.
-  //
-  // The `clientHeight` threshold (≈ one viewport height) means the user
-  // has to scroll more than a full screen away before the system stops
-  // following — matching the affordance of the down-arrow button.
-  const prevVirtualCountRef = useRef(0);
-  useLayoutEffect(() => {
-    if (!didInitialScrollRef.current) return;
-    const countGrew = virtualCount > prevVirtualCountRef.current;
-    prevVirtualCountRef.current = virtualCount;
-    if (!countGrew) return;
-    if (virtualCount === 0) return;
-
-    // Same condition as `setShowScrollToBottom(distFromBottom > clientHeight)`
-    // in `handleScroll` — see ChatPanel.tsx. Evaluated here against the
-    // current DOM, not a ref snapshot.
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const distFromBottom =
-      container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distFromBottom > container.clientHeight) return;
-
-    virtualizer.scrollToIndex(virtualCount - 1, { align: "end" });
-  }, [virtualCount, virtualizer, scrollContainerRef]);
-
-  // ── Ensure-renderable: fill viewport via adapter.onLayout ────────────
-  //
-  // ADR-041 C4: Delegates to adapter.onLayout(totalHeight, viewportHeight).
-  // The adapter decides whether to loadBefore or loadAfter based on
-  // hasOlder/hasNewer and the current streaming state. This fixes the
-  // old bug where only loadBefore was called (causing "stuck at top,
-  // can't reach bottom" when the tail was evicted).
-  useLayoutEffect(() => {
-    if (!didInitialScrollRef.current) return;
-    if (virtualCount === 0) return;
-    if (adapter.isLoading) return;
-
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    const totalHeight = virtualizer.getTotalSize();
-    const viewportHeight = container.clientHeight;
-    if (totalHeight >= viewportHeight) return;
-
-    adapter.onLayout(totalHeight, viewportHeight);
-  }, [
-    virtualCount,
-    virtualizer,
-    adapter,
-    scrollContainerRef,
-  ]);
-
-
+  // ── Scroll effects ──
+  // All scroll-related effects (init scroll, scrollHeight delta, sticky-bottom,
+  // ensure-renderable, jump target) have been moved to useScrollController.ts.
+  // VML now only owns: width measurement, virtualizer creation, rendering,
+  // and the imperative handle (scrollToBottom/scrollToTop/getFirstVisible/...).
 
   // ── Render ───────────────────────────────────────────────────────
   return (
