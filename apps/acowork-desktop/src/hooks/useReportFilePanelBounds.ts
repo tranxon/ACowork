@@ -33,6 +33,12 @@ export function useReportFilePanelBounds(
     ref: RefObject<HTMLElement | null>,
 ): void {
     const setFilePanelBounds = useLayoutStore((s) => s.setFilePanelBounds);
+    // Subscribe to right-panel collapsed state so the effect re-runs (and
+    // re-measures the panel's bounds) when the right panel is shown/hidden.
+    // ResizeObserver only fires on *size* changes, but the FileEditorPanel's
+    // viewport position can shift in the flex layout even when its own size
+    // stays the same (fixed fileWidth + shrink-0).
+    const resultsCollapsed = useLayoutStore((s) => s.resultsCollapsed);
 
     useEffect(() => {
         if (typeof ResizeObserver === "undefined") {
@@ -80,5 +86,5 @@ export function useReportFilePanelBounds(
             // last-known coordinates.
             setFilePanelBounds({ left: 0, right: 0, mounted: false });
         };
-    }, [ref, setFilePanelBounds]);
+    }, [ref, setFilePanelBounds, resultsCollapsed]);
 }
