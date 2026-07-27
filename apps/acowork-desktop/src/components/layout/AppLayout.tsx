@@ -14,6 +14,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useStatusBarStore } from "../../stores/statusBarStore";
+import { useEditorStatusStore } from "../../stores/editorStatusStore";
+import { FileStatusCluster, type FileStatusClusterActiveFile } from "../editor/FileStatusCluster";
 import { cn } from "../../lib/utils";
 import {
   DEFAULT_ACCENT_PRESET,
@@ -22,11 +24,12 @@ import {
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
+import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore, type PanelTab } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Bot, MessagesSquare, Cpu } from "lucide-react";
+import { Bot, Check, Cpu } from "lucide-react";
 import { log } from "../../lib/logger";
 
 /** Settings tab type — keep in sync with SettingsPage */
@@ -147,6 +150,68 @@ export function AppLayout() {
   const statusType = useStatusBarStore((s) => s.type);
   const statusVisible = useStatusBarStore((s) => s.visible);
   const clearStatus = useStatusBarStore((s) => s.clearStatus);
+
+  // ── File-status cluster subscriptions (PR-2 of the unified status-bar refactor) ──
+  // Read the live bounding rect reported by `useReportFilePanelBounds`
+  // (mounted inside `FileEditorPanel`). Use individual field selectors so
+  // unrelated components do not re-render on every state mutation — e.g.
+  // each Monaco cursor move updates only `cursor`, not the LSP signals.
+  const filePanelBounds = useLayoutStore((s) => s.filePanelBounds);
+  const editorCursor = useEditorStatusStore((s) => s.cursor);
+  const editorSelectedCount = useEditorStatusStore((s) => s.selectedCount);
+  const editorLspEnabled = useEditorStatusStore((s) => s.lspEnabled);
+  const editorLspLanguage = useEditorStatusStore((s) => s.lspLanguage);
+  const editorLspStatus = useEditorStatusStore((s) => s.lspStatus);
+  const editorLspStatusMessage = useEditorStatusStore((s) => s.lspStatusMessage);
+
+  // Active file — pulled from `fileEditorStore` and trimmed to the cluster's
+  // minimal structural shape so the cluster does not have to import the
+  // full `OpenFile` type.
+  const openFiles = useFileEditorStore((s) => s.openFiles);
+  const activeFileId = useFileEditorStore((s) => s.activeFileId);
+  const clusterActiveFile: FileStatusClusterActiveFile | null =
+    activeFileId !== null
+      ? (() => {
+            const f = openFiles.find((file) => file.id === activeFileId);
+            if (!f) return null;
+            return {
+                fileName: f.fileName,
+                language: f.language,
+                mimeType: f.mimeType,
+                mode: f.mode,
+                kind: f.kind,
+                url: f.url,
+                relPath: f.relPath,
+                loading: f.loading,
+            };
+        })()
+      : null;
+
+  // ── Window width tracking ────────────────────────────────────────────
+  // The cluster is positioned absolutely inside the global bar with
+  // `right: ${windowW - bounds.right}px`, so we need the live window width
+  // in pixels. Tauri webviews fire `resize` on the window object (not just
+  // `window` resize) — we listen on both. Throttled with `requestAnimationFrame`
+  // to keep drag-to-resize cheap.
+  const [windowWidth, setWindowWidth] = useState<number>(
+    () => (typeof window !== "undefined" ? window.innerWidth : 0),
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let rafId: number | null = null;
+    const schedule = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        setWindowWidth(window.innerWidth);
+      });
+    };
+    window.addEventListener("resize", schedule);
+    return () => {
+      window.removeEventListener("resize", schedule);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, []);
   // Determine if selected agent is in debug mode
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
@@ -157,11 +222,10 @@ export function AppLayout() {
       selectedAgent.display_name ??
       selectedAgent.name)
     : null;
-  // Agent session count + context usage for the bottom status bar
-  const openSessionCount = useChatStore((s) => {
-    if (!selectedAgentId) return 0;
-    return s.agentStates[selectedAgentId]?.openSessionIds?.length ?? 0;
-  });
+  // Context usage for the bottom status bar.
+  // (Session count was removed — see PR-3 follow-up: users found it noisy
+  // without adding actionable signal beyond the active session indicator
+  // already present in the chat panel tab bar.)
   const contextUsage = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -173,6 +237,38 @@ export function AppLayout() {
   // we just reflect state into the UI.
   const mqttConnected = useChatStore((s) => s.mqttConnected);
   const lastMqttError = useChatStore((s) => s.lastMqttError);
+  // Status message click-to-copy: short-lived "Copied!" feedback.
+  // Reset whenever the underlying message changes so a new warning
+  // arriving mid-feedback doesn't leave a stale checkmark.
+  const [statusCopied, setStatusCopied] = useState(false);
+  const statusCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    setStatusCopied(false);
+    if (statusCopyTimerRef.current) {
+      clearTimeout(statusCopyTimerRef.current);
+      statusCopyTimerRef.current = null;
+    }
+  }, [statusMsg]);
+  useEffect(() => {
+    return () => {
+      if (statusCopyTimerRef.current) clearTimeout(statusCopyTimerRef.current);
+    };
+  }, []);
+  const handleCopyStatusMsg = useCallback(() => {
+    if (!statusMsg) return;
+    void navigator.clipboard.writeText(statusMsg)
+      .then(() => {
+        setStatusCopied(true);
+        if (statusCopyTimerRef.current) clearTimeout(statusCopyTimerRef.current);
+        statusCopyTimerRef.current = setTimeout(() => setStatusCopied(false), 1500);
+      })
+      .catch(() => {
+        // Clipboard API can fail in some sandboxed contexts (e.g. a
+        // future hardened WKWebView policy); fail silently — the
+        // hover Tooltip still surfaces the full message.
+      });
+  }, [statusMsg]);
+
   const { t } = useTranslation();
 
   // ── Glass tint color ──────────────────────────────────────────────
@@ -731,18 +827,47 @@ export function AppLayout() {
 
       {/* Bottom status bar */}
       {/* Per-key:value pill style: opaque backdrop so the text stays readable when window opacity < 1 */}
-      <div className="flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-[11px] select-none dark:text-zinc-300">
+      {/* `relative` so the file-status cluster can anchor absolutely to */}
+      {/* the file editor panel's left/right edges via PR-1's filePanelBounds. */}
+      <div className="relative flex h-6 shrink-0 items-center gap-2 pl-14 pr-3 text-[11px] select-none dark:text-zinc-300">
         {statusVisible && (
-          <span className={cn(
-            "rounded-md px-2 py-px truncate",
-            "bg-zinc-100/80 dark:bg-zinc-800/75",
-            "border border-zinc-200/50 dark:border-zinc-700/60",
-            statusType === "error" && "text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-950/70 border-red-300/70 dark:border-red-800/70",
-            statusType === "warning" && "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70",
-            statusType === "info" && "text-zinc-700 dark:text-zinc-300",
-          )}>
-            {statusMsg}
-          </span>
+          <Tooltip
+            content={statusMsg}
+            variant="plain"
+            position="top"
+            delayMs={200}
+            maxWidth="60vw"
+          >
+            <button
+              type="button"
+              onClick={handleCopyStatusMsg}
+              aria-label={t("common.ariaLabelCopyError")}
+              title={t("common.copy")}
+              className={cn(
+                // `max-w-[min(60%,32rem)]` caps the pill so a long
+                // error never squeezes the agent/context pills off
+                // screen. `truncate` (already on the inner span) only
+                // engages once the button has a finite width.
+                "inline-flex items-center gap-1 rounded-md px-2 py-0.5 max-w-[min(60%,32rem)] cursor-pointer transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40",
+                statusType === "error" &&
+                  "text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-950/70 border-red-300/70 dark:border-red-800/70 hover:bg-red-200/80 dark:hover:bg-red-900/70",
+                statusType === "warning" &&
+                  "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70 hover:bg-amber-200/80 dark:hover:bg-amber-900/70",
+                statusType === "info" &&
+                  "text-zinc-700 dark:text-zinc-300 bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
+              )}
+            >
+              {statusCopied ? (
+                <>
+                  <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <span>{t("common.copied")}</span>
+                </>
+              ) : (
+                <span className="truncate">{statusMsg}</span>
+              )}
+            </button>
+          </Tooltip>
         )}
         {(resultsCollapsed || activeTab !== "status") && selectedAgent?.running && agentDisplayName && (
           <span className="flex items-center gap-2 truncate">
@@ -750,11 +875,6 @@ export function AppLayout() {
               <Bot className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
               <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.agent")}: </span>
               <span className="font-medium text-zinc-600 dark:text-zinc-400">{agentDisplayName}</span>
-            </span>
-            <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
-              <MessagesSquare className="h-3 w-3 text-zinc-600 dark:text-zinc-400" aria-hidden="true" />
-              <span className="text-zinc-600 dark:text-zinc-400">{t("statusBar.sessions")}: </span>
-              <span className="tabular-nums font-medium text-zinc-600 dark:text-zinc-400">{openSessionCount}</span>
             </span>
             {contextUsage && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
@@ -780,6 +900,37 @@ export function AppLayout() {
           </span>
         )}
         <MqttDebugControls />
+
+        {/* File-status cluster (PR-2). Absolutely positioned inside this */}
+        {/* bar so it visually floats over the file editor column without */}
+        {/* forcing the other pills to reflow. Hidden when no file is open */}
+        {/* (the panel is unmounted, so bounds stay at mounted:false) — */}
+        {/* keeps the global bar untouched for the dominant no-file state. */}
+        {filePanelBounds.mounted && (
+          <div
+            style={{
+              position: "absolute",
+              display: "flex",
+              alignItems: "center",
+              left: filePanelBounds.left,
+              // `right` is measured from window right edge; CSS clamps
+              // negative values to 0, so a window narrower than the
+              // panel's last known right edge degrades to full bleed
+              // until ResizeObserver catches up.
+              right: Math.max(0, windowWidth - filePanelBounds.right),
+            }}
+          >
+            <FileStatusCluster
+              activeFile={clusterActiveFile}
+              cursor={editorCursor}
+              selectedCount={editorSelectedCount}
+              lspEnabled={editorLspEnabled}
+              lspLanguage={editorLspLanguage}
+              lspStatus={editorLspStatus}
+              lspStatusMessage={editorLspStatusMessage}
+            />
+          </div>
+        )}
       </div>
 
     </div>

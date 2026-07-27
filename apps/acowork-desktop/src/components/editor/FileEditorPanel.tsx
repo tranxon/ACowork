@@ -7,15 +7,18 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
-import { useLspClientPool, type LspStatus } from "../../hooks/useLspClientPool";
+import { useEditorStatusStore } from "../../stores/editorStatusStore";
+import { useLspClientPool } from "../../hooks/useLspClientPool";
+import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, CircleDot, Circle, Copy, Check, MessageSquarePlus, Play, AlertTriangle, Eye, Locate, RefreshCw, XSquare, Files } from "lucide-react";
+import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Locate, RefreshCw, XSquare, Files } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
+import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { HtmlPreviewView } from "./HtmlPreviewView";
@@ -26,340 +29,18 @@ import { SymbolSearchPanel } from "./SymbolSearchPanel";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
-// ── LSP Install Hints ─────────────────────────────────────────────────
-
-const LSP_INSTALL_HINTS: Record<string, { name: string; command: string; url?: string }> = {
-    rust: {
-        name: "rust-analyzer",
-        command: "rustup component add rust-analyzer",
-        url: "https://rust-analyzer.github.io/",
-    },
-    python: {
-        name: "python-lsp-server",
-        command: "pip install python-lsp-server",
-        url: "https://github.com/python-lsp/python-lsp-server",
-    },
-    typescript: {
-        name: "typescript-language-server",
-        command: "npm install -g typescript-language-server typescript",
-        url: "https://github.com/typescript-language-server/typescript-language-server",
-    },
-    javascript: {
-        name: "typescript-language-server",
-        command: "npm install -g typescript-language-server typescript",
-    },
-    go: {
-        name: "gopls",
-        command: "go install golang.org/x/tools/gopls@latest",
-        url: "https://pkg.go.dev/golang.org/x/tools/gopls",
-    },
-    cpp: {
-        name: "clangd",
-        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: brew install llvm",
-        url: "https://clangd.llvm.org/",
-    },
-    c: {
-        name: "clangd",
-        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: brew install llvm",
-    },
-    java: {
-        name: "jdtls (Eclipse JDT Language Server)",
-        command: "Windows / Linux / macOS: Install VS Code Java Extension Pack, or download jdtls from https://download.eclipse.org/jdtls/",
-        url: "https://github.com/eclipse-jdtls/eclipse.jdt.ls",
-    },
-    kotlin: {
-        name: "kotlin-language-server",
-        command: "Windows: Download from https://github.com/fwcd/kotlin-language-server/releases | Linux: Download from https://github.com/fwcd/kotlin-language-server/releases | macOS: brew install kotlin-language-server",
-        url: "https://github.com/fwcd/kotlin-language-server",
-    },
-    swift: {
-        name: "sourcekit-lsp",
-        command: "Windows: Install Swift toolchain from https://swift.org/install | Linux: Included with Swift toolchain (https://swift.org/install) | macOS: Included with Xcode Command Line Tools",
-        url: "https://github.com/swiftlang/sourcekit-lsp",
-    },
-    "objective-c": {
-        name: "clangd / sourcekit-lsp",
-        command: "Windows: winget install LLVM.LLVM | Linux: apt install clangd | macOS: Included with Xcode (sourcekit-lsp)",
-        url: "https://clangd.llvm.org/",
-    },
-    dart: {
-        name: "Dart Analysis Server",
-        command: "Included with Dart SDK / Flutter SDK: dart pub global activate dart_language_server",
-        url: "https://dart.dev/get-dart",
-    },
-    markdown: {
-        name: "marksman",
-        command: "Windows: winget install marksman | Linux: See https://github.com/artempyanykh/marksman | macOS: brew install marksman",
-        url: "https://github.com/artempyanykh/marksman",
-    },
-    md: {
-        name: "marksman",
-        command: "Windows: winget install marksman | Linux: See https://github.com/artempyanykh/marksman | macOS: brew install marksman",
-        url: "https://github.com/artempyanykh/marksman",
-    },
-    json: {
-        name: "vscode-json-languageserver",
-        command: "npm install -g vscode-json-languageserver",
-    },
-    yaml: {
-        name: "yaml-language-server",
-        command: "npm install -g yaml-language-server",
-        url: "https://github.com/redhat-developer/yaml-language-server",
-    },
-    yml: {
-        name: "yaml-language-server",
-        command: "npm install -g yaml-language-server",
-        url: "https://github.com/redhat-developer/yaml-language-server",
-    },
-    html: {
-        name: "vscode-html-languageserver",
-        command: "npm install -g vscode-html-languageserver",
-    },
-    css: {
-        name: "vscode-css-languageserver",
-        command: "npm install -g vscode-css-languageserver",
-    },
-    scss: {
-        name: "vscode-css-languageserver",
-        command: "npm install -g vscode-css-languageserver",
-    },
-    less: {
-        name: "vscode-css-languageserver",
-        command: "npm install -g vscode-css-languageserver",
-    },
-};
-
-// ── LSP Status Indicator ──────────────────────────────────────────────
-
-function LspIndicator({ status, statusMessage, language }: { status: LspStatus; statusMessage: string; language: string }) {
-    const { t } = useTranslation();
-    const [showPopover, setShowPopover] = useState(false);
-    const [copied, setCopied] = useState(false);
-    const [installing, setInstalling] = useState(false);
-    const [installResult, setInstallResult] = useState<{ success: boolean; text: string } | null>(null);
-    const popoverRef = useRef<HTMLDivElement>(null);
-
-    const isUnavailable = status === "disconnected" || status === "error";
-    const hint = LSP_INSTALL_HINTS[language];
-
-    // Close popover on outside click or Escape
-    useEffect(() => {
-        if (!showPopover) return;
-
-        const handleClickOutside = (e: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
-                setShowPopover(false);
-            }
-        };
-        const handleEscape = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setShowPopover(false);
-        };
-
-        document.addEventListener("mousedown", handleClickOutside);
-        document.addEventListener("keydown", handleEscape);
-        return () => {
-            document.removeEventListener("mousedown", handleClickOutside);
-            document.removeEventListener("keydown", handleEscape);
-        };
-    }, [showPopover]);
-
-    const handleClick = () => {
-        if (isUnavailable && hint) {
-            setShowPopover((v) => !v);
-        }
-    };
-
-    const copyToClipboard = () => {
-        if (!hint) return;
-        void navigator.clipboard.writeText(hint.command).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-        });
-    };
-
-    const runInstall = async () => {
-        if (!language || installing) return;
-        setInstalling(true);
-        setInstallResult(null);
-        try {
-            const gatewayUrl = getGatewayUrl();
-            const resp = await fetch(`${gatewayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
-                method: "POST",
-            });
-            const data = await resp.json();
-            if (data.success) {
-                setInstallResult({
-                    success: true,
-                    text: data.stdout || "Installation completed. Restart Gateway to apply.",
-                });
-            } else {
-                // Show stderr first, then stdout, then error field, then fallback
-                const detail = data.stderr || data.stdout || data.error || `Install failed (exit code: ${data.exit_code})`;
-                setInstallResult({
-                    success: false,
-                    text: detail,
-                });
-            }
-        } catch (err: any) {
-            setInstallResult({
-                success: false,
-                text: err?.message || "Failed to run install script",
-            });
-        } finally {
-            setInstalling(false);
-        }
-    };
-
-    // Render the status text
-    let content: React.ReactNode;
-    if (status === "disconnected") {
-        content = (
-            <span className="flex items-center gap-1 text-[10px] text-zinc-400 dark:text-zinc-500">
-                <Circle className="h-2 w-2" />
-                <span>{language} LSP unavailable</span>
-            </span>
-        );
-    } else if (status === "connecting") {
-        content = (
-            <span className="flex items-center gap-1 text-[10px] text-zinc-400">
-                <Circle className="h-2 w-2 animate-pulse" />
-                <span>{language} LSP connecting...</span>
-            </span>
-        );
-    } else if (status === "indexing") {
-        content = (
-            <span className="flex items-center gap-1 text-[10px] text-amber-500 dark:text-amber-400">
-                <Circle className="h-2 w-2 animate-pulse" />
-                <span>{statusMessage ? `${language} ${statusMessage}` : `${language} LSP indexing...`}</span>
-            </span>
-        );
-    } else if (status === "connected") {
-        // Handshake done, but indexing has not started/finished yet —
-        // hover/definition results may be incomplete.
-        content = (
-            <span className="flex items-center gap-1 text-[10px] text-emerald-500/70 dark:text-emerald-400/70">
-                <Circle className="h-2 w-2" />
-                <span>{language} LSP connected</span>
-            </span>
-        );
-    } else if (status === "ready") {
-        content = (
-            <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
-                <CircleDot className="h-2 w-2" />
-                <span>{language} LSP ready</span>
-            </span>
-        );
-    } else {
-        // error
-        const tooltip = statusMessage || "unknown error";
-        content = (
-            <Tooltip content={tooltip} variant="plain">
-                <span className="flex items-center gap-1 text-[10px] text-amber-500">
-                    <Circle className="h-2 w-2" />
-                    <span>{language} LSP unavailable</span>
-                </span>
-            </Tooltip>
-        );
-    }
-
-    return (
-        <div className="relative" ref={popoverRef}>
-            <button
-                type="button"
-                onClick={handleClick}
-                className={cn(
-                    "flex items-center",
-                    isUnavailable && hint ? "cursor-pointer hover:opacity-80" : "cursor-default",
-                )}
-            >
-                {content}
-            </button>
-
-            {/* Install hint popover */}
-            {showPopover && hint && (
-                <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-md border border-zinc-200 bg-modal-surface p-3 shadow-lg dark:border-zinc-700 text-xs">
-                    <div className="font-medium text-zinc-700 dark:text-zinc-200 mb-1.5">
-                        Install {hint.name}
-                    </div>
-                    <div className="flex items-center gap-1.5 rounded bg-zinc-100 dark:bg-zinc-900 px-2 py-1.5 font-mono text-[11px]">
-                        <span className="flex-1 select-all break-all text-zinc-700 dark:text-zinc-300">
-                            {hint.command}
-                        </span>
-                        <Tooltip content={t("fileEditor.copy")} variant="plain">
-                            <button
-                                type="button"
-                                onClick={copyToClipboard}
-                                className="shrink-0 rounded p-0.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors"
-                            >
-                                {copied ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                            </button>
-                        </Tooltip>
-                    </div>
-
-                    {/* Install button */}
-                    <button
-                        type="button"
-                        onClick={runInstall}
-                        disabled={installing}
-                        className={cn(
-                            "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-[11px] font-medium transition-colors",
-                            installing
-                                ? "bg-zinc-200 text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400 cursor-not-allowed"
-                                : "bg-[var(--color-accent)] text-white hover:opacity-90",
-                        )}
-                    >
-                        {installing ? (
-                            <>
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                                Installing...
-                            </>
-                        ) : (
-                            <>
-                                <Play className="h-3 w-3" />
-                                Run Install Script
-                            </>
-                        )}
-                    </button>
-
-                    {/* Install result */}
-                    {installResult && (
-                        <div
-                            className={cn(
-                                "mt-2 rounded px-2 py-1.5 text-[11px] leading-relaxed",
-                                installResult.success
-                                    ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                                    : "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
-                            )}
-                        >
-                            <div className="flex items-start gap-1">
-                                {installResult.success ? (
-                                    <Check className="h-3 w-3 mt-0.5 shrink-0" />
-                                ) : (
-                                    <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
-                                )}
-                                <span className="whitespace-pre-wrap break-all">{installResult.text}</span>
-                            </div>
-                        </div>
-                    )}
-
-                    {hint.url && (
-                        <a
-                            href={hint.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="mt-2 inline-block text-[var(--color-accent)] hover:underline text-[11px]"
-                        >
-                            Documentation →
-                        </a>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-}
-
 export function FileEditorPanel({ width }: { width: number }) {
     const { t } = useTranslation();
+
+    // ── Layout bounds reporting (PR-1 of the unified status-bar refactor) ──
+    // Reports the panel's `getBoundingClientRect()` to `useLayoutStore.filePanelBounds`
+    // on every layout change. Lets the global status bar in `AppLayout` anchor
+    // file-status items (language / LSP / cursor) to the panel's left & right
+    // edges without any prop drilling or DOM cross-measurement. The hook is
+    // rAF-coalesced so dragging the resize handle does not flood the store.
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    useReportFilePanelBounds(rootRef);
+
     const openFiles = useFileEditorStore((s) => s.openFiles);
     const activeFileId = useFileEditorStore((s) => s.activeFileId);
     const setActiveFile = useFileEditorStore((s) => s.setActiveFile);
@@ -384,7 +65,10 @@ export function FileEditorPanel({ width }: { width: number }) {
     const [tabContextMenu, setTabContextMenu] = useState<
         { fileId: string; x: number; y: number } | null
     >(null);
-    const tabMenuRef = useRef<HTMLDivElement>(null);
+    // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
+    const { menuRef: tabMenuRef, style: tabMenuStyle } = useContextMenuPosition({
+        pointer: tabContextMenu ? { x: tabContextMenu.x, y: tabContextMenu.y } : null,
+    });
     // Batch close confirmation (Close Others / Close All with dirty files)
     const [batchCloseRequest, setBatchCloseRequest] = useState<
         { kind: "others" | "all"; fileIds: string[]; dirtyCount: number; keepFileId?: string } | null
@@ -394,8 +78,9 @@ export function FileEditorPanel({ width }: { width: number }) {
     const [showSymbolSearch, setShowSymbolSearch] = useState(false);
     const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
     const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
-    const [cursor, setCursor] = useState({ line: 1, column: 1 });
-    const [selectedCount, setSelectedCount] = useState(0);
+    // (cursor / selectedCount moved to useEditorStatusStore — see Monaco
+    //  selection handler below. The local useState was only used by the
+    //  per-file status bar that PR-3 removed.)
     // Selection range for "Add to Chat" floating button
     const [selectionRange, setSelectionRange] = useState<{ startLine: number; endLine: number } | null>(null);
     const [addToChatPos, setAddToChatPos] = useState<{ top: number; left: number } | null>(null);
@@ -501,6 +186,43 @@ export function FileEditorPanel({ width }: { width: number }) {
         );
     }, [lspLanguage, lspStatus, lspEnabled]);
 
+    // ── editorStatusStore mirroring (PR-2 of the unified status-bar refactor) ──
+    // After PR-3 the cursor + selectedCount mirrors became redundant —
+    // the Monaco selection handler writes straight to the store. The
+    // LSP signals and reset effects below stay because they are driven
+    // by `useLspClientPool` (which is NOT a singleton — AppLayout would
+    // otherwise open a duplicate LSP WebSocket per language) and by
+    // lifecycle transitions respectively.
+    // See `stores/editorStatusStore.ts` for the data model.
+
+    // Mirror the four LSP signals together (one action keeps partial
+    // updates coherent — see the bundle comment in `editorStatusStore`).
+    useEffect(() => {
+        useEditorStatusStore.getState().setLspSignals({
+            enabled: lspEnabled,
+            language: lspLanguage,
+            status: lspStatus,
+            statusMessage: lspStatusMessage,
+        });
+    }, [lspEnabled, lspLanguage, lspStatus, lspStatusMessage]);
+
+    // Reset to idle when the active file goes away or is loading — prevents
+    // stale "Ln 42, Col 13" leaking into the global status bar. The dep
+    // array uses both `id` (file switch) and `loading` (file became ready),
+    // so this fires at every meaningful transition.
+    useEffect(() => {
+        if (!activeFile || activeFile.loading) {
+            useEditorStatusStore.getState().resetToIdle();
+        }
+    }, [activeFile?.id, activeFile?.loading]);
+
+    // Reset on unmount (panel closes via `AppLayout.hasOpenFiles === false`).
+    useEffect(() => {
+        return () => {
+            useEditorStatusStore.getState().resetToIdle();
+        };
+    }, []);
+
     // Jump to cursorLine when search result navigates to a file.
     // Must handle two cases:
     //   1. File already active → same model, navigate directly.
@@ -561,7 +283,16 @@ export function FileEditorPanel({ width }: { width: number }) {
         monacoRef.current = monaco;
         // Track cursor position + selection + "Add to Chat" button position
         editor.onDidChangeCursorSelection((e) => {
-            setCursor({ line: e.selection.positionLineNumber, column: e.selection.positionColumn });
+            // Write cursor + selection straight to the cross-component
+            // status store so the global-bar <FileStatusCluster> sees
+            // every selection change without an intermediate local
+            // useState. PR-3 removed the per-file status bar that used
+            // to be the only consumer of these locals.
+            const { setCursor, setSelectedCount } = useEditorStatusStore.getState();
+            setCursor({
+                line: e.selection.positionLineNumber,
+                column: e.selection.positionColumn,
+            });
             // Sync selection count and "Add to Chat" button
             const sel = e.selection;
             if (sel && !sel.isEmpty()) {
@@ -1326,6 +1057,7 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     return (
         <div
+            ref={rootRef}
             className="relative flex flex-col shrink-0 bg-chat-area dark:border-zinc-800 rounded-xl overflow-hidden"
             style={{ width }}
         >
@@ -1531,46 +1263,6 @@ export function FileEditorPanel({ width }: { width: number }) {
                 )}
             </div>
 
-            {/* Status bar — shown in both edit and preview modes so the bar
-                reserves a consistent strip of vertical space at the bottom of
-                the panel. Preview-mode tabs are read-only, so we replace the
-                cursor/LSP indicators with the file MIME type and (for URL
-                previews) the remote host. */}
-            {activeFile && !activeFile.loading && (
-                <div className="flex items-center justify-between gap-2 border-t border-zinc-200 bg-chat-area px-3 h-5 text-[11px] text-zinc-500 select-none dark:border-zinc-800 dark:text-zinc-400">
-                    {activeFile.mode === "edit" ? (
-                        <>
-                            <span className="uppercase truncate min-w-0">{activeFile.language || "plain text"}</span>
-                            {lspEnabled && lspLanguage && (
-                                <div className="shrink-0">
-                                    <LspIndicator status={lspStatus} statusMessage={lspStatusMessage} language={lspLanguage} />
-                                </div>
-                            )}
-                            <span className="truncate min-w-0 text-right">Ln {cursor.line}, Col {cursor.column}{selectedCount > 0 ? ` (${selectedCount} selected)` : ""}</span>
-                        </>
-                    ) : (
-                        <>
-                            <span className="uppercase truncate min-w-0">
-                                {activeFile.kind === "url"
-                                    ? "URL"
-                                    : (activeFile.mimeType || activeFile.language || "")}
-                            </span>
-                            <span className="truncate min-w-0 text-right">
-                                {activeFile.kind === "url"
-                                    ? (() => {
-                                        try {
-                                            return new URL(activeFile.url || activeFile.relPath).host;
-                                        } catch {
-                                            return activeFile.url || activeFile.relPath;
-                                        }
-                                    })()
-                                    : ""}
-                            </span>
-                        </>
-                    )}
-                </div>
-            )}
-
             {/* Close confirmation dialog */}
             {closingFileId && (
                 <div
@@ -1655,7 +1347,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 <div
                     ref={tabMenuRef}
                     className="context-menu"
-                    style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+                    style={tabMenuStyle}
                     onContextMenu={(e) => e.preventDefault()}
                 >
                     {(() => {
