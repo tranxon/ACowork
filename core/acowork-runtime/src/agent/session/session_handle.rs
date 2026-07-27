@@ -142,12 +142,12 @@ impl SessionHandle {
                 // Fallback: return a minimal snapshot if the lock is poisoned.
                 SessionRuntimeSnapshot {
                     session_id: self.session_id.clone(),
-                    status_json: r#""idle""#.to_string(),
+                    status: r#""idle""#.to_string(),
                     model: None,
                     provider: None,
                     ratio: None,
                     todos_json: None,
-                    context_usage_json: None,
+                    context_usage: None,
                 }
             })
     }

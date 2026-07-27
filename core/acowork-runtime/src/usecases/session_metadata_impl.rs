@@ -110,14 +110,14 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                     match snap.read() {
                         Ok(guard) => {
                             let status: serde_json::Value =
-                                serde_json::from_str(&guard.status_json)
+                                serde_json::from_str(&guard.status)
                                     .unwrap_or(serde_json::Value::Null);
                             let todos: Option<serde_json::Value> = guard
                                 .todos_json
                                 .as_deref()
                                 .and_then(|s| serde_json::from_str(s).ok());
                             let context_usage: Option<serde_json::Value> = guard
-                                .context_usage_json
+                                .context_usage
                                 .as_deref()
                                 .and_then(|s| serde_json::from_str(s).ok());
                             Some(serde_json::json!({

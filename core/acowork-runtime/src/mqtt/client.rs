@@ -1422,7 +1422,7 @@ impl MqttChunkPublisher {
     /// Publish a context_usage event via MQTT (QoS 0).
     ///
     /// Carries the full [`acowork_core::protocol::ContextUsageInfo`] serialised
-    /// as JSON in `context_usage_json`. The Desktop Rust subscriber expands it
+    /// as JSON in `context_usage`. The Desktop Rust subscriber expands it
     /// into the same shape it emits for `SessionStateChanged`, so the frontend
     /// can render the StatusBar from either source without special-casing.
     pub(crate) async fn publish_context_usage(
@@ -1434,7 +1434,7 @@ impl MqttChunkPublisher {
         let agent_id = self.agent_id.clone();
         // Backwards-compat: keep the legacy individual token fields populated
         // for any in-flight Desktop subscriber that hasn't switched to
-        // `context_usage_json` yet.
+        // `context_usage` yet.
         let input_tokens = ctx_info.input_tokens;
         let output_tokens = ctx_info.output_tokens;
         let total_input_tokens = ctx_info.total_input_tokens.unwrap_or(0);
@@ -1449,7 +1449,7 @@ impl MqttChunkPublisher {
                 output_tokens,
                 total_input_tokens,
                 total_output_tokens,
-                context_usage_json: cu_json,
+                context_usage: cu_json,
             })),
         };
         let envelope = DataEnvelope {

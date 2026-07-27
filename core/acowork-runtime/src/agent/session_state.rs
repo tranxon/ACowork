@@ -61,7 +61,7 @@ pub struct SessionRuntimeSnapshot {
     /// Session identifier.
     pub session_id: String,
     /// JSON-serialized `SessionStatus` (same format as `SessionStateChanged` event).
-    pub status_json: String,
+    pub status: String,
     /// Currently active model, if any.
     /// **Runtime mirror of `SessionState::model`** — see ADR-039 (revised).
     /// The authoritative value lives in `data/meta/{session_id}.json`.
@@ -80,7 +80,7 @@ pub struct SessionRuntimeSnapshot {
     /// `None` if no LLM call has been made yet in this session.
     /// Serialized as JSON so the Gateway and frontend can consume it
     /// without additional protobuf message definitions.
-    pub context_usage_json: Option<String>,
+    pub context_usage: Option<String>,
 }
 
 /// A single item in the session-level todo list.
@@ -246,7 +246,7 @@ impl SessionState {
         budget: acowork_core::Budget,
         conversation: Option<ConversationSession>,
     ) -> Self {
-        let status_json = serde_json::to_string(&SessionStatus::Idle)
+        let status = serde_json::to_string(&SessionStatus::Idle)
             .unwrap_or_else(|_| r#""idle""#.to_string());
         Self {
             history: HistoryManager::new(max_tokens),
@@ -266,12 +266,12 @@ impl SessionState {
             identity_context: None,
             snapshot: Arc::new(RwLock::new(SessionRuntimeSnapshot {
                 session_id: String::new(),
-                status_json,
+                status,
                 model: None,
                 provider: None,
                 ratio: None,
                 todos_json: None,
-                context_usage_json: None,
+                context_usage: None,
             })),
         }
     }

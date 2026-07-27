@@ -449,9 +449,9 @@ pub struct ConversationSession {
     /// these are cached here whenever `emit_session_state()` runs.
     /// `build_session_state_snapshot()` reads them to produce a complete
     /// `SessionState` proto.
-    last_status_json: std::sync::Mutex<String>,
+    last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
-    last_context_usage_json: std::sync::Mutex<String>,
+    last_context_usage: std::sync::Mutex<String>,
 }
 
 /// Config-change notification carrying the full proto snapshot.
@@ -542,33 +542,33 @@ impl ConversationSession {
     ///
     /// ADR-043: carries only runtime telemetry (status, message_count,
     /// tokens, ratio, context_usage, updated_at). The runtime-only fields
-    /// (status_json, ratio, context_usage_json) are read from the cached
+    /// (status, ratio, context_usage) are read from the cached
     /// values updated by `update_runtime_state_cache()`.
     pub fn build_session_state_snapshot(&self) -> acowork_core::mqtt_proto::SessionState {
         let full = self.build_meta();
         let tokens = full.tokens.clone();
-        let status_json = self
-            .last_status_json
+        let status = self
+            .last_status
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
         let ratio = self.last_ratio.lock().map(|r| *r).unwrap_or(0.0);
-        let context_usage_json = self
-            .last_context_usage_json
+        let context_usage = self
+            .last_context_usage
             .lock()
             .map(|s| s.clone())
             .unwrap_or_default();
         acowork_core::mqtt_proto::SessionState {
             agent_id: full.agent_id,
             session_id: full.session_id,
-            status_json,
+            status,
             message_count: full.message_count,
             input_tokens: tokens.as_ref().map(|t| t.last_input).unwrap_or(0),
             output_tokens: tokens.as_ref().map(|t| t.last_output).unwrap_or(0),
             total_input_tokens: tokens.as_ref().map(|t| t.total_input).unwrap_or(0),
             total_output_tokens: tokens.as_ref().map(|t| t.total_output).unwrap_or(0),
             ratio,
-            context_usage_json,
+            context_usage,
             updated_at: full.last_active_at,
         }
     }
@@ -581,18 +581,18 @@ impl ConversationSession {
     /// to pass in the runtime fields.
     pub fn update_runtime_state_cache(
         &self,
-        status_json: &str,
+        status: &str,
         ratio: f64,
-        context_usage_json: &str,
+        context_usage: &str,
     ) {
-        if let Ok(mut s) = self.last_status_json.lock() {
-            *s = status_json.to_string();
+        if let Ok(mut s) = self.last_status.lock() {
+            *s = status.to_string();
         }
         if let Ok(mut r) = self.last_ratio.lock() {
             *r = ratio;
         }
-        if let Ok(mut c) = self.last_context_usage_json.lock() {
-            *c = context_usage_json.to_string();
+        if let Ok(mut c) = self.last_context_usage.lock() {
+            *c = context_usage.to_string();
         }
     }
 
@@ -705,9 +705,9 @@ impl ConversationSession {
             conversations_dir: conversations_dir.clone(),
             config_change_tx: config_tx,
             state_change_tx: state_tx,
-            last_status_json: std::sync::Mutex::new(String::new()),
+            last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(0.0),
-            last_context_usage_json: std::sync::Mutex::new(String::new()),
+            last_context_usage: std::sync::Mutex::new(String::new()),
         };
 
         // ADR-024: write per-session meta file (replaces index.json update).
@@ -784,9 +784,9 @@ impl ConversationSession {
                 conversations_dir,
                 config_change_tx: config_tx,
                 state_change_tx: state_tx,
-                last_status_json: std::sync::Mutex::new(String::new()),
+                last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(0.0),
-                last_context_usage_json: std::sync::Mutex::new(String::new()),
+                last_context_usage: std::sync::Mutex::new(String::new()),
             },
             config_rx,
             state_rx,
@@ -1164,14 +1164,14 @@ impl Clone for ConversationSession {
             conversations_dir: self.conversations_dir.clone(),
             config_change_tx: self.config_change_tx.clone(),
             state_change_tx: self.state_change_tx.clone(),
-            last_status_json: std::sync::Mutex::new(
-                self.last_status_json.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+            last_status: std::sync::Mutex::new(
+                self.last_status.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
             last_ratio: std::sync::Mutex::new(
                 self.last_ratio.lock().ok().map(|r| *r).unwrap_or(0.0),
             ),
-            last_context_usage_json: std::sync::Mutex::new(
-                self.last_context_usage_json.lock().ok().map(|s| s.clone()).unwrap_or_default(),
+            last_context_usage: std::sync::Mutex::new(
+                self.last_context_usage.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
         }
     }

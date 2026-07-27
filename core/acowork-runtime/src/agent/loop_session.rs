@@ -45,8 +45,8 @@ impl super::loop_::AgentLoop {
         let status = self.session.status.clone();
         // Build context_usage from persisted session tokens (if available)
         // so the frontend can show token counts immediately on session state push,
-        // without waiting for the first LLM call or a WebSocket context_usage event.
-        let context_usage_json = self.session.conversation.as_ref().and_then(|conv| {
+        // without waiting for the first LLM call or a MQTT context_usage event.
+        let context_usage = self.session.conversation.as_ref().and_then(|conv| {
             let persisted = conv.tokens()?;
             let model_name = self.session.model().unwrap_or("unknown");
             let caps = self.core.get_model_capabilities(model_name)?;
@@ -66,11 +66,11 @@ impl super::loop_::AgentLoop {
                 last_input = persisted.last_input,
                 last_output = persisted.last_output,
                 has_json = json.is_some(),
-                "emit_session_state: built context_usage_json"
+                "emit_session_state: built context_usage"
             );
             json
         });
-        if context_usage_json.is_none() {
+        if context_usage.is_none() {
             let has_conv = self.session.conversation.is_some();
             let has_tokens = self.session.conversation.as_ref()
                 .and_then(|c| c.tokens())
@@ -83,20 +83,20 @@ impl super::loop_::AgentLoop {
                 has_tokens,
                 model = %model_for_caps,
                 has_caps,
-                "emit_session_state: context_usage_json is None"
+                "emit_session_state: context_usage is None"
             );
         }
 
         // ADR-043: Update the runtime state cache on ConversationSession
         // and notify the state relay. The relay publishes a retained
-        // SessionState snapshot to `sessions/{sid}/state` (throttled).
+        // SessionState snapshot to `sessions/{sid}/state`.
         // This replaces the old ChunkEvent::SessionStateChanged path.
         if let Some(ref conv) = self.session.conversation {
-            let status_json = serde_json::to_string(&status)
+            let status = serde_json::to_string(&status)
                 .unwrap_or_else(|_| r#""idle""#.to_string());
             let ratio = self.session.model_ratio().unwrap_or(0.0);
-            let cu = context_usage_json.clone().unwrap_or_default();
-            conv.update_runtime_state_cache(&status_json, ratio, &cu);
+            let cu = context_usage.clone().unwrap_or_default();
+            conv.update_runtime_state_cache(&status, ratio, &cu);
             conv.notify_state_change();
         }
         // Update watch channel for SessionHandle reads.
@@ -133,7 +133,7 @@ impl super::loop_::AgentLoop {
                 }
             };
             if let Ok(mut guard) = self.session.snapshot.write() {
-                guard.status_json = status_json;
+                guard.status = status_json;
                 // ADR-039 (revised): mirror model + provider into the runtime
                 // snapshot so SessionManager::current_model_name and
                 // current_model_and_provider have sync access without
@@ -144,14 +144,14 @@ impl super::loop_::AgentLoop {
                 guard.provider = self.session.provider().map(|s| s.to_string());
                 guard.ratio = self.session.model_ratio();
                 guard.todos_json = todos_json;
-                // Only overwrite context_usage_json if we successfully computed a
+                // Only overwrite context_usage if we successfully computed a
                 // new value.  Otherwise preserve the existing value set by
                 // build_initial_session_state — emit_session_state may fail to
                 // compute context_usage (e.g. model capabilities not yet available
                 // for the session's model name), and unconditionally writing None
                 // would wipe the initial snapshot populated at session creation.
-                if context_usage_json.is_some() || guard.context_usage_json.is_none() {
-                    guard.context_usage_json = context_usage_json;
+                if context_usage.is_some() || guard.context_usage.is_none() {
+                    guard.context_usage = context_usage;
                 }
             }
         }

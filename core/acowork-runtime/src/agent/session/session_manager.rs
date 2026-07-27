@@ -977,7 +977,7 @@ impl SessionManager {
             let provider_name = session_state.provider().map(|s| s.to_string());
 
             // Build context_usage from persisted session tokens (if available).
-            let context_usage_json = session_state.conversation().and_then(|conv| {
+            let context_usage = session_state.conversation().and_then(|conv| {
                 let persisted = conv.tokens()?;
                 let m = model_name.as_deref().unwrap_or("unknown");
                 let caps = self.core.get_model_capabilities(m)?;
@@ -996,7 +996,7 @@ impl SessionManager {
             if let Ok(mut snap) = session_state.snapshot.write() {
                 snap.model = model_name;
                 snap.provider = provider_name;
-                snap.context_usage_json = context_usage_json;
+                snap.context_usage = context_usage;
                 // session_id is set by the caller after
                 // build_initial_session_state returns.
             }

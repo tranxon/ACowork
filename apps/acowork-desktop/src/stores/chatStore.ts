@@ -2694,7 +2694,7 @@ function handleMessageEvent(
     case "context_usage": {
       if (sid) {
         // ADR-033: Runtime now publishes a fully-populated `ContextUsageInfo`
-        // under `data.context_usage` (serialised from `ContextUsagePayload.context_usage_json`).
+        // under `data.context_usage` (serialised from `ContextUsagePayload.context_usage`).
         // The top-level `input_tokens` / `output_tokens` / `total_*_tokens` fields
         // are legacy per-turn counts only and must NOT be used to populate
         // `ContextUsageInfo` — they lack `context_window` / `total_tokens` /

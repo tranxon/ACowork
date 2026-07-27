@@ -169,18 +169,18 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "ratio": state.ratio,
                     "updated_at": state.updated_at,
                 });
-                // Parse status_json and context_usage_json inline
+                // Parse status and context_usage inline
                 let mut m = event.as_object().unwrap().clone();
-                if !state.status_json.is_empty() {
-                    match serde_json::from_str::<serde_json::Value>(&state.status_json) {
+                if !state.status.is_empty() {
+                    match serde_json::from_str::<serde_json::Value>(&state.status) {
                         Ok(val) => { m.insert("status".into(), val); }
-                        Err(_) => { m.insert("status_json".into(), serde_json::Value::String(state.status_json.clone())); }
+                        Err(_) => { m.insert("status".into(), serde_json::Value::String(state.status.clone())); }
                     }
                 }
-                if !state.context_usage_json.is_empty() {
-                    match serde_json::from_str::<serde_json::Value>(&state.context_usage_json) {
+                if !state.context_usage.is_empty() {
+                    match serde_json::from_str::<serde_json::Value>(&state.context_usage) {
                         Ok(val) => { m.insert("context_usage".into(), val); }
-                        Err(_) => { m.insert("context_usage_json".into(), serde_json::Value::String(state.context_usage_json.clone())); }
+                        Err(_) => { m.insert("context_usage".into(), serde_json::Value::String(state.context_usage.clone())); }
                     }
                 }
                 tracing::info!(
@@ -815,7 +815,7 @@ fn session_message_to_flat(
             Some(serde_json::Value::Object(m))
         }
         session_message::Event::ContextUsage(p) => {
-            // Prefer the fully-populated `context_usage_json` payload when the
+            // Prefer the fully-populated `context_usage` payload when the
             // Runtime publishes it: it carries `context_window`, `total_tokens`,
             // `usage_percent` and `usable_context` that the StatusBar needs.
             // Falling back to the legacy 4 token-count fields would render the
@@ -827,11 +827,11 @@ fn session_message_to_flat(
             m.insert("output_tokens".into(), serde_json::json!(p.output_tokens));
             m.insert("total_input_tokens".into(), serde_json::json!(p.total_input_tokens));
             m.insert("total_output_tokens".into(), serde_json::json!(p.total_output_tokens));
-            if !p.context_usage_json.is_empty() {
-                match serde_json::from_str::<serde_json::Value>(&p.context_usage_json) {
+            if !p.context_usage.is_empty() {
+                match serde_json::from_str::<serde_json::Value>(&p.context_usage) {
                     Ok(val) => { m.insert("context_usage".into(), val); }
                     Err(e) => {
-                        tracing::warn!(error = %e, "Failed to parse ContextUsagePayload.context_usage_json");
+                        tracing::warn!(error = %e, "Failed to parse ContextUsagePayload.context_usage");
                     }
                 }
             }

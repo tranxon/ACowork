@@ -363,7 +363,7 @@ message SessionConfig {
 /// separately via SessionConfig on the `sessions/{sid}/config` topic.
 ///
 /// This message absorbs the fields previously carried by the deleted
-/// SessionStateChangedPayload (status_json, ratio, context_usage_json).
+/// SessionStateChangedPayload (status, ratio, context_usage).
 /// The retained topic replaces the old non-retained
 /// `messages/session_state_changed` event, ensuring reconnecting clients
 /// immediately receive the latest state.
@@ -403,7 +403,7 @@ message SessionMessage {
     MemoryUpdatedPayload  memory_updated  = 23;
     SkillExecutedPayload       skill_executed          = 24;
     // ADR-043: SessionStateChangedPayload (field 25) removed. Its fields
-    // (status_json, ratio, context_usage_json) are now carried by the
+    // (status, ratio, context_usage) are now carried by the
     // retained SessionState topic (sessions/{sid}/state).
     IterationLimitPausedPayload iteration_limit_paused = 26;
     ToolApprovalNeededPayload   tool_approval_needed    = 27;
@@ -478,7 +478,7 @@ message CompactingPayload {
 // `context_window`, `input_tokens`, `output_tokens`, `total_tokens`,
 // `usage_percent`, `usable_context`. The legacy 4 token-count fields
 // are kept for backward compatibility with any in-flight Desktop
-// subscriber; new code should consume `context_usage_json` (a
+// subscriber; new code should consume `context_usage` (a
 // fully-populated JSON-serialized `ContextUsageInfo`).
 message ContextUsagePayload {
   string session_id = 1;
@@ -490,7 +490,7 @@ message ContextUsagePayload {
   // `context_window`, `total_tokens`, `usage_percent`, `usable_context`
   // and all optional cumulative fields. Frontend must prefer this over
   // the legacy individual token fields.
-  string context_usage_json = 6;
+  string context_usage = 6;
 }
 
 message MemoryUpdatedPayload {
@@ -504,8 +504,8 @@ message SkillExecutedPayload {
   bool success = 3;
 }
 
-// ADR-043: SessionStateChangedPayload removed. Its fields (status_json,
-// ratio, context_usage_json) are now carried by the retained SessionState
+// ADR-043: SessionStateChangedPayload removed. Its fields (status,
+// ratio, context_usage) are now carried by the retained SessionState
 // topic (sessions/{sid}/state), replacing the old non-retained
 // `messages/session_state_changed` event.
 
