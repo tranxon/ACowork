@@ -18,6 +18,14 @@ interface ExploreBlockProps {
   /** True when an assistant reply message follows this explore block in display order.
    *  This is the ONLY condition that triggers auto-collapse. */
   hasFollowUpReply?: boolean;
+  /** Live thinking state from the store.  When `isThinking=true` AND the
+   *  thought message has not yet been loaded into `items[]` (i.e. HTTP
+   *  refresh hasn't completed), a lightweight live ThinkBlock is rendered
+   *  at the top of the expanded view so the user sees real-time progress
+   *  inside the explore block — not floating outside as a duplicate. */
+  isThinking?: boolean;
+  thinkingContent?: string;
+  thinkingStartTime?: number | null;
 }
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
@@ -249,7 +257,7 @@ function approvalMatchesSession(
  *   message appears after this explore block in display order.
  * - Collapse (manual): user can collapse at any time.
  */
-export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress }: ExploreBlockProps) {
+export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime }: ExploreBlockProps) {
   const { t } = useTranslation();
   // Start collapsed only if this block already has a follow-up reply (historical/loaded).
   // For new active blocks, always start expanded — collapses ONLY when
@@ -263,7 +271,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     if (expanded && contentRef.current) {
       contentRef.current.scrollTop = contentRef.current.scrollHeight;
     }
-  }, [expanded, items]);
+  }, [expanded, items, thinkingContent]);
 
   const pairedItems = buildPairedItems(items);
   const stepCount = pairedItems.length;
@@ -281,6 +289,13 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   const hasPendingTools = pendingToolsCount > 0;
 
   const isExploring = isStreaming || hasPendingTools;
+
+  // Live ThinkBlock: shown only when (a) the agent is actively thinking,
+  // AND (b) the thought message has NOT yet been loaded into items[].
+  // Once HTTP refresh lands, pairedItems will contain a thought item and
+  // the frozen ThinkBlock takes over - no duplicate rendering.
+  const liveThoughtNotYetLoaded = !!isThinking
+    && (pairedItems.length === 0 || pairedItems[0].kind !== "thought");
 
   // Auto-expand when exploring starts (respect user manual collapse),
   // but only if no follow-up reply has appeared (once collapsed by reply, stay collapsed)
@@ -380,6 +395,23 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
             {pairedItems.map((paired, idx) => (
               <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />
             ))}
+            {/* Live thought anchored at the BOTTOM (after paired items).
+                Rationale:  the live thought is the freshest item currently
+                being produced, so it should be the last / bottom-most
+                entry the user sees.  Once HTTP refresh lands the thought
+                into items[], buildPairedItems will hoist it into its
+                proper chronological position above this slot, and the
+                live ThinkBlock disappears (liveThoughtNotYetLoaded=false).
+                The container auto-scrolls to scrollHeight (see useEffect
+                above) so the bottom-anchored live thought is always in
+                view while it streams. */}
+            {liveThoughtNotYetLoaded && (
+              <ThinkBlock
+                content={thinkingContent ?? ""}
+                isStreaming={true}
+                startTime={thinkingStartTime ?? undefined}
+              />
+            )}
           </div>
         </div>
       )}
@@ -393,7 +425,10 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     && prev.pendingApproval === next.pendingApproval
     && prev.hasFollowUpReply === next.hasFollowUpReply
     && prev.toolProgress === next.toolProgress
-    && prev.onCancelTool === next.onCancelTool;
+    && prev.onCancelTool === next.onCancelTool
+    && prev.isThinking === next.isThinking
+    && prev.thinkingContent === next.thinkingContent
+    && prev.thinkingStartTime === next.thinkingStartTime;
 });
 
 /** Pair tool_call with its corresponding tool_result.
@@ -605,7 +640,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             </span>
           )}
           {showProgress && progressEntry && call.toolCallId && (
-            <div className="ml-2 flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+            <div className="ml-2 flex items-center gap-2 text-[10px] text-zinc-400 dark:text-zinc-500">
               <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
                 <div
                   className="absolute inset-y-0 left-0 bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
@@ -617,11 +652,11 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
                 <button
                   onClick={handleCancel}
                   disabled={cancelling}
-                  className="ml-0.5 text-zinc-400 hover:text-red-500 transition-colors disabled:opacity-30"
+                  className="ml-1 text-zinc-400 hover:text-red-500 transition-colors disabled:opacity-30"
                   title={t("exploreBlock.cancelTool")}
                   aria-label={t("exploreBlock.cancelTool")}
                 >
-                  <Square className="h-2.5 w-2.5 fill-current" />
+                  <Square className="h-4 w-4 fill-current" />
                 </button>
               )}
             </div>

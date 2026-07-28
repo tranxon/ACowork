@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -61,7 +61,6 @@ function useMergedRef<T>(
 
 import { AskQuestionCard } from "./AskQuestionCard";
 import { DebugPausedBanner } from "./DebugPausedBanner";
-import { ThinkBlock } from "./ThinkBlock";
 import { RetryWaitBanner } from "./RetryWaitBanner";
 import { SessionTabBar } from "./SessionTabBar";
 import { SkillsPanel } from "../skills/SkillsPanel";
@@ -348,6 +347,7 @@ export function ChatPanel() {
   });
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const loopDetectedPaused = sessionState?.loopDetectedPaused ?? null;
+  const serverError = sessionState?.serverError ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
   const pendingQuestions = sessionState?.pendingQuestions ?? [];
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -407,6 +407,7 @@ export function ChatPanel() {
     continueExecution,
     resolveApproval,
     resolveApprovalByToolCallId,
+    clearServerError,
   } = useChatStore.getState();
   const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const currentScrollKey = selectedAgentId && currentSessionId ? `${selectedAgentId}:${currentSessionId}` : null;
@@ -441,6 +442,24 @@ export function ChatPanel() {
   }, [todos, session.setTodosCollapsed]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  // Last known scrollTop — captured BEFORE DOM mutation each commit.
+  //
+  // useInsertionEffect runs in the commit phase, BEFORE the mutation step
+  // (VML unmount/mount).  At this point the previous VirtualMessageList is
+  // still in the DOM and container.scrollTop reflects the user’s real
+  // position.  This ref is read by the snapshot-write cleanup below, which
+  // runs AFTER mutation — by then the previous VML has been removed, the
+  // container is empty, and the browser has clamped container.scrollTop to 0.
+  //
+  // Without this ref, every session switch would snapshot scrollOffset=0 and
+  // the user would be restored to the TOP of every previously-visited session.
+  const lastScrollTopRef = useRef(0);
+  useInsertionEffect(() => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      lastScrollTopRef.current = container.scrollTop;
+    }
+  });
   /** Timestamp of the last compositionEnd event. On macOS WKWebView, compositionEnd
    *  fires BEFORE the keydown(Enter) that confirmed the IME selection, so
    *  isComposing is already false when keydown runs. We use a time-window
@@ -464,17 +483,30 @@ export function ChatPanel() {
   const scrollSnapshot = currentScrollKey
     ? chatScrollSnapshots.get(currentScrollKey)
     : undefined;
-  // While streaming the message list grows continuously, so any saved
-  // scrollOffset is stale by definition — the same numeric offset points to
-  // different content (or no content at all) after even a few seconds of
-  // streaming.  Force a "Fresh session" scroll-to-bottom on remount whenever
-  // the session is actively streaming, regardless of what the snapshot says.
-  // This also defends against the snapshot having been written with
-  // pinnedToBottom=false (e.g. by a stale handleScroll read) which would
-  // otherwise land the user near the top of the conversation.
-  const initialScrollOffset = !sending && scrollSnapshot &&
-    !scrollSnapshot.pinnedToBottom &&
-    scrollSnapshot.scrollOffset > 0
+  // Decide whether to restore the saved scrollOffset or scroll to bottom.
+  //
+  // Single source of truth: `sending` (derived from sessionStatus — the
+  // backend's view of whether the agent is actively streaming).  Two
+  // branches, by user intent:
+  //
+  //   sending=true   → scroll to bottom unconditionally.  The user just
+  //                    returned to a session that's still producing output;
+  //                    they want to see the latest in-flight message.  The
+  //                    saved scrollOffset is also stale by definition (the
+  //                    list grows every poll), so restoring it would land
+  //                    the user on wrong/no content.
+  //
+  //   sending=false  → restore the saved scrollOffset verbatim — "leave
+  //                    it where the user left it".  The list is stable,
+  //                    the offset is the user's last deliberate position.
+  //
+  // Previous gate (`!pinnedToBottom && scrollOffset > 0`) was the source of
+  // the session-switch-scroll bug: pinnedToBottom is a side-effect of the
+  // scroll state machine (transient during pagination / mid-load) rather
+  // than user intent, and `scrollOffset > 0` falsely bailed out when the
+  // user was genuinely at the top.  Using `sending` alone is both more
+  // stable and easier to reason about.
+  const initialScrollOffset = !sending && scrollSnapshot
     ? scrollSnapshot.scrollOffset
     : undefined;
   // DIAGNOSTIC — log only when the (key, sending, snapshot) signature actually
@@ -498,7 +530,6 @@ export function ChatPanel() {
 
   // ADR-041 C4: messageBlocks now comes from the adapter.
   const messageBlocks = adapter.blocks;
-
   // Show compacting indicator below messages when compaction is in progress
   const isCompacting = sessionState?.isCompacting ?? false;
   const showCompactingItem = isCompacting;
@@ -690,10 +721,16 @@ export function ChatPanel() {
       const container = messagesContainerRef.current;
       if (!key || !container) return;
 
+      // CRITICAL: read scrollOffset from lastScrollTopRef, NOT container.scrollTop.
+      // Cleanup runs AFTER mutation — the previous VML has been unmounted and
+      // the browser has clamped scrollTop to 0.  lastScrollTopRef was captured
+      // PRE-mutation by useInsertionEffect above (BEFORE VML unmount), so it
+      // reflects the user’s actual position.  See the ref declaration for why.
+      const scrollOffset = lastScrollTopRef.current;
       const distFromBottom = getDistanceFromBottom(container);
-      log.debug("[CP:snapshot-write]", { key, scrollOffset: container.scrollTop, sending, distFromBottom });
+      log.debug("[CP:snapshot-write]", { key, scrollOffset, sending, distFromBottom });
       setScrollSnapshot(key, {
-        scrollOffset: container.scrollTop,
+        scrollOffset,
         // Use a generous threshold (120px) for snapshot: if the user was only
         // slightly scrolled up, treat it as pinned so nav-back re-pins to bottom.
         //
@@ -831,7 +868,7 @@ export function ChatPanel() {
   // jumpToOldest.  The jump target effect in the controller handles the
   // actual scroll after data arrives.
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const content = session.inputValue.trim();
     const hasItems = session.pendingAttachedItems.some(
       (it) => it.status === "success" && it.item !== undefined,
@@ -851,21 +888,38 @@ export function ChatPanel() {
       .filter((it) => it.status === "success" && it.item !== undefined)
       .map((it) => it.item!) as AttachedItem[];
 
-    // sendMessage is async but we fire-and-forget here —
-    // the store handles all state updates internally
-    session.scope.current.userJustSent = true;
+    // sendMessage is async but we fire-and-forget here.
+    // The store handles all state updates internally.
+    //
+    // If the user is scrolled up, jump to the latest page first.  This
+    // resets messageOffset to 0 so the optimistic insert in sendMessage
+    // -> appendMessageAndAdjustMeta correctly appends to the contiguous
+    // tail window.  We delegate to scrollController.jumpToBottom (same
+    // code path as the arrow button) so the state machine transitions
+    // through "jumping" while the data loads, blocking the pagination
+    // timer from racing with ensureLatestInCache.
+    //
+    // Input is cleared immediately for responsiveness; the actual send
+    // waits for the jump to complete.
+    session.setInputValue("");
+    session.setPendingAttachedItems([]);
+
+    if (selectedAgentId && currentSessionId) {
+      const ss = useChatStore.getState().getSessionState(selectedAgentId, currentSessionId);
+      if (ss.messageOffset > 0) {
+        await scrollController.jumpToBottom();
+      }
+    }
+
     void sendMessage(content, selectedAgentId, activeSkill?.name, attachedItems.length > 0 ? attachedItems : undefined).then(() => {
       clearActiveSkill();
     });
-    session.setInputValue("");
-    // Clear pending attachments after send (one-shot)
-    session.setPendingAttachedItems([]);
   };
 
   // Stop button dual-action:
   //   input has content → send to queue (no stop, message waits for next loop)
   //   input empty       → stop current loop
-  const handleStop = () => {
+  const handleStop = async () => {
     const content = session.inputValue.trim();
     if (content && selectedAgentId && currentSessionId) {
       // Add to queue — message waits in the queue box above the input area.
@@ -873,9 +927,18 @@ export function ChatPanel() {
       session.setInputValue("");
     } else if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
       // Click with queued messages: send all queued + stop current loop.
-      session.scope.current.userJustSent = true;
       const msgs = [...queuedMessages];
       useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
+
+      // Jump to bottom first if scrolled up, so optimistic inserts
+      // don't break the sliding window (same as handleSend).  Use
+      // scrollController.jumpToBottom so the state machine goes
+      // through "jumping" while ensureLatestInCache runs.
+      const ss = useChatStore.getState().getSessionState(selectedAgentId, currentSessionId);
+      if (ss.messageOffset > 0) {
+        await scrollController.jumpToBottom();
+      }
+
       for (const msg of msgs) {
         void sendMessage(msg, selectedAgentId, activeSkill?.name).then(() => {
           clearActiveSkill();
@@ -887,6 +950,22 @@ export function ChatPanel() {
       sendStop(selectedAgentId);
     }
   };
+
+  // Continue button (iterationLimit / loopDetected pause): jump to
+  // bottom first if scrolled up so the resumed response lands in
+  // view.  Same code path as the down-arrow button — state machine
+  // goes through "jumping" while ensureLatestInCache runs, blocking
+  // the pagination timer from racing with the jump.
+  const handleContinue = useCallback(async () => {
+    if (!selectedAgentId) return;
+    if (currentSessionId) {
+      const ss = useChatStore.getState().getSessionState(selectedAgentId, currentSessionId);
+      if (ss.messageOffset > 0) {
+        await scrollController.jumpToBottom();
+      }
+    }
+    continueExecution(selectedAgentId);
+  }, [selectedAgentId, currentSessionId, continueExecution, scrollController]);
 
   const handleRemoveQueued = (index: number) => {
     if (selectedAgentId && currentSessionId) {
@@ -1303,6 +1382,9 @@ export function ChatPanel() {
               onApprove={handleToolApprove}
               onCancelTool={handleToolCancel}
               toolProgress={toolProgressByToolCallId}
+              isThinking={isThinking}
+              thinkingContent={thinkingContent}
+              thinkingStartTime={thinkingStartTime}
               t={t}
               adapter={adapter}
               scrollContainerRef={messagesContainerRef}
@@ -1349,18 +1431,21 @@ export function ChatPanel() {
                   </div>
                 )}
                 <div className="ml-12 py-1.5">
-                  {isThinking ? (
-                    <ThinkBlock
-                      content={thinkingContent}
-                      isStreaming={true}
-                      startTime={thinkingStartTime ?? undefined}
-                    />
-                  ) : (
-                    <div className="flex items-center gap-1.5">
-                      <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                      <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
-                    </div>
-                  )}
+                  {/* ThinkBlock intentionally NEVER renders here in the
+                      outer working indicator.  Live thinking always
+                      belongs inside ExploreBlock (the only context
+                      where the "think + tool" sequence is meaningful)
+                      — see ExploreBlock's paired-items render where
+                      the live thought is anchored at the bottom as
+                      the freshest item.  When the last messageBlocks
+                      entry is an explore_group, the working indicator
+                      just shows the status line so the agent header
+                      transitions seamlessly into the explore_block
+                      content. */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                    <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
+                  </div>
                 </div>
               </div>
             )}
@@ -1392,12 +1477,7 @@ export function ChatPanel() {
                     {iterationLimitPaused.message}
                   </span>
                   <button
-                    onClick={() => {
-                      if (selectedAgentId) {
-                        session.scope.current.userJustSent = true;
-                        continueExecution(selectedAgentId);
-                      }
-                    }}
+                    onClick={handleContinue}
                     className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
@@ -1418,12 +1498,7 @@ export function ChatPanel() {
                     {loopDetectedPaused.message}
                   </span>
                   <button
-                    onClick={() => {
-                      if (selectedAgentId) {
-                        session.scope.current.userJustSent = true;
-                        continueExecution(selectedAgentId);
-                      }
-                    }}
+                    onClick={handleContinue}
                     className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
@@ -1434,6 +1509,40 @@ export function ChatPanel() {
               </div>
             )}
             {/* Ask question cards — shown when LLM asks the user questions */}
+            {serverError && (
+              <div className="mt-1.5 flex justify-center px-6">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-amber-600 select-none dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-400">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="whitespace-pre-wrap break-words" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
+                      {serverError.content}
+                    </div>
+                    {serverError.errorDetail && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-xs text-amber-500/70 hover:text-amber-500 select-none">
+                          Details
+                        </summary>
+                        <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-amber-500/70 whitespace-pre-wrap break-all">
+                          {serverError.errorDetail}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (selectedAgentId && currentSessionId) {
+                        clearServerError(selectedAgentId, currentSessionId);
+                      }
+                    }}
+                    className="ml-auto flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
+                  >
+                    <X className="h-3 w-3" />
+                    <span>Dismiss</span>
+                  </button>
+                </div>
+              </div>
+            )}
             {pendingQuestions.length > 0 && (
               <div className="space-y-1">
                 {/* Progress indicator */}

@@ -27,8 +27,6 @@ export interface SessionScope {
   // ── Scroll & Virtual ──
   /** Tracks which session ID is being initial-loaded. `null` when no load is in flight. */
   isInitialLoad: string | null;
-  /** True for the render immediately after the user sends a message. */
-  userJustSent: boolean;
   /** True while the LLM is in its "thinking" prelude (before any text streamed). */
   thinkingWasShowing: boolean;
   /** Previous display count for scroll-on-new-message logic. */
@@ -40,7 +38,6 @@ export interface SessionScope {
 export function createDefaultSessionScope(): SessionScope {
   return {
     isInitialLoad: null,
-    userJustSent: false,
     thinkingWasShowing: false,
     prevDisplayCount: 0,
   };

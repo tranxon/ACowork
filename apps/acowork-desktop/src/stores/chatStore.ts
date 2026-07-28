@@ -37,7 +37,7 @@ const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *
  * Called from the `record_complete` handler and from `setPinnedToBottom`
  * (catch-up when the user returns to the bottom).
- *
+  *
  * Guards:
  *  - isPinnedToBottom (early exit): user is not at the bottom – skip
  *    entirely.  Prevents message array mutations (append/replace) from
@@ -46,10 +46,13 @@ const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *  - isLoadingMore: don't interfere with an in-flight user-initiated
  *    pagination request (loadBefore / loadAfter share the same
  *    per-session AbortController).
- *  - messageOffset !== 0 (in-timeout): user is not on the latest page
- *    (browsing history) – skip.  This is a secondary check inside the
- *    timeout because messageOffset can change between the early exit
- *    and the timeout callback.
+ *
+ * NOTE: The former `messageOffset !== 0` guard was removed because it
+ * blocked the very refresh that resets messageOffset to 0.  When the
+ * user scrolls back to bottom (isPinnedToBottom becomes true) while
+ * messageOffset is still > 0, the HTTP fetch at offset=0 is what
+ * brings the window back to the newest page.  isPinnedToBottom alone
+ * is sufficient to decide whether a refresh should fire.
  */
 function scheduleRefresh(agentId: string, sessionId: string): void {
   // Early exit: if the user is not at the bottom, don't even set a timer.
@@ -71,7 +74,6 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
     const ss = getSessionState(store, agentId, sessionId);
     if (ss.isLoadingMore) return;
     if (!ss.isPinnedToBottom) return;  // re-check after debounce
-    if (ss.messageOffset !== 0) return; // not on latest page
     // No messageTotal === 0 guard: record_complete itself proves data
     // exists in the Runtime's storage.  An HTTP fetch with offset=0 will
     // return the latest records regardless of the stale local total.
@@ -104,49 +106,36 @@ function trimOldest(messages: ChatMessage[]): ChatMessage[] {
 }
 
 /**
- * Apply `trimOldest` and adjust pagination metadata (messageOffset /
- * messageLimit / messageTotal) to keep `hasOlder` / `hasNewer` accurate
- * after mutations that bypass `loadSessionMessages` (i.e. MQTT-driven
- * inserts and optimistic user-message appends).
+ * Append a new message to the cache and adjust pagination metadata.
  *
- * The offset/limit/total model:
- *   offset = messages NEWER than the cache window (0 = includes newest)
- *   limit  = size of the cache window
- *   total  = total messages in the conversation
- *
- * When a NEW entry is added:
- *   - total += 1
- *   - If offset == 0 (cache includes newest): limit += 1, then subtract any
- *     messages dropped by trimming.  The window grew on the newer end and
- *     shrank on the older end.
- *   - If offset > 0 (user scrolled up): offset += 1 (one more message is
- *     now above the window), limit unchanged minus any trimming.
- *
- * When an IN-PLACE update occurs (same id, e.g. placeholder -> freeze):
- *   - No change to total (count unchanged).
- *   - If trimming drops messages (shouldn't normally happen since the array
- *     length is the same), reduce limit accordingly.
+ * **Sliding-window invariant**: `messages` is ALWAYS a contiguous window
+ * into the full conversation.  When `messageOffset === 0` the window
+ * touches the newest entry, so appending a real-time message keeps it
+ * contiguous.  When `messageOffset > 0` the user has scrolled up – the
+ * new message (at offset 0) is NOT adjacent to the window, so we must
+ * NOT append it.  The message will be loaded via `scheduleRefresh` when
+ * the user returns to the bottom.
  */
-function applyTrimAndAdjustMeta(
+function appendMessageAndAdjustMeta(
   ss: SessionChatState,
   newMessages: ChatMessage[],
-  isNewEntry: boolean,
 ): Partial<SessionChatState> {
-  const trimmed = trimOldest(newMessages);
-  const dropped = newMessages.length - trimmed.length;
-  const patch: Partial<SessionChatState> = { messages: trimmed };
-  if (isNewEntry) {
-    patch.messageTotal = ss.messageTotal + 1;
-    if (ss.messageOffset === 0) {
-      patch.messageLimit = Math.max(0, ss.messageLimit + 1 - dropped);
-    } else {
-      patch.messageOffset = ss.messageOffset + 1;
-      patch.messageLimit = Math.max(0, ss.messageLimit - dropped);
-    }
-  } else if (dropped > 0) {
-    patch.messageLimit = Math.max(0, ss.messageLimit - dropped);
+  if (ss.messageOffset === 0) {
+    // At the bottom – append and trim if over the cache cap.
+    const trimmed = trimOldest(newMessages);
+    const dropped = newMessages.length - trimmed.length;
+    return {
+      messages: trimmed,
+      messageTotal: ss.messageTotal + 1,
+      messageLimit: Math.max(0, ss.messageLimit + 1 - dropped),
+    };
   }
-  return patch;
+  // Not at the bottom – don't touch messages array.  Just bump the
+  // metadata so hasNewer / hasOlder stay accurate.
+  return {
+    messageTotal: ss.messageTotal + 1,
+    messageOffset: ss.messageOffset + 1,
+  };
 }
 
 // ── ADR-035 C2: assistant activeStream safety valve ──
@@ -330,6 +319,13 @@ interface SessionChatState {
    *  `tool_result` record arrives. Absence of an entry means the tool
    *  completed in <5s — keep the pre-ADR-045 UX (breathing dot). */
   toolProgress: Record<string, { elapsedMs: number; timeoutMs: number }>;
+  /**
+   * Server-side error from MQTT `error` event.  NOT persisted to JSONL
+   * by the backend, so it must NOT enter the `messages` array (which is
+   * a sliding window over JSONL).  Rendered as a dismissible banner in
+   * ChatPanel, same pattern as RetryWaitBanner / DebugPausedBanner.
+   */
+  serverError: { content: string; errorDetail?: string; errorType?: string; timestamp: number } | null;
   isSessionReady: boolean;
 }
 
@@ -371,6 +367,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isSessionReady: false,
   isLoadingMore: false,
   toolProgress: {} as Record<string, { elapsedMs: number; timeoutMs: number }>,
+  serverError: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -724,6 +721,8 @@ interface ChatStore {
    * any messages that arrived while the user was scrolled up are loaded.
    */
   setPinnedToBottom: (agentId: string, sessionId: string, value: boolean) => void;
+  /** Dismiss the server-side error banner. */
+  clearServerError: (agentId: string, sessionId: string) => void;
   /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
    *  Config fields (model/provider/workspace_id/reasoning_effort/temperature)
    *  are NOT applied here - use `fetchSessionConfig` or `loadSession`. */
@@ -1257,6 +1256,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
+        serverError: null,
       }),
     }));
   },
@@ -1277,6 +1277,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         hasMoreIncremental: false,
         abortController: null,
         loadSequence: 0,
+        serverError: null,
       }),
     }));
   },
@@ -1322,7 +1323,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
         return updateSessionState(state, agentId, sessionId,
-          applyTrimAndAdjustMeta(ss, [...ss.messages, userMsg], true));
+          appendMessageAndAdjustMeta(ss, [...ss.messages, userMsg]));
       });
       // ── DIAG: verify optimistic user message insert ──
       log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
@@ -1394,19 +1395,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
     } catch (error) {
       log.error("[ChatStore] MQTT message send failed:", error);
-      const errorMsg: ChatMessage = {
-        id: `msg-error-${Date.now()}`,
-        type: "system",
-        content: `Failed to send message: Agent may not be connected yet. Please wait and try again.`,
-        timestamp: Date.now(),
-      };
-      if (sessionId) {
-        set((state) => ({
-          ...updateSessionState(state, agentId, sessionId, {
-                messages: [...getSessionState(state, agentId, sessionId).messages, errorMsg],
-          }),
-        }));
-      }
+      // Transient client-side error - show a toast, don't pollute the
+      // messages array (sliding window over JSONL).
+      showToast({
+        type: "error",
+        message: "Failed to send message: Agent may not be connected yet. Please wait and try again.",
+      });
     }
   },
 
@@ -1752,9 +1746,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               : merged;
           }
         } else {
+          // returnedOffset === prevOffset: same window (e.g. scheduleRefresh
+          // or duplicate load).  Merge any newly appeared messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const same = converted.filter((m) => !existingIds.has(m.id));
-          nextMessages = [...ss.messages, ...same];
+          const merged = [...ss.messages, ...same];
+          if (effectiveDirection === "none") {
+            nextMessages = merged;
+            finalOffset = Math.min(returnedOffset, prevOffset);
+            finalLimit = Math.max(
+              returnedOffset + returnedLimit,
+              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+            ) - finalOffset;
+          } else {
+            // Trim oldest to stay within MESSAGE_CACHE_WINDOW, since
+            // any new messages arrive at the newer end of the window.
+            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
+              ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
+              : merged;
+            // Preserve the larger of the two limits so the cache
+            // window metadata never shrinks on a refresh.
+            finalLimit = Math.max(returnedLimit, prevLimit);
+          }
         }
 
         return updateSessionState(state, agentId, sessionId, {
@@ -1979,10 +1992,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Catch-up: user returned to the bottom.  Trigger scheduleRefresh
     // so any record_complete events that were blocked while the user
     // was scrolled up are now loaded.  scheduleRefresh will re-check
-    // isPinnedToBottom (now true) and messageOffset before firing.
+    // isPinnedToBottom (now true) before firing.
     if (value) {
       scheduleRefresh(agentId, sessionId);
     }
+  },
+
+  clearServerError: (agentId: string, sessionId: string) => {
+    set((state) => updateSessionState(state, agentId, sessionId, { serverError: null }));
   },
 
   // ADR-047: Pull session state (runtime telemetry only) from backend.
@@ -2586,24 +2603,20 @@ function handleMessageEvent(
       const errorType = (data.error_type) as string | undefined;
       log.error("[ChatStore] Server error:", errorMsg, errorDetail);
       // ADR-035 Phase 3: no polling
-      const errMsg: ChatMessage = {
-        id: `msg-error-${Date.now()}`,
-        type: "error",
-        content: errorMsg as string,
-        errorDetail: errorDetail || undefined,
-        errorType: errorType || undefined,
-        timestamp: Date.now(),
-        ...getAgentSenderInfo(agentId),
-      };
-      set((state) => {
-        const ss = getSessionState(state, agentId, sid!);
-        return {
-          ...updateSessionState(state, agentId, sid!, {
-            ...applyTrimAndAdjustMeta(ss, [...ss.messages, errMsg], true),
-            isCompacting: false,
-          }),
-        };
-      });
+      // Server errors are NOT persisted to JSONL by the backend, so they
+      // must NOT enter the messages array (sliding window over JSONL).
+      // Store as a separate banner state instead.
+      set((state) => ({
+        ...updateSessionState(state, agentId, sid!, {
+          serverError: {
+            content: errorMsg as string,
+            errorDetail: errorDetail || undefined,
+            errorType: errorType || undefined,
+            timestamp: Date.now(),
+          },
+          isCompacting: false,
+        }),
+      }));
       break;
     }
 

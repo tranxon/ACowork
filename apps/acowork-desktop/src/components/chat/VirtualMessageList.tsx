@@ -42,6 +42,12 @@ interface VirtualMessageListProps {
   currentSessionId: string | null;
   /** ADR-045: Per-tool progress heartbeat, keyed by tool_call_id. */
   toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }>;
+  /** Live thinking state from the store, propagated to the last explore
+   *  group so it can render a real-time ThinkBlock inside its expanded
+   *  area before the HTTP refresh lands. */
+  isThinking: boolean;
+  thinkingContent: string;
+  thinkingStartTime: number | null;
   /** ADR-045: Cancel a single in-flight tool execution. */
   onCancelTool?: (toolCallId: string) => void;
   /** Current agent ID (for AgentAvatar). */
@@ -142,6 +148,9 @@ export const VirtualMessageList = React.forwardRef<
     currentSessionId,
     toolProgress,
     onCancelTool,
+    isThinking,
+    thinkingContent,
+    thinkingStartTime,
     selectedAgentId,
     agentDisplayName,
     selectedAgent,
@@ -608,6 +617,9 @@ export const VirtualMessageList = React.forwardRef<
                         onCancelTool={onCancelTool}
                         toolProgress={toolProgress}
                         hasFollowUpReply={hasFollowUpReply}
+                        isThinking={isThinking}
+                        thinkingContent={thinkingContent}
+                        thinkingStartTime={thinkingStartTime}
                       />
                     </div>
                   );

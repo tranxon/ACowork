@@ -215,11 +215,34 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   }, []);
 
   // ── Session reset ──
-  // When the session changes, reset all state to defaults.  This runs
-  // as a useEffect (not useLayoutEffect) because it doesn't need to
-  // run before paint - the init scroll effect will handle the initial
-  // scroll position on the first data arrival.
-  useEffect(() => {
+  // When the session changes, reset all state to defaults.  Runs as
+  // useLayoutEffect (NOT useEffect) because the order matters:
+  //
+  //   useLayoutEffect cleanup + setup run inside the commit phase,
+  //   BEFORE paint.  Within the same component, hooks execute in
+  //   source order — so this session-reset effect runs BEFORE the
+  //   init-scroll useLayoutEffect below.  That ordering is critical:
+  //   it guarantees didInitScrollRef.current = false is visible to the
+  //   init-scroll effect on the SAME commit, so the init-scroll can
+  //   actually run scrollToBottom() for the new session.
+  //
+  // If we used useEffect (post-paint, asynchronous):
+  //   1. Commit phase: init-scroll runs first, sees didInitScrollRef
+  //      still == true from the previous session, early-returns →
+  //      scroll position is NEVER set for the new session.
+  //   2. Paint happens with scrollTop at whatever the browser left it
+  //      (typically 0).
+  //   3. THEN the session-reset useEffect runs and resets the ref —
+  //      but init-scroll's deps ([virtualCount, initialScrollOffset,
+  //      sending, ...]) haven't changed, so it won't re-run.  The user
+  //      lands at the top of every freshly-mounted session.
+  //
+  // This was the root cause of both:
+  //   - "streaming session → switch → switch back lands at top"
+  //     (scrollToBottom never fired for the returning session).
+  //   - "idle session → switch → switch back lands at top"
+  //     (init-scroll never ran to apply the saved scrollOffset either).
+  useLayoutEffect(() => {
     if (prevSessionKeyRef.current === sessionKey) return;
     prevSessionKeyRef.current = sessionKey;
     log.debug("[ScrollController] session reset", { sessionKey });
