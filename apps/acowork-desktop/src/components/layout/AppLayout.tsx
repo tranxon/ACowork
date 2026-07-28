@@ -516,8 +516,60 @@ export function AppLayout() {
     }
   }, [mqttConnected, lastMqttError, gatewayStatus, setStatus, clearStatus, t]);
 
-  // Detect wake from sleep via visibility change and reconnect
+  // Detect wake from sleep via visibility change and reconnect.
+  //
+  // ADR-036 originally declared "we do NOT touch the MQTT client here"
+  // and relied entirely on the Rust `rumqttc` eventloop + 90 s watchdog
+  // to recover from OS sleep/wake. Empirically that leaves the user
+  // staring at a "Realtime connection lost, retrying..." banner for up
+  // to 90 s after every wake event - and on some OSes the kernel never
+  // detects the broken TCP connection at all (half-dead socket), so
+  // the watchdog is the *only* recovery path. The fix:
+  //
+  //   1. Frontend proactively invokes `force_reconnect_mqtt` on wake
+  //      whenever the store says we are disconnected. The Rust side
+  //      drops the EventLoop + AsyncClient and creates a fresh pair,
+  //      which immediately fails-or-succeeds against the (possibly
+  //      just-restored) TCP socket - no need to wait for the watchdog.
+  //   2. Debounced: a flurry of `visibilitychange` events (e.g. user
+  //      switches apps then back rapidly) only triggers ONE reconnect.
+  //   3. Falls back to `checkHealth()` if the Tauri command is missing
+  //      or transiently rejects (e.g. during shutdown).
   useEffect(() => {
+    let pending = false;
+    let debounceHandle: ReturnType<typeof setTimeout> | null = null;
+
+    const triggerForceReconnect = () => {
+      if (pending) return;
+      pending = true;
+      // 500 ms window: collect a burst of visibilitychange events
+      // into a single reconnect attempt.
+      debounceHandle = setTimeout(() => {
+        debounceHandle = null;
+        const mqttConnected = useChatStore.getState().mqttConnected;
+        if (mqttConnected) {
+          log.debug("[AppLayout] visibility wake - already connected, skipping force_reconnect");
+          pending = false;
+          return;
+        }
+        log.debug("[AppLayout] visibility wake - forcing MQTT reconnect");
+        invoke("force_reconnect_mqtt")
+          .then(() => {
+            log.debug("[AppLayout] force_reconnect_mqtt ok");
+          })
+          .catch((e) => {
+            // Old binary without the command, or MQTT not yet
+            // connected at all - fall back to health check so the
+            // user still sees current Gateway status.
+            log.warn("[AppLayout] force_reconnect_mqtt failed, falling back to checkHealth:", e);
+            checkHealth();
+          })
+          .finally(() => {
+            pending = false;
+          });
+      }, 500);
+    };
+
     const handleVisibility = () => {
       if (document.visibilityState !== "visible") return;
       const a = useAgentStore.getState();
@@ -530,16 +582,24 @@ export function AppLayout() {
         knownAgents: Object.keys(a.agents),
         sessionsForSelected: a.selectedAgentId ? (a.agents[a.selectedAgentId]?.sessions ?? []).map((s) => s.session_id) : null,
       });
+      // Always poke Gateway health so the user sees current status,
+      // even when MQTT is still connected (sanity check on wake).
       checkHealth();
-      // ADR-036: reconnection is owned by the Rust `rumqttc` eventloop
-      // (it polls and retries internally).  On visibility-change we only
-      // poke the Gateway health check; if MQTT is down the next
-      // `mqtt-status` event from Rust will flip `mqttConnected` and the
-      // status bar effect above will display the warning.  We do NOT
-      // touch the MQTT client here.
+      // Only force-reconnect MQTT when we believe it is down.
+      // Otherwise the active connection would be torn down for no
+      // reason, causing a brief UI flash.
+      if (!useChatStore.getState().mqttConnected) {
+        triggerForceReconnect();
+      }
     };
     document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (debounceHandle) {
+        clearTimeout(debounceHandle);
+        debounceHandle = null;
+      }
+    };
   }, [checkHealth]);
 
   // Scale file panel proportionally when window size changes significantly (maximize/restore).
@@ -861,7 +921,7 @@ export function AppLayout() {
               {statusCopied ? (
                 <>
                   <Check className="h-3 w-3 shrink-0" aria-hidden="true" />
-                  <span>{t("common.copied")}</span>
+                  <span className="truncate">{t("common.copied")}</span>
                 </>
               ) : (
                 <span className="truncate">{statusMsg}</span>
