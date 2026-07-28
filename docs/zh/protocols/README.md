@@ -102,6 +102,14 @@ sequenceDiagram
     RT-->>B: PUB chat/stream/{session_id} (done)
     B-->>DA: chat/stream/{session_id} (done)
 
+    Note over RT,DA: 长工具期间（ADR-045）
+    RT-->>B: PUB chat/stream/{session_id} (tool_progress) 每 5s
+    B-->>DA: chat/stream/{session_id} (tool_progress)
+    DA->>B: PUB sessions/control/cancel_tool (tool_call_id)
+    B-->>RT: cancel_tool command
+    RT-->>B: PUB chat/stream/{session_id} (tool_result error=Cancelled)
+    B-->>DA: tool_result 到达，灰点收起
+
     DA->>G: HTTP GET /api/agents/{id}/sessions/{sid}/messages
     G->>RT: HTTP 反向代理 (localhost HTTP)
     RT-->>G: 会话消息 JSON
@@ -166,6 +174,7 @@ Gateway 启动后会在 `<data_dir>/` 下写入：
 | 发起聊天（HTTP） | [http.md §Chat 与会话](./http.md#三chat-与会话) |
 | 订阅流式事件（MQTT） | [mqtt.md §Topic 树与事件类型](./mqtt.md) |
 | 了解 Runtime ↔ Gateway 通信（MQTT 主题、反向代理） | [mqtt.md](./mqtt.md) |
+| 取消单个长工具 / 查看工具执行进度（ADR-045） | [mqtt.md §9.4](./mqtt.md#94-单工具取消adr-045) + [ADR-045](../../adr/zh/ADR-045-tool-progress-and-cancel.md) |
 | 管理 Provider/MCP/Search | [http.md §LLM Provider 与 Models](./http.md#五llm-provider-与-models) / [http.md §MCP 目录](./http.md#六mcp-目录) |
 | 操作 Memory | [http.md §记忆](./http.md#七记忆) |
 | 调试/重启 Agent / LSP | [http.md §调试与开发工具](./http.md#十三调试与开发工具) |

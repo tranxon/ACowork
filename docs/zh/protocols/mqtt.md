@@ -253,6 +253,8 @@ acowork/agents/{agent_id}/
     │   │                             #   payload = DeleteSessionCommand { agent_id, sid }
     │   ├── message                   # payload = { agent_id, sid, message_id, content }
     │   ├── stop                      # payload = { agent_id, sid }
+│   ├── cancel_tool               # ADR-045 payload = { agent_id, sid, tool_call_id }
+│   │                             #   取消单工具（区别于 stop 整轮），到达即终止对应工具进程
     │   ├── model_switch              # payload = { agent_id, sid, model_id }
     │   ├── reasoning_effort          # payload = { agent_id, sid, effort }
     │   └── compact_context           # payload = { agent_id, sid }
@@ -268,6 +270,7 @@ acowork/agents/{agent_id}/
             ├── done                  # 本轮完成
             ├── error                 # 错误
             ├── stopped               # 已停止
+            ├── tool_progress          # ADR-045 工具进度心跳（5s 间隔）
             ├── ask_question          # LLM 询问用户
             ├── todo_updated          # todo 列表更新
             ├── reasoning_started     # 推理阶段开始
@@ -670,7 +673,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Session config** | `config` Retained（单主题） | `GET /api/agents/{id}/sessions/{sid}/config`（全量兜底） |
 | **Session messages 增量** | `messages/chunk` `tool_call` `done` `error` ... | — |
 | **Session messages 全量** | ❌ 不走（大数据） | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` |
-| **Control 指令** | `sessions/control/{cmd}`（Desktop → Runtime 直发，sid 在 payload 中），`cmd` ∈ {`create_session`, `delete_session`, `message`, `stop`, `model_switch`, `reasoning_effort`, `compact_context`} | `POST /api/agents/{id}/control`（需明确 ack 时用） |
+| **Control 指令** | `sessions/control/{cmd}`（Desktop → Runtime 直发，sid 在 payload 中），`cmd` ∈ {`create_session`, `delete_session`, `message`, `stop`, `cancel_tool`, `model_switch`, `reasoning_effort`, `compact_context`} | `POST /api/agents/{id}/control`（需明确 ack 时用） |
 | **Memory 单 node 变更** | `agents/{id}/memory/nodes/{nid}/update`（payload = 最新 node） | `GET /api/agents/{id}/memory/nodes/{nid}`（兜底） |
 | **Memory graph 全量** | ❌ 不走（MB+） | ✅ `GET /api/agents/{id}/memory/graph` |
 | **Sidecar 端点** | `sidecar/{kind}/status` Retained | `GET /api/sidecar/{kind}` |
@@ -913,13 +916,56 @@ Desktop POST /api/agents/{id}/control {agent_id, sid, cmd: "switch_model", model
 |------|------|------|
 | 发送消息 | MQTT `control/message` | 无需 ack（chunk/done 自带反馈） |
 | 取消执行 / 中断生成 | MQTT `control/stop` | 无需 ack（后续 `messages/stopped` 事件反馈） |
+| 取消单工具（ADR-045） | MQTT `control/cancel_tool` | 无需 ack（tool_result 在 ~ms 内到达，error=`Cancelled by user`） |
 | 切换模型 | HTTP | 需 ack（要确认切换结果） |
 | 推理强度调整 | HTTP | 需 ack |
 | 上下文压缩 | HTTP | 需 ack |
 | 启用 debug 模式 | HTTP | 需 ack |
 | 工具审批 / 问答回答 | HTTP | 需 ack |
 
----
+### 9.4 单工具取消（ADR-045）
+
+`cancel_tool` 是 `stop` 的**细粒度版本**——只中止当前正在执行的某一个工具，而不影响 iteration 整体：
+
+| 维度 | `stop`（整轮） | `cancel_tool`（单工具） |
+|------|---------------|------------------------|
+| 中止范围 | 整个 iteration（含后续 tool_call） | 仅当前正在执行的 tool |
+| LLM 后续行为 | 收到 `stopped` 事件 → 等用户新指令 | 收到 `tool_result { error: "Cancelled by user" }` → 继续推理 |
+| 典型场景 | 用户突然不想继续 / 输入了新指令 | 长命令卡住，用户只想换工具或换参数 |
+| 协议载荷 | `{ agent_id, sid }` | `{ agent_id, sid, tool_call_id }` |
+
+**Runtime 取消路径**：
+
+```text
+Desktop PUBLISH acowork/agents/{id}/sessions/control/cancel_tool
+  payload = { agent_id, sid, tool_call_id }
+        ↓
+Broker 路由
+        ↓
+Runtime gateway_loop.rs:parse_control_payload → ControlAction::CancelTool
+        ↓ control_action_to_inbound
+InboundMessage::UserOperation(UserOp::CancelTool { tool_call_id })
+        ↓ session_task inbox
+AgentLoop.apply_user_op → pending_tool_cancels[tool_call_id].send(true)
+        ↓
+loop_tools.rs 的 tokio::select! 命中 cancel_rx 分支
+        ↓ outer future 被 Drop
+shell.rs 的 ProcessGuard::Drop → child.kill() + child.wait()
+        ↓
+tool_result { success: false, error: "Cancelled by user after Ys", stdout: <已读到的输出> }
+```
+
+**心跳事件 `tool_progress`（同主题 `messages/`）**：
+
+Runtime 在工具运行 ≥5s 后开始每 5s 发一次心跳，**不带任何 stdout/stderr**，仅供前端刷新计时器/进度条：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `tool_call_id` | string | 与 `messages/tool_call` 同 id |
+| `elapsed_ms` | u64 | 自工具 spawn 起的总耗时 |
+| `timeout_ms` | u64 | = `tool_timeout_ms`（前端用来算进度百分比） |
+
+> **设计意图**：5s 阈值让短命令（`ls`/`grep`/`cat`）保持原 UX（仅呼吸灰点），长命令（`cargo build` / `npm install`）从第 5s 起获得完整计时器+进度条+取消按钮——见 [ADR-045 §3.2](../../adr/zh/ADR-045-tool-progress-and-cancel.md)。
 
 ## 10. 多用户扩展（基于 ACL）
 

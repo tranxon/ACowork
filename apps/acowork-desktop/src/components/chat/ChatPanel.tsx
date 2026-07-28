@@ -1075,6 +1075,34 @@ export function ChatPanel() {
     }
   };
 
+  // ADR-045: cancel an in-flight tool execution by tool_call_id.
+  // The selected agent's active session is cancelled; we don't need toolCallId
+  // here because the wire message already carries it.
+  const handleToolCancel = useCallback(
+    (toolCallId: string) => {
+      if (!currentSessionId || !selectedAgentId) {
+        console.warn('[ChatPanel] handleToolCancel: missing agent/session', {
+          currentSessionId,
+          selectedAgentId,
+        });
+        return;
+      }
+      useChatStore.getState().cancelTool(selectedAgentId, currentSessionId, toolCallId);
+    },
+    [currentSessionId, selectedAgentId],
+  );
+
+  // ADR-045: per-tool heartbeat state derived from session.
+  // We subscribe to the session's toolProgress map and re-render only when
+  // its identity changes (i.e. when a new tool starts OR the map gains a key).
+  // The high-frequency heartbeat updates within an existing entry do NOT
+  // re-render this component — only ExploreBlock re-renders for those,
+  // because ExploreBlock subscribes directly via props.
+  const toolProgressByToolCallId = useChatStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return undefined;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.toolProgress;
+  });
+
   // Tool approval: send decision via MQTT, then clear inline state
   const handleToolApprove = async (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
     const agentId = String(approval.agent_id ?? selectedAgentId ?? "");
@@ -1267,6 +1295,8 @@ export function ChatPanel() {
               userAvatarUrl={userAvatarUrl}
               userBuiltinAvatarId={userBuiltinAvatarId}
               onApprove={handleToolApprove}
+              onCancelTool={handleToolCancel}
+              toolProgress={toolProgressByToolCallId}
               t={t}
               adapter={adapter}
               scrollContainerRef={messagesContainerRef}

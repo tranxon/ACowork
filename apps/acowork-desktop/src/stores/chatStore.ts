@@ -319,6 +319,12 @@ interface SessionChatState {
    *  other sessions are unaffected. Previously a global boolean which
    *  caused cross-session blocking. */
   isLoadingMore: boolean;
+  /** ADR-045: Per-tool progress heartbeat state.
+   *  Keyed by tool_call_id. Entry is created on first `tool_progress`
+   *  event (5s after tool start) and removed when the matching
+   *  `tool_result` record arrives. Absence of an entry means the tool
+   *  completed in <5s — keep the pre-ADR-045 UX (breathing dot). */
+  toolProgress: Record<string, { elapsedMs: number; timeoutMs: number }>;
   isSessionReady: boolean;
 }
 
@@ -355,6 +361,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isReasoning: false,
   isSessionReady: false,
   isLoadingMore: false,
+  toolProgress: {} as Record<string, { elapsedMs: number; timeoutMs: number }>,
 };
 
 // ---------------------------------------------------------------------------
@@ -668,6 +675,10 @@ interface ChatStore {
    *  `compressType` is the proto `CompressType` enum value:
    *    1 = SUMMARY, 2 = TOOL_RESULTS. */
   sendCompressAction: (agentId: string, sessionId: string, compressType: number) => void;
+  /** ADR-045: Cancel an in-flight tool execution by tool_call_id.
+   *  Publishes a `cancel_tool` control message to the Runtime.
+   *  The Runtime maps toolCallId → pending tokio task and aborts it. */
+  cancelTool: (agentId: string, sessionId: string, toolCallId: string) => void;
   /** Toggle a file tree directory expansion (per-session) */
   toggleTreeExpandedPath: (agentId: string, sessionId: string, relPath: string) => void;
   /**
@@ -1053,6 +1064,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       command: "compress_action",
       payloadJson: { session_id: sessionId, compress_type: compressType },
     }).catch((err: unknown) => log.warn("[ChatStore] compress_action via MQTT failed:", err));
+  },
+
+  /**
+   * ADR-045: Cancel a single in-flight tool execution by tool_call_id.
+   *
+   * The Runtime owns the tool-dispatch task map; the UI only emits the intent.
+   * The Runtime looks up the task by toolCallId and aborts it; the resulting
+   * tool_result is published as normal (with `cancelled: true` flag if the
+   * backend wants to surface it). The UI does NOT optimistically remove the
+   * tool_progress entry — we wait for the matching tool_result so the chip
+   * transitions through the normal lifecycle (running → cancelled → done).
+   */
+  cancelTool: (agentId: string, sessionId: string, toolCallId: string) => {
+    invoke("mqtt_publish_control", {
+      agentId,
+      command: "cancel_tool",
+      payloadJson: { session_id: sessionId, tool_call_id: toolCallId },
+    }).catch((err: unknown) => log.warn("[ChatStore] cancel_tool via MQTT failed:", err));
   },
 
   /**
@@ -2205,6 +2234,7 @@ const CONTENT_EVENT_TYPES = new Set([
   "memory_updated", "skill_executed",
   "session_config", "session_state",
   "stream_delta", "record_complete",
+  "tool_progress",
 ]);
 
 // ── ADR-035: upsert a message into a session's messages[] by id ──
@@ -2581,6 +2611,51 @@ function handleMessageEvent(
         }));
       }
       notifyActiveStreamSubscribers(sid, msgId);
+      // ADR-045: Clean up toolProgress entry when a tool_result arrives.
+      // We match by toolCallId when present, and as a fallback we also clear
+      // ALL stale toolProgress entries on any tool_result — covers the case
+      // where the LLM reuses a toolCallId (or omits it) so a "running"
+      // entry would otherwise stay stuck with a ticking timer until the
+      // *next* matching tool_call comes along.
+      if (role === 'tool_result') {
+        set((state) => {
+          const agent = getAgentState(state, agentId);
+          const ss = agent.sessionStates[sid!];
+          if (!ss) return {};
+          const keys = Object.keys(ss.toolProgress);
+          if (keys.length === 0) return {};
+          const updated = { ...ss.toolProgress };
+          if (toolCallId && updated[toolCallId]) {
+            delete updated[toolCallId];
+          } else {
+            // No exact match — clear any entry whose elapsedMs is already
+            // >= 90% of its timeout (clearly stale, safe to drop).
+            for (const k of keys) {
+              const e = updated[k];
+              if (e && e.elapsedMs / Math.max(e.timeoutMs, 1) >= 0.9) {
+                delete updated[k];
+              }
+            }
+            // If we still have nothing dropped and toolCallId was missing,
+            // clear the single oldest entry (deterministic FIFO).
+            if (toolCallId === '' && Object.keys(updated).length === keys.length) {
+              let oldestId: string | null = null;
+              let oldestElapsed = -1;
+              for (const k of keys) {
+                const e = updated[k];
+                if (e && e.elapsedMs > oldestElapsed) {
+                  oldestElapsed = e.elapsedMs;
+                  oldestId = k;
+                }
+              }
+              if (oldestId) delete updated[oldestId];
+            }
+          }
+          return updateSessionState(state, agentId, sid!, {
+            toolProgress: updated,
+          });
+        });
+      }
       break;
     }
 
@@ -2782,6 +2857,27 @@ function handleMessageEvent(
       const total = data.total as number;
       if (processed != null && total != null) {
         useGatewayStore.getState().updateMigrationProgress(agentId, processed, total);
+      }
+      break;
+    }
+
+    case "tool_progress": {
+      if (sid) {
+        const toolCallId = data.tool_call_id as string;
+        const elapsedMs = data.elapsed_ms as number;
+        const timeoutMs = data.timeout_ms as number;
+        if (toolCallId && elapsedMs != null && timeoutMs != null) {
+          set((state) => {
+            const agent = getAgentState(state, agentId);
+            const ss = agent.sessionStates[sid];
+            if (!ss) return {};
+            const updated = { ...ss.toolProgress };
+            updated[toolCallId] = { elapsedMs, timeoutMs };
+            return updateSessionState(state, agentId, sid, {
+              toolProgress: updated,
+            });
+          });
+        }
       }
       break;
     }

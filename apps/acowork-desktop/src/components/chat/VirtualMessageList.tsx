@@ -38,10 +38,12 @@ interface VirtualMessageListProps {
   showReplyingItem: boolean;
   /** Whether the session is currently streaming. */
   sending: boolean;
-  /** Pending tool approvals keyed by tool_call_id. */
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
-  /** Current session ID (for ExploreBlock). */
   currentSessionId: string | null;
+  /** ADR-045: Per-tool progress heartbeat, keyed by tool_call_id. */
+  toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }>;
+  /** ADR-045: Cancel a single in-flight tool execution. */
+  onCancelTool?: (toolCallId: string) => void;
   /** Current agent ID (for AgentAvatar). */
   selectedAgentId: string | null;
   /** Agent display name (for AgentAvatar). */
@@ -138,6 +140,8 @@ export const VirtualMessageList = React.forwardRef<
     sending,
     pendingApproval,
     currentSessionId,
+    toolProgress,
+    onCancelTool,
     selectedAgentId,
     agentDisplayName,
     selectedAgent,
@@ -598,6 +602,8 @@ export const VirtualMessageList = React.forwardRef<
                         pendingApproval={pendingApproval}
                         currentSessionId={currentSessionId}
                         onApprove={(action, approval) => onApprove(action, approval)}
+                        onCancelTool={onCancelTool}
+                        toolProgress={toolProgress}
                         hasFollowUpReply={hasFollowUpReply}
                       />
                     </div>

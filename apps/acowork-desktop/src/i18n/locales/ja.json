@@ -798,7 +798,9 @@
     "step_one": "{{count}} ステップ",
     "step_other": "{{count}} ステップ",
     "running_one": "{{count}} 件実行中",
-    "running_other": "{{count}} 件実行中"
+    "running_other": "{{count}} 件実行中",
+    "cancelTool": "ツールをキャンセル",
+    "cancelledByUser": "ユーザーによりキャンセル"
   },
   "thinkBlock": {
     "thinking": "思考中",

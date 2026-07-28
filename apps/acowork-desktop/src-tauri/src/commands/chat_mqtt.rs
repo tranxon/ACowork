@@ -426,6 +426,7 @@ pub async fn mqtt_unsubscribe_agent_session(
 /// - "enable_notify": { "session_id" }
 /// - "disable_notify": { "session_id" }
 /// - "approval_decision": { "session_id", "request_id", "approved", "allow_all_session", "reason" }
+/// - "cancel_tool": { "session_id", "tool_call_id" } (ADR-045)
 /// - "question_answer": { "session_id", "request_id", "answer" }
 /// - "model_switch": { "session_id", "model_id", "provider_id" }
 /// - "reasoning_effort": { "session_id", "effort" }
@@ -596,6 +597,19 @@ fn build_control_command(
                     approved,
                     allow_all_session: allow_all,
                     reason,
+                },
+            )
+        }
+        // ADR-045: cancel a single in-flight tool execution by tool_call_id.
+        "cancel_tool" => {
+            let tool_call_id = json.get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            control_command::Command::CancelTool(
+                mqtt_proto::CancelTool {
+                    session_id,
+                    tool_call_id,
                 },
             )
         }
@@ -942,6 +956,17 @@ fn session_message_to_flat(
             if let Some(seq) = p.seq {
                 m.insert("seq".into(), serde_json::json!(seq));
             }
+            Some(serde_json::Value::Object(m))
+        }
+        session_message::Event::ToolProgress(p) => {
+            // ADR-045: Tool execution progress heartbeat.
+            // Frontend uses this to refresh a timer/countdown display.
+            // Does NOT carry tool result data — pure control-plane signal.
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("tool_progress".into()));
+            m.insert("tool_call_id".into(), serde_json::Value::String(p.tool_call_id.clone()));
+            m.insert("elapsed_ms".into(), serde_json::json!(p.elapsed_ms));
+            m.insert("timeout_ms".into(), serde_json::json!(p.timeout_ms));
             Some(serde_json::Value::Object(m))
         }
     }

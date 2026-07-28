@@ -258,6 +258,20 @@ pub mod constants {
     /// `acowork-runtime/src/config.rs`.  The user-configurable equivalent
     /// is `Timeouts::tool_http_timeout_ms`.
     pub const TOOL_HTTP: Duration = Duration::from_secs(30);
+
+    /// ADR-045: Tool execution progress heartbeat interval. The runtime
+    /// emits `ChunkEvent::ToolProgress` every `TOOL_HEARTBEAT` while a
+    /// tool is in flight, **and skips the first tick so the first event
+    /// lands at 5s, not at 0s** — short commands (5s) complete without
+    /// ever sending a heartbeat, preserving the pre-ADR-045 UX.
+    ///
+    /// Single source of truth for "5s" referenced by:
+    /// - runtime heartbeat task (acowork-runtime/src/agent/loop_tools.rs)
+    /// - any future operator-facing documentation
+    ///
+    /// Not user-tunable: this is a UX threshold, not an operational
+    /// timeout. Promote to `Timeouts` if it ever becomes tunable.
+    pub const TOOL_HEARTBEAT: Duration = Duration::from_secs(5);
 }
 
 // ── Layer 3: safety-bound validation ────────────────────────────────────

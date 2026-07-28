@@ -175,6 +175,23 @@ pub enum ChunkEvent {
         /// `None` when title has not been generated yet.
         title: Option<String>,
     },
+    /// ADR-045: Tool execution progress heartbeat.
+    ///
+    /// Pure control-plane signal — carries NO tool result data.
+    /// The frontend uses it to refresh a timer/countdown display.
+    /// Emitted once every `TOOL_HEARTBEAT` (5 s) while a tool is in
+    /// flight, **skipping the first tick so the first event lands at
+    /// 5s, not 0s**. Short tools (<5s) complete without ever sending
+    /// this event, preserving the pre-ADR-045 UX.
+    ToolProgress {
+        session_id: String,
+        tool_call_id: String,
+        /// Milliseconds since tool execution started (wall clock).
+        elapsed_ms: u64,
+        /// Tool timeout in ms (= tool_timeout_ms). Used by the
+        /// frontend to compute the progress bar percentage.
+        timeout_ms: u64,
+    },
     /// Clear a retained `messages/*` event for this session.
     ///
     /// Published as a zero-byte payload with `retain = true` to the
@@ -325,6 +342,19 @@ pub struct AgentLoop {
     /// never lost — even when the original channel/notify event has been
     /// consumed by a sub-module's own `select!` loop.
     pub(crate) pending_interrupt: Option<ControlDecision>,
+
+    /// ADR-045: Per-tool cancel tokens. Each entry is the `Sender` half of a
+    /// `tokio::sync::watch<bool>`; the corresponding `Receiver` is moved into
+    /// the spawned tool task via [`crate::agent::loop_tools`]. When the user
+    /// clicks "cancel this tool" on the frontend, `cancel_tool_by_id()` fires
+    /// the matching sender, which trips the tool task's `tokio::select!`
+    /// branch and yields a "Cancelled by user" result.
+    ///
+    /// Bounded by the number of in-flight tools — typically O(active_iteration_tool_calls)
+    /// and cleaned up by the tool task itself when it returns. A `watch::Sender`
+    /// is cheap (~24 B) so a HashMap is the right structure.
+    pub(crate) pending_tool_cancels:
+        std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>,
     /// Transient tool results from the previous iteration (ADR-032 C3a).
     ///
     /// Tools with `transient: true` (e.g., `context_recall`) have their
@@ -415,6 +445,7 @@ impl AgentLoop {
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,
+            pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             compress_action_rx: None,
         };
@@ -483,6 +514,7 @@ impl AgentLoop {
             last_reasoning_effort: None,
             last_thinking_mode: None,
             pending_interrupt: None,
+            pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             compress_action_rx: None,
         };

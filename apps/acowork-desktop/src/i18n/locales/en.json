@@ -872,7 +872,9 @@
     "step_one": "{{count}} step",
     "step_other": "{{count}} steps",
     "running_one": "{{count}} running",
-    "running_other": "{{count}} running"
+    "running_other": "{{count}} running",
+    "cancelTool": "Cancel tool",
+    "cancelledByUser": "Cancelled by user"
   },
   "thinkBlock": {
     "thinking": "Thinking",

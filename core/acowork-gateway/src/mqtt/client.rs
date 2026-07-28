@@ -27,8 +27,8 @@ use acowork_mqtt_session::{
 /// The poll task breaks to the soft-restart path, which drops the old
 /// EventLoop and creates a fresh TCP connection.
 ///
-/// 90 s = 3 x keepalive (30 s).
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+/// 20 s = 4 × keepalive interval (5 s). Previously 90 s.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Build an [`ErrorDescriptor`] from rumqttc 0.25's `ConnectionError`.
 ///
@@ -155,7 +155,11 @@ impl GatewayMqttClient {
         message_callback: Option<MqttMessageCallback>,
     ) -> Result<Self, GatewayMqttClientError> {
         let mut options = MqttOptions::new(client_id, host, port);
-        options.set_keep_alive(Duration::from_secs(30));
+        // Match the broker's `connection_timeout_ms` (5 s). This client
+        // connects to the Gateway's own embedded broker on localhost,
+        // but TCP half-dead connections can still occur after OS
+        // sleep/wake, so we use the same keepalive as the broker timeout.
+        options.set_keep_alive(Duration::from_secs(5));
         // Clean start = true (MQTT 3.1.1). No session persistence.
         options.set_clean_session(true);
 

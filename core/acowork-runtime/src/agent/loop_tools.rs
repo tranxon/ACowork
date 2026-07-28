@@ -82,6 +82,10 @@ impl AgentLoop {
         );
 
         // Spawn each tool as an independent task
+        let session_id = self.session_core.session_id.clone();
+        let chunk_tx = self.session_core.chunk_tx.clone();
+        let tool_timeout_ms = self.core.config.timeouts.tool_timeout_ms;
+
         let handles: Vec<tokio::task::JoinHandle<()>> = all_indices
             .iter()
             .map(|&idx| {
@@ -91,6 +95,19 @@ impl AgentLoop {
                 let approval_handle = approval_handle.clone();
                 let approval_gate = approval_gate.clone();
                 let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
+                let session_id = session_id.clone();
+                let chunk_tx = chunk_tx.clone();
+
+                // ADR-045: per-tool cancel token. Created BEFORE `spawn`
+                // so the sender is registered into `pending_tool_cancels`
+                // synchronously — eliminating the race where a user cancel
+                // arrives between spawn and registration. The receiver is
+                // moved into the spawned task and used as the cancel branch
+                // of the `tokio::select!` below.
+                let (cancel_tx, mut cancel_rx) =
+                    tokio::sync::watch::channel(false);
+                self.pending_tool_cancels.insert(tc.id.clone(), cancel_tx);
+
                 tokio::spawn(async move {
                     // Shell risk check: if this is a shell command and risk >= threshold,
                     // request user approval before execution.
@@ -130,23 +147,125 @@ impl AgentLoop {
                         }
                     }
 
-                    let result = match tokio::time::timeout(
-                        tool_timeout,
-                        execute_single_tool(&tools, &tc, work_dir.as_deref()),
-                    )
-                    .await
+                    // ADR-045: Tool execution progress heartbeat.
+                    // Spawned BEFORE the `select!` so it starts ticking
+                    // immediately. The first tick is skipped (interval
+                    // fires at 5s, not 0s), so short tools (<5s) never
+                    // emit a heartbeat event. The heartbeat task is
+                    // aborted after the tool completes/cancels/times out.
+                    //
+                    // Uses `try_send_chunk` (non-blocking) and
+                    // `try_send` (non-blocking) so the heartbeat cannot
+                    // stall the tool execution or the result channel.
+                    let heartbeat_task = if let (Some(sid), Some(ct)) =
+                        (session_id.as_ref(), chunk_tx.as_ref())
                     {
-                        Ok((content, transient)) => (content, transient),
-                        Err(_) => (
-                            format!(
-                                "Error: Tool '{}' timed out after {}ms",
-                                tc.function.name,
-                                tool_timeout.as_millis()
-                            ),
-                            false,
-                        ),
+                        let sid = sid.clone();
+                        let ct = ct.clone();
+                        let tool_call_id = tc.id.clone();
+                        let heartbeat_interval =
+                            acowork_core::timeout_config::constants::TOOL_HEARTBEAT;
+                        Some(tokio::spawn(async move {
+                            let mut interval = tokio::time::interval(
+                                heartbeat_interval,
+                            );
+                            // Skip the first (immediate) tick so the
+                            // first heartbeat lands at 5s, not 0s.
+                            interval.tick().await;
+                            let tool_start = std::time::Instant::now();
+                            loop {
+                                interval.tick().await;
+                                let elapsed = tool_start.elapsed();
+                                let event = crate::agent::loop_::ChunkEvent::ToolProgress {
+                                    session_id: sid.clone(),
+                                    tool_call_id: tool_call_id.clone(),
+                                    elapsed_ms: elapsed.as_millis() as u64,
+                                    timeout_ms: tool_timeout_ms,
+                                };
+                                // try_send: non-blocking; if the
+                                // channel is full or closed, skip
+                                // this heartbeat.
+                                if ct.try_send(crate::agent::loop_::SessionChunkEvent {
+                                    session_id: sid.clone(),
+                                    event,
+                                }).is_err() {
+                                    break;
+                                }
+                                if elapsed.as_millis() as u64 >= tool_timeout_ms {
+                                    break;
+                                }
+                            }
+                        }))
+                    } else {
+                        None
                     };
+
+                    // ADR-045: tool completion vs. user cancel. When the
+                    // cancel branch wins, the inner `execute_single_tool`
+                    // future is dropped, which drops the `ProcessGuard`
+                    // child process handle and triggers its `Drop` impl
+                    // (`child.kill()` + `child.wait()`) — see
+                    // `tools/builtin/shell.rs` for the Drop semantics.
+                    let result = tokio::select! {
+                        // Branch A: tool completes (or per-tool timeout fires)
+                        res = tokio::time::timeout(
+                            tool_timeout,
+                            execute_single_tool(&tools, &tc, work_dir.as_deref()),
+                        ) => {
+                            match res {
+                                Ok((content, transient)) => (content, transient),
+                                Err(_) => (
+                                    format!(
+                                        "Error: Tool '{}' timed out after {}ms",
+                                        tc.function.name,
+                                        tool_timeout.as_millis()
+                                    ),
+                                    false,
+                                ),
+                            }
+                        }
+                        // Branch B: user cancelled via CancelTool MQTT command.
+                        // `wait_for(|cancelled| *cancelled)` is cancel-safe
+                        // and does not consume the receiver.
+                        _ = cancel_rx.wait_for(|cancelled| *cancelled) => {
+                            tracing::info!(
+                                tool_call_id = %tc.id,
+                                tool_name = %tc.function.name,
+                                "ADR-045: tool cancelled by user — returning CancelledByUser to LLM"
+                            );
+                            (
+                                // The "Error: " prefix is load-bearing —
+                                // `looks_like_tool_error` keys off it to
+                                // surface a red ✗ in the UI. The plain
+                                // "Cancelled by user ..." text without
+                                // the prefix would render as a green ✓,
+                                // which silently misleads users into
+                                // thinking the tool succeeded.
+                                format!(
+                                    "Error: Cancelled by user while running '{}'",
+                                    tc.function.name
+                                ),
+                                false,
+                            )
+                        }
+                    };
+
+                    // Abort the heartbeat task — tool is done/cancelled.
+                    // Non-blocking; the task will be dropped at the next
+                    // await point (which is the interval.tick().await).
+                    if let Some(ht) = heartbeat_task {
+                        ht.abort();
+                    }
+
                     let _ = tx.send((idx, result)).await;
+                    // `cancel_rx` is dropped here when this async block
+                    // ends; after that point, any further `send(true)`
+                    // from `cancel_tool_by_id` returns Err (no receivers
+                    // alive) and is silently ignored. The map entry
+                    // remains until overwritten by a future spawn with
+                    // the same id — this is acceptable because
+                    // `cancel_tool_by_id` already treats "key not found"
+                    // as a no-op.
                 })
             })
             .collect();

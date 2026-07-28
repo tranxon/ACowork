@@ -142,6 +142,14 @@ pub enum ControlAction {
         request_id: String,
         answer: String,
     },
+    /// ADR-045: Cancel a single in-flight tool execution. The iteration
+    /// continues normally; the cancelled tool returns a "Cancelled by
+    /// user" result so the LLM can react. Unknown tool_call_id is a no-op
+    /// (race vs. tool natural completion).
+    CancelTool {
+        session_id: String,
+        tool_call_id: String,
+    },
     /// Unknown or unimplemented command.
     Unsupported {
         command_type: String,
@@ -245,6 +253,10 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             session_id: qa.session_id,
             request_id: qa.request_id,
             answer: qa.answer,
+        },
+        mqtt_proto::control_command::Command::CancelTool(ct) => ControlAction::CancelTool {
+            session_id: ct.session_id,
+            tool_call_id: ct.tool_call_id,
         },
         mqtt_proto::control_command::Command::Intent(intent) => ControlAction::IntentReceived {
             from: intent.from,

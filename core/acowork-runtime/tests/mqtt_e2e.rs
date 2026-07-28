@@ -148,6 +148,33 @@ fn test_parse_control_stop() {
     assert!(matches!(action, Some(ControlAction::StopGeneration { .. })));
 }
 
+// ADR-045: CancelTool payload must parse to ControlAction::CancelTool
+// carrying both session_id and tool_call_id verbatim.
+#[test]
+fn test_parse_control_cancel_tool() {
+    let cmd = ControlCommand {
+        agent_id: "a".into(),
+        command: Some(Command::CancelTool(mqtt_proto::CancelTool {
+            session_id: "s".into(),
+            tool_call_id: "call_abc123".into(),
+        })),
+    };
+    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let bytes = env.encode_to_vec();
+
+    let action = control_handler::parse_control_payload(
+        "acowork/agents/a/sessions/control/cancel_tool",
+        &bytes,
+    );
+    match action {
+        Some(ControlAction::CancelTool { session_id, tool_call_id }) => {
+            assert_eq!(session_id, "s");
+            assert_eq!(tool_call_id, "call_abc123");
+        }
+        other => panic!("Expected ControlAction::CancelTool, got {:?}", other),
+    }
+}
+
 #[test]
 fn test_parse_control_create_session() {
     // ADR-034 Phase 1A: CreateSession has no fields (agent_id moved

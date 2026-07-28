@@ -420,6 +420,11 @@ message SessionMessage {
     // displays the message and a "Continue" button so the user can decide
     // whether to let the loop proceed.
     LoopDetectedPausedPayload   loop_detected_paused    = 31;
+    // ADR-045: Tool execution progress heartbeat. Carries elapsed_ms and
+    // timeout_ms so the frontend can render a countdown / progress bar
+    // WITHOUT downloading JSONL. Published every 5 s while a tool runs.
+    // Short tools (5s) never trigger this event.
+    ToolProgressPayload         tool_progress           = 32;
   }
 }
 
@@ -521,6 +526,20 @@ message LoopDetectedPausedPayload {
   string message = 2;
 }
 
+// ADR-045: Tool execution progress heartbeat. Carries elapsed_ms and
+// timeout_ms so the frontend can render a countdown / progress bar
+// WITHOUT downloading JSONL. Published every 5 s while a tool runs.
+// Short tools (<5s) never trigger this event.
+message ToolProgressPayload {
+  string session_id = 1;
+  string tool_call_id = 2;
+  // Milliseconds since tool execution started (wall clock).
+  uint64 elapsed_ms = 3;
+  // Tool timeout in ms (= tool_timeout_ms). Used by the frontend to
+  // compute the progress bar percentage.
+  uint64 timeout_ms = 4;
+}
+
 message ToolApprovalNeededPayload {
   string session_id = 1;
   string request_id = 2;
@@ -616,6 +635,11 @@ message ControlCommand {
     ApprovalDecision    approval_decision     = 26;
     QuestionAnswer      question_answer       = 27;
 
+    // ADR-045: cancel a single in-flight tool execution (does not stop the
+    // surrounding iteration). tool_call_id matches the one the runtime
+    // emitted via RecordComplete{ role: "tool_call" }.
+    CancelTool          cancel_tool           = 30;
+
     // ── Per-session config (3) ──
     ModelSwitch         model_switch          = 14;
     ReasoningEffort     reasoning_effort      = 15;
@@ -691,6 +715,17 @@ message Stop {
   /// Stop reason for logging. Free-form but conventionally:
   /// "user_requested" | "iteration_limit" | "budget_exceeded" | "error" | ...
   string reason = 3;
+}
+
+// ADR-045: Cancel a single in-flight tool execution. Distinct from Stop
+// (which aborts the whole iteration) — the iteration continues after the
+// cancelled tool returns a "Cancelled by user" result, and the LLM sees it
+// in history.
+message CancelTool {
+  string session_id = 2;
+  /// Tool call id as published by RecordComplete{ role: "tool_call" }.
+  /// Unknown ids are silently dropped (race vs. tool natural completion).
+  string tool_call_id = 3;
 }
 
 message ContinueExecution {

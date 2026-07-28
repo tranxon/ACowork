@@ -29,10 +29,13 @@ use acowork_mqtt_session::{
 /// breaks to the soft-restart path, which drops the old EventLoop and
 /// creates a fresh TCP connection.
 ///
-/// 90 s = 3 x keepalive (30 s). Normal connections produce at least one
-/// PINGRESP within every keepalive interval, so 90 s without any event
-/// strongly indicates a stuck socket.
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+/// 20 s = 4 × keepalive interval. Normal connections produce at least
+/// one PINGRESP within every keepalive interval (now 5 s — see
+/// `set_keep_alive` below), so 20 s without any event strongly
+/// indicates a stuck socket. Previously 90 s but the long delay caused
+/// a poor UX after OS wake-from-sleep (users waited up to 90 s for
+/// the reconnection to kick in).
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
@@ -261,7 +264,14 @@ impl DesktopMqttClient {
         let client_id = format!("user:{}:desktop:{}", user_id, pid);
 
         let mut options = MqttOptions::new(client_id.clone(), host, port);
-        options.set_keep_alive(Duration::from_secs(30));
+        // ADR-039: match the broker's `connection_timeout_ms` (5 s, see
+        // `core/acowork-gateway/src/mqtt/broker.rs`). Setting the client
+        // keepalive to 5 s means PINGREQs are emitted well inside the
+        // broker's idle window. The previous 30 s value caused the broker
+        // to disconnect the client after every OS sleep/wake (broker
+        // timed out at 5 s while client still thought itself connected
+        // until the next PINGREQ 30 s later).
+        options.set_keep_alive(Duration::from_secs(5));
         options.set_clean_session(true);
 
         // ADR-039: align outgoing packet size with the broker's
@@ -647,6 +657,7 @@ impl DesktopMqttClient {
                     Some(mqtt_proto::control_command::Command::DisableNotify(_)) => "disable_notify",
                     Some(mqtt_proto::control_command::Command::ApprovalDecision(_)) => "approval_decision",
                     Some(mqtt_proto::control_command::Command::QuestionAnswer(_)) => "question_answer",
+                    Some(mqtt_proto::control_command::Command::CancelTool(_)) => "cancel_tool",
                     Some(mqtt_proto::control_command::Command::ModelSwitch(_)) => "model_switch",
                     Some(mqtt_proto::control_command::Command::ReasoningEffort(_)) => "reasoning_effort",
                     Some(mqtt_proto::control_command::Command::WorkspaceSwitch(_)) => "workspace_switch",

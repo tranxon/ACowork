@@ -65,7 +65,12 @@ fn mcp_transport_to_def(t: i32) -> McpTransportDef {
 /// connection is likely half-dead (e.g. after OS sleep/wake where the
 /// kernel hasn't detected the broken connection). We break to the
 /// soft-restart path to create a fresh `AsyncClient` + `EventLoop`.
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(90);
+///
+/// 20 s = 4 × keepalive interval (5 s). Normal connections produce at
+/// least one PINGRESP within every keepalive interval, so 20 s without
+/// any event strongly indicates a stuck socket. Previously 90 s but
+/// the long delay caused poor recovery after OS sleep/wake.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Error type for Runtime MQTT client operations.
 #[derive(Debug, thiserror::Error)]
@@ -416,7 +421,12 @@ impl RuntimeMqttClient {
 
         // Configure MQTT options with Last Will.
         let mut options = MqttOptions::new(client_id.clone(), cfg.host, cfg.port);
-        options.set_keep_alive(Duration::from_secs(30));
+        // Match the broker's `connection_timeout_ms` (5 s, see
+        // `core/acowork-gateway/src/mqtt/broker.rs`). The previous 30 s
+        // value caused the broker to disconnect the Runtime after every
+        // OS sleep/wake (broker timed out at 5 s while the client still
+        // thought itself connected until the next PINGREQ 30 s later).
+        options.set_keep_alive(Duration::from_secs(5));
         options.set_clean_session(true);
 
         // ADR-039: align outgoing packet size with the broker's
@@ -1417,6 +1427,37 @@ impl MqttChunkPublisher {
         };
         let bytes = prost::Message::encode_to_vec(&envelope);
         self.publish(&sid, "stopped", &bytes).await;
+    }
+
+    /// ADR-045: Publish a tool progress heartbeat (QoS 0).
+    pub(crate) async fn publish_tool_progress(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        elapsed_ms: u64,
+        timeout_ms: u64,
+    ) {
+        let sid = session_id.to_string();
+        let tid = tool_call_id.to_string();
+        let agent_id = self.agent_id.clone();
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::ToolProgress(
+                acowork_core::mqtt_proto::ToolProgressPayload {
+                    session_id: sid.clone(),
+                    tool_call_id: tid,
+                    elapsed_ms,
+                    timeout_ms,
+                },
+            )),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish(&sid, "tool_progress", &bytes).await;
     }
 
     /// Publish a context_usage event via MQTT (QoS 0).

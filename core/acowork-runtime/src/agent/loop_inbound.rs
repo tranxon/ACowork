@@ -111,6 +111,18 @@ impl AgentLoop {
                 );
                 false
             }
+            // ADR-045: Cancel a single in-flight tool. Returns false (not
+            // an interrupt) — the iteration continues normally. The actual
+            // tool-cancellation is dispatched via `pending_tool_cancels`
+            // by the loop_tools module (Step 1).
+            crate::agent::inbound::UserOp::CancelTool { tool_call_id } => {
+                tracing::info!(
+                    tool_call_id = %tool_call_id,
+                    "UserOp: cancel tool (handled by loop_tools::pending_tool_cancels)"
+                );
+                self.cancel_tool_by_id(tool_call_id);
+                false
+            }
             crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides) => {
                 tracing::info!(
                     max_output_tokens = overrides.max_output_tokens,
@@ -174,6 +186,24 @@ impl AgentLoop {
                     match &op {
                         crate::agent::inbound::UserOp::StopLoop { .. } => {
                             return ControlDecision::Stop;
+                        }
+                        // ADR-045: Cancel a single in-flight tool. Unlike
+                        // StopLoop (which aborts the whole iteration),
+                        // CancelTool is a tool-scoped signal — it must be
+                        // dispatched IMMEDIATELY to the pending tokio task,
+                        // not deferred to drain_inbound_queue at the end of
+                        // the current iteration. Otherwise a long-running
+                        // tool would receive its cancel signal 30+ seconds
+                        // late, only to find it had already completed.
+                        crate::agent::inbound::UserOp::CancelTool { tool_call_id } => {
+                            tracing::info!(
+                                tool_call_id = %tool_call_id,
+                                "poll_control: immediate dispatch of CancelTool (skip deferral)"
+                            );
+                            self.cancel_tool_by_id(tool_call_id);
+                            // Do NOT return Stop; the iteration continues
+                            // and the cancelled tool will produce a normal
+                            // tool_result via its own drop semantics.
                         }
                         _ => {
                             self.session
@@ -352,5 +382,48 @@ impl AgentLoop {
         self.core.debug_observer.on_phase_step_done().await;
 
         IterationResult::Stopped(content.to_string())
+    }
+
+    /// ADR-045: Dispatch a single-tool cancel request.
+    ///
+    /// Looks up the per-tool cancel token registered by
+    /// [`crate::agent::loop_tools`] and fires it. Unknown `tool_call_id`
+    /// is a silent no-op (race vs. tool natural completion — tool already
+    /// returned and removed itself from `pending_tool_cancels`).
+    ///
+    /// `send(true)` on a `watch::Sender` is fire-and-forget; the watcher on
+    /// the tool-task side will trip its `select!` branch and exit
+    /// gracefully. Process cleanup for in-flight child processes (e.g. shell
+    /// `wait_with_output()`) is handled by the existing `ProcessGuard`
+    /// Drop semantics in `tools/builtin/shell.rs` — no extra kill path.
+    pub(crate) fn cancel_tool_by_id(&mut self, tool_call_id: &str) {
+        match self.pending_tool_cancels.get(tool_call_id) {
+            Some(tx) => {
+                // watch::Sender::send is non-blocking and returns Err only
+                // when there are no receivers — i.e. the tool task has
+                // already returned and removed its receiver. Treat as no-op
+                // (race vs. natural completion), same as "key not found".
+                match tx.send(true) {
+                    Ok(_) => {
+                        tracing::info!(
+                            tool_call_id = %tool_call_id,
+                            "ADR-045: cancel signal fired to tool task"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::debug!(
+                            tool_call_id = %tool_call_id,
+                            "ADR-045: cancel token fire ignored — receiver already dropped (tool done)"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::debug!(
+                    tool_call_id = %tool_call_id,
+                    "ADR-045: cancel requested for unknown/done tool_call_id (no-op)"
+                );
+            }
+        }
     }
 }

@@ -796,7 +796,9 @@
     "step_one": "{{count}} 단계",
     "step_other": "{{count}} 단계",
     "running_one": "{{count}}개 실행 중",
-    "running_other": "{{count}}개 실행 중"
+    "running_other": "{{count}}개 실행 중",
+    "cancelTool": "도구 취소",
+    "cancelledByUser": "사용자에 의해 취소됨"
   },
   "thinkBlock": {
     "thinking": "생각 중",

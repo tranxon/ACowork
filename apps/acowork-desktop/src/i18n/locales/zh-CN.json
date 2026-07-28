@@ -820,7 +820,9 @@
     "step_one": "{{count}} 步",
     "step_other": "{{count}} 步",
     "running_one": "{{count}} 个运行中",
-    "running_other": "{{count}} 个运行中"
+    "running_other": "{{count}} 个运行中",
+    "cancelTool": "取消工具",
+    "cancelledByUser": "已由用户取消"
   },
   "thinkBlock": {
     "thinking": "正在思考",

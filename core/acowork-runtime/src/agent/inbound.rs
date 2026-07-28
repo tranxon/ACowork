@@ -56,6 +56,11 @@ pub enum UserOp {
     },
     /// User's answer to an ask_user_question prompt.
     QuestionAnswer { request_id: String, answer: String },
+    /// ADR-045: Cancel a single in-flight tool execution. The iteration
+    /// continues normally; the cancelled tool returns a "Cancelled by user"
+    /// result so the LLM can react. Unknown tool_call_id is a no-op
+    /// (race vs. tool natural completion).
+    CancelTool { tool_call_id: String },
     /// Apply runtime configuration changes immediately.
     /// These are also persisted via the SessionTask channel
     /// (`SessionMessage::UpdateRuntimeConfig`) for tool definitions

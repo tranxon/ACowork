@@ -241,6 +241,20 @@ fn control_action_to_inbound(
             },
         )),
 
+        // ADR-045: Cancel a single in-flight tool. Routed via the fast
+        // UserOperation channel so it takes effect even while the agent
+        // loop is mid-iteration. Unknown tool_call_id is a no-op
+        // (race vs. tool natural completion).
+        ControlAction::CancelTool {
+            session_id,
+            tool_call_id,
+        } => Some((
+            session_id,
+            InboundMessage::UserOperation(
+                crate::agent::inbound::UserOp::CancelTool { tool_call_id },
+            ),
+        )),
+
         // ── Per-session config ─────────────────────────────────────────
         ControlAction::ModelSwitch {
             session_id,

@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
+import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square } from "lucide-react";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { useStreamingContent } from "./useStreamingContent";
@@ -12,6 +12,10 @@ interface ExploreBlockProps {
   pendingApproval?: Record<string, ToolApprovalNeededEvent> | null;
   currentSessionId?: string | null;
   onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void;
+  /** ADR-045: Cancel a single in-flight tool execution. */
+  onCancelTool?: (toolCallId: string) => void;
+  /** ADR-045: Per-tool progress heartbeat state, keyed by tool_call_id. */
+  toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }>;
   /** True when an assistant reply message follows this explore block in display order.
    *  This is the ONLY condition that triggers auto-collapse. */
   hasFollowUpReply?: boolean;
@@ -27,6 +31,17 @@ const EXPLORE_DETAIL_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
 function isShellTool(name: string): boolean {
   return SHELL_TOOLS.includes(name);
 }
+/** Format milliseconds as M:SS or H:MM:SS for the heartbeat timer. */
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const mm = m.toString().padStart(h > 0 ? 2 : 1, "0");
+  const ss = s.toString().padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 
 /**
  * Build the one-line summary that appears right of a tool name in the
@@ -235,7 +250,7 @@ function approvalMatchesSession(
  *   message appears after this explore block in display order.
  * - Collapse (manual): user can collapse at any time.
  */
-export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply }: ExploreBlockProps) {
+export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress }: ExploreBlockProps) {
   const { t } = useTranslation();
   // Start collapsed only if this block already has a follow-up reply (historical/loaded).
   // For new active blocks, always start expanded — collapses ONLY when
@@ -364,7 +379,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         >
           <div className="flex flex-col gap-0.5">
             {pairedItems.map((paired, idx) => (
-              <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} />
+              <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />
             ))}
           </div>
         </div>
@@ -377,7 +392,9 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   return prev.items === next.items
     && prev.isStreaming === next.isStreaming
     && prev.pendingApproval === next.pendingApproval
-    && prev.hasFollowUpReply === next.hasFollowUpReply;
+    && prev.hasFollowUpReply === next.hasFollowUpReply
+    && prev.toolProgress === next.toolProgress
+    && prev.onCancelTool === next.onCancelTool;
 });
 
 /** Pair tool_call with its corresponding tool_result.
@@ -458,7 +475,7 @@ function buildPairedItems(items: ChatMessage[]): PairedItem[] {
 }
 
 /** Render a paired item */
-function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove }: { item: PairedItem; isStreaming: boolean; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void }) {
+function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove, onCancelTool, toolProgress }: { item: PairedItem; isStreaming: boolean; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void; onCancelTool?: (toolCallId: string) => void; toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }> }) {
   // ADR-027: Read streaming content from mutable store for thought items.
   // For settled thoughts, the hook returns null and we fall back to msg.content.
   const msgId = item.kind === "thought" ? item.msg.id
@@ -481,7 +498,7 @@ function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionI
   }
 
   if (item.kind === "tool") {
-    return <ToolCallItem call={item.call} result={item.result} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} />;
+    return <ToolCallItem call={item.call} result={item.result} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />;
   }
 
   // Fallback
@@ -493,7 +510,30 @@ function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionI
 }
 
 /** Tool call + result paired display: icon + tool name + status indicator + expandable details */
-function ToolCallItem({ call, result, pendingApproval, currentSessionId, onApprove }: { call: ChatMessage; result?: ChatMessage; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void }) {
+function ToolCallItem({ call, result, pendingApproval, currentSessionId, onApprove, onCancelTool, toolProgress }: { call: ChatMessage; result?: ChatMessage; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void; onCancelTool?: (toolCallId: string) => void; toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }> }) {
+  // ADR-045: local "cancelling" UI state for button feedback
+  const [cancelling, setCancelling] = useState(false);
+
+  // ADR-045: pull heartbeat entry for THIS tool. undefined = no heartbeat yet.
+  // First heartbeat arrives 5s after tool starts → we stay in Phase A until then.
+  const progressEntry = toolProgress?.[call.toolCallId ?? ""];
+  const showProgress = progressEntry !== undefined;
+
+  const handleCancel = useCallback(() => {
+    // ADR-045 debug breadcrumb: surface the actual values to DevTools so we
+    // can diagnose "button does nothing" reports. Safe to keep in dev —
+    // negligible cost and users can always check the console.
+    console.info("[ADR-045] handleCancel", {
+      toolCallId: call.toolCallId,
+      onCancelToolType: typeof onCancelTool,
+      progressEntry,
+      showProgress,
+    });
+    if (!call.toolCallId || cancelling || !onCancelTool) return;
+    setCancelling(true);
+    onCancelTool(call.toolCallId);
+  }, [call.toolCallId, onCancelTool, cancelling, progressEntry, showProgress]);
+
   const { t } = useTranslation();
   const [showDetails, setShowDetails] = useState(false);
   const toolName = call.toolName ?? "tool";
@@ -571,6 +611,28 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
               {summary}
             </span>
           )}
+          {showProgress && progressEntry && call.toolCallId && (
+            <div className="ml-2 flex items-center gap-1.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+              <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                <div
+                  className="absolute inset-y-0 left-0 bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
+                  style={{ width: `${Math.min(100, (progressEntry.elapsedMs / progressEntry.timeoutMs) * 100).toFixed(1)}%` }}
+                />
+              </div>
+              <span className="tabular-nums">{formatDuration(progressEntry.elapsedMs)}</span>
+              {onCancelTool && (
+                <button
+                  onClick={handleCancel}
+                  disabled={cancelling}
+                  className="ml-0.5 text-zinc-400 hover:text-red-500 transition-colors disabled:opacity-30"
+                  title={t("exploreBlock.cancelTool")}
+                  aria-label={t("exploreBlock.cancelTool")}
+                >
+                  <Square className="h-2.5 w-2.5 fill-current" />
+                </button>
+              )}
+            </div>
+          )}
           {isCompressed && (
             <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               已压缩
@@ -609,6 +671,14 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         {/* Status indicator */}
         {isSuccess ? (
           <Check className="h-3 w-3 shrink-0" style={{ color: "var(--color-accent)" }} />
+        ) : isError && /^Error: Cancelled by user/.test(result.content) ? (
+          // ADR-045: cancellation reuses the X glyph (consistent with other
+          // "non-success" terminations) but is amber, not red, to signal that
+          // the user caused it — distinct from a tool error.
+          <X
+            className="h-3 w-3 shrink-0 text-amber-500"
+            aria-label={t("exploreBlock.cancelledByUser")}
+          />
         ) : isError ? (
           <X className="h-3 w-3 shrink-0 text-red-500" />
         ) : isPendingResult ? (
