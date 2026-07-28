@@ -592,8 +592,11 @@ export const VirtualMessageList = React.forwardRef<
                   const nextItem = messageBlocks[virtualRow.index + 1];
                   const hasFollowUpReply = nextItem !== undefined && nextItem.type !== "explore_group";
                   const isLastGroup = virtualRow.index === messageBlocks.length - 1;
-                  const isStreamingGroup = sending && isLastGroup
-                    && item.items.some((it: ChatMessage) => it.isStreaming === true);
+                  // ADR-035 convergent model: no placeholder messages with
+                  // isStreaming=true exist in messages[] anymore.  The
+                  // streaming state is driven solely by `sending` (which
+                  // reflects isAssistantReplying / session active status).
+                  const isStreamingGroup = sending && isLastGroup;
                   return (
                     <div className="ml-12">
                       <ExploreBlock

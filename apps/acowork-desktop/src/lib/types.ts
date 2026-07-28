@@ -988,45 +988,25 @@ export interface PaginatedMessages {
   total: number;
 }
 
-// ── ADR-035: per-session streaming data structures ───────────────────
-
-/** A single complete streaming line pushed via MQTT `stream_delta`. */
+/** A single streaming line from MQTT stream_delta (thought only). */
 export interface StreamLine {
   role: "thought" | "assistant";
   lineNo: number;
   content: string;
 }
 
-/** Per-session active stream buffer (ADR-035 D3, replaces ADR-027 multi-buffer).
- *
- *  `prevMessageId` records the message_id of the last entry in messages[]
- *  at the time this stream started. It is the physical predecessor of this
- *  streaming record in the linear conversation. When record_complete
- *  arrives, the frontend checks whether prevMessageId is still in the
- *  messages[] cache window:
- *    - present → the record is continuous with the cache → freeze it in.
- *    - absent  → the user scrolled away, the predecessor was evicted by
- *      scroll-back trim → discard; the next HTTP scroll-back/forward will
- *      load the complete record from JSONL (it sits right after its
- *      predecessor, which HTTP will reach linearly). */
+/** Per-session active stream tracker.
+ *  - assistant: lineCount for isAssistantReplying threshold
+ *  - thought: lines (cap 5) + startTime for ThinkBlock display */
 export interface ActiveStream {
   messageId: string;
-  /** Per-session seq assigned to the first stream_delta frame this stream
-   *  emits. All stream_deltas for this stream use the same seq; the
-   *  matching `record_complete` carries the same value so the Desktop
-   *  can recognise the freeze as belonging to this placeholder. */
-  seq?: number;
   role: "thought" | "assistant";
+  /** Assistant: line count for threshold. Thought: not used. */
+  lineCount: number;
+  /** Thought only: last 5 lines for ThinkBlock preview. */
   lines: StreamLine[];
-  prevMessageId: string | null;
-  /** Incrementally built content string.  Appended to on every stream_delta
-   *  in O(1) per line, replacing the previous O(N) `lines.map().join()`
-   *  per delta (which was O(N²) over a full stream and caused severe V8
-   *  heap expansion during long assistant replies).
-   *
-   *  Rebuilt from scratch only on truncation (thought 5-line cap or
-   *  assistant 10k safety valve), which is rare and bounded. */
-  contentBuilder: string;
+  /** Thought only: timestamp when thinking started. */
+  startTime: number;
 }
 
 /**

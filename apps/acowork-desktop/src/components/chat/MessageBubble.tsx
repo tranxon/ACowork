@@ -9,7 +9,6 @@ import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
-import { useStreamingContent } from "./useStreamingContent";
 import { CodeBlock } from "./CodeBlock";
 import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { MermaidBlock } from "./MermaidBlock";
@@ -228,13 +227,8 @@ const MessageBubble = React.memo(function MessageBubble({
   liveUserAvatarUrl?: string | null;
   liveUserBuiltinAvatarId?: string | null;
 }) {
-  // ADR-027: Streaming content lives in an external mutable Map, read via
-  // useSyncExternalStore.  The ChatMessage ref in React state is stable
-  // across polls — only the mutable Map update triggers a re-render of
-  // this single bubble.
-  const streaming = useStreamingContent(currentSessionId, message.id);
-  const displayContent = streaming?.content ?? message.content;
-  const isStreaming = streaming?.isStreaming ?? false;
+  // Convergent model: content always comes from the frozen message.
+  const displayContent = message.content;
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
@@ -287,16 +281,7 @@ const MessageBubble = React.memo(function MessageBubble({
   }
 
   if (message.type === "assistant") {
-    // During streaming the session-level "replying" indicator in
-    // VirtualMessageList takes over entirely — the bubble itself must not
-    // render any placeholder (would double up with the outer indicator) and
-    // must not render streaming markdown either (would cause full re-parse of
-    // the accumulated string on every stream_delta, generating large amounts
-    // of GC churn — an approach previously discarded for this reason).
-    // The bubble fully materialises only after record_complete, when
-    // useStreamingContent returns null and displayContent falls back to the
-    // frozen message.content.
-    if (isStreaming || !displayContent) return null;
+    if (!displayContent) return null;
     return (
       <MessageContentWrapper>
         <div className="min-w-0 flex flex-col ml-12">
@@ -316,9 +301,7 @@ const MessageBubble = React.memo(function MessageBubble({
         <div className="min-w-0 flex flex-col ml-12">
 <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
               <ThinkBlock
-                content={displayContent || message.content}
-                isStreaming={isStreaming}
-                hasReplyStarted={!isStreaming}
+                content={message.content}
                 startTime={message.startTime}
                 endTime={message.endTime}
               />
@@ -551,15 +534,8 @@ const MessageBubble = React.memo(function MessageBubble({
 
   return null;
 }, (prev, next) => {
-  // ADR-027: chatStore keeps message object references stable for streaming
-  // messages (only appended on first appearance, never mutated).  Reference
-  // equality correctly skips re-renders for both settled and streaming
-  // messages alike.  Streaming content changes are delivered via
-  // useSyncExternalStore → useStreamingContent, which triggers a granular
-  // re-render of only the affected MessageBubble.
-  //
-  // isStreaming is intentionally NOT compared here — it's derived internally
-  // from useStreamingContent, not received as a prop.
+  // Convergent model: message objects are frozen records from HTTP.
+  // Reference equality is sufficient.
   return prev.message === next.message
     && prev.liveUserName === next.liveUserName
     && prev.liveUserAvatarUrl === next.liveUserAvatarUrl

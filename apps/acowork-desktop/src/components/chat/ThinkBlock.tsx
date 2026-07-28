@@ -85,7 +85,16 @@ export const ThinkBlock = React.memo(function ThinkBlock({ content, isStreaming,
   const { t } = useTranslation();
   const isThinking = !!(isStreaming && endTime == null);
   const [expanded, setExpanded] = useState(defaultExpanded ?? isThinking);
+  const [, setTick] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
+
+  // Live timer tick: ensure duration updates every second even when no
+  // new stream_delta arrives (e.g. slow thinking phase between chunks).
+  useEffect(() => {
+    if (!isThinking) return;
+    const interval = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [isThinking]);
   const manuallyCollapsed = useRef(false);
 
   // Auto-expand when thinking starts (respect user manual collapse)

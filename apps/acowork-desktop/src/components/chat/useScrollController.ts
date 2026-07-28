@@ -34,19 +34,19 @@ import { useRef, useState, useCallback, useEffect, useLayoutEffect } from "react
 import type { ChatListAdapter } from "./useChatListAdapter";
 import type { VirtualMessageListHandle } from "./VirtualMessageList";
 import type { MessageBlock } from "./messageFolder";
+import { useChatStore } from "../../stores/chatStore";
 import { log } from "../../lib/logger";
 
 // ── Constants ────────────────────────────────────────────────────────────
 
 /**
  * Distance from bottom (in px) within which we consider the user "pinned
- * to the bottom".  When the user scrolls up beyond this threshold, the
- * state machine transitions from pinned-bottom to idle, the down-arrow
- * button appears, and auto-scroll on new messages is disabled.
- *
- * This is intentionally SMALLER than clientHeight (the down-arrow button
- * threshold) so that the auto-scroll disengages before the arrow button
- * appears, giving the user a visual cue that they've left the bottom.
+ * to the bottom".  When the user scrolls up beyond this threshold:
+ *  - State machine transitions from pinned-bottom to idle.
+ *  - isPinnedToBottom is set to false in the store (via setPinnedToBottom).
+ *  - Down-arrow button appears (same threshold, unified).
+ *  - Auto-scroll on new messages is disabled.
+ *  - thinkingContent flush and scheduleRefresh are blocked.
  */
 const PIN_THRESHOLD_PX = 120;
 
@@ -95,6 +95,10 @@ interface ScrollControllerConfig {
   initialScrollOffset?: number;
   /** Session key (for reset on session change). */
   sessionKey: string | null;
+  /** Agent ID – used to sync isPinnedToBottom to the store. */
+  agentId: string | null;
+  /** Session ID – used to sync isPinnedToBottom to the store. */
+  sessionId: string | null;
 }
 
 // ── Hook ────────────────────────────────────────────────────────────────
@@ -109,7 +113,17 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     messageBlocks,
     initialScrollOffset,
     sessionKey,
+    agentId,
+    sessionId,
   } = config;
+
+  // ── Refs for stable callbacks ──
+  // agentId/sessionId are read inside transitionTo (which has empty deps
+  // for stable identity).  Refs ensure we always read the latest values.
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   // ── State machine (ref, no re-render on transition) ──
   const stateRef = useRef<ScrollState>("pinned-bottom");
@@ -170,7 +184,34 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       from: stateRef.current,
       to: newState,
     });
+    const oldState = stateRef.current;
     stateRef.current = newState;
+    // Sync isPinnedToBottom to store ONLY on direct transitions between
+    // "pinned-bottom" and "idle".  Intermediate states (loading-older,
+    // loading-newer, jumping) must NOT trigger store updates:
+    //  - They are transient (the state machine will return to pinned-bottom
+    //    or idle shortly after).
+    //  - A false->true flip on the return trip would trigger a spurious
+    //    scheduleRefresh catch-up.
+    //
+    // Allowed pin-state-changing transitions:
+    //   pinned-bottom -> idle         (user scrolled up)
+    //   idle -> pinned-bottom         (user scrolled back to bottom)
+    // All other transitions (e.g. pinned-bottom -> loading-newer) leave
+    // isPinnedToBottom unchanged in the store.
+    const isPinned = newState === "pinned-bottom";
+    const wasPinned = oldState === "pinned-bottom";
+    if (isPinned !== wasPinned) {
+      // Only sync when both old and new states are "settled" (not loading/jumping).
+      const isSettled = (s: ScrollState) => s === "pinned-bottom" || s === "idle";
+      if (isSettled(oldState) && isSettled(newState)) {
+        const aid = agentIdRef.current;
+        const sid = sessionIdRef.current;
+        if (aid && sid) {
+          useChatStore.getState().setPinnedToBottom(aid, sid, isPinned);
+        }
+      }
+    }
   }, []);
 
   // ── Session reset ──
@@ -192,6 +233,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     wasAtBottomRef.current = true;
     setShowScrollToBottom(false);
     setShowScrollToTop(false);
+    // isPinnedToBottom is NOT explicitly synced here.  The new session's
+    // DEFAULT_SESSION_STATE.isPinnedToBottom is already true, and the
+    // state machine starts as "pinned-bottom".  The first handleScroll
+    // or transitionTo will sync naturally if needed.
   }, [sessionKey]);
 
   // ── 1. Init scroll ──
@@ -319,8 +364,11 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     const distFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    // Update arrow buttons (visual only)
-    setShowScrollToBottom(distFromBottom > container.clientHeight);
+    // Update arrow buttons (visual only) – unified with PIN_THRESHOLD_PX
+    // so the arrow appears at the exact moment the state machine leaves
+    // "pinned-bottom".  This keeps the visual cue in sync with the
+    // behavioral change (auto-scroll disengage, scheduleRefresh block).
+    setShowScrollToBottom(distFromBottom > PIN_THRESHOLD_PX);
     setShowScrollToTop(container.scrollTop > container.clientHeight);
 
     // Auto-scroll ONLY if the state machine says we're pinned to the bottom.
@@ -540,8 +588,8 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     const distFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
-    // Update arrow buttons
-    setShowScrollToBottom(distFromBottom > container.clientHeight);
+    // Update arrow buttons – unified threshold with state machine
+    setShowScrollToBottom(distFromBottom > PIN_THRESHOLD_PX);
     setShowScrollToTop(container.scrollTop > container.clientHeight);
 
     // Track the user's actual position on EVERY scroll event, even

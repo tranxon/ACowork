@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square } from "lucide-react";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
-import { useStreamingContent } from "./useStreamingContent";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface ExploreBlockProps {
@@ -476,15 +475,9 @@ function buildPairedItems(items: ChatMessage[]): PairedItem[] {
 
 /** Render a paired item */
 function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionId, onApprove, onCancelTool, toolProgress }: { item: PairedItem; isStreaming: boolean; pendingApproval?: Record<string, ToolApprovalNeededEvent> | null; currentSessionId?: string | null; onApprove?: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void; onCancelTool?: (toolCallId: string) => void; toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }> }) {
-  // ADR-027: Read streaming content from mutable store for thought items.
-  // For settled thoughts, the hook returns null and we fall back to msg.content.
-  const msgId = item.kind === "thought" ? item.msg.id
-    : item.kind === "other" ? item.msg.id
-    : item.call.id;
-  const streamingContent = useStreamingContent(currentSessionId ?? "", msgId);
-
+  // Convergent model: content always comes from the frozen message.
   if (item.kind === "thought") {
-    const content = streamingContent?.content || item.msg.content;
+    const content = item.msg.content;
     return (
       <ThinkBlock
         content={content}

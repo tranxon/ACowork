@@ -61,6 +61,7 @@ function useMergedRef<T>(
 
 import { AskQuestionCard } from "./AskQuestionCard";
 import { DebugPausedBanner } from "./DebugPausedBanner";
+import { ThinkBlock } from "./ThinkBlock";
 import { RetryWaitBanner } from "./RetryWaitBanner";
 import { SessionTabBar } from "./SessionTabBar";
 import { SkillsPanel } from "../skills/SkillsPanel";
@@ -371,6 +372,9 @@ export function ChatPanel() {
    *  physically anchors to the last message bubble — the same slot the
    *  final reply will occupy once it lands. */
   const isAssistantReplying = sessionState?.isAssistantReplying ?? false;
+  const isThinking = sessionState?.isThinking ?? false;
+  const thinkingStartTime = sessionState?.thinkingStartTime ?? null;
+  const thinkingContent = sessionState?.thinkingContent ?? "";
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state within ~50ms.
@@ -615,6 +619,8 @@ export function ChatPanel() {
     messageBlocks,
     initialScrollOffset,
     sessionKey: currentScrollKey,
+    agentId: selectedAgentId,
+    sessionId: currentSessionId,
   });
 
   // Load available models: configured providers (from vault) + capabilities (from models API)
@@ -1342,9 +1348,19 @@ export function ChatPanel() {
                     </div>
                   </div>
                 )}
-                <div className="flex items-center gap-1.5 ml-12 py-1.5">
-                  <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                  <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
+                <div className="ml-12 py-1.5">
+                  {isThinking ? (
+                    <ThinkBlock
+                      content={thinkingContent}
+                      isStreaming={true}
+                      startTime={thinkingStartTime ?? undefined}
+                    />
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                      <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

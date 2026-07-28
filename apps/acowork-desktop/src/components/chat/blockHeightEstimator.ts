@@ -262,11 +262,9 @@ export function estimateBlockHeight(
     case "thought": {
       const msg = block.items[0];
       const content = msg?.content ?? "";
-      // While `isStreaming`, MessageBubble renders a single-line "thinking"
-      // placeholder instead of the full text.  Default to the streaming
-      // bubble height when content is empty (the streaming path also reads
-      // `displayContent` from useStreamingContent, which is empty until
-      // record_complete freezes the message).
+      // Under the convergent model, messages[] only contains frozen records.
+      // An empty content with isStreaming=true is a legacy placeholder that
+      // should not exist; default to a single-line height as a safety net.
       if (!content && msg?.isStreaming) {
         return BUBBLE_PADDING_Y + LINE_HEIGHT_PX;
       }
