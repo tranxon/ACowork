@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from "react";
+import { useEffect, useLayoutEffect, type RefObject } from "react";
 import { useLayoutStore } from "../stores/layoutStore";
 
 /**
@@ -28,18 +28,21 @@ import { useLayoutStore } from "../stores/layoutStore";
  * SSR / pre-hydration: no-op (the effect only runs client-side). Tauri
  * webview targets (WKWebView / WebView2 / WebKitGTK) all support
  * `ResizeObserver` natively, so no polyfill is required.
+ *
+ * Right-panel visibility: ResizeObserver only fires on *size* changes, but
+ * the FileEditorPanel's viewport position shifts in the flex layout when
+ * the right panel is shown/hidden even though its own size stays the same
+ * (fixed fileWidth + shrink-0).  We subscribe to `resultsCollapsed` and
+ * re-measure via a separate `useLayoutEffect` + `requestAnimationFrame` to
+ * guarantee the DOM reflow has settled before reading the rect.
  */
 export function useReportFilePanelBounds(
     ref: RefObject<HTMLElement | null>,
 ): void {
     const setFilePanelBounds = useLayoutStore((s) => s.setFilePanelBounds);
-    // Subscribe to right-panel collapsed state so the effect re-runs (and
-    // re-measures the panel's bounds) when the right panel is shown/hidden.
-    // ResizeObserver only fires on *size* changes, but the FileEditorPanel's
-    // viewport position can shift in the flex layout even when its own size
-    // stays the same (fixed fileWidth + shrink-0).
     const resultsCollapsed = useLayoutStore((s) => s.resultsCollapsed);
 
+    // ── ResizeObserver — catches size-driven layout changes ────────────
     useEffect(() => {
         if (typeof ResizeObserver === "undefined") {
             return;
@@ -86,5 +89,24 @@ export function useReportFilePanelBounds(
             // last-known coordinates.
             setFilePanelBounds({ left: 0, right: 0, mounted: false });
         };
-    }, [ref, setFilePanelBounds, resultsCollapsed]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [ref, setFilePanelBounds]);
+
+    // ── Right-panel visibility — re-measure immediately ────────────────
+    // ResizeObserver only fires on *size* changes.  When the right panel is
+    // shown/hidden the FileEditorPanel's viewport position shifts but its
+    // own size stays the same (fixed fileWidth + shrink-0).  We use a
+    // separate useLayoutEffect keyed on resultsCollapsed so the re-measure
+    // is guaranteed to run before the next paint.
+    useLayoutEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+
+        const rect = el.getBoundingClientRect();
+        setFilePanelBounds({
+            left: rect.left,
+            right: rect.right,
+            mounted: true,
+        });
+    }, [resultsCollapsed, setFilePanelBounds, ref]);
 }
