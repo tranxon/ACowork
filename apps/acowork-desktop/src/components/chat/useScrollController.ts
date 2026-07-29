@@ -179,6 +179,27 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // ── Helpers ──
 
   const transitionTo = useCallback((newState: ScrollState) => {
+    // INVARIANT: when content doesn't overflow the viewport, the user is
+    // always "at the bottom" — there is nowhere else to scroll to.  Any
+    // attempt to transition to "idle" in this state is a bug: the user
+    // cannot be "browsing history" when history fits on one screen.
+    //
+    // This guard is the single choke point that makes the state machine
+    // robust regardless of which effect triggered the transition:
+    //   - §1 init scroll restoring a stale scrollOffset
+    //   - §3 sticky-bottom with a stale wasAtBottomRef
+    //   - §6 loading cleanup on a short conversation
+    //   - handleScroll firing during a layout reflow
+    // All of these may try to set "idle" when there's no scrollbar; the
+    // guard redirects them to "pinned-bottom", preserving streaming
+    // auto-follow and scheduleRefresh.
+    if (newState === "idle") {
+      const container = containerRef.current;
+      if (container && container.scrollHeight <= container.clientHeight) {
+        newState = "pinned-bottom";
+      }
+    }
+
     if (stateRef.current === newState) return;
     log.debug("[ScrollController] transition", {
       from: stateRef.current,
@@ -535,46 +556,33 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // no data was loaded (e.g., no older messages found), so the
   // scrollHeight delta effect didn't fire to transition the state.
   //
-  // Restore the pre-load state (saved in preLoadStateRef before the load
-  // started).  This preserves the user's intent:
-  //  - If they were browsing ("idle"), return to "idle" — no auto-scroll.
-  //  - If they were at the bottom ("pinned-bottom"), return to "pinned-bottom"
-  //    so streaming continues to auto-follow.
+  // Reads the ACTUAL scroll position from the DOM - handleScroll is
+  // blocked while the state is "loading-*", so it could not update
+  // stateRef if the user scrolled during the load.  This microtask
+  // is the only chance to set the correct state based on where the
+  // user actually is.
   //
-  // Guard: only transition to "pinned-bottom" if the content actually
-  // fills the viewport (scrollHeight > clientHeight).  When the content
-  // is shorter than the viewport, distFromBottom is meaningless as a
-  // "near bottom" indicator — the user is at the top of a short
-  // conversation, not actually "at the bottom".
+  // The transitionTo guard handles the no-overflow case automatically:
+  // if scrollHeight <= clientHeight, any transitionTo("idle") is
+  // redirected to "pinned-bottom", so we don't need a separate branch.
   useEffect(() => {
     if (!adapter.isLoading) {
       const state = stateRef.current;
       if (state === "loading-older" || state === "loading-newer") {
-        // Use a microtask to let layout effects (scrollHeight delta,
-        // sticky-bottom) run first.  If they already transitioned, this
-        // is a no-op.  If they didn't (no data loaded), we clean up.
         queueMicrotask(() => {
           if (
             stateRef.current === "loading-older" ||
             stateRef.current === "loading-newer"
           ) {
             const container = containerRef.current;
-            if (container) {
-              const distFromBottom =
-                container.scrollHeight - container.scrollTop - container.clientHeight;
-              // Read the ACTUAL scroll position - do NOT use preLoadStateRef.
-              // The user may have scrolled during the load (handleScroll is
-              // blocked while state is "loading-*").  For loadAfter there is
-              // no scrollTop adjustment and no scroll event, so this microtask
-              // is the only chance to set the correct state.
-              if (
-                container.scrollHeight > container.clientHeight &&
-                distFromBottom <= PIN_THRESHOLD_PX
-              ) {
-                transitionTo("pinned-bottom");
-              } else {
-                transitionTo("idle");
-              }
+            if (!container) {
+              transitionTo("idle");
+              return;
+            }
+            const distFromBottom =
+              container.scrollHeight - container.scrollTop - container.clientHeight;
+            if (distFromBottom <= PIN_THRESHOLD_PX) {
+              transitionTo("pinned-bottom");
             } else {
               transitionTo("idle");
             }
@@ -624,24 +632,24 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       const firstIdx = vmlRef.current?.getFirstVisibleBlockIndex() ?? null;
 
       if (process.env.NODE_ENV === "development") {
-        const firstMsg = ad.blocks[0]?.items[0];
-        console.debug("[scroll:timer]", JSON.stringify({
-          scrollTop: Math.round(container.scrollTop),
-          scrollHeight: Math.round(container.scrollHeight),
-          clientHeight: container.clientHeight,
-          firstVisibleIndex: firstIdx,
-          firstBlockType: ad.blocks[0]?.type ?? null,
-          firstMsgType: firstMsg?.type ?? null,
-          firstMsgId: firstMsg?.id?.slice(0, 16) ?? null,
-          blocksCount: ad.blocks.length,
-          hasOlder: ad.hasOlder,
-          hasNewer: ad.hasNewer,
-          messageOffset: ad.messageOffset,
-          messageLimit: ad.messageLimit,
-          messageTotal: ad.messageTotal,
-          state,
-          isLoading: ad.isLoading,
-        }));
+        // const firstMsg = ad.blocks[0]?.items[0];
+        // console.debug("[scroll:timer]", JSON.stringify({
+        //   scrollTop: Math.round(container.scrollTop),
+        //   scrollHeight: Math.round(container.scrollHeight),
+        //   clientHeight: container.clientHeight,
+        //   firstVisibleIndex: firstIdx,
+        //   firstBlockType: ad.blocks[0]?.type ?? null,
+        //   firstMsgType: firstMsg?.type ?? null,
+        //   firstMsgId: firstMsg?.id?.slice(0, 16) ?? null,
+        //   blocksCount: ad.blocks.length,
+        //   hasOlder: ad.hasOlder,
+        //   hasNewer: ad.hasNewer,
+        //   messageOffset: ad.messageOffset,
+        //   messageLimit: ad.messageLimit,
+        //   messageTotal: ad.messageTotal,
+        //   state,
+        //   isLoading: ad.isLoading,
+        // }));
       }
 
       if (firstIdx === 0 && ad.hasOlder) {
@@ -657,13 +665,13 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
         // the first item is NOT visible), so loadBefore won't fire.
         // This is the "can't scroll to top" bug.
         if (process.env.NODE_ENV === "development") {
-          console.debug("[scroll:timer] ⚠️ hasOlder=true but firstIdx!=0", {
-            firstIdx,
-            hasOlder: ad.hasOlder,
-            totalHeight: container.scrollHeight,
-            viewportHeight: container.clientHeight,
-            scrollTop: Math.round(container.scrollTop),
-          });
+          // console.debug("[scroll:timer] ⚠️ hasOlder=true but firstIdx!=0", {
+          //   firstIdx,
+          //   hasOlder: ad.hasOlder,
+          //   totalHeight: container.scrollHeight,
+          //   viewportHeight: container.clientHeight,
+          //   scrollTop: Math.round(container.scrollTop),
+          // });
         }
       } else if (state === "idle" && distFromBottom < EDGE_THRESHOLD_PX && ad.hasNewer) {
         if (process.env.NODE_ENV === "development") {

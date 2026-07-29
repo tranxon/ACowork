@@ -67,7 +67,9 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
   // The catch-up is handled by setPinnedToBottom(true) -> scheduleRefresh.
   {
     const ss = getSessionState(useChatStore.getState(), agentId, sessionId);
-    if (!ss.isPinnedToBottom) return;
+    if (!ss.isPinnedToBottom) {
+      return;
+    }
   }
 
   const key = `${agentId}:${sessionId}`;
@@ -80,8 +82,12 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
     // has fully loaded.
     const store = useChatStore.getState();
     const ss = getSessionState(store, agentId, sessionId);
-    if (ss.isLoadingMore) return;
-    if (!ss.isPinnedToBottom) return;  // re-check after debounce
+    if (ss.isLoadingMore) {
+      return;
+    }
+    if (!ss.isPinnedToBottom) {
+      return;
+    }
     // No messageTotal === 0 guard: record_complete itself proves data
     // exists in the Runtime's storage.  An HTTP fetch with offset=0 will
     // return the latest records regardless of the stale local total.
@@ -2370,12 +2376,6 @@ function handleMessageEvent(
   agentId: string,
 ) {
   const eventType = data.type as string;
-
-  // ── DIAG: log every incoming WS message ──
-  // if (eventType === "tool_approval_needed" || eventType === "tool_call") {
-  //   log.debug("[DIAG:handleMessageEvent]", eventType, JSON.stringify(data));
-  // }
-
   // For content events: route to the session specified by event.session_id
   // If no session_id in event, fall back to the agent's active session.
   // This is the core fix: events go directly to their owning session,
@@ -2771,14 +2771,6 @@ function handleMessageEvent(
     }
 
     case "tool_approval_needed": {
-      log.debug("[DIAG:tool_approval_needed]", {
-        sid,
-        agentId,
-        "data.tool_call_id": data.tool_call_id,
-        "data.request_id": data.request_id,
-        "data.session_id": data.session_id,
-        "activeSessionId": getAgentState(get(), agentId).activeSessionId,
-      });
       if (sid) {
         const approvalEvent = data as unknown as ToolApprovalNeededEvent;
         set((state) => {
@@ -2786,19 +2778,16 @@ function handleMessageEvent(
           const prevPending = agentState?.sessionStates[sid]?.pendingApproval || {};
           const key = approvalEvent.tool_call_id || approvalEvent.request_id;
           const newPending = { ...prevPending, [key]: approvalEvent };
-          log.debug("[DIAG:tool_approval_needed:set]", {
-            sid,
-            key,
-            prevKeys: Object.keys(prevPending),
-            newKeys: Object.keys(newPending),
-            approvalKeys: Object.keys(agentState?.sessionStates[sid]?.pendingApproval || {}),
-          });
           return updateSessionState(state, agentId, sid, {
             pendingApproval: newPending,
           });
         });
       } else {
-        log.warn("[DIAG:tool_approval_needed] DROPPED — sid is null!");
+        log.warn("[ChatStore] tool_approval_needed dropped - session_id is null", {
+          agentId,
+          tool_call_id: data.tool_call_id,
+          request_id: data.request_id,
+        });
       }
       break;
     }
