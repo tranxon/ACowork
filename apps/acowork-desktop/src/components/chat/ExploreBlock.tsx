@@ -709,7 +709,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           />
         ) : isError ? (
           <X className="h-3 w-3 shrink-0 text-red-500" />
-        ) : isPendingResult ? (
+        ) : isPendingResult && !showProgress && !showApproval ? (
           <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
         ) : null}
         <button onClick={() => setShowDetails(!showDetails)}>

@@ -627,6 +627,7 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
             size_bytes: 9,
             width: Some(640),
             height: Some(480),
+            client_id: None,
         },
         AttachedItem::ImageUpload {
             document_id: "img-2".into(),
@@ -635,6 +636,7 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
             size_bytes: 12,
             width: None,
             height: None,
+            client_id: None,
         },
     ];
     let frontend_content_parts: Option<Vec<ContentPart>> = None;

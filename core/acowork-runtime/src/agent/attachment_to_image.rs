@@ -138,6 +138,7 @@ pub async fn derive_image_parts_from_items(
             size_bytes,
             width,
             height,
+            ..
         } = item
         else {
             continue;
@@ -297,6 +298,7 @@ mod tests {
             size_bytes,
             width: Some(640),
             height: Some(480),
+            client_id: None,
         }
     }
 
@@ -365,21 +367,25 @@ mod tests {
                 filename: "report.pdf".into(),
                 format: "pdf".into(),
                 size_bytes: 4096,
+            client_id: None,
             },
             png_item("img-1", "png", 16),
             AttachedItem::AttachedFile {
                 abs_path: "/workspace/foo.rs".into(),
                 name: "foo.rs".into(),
+            client_id: None,
             },
             AttachedItem::AttachedSelection {
                 abs_path: "/workspace/foo.rs".into(),
                 name: "foo.rs".into(),
                 start_line: 1,
                 end_line: 5,
+                client_id: None,
             },
             AttachedItem::AttachedFolder {
                 abs_path: "/workspace/src".into(),
                 name: "src".into(),
+            client_id: None,
             },
         ];
         let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
@@ -450,6 +456,7 @@ mod tests {
                 size_bytes: 4,
                 width: None,
                 height: None,
+            client_id: None,
             },
         ];
         let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
@@ -487,6 +494,7 @@ mod tests {
             size_bytes: (MAX_INLINE_IMAGE_BYTES as u64) + 1,
             width: None,
             height: None,
+            client_id: None,
         }];
         let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
         assert!(parts.is_empty());

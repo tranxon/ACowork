@@ -365,6 +365,18 @@ pub enum AttachedItem {
         filename: String,
         format: String,
         size_bytes: u64,
+        /// Frontend-generated client ID (the `clientId` from
+        /// `AttachedItem` on the wire). When `Some`, the Runtime writes
+        /// the JSONL attachment system entry with this exact ID so the
+        /// optimistic overlay in the desktop can be cleared via ID
+        /// deduplication. When `None` (legacy / non-optimistic
+        /// callers), the Runtime generates a fresh UUID per item.
+        ///
+        /// `#[serde(default)]` keeps the field optional for backward
+        /// compatibility with desktop clients that don't generate
+        /// client IDs yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// User-uploaded image (PNG/JPG).
     #[serde(rename_all = "camelCase")]
@@ -377,12 +389,16 @@ pub enum AttachedItem {
         width: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// User-attached workspace file (read-only reference, not copied).
     #[serde(rename_all = "camelCase")]
     AttachedFile {
         abs_path: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// User-attached workspace selection with explicit line range.
     #[serde(rename_all = "camelCase")]
@@ -391,6 +407,8 @@ pub enum AttachedItem {
         name: String,
         start_line: u32,
         end_line: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// User-attached workspace folder. Directory contents are NOT copied;
     /// the LLM is expected to walk the path on demand via its own tools.
@@ -398,6 +416,8 @@ pub enum AttachedItem {
     AttachedFolder {
         abs_path: String,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 }
 
@@ -1649,6 +1669,7 @@ mod tests {
             filename: "report.pdf".into(),
             format: "pdf".into(),
             size_bytes: 12345,
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"file_upload\""));
@@ -1668,6 +1689,7 @@ mod tests {
             size_bytes: 987654,
             width: Some(1920),
             height: Some(1080),
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"image_upload\""));
@@ -1686,6 +1708,7 @@ mod tests {
             size_bytes: 1,
             width: None,
             height: None,
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("width"));
@@ -1699,6 +1722,7 @@ mod tests {
         let item = AttachedItem::AttachedFile {
             abs_path: "/workspace/foo.rs".into(),
             name: "foo.rs".into(),
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"attached_file\""));
@@ -1714,6 +1738,7 @@ mod tests {
             name: "bar.rs".into(),
             start_line: 10,
             end_line: 25,
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"attached_selection\""));
@@ -1728,6 +1753,7 @@ mod tests {
         let item = AttachedItem::AttachedFolder {
             abs_path: "/workspace/src".into(),
             name: "src".into(),
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"attached_folder\""));

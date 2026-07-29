@@ -86,7 +86,7 @@ fn desktop_attached_items_fixture_roundtrips() {
         (
             "file_upload",
             &["type", "documentId", "filename", "format", "sizeBytes"],
-            &[],
+            &["clientId"],
         ),
         (
             "image_upload",
@@ -96,15 +96,15 @@ fn desktop_attached_items_fixture_roundtrips() {
             // when the renderer can measure the natural pixel size —
             // ADR-046 §2.5. Treat them as optional-but-camelCase.
             &["type", "documentId", "filename", "format", "sizeBytes"],
-            &["width", "height"],
+            &["width", "height", "clientId"],
         ),
-        ("attached_file", &["type", "absPath", "name"], &[]),
+        ("attached_file", &["type", "absPath", "name"], &["clientId"]),
         (
             "attached_selection",
             &["type", "absPath", "name", "startLine", "endLine"],
-            &[],
+            &["clientId"],
         ),
-        ("attached_folder", &["type", "absPath", "name"], &[]),
+        ("attached_folder", &["type", "absPath", "name"], &["clientId"]),
     ];
     let mut shape: std::collections::HashMap<
         &str,
@@ -193,7 +193,7 @@ fn desktop_attached_items_fixture_roundtrips() {
         );
 
         match &parsed {
-            AttachedItem::FileUpload { document_id, filename, format, size_bytes } => {
+            AttachedItem::FileUpload { document_id, filename, format, size_bytes, .. } => {
                 assert!(!document_id.is_empty(), "file_upload.document_id must be populated");
                 assert!(!filename.is_empty(), "file_upload.filename must be populated");
                 assert!(!format.is_empty(), "file_upload.format must be populated");
@@ -210,17 +210,17 @@ fn desktop_attached_items_fixture_roundtrips() {
                     _ => panic!("image_upload width/height must both be Some or both None"),
                 }
             }
-            AttachedItem::AttachedFile { abs_path, name } => {
+            AttachedItem::AttachedFile { abs_path, name, .. } => {
                 assert!(!abs_path.is_empty(), "attached_file.abs_path must be populated");
                 assert!(!name.is_empty(), "attached_file.name must be populated");
             }
-            AttachedItem::AttachedSelection { abs_path, name, start_line, end_line } => {
+            AttachedItem::AttachedSelection { abs_path, name, start_line, end_line, .. } => {
                 assert!(!abs_path.is_empty(), "attached_selection.abs_path must be populated");
                 assert!(!name.is_empty(), "attached_selection.name must be populated");
                 assert!(*start_line >= 1, "start_line must be 1-based");
                 assert!(*end_line >= *start_line, "end_line must be >= start_line");
             }
-            AttachedItem::AttachedFolder { abs_path, name } => {
+            AttachedItem::AttachedFolder { abs_path, name, .. } => {
                 assert!(!abs_path.is_empty(), "attached_folder.abs_path must be populated");
                 assert!(!name.is_empty(), "attached_folder.name must be populated");
             }

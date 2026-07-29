@@ -737,19 +737,13 @@ impl SessionTask {
                     // (e.g. after a rewind issued post-completion).
                     last_user_message = Some((content.clone(), message_id.clone()));
 
-                    // ADR-046: Persist all attachment records to the conversation
-                    // JSONL BEFORE running the agent loop. Each upload/file/folder
-                    // appears as an independent system entry that the frontend
-                    // renders as a chip / thumbnail / link on reload. The user's
-                    // original message is kept verbatim — no [Attached context:]
-                    // prefix, no inlined document body.
-                    //
-                    // Order: items are appended in the order the frontend sent
-                    // them, preserving the user's perceived attach sequence.
-                    if let Some(ref items) = attached_items
-                        && !items.is_empty() {
-                            agent_loop.write_attached_items(items);
-                        }
+                    // ADR-046: Attachment records are persisted inside
+                    // `agent_loop.run()` (loop_.rs) AFTER the user message, so
+                    // their timestamps are slightly later than the user entry.
+                    // This ensures the frontend's `foldMessages` (which looks
+                    // for attachment entries *after* the user message by
+                    // timestamp) can fold them into a single
+                    // `user_with_attachments` block.
 
                     // Save the raw user message before any prompt assembly.
                     // Used by AgentLoop for session title generation and
@@ -924,7 +918,7 @@ impl SessionTask {
                         };
 
                     match agent_loop
-                        .run(&enriched_content, &mut context_builder, final_content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()))
+                        .run(&enriched_content, &mut context_builder, final_content_parts, Some(message_id.clone()), Some(raw_user_message.as_str()), attached_items.as_deref())
                         .await
                     {
                         Ok(response) => {
@@ -1591,6 +1585,7 @@ mod tests {
             filename: "report.pdf".to_string(),
             format: "pdf".to_string(),
             size_bytes: 12345,
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"documentId\":"));
@@ -1611,6 +1606,7 @@ mod tests {
             size_bytes: 987654,
             width: Some(1920),
             height: Some(1080),
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("\"type\":\"image_upload\""));
@@ -1632,6 +1628,7 @@ mod tests {
             size_bytes: 1,
             width: None,
             height: None,
+            client_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("width"));
@@ -1675,6 +1672,7 @@ mod tests {
         let items = vec![acowork_core::protocol::AttachedItem::AttachedFile {
             abs_path: "/work/src/main.rs".to_string(),
             name: "main.rs".to_string(),
+            client_id: None,
         }];
         let s = build_attachment_hint("review this", Some(&items), Some("/work"));
         assert!(s.contains("- file: `/work/src/main.rs`"));
@@ -1693,6 +1691,7 @@ mod tests {
             name: "lib.rs".to_string(),
             start_line: 10,
             end_line: 25,
+            client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), Some("/work"));
         assert!(s.contains("- file: `/work/lib.rs` (L10-L25)"), "got: {s}");
@@ -1702,6 +1701,7 @@ mod tests {
             name: "lib.rs".to_string(),
             start_line: 7,
             end_line: 7,
+            client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), Some("/work"));
         assert!(s.contains("- file: `/work/lib.rs` (L7)"), "got: {s}");
@@ -1718,6 +1718,7 @@ mod tests {
             filename: "report.pdf".to_string(),
             format: "pdf".to_string(),
             size_bytes: 12345,
+            client_id: None,
         }];
         let s = build_attachment_hint("summarise this contract", Some(&items), Some("/work"));
         assert!(s.starts_with("summarise this contract\n\n"));
@@ -1743,6 +1744,7 @@ mod tests {
                 filename: format!("report.{fmt}"),
                 format: fmt.to_string(),
                 size_bytes: 100,
+            client_id: None,
             }];
             let s = build_attachment_hint("x", Some(&items), Some("/work"));
             assert!(
@@ -1764,6 +1766,7 @@ mod tests {
             filename: "report.docx".to_string(),
             format: "docx".to_string(),
             size_bytes: 1,
+            client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), None);
         assert!(
@@ -1781,12 +1784,14 @@ mod tests {
             acowork_core::protocol::AttachedItem::AttachedFile {
                 abs_path: "/work/src/lib.rs".to_string(),
                 name: "lib.rs".to_string(),
+            client_id: None,
             },
             acowork_core::protocol::AttachedItem::FileUpload {
                 document_id: "0123456789ab-3".to_string(),
                 filename: "report.docx".to_string(),
                 format: "docx".to_string(),
                 size_bytes: 1,
+                client_id: None,
             },
             acowork_core::protocol::AttachedItem::ImageUpload {
                 document_id: "img1".to_string(),
@@ -1795,6 +1800,7 @@ mod tests {
                 size_bytes: 1,
                 width: Some(800),
                 height: Some(600),
+            client_id: None,
             },
         ];
         let s = build_attachment_hint("look at these", Some(&items), Some("/work"));
@@ -1812,6 +1818,7 @@ mod tests {
         let items = vec![acowork_core::protocol::AttachedItem::AttachedFolder {
             abs_path: "/work/src".to_string(),
             name: "src".to_string(),
+            client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), Some("/work"));
         // With only a folder (no hintable items) we return verbatim

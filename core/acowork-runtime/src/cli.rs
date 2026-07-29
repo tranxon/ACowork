@@ -302,7 +302,7 @@ async fn run_chat_loop(
             return Ok(());
         }
 
-        match agent_loop.run(trimmed, context_builder, None, None, Some(trimmed)).await {
+        match agent_loop.run(trimmed, context_builder, None, None, Some(trimmed), None).await {
             Ok(response) => {
                 println!(
                     "

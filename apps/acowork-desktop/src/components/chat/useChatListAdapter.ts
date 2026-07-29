@@ -84,6 +84,34 @@ export function useChatListAdapter(
     return agent.sessionStates[sessionId]?.messages ?? EMPTY_MESSAGES;
   });
 
+  // Optimistic user-message overlay. The chatStore merges this into
+  // `messages[]` whenever the HTTP window lands (same id → optimistic
+  // copy is dropped, server copy kept; different id → optimistic copy
+  // stays and `mergeMessageWindow` sorts it into position by timestamp).
+  //
+  // We re-derive a display array by appending, then sorting by timestamp,
+  // so the block fold sees the exact same ordered stream the merge
+  // function would have produced. This keeps the block layer
+  // (`foldMessages`) ignorant of overlay mechanics while guaranteeing
+  // the user sees their optimistic bubble in the right place.
+  const optimisticEntries = useChatStore((s) => {
+    if (!agentId) return EMPTY_MESSAGES;
+    const agent = s.agentStates[agentId];
+    if (!agent || !sessionId) return EMPTY_MESSAGES;
+    return agent.sessionStates[sessionId]?.optimisticEntries ?? EMPTY_MESSAGES;
+  });
+
+  const displayMessages = useMemo<ChatMessage[]>(() => {
+    if (optimisticEntries.length === 0) return messages;
+    // Dedupe by id (defensive — store already dedupes, but a stale
+    // subscription could momentarily return both copies if the merge
+    // landed between two selector reads).
+    const seen = new Set(messages.map((m) => m.id));
+    const pending = optimisticEntries.filter((m) => !seen.has(m.id));
+    if (pending.length === 0) return messages;
+    return [...messages, ...pending].sort((a, b) => a.timestamp - b.timestamp);
+  }, [messages, optimisticEntries]);
+
   const messageOffset = useChatStore((s) => {
     if (!agentId) return 0;
     const agent = s.agentStates[agentId];
@@ -116,8 +144,8 @@ export function useChatListAdapter(
   const hasNewer = messageOffset > 0;
 
   const blocks = useMemo<MessageBlock[]>(
-    () => foldMessages(messages),
-    [messages],
+    () => foldMessages(displayMessages),
+    [displayMessages],
   );
 
   // ── Jump target ──

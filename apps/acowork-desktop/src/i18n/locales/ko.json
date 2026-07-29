@@ -161,7 +161,7 @@
     "replying": "답장 중...",
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
-    "inputMessage": "메시지 입력...（Enter로 전송, Shift+Enter로 줄바꿈）",
+    "inputMessage": "",
     "inputMessageConnecting": "메시지 입력...（Agent에 연결 중...）",
     "inputGatewayDisconnected": "Gateway 미연결",
     "ariaLabelChatMessages": "채팅 메시지",

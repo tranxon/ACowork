@@ -34,15 +34,16 @@ import { toWireAttachedItems, type AttachedItem } from "../src/lib/types.ts";
 //    so the fixture is grepable for both humans and the Rust parser. ─────────
 
 const FIXTURES: AttachedItem[] = [
-  // 1. file_upload — minimum required fields
+  // 1. file_upload — with clientId (optimistic insertion path)
   {
     type: "file_upload",
     documentId: "0123456789ab-3",
     filename: "Q3-report.pdf",
     format: "pdf",
     sizeBytes: 482301,
+    clientId: "msg-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   },
-  // 2. image_upload — with width / height (desktop ships both)
+  // 2. image_upload — with width / height + clientId
   {
     type: "image_upload",
     documentId: "fedcba987654-7",
@@ -51,9 +52,10 @@ const FIXTURES: AttachedItem[] = [
     sizeBytes: 987654,
     width: 1920,
     height: 1080,
+    clientId: "msg-b2c3d4e5-f6a7-8901-bcde-f12345678901",
   },
-  // 3. image_upload — CLI-style, width/height omitted (renderer falls back
-  //    to `<img onLoad>` natural sizing per ADR-046 §2.5)
+  // 3. image_upload — CLI-style, width/height omitted, NO clientId
+  //    (backward-compatibility: old clients don't send clientId)
   {
     type: "image_upload",
     documentId: "112233445566-a",
@@ -61,21 +63,23 @@ const FIXTURES: AttachedItem[] = [
     format: "jpg",
     sizeBytes: 12345,
   },
-  // 4. attached_file — workspace reference, no copy
+  // 4. attached_file — workspace reference with clientId
   {
     type: "attached_file",
     absPath: "/Users/alice/projects/agentcow/core/acowork-runtime/src/lib.rs",
     name: "lib.rs",
+    clientId: "msg-c3d4e5f6-a7b8-9012-cdef-123456789012",
   },
-  // 5. attached_selection — line-range variant
+  // 5. attached_selection — line-range variant with clientId
   {
     type: "attached_selection",
     absPath: "/Users/alice/projects/agentcow/core/acowork-runtime/src/agent/loop_.rs",
     name: "loop_.rs",
     startLine: 521,
     endLine: 540,
+    clientId: "msg-d4e5f6a7-b8c9-0123-defa-234567890123",
   },
-  // 6. attached_selection — single-line collapse (start == end)
+  // 6. attached_selection — single-line collapse (start == end), NO clientId
   {
     type: "attached_selection",
     absPath: "/Users/alice/projects/agentcow/core/acowork-runtime/src/main.rs",
@@ -83,7 +87,7 @@ const FIXTURES: AttachedItem[] = [
     startLine: 42,
     endLine: 42,
   },
-  // 7. attached_folder — workspace dir reference
+  // 7. attached_folder — workspace dir reference, NO clientId
   {
     type: "attached_folder",
     absPath: "/Users/alice/projects/agentcow/core/acowork-runtime/src/agent/session",

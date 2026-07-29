@@ -163,7 +163,7 @@
     "replying": "正在回复...",
     "working": "正在处理...",
     "compacting": "上下文压缩中...",
-    "inputMessage": "输入消息...（Enter 发送，Shift+Enter 换行）",
+    "inputMessage": "",
     "inputMessageConnecting": "输入消息...（正在连接 Agent...）",
     "inputGatewayDisconnected": "Gateway 未连接",
     "ariaLabelChatMessages": "聊天消息",

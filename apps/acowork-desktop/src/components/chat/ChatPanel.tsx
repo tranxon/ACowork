@@ -332,6 +332,24 @@ export function ChatPanel() {
     if (!agent?.activeSessionId) return EMPTY_MESSAGES;
     return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
   });
+  // Optimistic user-message overlay. Mirrored from chatStore so the
+  // working-indicator walk below can see "just sent" bubbles that have
+  // not yet been confirmed by the server. Same merge contract as
+  // `useChatListAdapter` (defensive dedupe + timestamp sort) so the two
+  // views can never disagree.
+  const optimisticEntries = useChatStore((s) => {
+    if (!selectedAgentId) return EMPTY_MESSAGES;
+    const agent = s.agentStates[selectedAgentId];
+    if (!agent?.activeSessionId) return EMPTY_MESSAGES;
+    return agent.sessionStates[agent.activeSessionId]?.optimisticEntries ?? EMPTY_MESSAGES;
+  });
+  const displayMessages = useMemo<ChatMessage[]>(() => {
+    if (optimisticEntries.length === 0) return messages;
+    const seen = new Set(messages.map((m) => m.id));
+    const pending = optimisticEntries.filter((m) => !seen.has(m.id));
+    if (pending.length === 0) return messages;
+    return [...messages, ...pending].sort((a, b) => a.timestamp - b.timestamp);
+  }, [messages, optimisticEntries]);
   const sessionStatus = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -579,8 +597,8 @@ export function ChatPanel() {
   // streaming has crossed the threshold) and `showCompactingItem` (session
   // compacting), so the four indicators cannot overlap.
   const canShowWorkingItemAfterUser = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
+    for (let i = displayMessages.length - 1; i >= 0; i--) {
+      const msg = displayMessages[i];
       if (msg.type === "user") return true;
       // Skip non-message items that may be interleaved between the user
       // message and the working indicator (e.g., a compaction event loaded
@@ -773,8 +791,18 @@ export function ChatPanel() {
     prevAgentIdRef.current = selectedAgentId;
 
     const chatStore = useChatStore.getState();
-    const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId]?.messages;
-    const hasMessages = !!(existingMessages && existingMessages.length > 0);
+    const ss0 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId];
+    const existingMessages = ss0?.messages;
+    const existingOptimistic = ss0?.optimisticEntries;
+    // Treat the union as "has data" — a freshly-sent optimistic user
+    // message MUST NOT cause a redundant reload. The load path will
+    // overwrite `messages[]` with whatever the server says; the merge
+    // step inside `loadSessionMessages` will then reconcile the
+    // overlay (P0-2 invariant).
+    const hasMessages = !!(
+      (existingMessages && existingMessages.length > 0) ||
+      (existingOptimistic && existingOptimistic.length > 0)
+    );
 
     log.debug("[ChatPanel:mount] atomized restore start", {
       agentId: selectedAgentId,
@@ -835,9 +863,20 @@ export function ChatPanel() {
     }
 
     const chatStore = useChatStore.getState();
-    const existingMessages = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.messages;
-    if (existingMessages && existingMessages.length > 0) {
-      // Messages already cached — just refresh session state.
+    const ss1 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId];
+    const existingMessages = ss1?.messages;
+    const existingOptimistic = ss1?.optimisticEntries;
+    // Same union rule as the mount effect: don't treat "only optimistic"
+    // as "empty cache". A session that has an in-flight optimistic
+    // insert must NOT trigger a redundant reload — the optimistic user
+    // is real state and the next `scheduleRefresh` will reconcile.
+    const hasMessages = !!(
+      (existingMessages && existingMessages.length > 0) ||
+      (existingOptimistic && existingOptimistic.length > 0)
+    );
+    if (hasMessages) {
+      // Messages (and/or optimistic overlay) already cached — just
+      // refresh session state.
       chatStore.loadSession(selectedAgentId, currentSessionId);
       return;
     }
@@ -905,11 +944,12 @@ export function ChatPanel() {
     //
     // If the user is scrolled up, jump to the latest page first.  This
     // resets messageOffset to 0 so the optimistic insert in sendMessage
-    // -> appendMessageAndAdjustMeta correctly appends to the contiguous
-    // tail window.  We delegate to scrollController.jumpToBottom (same
-    // code path as the arrow button) so the state machine transitions
-    // through "jumping" while the data loads, blocking the pagination
-    // timer from racing with ensureLatestInCache.
+    // (`appendOptimisticUserMessage` in chatStore) merges into a
+    // contiguous tail window when the next HTTP response lands.  We
+    // delegate to scrollController.jumpToBottom (same code path as the
+    // arrow button) so the state machine transitions through
+    // "jumping" while the data loads, blocking the pagination timer
+    // from racing with ensureLatestInCache.
     //
     // Input is cleared immediately for responsiveness; the actual send
     // waits for the jump to complete.

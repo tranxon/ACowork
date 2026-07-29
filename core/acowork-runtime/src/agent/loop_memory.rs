@@ -282,8 +282,8 @@ impl super::loop_::AgentLoop {
             return;
         };
         for item in items {
-            let (content, metadata) = match item {
-                acowork_core::protocol::AttachedItem::FileUpload { document_id, filename, format, size_bytes } => {
+            let (content, metadata, client_id) = match item {
+                acowork_core::protocol::AttachedItem::FileUpload { document_id, filename, format, size_bytes, client_id, .. } => {
                     let meta = crate::conversation::FileUploadMeta {
                         document_id: document_id.clone(),
                         filename: filename.clone(),
@@ -295,9 +295,9 @@ impl super::loop_::AgentLoop {
                         crate::conversation::AttachmentMeta::FileUpload(meta),
                     )
                     .expect("FileUploadMeta is always serializable");
-                    (content, Some(metadata))
+                    (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::ImageUpload { document_id, filename, format, size_bytes, width, height } => {
+                acowork_core::protocol::AttachedItem::ImageUpload { document_id, filename, format, size_bytes, width, height, client_id, .. } => {
                     let meta = crate::conversation::ImageUploadMeta {
                         document_id: document_id.clone(),
                         filename: filename.clone(),
@@ -311,9 +311,9 @@ impl super::loop_::AgentLoop {
                         crate::conversation::AttachmentMeta::ImageUpload(meta),
                     )
                     .expect("ImageUploadMeta is always serializable");
-                    (content, Some(metadata))
+                    (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedFile { abs_path, name } => {
+                acowork_core::protocol::AttachedItem::AttachedFile { abs_path, name, client_id, .. } => {
                     let meta = crate::conversation::AttachedFileMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),
@@ -323,9 +323,9 @@ impl super::loop_::AgentLoop {
                         crate::conversation::AttachmentMeta::AttachedFile(meta),
                     )
                     .expect("AttachedFileMeta is always serializable");
-                    (content, Some(metadata))
+                    (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, name, start_line, end_line } => {
+                acowork_core::protocol::AttachedItem::AttachedSelection { abs_path, name, start_line, end_line, client_id, .. } => {
                     let meta = crate::conversation::AttachedSelectionMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),
@@ -337,9 +337,9 @@ impl super::loop_::AgentLoop {
                         crate::conversation::AttachmentMeta::AttachedSelection(meta),
                     )
                     .expect("AttachedSelectionMeta is always serializable");
-                    (content, Some(metadata))
+                    (content, Some(metadata), client_id.clone())
                 }
-                acowork_core::protocol::AttachedItem::AttachedFolder { abs_path, name } => {
+                acowork_core::protocol::AttachedItem::AttachedFolder { abs_path, name, client_id, .. } => {
                     let meta = crate::conversation::AttachedFolderMeta {
                         abs_path: abs_path.clone(),
                         name: name.clone(),
@@ -349,10 +349,10 @@ impl super::loop_::AgentLoop {
                         crate::conversation::AttachmentMeta::AttachedFolder(meta),
                     )
                     .expect("AttachedFolderMeta is always serializable");
-                    (content, Some(metadata))
+                    (content, Some(metadata), client_id.clone())
                 }
             };
-            conversation.append_message("system", &content, metadata);
+            conversation.append_message_with_id("system", &content, metadata, client_id);
         }
     }
 

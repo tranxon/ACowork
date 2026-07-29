@@ -4,6 +4,7 @@ import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
+import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
 import type { MessageBlock } from "./messageFolder";
 import type { ChatListAdapter } from "./useChatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
@@ -652,7 +653,7 @@ export const VirtualMessageList = React.forwardRef<
                 })()}
 
                 {/* Regular message */}
-                {item.type !== "explore_group" && (() => {
+                {item.type !== "explore_group" && item.type !== "user_with_attachments" && (() => {
                   const msg = item.items[0];
                   return (
                     <MessageBubble
@@ -661,6 +662,23 @@ export const VirtualMessageList = React.forwardRef<
                       liveUserName={userDisplayName}
                       liveUserAvatarUrl={userAvatarUrl}
                       liveUserBuiltinAvatarId={userBuiltinAvatarId}
+                    />
+                  );
+                })()}
+
+                {/* User message with attachments */}
+                {item.type === "user_with_attachments" && (() => {
+                  const userMsg = item.items[0];
+                  const attachments = item.items.slice(1);
+                  return (
+                    <UserWithAttachmentsBubble
+                      userMessage={userMsg}
+                      attachments={attachments}
+                      currentSessionId={currentSessionId ?? ""}
+                      liveUserName={userDisplayName}
+                      liveUserAvatarUrl={userAvatarUrl}
+                      liveUserBuiltinAvatarId={userBuiltinAvatarId}
+                      agentId={selectedAgentId as string | undefined}
                     />
                   );
                 })()}

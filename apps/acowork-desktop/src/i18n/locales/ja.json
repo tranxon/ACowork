@@ -163,7 +163,7 @@
     "replying": "返信中...",
     "working": "処理中...",
     "compacting": "コンテキスト圧縮中...",
-    "inputMessage": "メッセージを入力...（Enterで送信、Shift+Enterで改行）",
+    "inputMessage": "",
     "inputMessageConnecting": "メッセージを入力...（Agentに接続中...）",
     "inputGatewayDisconnected": "Gateway 未接続",
     "ariaLabelChatMessages": "チャットメッセージ",

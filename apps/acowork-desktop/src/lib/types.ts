@@ -279,6 +279,10 @@ export interface FileUploadItem {
   /** Lowercase extension without the dot (e.g. "pdf"). */
   format: string;
   sizeBytes: number;
+  /** Frontend-generated client ID for optimistic insertion.
+   *  When set, the Runtime writes the JSONL entry with this exact ID
+   *  so the optimistic overlay can be cleared via ID deduplication. */
+  clientId?: string;
 }
 
 /** User-uploaded image (PNG/JPG). Blob at `<work_dir>/files/<documentId>`.
@@ -293,6 +297,7 @@ export interface ImageUploadItem {
   sizeBytes: number;
   width?: number;
   height?: number;
+  clientId?: string;
 }
 
 /** Workspace file attached via "Add to Chat" (read-only reference, not copied). */
@@ -300,6 +305,7 @@ export interface AttachedFileItem {
   type: "attached_file";
   absPath: string;
   name: string;
+  clientId?: string;
 }
 
 /** Workspace selection with explicit line range. */
@@ -311,6 +317,7 @@ export interface AttachedSelectionItem {
   startLine: number;
   /** 1-based end line (inclusive). */
   endLine: number;
+  clientId?: string;
 }
 
 /** Workspace folder (contents NOT copied — LLM walks path via its own tools). */
@@ -318,6 +325,7 @@ export interface AttachedFolderItem {
   type: "attached_folder";
   absPath: string;
   name: string;
+  clientId?: string;
 }
 
 /**
@@ -376,14 +384,17 @@ export type AttachedItem =
 export function toWireAttachedItems(items: readonly AttachedItem[]): unknown[] {
   return items.map((item) => {
     switch (item.type) {
-      case "file_upload":
-        return {
+      case "file_upload": {
+        const out: Record<string, unknown> = {
           type: "file_upload",
           documentId: item.documentId,
           filename: item.filename,
           format: item.format,
           sizeBytes: item.sizeBytes,
         };
+        if (item.clientId !== undefined) out.clientId = item.clientId;
+        return out;
+      }
       case "image_upload": {
         const out: Record<string, unknown> = {
           type: "image_upload",
@@ -394,28 +405,38 @@ export function toWireAttachedItems(items: readonly AttachedItem[]): unknown[] {
         };
         if (item.width !== undefined) out.width = item.width;
         if (item.height !== undefined) out.height = item.height;
+        if (item.clientId !== undefined) out.clientId = item.clientId;
         return out;
       }
-      case "attached_file":
-        return {
+      case "attached_file": {
+        const out: Record<string, unknown> = {
           type: "attached_file",
           absPath: item.absPath,
           name: item.name,
         };
-      case "attached_selection":
-        return {
+        if (item.clientId !== undefined) out.clientId = item.clientId;
+        return out;
+      }
+      case "attached_selection": {
+        const out: Record<string, unknown> = {
           type: "attached_selection",
           absPath: item.absPath,
           name: item.name,
           startLine: item.startLine,
           endLine: item.endLine,
         };
-      case "attached_folder":
-        return {
+        if (item.clientId !== undefined) out.clientId = item.clientId;
+        return out;
+      }
+      case "attached_folder": {
+        const out: Record<string, unknown> = {
           type: "attached_folder",
           absPath: item.absPath,
           name: item.name,
         };
+        if (item.clientId !== undefined) out.clientId = item.clientId;
+        return out;
+      }
     }
   });
 }
@@ -498,6 +519,11 @@ export interface ChatMessage {
   /** Raw metadata from the JSONL entry. Used by system entries to carry
    *  attachment metadata (ADR-046 §2.5: 5 metadata.type branches). */
   metadata?: Record<string, unknown>;
+  /** Internal flag: this entry is an optimistic (unconfirmed) insert from
+   *  the frontend. Set by `sendMessage` on attachment system entries and
+   *  cleared when the HTTP window lands (same id → server copy wins).
+   *  Used by `AttachmentChipRow` to render the pending visual state. */
+  _isOptimistic?: true;
 
 }
 

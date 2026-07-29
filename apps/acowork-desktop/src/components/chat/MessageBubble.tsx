@@ -371,6 +371,7 @@ const MessageBubble = React.memo(function MessageBubble({
               }}
               compact
               onRemove={handleChipRemove}
+              pending={!!message._isOptimistic}
             />
           </div>
         </MessageContentWrapper>
@@ -397,6 +398,7 @@ const MessageBubble = React.memo(function MessageBubble({
               agentId={selectedAgentId}
               compact
               onRemove={handleChipRemove}
+              pending={!!message._isOptimistic}
             />
           </div>
         </MessageContentWrapper>
@@ -416,6 +418,7 @@ const MessageBubble = React.memo(function MessageBubble({
               compact
               onChipClick={handleChipClick}
               onRemove={handleChipRemove}
+              pending={!!message._isOptimistic}
             />
           </div>
         </MessageContentWrapper>
@@ -437,6 +440,7 @@ const MessageBubble = React.memo(function MessageBubble({
               compact
               onChipClick={handleChipClick}
               onRemove={handleChipRemove}
+              pending={!!message._isOptimistic}
             />
           </div>
         </MessageContentWrapper>
@@ -456,6 +460,7 @@ const MessageBubble = React.memo(function MessageBubble({
               compact
               onChipClick={handleChipClick}
               onRemove={handleChipRemove}
+              pending={!!message._isOptimistic}
             />
           </div>
         </MessageContentWrapper>

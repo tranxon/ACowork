@@ -161,7 +161,7 @@
     "replying": "正在回覆...",
     "working": "正在處理...",
     "compacting": "上下文壓縮中...",
-    "inputMessage": "輸入訊息...（Enter 傳送，Shift+Enter 換行）",
+    "inputMessage": "",
     "inputMessageConnecting": "輸入訊息...（正在連線至 Agent...）",
     "inputGatewayDisconnected": "Gateway 未連線",
     "ariaLabelChatMessages": "聊天訊息",

@@ -17,7 +17,7 @@
  * inline in a user bubble). Clickable workspace refs call `onChipClick`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Folder, Hash, X } from "lucide-react";
+import { FileText, Folder, Hash, Loader2, X } from "lucide-react";
 import type { AttachedFileItem, AttachedFolderItem, AttachedItem, AttachedSelectionItem, ImageUploadItem } from "../../lib/types";
 import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
@@ -36,6 +36,10 @@ export interface AttachmentChipRowProps {
   onChipClick?: (item: AttachedItem) => void;
   /** Called when the user clicks the remove button (upload chips only). */
   onRemove?: (item: AttachedItem) => void;
+  /** When true, renders the chip in a pending (optimistic) state with
+   *  reduced opacity and a spinner icon, indicating the server has not
+   *  yet confirmed the attachment entry. */
+  pending?: boolean;
 }
 
 export function AttachmentChipRow({
@@ -44,6 +48,7 @@ export function AttachmentChipRow({
   compact = true,
   onChipClick,
   onRemove,
+  pending = false,
 }: AttachmentChipRowProps) {
   switch (item.type) {
     case "file_upload":
@@ -62,6 +67,7 @@ export function AttachmentChipRow({
           item={item}
           agentId={agentId ?? null}
           onRemove={onRemove ? () => onRemove(item) : undefined}
+          pending={pending}
         />
       );
     case "attached_file":
@@ -70,6 +76,7 @@ export function AttachmentChipRow({
           item={item}
           compact={compact}
           onClick={onChipClick ? () => onChipClick(item) : undefined}
+          pending={pending}
         />
       );
     case "attached_selection":
@@ -78,6 +85,7 @@ export function AttachmentChipRow({
           item={item}
           compact={compact}
           onClick={onChipClick ? () => onChipClick(item) : undefined}
+          pending={pending}
         />
       );
     case "attached_folder":
@@ -86,6 +94,7 @@ export function AttachmentChipRow({
           item={item}
           compact={compact}
           onClick={onChipClick ? () => onChipClick(item) : undefined}
+          pending={pending}
         />
       );
   }
@@ -97,10 +106,12 @@ function WorkspaceRefChip({
   item,
   compact,
   onClick,
+  pending,
 }: {
   item: AttachedFileItem;
   compact: boolean;
   onClick?: () => void;
+  pending?: boolean;
 }) {
   const Tag = onClick ? "button" : "div";
   return (
@@ -112,11 +123,16 @@ function WorkspaceRefChip({
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
           : "")
+        + (pending ? " opacity-60" : "")
       }
-      title={item.absPath}
+      title={pending ? "等待服务器确认..." : item.absPath}
       onClick={onClick}
     >
-      <FileText className="h-4 w-4 shrink-0 text-zinc-400" />
+      {pending ? (
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-400" />
+      ) : (
+        <FileText className="h-4 w-4 shrink-0 text-zinc-400" />
+      )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
     </Tag>
   );
@@ -126,10 +142,12 @@ function SelectionChip({
   item,
   compact,
   onClick,
+  pending,
 }: {
   item: AttachedSelectionItem;
   compact: boolean;
   onClick?: () => void;
+  pending?: boolean;
 }) {
   const Tag = onClick ? "button" : "div";
   return (
@@ -141,11 +159,16 @@ function SelectionChip({
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
           : "")
+        + (pending ? " opacity-60" : "")
       }
-      title={`${item.absPath}:${item.startLine}-${item.endLine}`}
+      title={pending ? "等待服务器确认..." : `${item.absPath}:${item.startLine}-${item.endLine}`}
       onClick={onClick}
     >
-      <Hash className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+      {pending ? (
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
+      ) : (
+        <Hash className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+      )}
       <span className="max-w-[180px] truncate font-medium">{item.name}</span>
       <span className="text-zinc-400 dark:text-zinc-500">
         {item.startLine}-{item.endLine}
@@ -158,10 +181,12 @@ function FolderChip({
   item,
   compact,
   onClick,
+  pending,
 }: {
   item: AttachedFolderItem;
   compact: boolean;
   onClick?: () => void;
+  pending?: boolean;
 }) {
   const Tag = onClick ? "button" : "div";
   return (
@@ -173,11 +198,16 @@ function FolderChip({
         + (onClick
           ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
           : "")
+        + (pending ? " opacity-60" : "")
       }
-      title={item.absPath}
+      title={pending ? "等待服务器确认..." : item.absPath}
       onClick={onClick}
     >
-      <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+      {pending ? (
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
+      ) : (
+        <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+      )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
     </Tag>
   );
@@ -195,10 +225,12 @@ function ImageAttachmentThumbnail({
   item,
   agentId,
   onRemove,
+  pending,
 }: {
   item: ImageUploadItem;
   agentId: string | null;
   onRemove?: () => void;
+  pending?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -258,8 +290,8 @@ function ImageAttachmentThumbnail({
 
   return (
     <div
-      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
-      title={`${item.filename} (${item.format})`}
+      className={"group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800" + (pending ? " opacity-60" : "")}
+      title={pending ? "等待服务器确认..." : `${item.filename} (${item.format})`}
       style={aspectRatio ? { aspectRatio } : undefined}
     >
       {url ? (

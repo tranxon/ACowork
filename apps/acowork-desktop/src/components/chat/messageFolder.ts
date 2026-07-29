@@ -12,6 +12,19 @@
 
 import type { ChatMessage } from "../../lib/types";
 
+/** ADR-046 §2.5: 5 attachment metadata types. */
+const ATTACHMENT_META_TYPES = new Set([
+  "file_upload",
+  "image_upload",
+  "attached_file",
+  "attached_selection",
+  "attached_folder",
+]);
+
+/** Max timestamp delta (ms) between a user message and its attachment
+ *  system entries for them to be folded into a single block. */
+const ATTACHMENT_FOLD_WINDOW_MS = 100;
+
 /**
  * Strict intermediate representation between the data layer (raw
  * `ChatMessage[]` in chatStore) and the rendering layer
@@ -32,11 +45,18 @@ import type { ChatMessage } from "../../lib/types";
 export interface MessageBlock {
   /** Content-derived stable ID: `block-${items[0].id}`. Survives prepend/append. */
   blockId: string;
-  type: ChatMessage["type"] | "explore_group";
+  type: ChatMessage["type"] | "explore_group" | "user_with_attachments";
   items: ChatMessage[];
   rawCount: number;
   anchorToLatest: boolean;
   hasFollowUpReply: boolean;
+}
+
+/** Check if a system message is an attachment entry (ADR-046 §2.5). */
+function isAttachmentEntry(msg: ChatMessage): boolean {
+  if (msg.type !== "system") return false;
+  const metaType = msg.metadata?.type as string | undefined;
+  return metaType !== undefined && ATTACHMENT_META_TYPES.has(metaType);
 }
 
 /**
@@ -45,6 +65,9 @@ export interface MessageBlock {
  * Rules:
  *  - Consecutive `tool_call` / `tool_result` / `thought` messages are grouped
  *    into a single `explore_group` block.
+ *  - A `user` message followed by attachment system entries (within
+ *    `ATTACHMENT_FOLD_WINDOW_MS`) is folded into a single
+ *    `user_with_attachments` block.
  *  - All other message types become individual blocks.
  *  - `blockId` is derived from the first item's `id` (content-derived, stable).
  *  - `anchorToLatest` is set on the block containing the last raw entry.
@@ -87,6 +110,37 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
       exploreBuffer.push(msg);
     } else {
       flushExplore();
+
+      // ── user_with_attachments folding ──────────────────────────────
+      // If this is a user message, look ahead for attachment system
+      // entries that belong to it (same batch, within fold window).
+      if (msg.type === "user") {
+        const attachments: ChatMessage[] = [];
+        let j = i + 1;
+        while (
+          j < messages.length &&
+          isAttachmentEntry(messages[j]) &&
+          messages[j].timestamp - msg.timestamp <= ATTACHMENT_FOLD_WINDOW_MS
+        ) {
+          attachments.push(messages[j]);
+          j++;
+        }
+        if (attachments.length > 0) {
+          const items = [msg, ...attachments];
+          const blockId = `block-${msg.id}`;
+          blocks.push({
+            blockId,
+            type: "user_with_attachments",
+            items,
+            rawCount: items.length,
+            anchorToLatest: j - 1 === lastIdx,
+            hasFollowUpReply: false,
+          });
+          i = j - 1; // skip the consumed attachment entries
+          continue;
+        }
+      }
+
       const blockId = `block-${msg.id}`;
       blocks.push({
         blockId,

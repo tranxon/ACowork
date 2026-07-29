@@ -9,6 +9,8 @@ import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
+import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
+import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
@@ -101,34 +103,119 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
 // A single display group can occupy multiple slots here, which is fine:
 // the cache only bounds memory, the UI rendering handles folding.
 
-/**
- * Append a new message to the cache and adjust pagination metadata.
- *
- * **Sliding-window invariant**: `messages` is ALWAYS a contiguous window
- * into the full conversation.  When `messageOffset === 0` the window
- * touches the newest entry, so appending a real-time message keeps it
- * contiguous.  When `messageOffset > 0` the user has scrolled up – the
- * new message (at offset 0) is NOT adjacent to the window, so we must
- * NOT append it.  The message will be loaded via `scheduleRefresh` when
- * the user returns to the bottom.
- */
-function appendMessageAndAdjustMeta(
-  ss: SessionChatState,
-  newMessages: ChatMessage[],
-): Partial<SessionChatState> {
-  if (ss.messageOffset === 0) {
-    // At the bottom – append directly, no trimming.
-    return {
-      messages: [...ss.messages, ...newMessages],
-      messageTotal: ss.messageTotal + 1,
-      messageLimit: ss.messageLimit + 1,
-    };
+// ── Message window merge ──────────────────────────────────────────────
+//
+// Single source of truth for "what should `messages[]` look like after a
+// new HTTP `/sessions/{sid}/messages` response lands?"
+//
+// Invariants (P0-1, P0-2, P0-3 from the messages review):
+//
+//   1. The HTTP response is the authoritative timestamp-ordered window.
+//      Any cache entry whose id appears in the response MUST be replaced
+//      by the response copy (backend wins for content; ties impossible in
+//      practice but we dedupe defensively).
+//
+//   2. Cache entries with ids NOT in the response are preserved (they
+//      belong to a different window — e.g. older entries loaded via
+//      `loadBefore`). They keep their relative timestamp order.
+//
+//   3. Optimistic user messages (overlay) are merged in by id and
+//      timestamp. If the response confirms an optimistic user (same id),
+//      the response copy wins and the optimistic copy is dropped from
+//      `remainingOptimistic`. If the response doesn't yet contain the
+//      optimistic user (backend write latency), the optimistic copy is
+//      kept (and will be dropped on the next confirmation).
+//
+//   4. The final array is sorted by `timestamp` ascending. `Array.sort`
+//      is stable in V8 since ES2019, so rows with identical `timestamp`
+//      keep their input order — important when attachment system rows and
+//      their owning user entry share an ISO millisecond.
+//
+//   5. No path may wipe `messages[]` based on a failed/aborted HTTP
+//      request. Only the response handler may overwrite the window, and
+//      only with merged content (never an empty reset).
+//
+// `mergeMessageWindow` is exported (pure function) so the regression tests
+// in `chatStore.test.ts` can pin the contract without needing a Zustand
+// store or fetch mock.
+export interface MergedMessageWindow {
+  /** Sorted, deduped message array ready to write into `messages[]`. */
+  messages: ChatMessage[];
+  /**
+   * Optimistic overlay AFTER the merge — entries the response did NOT
+   * confirm. Empty when every optimistic user was echoed back by the
+   * server (the normal case once `record_complete` lands).
+   */
+  remainingOptimistic: ChatMessage[];
+}
+
+export function mergeMessageWindow(
+  cache: ChatMessage[],
+  optimistic: ChatMessage[],
+  server: ChatMessage[],
+): MergedMessageWindow {
+  // Step 1: server is authoritative for its ids. Build a Map<id, msg>
+  // starting from server entries so duplicates in `server` itself are
+  // resolved in favor of the first occurrence (server is already ts-
+  // ordered, so the first occurrence is the oldest; ties are harmless).
+  const byId = new Map<string, ChatMessage>();
+  for (const m of server) byId.set(m.id, m);
+
+  // Step 2: cache contributes any entry whose id is NOT in the server
+  // window. These are older or otherwise out-of-window rows that the
+  // server didn't echo back this round (e.g. a paginated window that
+  // doesn't overlap the cache's older entries).
+  for (const m of cache) {
+    if (!byId.has(m.id)) byId.set(m.id, m);
   }
-  // Not at the bottom – don't touch messages array.  Just bump the
-  // metadata so hasNewer / hasOlder stay accurate.
+
+  // Step 3: optimistic overlay — same rule, but track which survived so
+  // the caller can clear confirmed ones from `optimisticEntries`.
+  const remainingOptimistic: ChatMessage[] = [];
+  for (const m of optimistic) {
+    if (byId.has(m.id)) {
+      // Server already confirmed — drop optimistic copy, keep server's.
+      continue;
+    }
+    byId.set(m.id, m);
+    remainingOptimistic.push(m);
+  }
+
+  // Step 4: stable sort by timestamp ascending. The merge Map preserves
+  // insertion order on iteration, and Array.sort is stable, so rows
+  // sharing an ISO millisecond keep the layered order
+  // (server → cache → optimistic).
+  const messages = Array.from(byId.values()).sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
+
+  return { messages, remainingOptimistic };
+}
+
+/**
+ * Write a single user message into the optimistic overlay.
+ *
+ * Replaces the old `appendMessageAndAdjustMeta`, which conflated the
+ * optimistic insert path with the server-authoritative pagination cursor
+ * (messageOffset/limit/total). Those three coordinates now belong
+ * exclusively to the server; the overlay is rendered separately by the
+ * adapter (`useChatListAdapter` -> `messages + optimisticEntries`)
+ * and sorted into display order by `mergeMessageWindow` on every HTTP
+ * response.
+ *
+ * Side effects:
+ *   - `optimisticEntries` gains one entry.
+ *   - NO change to `messages`, `messageOffset`, `messageLimit`, or
+ *     `messageTotal`. This is the difference that fixes P0-1/P0-2/P0-3:
+ *     the optimistic insert can no longer race with the HTTP fetch
+ *     because they no longer share a mutable array.
+ */
+function appendOptimisticEntries(
+  ss: SessionChatState,
+  entries: ChatMessage[],
+): Partial<SessionChatState> {
   return {
-    messageTotal: ss.messageTotal + 1,
-    messageOffset: ss.messageOffset + 1,
+    optimisticEntries: [...ss.optimisticEntries, ...entries],
   };
 }
 
@@ -185,6 +272,16 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 /** State for a single conversation session within an agent. */
 interface SessionChatState {
   messages: ChatMessage[];
+  /**
+   * Unconfirmed user messages overlay. See `DEFAULT_SESSION_STATE.messages`
+   * for the full rationale. Always rendered after `messages` (timestamp-
+   * merged by `mergeMessageWindow`).
+   */
+  /** Unconfirmed entries (user text + attachment system entries) written
+   *  immediately by `sendMessage` and cleared when the HTTP window lands
+   *  (same id → server copy wins; different id → optimistic copy stays
+   *  and `mergeMessageWindow` sorts it into position by timestamp). */
+  optimisticEntries: ChatMessage[];
   tokenUsage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
   /**
@@ -338,6 +435,26 @@ interface SessionChatState {
 
 const DEFAULT_SESSION_STATE: SessionChatState = {
   messages: [],
+  /**
+   * Unconfirmed user messages — written immediately by `sendMessage` and
+   * removed as soon as the backend confirms them (same `id` shows up in an
+   * HTTP `/sessions/{sid}/messages` response). Rendered as an overlay on
+   * top of the server-authoritative `messages[]`, sorted into display
+   * position by `mergeMessageWindow` using the entry timestamp.
+   *
+   * Why a separate field (not just `messages.push`):
+   *   1. `isInitialLoad` must not wipe optimistic inserts — a freshly
+   *      created session can have `messages[] === []` when the user hits
+   *      send, and the first HTTP response may not yet include the just-
+   *      written user entry.
+   *   2. Backend-attached `system` rows (ADR-046 attachments) arrive in
+   *      the same window; they MUST appear next to their owning user
+   *      entry, not as orphans appended to the tail. The merge function
+   *      sorts all rows by `entry.ts`, which is what the user expects.
+   *   3. When the backend confirms a user (same id), it MUST silently
+   *      disappear from the overlay — no flicker, no duplicate bubble.
+   */
+  optimisticEntries: [],
   tokenUsage: null,
   contextUsage: null,
   messageOffset: 0,
@@ -567,7 +684,6 @@ interface ChatStore {
   /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
   resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => void;
   resolveQuestion: (agentId: string, requestId: string) => void;
-  loadConversationHistory: (agentId: string) => Promise<void>;
   /**
    * Load messages for a session via HTTP pagination.
    * - `offset === undefined` (default): initial load — fetches the newest `limit` raw entries.
@@ -1261,6 +1377,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       ...updateSessionState(state, agentId, sessionId, {
         messages: [],
+        optimisticEntries: [],
         tokenUsage: null,
         contextUsage: null,
         messageOffset: 0,
@@ -1282,6 +1399,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => ({
       ...updateSessionState(state, agentId, sessionId, {
         messages: [],
+        optimisticEntries: [],
         tokenUsage: null,
         contextUsage: null,
         messageOffset: 0,
@@ -1321,72 +1439,96 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // optimistic render and the backend-persisted message must share the same ID.
     const userMsgId = `msg-${crypto.randomUUID()}`;
 
-    // ADR-046: every attachment — uploaded documents, uploaded images, AND
-    // workspace references — flows through the same `AttachedItem[]` list.
-    // The optimistic user message carries only the text content. The
-    // attachments are written as separate system entries by the backend
-    // and rendered as individual `AttachmentChipRow` in the message list.
-    const items = attachedItems ?? [];
+    // ADR-046: Build the unified `attached_items` payload from BOTH upload
+    // payloads (`attachedItems`) AND workspace refs (`attachedContext`).
+    // They are collected into one list FIRST so that every attachment gets
+    // a `clientId` and an optimistic system entry. Without this step
+    // workspace refs would only appear after the backend responds.
+    const rawItems: AttachedItem[] = [...(attachedItems ?? [])];
+    const ssAttachedContext = sessionId
+      ? getSessionState(get(), agentId, sessionId).attachedContext
+      : [];
+    if (sessionId && ssAttachedContext.length > 0) {
+      for (const ctx of ssAttachedContext) {
+        if (ctx.type === "file") {
+          rawItems.push({
+            type: "attached_file",
+            absPath: ctx.absPath,
+            name: ctx.name,
+          });
+        } else if (ctx.type === "selection") {
+          rawItems.push({
+            type: "attached_selection",
+            absPath: ctx.absPath,
+            name: ctx.name,
+            startLine: ctx.startLine ?? 1,
+            endLine: ctx.endLine ?? ctx.startLine ?? 1,
+          });
+        } else if (ctx.type === "directory") {
+          rawItems.push({
+            type: "attached_folder",
+            absPath: ctx.absPath,
+            name: ctx.name,
+          });
+        }
+      }
+      // Clear workspace refs immediately so the next send starts fresh.
+      // This must happen before the async MQTT publish to avoid races if
+      // the user sends another message quickly.
+      set((s) =>
+        updateSessionState(s, agentId, sessionId, { attachedContext: [] }),
+      );
+    }
 
+    const items: AttachedItem[] = rawItems.map((item) => {
+      const clientId = `msg-${crypto.randomUUID()}`;
+      return { ...item, clientId };
+    });
+
+    const now = Date.now();
     const userMsg: ChatMessage = {
       id: userMsgId,
       type: "user",
       content,
-      timestamp: Date.now(),
+      timestamp: now,
       ...getUserSenderInfo(),
     };
+
+    // Build optimistic system entries for each attachment so they appear
+    // immediately in the chat list alongside the user text bubble.
+    const optimisticAttachments: ChatMessage[] = items.map((item, idx) => {
+      const metaType = item.type; // "file_upload" | "image_upload" | "attached_file" | "attached_selection" | "attached_folder"
+      const meta: Record<string, unknown> = { type: metaType };
+      // Copy all fields except `type` and `clientId` into metadata
+      for (const [k, v] of Object.entries(item)) {
+        if (k !== "type" && k !== "clientId" && v !== undefined) {
+          meta[k] = v;
+        }
+      }
+      return {
+        id: item.clientId!,
+        type: "system" as const,
+        content: "",
+        timestamp: now + 1 + idx, // +1ms per attachment so they sort after the user text
+        metadata: meta,
+        senderDisplayName: undefined,
+        _isOptimistic: true as const,
+      };
+    });
 
     if (sessionId) {
       set((state) => {
         const ss = getSessionState(state, agentId, sessionId);
         return updateSessionState(state, agentId, sessionId,
-          appendMessageAndAdjustMeta(ss, [...ss.messages, userMsg]));
+          appendOptimisticEntries(ss, [userMsg, ...optimisticAttachments]));
       });
-      // ── DIAG: verify optimistic user message insert ──
+      // ── DIAG: verify optimistic insert ──
       log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
         sid: sessionId,
         userMsgId,
         attachedItemCount: items.length,
-        messagesLenAfter: getSessionState(get(), agentId, sessionId).messages.length,
+        optimisticCount: getSessionState(get(), agentId, sessionId).optimisticEntries.length,
       });
-    }
-
-    // ADR-046: workspace refs (the `attachedContext` state field, which is
-    // also the source of `AttachedContextChips`) are bridged into the same
-    // `attached_items` envelope. After this snapshot the field is cleared
-    // so the next send starts with a fresh slate. Upload payloads from the
-    // caller (already in `items`) come first so upload chips win any
-    // filename collisions on render.
-    if (sessionId) {
-      const ss = getSessionState(get(), agentId, sessionId);
-      if (ss.attachedContext.length > 0) {
-        for (const ctx of ss.attachedContext) {
-          if (ctx.type === "file") {
-            items.push({
-              type: "attached_file",
-              absPath: ctx.absPath,
-              name: ctx.name,
-            });
-          } else if (ctx.type === "selection") {
-            items.push({
-              type: "attached_selection",
-              absPath: ctx.absPath,
-              name: ctx.name,
-              startLine: ctx.startLine ?? 1,
-              endLine: ctx.endLine ?? ctx.startLine ?? 1,
-            });
-          } else if (ctx.type === "directory") {
-            items.push({
-              type: "attached_folder",
-              absPath: ctx.absPath,
-              name: ctx.name,
-            });
-          }
-        }
-        set((s) =>
-          updateSessionState(s, agentId, sessionId, { attachedContext: [] }),
-        );
-      }
     }
 
     // ADR-046 §params: only `attached_items` survives. The legacy
@@ -1481,10 +1623,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     log.debug("[ChatStore:DEBUG] setCurrentModel called", { model, provider, agentId, sessionId });
     if (!sessionId) return;
 
-    // Resolve new model's default reasoning effort from availableModels
-    const models = get().availableModels;
-    const newModelEntry = models.find((m) => m.name === model && m.provider === provider);
-    const defaultEffort = newModelEntry?.default_reasoning_effort ?? null;
+    // Resolve new model's default reasoning effort from availableModels.
+    // Lookup goes through resolveDefaultReasoningEffort so this stays in
+    // sync with the MQTT model_confirmed handler.
+    const defaultEffort = resolveDefaultReasoningEffort(get().availableModels, model, provider);
 
     // Update session model + reset reasoningEffort to new model's default
     set((state) => updateSessionState(state, agentId, sessionId, {
@@ -1590,40 +1732,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ),
     }));
   },
-  loadConversationHistory: async (agentId: string) => {
-    try {
-      const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/conversations/latest`);
-      if (!resp.ok) return;
-      const data = await resp.json() as { session_id?: string; messages?: Array<{ role: string; content: string; timestamp: number; turn_index: number }> };
-
-      if (!data.messages || data.messages.length === 0) return;
-
-      const historyMessages: ChatMessage[] = data.messages.map((msg) => ({
-        id: `history-${msg.turn_index}-${msg.role}-${msg.timestamp}`,
-        type: (msg.role === "user"
-          ? "user"
-          : msg.role === "assistant"
-            ? "assistant"
-            : msg.role === "think" || msg.role === "thought"
-              ? "thought"
-              : "system") as ChatMessage["type"],
-        content: msg.content,
-        timestamp: msg.timestamp * 1000,
-      }));
-
-      // Use session_id from response if available, else fall back to active session
-      const sessionId = data.session_id ?? getAgentState(get(), agentId).activeSessionId;
-      if (sessionId) {
-        set((state) => updateSessionState(state, agentId, sessionId, { messages: historyMessages }));
-      }
-    } catch (e) {
-      log.error("[ChatStore] Failed to load conversation history:", e);
-      const sessionId = getAgentState(get(), agentId).activeSessionId;
-      if (sessionId) {
-        set((state) => updateSessionState(state, agentId, sessionId, { messages: [] }));
-      }
-    }
-  },
 
   loadSessionMessages: async (
     agentId: string,
@@ -1702,43 +1810,57 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const prevOffset = ss.messageOffset;
         const prevLimit = ss.messageLimit;
 
-        let nextMessages: ChatMessage[];
+        // Server window is the authoritative timestamp-ordered slice.
+        // `mergeMessageWindow` reconciles it with the local cache and the
+        // optimistic-user overlay in a single pass:
+        //
+        //   1. server entries win on id collision (defensive dedupe even
+        //      though the backend never emits duplicates within a window).
+        //   2. cache entries with non-overlapping ids are preserved
+        //      (older rows from `loadBefore`, etc.).
+        //   3. optimistic entries not yet echoed back are kept in the
+        //      overlay and sorted by timestamp into the final array.
+        //   4. final array is sorted by `timestamp` ascending — this is
+        //      what the user perceives as "correct order" regardless of
+        //      which window HTTP fetched.
+        //
+        // Pagination cursor math is unchanged: offset/limit continue to
+        // be derived from the server window (server-authoritative).
+        const merged = mergeMessageWindow(
+          ss.messages,
+          ss.optimisticEntries,
+          converted,
+        );
 
-        // No sliding window — always merge without trimming.
-        // The messages array grows as the user scrolls up or as new
-        // messages arrive, and is released on closeSession/switch.
         let finalOffset = returnedOffset;
         let finalLimit = returnedLimit;
 
         if (isInitialLoad) {
+          // ADR-035 C2: drop any in-flight activeStream tracker so a
+          // stale lineCount from a previous session incarnation cannot
+          // bleed into the freshly-loaded view.
           activeStreams.delete(sessionId);
-          nextMessages = converted;
         } else if (returnedOffset > prevOffset) {
-          // Loading OLDER messages (scroll-up). Prepend older messages.
-          const existingIds = new Set(ss.messages.map((m) => m.id));
-          const older = converted.filter((m) => !existingIds.has(m.id));
-          nextMessages = [...older, ...ss.messages];
+          // Loading OLDER messages (scroll-up). Window slid up; expand
+          // the cached range by the older entries the server just sent.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
             prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
           ) - finalOffset;
         } else if (returnedOffset < prevOffset) {
-          // Loading NEWER messages (scroll-down). Append newer messages.
-          const existingIds = new Set(ss.messages.map((m) => m.id));
-          const newer = converted.filter((m) => !existingIds.has(m.id));
-          nextMessages = [...ss.messages, ...newer];
+          // Loading NEWER messages (scroll-down). Window slid down; the
+          // newer entries the server returned extend the bottom of the
+          // cached range.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
             prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
           ) - finalOffset;
         } else {
-          // returnedOffset === prevOffset: same window (e.g. scheduleRefresh
-          // or duplicate load).  Merge any newly appeared messages.
-          const existingIds = new Set(ss.messages.map((m) => m.id));
-          const same = converted.filter((m) => !existingIds.has(m.id));
-          nextMessages = [...ss.messages, ...same];
+          // returnedOffset === prevOffset: same window (scheduleRefresh,
+          // duplicate load, or a re-fetch of the same page).  No cursor
+          // math change.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
@@ -1747,7 +1869,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
 
         return updateSessionState(state, agentId, sessionId, {
-          messages: nextMessages,
+          messages: merged.messages,
+          optimisticEntries: merged.remainingOptimistic,
           messageOffset: finalOffset,
           messageLimit: finalLimit,
           messageTotal: returnedTotal,
@@ -1763,19 +1886,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return;
       }
       if (e instanceof DOMException && e.name === "AbortError") {
+        // P0-3: abort / cancellation must NEVER wipe the cached message
+        // window. The previous implementation reset `messages: []` here,
+        // which destroyed in-flight optimistic entries and caused the
+        // "user message reappears as duplicate" bug. We only flip the
+        // loading flags so the UI can re-attempt via the next scroll /
+        // scheduleRefresh / setPinnedToBottom hook.
         log.debug(`[ChatStore] loadSessionMessages aborted (seq ${seq})`);
-        set((state) => updateSessionState(state, agentId, sessionId, { isLoadingSession: false, isLoadingMore: false }));
+        set((state) => updateSessionState(state, agentId, sessionId, {
+          isLoadingSession: false,
+          isLoadingMore: false,
+        }));
         return;
       }
       log.error("[ChatStore] Failed to load session messages:", e);
+      // P0-3: even on hard failures, do NOT reset `messages[]`. The
+      // cache may already hold valid content from a previous window; we
+      // only surface the error and clear loading flags so the retry
+      // button in VirtualMessageList can fire `ensureLatestInCache`
+      // without first losing the cached history.
       set((state) => updateSessionState(state, agentId, sessionId, {
-        messages: [],
-        messageOffset: 0,
-        messageLimit: 0,
-        messageTotal: 0,
         isLoadingSession: false,
-        loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
         isLoadingMore: false,
+        loadError: `${i18n.t("chatPanel.sessionLoadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
       }));
     } finally {
       const currentController = getSessionState(get(), agentId, sessionId).abortController;
@@ -1868,6 +2001,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearSessionMessages: (agentId: string, sessionId: string) => {
     set((state) => updateSessionState(state, agentId, sessionId, {
       messages: [],
+      optimisticEntries: [],
       messageOffset: 0,
       messageLimit: 0,
       messageTotal: 0,
@@ -2062,45 +2196,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         log.warn(`[ChatStore] fetchSessionConfig HTTP ${resp.status} for session ${sessionId}`);
         return;
       }
-      const config = await resp.json() as {
-        model?: string | null;
-        provider?: string | null;
+      const config = await resp.json() as SessionConfigInput & {
         workspace_id?: string | null;
-        reasoning_effort?: string | null;
-        temperature?: number | null;
         title?: string | null;
       };
 
-      // ADR-047 P1: Explicitly handle null/empty values to clear stale
-      // config from a previous session. Without this, switching to a
-      // session with no model set would retain the previous session's
-      // model in the UI until the next MQTT push.
-      const sessionPatch: Partial<SessionChatState> = {};
-
-      // model: null -> clear, string -> set
-      if (typeof config.model === "string" && config.model) {
-        sessionPatch.model = config.model;
-      } else {
-        sessionPatch.model = null;
-      }
-      // provider: null -> clear, string -> set
-      if (typeof config.provider === "string" && config.provider) {
-        sessionPatch.provider = config.provider;
-      } else {
-        sessionPatch.provider = null;
-      }
-      // reasoning_effort: null -> clear, string -> set
-      if (typeof config.reasoning_effort === "string" && config.reasoning_effort) {
-        sessionPatch.reasoningEffort = config.reasoning_effort;
-      } else {
-        sessionPatch.reasoningEffort = null;
-      }
-      // temperature: null/NaN -> clear, number -> set
-      if (typeof config.temperature === "number" && !Number.isNaN(config.temperature)) {
-        sessionPatch.temperature = config.temperature;
-      } else {
-        sessionPatch.temperature = null;
-      }
+      // ADR-047 P1: null/empty values clear stale config from the previous
+      // session. The mapper is the single source of truth for both HTTP
+      // and MQTT paths -- see sessionConfigMapper.ts for the rationale
+      // behind clearOnNull: true (and the special preserve-on-null rule
+      // for reasoning_effort).
+      const sessionPatch = sessionConfigToPatch(config, { clearOnNull: true });
 
       set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
 
@@ -2587,9 +2693,8 @@ function handleMessageEvent(
       log.debug("[ChatStore] Model switch confirmed:", confirmedModel, confirmedProvider);
       if (confirmedModel && sid) {
         // Resolve new model's default reasoning effort
-        const models = get().availableModels;
-        const newModelEntry = models.find((m) => m.name === confirmedModel && m.provider === (confirmedProvider ?? ""));
-        const defaultEffort = newModelEntry?.default_reasoning_effort ?? null;
+        // Same lookup as setCurrentModel -- see resolveDefaultReasoningEffort.
+        const defaultEffort = resolveDefaultReasoningEffort(get().availableModels, confirmedModel, confirmedProvider ?? "");
 
         // Update session model (current session only)
         set((state) => updateSessionState(state, agentId, sid!, {
@@ -2969,16 +3074,19 @@ function handleMessageEvent(
       if (typeof data.title === "string" && data.title) {
         useAgentStore.getState().updateSessionTitle(sid, data.title);
       }
-      const patch: Partial<SessionChatState> = {};
-      if (typeof data.model_id === "string" && data.model_id) patch.model = data.model_id;
-      if (typeof data.provider_id === "string" && data.provider_id) patch.provider = data.provider_id;
-      if (typeof data.reasoning_effort === "string" && data.reasoning_effort) {
-        patch.reasoningEffort = data.reasoning_effort;
-      }
-      // NaN is the Runtime "no override" sentinel for temperature.
-      if (typeof data.temperature === "number" && !Number.isNaN(data.temperature)) {
-        patch.temperature = data.temperature;
-      }
+      // MQTT session_config envelope uses model_id / provider_id and encodes
+      // "no override" as "" for strings / NaN for floats (prost can't
+      // encode Option<T>). Normalize to the unified SessionConfigInput
+      // shape and delegate to the mapper. clearOnNull: false because the
+      // retained payload only carries fields the Runtime explicitly set;
+      // absent fields must NOT clobber the existing UI value.
+      const mqttConfig: SessionConfigInput = {
+        model: typeof data.model_id === "string" && data.model_id ? data.model_id : null,
+        provider: typeof data.provider_id === "string" && data.provider_id ? data.provider_id : null,
+        reasoning_effort: typeof data.reasoning_effort === "string" && data.reasoning_effort ? data.reasoning_effort : null,
+        temperature: typeof data.temperature === "number" && !Number.isNaN(data.temperature) ? data.temperature : null,
+      };
+      const patch = sessionConfigToPatch(mqttConfig, { clearOnNull: false });
       if (Object.keys(patch).length > 0) {
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
