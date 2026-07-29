@@ -375,6 +375,12 @@ export function ChatPanel() {
   const isThinking = sessionState?.isThinking ?? false;
   const thinkingStartTime = sessionState?.thinkingStartTime ?? null;
   const thinkingContent = sessionState?.thinkingContent ?? "";
+  // Live assistant streaming preview — pushed by chatStore during
+  // stream_delta, cleared on record_complete.  Rendered inside the
+  // trailing replying virtual item via StreamingSourceBlock variant=
+  // "assistant" (replaces the old static "Replying..." indicator).
+  const assistantStreamingContent = sessionState?.assistantStreamingContent ?? "";
+  const assistantStreamingStartTime = sessionState?.assistantStreamingStartTime ?? null;
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state within ~50ms.
@@ -779,12 +785,7 @@ export function ChatPanel() {
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
     if (!hasMessages) {
       // 2a. No messages in store — load from backend (first mount or new session).
-      // Use ensureLatestInCache to fetch the LAST MESSAGE_CACHE_WINDOW raw
-      // entries in one request.  The rendering layer's ensureRenderable
-      // effect then decides if more prepended data is needed to fill the
-      // viewport (the loop fires loadMoreOlderMessages one page at a time
-      // until virtualizer.getTotalSize() >= clientHeight, or we hit the
-      // top of the conversation).
+      // 2a. No messages in store — load from backend (first mount or new session).
       session.scope.current.isInitialLoad = currentSessId;
       chatStore.ensureLatestInCache(selectedAgentId, currentSessId)
         .then(() => chatStore.loadSession(selectedAgentId, currentSessId))
@@ -811,9 +812,20 @@ export function ChatPanel() {
   // ── Session switch effect ─────────────────────────────────────────
   // When the user picks a different session from the session panel,
   // ChatPanel stays mounted — only activeSessionId changes in chatStore.
-  // Load messages for the newly-active session.
+  // Load messages for the newly-active session, and release the old
+  // session's messages to free memory.
+  const prevSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedAgentId || !currentSessionId) return;
+
+    // Release the previous session's messages (memory cleanup).
+    // We do this BEFORE loading the new session so the memory is freed
+    // before the new data arrives.
+    const prevId = prevSessionIdRef.current;
+    if (prevId && prevId !== currentSessionId) {
+      useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
+    }
+    prevSessionIdRef.current = currentSessionId;
 
     // Guard: mount effect (above) already handles the initial session load.
     // If it set isInitialLoad, it means a load is in progress for this session.
@@ -1385,6 +1397,8 @@ export function ChatPanel() {
               isThinking={isThinking}
               thinkingContent={thinkingContent}
               thinkingStartTime={thinkingStartTime}
+              assistantStreamingContent={assistantStreamingContent}
+              assistantStreamingStartTime={assistantStreamingStartTime}
               t={t}
               adapter={adapter}
               scrollContainerRef={messagesContainerRef}

@@ -105,20 +105,34 @@ export const SYSTEM_BUBBLE_HEIGHT = 26;
 export const COMPACTING_INDICATOR_HEIGHT = 26;
 
 /**
- * Replying indicator virtual item — same visual chrome as the compacting
- * indicator (`ml-12 py-1.5 + pulse-dot + shimmer label`) but rendered when
- * the assistant has streamed past `ASSISTANT_REPLYING_LINE_THRESHOLD` and
- * the user is staring at a placeholder bubble waiting for record_complete.
+ * Replying indicator virtual item — renders a `StreamingSourceBlock`
+ * variant="assistant" (header row with sparkles icon + "Replying" label
+ * + duration timer + chevron, then a content <pre> with max-height =
+ * 5 lines × 1.5rem) when the assistant has streamed past
+ * `ASSISTANT_REPLYING_LINE_THRESHOLD`. Replaces the old static
+ * "Replying..." pulse-dot — the user now sees the live streamed text
+ * preview instead of a status label, with the same layout-stable
+ * placeholder contract (slot collapses onto the real bubble content
+ * without a jump when record_complete clears `isAssistantReplying`).
  *
  * Sits in VirtualMessageList as an extra virtual item at `index ===
  * messageBlocks.length`, physically pinned to the last message bubble —
- * the same conversation slot the reply will occupy once it lands.  This
- * is what makes the indicator double as a layout-stable placeholder: when
- * record_complete freezes the message and `isAssistantReplying` clears,
- * the virtualCount shrinks by 1 and the indicator's slot collapses onto
- * the now-real bubble content without any jump.
+ * the same conversation slot the reply will occupy once it lands.
+ *
+ * Height math (matches StreamingSourceBlock chrome byte-for-byte):
+ *   header: ~26px (icon 12px + line-height × 0.9 font ≈ 19px, vertically
+ *     centered in a button row)
+ *   container py-2 = 16px vertical padding
+ *   content <pre> maxHeight = 7.5rem × 16 = 120px (capped at 5 lines)
+ *   truncation notice = ~16px (text-xs + mb-1)
+ *   Total: 26 + 16 + 120 + 16 ≈ 178px when content fills 5 lines.
+ *
+ * ResizeObserver corrects the actual rendered height to truth once the
+ * block mounts; the constant below is just an initial estimate to avoid
+ * a big first-frame layout shift.  A slightly tight value is fine —
+ * the virtualizer only uses it as a starting point.
  */
-export const REPLYING_INDICATOR_HEIGHT = 26;
+export const REPLYING_INDICATOR_HEIGHT = 178;
 
 // ── Agent header (rendered in VirtualMessageList above agent block) ──
 /** Avatar rendered at size=40 + `mb-2 mt-1` between header and bubble. */

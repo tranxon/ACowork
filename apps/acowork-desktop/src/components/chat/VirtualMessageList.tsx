@@ -7,6 +7,7 @@ import { MessageBubble } from "./MessageBubble";
 import type { MessageBlock } from "./messageFolder";
 import type { ChatListAdapter } from "./useChatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
+import { StreamingSourceBlock } from "./StreamingSourceBlock";
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
@@ -48,6 +49,14 @@ interface VirtualMessageListProps {
   isThinking: boolean;
   thinkingContent: string;
   thinkingStartTime: number | null;
+  /** Live assistant streaming text (last 5 lines, joined). Rendered
+   *  inside the trailing replying slot via StreamingSourceBlock.
+   *  Mirrors the `thinkingContent` pattern: throttled flush from the
+   *  store, cleared on record_complete. */
+  assistantStreamingContent: string;
+  /** When the current assistant stream started — used by the trailing
+   *  StreamingSourceBlock's duration timer. */
+  assistantStreamingStartTime: number | null;
   /** ADR-045: Cancel a single in-flight tool execution. */
   onCancelTool?: (toolCallId: string) => void;
   /** Current agent ID (for AgentAvatar). */
@@ -151,6 +160,8 @@ export const VirtualMessageList = React.forwardRef<
     isThinking,
     thinkingContent,
     thinkingStartTime,
+    assistantStreamingContent,
+    assistantStreamingStartTime,
     selectedAgentId,
     agentDisplayName,
     selectedAgent,
@@ -477,6 +488,14 @@ export const VirtualMessageList = React.forwardRef<
               : -1;
 
             // --- Replying indicator (extra virtual item, slot 0) ---
+            // Same chrome as the thought preview (StreamingSourceBlock
+            // variant="thought" inside ExploreBlock) but rendered as a
+            // trailing virtual item with ml-12 offset matching the agent
+            // message column.  When record_complete freezes the message
+            // and `isAssistantReplying` clears, the slot collapses onto
+            // the now-real bubble content with no jump — the same layout
+            // contract the old "Replying..." dot indicator provided, but
+            // now showing live streamed text instead of a static label.
             if (virtualRow.index === replyingIdx) {
               return (
                 <div
@@ -491,17 +510,14 @@ export const VirtualMessageList = React.forwardRef<
                     transform: `translateY(${virtualRow.start}px)`,
                   }}
                 >
-                  <div
-                    className="flex items-center gap-1.5 ml-12 py-1.5 select-none"
-                    aria-label={t("chatPanel.replying")}
-                  >
-                    <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                    <span
-                      className="thinking-shimmer"
-                      style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-                    >
-                      {t("chatPanel.replying")}
-                    </span>
+                  <div className="ml-12" aria-label={t("chatPanel.replying")}>
+                    <StreamingSourceBlock
+                      content={assistantStreamingContent}
+                      isStreaming={true}
+                      startTime={assistantStreamingStartTime ?? undefined}
+                      variant="assistant"
+                      showTruncationNotice={false}
+                    />
                   </div>
                 </div>
               );

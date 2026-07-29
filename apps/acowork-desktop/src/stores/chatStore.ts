@@ -25,6 +25,12 @@ const activeStreams = new Map<string, ActiveStream>();
 // Throttle timestamp for thinking content flush (per session).
 // Limits Zustand set() calls to at most every 500ms during thought streaming.
 const lastThinkingFlush = new Map<string, number>();
+// Throttle timestamp for assistant streaming content flush (per session).
+// Same 500ms cadence as `lastThinkingFlush`. Both share the same intent:
+// stream_delta can arrive every ~50-200ms during long generations, but
+// the trailing preview only needs to update at human-perceptible cadence
+// (500ms = ~2Hz) to look "live" without piling up Zustand re-renders.
+const lastAssistantFlush = new Map<string, number>();
 
 // Debounce timers for HTTP refresh triggered by record_complete.
 // Keyed by `${agentId}:${sessionId}`.  Multiple record_complete events
@@ -77,33 +83,23 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
     // No messageTotal === 0 guard: record_complete itself proves data
     // exists in the Runtime's storage.  An HTTP fetch with offset=0 will
     // return the latest records regardless of the stale local total.
-    void store.loadSessionMessages(agentId, sessionId, 0, MESSAGE_CACHE_WINDOW);
+    void store.loadSessionMessages(agentId, sessionId, 0, 50);
   }, 200));
 }
 
 
 
-// ── ADR-035 O1: messages[] cache window ──
+// ── messages[] cache: grows continuously, no sliding window ──
 //
-// MESSAGE_CACHE_WINDOW is NOT a hard conversation limit — sessions may have
-// thousands of raw entries; the user can always scroll backward through all
-// of them via HTTP pagination. This window is a frontend memory
-// optimization: keep at most 150 raw entries in React state to bound DOM
-// nodes and render cost. Scroll-back slides the window forward (drops
-// newest from the back to make room for older at the front); real-time
-// MQTT appends slide it forward naturally (drops oldest from the front).
+// The messages array grows as the user scrolls up (loadBefore prepends)
+// or as new messages arrive via streaming (append).  No trimming is
+// performed — the cache holds all messages that have been loaded.
+// Memory is released when the session is closed or switched away.
+// At ~593 messages / 3 MB, this is well within acceptable limits.
 //
-// Counted in raw-entry units (same as backend `PaginatedMessages.limit`)
-// — a single display group can occupy multiple slots here, which is fine:
+// Counted in raw-entry units (same as backend `PaginatedMessages.limit`).
+// A single display group can occupy multiple slots here, which is fine:
 // the cache only bounds memory, the UI rendering handles folding.
-const MESSAGE_CACHE_WINDOW = 150; // 3 pages of 50
-
-/** Trim oldest entries from the front — keep the last `cap` (newest).
- *  Used for initial load and real-time MQTT appends. */
-function trimOldest(messages: ChatMessage[]): ChatMessage[] {
-  if (messages.length <= MESSAGE_CACHE_WINDOW) return messages;
-  return messages.slice(-MESSAGE_CACHE_WINDOW);
-}
 
 /**
  * Append a new message to the cache and adjust pagination metadata.
@@ -121,13 +117,11 @@ function appendMessageAndAdjustMeta(
   newMessages: ChatMessage[],
 ): Partial<SessionChatState> {
   if (ss.messageOffset === 0) {
-    // At the bottom – append and trim if over the cache cap.
-    const trimmed = trimOldest(newMessages);
-    const dropped = newMessages.length - trimmed.length;
+    // At the bottom – append directly, no trimming.
     return {
-      messages: trimmed,
+      messages: [...ss.messages, ...newMessages],
       messageTotal: ss.messageTotal + 1,
-      messageLimit: Math.max(0, ss.messageLimit + 1 - dropped),
+      messageLimit: ss.messageLimit + 1,
     };
   }
   // Not at the bottom – don't touch messages array.  Just bump the
@@ -286,6 +280,19 @@ interface SessionChatState {
   /** Latest thought lines (cap 5, joined) for ThinkBlock preview. */
   thinkingContent: string;
   /**
+   * Latest assistant text lines (joined) for the trailing streaming
+   * preview rendered as a `StreamingSourceBlock variant="assistant"`
+   * virtual item in VirtualMessageList. Mirrors the `thinkingContent`
+   * pattern: live preview during `stream_delta`, cleared on
+   * `record_complete`. Capped at the source (last 5 lines from the
+   * store) to keep DOM memory flat during long streams.
+   */
+  assistantStreamingContent: string;
+  /** Timestamp when the current assistant stream started (used for
+   *  duration display in StreamingSourceBlock). Mirrors
+   *  `thinkingStartTime`. Reset on each new assistant messageId. */
+  assistantStreamingStartTime: number | null;
+  /**
    * Whether the user is pinned to the bottom of the scrollable area.
    * Updated by useScrollController's state machine via `setPinnedToBottom`.
    *
@@ -362,6 +369,8 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   isThinking: false,
   thinkingStartTime: null,
   thinkingContent: '',
+  assistantStreamingContent: '',
+  assistantStreamingStartTime: null,
   isPinnedToBottom: true,
   isReasoning: false,
   isSessionReady: false,
@@ -572,11 +581,8 @@ interface ChatStore {
    * Direction is **derived** from `sessionState.messageOffset` after the response
    * lands (see `SessionChatState` for the rules); callers don't need to specify it.
    *
-   * ADR-041 C2: `options.evictionDirection` lets the caller override the
-   * default trim direction. `'none'` skips trimming entirely (used when
-   * loading older messages during streaming, so the streaming tail isn't
-   * evicted). When omitted, the direction is derived from offset comparison
-   * (backward compatible).
+   * No sliding window — the messages array grows continuously and is released
+   * on closeSession or session switch.
    *
    * Returns the window coordinates returned by the server, or `undefined` if
    * the response was discarded (stale sequence / aborted).
@@ -586,12 +592,10 @@ interface ChatStore {
     sessionId: string,
     offset?: number,
     limit?: number,
-    options?: { evictionDirection?: "head" | "tail" | "none" },
   ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
   /**
-   * One-shot jump to the latest page: replace cache with the LAST
-   * MESSAGE_CACHE_WINDOW raw entries (offset=0, limit=MESSAGE_CACHE_WINDOW).
+   * One-shot jump to the latest page (offset=0).
    *
    * Used by all "navigate to the bottom" scenarios:
    *  - Initial session mount / session switch
@@ -602,13 +606,20 @@ interface ChatStore {
   ensureLatestInCache: (agentId: string, sessionId: string) => Promise<void>;
   /**
    * One-shot jump to the oldest page: replace cache with the FIRST
-   * MESSAGE_CACHE_WINDOW raw entries (offset=messageTotal-limit).
+   * raw entries (offset=messageTotal-limit).
    *
    * Symmetric to ensureLatestInCache. Used by the scroll-to-top button
    * to jump directly to the beginning of the conversation without
    * paginating one page at a time.
    */
   ensureOldestInCache: (agentId: string, sessionId: string) => Promise<void>;
+  /**
+   * Release the messages array for a session to free memory.
+   * Called on closeSession and session switch.  The session state
+   * is preserved (offset/limit/total) so the metadata can be used
+   * to decide whether to reload from scratch or from a specific page.
+   */
+  clearSessionMessages: (agentId: string, sessionId: string) => void;
   /**
    * ADR-038: Strict UI-only switch — set which session is in the foreground.
    *
@@ -1006,10 +1017,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // but do not block UI cleanup, which is the source of truth for the
   // frontend tab strip):
   //  1. UI: remove from `openSessionIds`, activate a neighbor tab.
-  //  2. Backend: send MQTT `close_session` so Runtime drops the in-memory
+  //  2. Memory: clear the session's messages array (free memory).
+  //  3. Backend: send MQTT `close_session` so Runtime drops the in-memory
   //     session task. The JSONL + meta stay on disk; reopen is via
   //     `openSession`.
-  //  3. Reset `isSessionReady` on the evicted session so a later switch
+  //  4. Reset `isSessionReady` on the evicted session so a later switch
   //     back must wait for a fresh `session_opened` ack.
   closeTab: async (agentId: string, sessionId: string): Promise<string | null> => {
     let newActiveId: string | null = null;
@@ -1043,6 +1055,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessionStates: newSessionStates,
       });
     });
+
+    // 2. Memory: clear the session's messages array to free memory.
+    //    The session state metadata (offset/limit/total) is preserved
+    //    so the next load can resume from the correct page.
+    get().clearSessionMessages(agentId, sessionId);
 
     // 2. Backend: tell Runtime to release the session task.  `close_session`
     // is idempotent on the Runtime side (Closed → closed no-op), so it is
@@ -1613,7 +1630,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     sessionId: string,
     offset?: number,
     limit: number = 50,
-    options?: { evictionDirection?: "head" | "tail" | "none" },
   ): Promise<{ offset: number; limit: number; total: number } | undefined> => {
     // ADR-021: Per-session abortController + loadSequence (no cross-session interference).
     const sessionState = getSessionState(get(), agentId, sessionId);
@@ -1688,86 +1704,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
         let nextMessages: ChatMessage[];
 
-        // ADR-041 C2: evictionDirection controls cache window trimming.
-        // - 'none': no trimming (window grows) - used by adapter loadBefore/loadAfter
-        // - 'tail': drop newest (slide window toward past)
-        // - 'head': drop oldest (slide window toward present)
-        // - undefined: derive from offset comparison (backward compatible)
-        const eviction = options?.evictionDirection;
-        const derivedDirection: "head" | "tail" =
-          returnedOffset > prevOffset ? "tail" : "head";
-        const effectiveDirection = eviction ?? derivedDirection;
-
-        // When evictionDirection='none', we need to track the full merged
-        // offset range so hasOlder/hasNewer are computed correctly.
-        // messageOffset = min(returnedOffset, prevOffset) = newest offset in cache
-        // messageLimit = max(returnedOffset+returnedLimit, prevOffset+prevLimit) - messageOffset
+        // No sliding window — always merge without trimming.
+        // The messages array grows as the user scrolls up or as new
+        // messages arrive, and is released on closeSession/switch.
         let finalOffset = returnedOffset;
         let finalLimit = returnedLimit;
 
         if (isInitialLoad) {
           activeStreams.delete(sessionId);
-          nextMessages = trimOldest(converted);
+          nextMessages = converted;
         } else if (returnedOffset > prevOffset) {
           // Loading OLDER messages (scroll-up). Prepend older messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const older = converted.filter((m) => !existingIds.has(m.id));
-          const merged = [...older, ...ss.messages];
-          if (effectiveDirection === "none") {
-            nextMessages = merged;
-            // Compute the full merged range: offset 0 = newest, higher = older.
-            // prevOffset/prevLimit describe the old cache; returnedOffset/returnedLimit
-            // describe the newly loaded older page.
-            finalOffset = Math.min(returnedOffset, prevOffset);
-            finalLimit = Math.max(
-              returnedOffset + returnedLimit,
-              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
-            ) - finalOffset;
-          } else {
-            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
-              ? merged.slice(0, MESSAGE_CACHE_WINDOW)
-              : merged;
-          }
+          nextMessages = [...older, ...ss.messages];
+          finalOffset = Math.min(returnedOffset, prevOffset);
+          finalLimit = Math.max(
+            returnedOffset + returnedLimit,
+            prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+          ) - finalOffset;
         } else if (returnedOffset < prevOffset) {
           // Loading NEWER messages (scroll-down). Append newer messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const newer = converted.filter((m) => !existingIds.has(m.id));
-          const merged = [...ss.messages, ...newer];
-          if (effectiveDirection === "none") {
-            nextMessages = merged;
-            finalOffset = Math.min(returnedOffset, prevOffset);
-            finalLimit = Math.max(
-              returnedOffset + returnedLimit,
-              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
-            ) - finalOffset;
-          } else {
-            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
-              ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
-              : merged;
-          }
+          nextMessages = [...ss.messages, ...newer];
+          finalOffset = Math.min(returnedOffset, prevOffset);
+          finalLimit = Math.max(
+            returnedOffset + returnedLimit,
+            prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+          ) - finalOffset;
         } else {
           // returnedOffset === prevOffset: same window (e.g. scheduleRefresh
           // or duplicate load).  Merge any newly appeared messages.
           const existingIds = new Set(ss.messages.map((m) => m.id));
           const same = converted.filter((m) => !existingIds.has(m.id));
-          const merged = [...ss.messages, ...same];
-          if (effectiveDirection === "none") {
-            nextMessages = merged;
-            finalOffset = Math.min(returnedOffset, prevOffset);
-            finalLimit = Math.max(
-              returnedOffset + returnedLimit,
-              prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
-            ) - finalOffset;
-          } else {
-            // Trim oldest to stay within MESSAGE_CACHE_WINDOW, since
-            // any new messages arrive at the newer end of the window.
-            nextMessages = merged.length > MESSAGE_CACHE_WINDOW
-              ? merged.slice(merged.length - MESSAGE_CACHE_WINDOW)
-              : merged;
-            // Preserve the larger of the two limits so the cache
-            // window metadata never shrinks on a refresh.
-            finalLimit = Math.max(returnedLimit, prevLimit);
-          }
+          nextMessages = [...ss.messages, ...same];
+          finalOffset = Math.min(returnedOffset, prevOffset);
+          finalLimit = Math.max(
+            returnedOffset + returnedLimit,
+            prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
+          ) - finalOffset;
         }
 
         return updateSessionState(state, agentId, sessionId, {
@@ -1828,12 +1804,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
 
   /**
-   * One-shot jump to the latest page (offset=0, limit=MESSAGE_CACHE_WINDOW).
+   * One-shot jump to the latest page (offset=0).
    *
    * Replaces the old `loadMoreNewerMessages` loop which had to issue N HTTP
    * requests to slide a cache from the middle to the tail.  After this call
-   * the cache holds the LAST `MESSAGE_CACHE_WINDOW` raw entries (or all of
-   * them if the session has fewer); `messageOffset` becomes 0; the rendering
+   * the cache holds the newest page; `messageOffset` becomes 0; the rendering
    * layer's ensureRenderable effect then decides if more prepended data is
    * needed to fill the viewport (same load-older path).
    *
@@ -1849,21 +1824,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     //   - messageTotal > 0 (we know the conversation has data — guards against
     //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
     //     empty, which would otherwise be mistaken for "already at tail"), AND
-    //   - messages.length covers at least min(WINDOW, total) items (the cache
-    //     window is fully populated at the tail end).
-    //
-    // The naive `if (messageOffset === 0) return;` check incorrectly no-ops
-    // on first-ever load of a new session: DEFAULT_SESSION_STATE initializes
-    // messageOffset to 0, so the very call that is supposed to load the first
-    // page short-circuits and leaves the user staring at a blank chat.
+    //   - messages.length > 0 (the cache has at least some data at the tail).
     const tailCovered =
       messageOffset === 0 &&
       messageTotal > 0 &&
-      messages.length >= Math.min(MESSAGE_CACHE_WINDOW, messageTotal);
+      messages.length > 0;
     if (tailCovered) return;
     set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
     try {
-      await get().loadSessionMessages(agentId, sessionId, 0, MESSAGE_CACHE_WINDOW);
+      await get().loadSessionMessages(agentId, sessionId, 0, 50);
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }
@@ -1880,19 +1849,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const headCovered =
       messageTotal > 0 &&
       messageOffset + messageLimit >= messageTotal &&
-      messages.length >= Math.min(MESSAGE_CACHE_WINDOW, messageTotal);
+      messages.length > 0;
     if (headCovered) return;
     set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
     try {
-      // Load the oldest page: offset = max(0, total - WINDOW).
+      // Load the oldest page: offset = max(0, total - limit).
       // offset=0 means newest; higher offset = older.
       // The oldest page starts at offset = total - limit (clamped to 0).
-      const limit = MESSAGE_CACHE_WINDOW;
+      const limit = 50;
       const oldestOffset = Math.max(0, messageTotal - limit);
       await get().loadSessionMessages(agentId, sessionId, oldestOffset, limit);
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }
+  },
+
+  /** Release the messages array for a session to free memory. */
+  clearSessionMessages: (agentId: string, sessionId: string) => {
+    set((state) => updateSessionState(state, agentId, sessionId, {
+      messages: [],
+      messageOffset: 0,
+      messageLimit: 0,
+      messageTotal: 0,
+    }));
   },
 
   toggleTreeExpandedPath: (agentId: string, sessionId: string, relPath: string) => {
@@ -2402,9 +2381,15 @@ function handleMessageEvent(
       // -- assistant --------------------------------------------------
       const msgId = lines[0].message_id;
       let as = activeStreams.get(sid);
-      if (!as || as.messageId !== msgId) {
-        as = { messageId: msgId, role, lineCount: 0, lines: [], startTime: 0 };
+      const sessionState = getSessionState(get(), agentId, sid);
+      const isFirstChunkForNewStream = !as || as.messageId !== msgId;
+      if (isFirstChunkForNewStream) {
+        // Edge-triggered: new messageId → reset startTime for duration.
+        as = { messageId: msgId, role, lineCount: 0, lines: [], startTime: Date.now() };
         activeStreams.set(sid, as);
+        // Seed the throttle timestamp so the first flush below can run
+        // immediately (delta from a 0 baseline would otherwise be huge).
+        lastAssistantFlush.set(sid, Date.now());
       }
       if (!as) break;
       as.lineCount += lines.length;
@@ -2418,13 +2403,47 @@ function handleMessageEvent(
         );
         as.lineCount = ASSISTANT_LINE_SAFETY_CAP;
       }
+      // Mirror the thought branch: keep last 5 lines for the trailing
+      // streaming preview (DOM memory stays flat — same <pre> node is
+      // reused via direct textContent mutation in StreamingSourceBlock).
+      for (const l of lines) {
+        as.lines.push({ role: 'assistant', lineNo: l.line_no, content: l.content });
+      }
+      if (as.lines.length > 5) {
+        as.lines = as.lines.slice(-5);
+      }
       // Edge-triggered isAssistantReplying flip.
       const shouldBeReplying = as.lineCount > ASSISTANT_REPLYING_LINE_THRESHOLD;
-      const isCurrentlyReplying = getSessionState(get(), agentId, sid).isAssistantReplying;
+      const isCurrentlyReplying = sessionState.isAssistantReplying;
       if (shouldBeReplying !== isCurrentlyReplying) {
         set((state) => updateSessionState(state, agentId, sid, {
           isAssistantReplying: shouldBeReplying,
         }));
+      }
+      // Edge-triggered startTime: only push on the first chunk of a new
+      // stream so the duration timer starts fresh per assistant message.
+      if (isFirstChunkForNewStream) {
+        set((state) => updateSessionState(state, agentId, sid, {
+          assistantStreamingStartTime: as.startTime,
+        }));
+      }
+      // Throttled flush of the trailing 5-line preview.  Mirror of the
+      // thought branch: only push to Zustand when (a) isPinnedToBottom
+      // (user is watching the tail) and (b) at least 500ms since the
+      // previous flush.  Keeps re-render churn flat regardless of how
+      // fast stream_delta events arrive.
+      if (sessionState.isPinnedToBottom) {
+        const now = Date.now();
+        const lastFlush = lastAssistantFlush.get(sid) ?? 0;
+        if (now - lastFlush >= 500) {
+          const content = as.lines.map((l) => l.content).join('\n');
+          if (content !== sessionState.assistantStreamingContent) {
+            set((state) => updateSessionState(state, agentId, sid, {
+              assistantStreamingContent: content,
+            }));
+          }
+          lastAssistantFlush.set(sid, now);
+        }
       }
       break;
     }
@@ -2448,10 +2467,25 @@ function handleMessageEvent(
       const toolCallId = (data.tool_call_id as string | undefined) ?? '';
 
       // Clear isAssistantReplying unconditionally.
-      if (getSessionState(get(), agentId, sid).isAssistantReplying) {
+      const curSessionState = getSessionState(get(), agentId, sid);
+      if (curSessionState.isAssistantReplying) {
         set((state) => updateSessionState(state, agentId, sid, {
           isAssistantReplying: false,
         }));
+      }
+      // Clear assistantStreamingContent + assistantStreamingStartTime
+      // unconditionally — the trailing StreamingSourceBlock variant=
+      // "assistant" virtual slot disappears alongside isAssistantReplying,
+      // and we don't want stale preview text / startTime surviving a
+      // session-id reuse (next stream_delta for a new message would race
+      // against a leftover snapshot).
+      if (curSessionState.assistantStreamingContent !== ''
+        || curSessionState.assistantStreamingStartTime !== null) {
+        set((state) => updateSessionState(state, agentId, sid, {
+          assistantStreamingContent: '',
+          assistantStreamingStartTime: null,
+        }));
+        lastAssistantFlush.delete(sid);
       }
 
       // Clear isThinking when thought completes.
