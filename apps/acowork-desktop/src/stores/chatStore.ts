@@ -3107,6 +3107,48 @@ function handleMessageEvent(
           // change (e.g. workspace_switch side effects) would silently
           // leave the Setup panel showing stale localStorage values.
           emitAgentConfigRefresh(aid);
+
+          // Sync context_window to all cached session contextUsage.
+          //
+          // The agent_config MQTT event carries the full AgentConfig
+          // (including context_window) as a retained message, published
+          // immediately after PUT /api/agents/{id}/config.  However the
+          // live contextUsage push (via session_state / messages/context_usage)
+          // only fires when the agent loop runs.  Without this local sync,
+          // the ContextUsageIcon, status bar, and ResultsPanel keep showing
+          // the old context_window until the user sends a message and
+          // triggers the loop.
+          //
+          // We update context_window and recalculate the derived fields
+          // (usage_percent, usable_context) as a best-effort approximation.
+          // The next agent-loop context_usage push will overwrite these
+          // with the backend's exact computation (which accounts for model
+          // capabilities and output token reservation).
+          if (typeof config.context_window === "number" && config.context_window > 0) {
+            const newWindow = config.context_window;
+            set((state) => {
+              const agent = state.agentStates[aid];
+              if (!agent) return {};
+              let changed = false;
+              const updatedSessions = { ...agent.sessionStates };
+              for (const [sid, sess] of Object.entries(updatedSessions)) {
+                if (!sess.contextUsage) continue;
+                const cu = sess.contextUsage;
+                const total = cu.total_tokens ?? 0;
+                updatedSessions[sid] = {
+                  ...sess,
+                  contextUsage: {
+                    ...cu,
+                    context_window: newWindow,
+                    usage_percent: Math.min(100, Math.round((total / newWindow) * 100)),
+                    usable_context: Math.max(0, newWindow - total),
+                  },
+                };
+                changed = true;
+              }
+              return changed ? updateAgentState(state, aid, { sessionStates: updatedSessions }) : {};
+            });
+          }
         } catch (e) {
           log.warn("[ChatStore] Failed to parse agent_config JSON:", e);
         }
