@@ -27,6 +27,9 @@ export interface ChatListAdapter {
   readonly hasOlder: boolean;
   readonly hasNewer: boolean;
   readonly isLoading: boolean;
+  readonly messageOffset: number;
+  readonly messageLimit: number;
+  readonly messageTotal: number;
   loadBefore: () => Promise<void>;
   loadAfter: () => Promise<void>;
   jumpToLatest: () => Promise<void>;
@@ -144,11 +147,19 @@ export function useChatListAdapter(
     if (ss.messageOffset + ss.messageLimit >= ss.messageTotal) return;
 
     const nextOffset = ss.messageOffset + ss.messageLimit;
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[adapter:loadBefore]", {
+        messageOffset: ss.messageOffset,
+        messageLimit: ss.messageLimit,
+        messageTotal: ss.messageTotal,
+        nextOffset,
+        pageSize: PAGINATION_PAGE_SIZE,
+      });
+    }
     setSessionLoadingMore(agentId, sessionId, true);
     try {
       await useChatStore.getState().loadSessionMessages(
         agentId, sessionId, nextOffset, PAGINATION_PAGE_SIZE,
-        { evictionDirection: "none" },
       );
     } finally {
       setSessionLoadingMore(agentId, sessionId, false);
@@ -162,11 +173,17 @@ export function useChatListAdapter(
     if (ss.messageOffset <= 0) return;
 
     const nextOffset = Math.max(0, ss.messageOffset - PAGINATION_PAGE_SIZE);
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[adapter:loadAfter]", {
+        messageOffset: ss.messageOffset,
+        nextOffset,
+        pageSize: PAGINATION_PAGE_SIZE,
+      });
+    }
     setSessionLoadingMore(agentId, sessionId, true);
     try {
       await useChatStore.getState().loadSessionMessages(
         agentId, sessionId, nextOffset, PAGINATION_PAGE_SIZE,
-        { evictionDirection: "none" },
       );
     } finally {
       setSessionLoadingMore(agentId, sessionId, false);
@@ -195,12 +212,14 @@ export function useChatListAdapter(
   return useMemo<ChatListAdapter>(
     () => ({
       blocks, hasOlder, hasNewer, isLoading: isLoadingMore,
+      messageOffset, messageLimit, messageTotal,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       blocks, hasOlder, hasNewer, isLoadingMore,
+      messageOffset, messageLimit, messageTotal,
       loadBefore, loadAfter, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
       jumpVersion,

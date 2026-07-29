@@ -128,7 +128,16 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
       : t("chatPanel.replying");
 
   return (
-    <div className="my-1">
+    // `max-w-[var(--content-max-width)]` mirrors the width contract shared by
+    // every other chat bubble in the panel (MessageBubble / ExploreBlock /
+    // CompactionCard / AskQuestionCard).  It is driven by the global
+    // "display content width" setting written by settingsStore.  Without it,
+    // the inner `w-full` content area would stretch to fill the chat panel
+    // and visually drift past adjacent MessageBubble columns — most visible
+    // in the trailing "Replying" slot in VirtualMessageList, where the
+    // StreamingSourceBlock is mounted as a direct child of the chat scroll
+    // container rather than inside an already-constrained bubble wrapper.
+    <div className="my-1 max-w-[var(--content-max-width)]">
       <button
         onClick={() => {
           const next = !expanded;

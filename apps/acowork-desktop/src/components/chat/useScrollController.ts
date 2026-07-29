@@ -334,12 +334,19 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
 
     if (wasPrepend) {
       const delta = container.scrollHeight - prevScrollHeightRef.current;
+      if (process.env.NODE_ENV === "development") {
+        console.debug("[scroll:delta] prepend detected", {
+          delta,
+          scrollTopBefore: container.scrollTop,
+          scrollTopAfter: container.scrollTop + delta,
+          scrollHeight: container.scrollHeight,
+          clientHeight: container.clientHeight,
+          state: stateRef.current,
+          preLoadState: preLoadStateRef.current,
+        });
+      }
       if (delta > 0) {
         container.scrollTop += delta;
-        log.debug("[ScrollController] prepend delta adjusted", {
-          delta,
-          newScrollTop: container.scrollTop,
-        });
       }
       // Restore the pre-load state (e.g. "idle" if the user was browsing,
       // "pinned-bottom" if they were at the bottom).  The browser will
@@ -442,7 +449,17 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     if (!didInitScrollRef.current) return;
     if (virtualCount === 0) return;
     if (adapter.isLoading) return;
-    if (ensureRenderableCountRef.current >= MAX_ENSURE_RENDERABLE_PAGES) return;
+    if (ensureRenderableCountRef.current >= MAX_ENSURE_RENDERABLE_PAGES) {
+      if (process.env.NODE_ENV === "development") {
+        console.debug("[scroll:ensure] blocked by counter", {
+          count: ensureRenderableCountRef.current,
+          max: MAX_ENSURE_RENDERABLE_PAGES,
+          totalHeight: containerRef.current?.scrollHeight,
+          viewportHeight: containerRef.current?.clientHeight,
+        });
+      }
+      return;
+    }
 
     const state = stateRef.current;
     if (state !== "idle" && state !== "pinned-bottom") return;
@@ -453,6 +470,17 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     const totalHeight = container.scrollHeight;
     const viewportHeight = container.clientHeight;
     if (totalHeight >= viewportHeight) return;
+
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[scroll:ensure] firing", {
+        count: ensureRenderableCountRef.current + 1,
+        totalHeight,
+        viewportHeight,
+        state,
+        hasOlder: adapter.hasOlder,
+        hasNewer: adapter.hasNewer,
+      });
+    }
 
     // Need more data to fill viewport.
     // Save pre-load state so scrollHeight delta and loading cleanup
@@ -583,11 +611,64 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       const distFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
 
-      if (container.scrollTop < EDGE_THRESHOLD_PX && ad.hasOlder) {
+      // ── loadBefore trigger: data-driven ──
+      // Use getFirstVisibleBlockIndex() === 0 instead of scrollTop <
+      // EDGE_THRESHOLD_PX.  scrollTop is unreliable because:
+      //   - scrollHeight delta adjustments after prepend change it
+      //   - getTotalSize() may lag behind actual measurements
+      //   - measurement cache inconsistencies can offset the range
+      // getFirstVisibleBlockIndex() is a pure data query: it returns
+      // the index of the first block in the virtualizer's viewport.
+      // If it's 0 AND hasOlder is true, the user is at the top of
+      // the loaded data and we should load more.
+      const firstIdx = vmlRef.current?.getFirstVisibleBlockIndex() ?? null;
+
+      if (process.env.NODE_ENV === "development") {
+        const firstMsg = ad.blocks[0]?.items[0];
+        console.debug("[scroll:timer]", JSON.stringify({
+          scrollTop: Math.round(container.scrollTop),
+          scrollHeight: Math.round(container.scrollHeight),
+          clientHeight: container.clientHeight,
+          firstVisibleIndex: firstIdx,
+          firstBlockType: ad.blocks[0]?.type ?? null,
+          firstMsgType: firstMsg?.type ?? null,
+          firstMsgId: firstMsg?.id?.slice(0, 16) ?? null,
+          blocksCount: ad.blocks.length,
+          hasOlder: ad.hasOlder,
+          hasNewer: ad.hasNewer,
+          messageOffset: ad.messageOffset,
+          messageLimit: ad.messageLimit,
+          messageTotal: ad.messageTotal,
+          state,
+          isLoading: ad.isLoading,
+        }));
+      }
+
+      if (firstIdx === 0 && ad.hasOlder) {
+        if (process.env.NODE_ENV === "development") {
+          console.debug("[scroll:timer] → loadBefore (firstIdx=0, hasOlder=true)");
+        }
         preLoadStateRef.current = state;
         transitionTo("loading-older");
         void ad.loadBefore();
+      } else if (firstIdx !== null && firstIdx !== 0 && ad.hasOlder) {
+        // KEY DEBUG: hasOlder is true but firstIdx is not 0.
+        // The user is at the top of the loaded data (firstIdx != 0 means
+        // the first item is NOT visible), so loadBefore won't fire.
+        // This is the "can't scroll to top" bug.
+        if (process.env.NODE_ENV === "development") {
+          console.debug("[scroll:timer] ⚠️ hasOlder=true but firstIdx!=0", {
+            firstIdx,
+            hasOlder: ad.hasOlder,
+            totalHeight: container.scrollHeight,
+            viewportHeight: container.clientHeight,
+            scrollTop: Math.round(container.scrollTop),
+          });
+        }
       } else if (state === "idle" && distFromBottom < EDGE_THRESHOLD_PX && ad.hasNewer) {
+        if (process.env.NODE_ENV === "development") {
+          console.debug("[scroll:timer] → loadAfter (idle, near bottom, hasNewer=true)");
+        }
         // loadAfter only in idle state - prevents streaming duplicates
         preLoadStateRef.current = state;
         transitionTo("loading-newer");
@@ -595,7 +676,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       }
     }, TIMER_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [containerRef, transitionTo]);
+  }, [containerRef, vmlRef, transitionTo]);
 
   // ── 8. handleScroll (onScroll event) ──
   //
@@ -611,6 +692,16 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     const distFromBottom =
       container.scrollHeight - container.scrollTop - container.clientHeight;
 
+    if (process.env.NODE_ENV === "development") {
+      console.debug("[scroll:event]", JSON.stringify({
+        type: "scroll",
+        scrollTop: Math.round(container.scrollTop),
+        scrollHeight: Math.round(container.scrollHeight),
+        clientHeight: container.clientHeight,
+        distFromBottom: Math.round(distFromBottom),
+      }));
+    }
+
     // Update arrow buttons – unified threshold with state machine
     setShowScrollToBottom(distFromBottom > PIN_THRESHOLD_PX);
     setShowScrollToTop(container.scrollTop > container.clientHeight);
@@ -623,6 +714,19 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     // Update state machine (only if not in a loading/jumping state)
     const state = stateRef.current;
     if (state === "loading-older" || state === "loading-newer" || state === "jumping") return;
+
+    // Reset ensureRenderable counter on every manual scroll event.
+    // This prevents the "scroll stops before reaching top" bug where
+    // ensureRenderableCountRef reached MAX_ENSURE_RENDERABLE_PAGES
+    // during a previous fill cycle and was never reset, permanently
+    // blocking ensureRenderable from re-triggering even though the
+    // viewport may still be unfilled (e.g. after scrolling down and
+    // back up, the scroll range is wrong and the user can't reach
+    // the top to trigger the pagination timer).
+    // We reset here (not just on state transitions) because the user
+    // may be scrolling within the same state (e.g. idle → idle) and
+    // we still want ensureRenderable to be able to re-fire.
+    ensureRenderableCountRef.current = 0;
 
     if (distFromBottom <= PIN_THRESHOLD_PX) {
       transitionTo("pinned-bottom");
