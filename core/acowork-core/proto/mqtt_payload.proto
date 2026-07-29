@@ -220,6 +220,11 @@ message ModelCapabilities {
   repeated string input_modalities = 3;
   repeated string output_modalities = 4;
   // Cost info omitted from MQTT — Runtime doesn't need it for invocation.
+
+  // Reasoning support. Optional wrappers because prost can't encode
+  // Option<T> directly — the Runtime treats absent as "unknown".
+  optional bool supports_reasoning = 5;
+  optional string default_reasoning_effort = 6;
 }
 
 // ── MCP reference (mirrors McpListItem; carries auth token inline) ────

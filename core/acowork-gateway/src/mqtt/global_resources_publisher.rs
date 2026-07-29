@@ -290,6 +290,8 @@ fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
                                 max_output_tokens: m.capabilities.max_output_tokens,
                                 input_modalities,
                                 output_modalities,
+                                supports_reasoning: m.capabilities.supports_reasoning,
+                                default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
                             }),
                             max_output_tokens_limit: m.max_output_tokens_limit,
                         }

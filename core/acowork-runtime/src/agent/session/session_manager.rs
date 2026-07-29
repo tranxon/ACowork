@@ -774,6 +774,11 @@ impl SessionManager {
                 chunk_tx.clone(),
                 conv.clone(),
                 session_id.clone(),
+                // Wrap self.core in a fresh SharedAgentCore slot for the
+                // relay. self.core is already fully constructed (this path
+                // runs inside SessionManager which owns the Arc), so the
+                // slot is immediately populated.
+                std::sync::Arc::new(std::sync::RwLock::new(Some(self.core.clone()))),
             );
             crate::startup::subsystems::spawn_state_change_relay(
                 state_rx,
@@ -1349,6 +1354,7 @@ impl SessionManager {
                 chunk_tx.clone(),
                 conv.clone(),
                 session_id.to_string(),
+                std::sync::Arc::new(std::sync::RwLock::new(Some(self.core.clone()))),
             );
             crate::startup::subsystems::spawn_state_change_relay(
                 state_rx,

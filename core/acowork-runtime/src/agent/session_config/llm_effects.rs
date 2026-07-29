@@ -15,6 +15,93 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::loop_::AgentLoop;
 use crate::agent::session_config::SessionConfigSnapshot;
 
+/// Resolve the effective `reasoning_effort` for a session.
+///
+/// This is the **single source of truth** for the three-level priority
+/// chain that decides what `reasoning_effort` value a session should
+/// have. Previously every call site (session resume, model switch
+/// `apply_llm_effects`, HTTP `GET /sessions/{sid}/config`, MQTT
+/// `session_config` retained) reimplemented its own
+/// `persisted → provider_default → supports_reasoning → None` chain,
+/// which caused two user-visible bugs:
+///
+/// 1. Old sessions whose `meta.json` never persisted `reasoning_effort`
+///    (e.g. the user never toggled it, or the model didn't support
+///    reasoning at the time the session was created) would always
+///    report `reasoning_effort: null` on HTTP GET and MQTT retained,
+///    so the Desktop hid the reasoning-effort toggle button until the
+///    user explicitly switched model once.
+/// 2. Drift between the in-memory `ConversationSession` snapshot
+///    (used by turn-boundary diff detection) and the externally
+///    observable snapshot (HTTP/MQTT) created confusing "the
+///    button appeared for one render, then disappeared" flicker.
+///
+/// Both bugs are fixed by funnelling all read and write paths through
+/// this function.
+///
+/// # Priority chain
+///
+///  1. `persisted` — explicit per-session value (user-set, or
+///     initialized from provider capabilities during
+///     `create_or_resume_session` / `apply_llm_effects`).
+///  2. `caps.default_reasoning_effort` — the provider's recommended
+///     default for this model (e.g. `"medium"` for some Anthropic models).
+///  3. `Auto` — the model is reasoning-capable per `supports_reasoning`
+///     but has no explicit default. Ensures the UI shows the toggle.
+///  4. `None` — model doesn't support thinking control. The UI hides the
+///     toggle button.
+///
+/// # Why `Option<&str>` and `Option<&ModelCapabilitiesInfo>`?
+///
+/// Pure function — no interior mutability, no locks. Both call sites
+/// (HTTP/MQTT read, in-memory init) compute `caps` from `AgentCore`
+/// and `persisted` from `ConversationSession` separately, then ask this
+/// function for the merged answer. This keeps `ConversationSession`
+/// unaware of the capabilities registry and avoids cross-module
+/// dependency cycles.
+pub fn resolve_effective_reasoning_effort(
+    caps: Option<&acowork_core::ModelCapabilitiesInfo>,
+    persisted: Option<&str>,
+) -> Option<ReasoningEffort> {
+    // Level 1: persisted wins unconditionally. Even if the model later
+    // drops support for reasoning, a user who explicitly chose an
+    // effort should keep it (and the LLM call will then naturally fail
+    // with a provider-side error if the model really can't honor it —
+    // which is the right place for that error to surface).
+    if let Some(persisted_str) = persisted
+        && let Some(parsed) = ReasoningEffort::from_str_loose(persisted_str)
+    {
+        return Some(parsed);
+    }
+
+    // Level 2: provider-recommended default.
+    if let Some(caps) = caps
+        && let Some(default_str) = caps.default_reasoning_effort.as_deref()
+        && let Some(parsed) = ReasoningEffort::from_str_loose(default_str)
+    {
+        return Some(parsed);
+    }
+
+    // Level 3: reasoning-capable model with no explicit default → Auto.
+    // Without this fallback, every model that supports reasoning but
+    // has no `default_reasoning_effort` configured would render the
+    // toggle button hidden until the user switched models. The Rust
+    // backend has always applied this fallback at session init time
+    // (see `session_manager::create_or_resume_session`), but the
+    // frontend never knew about it because HTTP GET read the raw
+    // persisted value. Centralising the chain here means HTTP/MQTT
+    // reads see the same effective value that the in-memory session
+    // already has.
+    if caps
+        .and_then(|c| c.supports_reasoning)
+        .unwrap_or(false)
+    {
+        return Some(ReasoningEffort::Auto);
+    }
+
+    None
+}
+
 /// Apply LLM-side effects of a config change.
 ///
 /// Called by SessionTask at turn boundaries when config version has changed.
@@ -74,24 +161,14 @@ pub fn apply_llm_effects(
         context_builder.set_override_model(model.clone());
 
         // Model switch resets reasoning_effort to new model's default
-        // (clears any user override). Three-level priority chain:
-        // 1. provider capabilities default_reasoning_effort
-        // 2. Auto (if supports_reasoning is true)
-        // 3. None (provider does not support thinking control)
+        // (clears any user override). Three-level priority chain —
+        // same logic as session resume and HTTP/MQTT read paths;
+        // see `resolve_effective_reasoning_effort` for the rationale.
         let caps = agent_loop.core.get_model_capabilities(model);
-        let provider_default = caps
-            .as_ref()
-            .and_then(|c| c.default_reasoning_effort.clone());
-        let default_effort = provider_default
-            .as_deref()
-            .and_then(ReasoningEffort::from_str_loose)
-            .or_else(|| {
-                if caps.as_ref().and_then(|c| c.supports_reasoning).unwrap_or(false) {
-                    Some(ReasoningEffort::Auto)
-                } else {
-                    None
-                }
-            });
+        let default_effort = crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
+            caps.as_ref(),
+            None, // model switch: no persisted override yet (clears any prior user-set value)
+        );
         agent_loop.session.set_reasoning_effort(default_effort.clone());
 
         // Persist new default effort to ConversationSession so resume

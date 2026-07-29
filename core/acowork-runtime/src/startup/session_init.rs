@@ -67,6 +67,13 @@ pub(crate) async fn phase_b_init_session(
                             chunk_tx.clone(),
                             conv.clone(),
                             latest_id.clone(),
+                            // agent_core_shared is populated later in
+                            // Phase B (after AgentCore construction +
+                            // injection). The relay reads it lazily on
+                            // each config change event, so by the time
+                            // a user action triggers a push the slot is
+                            // already filled.
+                            ctx.agent_core_shared.clone(),
                         );
                         crate::startup::subsystems::spawn_state_change_relay(
                             state_rx,
@@ -566,10 +573,26 @@ pub(crate) async fn phase_b_init_session(
         }
 
         // ADR-047: Build the SessionConfigService.
+        //
+        // Pass the `agent_core_shared` slot so `get_config` can apply
+        // the shared `resolve_effective_reasoning_effort` chain before
+        // returning the snapshot. Without this, HTTP
+        // `GET /sessions/{sid}/config` would surface raw persisted
+        // `reasoning_effort` and could report `null` for any session
+        // whose `meta.json` was written before reasoning was ever
+        // supported — see `usecases::session_config_impl` for the full
+        // rationale.
+        //
+        // The slot is populated by Phase B at the bottom of this
+        // function (after AgentCore construction + injection is
+        // complete), so by the time the first HTTP request lands the
+        // slot is already filled. `get_config` falls back to the raw
+        // persisted value if it isn't — safe during boot races.
         let session_config: Arc<dyn crate::usecases::SessionConfigService> =
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 ctx.session_configs.clone(),
                 Some(ctx.workspace_resolver.clone()),
+                ctx.agent_core_shared.clone(),
             ));
         {
             let mut slot = ctx.session_config_slot.lock().await;

@@ -10,6 +10,7 @@
 use crate::config::RuntimeConfig;
 use crate::conversation::{ConfigChange, ConversationSession, StateChange};
 use crate::error::Result;
+use crate::http::SharedAgentCore;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
 use acowork_core::mqtt_proto::StreamLine;
 
@@ -388,6 +389,11 @@ pub(crate) fn spawn_config_change_relay(
     chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
     conv: ConversationSession,
     session_id: String,
+    // Late-bind slot for AgentCore. Used to run
+    // resolve_effective_reasoning_effort before publishing so MQTT
+    // subscribers see the same effective value as HTTP GET.
+    // See agent::session_config::llm_effects for the rationale.
+    core_slot: SharedAgentCore,
 ) {
     tokio::spawn(async move {
         use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
@@ -395,13 +401,33 @@ pub(crate) fn spawn_config_change_relay(
         while let Some(change) = config_rx.recv().await {
             // Drop sentinel: empty session_id means the ConversationSession
             // is being dropped. Fall back to the relay's own clone.
-            let config = if change.snapshot.session_id.is_empty()
+            let mut config = if change.snapshot.session_id.is_empty()
                 && change.snapshot.agent_id.is_empty()
             {
                 conv.build_session_config_snapshot()
             } else {
                 change.snapshot
             };
+
+            // Resolve effective reasoning_effort before publish. The
+            // raw value may be empty if the session was resumed from
+            // a meta.json that never persisted reasoning_effort.
+            // Funnel through the shared resolver so MQTT subscribers
+            // see the same effective value as HTTP GET.
+            if config.reasoning_effort.is_empty()
+                && let Ok(slot) = core_slot.read()
+                && let Some(core) = slot.as_ref()
+            {
+                let caps = core.get_model_capabilities(&config.model_id);
+                if let Some(effort) =
+                    crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
+                        caps.as_ref(),
+                        None,
+                    )
+                {
+                    config.reasoning_effort = effort.to_string();
+                }
+            }
 
             tracing::info!(
                 session_id = %session_id,

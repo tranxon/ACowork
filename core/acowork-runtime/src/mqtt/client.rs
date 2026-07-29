@@ -156,7 +156,10 @@ fn map_provider_refs_to_list_items(
                             .unwrap_or(16_384),
                         max_input_tokens: None,
                         supports_tool_calling: true,
-                        supports_reasoning: None,
+                        supports_reasoning: m
+                            .capabilities
+                            .as_ref()
+                            .and_then(|c| c.supports_reasoning),
                         supports_attachment: None,
                         supports_temperature: None,
                         cost: None,
@@ -175,7 +178,10 @@ fn map_provider_refs_to_list_items(
                         name: None,
                         family: None,
                         knowledge_cutoff: None,
-                        default_reasoning_effort: None,
+                        default_reasoning_effort: m
+                            .capabilities
+                            .as_ref()
+                            .and_then(|c| c.default_reasoning_effort.clone()),
                         thinking_mode: None,
                     },
                     max_output_tokens_limit: m.max_output_tokens_limit,

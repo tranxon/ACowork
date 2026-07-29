@@ -4337,6 +4337,7 @@ mod tests {
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
                 None, // no resolver for basic tests
+                Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
             ));
 
         (svc, conv_arc)
@@ -4466,6 +4467,7 @@ mod tests {
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
                 None,
+                Arc::new(std::sync::RwLock::new(None)),
             ));
         let session_config_slot =
             Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
@@ -4544,6 +4546,7 @@ mod tests {
             Arc::new(crate::usecases::RuntimeSessionConfigService::new(
                 shared_configs,
                 Some(resolver),
+                Arc::new(std::sync::RwLock::new(None)),
             ));
         let session_config_slot =
             Arc::new(tokio::sync::Mutex::new(Some(config_svc)));

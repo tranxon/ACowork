@@ -13,6 +13,9 @@ import { UserAvatar } from "../common/UserAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
+import { useAgentStore } from "../../stores/agentStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
 
 export interface UserWithAttachmentsBubbleProps {
   /** The user text message (items[0] of the block). */
@@ -104,10 +107,23 @@ export function UserWithAttachmentsBubble({
     [agentId, currentSessionId, userMessage.id, removeMessageAttachment],
   );
 
-  const handleChipClick = useCallback((_item: AttachedItem) => {
-    // Workspace ref click — handled by the parent (open file in editor).
-    // Currently a no-op; the parent can subscribe to this via context.
-  }, []);
+  const handleChipClick = useCallback(
+    (item: AttachedItem) => {
+      // Open workspace refs (attached_file / attached_selection) in the
+      // in-app fileTab. Matches the handler in MessageBubble.tsx.
+      const agentIdFromStore = useAgentStore.getState().selectedAgentId;
+      if (!agentIdFromStore) return;
+      const workspaceId = useWorkspaceStore
+        .getState()
+        .getSessionWorkspaceId(currentSessionId);
+      void openAttachedRef({
+        item,
+        agentId: agentIdFromStore,
+        currentWorkspaceId: workspaceId,
+      });
+    },
+    [currentSessionId],
+  );
 
   const fontSizeStyle: React.CSSProperties | undefined = undefined;
 
