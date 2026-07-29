@@ -57,6 +57,20 @@ export const dialogButtonSecondary =
 export const testResultBase =
   "rounded-md px-3 py-[var(--ui-btn-py)] text-xs truncate";
 
+// ── Chat banner slot ──────────────────────────────────────────────
+
+/**
+ * Wrapper class for inline banners rendered inside the chat messages scroll
+ * container (DebugPausedBanner, RetryWaitBanner, …). The banner component is
+ * expected to render THIS wrapper itself and `return null` when not visible,
+ * so that no DOM element — and crucially, no `mt-1.5` margin — is left behind
+ * when the banner is hidden. An always-rendered empty wrapper with `mt-1.5`
+ * would silently push sibling content below the scroll viewport and trigger
+ * a phantom scrollbar on empty sessions.
+ */
+export const bannerSlot =
+  "mt-1.5 flex justify-center px-6";
+
 export const testResultSuccess =
   "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400";
 

@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useDebugStore } from "../../stores/debugStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { bannerSlot } from "../../lib/ui-styles";
 
 /**
  * Banner shown inside the chat panel when the selected agent is in debug mode
@@ -12,6 +13,12 @@ import { useTranslation } from "../../i18n/useTranslation";
  * Mirrors the visual style of the iteration-limit-paused banner but with
  * debug-specific colors and resume/step actions. The banner disappears
  * automatically when the debugger transitions back to "Running".
+ *
+ * IMPORTANT: this component owns its own `bannerSlot` wrapper and returns
+ * `null` when not visible. Callers MUST NOT wrap `<DebugPausedBanner />` in
+ * an outer wrapper, or an empty wrapper with `mt-1.5` will sit in the DOM
+ * even when the banner is hidden, pushing sibling content below the chat
+ * scroll viewport and causing a phantom scrollbar on empty sessions.
  */
 export function DebugPausedBanner() {
   const { t } = useTranslation();
@@ -73,39 +80,41 @@ export function DebugPausedBanner() {
   const stateLabel = debugState === "Paused" ? t("debugPausedBanner.statePaused") : t("debugPausedBanner.stateStepping");
 
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
-      style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-    >
-      <span className="flex shrink-0 items-center gap-1.5">
-        <Bug className="h-3.5 w-3.5 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
-        <Pause className="h-3 w-3 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
-        <span className="text-xs font-medium">
-          {stateLabel} in debug mode
+    <div className={bannerSlot}>
+      <div
+        role="status"
+        aria-live="polite"
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
+        style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+      >
+        <span className="flex shrink-0 items-center gap-1.5">
+          <Bug className="h-3.5 w-3.5 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
+          <Pause className="h-3 w-3 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
+          <span className="text-xs font-medium">
+            {stateLabel} in debug mode
+          </span>
         </span>
-      </span>
 
-      <div className="ml-auto flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={handleResume}
-          className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
-        >
-          <Play className="h-3 w-3" fill="currentColor" />
-          <span>{t("debugPausedBanner.resume")}</span>
-          <KbdHint>F5</KbdHint>
-        </button>
-        <button
-          type="button"
-          onClick={handleStep}
-          className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
-        >
-          <StepForward className="h-3 w-3" />
-          <span>{t("debugPausedBanner.step")}</span>
-          <KbdHint>F10</KbdHint>
-        </button>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleResume}
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+          >
+            <Play className="h-3 w-3" fill="currentColor" />
+            <span>{t("debugPausedBanner.resume")}</span>
+            <KbdHint>F5</KbdHint>
+          </button>
+          <button
+            type="button"
+            onClick={handleStep}
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
+          >
+            <StepForward className="h-3 w-3" />
+            <span>{t("debugPausedBanner.step")}</span>
+            <KbdHint>F10</KbdHint>
+          </button>
+        </div>
       </div>
     </div>
   );

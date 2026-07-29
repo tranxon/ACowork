@@ -1361,7 +1361,7 @@ export function ChatPanel() {
           <div
             ref={messagesContainerRef}
             onScroll={scrollController.handleScroll}
-            className="h-full overflow-y-auto px-4 py-3 select-text cursor-text"
+            className="relative h-full overflow-y-auto px-4 py-3 select-text cursor-text"
             role="log"
             aria-label={t("chatPanel.ariaLabelChatMessages")}
           >
@@ -1472,15 +1472,17 @@ export function ChatPanel() {
                 the just-rendered bubble content without a jump. */}
             {/* Debug paused banner — shown when the agent is in dev_mode and
                 the debugger is currently in Stepping/Paused state. Provides
-                F5 (resume) and F10 (step) actions directly from the chat. */}
-            <div className="mt-1.5 flex justify-center px-6">
-              <DebugPausedBanner />
-            </div>
-            {/* 429 Retry wait banner — countdown + Skip Wait button, shown when
-                LLM provider returns 429 with Retry-After > 10s */}
-            <div className="mt-1.5 flex justify-center px-6">
-              <RetryWaitBanner />
-            </div>
+                F5 (resume) and F10 (step) actions directly from the chat.
+                The banner renders its own bannerSlot wrapper and returns
+                null when not visible, so no empty wrapper sits in the DOM
+                when hidden — that empty wrapper would otherwise leave
+                a mt-1.5 of dead space below the scroll viewport and cause
+                a phantom scrollbar on empty sessions. */}
+            <DebugPausedBanner />
+            {/* 429 Retry wait banner — countdown + Skip Wait button, shown
+                when LLM provider returns 429 with Retry-After > 10s. Same
+                wrapper ownership as DebugPausedBanner. */}
+            <RetryWaitBanner />
             {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
