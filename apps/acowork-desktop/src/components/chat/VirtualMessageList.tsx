@@ -429,7 +429,7 @@ export const VirtualMessageList = React.forwardRef<
 
       {/* Loading session indicator */}
       {isLoadingSession && messages.length === 0 && (
-        <div className="flex h-full items-center justify-center">
+        <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
             <span className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
             <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">Loading conversation...</p>
@@ -438,7 +438,7 @@ export const VirtualMessageList = React.forwardRef<
       )}
 
       {loadError && !isLoadingSession && (
-        <div className="flex h-full flex-col items-center justify-center gap-3 px-4">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4">
           <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
             {t("chatPanel.sessionLoadFailed")}
             {loadError && <div className="mt-1 text-red-500 dark:text-red-400">{loadError}</div>}
@@ -453,7 +453,7 @@ export const VirtualMessageList = React.forwardRef<
       )}
 
       {!loadError && !isLoadingSession && messages.length === 0 && (
-        <div className="flex h-full items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
+        <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-400 dark:text-zinc-500">
           Start a conversation
         </div>
       )}
@@ -622,6 +622,16 @@ export const VirtualMessageList = React.forwardRef<
                   // streaming state is driven solely by `sending` (which
                   // reflects isAssistantReplying / session active status).
                   const isStreamingGroup = sending && isLastGroup;
+                  // Live thought attaches ONLY to the active (last) explore
+                  // group.  Historical explore groups must never render the
+                  // streaming ThinkBlock — otherwise every expanded past
+                  // block would show a phantom "正在思考..." entry because
+                  // their items[] lack a frozen thought message, satisfying
+                  // ExploreBlock's `liveThoughtNotYetLoaded` predicate.
+                  // Converging all three live-thought props through this
+                  // single flag ensures a future internal change in
+                  // ExploreBlock cannot regress this scope again.
+                  const liveThoughtAttaches = isThinking && isLastGroup;
                   return (
                     <div className="ml-12">
                       <ExploreBlock
@@ -633,9 +643,9 @@ export const VirtualMessageList = React.forwardRef<
                         onCancelTool={onCancelTool}
                         toolProgress={toolProgress}
                         hasFollowUpReply={hasFollowUpReply}
-                        isThinking={isThinking}
-                        thinkingContent={thinkingContent}
-                        thinkingStartTime={thinkingStartTime}
+                        isThinking={liveThoughtAttaches}
+                        thinkingContent={liveThoughtAttaches ? thinkingContent : ""}
+                        thinkingStartTime={liveThoughtAttaches ? thinkingStartTime : null}
                       />
                     </div>
                   );
