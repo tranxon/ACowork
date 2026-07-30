@@ -16,6 +16,7 @@ import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
+import { pickOpenActionForPath } from "../editor/markdownLinkResolver";
 import type { AttachedItem } from "../../lib/types";
 
 // ── Utilities ─────────────────────────────────────────────────────────
@@ -87,7 +88,13 @@ const markdownComponents = {
     }
     return <pre>{children}</pre>;
   },
-  /** Intercept link clicks: open in a preview tab instead of navigating the webview (which crashes). */
+  /** Intercept link clicks: open in the fileTab instead of navigating the
+   *  webview (which would crash). Image extensions open in preview mode,
+   *  every other supported text/source format (including JSON, Markdown,
+   *  HTML, source code) opens in Monaco — same rule as the workspace tree
+   *  and the chat banner chip. Previously this unconditionally opened
+   *  `openPreview`, which falls through to `MarkdownPreviewView` for
+   *  non-image / non-HTML files and freezes on multi-MB JSON. */
   a: ({ href, children, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
     const handleClick = (e: React.MouseEvent) => {
       if (!href) return;
@@ -100,12 +107,20 @@ const markdownComponents = {
         // Case 1: http/https URLs — open in URL preview tab
         useFileEditorStore.getState().openUrl(agentId, href);
       } else {
-        // Case 2: Local file paths — open in file preview tab
+        // Case 2: Local file paths — preview vs. Monaco decided by the
+        // shared helper. The `href` is treated as a workspace-relative or
+        // absolute path; `pickOpenActionForPath` only checks the extension.
         const sessionId = useChatStore.getState().getActiveSessionId(agentId);
         if (!sessionId) return;
         const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
         const relPath = href.replace(/^\//, "");
-        useFileEditorStore.getState().openPreview(agentId, workspaceId, relPath);
+        const action = pickOpenActionForPath(relPath);
+        const store = useFileEditorStore.getState();
+        if (action === "openPreview") {
+          void store.openPreview(agentId, workspaceId, relPath);
+        } else {
+          void store.openFile(agentId, workspaceId, relPath);
+        }
       }
     };
     return (

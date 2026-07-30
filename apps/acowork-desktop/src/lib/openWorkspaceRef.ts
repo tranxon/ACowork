@@ -25,10 +25,15 @@
 // `file_upload` / `image_upload` are **not** accepted here on purpose:
 // ADR-046 §2.5 says uploaded files are not clickable workspace refs (the
 // runtime owns the body; the UI just shows provenance).
+//
+// Action selection (preview vs. Monaco edit) is delegated to the shared
+// `pickOpenActionForPath` helper so this dispatcher stays in lock-step
+// with the workspace tree and the chat message `<a>` interceptor.
 
 import {
     notifyLinkNotFound,
     openFirstResolved,
+    pickOpenActionForPath,
     resolveAssetAcrossWorkspaces,
 } from "../components/editor/markdownLinkResolver";
 import { log } from "./logger";
@@ -61,11 +66,16 @@ interface OpenAttachedRefArgs {
  * Open a workspace attachment in the in-app fileTab.
  *
  * Behaviour by `item.type`:
- *   - `file` / `attached_file`         → `openPreview` (read-only).
+ *   - `file` / `attached_file`         → action picked by
+ *       `pickOpenActionForPath(absPath)` — images go to `openPreview`,
+ *       everything else (including JSON, Markdown, HTML, source code) goes
+ *       to `openFile` so Monaco renders the source rather than the markdown
+ *       preview fallback (which used to freeze on multi-MB JSON files).
  *   - `selection` / `attached_selection` → `openFile(..., startLine)`. The
  *       cursor jumps to `startLine`; multi-line selection highlight is
  *       intentionally **not** implemented yet (deferred — needs
- *       `selectionRange` on `fileEditorStore`).
+ *       `selectionRange` on `fileEditorStore`). Selections always open in
+ *       Monaco (never preview) — the user is pointing at a specific line.
  *   - `directory` / `attached_folder`  → silent no-op (fileTab doesn't open
  *       folders yet; waiting for folder-preview support).
  *
@@ -83,9 +93,17 @@ export async function openAttachedRef({
     // ── Branch on the user's "what does a click mean" intent ──────────
     switch (item.type) {
         case "file":
-        case "attached_file":
-            await openAsPreview(item.absPath, agentId, currentWorkspaceId);
+        case "attached_file": {
+            // Match the workspace-panel convention: images preview, every
+            // other supported text/source format (including JSON, MD, HTML,
+            // and source code) opens in Monaco. Previously this always went
+            // through `openPreview`, which falls through to
+            // `MarkdownPreviewView` for non-image / non-HTML files and
+            // freezes on multi-MB JSON.
+            const action = pickOpenActionForPath(item.absPath);
+            await openWithAction(action, item.absPath, agentId, currentWorkspaceId);
             return;
+        }
         case "selection":
         case "attached_selection": {
             // 1-based, inclusive. Fall back to 1 if upstream forgot to set them.
@@ -116,7 +134,8 @@ export async function openAttachedRef({
 
 // ── Internals ─────────────────────────────────────────────────────────
 
-async function openAsPreview(
+async function openWithAction(
+    action: "openFile" | "openPreview",
     absPath: string,
     agentId: string,
     currentWorkspaceId: string,
@@ -126,7 +145,7 @@ async function openAsPreview(
         notifyLinkNotFound(absPath);
         return;
     }
-    const result = await openFirstResolved(agentId, candidates, "openPreview");
+    const result = await openFirstResolved(agentId, candidates, action);
     if (!result.opened) {
         notifyLinkNotFound(absPath);
     }
