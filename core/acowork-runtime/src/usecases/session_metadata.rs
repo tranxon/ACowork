@@ -83,11 +83,16 @@ pub trait SessionMetadataService: Send + Sync {
     /// Return a single session's detail (meta + live state).
     async fn get_session(&self, session_id: &str) -> Result<SessionDetail>;
 
-    /// Read messages from a session with offset-based pagination.
+    /// Read messages from a session with offset-based pagination
+    /// (ADR-050 forward semantics: `offset = 0` = oldest entry).
+    ///
+    /// When `from_tail` is `true`, the window is anchored to the last
+    /// `limit` entries regardless of `offset` (initial-load path).
     async fn get_messages(
         &self,
         session_id: &str,
         offset: Option<u64>,
         limit: Option<u32>,
+        from_tail: bool,
     ) -> Result<MessagesResponse>;
 }

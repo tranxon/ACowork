@@ -1756,25 +1756,24 @@ pub(crate) fn prune_excess_sessions(
 
 /// Paginated message result.
 ///
-/// Pagination uses an `offset` model — direction is **derived from the
-/// offset itself, not passed as a request parameter**:
+/// ADR-050: Pagination uses a **forward** (oldest-end) `offset` model —
 ///
-/// - `offset = 0`  → the most recent `limit` raw entries.
-/// - `offset = K`  → the `limit` raw entries that are K positions behind the
-///   most recent (i.e. entries `[total-K-limit, total-K)`).
+/// - `offset = 0`  → the **oldest** `limit` raw entries (i.e. entries `[0, limit)`).
+/// - `offset = K`  → the `limit` raw entries starting at index K
+///   (i.e. entries `[K, K+limit)`, clamped to `total`).
 ///
 /// To scroll **older** (toward smaller offsets / older messages):
-///   `next_offset = offset + returned_limit`.
-/// To scroll **newer** (toward the bottom of the conversation):
 ///   `next_offset = max(0, offset - returned_limit)`.
-/// `offset == 0` means the cache window already touches the newest
-/// message (nothing newer to load from the bottom of the conversation).
+/// To scroll **newer** (toward the bottom of the conversation):
+///   `next_offset = offset + returned_limit`.
+/// The cache window has reached the **newest** message when
+/// `offset + limit >= total`.  See ADR-050 §3.2.
 #[derive(Debug, Clone)]
 pub struct PaginatedMessages {
     /// Messages in the current page, in chronological order
     /// (oldest → newest within the page).
     pub messages: Vec<ConversationEntry>,
-    /// Echo of the requested offset.
+    /// Echo of the requested offset (forward semantics: 0 = oldest entry).
     pub offset: u64,
     /// Number of messages actually returned (≤ requested limit).
     pub limit: u32,
@@ -1988,12 +1987,24 @@ pub fn scan_sessions_async(
 ///
 /// Returns messages in chronological order (oldest → newest within
 /// the page).
-pub fn read_messages_paginated(path: &Path, offset: u64, limit: u32) -> Result<PaginatedMessages> {
+pub fn read_messages_paginated(
+    path: &Path,
+    offset: u64,
+    limit: u32,
+    from_tail: bool,
+) -> Result<PaginatedMessages> {
     // ADR-024: no metadata header line on disk; data lives in a sidecar
     // file (see `<sid>.json`).  We still defensively skip any header
     // line that contains both `"version"` and `"session_id"` so legacy
     // files (or hand-edited JSONLs) cannot leak metadata into message
     // lists.
+    //
+    // ADR-050: pagination uses **forward** (oldest-end) offsets by default.
+    //   `offset = 0`  → the OLDEST `limit` entries.
+    //   `offset = K`  → entries `[K, K+limit)` clamped to `total`.
+    //   `from_tail = true` → force the window to the LAST `limit` entries
+    //     (overrides `offset`); used by the initial-load code path which
+    //     doesn't know `total` yet.
     let file_len = std::fs::metadata(path)?.len();
     if file_len == 0 {
         return Ok(PaginatedMessages {
@@ -2030,29 +2041,52 @@ pub fn read_messages_paginated(path: &Path, offset: u64, limit: u32) -> Result<P
     drop(raw_lines); // release the per-line Strings after parsing
 
     // If `offset` skips past the end, the page is empty (harmless boundary).
-    if offset >= total {
+    // `from_tail` is rejected for empty files — total=0 means there's nothing
+    // at the tail either.
+    if total == 0 {
         return Ok(PaginatedMessages {
             messages: Vec::new(),
             offset,
+            limit: 0,
+            total: 0,
+        });
+    }
+
+    // Compute the effective [start_idx, end_idx) window.
+    //
+    // Forward semantics:
+    //   start_idx = offset.min(total)
+    //   end_idx   = (offset + limit).min(total)
+    //
+    // `from_tail` overrides: clamp `start_idx` so `end_idx` lands on the
+    // last `limit` (or fewer) entries.
+    let (effective_offset, start_idx, end_idx) = if from_tail {
+        // Walk backwards from the tail by `limit` entries (or all of them
+        // when the file holds fewer than `limit`).
+        let tail_start = total.saturating_sub(limit as u64);
+        let echo_offset = tail_start; // What the caller "should have asked for"
+        (echo_offset, tail_start, total)
+    } else {
+        let start = offset.min(total);
+        let end = (offset + limit as u64).min(total);
+        (offset, start, end)
+    };
+
+    if start_idx >= end_idx {
+        return Ok(PaginatedMessages {
+            messages: Vec::new(),
+            offset: effective_offset,
             limit: 0,
             total,
         });
     }
 
-    // Slice the raw entries into a [start_idx, end_idx) window.
-    //   end_idx   = total - offset                 (exclusive, from oldest)
-    //   start_idx = max(0, end_idx - limit)
-    //
-    // The next page's offset is then simply `prev_offset + limit` —
-    // both sides in raw entries, no cross-dimensional arithmetic.
-    let end_idx = total - offset;
-    let start_idx = end_idx.saturating_sub(limit as u64);
     let messages = entries[start_idx as usize..end_idx as usize].to_vec();
     let actual_limit = messages.len() as u32;
 
     Ok(PaginatedMessages {
         messages,
-        offset,
+        offset: effective_offset,
         limit: actual_limit,
         total,
     })
@@ -2497,8 +2531,8 @@ mod tests {
             }
         }
 
-        // Page 1: offset=0, limit=10 → full conversation, total=5.
-        let page = read_messages_paginated(&file_path, 0, 10).unwrap();
+        // Page 1: offset=0, limit=10 → first 5 (full conversation).
+        let page = read_messages_paginated(&file_path, 0, 10, false).unwrap();
         assert_eq!(page.offset, 0);
         assert_eq!(page.limit, 5);
         assert_eq!(page.total, 5);
@@ -2506,60 +2540,73 @@ mod tests {
         assert_eq!(page.messages[0].content, "Message 0");
         assert_eq!(page.messages[4].content, "Message 4");
 
-        // Page 2: offset=0, limit=2 → latest 2 messages (Message 3, 4).
-        let page = read_messages_paginated(&file_path, 0, 2).unwrap();
+        // Page 2: offset=0, limit=2 → oldest 2 messages (Message 0, 1).
+        let page = read_messages_paginated(&file_path, 0, 2, false).unwrap();
         assert_eq!(page.offset, 0);
         assert_eq!(page.limit, 2);
         assert_eq!(page.total, 5);
         assert_eq!(page.messages.len(), 2);
-        assert_eq!(page.messages[0].content, "Message 3");
-        assert_eq!(page.messages[1].content, "Message 4");
+        assert_eq!(page.messages[0].content, "Message 0");
+        assert_eq!(page.messages[1].content, "Message 1");
 
-        // Page 3: offset=2, limit=2 → next 2 older (Message 1, 2).
-        let page2 = read_messages_paginated(&file_path, 2, 2).unwrap();
+        // Page 3: offset=2, limit=2 → entries [2, 4) (Message 2, 3).
+        let page2 = read_messages_paginated(&file_path, 2, 2, false).unwrap();
         assert_eq!(page2.offset, 2);
         assert_eq!(page2.limit, 2);
         assert_eq!(page2.total, 5);
         assert_eq!(page2.messages.len(), 2);
-        assert_eq!(page2.messages[0].content, "Message 1");
-        assert_eq!(page2.messages[1].content, "Message 2");
+        assert_eq!(page2.messages[0].content, "Message 2");
+        assert_eq!(page2.messages[1].content, "Message 3");
 
-        // Page 4: offset=4, limit=2 → only Message 0 remains.
-        let page3 = read_messages_paginated(&file_path, 4, 2).unwrap();
+        // Page 4: offset=4, limit=2 → entries [4, 6) clamped to total → Message 4 only.
+        let page3 = read_messages_paginated(&file_path, 4, 2, false).unwrap();
         assert_eq!(page3.offset, 4);
         assert_eq!(page3.limit, 1);
         assert_eq!(page3.total, 5);
         assert_eq!(page3.messages.len(), 1);
-        assert_eq!(page3.messages[0].content, "Message 0");
+        assert_eq!(page3.messages[0].content, "Message 4");
 
         // Page 5: offset past the end → empty page, offset/total still meaningful.
-        let out_of_range = read_messages_paginated(&file_path, 10, 2).unwrap();
+        let out_of_range = read_messages_paginated(&file_path, 10, 2, false).unwrap();
         assert_eq!(out_of_range.offset, 10);
         assert_eq!(out_of_range.limit, 0);
         assert_eq!(out_of_range.total, 5);
         assert!(out_of_range.messages.is_empty());
 
-        // Page 6: offset=0, limit=3 → use this as the anchor for scroll-newer.
-        // The frontend arrives at a page by knowing its own offset+limit; here
-        // the boundary conditions are exercised directly, no cursors involved.
-        let latest3 = read_messages_paginated(&file_path, 0, 3).unwrap();
-        assert_eq!(latest3.offset, 0);
-        assert_eq!(latest3.limit, 3);
-        assert_eq!(latest3.total, 5);
-        assert_eq!(latest3.messages[0].content, "Message 2");
-        assert_eq!(latest3.messages[1].content, "Message 3");
-        assert_eq!(latest3.messages[2].content, "Message 4");
+        // Page 6: offset=0, limit=3 → first 3 messages (Message 0, 1, 2).
+        let first3 = read_messages_paginated(&file_path, 0, 3, false).unwrap();
+        assert_eq!(first3.offset, 0);
+        assert_eq!(first3.limit, 3);
+        assert_eq!(first3.total, 5);
+        assert_eq!(first3.messages[0].content, "Message 0");
+        assert_eq!(first3.messages[1].content, "Message 1");
+        assert_eq!(first3.messages[2].content, "Message 2");
 
-        // Symmetric scroll-newer step: from offset=2 (got Message 1,2), ask
-        // for offset=2-2=0 to confirm we land on the same slice the first
-        // page produced.
-        let slide_to_bottom = read_messages_paginated(&file_path, 2, 2).unwrap();
-        assert_eq!(slide_to_bottom.messages[0].content, "Message 1");
-        assert_eq!(slide_to_bottom.messages[1].content, "Message 2");
+        // from_tail=true, limit=3 → latest 3 messages (Message 2, 3, 4).
+        // Mirrors the pre-ADR-050 "latest 3" page for regression coverage.
+        let tail3 = read_messages_paginated(&file_path, 0, 3, true).unwrap();
+        assert_eq!(tail3.offset, 2);
+        assert_eq!(tail3.limit, 3);
+        assert_eq!(tail3.total, 5);
+        assert_eq!(tail3.messages[0].content, "Message 2");
+        assert_eq!(tail3.messages[1].content, "Message 3");
+        assert_eq!(tail3.messages[2].content, "Message 4");
+
+        // from_tail=true with limit > total → full conversation.
+        let tail_all = read_messages_paginated(&file_path, 0, 10, true).unwrap();
+        assert_eq!(tail_all.offset, 0);
+        assert_eq!(tail_all.limit, 5);
+        assert_eq!(tail_all.messages[0].content, "Message 0");
+        assert_eq!(tail_all.messages[4].content, "Message 4");
+
+        // Symmetric scroll-newer step: from offset=2 (got Message 2,3), ask
+        // for offset=4 to load Message 4.
+        let next = read_messages_paginated(&file_path, 4, 2, false).unwrap();
+        assert_eq!(next.messages[0].content, "Message 4");
 
         // Empty file → empty page with zeroed totals.
         std::fs::write(&file_path, "").unwrap();
-        let empty = read_messages_paginated(&file_path, 0, 10).unwrap();
+        let empty = read_messages_paginated(&file_path, 0, 10, false).unwrap();
         assert_eq!(empty.offset, 0);
         assert_eq!(empty.limit, 0);
         assert_eq!(empty.total, 0);
@@ -3142,18 +3189,37 @@ mod tests {
     }
 
     #[test]
-    fn raw_limit_returns_last_n_raw_entries() {
-        // 10 raw entries; limit=3 → last 3 entries (chronological order).
+    fn raw_limit_returns_first_n_raw_entries() {
+        // 10 raw entries; limit=3 → first 3 entries (chronological order).
+        // ADR-050: forward semantics — offset=0 anchors at the OLDEST end.
         let dir = TempDir::new().unwrap();
         let entries: Vec<ConversationEntry> = (1..=10)
             .map(|i| make_entry(&i.to_string(), if i % 2 == 0 { "assistant" } else { "user" }, &format!("m{}", i)))
             .collect();
         let path = write_test_jsonl(&dir, "sess-raw-limit", &entries);
 
-        let page = read_messages_paginated(&path, 0, 3).unwrap();
+        let page = read_messages_paginated(&path, 0, 3, false).unwrap();
         assert_eq!(page.messages.len(), 3);
         assert_eq!(page.total, 10);
-        // Last 3 entries: m8, m9, m10.
+        assert_eq!(page.messages[0].content, "m1");
+        assert_eq!(page.messages[1].content, "m2");
+        assert_eq!(page.messages[2].content, "m3");
+    }
+
+    #[test]
+    fn raw_from_tail_returns_last_n_raw_entries() {
+        // 10 raw entries; from_tail=true, limit=3 → last 3 entries.
+        let dir = TempDir::new().unwrap();
+        let entries: Vec<ConversationEntry> = (1..=10)
+            .map(|i| make_entry(&i.to_string(), if i % 2 == 0 { "assistant" } else { "user" }, &format!("m{}", i)))
+            .collect();
+        let path = write_test_jsonl(&dir, "sess-raw-tail", &entries);
+
+        let page = read_messages_paginated(&path, 0, 3, true).unwrap();
+        assert_eq!(page.messages.len(), 3);
+        assert_eq!(page.total, 10);
+        // from_tail returns the last 3 entries: m8, m9, m10.
+        assert_eq!(page.offset, 7, "tail offset = total - limit");
         assert_eq!(page.messages[0].content, "m8");
         assert_eq!(page.messages[1].content, "m9");
         assert_eq!(page.messages[2].content, "m10");
@@ -3161,38 +3227,35 @@ mod tests {
 
     #[test]
     fn raw_offset_pagination_arithmetic() {
-        // Both `offset` and `limit` are raw entries, so a single
-        // arithmetic identity must hold across multiple pages:
-        //   page_n = read(offset = n * limit, limit)
-        //          = entries[total - (n+1)*limit .. total - n*limit]
-        // Every page exposes exactly `limit` raw entries (no group
-        // boundary alignment), and the union of all pages covers the
-        // whole file.
+        // ADR-050: forward semantics — page_n = read(offset = n * limit, limit)
+        // returns entries [n*limit, (n+1)*limit).  Every page exposes
+        // exactly `limit` raw entries (no group boundary alignment), and
+        // the union of all pages covers the whole file.
         let dir = TempDir::new().unwrap();
         let entries: Vec<ConversationEntry> = (1..=12)
             .map(|i| make_entry(&i.to_string(), "user", &format!("e{}", i)))
             .collect();
         let path = write_test_jsonl(&dir, "sess-paginate", &entries);
 
-        let p0 = read_messages_paginated(&path, 0, 5).unwrap();
+        let p0 = read_messages_paginated(&path, 0, 5, false).unwrap();
         assert_eq!(p0.messages.len(), 5);
-        assert_eq!(p0.messages.first().unwrap().content, "e8");
-        assert_eq!(p0.messages.last().unwrap().content, "e12");
+        assert_eq!(p0.messages.first().unwrap().content, "e1");
+        assert_eq!(p0.messages.last().unwrap().content, "e5");
 
-        let p1 = read_messages_paginated(&path, 5, 5).unwrap();
+        let p1 = read_messages_paginated(&path, 5, 5, false).unwrap();
         assert_eq!(p1.messages.len(), 5);
-        assert_eq!(p1.messages.first().unwrap().content, "e3");
-        assert_eq!(p1.messages.last().unwrap().content, "e7");
+        assert_eq!(p1.messages.first().unwrap().content, "e6");
+        assert_eq!(p1.messages.last().unwrap().content, "e10");
 
-        let p2 = read_messages_paginated(&path, 10, 5).unwrap();
+        let p2 = read_messages_paginated(&path, 10, 5, false).unwrap();
         assert_eq!(p2.messages.len(), 2, "tail page only has 2 entries left");
-        assert_eq!(p2.messages.first().unwrap().content, "e1");
-        assert_eq!(p2.messages.last().unwrap().content, "e2");
+        assert_eq!(p2.messages.first().unwrap().content, "e11");
+        assert_eq!(p2.messages.last().unwrap().content, "e12");
 
         // Union of pages = whole file. Sort with a numeric-aware comparator
         // so the assertion reads the natural order (`e1..e12`), not the
         // lexicographic order (`e1, e10, e11, e12, e2, ...`).
-        let mut all: Vec<&str> = p2.messages.iter().chain(&p1.messages).chain(&p0.messages)
+        let mut all: Vec<&str> = p0.messages.iter().chain(&p1.messages).chain(&p2.messages)
             .map(|e| e.content.as_str()).collect();
         all.sort_by_key(|s| s.trim_start_matches('e').parse::<u32>().unwrap());
         let expected: Vec<String> = (1..=12).map(|i| format!("e{}", i)).collect();
@@ -3208,7 +3271,7 @@ mod tests {
         ];
         let path = write_test_jsonl(&dir, "sess-empty-page", &entries);
 
-        let page = read_messages_paginated(&path, 100, 5).unwrap();
+        let page = read_messages_paginated(&path, 100, 5, false).unwrap();
         assert_eq!(page.messages.len(), 0);
         assert_eq!(page.total, 2);
         assert_eq!(page.limit, 0);
@@ -3228,7 +3291,7 @@ mod tests {
         ];
         let path = write_test_jsonl(&dir, "sess-under-limit", &entries);
 
-        let page = read_messages_paginated(&path, 0, 50).unwrap();
+        let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         assert_eq!(page.messages.len(), 4);
         assert_eq!(page.total, 4);
         assert_eq!(page.limit, 4);
@@ -3239,12 +3302,11 @@ mod tests {
         // Regression: with `limit=50` raw entries (frontend default),
         // a session of 1 user + 60 tool rows + 1 assistant = 62 raw
         // entries must surface the user message (which lives at idx 0,
-        // way outside the default page).  We verify two regimes:
-        //   (a) limit=50: only the tail (idx 12..62) comes back — no user msg.
-        //       This is fine: the frontend detects offset+limit == total
-        //       after the first page and loads the previous page.
-        //   (b) Paging back with offset=50, limit=50 returns idx 0..12,
-        //       including the user message and the head of the tool run.
+        // well within the default page).  We verify two regimes:
+        //   (a) Forward offset=0, limit=50: returns the FIRST 50 entries
+        //       (idx 0..50) — user message MUST be in there.
+        //   (b) Forward offset=50, limit=50: returns entries [50..62) —
+        //       idx 50..61 (the tail 12 entries), user message MUST NOT.
         let dir = TempDir::new().unwrap();
         let mut entries = vec![make_entry("1", "user", "user-msg")];
         for i in 0..20 {
@@ -3256,28 +3318,26 @@ mod tests {
         assert_eq!(entries.len(), 62);
         let path = write_test_jsonl(&dir, "sess-tool-heavy", &entries);
 
-        // Page 1: latest 50 raw entries.
-        let page1 = read_messages_paginated(&path, 0, 50).unwrap();
+        // Page 1: first 50 raw entries (idx 0..50).  Includes user-msg.
+        let page1 = read_messages_paginated(&path, 0, 50, false).unwrap();
         assert_eq!(page1.messages.len(), 50);
         assert_eq!(page1.total, 62);
         assert!(
-            !page1.messages.iter().any(|m| m.content == "user-msg"),
-            "page 1 (offset=0, limit=50) must NOT yet include the user message"
+            page1.messages.iter().any(|m| m.role == "user" && m.content == "user-msg"),
+            "page 1 (offset=0, limit=50) MUST include the user message at idx 0"
         );
 
-        // Page 2: paginate back by limit → entries[0..12], including user.
-        let page2 = read_messages_paginated(&path, 50, 50).unwrap();
+        // Page 2: forward offset=50 → entries [50..62), idx 50..61 (12 entries).
+        let page2 = read_messages_paginated(&path, 50, 50, false).unwrap();
         assert_eq!(page2.messages.len(), 12);
         assert!(
-            page2.messages.iter().any(|m| m.role == "user" && m.content == "user-msg"),
-            "page 2 must include the user message"
+            !page2.messages.iter().any(|m| m.content == "user-msg"),
+            "page 2 (idx 50..62) must NOT include the user message (it's at idx 0)"
         );
-        // The slice ends on entry idx 11 which, per the construction loop above,
-        // is `call-3` (a tool_call entry; the matching result-3 sits at idx 12
-        // and belongs to page 1).
+        // The last entry of the tail is the final assistant reply.
         assert_eq!(
-            page2.messages.last().unwrap().content, "call-3",
-            "page 2 ends on the 4th tool_call entry"
+            page2.messages.last().unwrap().content, "final-reply",
+            "page 2 ends on the final assistant reply"
         );
     }
 
@@ -3317,7 +3377,7 @@ mod tests {
         let path = write_test_jsonl(&dir, "sess-compaction", &entries);
 
         // limit large enough to span the entire file in raw entries
-        let page = read_messages_paginated(&path, 0, 50).unwrap();
+        let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         // Expect: all 7 entries (4 pre-compaction + compaction + 2 post-compaction)
         assert_eq!(page.messages.len(), 7, "display path must show full history");
         assert_eq!(page.total, 7);
@@ -3341,10 +3401,12 @@ mod tests {
     }
 
     #[test]
-    fn pagination_cursor_walks_back_through_compaction_boundary() {
-        // Tight limit so the first page does NOT include the compaction marker;
-        // paging back with `offset += limit` must still reach the pre-compaction
-        // history (display path shows everything).
+    fn pagination_cursor_walks_forward_through_compaction_boundary() {
+        // ADR-050 forward semantics: pagination cursor walks from the
+        // oldest end forward (`offset += limit`).  Tight limit so the first
+        // page does NOT include the tail of the conversation; the second
+        // page (offset=2, limit=50) covers the remaining 5 entries,
+        // crossing the compaction boundary.
         let dir = TempDir::new().unwrap();
         let entries = vec![
             make_entry("1", "user", "old-u1"),
@@ -3357,26 +3419,26 @@ mod tests {
         ];
         let path = write_test_jsonl(&dir, "sess-cap-boundary", &entries);
 
-        // Page 1: latest 2 raw entries (new-u3, new-a3).
-        let page1 = read_messages_paginated(&path, 0, 2).unwrap();
+        // Page 1: oldest 2 raw entries (old-u1, old-a1).
+        let page1 = read_messages_paginated(&path, 0, 2, false).unwrap();
         assert_eq!(page1.messages.len(), 2);
-        assert_eq!(page1.messages[0].content, "new-u3");
-        assert_eq!(page1.messages[1].content, "new-a3");
+        assert_eq!(page1.messages[0].content, "old-u1");
+        assert_eq!(page1.messages[1].content, "old-a1");
 
-        // Page 2: skip the 2 newest; returns 5 entries (old-u1..new-a2),
-        // crossing the compaction boundary.
-        let page2 = read_messages_paginated(&path, 2, 50).unwrap();
-        assert_eq!(page2.messages.len(), 5, "5 entries before the 2 newest");
+        // Page 2: forward offset=2 → entries [2..7) = 5 entries (compaction,
+        // new-u2..new-a3), crossing the compaction boundary.
+        let page2 = read_messages_paginated(&path, 2, 50, false).unwrap();
+        assert_eq!(page2.messages.len(), 5, "5 entries after the first 2");
         assert!(
             page2.messages.iter().any(|m| m.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)),
             "page 2 must include the compaction marker"
         );
         assert!(
-            page2.messages.iter().any(|m| m.content.starts_with("old-")),
-            "page 2 must include pre-compaction history"
+            page2.messages.iter().any(|m| m.content.starts_with("new-")),
+            "page 2 must include post-compaction history"
         );
-        // page2 starts at offset=0, so offset+limit covers the full file:
-        // every entry is on this page, nothing else to fetch.
+        // page2 covers everything from idx 2 to the end: union with page1
+        // = the whole file.
         assert_eq!(page2.total, 7);
         assert_eq!(page2.offset + page2.limit as u64, page2.total);
     }
@@ -3384,9 +3446,8 @@ mod tests {
     #[test]
     fn forward_pagination_with_stale_cursor() {
         // Forward pagination with a stale cursor pointing at offset 0
-        // (below the data section start). The cursor should be clamped
-        // up to `data_start` (meta_end), and all entries including
-        // pre-compaction history should be returned.
+        // (below the data section start). The cursor is clamped to 0,
+        // and all entries including pre-compaction history are returned.
         let dir = TempDir::new().unwrap();
         let entries = vec![
             make_entry("1", "user", "old-u1"),
@@ -3397,10 +3458,8 @@ mod tests {
         ];
         let path = write_test_jsonl(&dir, "sess-forward-clamp", &entries);
 
-        // offset below the data section start behaves like offset=0
-        // (defensive: any offset value entered past the end or below the
-        // data section just returns the latest window, never the metadata).
-        let page = read_messages_paginated(&path, 0, 50).unwrap();
+        // offset=0 anchors at the OLDEST entry (clamped).
+        let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         // Expect: all 5 entries (old-u1, old-a1, compaction, new-u2, new-a2)
         assert_eq!(page.messages.len(), 5, "forward pagination must show full history");
         assert!(
@@ -3425,7 +3484,7 @@ mod tests {
         ];
         let path = write_test_jsonl(&dir, "sess-no-compaction", &entries);
 
-        let page = read_messages_paginated(&path, 0, 50).unwrap();
+        let page = read_messages_paginated(&path, 0, 50, false).unwrap();
         assert_eq!(page.messages.len(), 4);
         assert_eq!(page.total, 4);
     }

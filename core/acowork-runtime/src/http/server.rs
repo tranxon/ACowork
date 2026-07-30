@@ -517,8 +517,8 @@ async fn get_latest_session(State(state): State<HttpState>) -> Result<Json<serde
 /// Query parameters for `GET /sessions/{sid}/messages`.
 #[derive(Debug, Deserialize)]
 struct GetMessagesQuery {
-    /// Offset from the newest end, in **raw entries** (one JSONL line each).
-    /// 0 = latest raw entries.  See
+    /// Offset from the **oldest** end, in **raw entries** (one JSONL line each).
+    /// 0 = first (oldest) raw entry.  See
     /// [`crate::conversation::PaginatedMessages`] for the contract.
     #[serde(default)]
     offset: Option<u64>,
@@ -528,6 +528,12 @@ struct GetMessagesQuery {
     /// is a frontend UI abstraction and is not visible here.
     #[serde(default)]
     limit: Option<u32>,
+    /// ADR-050: when true, the window is anchored to the **tail** of the
+    /// conversation (the latest `limit` entries), regardless of `offset`.
+    /// Used by the frontend's initial-load code path which doesn't yet
+    /// know `total`.  Ignored when total == 0.
+    #[serde(default)]
+    tail: Option<bool>,
 }
 
 // ── Session config (ADR-047) ───────────────────────────────────
@@ -599,7 +605,7 @@ async fn get_messages(
         Json(serde_json::json!({"error": "session metadata service not ready"})),
     ))?;
     let resp = svc
-        .get_messages(&sid, query.offset, query.limit)
+        .get_messages(&sid, query.offset, query.limit, query.tail.unwrap_or(false))
         .await
         .map_err(|e| {
             tracing::warn!(

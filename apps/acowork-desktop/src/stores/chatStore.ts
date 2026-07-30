@@ -45,22 +45,27 @@ const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
  *
  * Called from the `record_complete` handler and from `setPinnedToBottom`
  * (catch-up when the user returns to the bottom).
-  *
+ *
+ * ADR-050: this function is **deprecated** — C2 removes it entirely.
+ * The Adapter v2 owns live data absorption and dispatches HTTP refreshes
+ * on `flushAvailable` events.  For now, only the offset semantics are
+ * updated; the function body is still called by `record_complete` to
+ * keep session loading working until C2 lands.
+ *
  * Guards:
  *  - isPinnedToBottom (early exit): user is not at the bottom – skip
  *    entirely.  Prevents message array mutations (append/replace) from
  *    causing re-renders while the user is scrolled up.  When the user
  *    returns, `setPinnedToBottom(true)` re-triggers this function.
  *  - isLoadingMore: don't interfere with an in-flight user-initiated
- *    pagination request (loadBefore / loadAfter share the same
+ *    pagination request (loadPrevPage / loadNextPage share the same
  *    per-session AbortController).
  *
- * NOTE: The former `messageOffset !== 0` guard was removed because it
- * blocked the very refresh that resets messageOffset to 0.  When the
- * user scrolls back to bottom (isPinnedToBottom becomes true) while
- * messageOffset is still > 0, the HTTP fetch at offset=0 is what
- * brings the window back to the newest page.  isPinnedToBottom alone
- * is sufficient to decide whether a refresh should fire.
+ * NOTE: Under forward (ADR-050) semantics, the "is at the tail" check
+ * is `messageOffset + messageLimit >= messageTotal`, NOT `messageOffset
+ * === 0`.  We rely solely on `isPinnedToBottom` here — the catch-up
+ * refresh loads the tail page (`offset = max(0, total - limit)`), which
+ * may not be at offset=0 if the cache has previously scrolled back.
  */
 function scheduleRefresh(agentId: string, sessionId: string): void {
   // Early exit: if the user is not at the bottom, don't even set a timer.
@@ -88,10 +93,17 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
     if (!ss.isPinnedToBottom) {
       return;
     }
-    // No messageTotal === 0 guard: record_complete itself proves data
-    // exists in the Runtime's storage.  An HTTP fetch with offset=0 will
-    // return the latest records regardless of the stale local total.
-    void store.loadSessionMessages(agentId, sessionId, 0, 50);
+    // ADR-050: catch-up refresh anchors at the tail (`offset = max(0,
+    // total - limit)`), not at offset=0.  When `messageTotal` is unknown
+    // (fresh session) we delegate to the initial-load path via the
+    // `tail=true` query parameter so the backend can resolve the tail.
+    const limit = 50;
+    if (ss.messageTotal === 0) {
+      void store.loadSessionMessages(agentId, sessionId, undefined, limit);
+    } else {
+      const tailOffset = Math.max(0, ss.messageTotal - limit);
+      void store.loadSessionMessages(agentId, sessionId, tailOffset, limit);
+    }
   }, 200));
 }
 
@@ -299,13 +311,15 @@ interface SessionChatState {
    * (think + tool_call + tool_result → one chip) is the `MessageBlock`
    * abstraction local to `ChatPanel.tsx` and never reaches this state.
    *
-   * Direction is **derived from these**, not stored separately:
+   * ADR-050: **forward (oldest-end) semantics**:
    *
-   * - `messageOffset == 0`               → window touches the newest entry.
-   * - `messageOffset + messageLimit < messageTotal` → there are older entries
-   *   beyond this window (scroll-up can load them).
-   * - `messageOffset > 0`                → there are newer entries below the
-   *   window (scroll-down can load them).
+   * - `messageOffset == 0`               → window anchored at the OLDEST entry.
+   * - `messageOffset + messageLimit >= messageTotal` → window touches the
+   *   NEWEST entry (the cache "is at the tail").
+   * - `messageOffset > 0`                → there are older entries beyond the
+   *   window's left edge (scroll-up can load them).
+   * - `messageOffset + messageLimit < messageTotal` → there are newer entries
+   *   beyond the window's right edge (scroll-down can load them).
    *
    * Initial load sets `messageOffset = 0` and `messageLimit = 0`.
    * See `PaginatedMessages` in `lib/types.ts` for the request/response shape.
@@ -1768,11 +1782,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     //   - clears streaming buffers (activeStream entries that predate this
     //     load cycle and would otherwise be orphaned)
     //
+    // ADR-050: forward offset semantics.  `offset === undefined` means
+    // "from the tail end of the conversation" — backend interprets this
+    // via the `tail=true` query parameter so the caller does not need to
+    // know `total` before issuing the very first request.
+    //
     // offset===0 with a non-empty cache is NOT initial — it's a user-initiated
-    // "jump to the latest page" (ensureLatestInCache from a middle-of-conversation
-    // cache position).  We must NOT clear streaming in that case (the agent may
-    // still be writing live), and we must NOT show the loading overlay (the
-    // cache already has content to render).
+    // "jump to the oldest page" (a deliberate scroll-to-top), since under
+    // forward semantics offset=0 means the OLDEST entry.  We must NOT clear
+    // streaming in that case (the agent may still be writing live), and we
+    // must NOT show the loading overlay (the cache already has content to
+    // render).
     const cacheIsEmpty = sessionState.messages.length === 0;
     const isInitialLoad = offset === undefined && cacheIsEmpty;
     if (isInitialLoad) {
@@ -1784,7 +1804,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
-      params.set("offset", String(offset ?? 0));
+      // ADR-050: initial load uses `?tail=true` so the backend can return
+      // the latest `limit` entries without the caller having to know
+      // `total` yet.  Subsequent pagination calls pass an explicit offset.
+      if (offset === undefined) {
+        params.set("tail", "true");
+      } else {
+        params.set("offset", String(offset));
+      }
       // ADR-035 Phase 3: no HTTP incremental endpoint
 
       const resp = await fetch(
@@ -1832,6 +1859,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         //
         // Pagination cursor math is unchanged: offset/limit continue to
         // be derived from the server window (server-authoritative).
+        // ADR-050: under forward semantics, the direction comparison is
+        //   returnedOffset > prevOffset → loading NEWER entries (cursor
+        //     walked forward, larger offset = further from oldest)
+        //   returnedOffset < prevOffset → loading OLDER entries (cursor
+        //     walked back toward the oldest end, smaller offset)
+        // The min/max expressions below are direction-agnostic — they
+        // always extend the cached range to the union of old + new window.
         const merged = mergeMessageWindow(
           ss.messages,
           ss.optimisticEntries,
@@ -1847,17 +1881,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // bleed into the freshly-loaded view.
           activeStreams.delete(sessionId);
         } else if (returnedOffset > prevOffset) {
-          // Loading OLDER messages (scroll-up). Window slid up; expand
-          // the cached range by the older entries the server just sent.
+          // Loading NEWER messages (scroll-down).  Window slid forward;
+          // extend the cached range to include the newer entries the
+          // server just returned.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
             prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
           ) - finalOffset;
         } else if (returnedOffset < prevOffset) {
-          // Loading NEWER messages (scroll-down). Window slid down; the
-          // newer entries the server returned extend the bottom of the
-          // cached range.
+          // Loading OLDER messages (scroll-up).  Window slid backward
+          // (smaller offset under forward semantics); expand the cached
+          // range to include the older entries the server just sent.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
@@ -1943,61 +1978,72 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
 
   /**
-   * One-shot jump to the latest page (offset=0).
+   * ADR-050: One-shot jump to the latest page (tail of the conversation).
    *
    * Replaces the old `loadMoreNewerMessages` loop which had to issue N HTTP
    * requests to slide a cache from the middle to the tail.  After this call
-   * the cache holds the newest page; `messageOffset` becomes 0; the rendering
-   * layer's ensureRenderable effect then decides if more prepended data is
-   * needed to fill the viewport (same load-older path).
+   * the cache holds the newest page; `messageOffset + messageLimit ===
+   * messageTotal`; the rendering layer's ensureRenderable effect then decides
+   * if more data is needed to fill the viewport (same load path).
    *
-   * No-op if the cache is already at the latest page (`messageOffset === 0`)
-   * — the caller is expected to check `messageOffset > 0` before invoking.
+   * No-op if the cache is already at the tail (the cache window's far edge
+   * touches `total`) — the caller is expected to check before invoking.
    */
   ensureLatestInCache: async (agentId: string, sessionId: string) => {
     const sessionState = getSessionState(get(), agentId, sessionId);
     if (sessionState.isLoadingMore) return;
-    const { messageOffset, messageTotal, messages } = sessionState;
-    // Already at the newest page:
-    //   - messageOffset === 0 (window anchored at the tail), AND
+    const { messageOffset, messageLimit, messageTotal, messages } = sessionState;
+    // Already at the tail:
+    //   - The cache window's far edge touches the end of the conversation
+    //     (messageOffset + messageLimit >= messageTotal), AND
     //   - messageTotal > 0 (we know the conversation has data — guards against
     //     a freshly-initialized sessionState whose DEFAULT values are all 0 /
     //     empty, which would otherwise be mistaken for "already at tail"), AND
     //   - messages.length > 0 (the cache has at least some data at the tail).
     const tailCovered =
-      messageOffset === 0 &&
       messageTotal > 0 &&
+      messageOffset + messageLimit >= messageTotal &&
       messages.length > 0;
     if (tailCovered) return;
     set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
     try {
-      await get().loadSessionMessages(agentId, sessionId, 0, 50);
+      // Forward semantics: the latest `limit` entries live at
+      // `offset = max(0, total - limit)`.  When total === 0 (fresh session
+      // that has never been loaded) we delegate to the initial-load path,
+      // which uses `?tail=true` to grab the newest `limit` entries.
+      const limit = 50;
+      if (messageTotal === 0) {
+        await get().loadSessionMessages(agentId, sessionId, undefined, limit);
+      } else {
+        const tailOffset = Math.max(0, messageTotal - limit);
+        await get().loadSessionMessages(agentId, sessionId, tailOffset, limit);
+      }
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }
   },
 
+  /**
+   * ADR-050: One-shot jump to the oldest page (offset = 0 in forward semantics).
+   *
+   * Used by the scroll-to-top button to jump directly to the beginning of
+   * the conversation without paginating one page at a time.
+   */
   ensureOldestInCache: async (agentId: string, sessionId: string) => {
     const sessionState = getSessionState(get(), agentId, sessionId);
     if (sessionState.isLoadingMore) return;
-    const { messageOffset, messageLimit, messageTotal, messages } = sessionState;
+    const { messageOffset, messages } = sessionState;
     // Already at the oldest page?
-    //   - The cache window's far edge touches the end of the conversation
-    //     (messageOffset + messageLimit >= messageTotal), AND
-    //   - We have data (messageTotal > 0).
+    //   - messageOffset === 0 (window anchored at the oldest entry), AND
+    //   - messages.length > 0 (the cache has at least some data).
     const headCovered =
-      messageTotal > 0 &&
-      messageOffset + messageLimit >= messageTotal &&
+      messageOffset === 0 &&
       messages.length > 0;
     if (headCovered) return;
     set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
     try {
-      // Load the oldest page: offset = max(0, total - limit).
-      // offset=0 means newest; higher offset = older.
-      // The oldest page starts at offset = total - limit (clamped to 0).
-      const limit = 50;
-      const oldestOffset = Math.max(0, messageTotal - limit);
-      await get().loadSessionMessages(agentId, sessionId, oldestOffset, limit);
+      // Forward semantics: offset = 0 means the OLDEST entry.
+      await get().loadSessionMessages(agentId, sessionId, 0, 50);
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }

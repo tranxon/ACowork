@@ -4,7 +4,7 @@
  * Owns ALL scroll-related state and decisions:
  *  - Scroll position tracking (pinned-to-bottom vs free-scroll)
  *  - Arrow button visibility (showScrollToBottom / showScrollToTop)
- *  - Pagination triggers (loadBefore / loadAfter)
+ *  - Pagination triggers (loadPrevPage / loadNextPage)
  *  - scrollTop adjustment after prepend (scrollHeight delta)
  *  - Auto-scroll on new messages (sticky-bottom)
  *  - ensureRenderable (fill viewport)
@@ -18,8 +18,8 @@
  * States:
  *  - pinned-bottom: User is at the bottom; new messages auto-scroll.
  *  - idle: User is freely browsing; no operation in progress.
- *  - loading-older: loadBefore in progress; scrollTop will be adjusted on completion.
- *  - loading-newer: loadAfter in progress; no scrollTop adjustment needed.
+ *  - loading-older: loadPrevPage in progress; scrollTop will be adjusted on completion.
+ *  - loading-newer: loadNextPage in progress; no scrollTop adjustment needed.
  *  - jumping: User clicked an arrow button; waiting for data + scroll.
  *
  * Architecture:
@@ -151,7 +151,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   const wasAtBottomRef = useRef(true);
   // Track the first MESSAGE ID (not block ID) for prepend detection.
   // blockId is `block-${items[0].id}` (see messageFolder.ts), but when
-  // loadBefore prepends tool_call/thought messages that merge with the
+  // loadPrevPage prepends tool_call/thought messages that merge with the
   // existing first explore_group block, the old blockId disappears from
   // the array.  Message IDs are stable across block merges, so tracking
   // the first message ID is more robust.
@@ -162,7 +162,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   const prevSessionKeyRef = useRef<string | null>(null);
   // Save the state BEFORE transitioning to a loading state, so the
   // scrollHeight delta and loading cleanup can restore it correctly.
-  // Without this, loadBefore triggered from "pinned-bottom" (e.g. by
+  // Without this, loadPrevPage triggered from "pinned-bottom" (e.g. by
   // ensureRenderable) would incorrectly transition to "idle", breaking
   // auto-follow.
   const preLoadStateRef = useRef<ScrollState>("pinned-bottom");
@@ -315,14 +315,14 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
 
   // ── 2. scrollHeight delta (prepend adjustment) ──
   //
-  // Classic infinite-scroll technique. When loadBefore prepends data:
+  // Classic infinite-scroll technique. When loadPrevPage prepends data:
   //   1. Before prepend: scrollHeight = H_old (recorded in prevScrollHeightRef)
   //   2. After prepend:  scrollHeight = H_new (current container.scrollHeight)
   //   3. delta = H_new - H_old = height of prepended content
   //   4. scrollTop += delta -> user's viewport stays on the same content
   //
   // Detection: compare the first MESSAGE ID (not block ID). When
-  // loadBefore prepends tool_call/thought messages that merge with the
+  // loadPrevPage prepends tool_call/thought messages that merge with the
   // existing first explore_group, the old blockId disappears from the
   // array (the block is re-formed with a new first item).  Message IDs
   // are stable across block merges, so comparing the first message ID
@@ -331,7 +331,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // State transition: restore preLoadStateRef (saved before the load
   // started) instead of always transitioning to "idle".  This preserves
   // the user's intent: if they were in "pinned-bottom" (e.g.
-  // ensureRenderable triggered loadBefore while at the bottom), the
+  // ensureRenderable triggered loadPrevPage while at the bottom), the
   // state should return to "pinned-bottom" so streaming continues to
   // auto-follow.
   useLayoutEffect(() => {
@@ -459,11 +459,11 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // more data to fill the viewport.  The state machine prevents this
   // from running while a load is already in progress.
   //
-  // Direction: prefer loadBefore (older) when the user is in the top
-  // half of the content, loadAfter (newer) when in the bottom half.
-  // The old code always preferred loadAfter when state was "idle",
+  // Direction: prefer loadPrevPage (older) when the user is in the top
+  // half of the content, loadNextPage (newer) when in the bottom half.
+  // The old code always preferred loadNextPage when state was "idle",
   // which loaded newer messages when the user was browsing at the top -
-  // the wrong direction.  After loadAfter, the loading cleanup could
+  // the wrong direction.  After loadNextPage, the loading cleanup could
   // transition to "pinned-bottom" (if distFromBottom was small), causing
   // the scroll-up bounce-back bug.
   useLayoutEffect(() => {
@@ -517,16 +517,16 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     if (state === "pinned-bottom" && adapter.hasNewer) {
       // User is at the bottom - load newer messages to fill from below.
       transitionTo("loading-newer");
-      void adapter.loadAfter();
+      void adapter.loadNextPage();
     } else if (adapter.hasOlder) {
       // User is browsing (idle) or at the bottom with no newer msgs -
       // load older messages to fill from above.
       transitionTo("loading-older");
-      void adapter.loadBefore();
+      void adapter.loadPrevPage();
     } else if (adapter.hasNewer) {
       // No older messages available, fall back to newer.
       transitionTo("loading-newer");
-      void adapter.loadAfter();
+      void adapter.loadNextPage();
     }
   }, [virtualCount, adapter, containerRef, transitionTo]);
 
@@ -552,7 +552,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // ── 6. Loading state cleanup ──
   //
   // When isLoading becomes false, clean up any stuck loading states.
-  // This handles the edge case where loadBefore/loadAfter completes but
+  // This handles the edge case where loadPrevPage/loadNextPage completes but
   // no data was loaded (e.g., no older messages found), so the
   // scrollHeight delta effect didn't fire to transition the state.
   //
@@ -601,10 +601,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // The state machine prevents triggering while a load is in progress
   // (fixes Bug #2: pagination loop).
   //
-  // IMPORTANT: loadAfter (newer messages) is ONLY allowed in "idle"
+  // IMPORTANT: loadNextPage (newer messages) is ONLY allowed in "idle"
   // state, NEVER in "pinned-bottom".  When the user is pinned to the
   // bottom, streaming already appends the latest content - calling
-  // loadAfter during streaming would fetch messages that overlap with
+  // loadNextPage during streaming would fetch messages that overlap with
   // the active stream, causing duplicate content and scroll jumps.
   useEffect(() => {
     const interval = setInterval(() => {
@@ -619,7 +619,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
       const distFromBottom =
         container.scrollHeight - container.scrollTop - container.clientHeight;
 
-      // ── loadBefore trigger: data-driven ──
+      // ── loadPrevPage trigger: data-driven ──
       // Use getFirstVisibleBlockIndex() === 0 instead of scrollTop <
       // EDGE_THRESHOLD_PX.  scrollTop is unreliable because:
       //   - scrollHeight delta adjustments after prepend change it
@@ -654,15 +654,15 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
 
       if (firstIdx === 0 && ad.hasOlder) {
         if (process.env.NODE_ENV === "development") {
-          console.debug("[scroll:timer] → loadBefore (firstIdx=0, hasOlder=true)");
+          console.debug("[scroll:timer] → loadPrevPage (firstIdx=0, hasOlder=true)");
         }
         preLoadStateRef.current = state;
         transitionTo("loading-older");
-        void ad.loadBefore();
+        void ad.loadPrevPage();
       } else if (firstIdx !== null && firstIdx !== 0 && ad.hasOlder) {
         // KEY DEBUG: hasOlder is true but firstIdx is not 0.
         // The user is at the top of the loaded data (firstIdx != 0 means
-        // the first item is NOT visible), so loadBefore won't fire.
+        // the first item is NOT visible), so loadPrevPage won't fire.
         // This is the "can't scroll to top" bug.
         if (process.env.NODE_ENV === "development") {
           // console.debug("[scroll:timer] ⚠️ hasOlder=true but firstIdx!=0", {
@@ -675,12 +675,12 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
         }
       } else if (state === "idle" && distFromBottom < EDGE_THRESHOLD_PX && ad.hasNewer) {
         if (process.env.NODE_ENV === "development") {
-          console.debug("[scroll:timer] → loadAfter (idle, near bottom, hasNewer=true)");
+          console.debug("[scroll:timer] → loadNextPage (idle, near bottom, hasNewer=true)");
         }
-        // loadAfter only in idle state - prevents streaming duplicates
+        // loadNextPage only in idle state - prevents streaming duplicates
         preLoadStateRef.current = state;
         transitionTo("loading-newer");
-        void ad.loadAfter();
+        void ad.loadNextPage();
       }
     }, TIMER_INTERVAL_MS);
     return () => clearInterval(interval);

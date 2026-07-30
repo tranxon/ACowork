@@ -5,7 +5,7 @@
  * Design:
  *  - Folds raw ChatMessage[] into MessageBlock[] with stable, content-derived
  *    blockId (survives prepend/append).
- *  - loadBefore/loadAfter read state from useChatStore.getState() at call
+ *  - loadPrevPage/loadNextPage read state from useChatStore.getState() at call
  *    time, NOT from closure variables. This eliminates stale closures
  *    entirely - the function always sees the latest store state.
  *  - Pagination is triggered by a timer in ChatPanel (150ms interval),
@@ -13,6 +13,14 @@
  *    from the DOM and isLoading/hasOlder/hasNewer from the store.
  *  - Scroll position after prepend is maintained by VML's scrollHeight
  *    delta effect (classic infinite-scroll technique).
+ *
+ * ADR-050: pagination uses **forward (oldest-end) offset semantics**.
+ *  - `messageOffset === 0`      → window anchored at the OLDEST entry
+ *  - `messageOffset + limit >= total` → window touches the NEWEST entry
+ *  - `hasOlder` = `messageOffset > 0`                      (older entries available)
+ *  - `hasNewer` = `messageOffset + limit < messageTotal`    (newer entries available)
+ *  - `loadPrevPage` → `nextOffset = max(0, messageOffset - limit)` (older direction)
+ *  - `loadNextPage` → `nextOffset = messageOffset + limit`        (newer direction)
  */
 
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -30,8 +38,8 @@ export interface ChatListAdapter {
   readonly messageOffset: number;
   readonly messageLimit: number;
   readonly messageTotal: number;
-  loadBefore: () => Promise<void>;
-  loadAfter: () => Promise<void>;
+  loadPrevPage: () => Promise<void>;
+  loadNextPage: () => Promise<void>;
   jumpToLatest: () => Promise<void>;
   jumpToOldest: () => Promise<void>;
   readonly jumpTarget: "top" | "bottom" | null;
@@ -73,7 +81,7 @@ export function useChatListAdapter(
 ): ChatListAdapter {
   // ── Subscribe to store for React rendering ──
   // These selectors drive React re-renders (blocks, UI flags).
-  // loadBefore/loadAfter do NOT use these values - they read from
+  // loadPrevPage/loadNextPage do NOT use these values - they read from
   // useChatStore.getState() at call time for the latest state.
 
   const messages = useChatStore((s) => {
@@ -140,8 +148,8 @@ export function useChatListAdapter(
     return agent.sessionStates[sessionId]?.isLoadingMore ?? false;
   });
 
-  const hasOlder = messageOffset + messageLimit < messageTotal && messageLimit > 0;
-  const hasNewer = messageOffset > 0;
+  const hasOlder = messageOffset > 0;                                  // older entries available (scroll-up)
+  const hasNewer = messageOffset + messageLimit < messageTotal;       // newer entries available (scroll-down)
 
   const blocks = useMemo<MessageBlock[]>(
     () => foldMessages(displayMessages),
@@ -167,16 +175,25 @@ export function useChatListAdapter(
   // closure. This means the functions are always using the latest store
   // state, regardless of when React last rendered. Deps are minimal
   // (just agentId/sessionId which rarely change).
+  //
+  // ADR-050 (forward / oldest-end offset semantics):
+  //   loadPrevPage → user scrolled UP near top → load OLDER messages.
+  //                  nextOffset = max(0, messageOffset - limit).
+  //                  No-op if !hasOlder || isLoadingMore.
+  //   loadNextPage → user scrolled DOWN near bottom → load NEWER messages.
+  //                  nextOffset = messageOffset + limit.
+  //                  No-op if !hasNewer || isLoadingMore.
 
-  const loadBefore = useCallback(async () => {
+  const loadPrevPage = useCallback(async () => {
     if (!agentId || !sessionId) return;
     const ss = useChatStore.getState().getSessionState(agentId, sessionId);
     if (ss.isLoadingMore) return;
-    if (ss.messageOffset + ss.messageLimit >= ss.messageTotal) return;
+    // hasOlder: messageOffset > 0 means older messages remain above the window.
+    if (!(ss.messageOffset > 0)) return;
 
-    const nextOffset = ss.messageOffset + ss.messageLimit;
+    const nextOffset = Math.max(0, ss.messageOffset - PAGINATION_PAGE_SIZE);
     if (process.env.NODE_ENV === "development") {
-      console.debug("[adapter:loadBefore]", {
+      console.debug("[adapter:loadPrevPage]", {
         messageOffset: ss.messageOffset,
         messageLimit: ss.messageLimit,
         messageTotal: ss.messageTotal,
@@ -194,16 +211,19 @@ export function useChatListAdapter(
     }
   }, [agentId, sessionId]);
 
-  const loadAfter = useCallback(async () => {
+  const loadNextPage = useCallback(async () => {
     if (!agentId || !sessionId) return;
     const ss = useChatStore.getState().getSessionState(agentId, sessionId);
     if (ss.isLoadingMore) return;
-    if (ss.messageOffset <= 0) return;
+    // hasNewer: messageOffset + messageLimit < messageTotal means newer messages remain below the window.
+    if (!(ss.messageOffset + ss.messageLimit < ss.messageTotal)) return;
 
-    const nextOffset = Math.max(0, ss.messageOffset - PAGINATION_PAGE_SIZE);
+    const nextOffset = ss.messageOffset + ss.messageLimit;
     if (process.env.NODE_ENV === "development") {
-      console.debug("[adapter:loadAfter]", {
+      console.debug("[adapter:loadNextPage]", {
         messageOffset: ss.messageOffset,
+        messageLimit: ss.messageLimit,
+        messageTotal: ss.messageTotal,
         nextOffset,
         pageSize: PAGINATION_PAGE_SIZE,
       });
@@ -235,20 +255,20 @@ export function useChatListAdapter(
   // ── onLayout ──
   // Removed: ensureRenderable logic is now owned by useScrollController.
   // The controller checks totalHeight vs viewportHeight and calls
-  // loadBefore/loadAfter directly, with state machine guards.
+  // loadPrevPage/loadNextPage directly, with state machine guards.
 
   return useMemo<ChatListAdapter>(
     () => ({
       blocks, hasOlder, hasNewer, isLoading: isLoadingMore,
       messageOffset, messageLimit, messageTotal,
-      loadBefore, loadAfter, jumpToLatest, jumpToOldest,
+      loadPrevPage, loadNextPage, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       blocks, hasOlder, hasNewer, isLoadingMore,
       messageOffset, messageLimit, messageTotal,
-      loadBefore, loadAfter, jumpToLatest, jumpToOldest,
+      loadPrevPage, loadNextPage, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
       jumpVersion,
     ],

@@ -155,6 +155,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         session_id: &str,
         offset: Option<u64>,
         limit: Option<u32>,
+        from_tail: bool,
     ) -> Result<MessagesResponse> {
         let file_path = self
             .work_dir
@@ -164,7 +165,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         let off = offset.unwrap_or(0);
         let lim = limit.unwrap_or(50).clamp(1, 500);
 
-        let paginated = conversation::read_messages_paginated(&file_path, off, lim)?;
+        let paginated = conversation::read_messages_paginated(&file_path, off, lim, from_tail)?;
 
         // ADR-035 D9.2: truncate tool_result content to first 5 lines
         // for display in ALL HTTP paths. Full content stays in JSONL
