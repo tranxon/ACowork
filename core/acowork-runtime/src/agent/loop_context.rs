@@ -395,10 +395,23 @@ impl AgentLoop {
                 .await
             {
                 Ok((summary, usage)) => {
-                    // ADR-027: record raw Provider usage from compaction
-                    // call into the session token accumulator.
+                    // ADR-027 (revised for compaction): record raw Provider
+                    // usage from the compaction summary call into the session
+                    // token accumulator, but **do not** overwrite `last_input`
+                    // with the summary LLM's `prompt_tokens`. The summary LLM
+                    // was given the **full pre-compaction history** as input,
+                    // so its prompt size is unrepresentative of the
+                    // post-compaction session state — overwriting `last_input`
+                    // would inflate the displayed context usage until the
+                    // next main-dialog LLM call recalibrates it.
+                    //
+                    // `accumulate_compaction_usage` preserves `last_input` /
+                    // `last_output` and only updates cumulative totals.
+                    // `set_history_anchor` (called below after
+                    // `replace_middle_with_summary`) re-anchors `last_input`
+                    // to the post-compaction `history.token_count()`.
                     if let Some(ref conversation) = self.session.conversation {
-                        conversation.accumulate_llm_usage(&usage);
+                        conversation.accumulate_compaction_usage(&usage);
                     }
                     // ADR-028: also feed the agent-scoped counters so the
                     // agent-total line in Results Panel updates even if
@@ -419,10 +432,24 @@ impl AgentLoop {
                         0.0
                     };
 
-                    // Persist the compaction event into the JSONL session log.
-                    // The session restorer uses the most recent such event to
-                    // anchor the replay window on cold-start resume.
+                    // Anchor `last_input` to the post-compaction history size
+                    // so the next `emit_session_state()` push reports the new
+                    // (smaller) `usage_percent` **immediately**, without
+                    // waiting for the next main-dialog LLM call. The value is
+                    // heuristic — it will be overwritten by the next
+                    // `accumulate_llm_usage()` with the API's authoritative
+                    // `prompt_tokens` — but the heuristic is good enough for
+                    // the immediate StatusBar refresh and prevents the
+                    // "stale 70% before, drops to 20% after next message"
+                    // UX glitch.
+                    //
+                    // The anchor must run AFTER `replace_middle_with_summary`
+                    // (so `history.token_count()` reflects the new state) and
+                    // BEFORE `append_compaction_event` (so the JSONL event
+                    // carries the post-anchor token state).
                     if let Some(ref conversation) = self.session.conversation {
+                        conversation.set_history_anchor(new_tokens);
+
                         let meta = crate::conversation::CompactionEventMeta {
                             // Range tracking is best-effort; we don't currently
                             // know the precise from/to entry ids without
@@ -508,6 +535,22 @@ impl AgentLoop {
             // Also send updated context usage so the frontend shows the new
             // token count and percentage after compaction.
             let _ = self.session_core.try_send_chunk(ChunkEvent::CompactingEnded);
+
+            // Re-emit the runtime session-state snapshot now that
+            // `last_input` reflects the post-compaction history size (via
+            // `set_history_anchor` above). Without this call, the
+            // `SessionStateChanged` event published earlier in this flow
+            // (by `accumulate_compaction_usage → notify_state_change`)
+            // carries a stale, inflated `usage_percent` that contradicts
+            // the standalone `ContextUsage` event below. Frontends that
+            // key off `SessionStateChanged` (e.g. for the retained
+            // `sessions/{sid}/state` topic) would otherwise show the old
+            // percentage until the next main-dialog LLM call recalibrates.
+            //
+            // The standalone `ContextUsage(ctx_info)` push below carries
+            // the same numeric value computed here from
+            // `history.token_count()`, so the two channels stay consistent.
+            self.emit_session_state();
 
             // Compute and send updated context usage after compaction.
             if let Some((caps, effective_window, effective_usable)) =

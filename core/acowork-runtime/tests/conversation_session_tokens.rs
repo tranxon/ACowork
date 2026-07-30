@@ -472,3 +472,165 @@ fn session_tokens_wire_format_is_stable() {
         "{\"last_input\":0,\"last_output\":0,\"total_input\":0,\"total_output\":0}"
     );
 }
+
+// ─── last_compaction_offset persistence (regression for the
+//     "restore loads full session because meta.json never recorded the
+//     compaction offset" bug) ────────────────────────────────────────
+
+use acowork_runtime::conversation::CompactionEventMeta;
+
+/// After `append_compaction_event`, the offset must be visible in
+/// `build_meta()` immediately (the writer uses a sync handshake) and
+/// must survive a `write_meta` → `read_session_meta` round-trip.
+#[tokio::test]
+async fn compaction_offset_persists_to_meta_after_append() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "compaction_persist";
+
+    // Seed the JSONL with a user + assistant round so compaction has a
+    // non-zero starting offset (compaction captures `seek(End)` from
+    // whatever the writer's current EOF is).
+    let session = make_session(&dir, session_id);
+    session.append_message("user", "hello", None);
+    session.append_message("assistant", "world", None);
+    // Push a non-compaction entry through first so the JSONL EOF is
+    // non-zero. Then the compaction entry will land at a byte offset
+    // strictly greater than 0.
+    let compact_meta = CompactionEventMeta {
+        compacted_from_id: "msg_a".to_string(),
+        compacted_to_id: "msg_b".to_string(),
+        keep_last_rounds: 3,
+        model: "gpt-4".to_string(),
+        before_tokens: 1000,
+        after_tokens: 500,
+    };
+    session.append_compaction_event("summary", compact_meta);
+
+    // Flush the meta so the next read sees the new offset.
+    // (Most mutators call write_meta internally; append_compaction_event
+    // intentionally does NOT — the offset update is observable through
+    // build_meta() and survives the next write_meta() that any caller
+    // triggers. We trigger one explicitly here.)
+    // Need a way to call the private write_meta — instead, read the
+    // JSONL directly and verify the meta gets persisted through
+    // accumulate_llm_usage, which always calls write_meta().
+    session
+        .accumulate_llm_usage(&usage(100, 20));
+
+    let conv_dir = dir.path().join("conversations");
+    let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta after compaction");
+    let offset = on_disk
+        .last_compaction_offset
+        .expect("last_compaction_offset must be Some after a compaction event");
+    assert!(
+        offset > 0,
+        "compaction offset must be > 0 (compaction entry appended after prior entries); got {offset}"
+    );
+
+    // The JSONL itself must also contain the compaction entry — this
+    // confirms both halves of the persistence path:
+    //   - raw `ConversationEntry { kind: "compaction" ... }` in JSONL
+    //   - `last_compaction_offset: Some(<abs>)` in meta.json
+    let jsonl = std::fs::read_to_string(conv_dir.join(format!("{session_id}.jsonl")))
+        .expect("read jsonl");
+    assert!(
+        jsonl.contains("\"kind\":\"compaction\""),
+        "compaction entry must be present in JSONL"
+    );
+}
+
+/// On resume, `last_compaction_offset` must be hydrated into the shared
+/// Arc so the very first `build_meta()` (called by `emit_session_state`
+/// before the first new LLM call) reads the persisted offset instead of
+/// `None`. This is what lets the restorer do O(1) offset skip on the
+/// next restore.
+#[tokio::test]
+async fn resume_hydrates_last_compaction_offset_from_meta() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "compaction_resume";
+
+    // Phase 1: write a meta file with `last_compaction_offset: Some(1234)`
+    // and a JSONL file with at least one entry so resume() doesn't bail.
+    let conv_dir = dir.path().join("conversations");
+    std::fs::create_dir_all(conv_dir.join("meta")).unwrap();
+    let meta = SessionMeta {
+        version: 2,
+        session_id: session_id.to_string(),
+        agent_id: AGENT_ID.to_string(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        title: None,
+        workspace_id: None,
+        model: Some("gpt-4".to_string()),
+        provider: Some("openai".to_string()),
+        reasoning_effort: None,
+        temperature: None,
+        message_count: 1,
+        last_active_at: "2026-01-01T00:00:00Z".to_string(),
+        tokens: None,
+        last_compaction_offset: Some(1234),
+        corrupted: false,
+    };
+    write_session_meta(&conv_dir, &meta).expect("write meta");
+    std::fs::write(conv_dir.join(format!("{session_id}.jsonl")), "").unwrap();
+
+    // Phase 2: resume and force a write_meta so we can observe the
+    // hydrated offset.
+    let (session, _config_rx, _state_rx) = ConversationSession::resume(
+        dir.path(),
+        session_id,
+        Arc::new(AtomicUsize::new(0)),
+    )
+    .expect("resume");
+
+    session.accumulate_llm_usage(&usage(50, 10));
+
+    let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta after resume");
+    assert_eq!(
+        on_disk.last_compaction_offset,
+        Some(1234),
+        "resumed session must preserve the persisted last_compaction_offset"
+    );
+}
+
+/// `Clone` of `ConversationSession` must share the same
+/// `last_compaction_offset` Arc — otherwise a clone that outlives the
+/// parent (e.g. session-close distillation that calls
+/// `accumulate_llm_usage` after the parent has dropped its
+/// `ConversationWriter`) would lose the offset on the next meta write.
+#[tokio::test]
+async fn clone_shares_last_compaction_offset_arc() {
+    let dir = TempDir::new().unwrap();
+    let session_id = "compaction_clone";
+
+    let session = make_session(&dir, session_id);
+    // Append a non-compaction entry so the JSONL EOF is non-zero.
+    session.append_message("user", "hi", None);
+
+    // Drop a compaction marker through the parent; the shared Arc is
+    // updated synchronously via the writer's reply.
+    let compact_meta = CompactionEventMeta {
+        compacted_from_id: String::new(),
+        compacted_to_id: String::new(),
+        keep_last_rounds: 3,
+        model: "gpt-4".to_string(),
+        before_tokens: 0,
+        after_tokens: 0,
+    };
+    session.append_compaction_event("summary", compact_meta);
+
+    // Clone the session, then close the parent. The clone must still
+    // observe the offset.
+    let clone = session.clone();
+    drop(session);
+
+    // Trigger a meta write via the clone (accumulate_llm_usage always
+    // writes meta) so we can read the persisted offset back.
+    clone.accumulate_llm_usage(&usage(10, 1));
+
+    let conv_dir = dir.path().join("conversations");
+    let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta");
+    assert!(
+        on_disk.last_compaction_offset.is_some(),
+        "clone that outlives parent must persist the compaction offset"
+    );
+}
