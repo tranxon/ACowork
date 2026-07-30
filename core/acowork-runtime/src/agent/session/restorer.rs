@@ -19,10 +19,16 @@
 //! - `role="tool_result"` → emitted as `MessageRole::Tool` with `tool_call_id`
 //!   from metadata; orphaned results (no matching tool_call in the same
 //!   contiguous block) are dropped.
-//! - `kind="compaction"` → produces an `Assistant{name="compaction_summary"}`
+//! - `kind="compaction"` → produces a `User{name="compaction_summary"}`
 //!   marker. Only the **last** compaction event is honored: every entry
 //!   strictly before the last compaction marker (except leading `system`
 //!   messages) is discarded.
+//!
+//!   NOTE: The marker uses `User` role (not `Assistant`) in memory to
+//!   avoid an `Assistant → Assistant{tool_calls}` adjacency in the
+//!   rebuilt request, which glm-5.2 on Volcano Ark rejects with
+//!   `400 InvalidParameter`.  Consumers identify the marker by
+//!   `name == "compaction_summary"` regardless of role.
 //!
 //! ### Tool-call pairing
 //!
@@ -197,8 +203,13 @@ pub fn restore_history_from_jsonl(
         // older compactions inside `working` shouldn't exist by construction,
         // but defensively skip them).
         if entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION) {
+            // Compaction markers live at `User` role in memory (see
+            // `HistoryManager::replace_middle_with_summary`).  Using
+            // `Assistant` here would recreate the
+            // `Assistant → Assistant{tool_calls}` adjacency that some
+            // providers reject with 400 InvalidParameter.
             messages.push(ChatMessage {
-                role: MessageRole::Assistant,
+                role: MessageRole::User,
                 content: entry.content.clone(),
                 name: Some("compaction_summary".to_string()),
                 ..Default::default()
@@ -601,7 +612,10 @@ mod tests {
         assert!(outcome.had_compaction);
         // Expected: [compaction_summary marker, u3, a3]
         assert_eq!(outcome.messages.len(), 3);
-        assert!(matches!(outcome.messages[0].role, MessageRole::Assistant));
+        // Compaction marker lives at `User` role to avoid producing
+        // Assistant→Assistant adjacency in the request payload (see
+        // module-level docs).  Consumers identify the marker by name.
+        assert!(matches!(outcome.messages[0].role, MessageRole::User));
         assert_eq!(
             outcome.messages[0].name.as_deref(),
             Some("compaction_summary")

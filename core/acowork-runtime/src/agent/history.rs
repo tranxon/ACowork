@@ -294,7 +294,9 @@ impl HistoryManager {
     ///
     /// Preserved across all trims:
     /// - Leading `MessageRole::System` messages
-    /// - The single `Assistant{name="compaction_summary"}` marker, if present
+    /// - The single compaction summary marker (identified by
+    ///   `name == "compaction_summary"`; stored as a `User` message — see
+    ///   [`Self::replace_middle_with_summary`]), if present
     ///
     /// Returns the number of messages dropped. Does not invoke any LLM.
     ///
@@ -311,8 +313,12 @@ impl HistoryManager {
         }
 
         fn is_compaction_marker(msg: &ChatMessage) -> bool {
-            matches!(msg.role, MessageRole::Assistant)
-                && msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
+            // Identify by `name` only — the compaction summary lives at
+            // `User` role in memory (see `replace_middle_with_summary`),
+            // not `Assistant`.  A role-based check here would misclassify
+            // the marker as a regular user/assistant turn and let
+            // `lossless_trim` remove it.
+            msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
         }
 
         // Locate the first removable index: skip leading System and the
@@ -913,8 +919,15 @@ impl HistoryManager {
     ///
     /// Keeps system messages at the start and the last `keep_last_rounds`
     /// conversational rounds at the end. The middle is replaced with a
-    /// single Assistant message carrying `name: "compaction_summary"` as
+    /// single `User`-role message carrying `name: "compaction_summary"` as
     /// a compaction marker for [`last_compaction_index`].
+    ///
+    /// NOTE: The marker is stored as `User` (not `Assistant`) so that
+    /// providers which reject two consecutive `Assistant` messages in the
+    /// request payload (e.g. glm-5.2 on Volcano Ark) do not 400 when the
+    /// preserved tail's first round is also `Assistant{tool_calls}`.
+    /// Consumers that need to recognize the marker must filter by
+    /// `name == COMPACTION_SUMMARY_NAME`, not by role.
     ///
     /// Returns the number of messages removed.
     pub fn replace_middle_with_summary(&mut self, summary: &str, keep_last_rounds: usize) -> usize {
@@ -999,9 +1012,20 @@ impl HistoryManager {
         // Remove middle section
         self.messages.drain(system_count..tail_start);
 
-        // Insert compaction summary as Assistant message with marker
+        // Insert compaction summary as a User message with marker.
+        //
+        // We use `User` (not `Assistant`) on purpose: a compaction summary
+        // represents the conversation's prior content narrated as context, not
+        // a prior assistant turn.  Crucially, this avoids producing two
+        // consecutive `Assistant` messages in the request payload when the
+        // tail's first preserved round is also `Assistant{tool_calls}`.  Some
+        // providers (notably glm-5.2 on Volcano Ark) reject that exact pattern
+        // with `400 InvalidParameter`, even though the OpenAI spec treats it
+        // permissively.  The marker is still identified by
+        // `name == COMPACTION_SUMMARY_NAME`, so consumers that filter by role
+        // must check `name` instead.
         let summary_msg = ChatMessage {
-            role: MessageRole::Assistant,
+            role: MessageRole::User,
             content: summary.to_string(),
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
@@ -1026,9 +1050,13 @@ impl HistoryManager {
 
     /// Find the index of the last compaction summary message.
     ///
-    /// Scans messages from the end, looking for an Assistant message with
+    /// Scans messages from the end, looking for any message with
     /// `name == COMPACTION_SUMMARY_NAME`. Returns `Some(index)` if found,
     /// `None` if no compaction has occurred in this session.
+    ///
+    /// Identification is by `name` only — the marker is a `User` message
+    /// in memory (see [`Self::replace_middle_with_summary`]), not
+    /// `Assistant`.
     ///
     /// Used at session close to determine the tail distillation start point:
     /// tail = `messages[last_compaction_index + 1 ..]`.
@@ -1037,10 +1065,7 @@ impl HistoryManager {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, msg)| {
-                msg.role == MessageRole::Assistant
-                    && msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
-            })
+            .find(|(_, msg)| msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
             .map(|(i, _)| i)
     }
 }
@@ -1101,9 +1126,10 @@ mod tests {
     fn test_emergency_trim_protects_compaction_markers() {
         let mut hm = HistoryManager::new(10000);
         hm.append(make_message(MessageRole::System, "System"));
-        // Insert a compaction marker (Assistant with name="compaction_summary")
+        // Insert a compaction marker (User with name="compaction_summary" —
+        // see `replace_middle_with_summary`).
         hm.append(ChatMessage {
-            role: MessageRole::Assistant,
+            role: MessageRole::User,
             content: "Compaction summary".to_string(),
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
@@ -1169,7 +1195,7 @@ mod tests {
         let mut hm = HistoryManager::new(100);
         hm.append(make_message(MessageRole::System, "Sys"));
         hm.append(ChatMessage {
-            role: MessageRole::Assistant,
+            role: MessageRole::User,
             content: "summary of earlier conversation that we want to keep".to_string(),
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
@@ -1892,12 +1918,12 @@ mod tests {
 
         let messages = hm.messages();
 
-        // Should have: [System] [compaction_summary] [Assistant Round 4] [Tool tc_4]
+        // Should have: [System] [User compaction_summary] [Assistant Round 4] [Tool tc_4]
         //              [Assistant Round 5] [Tool tc_5]
 
-        // Verify compaction summary exists
+        // Verify compaction summary exists (User role, marker by name)
         let has_summary = messages.iter().any(|m| {
-            m.role == MessageRole::Assistant && m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
+            m.role == MessageRole::User && m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME)
         });
         assert!(has_summary, "Compaction summary should be present");
 

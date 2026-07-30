@@ -385,9 +385,9 @@ use crate::agent::history::COMPACTION_SUMMARY_NAME;
 /// | Actual role        | Detected condition                                          | Emitted label                                   |
 /// |--------------------|-------------------------------------------------------------|-------------------------------------------------|
 /// | `System`           | —                                                           | `[System]`                                      |
+/// | any                | `name == Some("compaction_summary")`                        | `[CompactionSummary]`                           |
 /// | `User`             | —                                                           | `[User]`                                        |
-/// | `Assistant`        | `name == Some("compaction_summary")`                        | `[CompactionSummary]`                           |
-/// | `Assistant`        | otherwise                                                   | `[Assistant]`                                   |
+/// | `Assistant`        | —                                                           | `[Assistant]`                                   |
 /// | `Tool`             | content starts with `COMPRESSED_TOOL_PLACEHOLDER_PREFIX`    | `[Tool(name={name}, id={tool_call_id})]`        |
 /// | `Tool`             | otherwise                                                   | `[Tool]` (or `[Tool(name={name})]` when name set)|
 ///
@@ -399,19 +399,18 @@ pub(crate) fn format_messages(messages: &[ChatMessage]) -> String {
     messages
         .iter()
         .map(|msg| {
+            // Compaction summary marker takes precedence over the role
+            // label — the marker lives at `User` role in memory (see
+            // `HistoryManager::replace_middle_with_summary`), but we
+            // still want the compaction LLM to recognize it as
+            // previous-compaction output rather than fresh user input.
+            if msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME) {
+                return format!("[CompactionSummary]: {}", msg.content);
+            }
             let role_label = match msg.role {
                 MessageRole::System => "System".to_string(),
                 MessageRole::User => "User".to_string(),
-                MessageRole::Assistant => {
-                    // Detect compaction summary markers: show as
-                    // "CompactionSummary" instead of "Assistant" so the
-                    // LLM knows it is reading a previous compaction output.
-                    if msg.name.as_deref() == Some(COMPACTION_SUMMARY_NAME) {
-                        "CompactionSummary".to_string()
-                    } else {
-                        "Assistant".to_string()
-                    }
-                }
+                MessageRole::Assistant => "Assistant".to_string(),
                 MessageRole::Tool => {
                     // Detect compressed tool results (placeholder content)
                     // and emit structured metadata in the role label so
@@ -794,8 +793,9 @@ mod tests {
 
     #[test]
     fn test_format_messages_compaction_summary() {
-        // An Assistant message with name="compaction_summary" should be
-        // labelled as "CompactionSummary" instead of "Assistant".
+        // Any message with name="compaction_summary" should be labelled
+        // as "CompactionSummary" regardless of role (the marker lives at
+        // `User` role in memory — see `HistoryManager::replace_middle_with_summary`).
         let mut msg = ChatMessage::assistant("Previous conversation summary");
         msg.name = Some(COMPACTION_SUMMARY_NAME.to_string());
         let messages = vec![
