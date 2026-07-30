@@ -770,6 +770,13 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     handleScroll,
     jumpToBottom,
     jumpToTop,
-    isPinnedToBottom: () => stateRef.current === "pinned-bottom",
+    isPinnedToBottom: () => {
+      const s = stateRef.current;
+      if (s === "pinned-bottom") return true;
+      if (s === "loading-older" || s === "loading-newer") {
+        return preLoadStateRef.current === "pinned-bottom";
+      }
+      return false;
+    },
   };
 }

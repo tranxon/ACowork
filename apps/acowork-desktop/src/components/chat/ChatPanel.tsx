@@ -89,6 +89,36 @@ interface ChatScrollSnapshot {
   pinnedToBottom: boolean;
 }
 
+/**
+ * Pure function: decide whether to restore the saved pixel scrollOffset or
+ * let the init-scroll effect call scrollToBottom() (data-driven).
+ *
+ * When pinnedToBottom is true, returning undefined causes the scroll
+ * controller's init effect to call vmlRef.scrollToBottom(), which uses
+ * virtualizer.scrollToIndex(count-1, {align:"end"}).  This is critical
+ * because pixel offset restoration is unreliable when VML remounts: the
+ * virtualizer's per-instance itemSizeCache is empty, and items outside the
+ * previous viewport fall back to SAFE_FALLBACK_HEIGHT (60px), making the
+ * initial totalSize much smaller than the real content height.  The
+ * browser clamps scrollTop to the wrong position, landing the user in the
+ * middle instead of at the bottom.
+ *
+ * When pinnedToBottom is false (user was browsing history), the pixel
+ * offset is restored verbatim - it represents the user's last deliberate
+ * reading position.
+ *
+ * Extracted as a standalone function for unit testing.
+ */
+export function computeInitialScrollOffset(
+  sending: boolean,
+  snapshot: ChatScrollSnapshot | undefined,
+): number | undefined {
+  if (sending) return undefined;
+  if (!snapshot) return undefined;
+  if (snapshot.pinnedToBottom) return undefined;
+  return snapshot.scrollOffset;
+}
+
 // Bounded LRU: cap snapshot entries to MAX_SCROLL_SNAPSHOTS so a long-lived
 // session that toggles Settings/Harness/Docs many times can't grow this Map
 // without bound.  Each snapshot is ~50 bytes; 64 entries ≈ 3.2 KB, negligible.
@@ -530,9 +560,7 @@ export function ChatPanel() {
   // than user intent, and `scrollOffset > 0` falsely bailed out when the
   // user was genuinely at the top.  Using `sending` alone is both more
   // stable and easier to reason about.
-  const initialScrollOffset = !sending && scrollSnapshot
-    ? scrollSnapshot.scrollOffset
-    : undefined;
+  const initialScrollOffset = computeInitialScrollOffset(sending, scrollSnapshot);
   // DIAGNOSTIC — log only when the (key, sending, snapshot) signature actually
   // changes, not on every render. ChatPanel re-renders frequently for many
   // unrelated reasons (other state updates in parent stores), and a
