@@ -41,10 +41,29 @@ export interface ChatListAdapter {
   readonly messageTotal: number;
   loadPrevPage: () => Promise<void>;
   loadNextPage: () => Promise<void>;
-  jumpToLatest: () => Promise<void>;
-  jumpToOldest: () => Promise<void>;
-  readonly jumpTarget: "top" | "bottom" | null;
-  clearJumpTarget: () => void;
+  // ADR-050 C4: scroll/pagination primitives exposed for the v2
+  // controller compatibility.  Both fields are derived from the data
+  // cursor and live buffer — v1 already computed `hasOlder/hasNewer/
+  // isLoading` from `messageOffset/limit/total`, so adding
+  // `isAtTail/hasPendingFlush/scrollToTop/scrollToBottom/subscribe`
+  // keeps v1 backward-compatible while v2 ChatListAdapterV2 owns the
+  // canonical implementations.
+  isAtTail: () => boolean;
+  hasPendingFlush: () => boolean;
+  scrollToTop: () => Promise<void>;
+  scrollToBottom: () => Promise<void>;
+  subscribe: (cb: (event: { type: string; [k: string]: unknown }) => void) => () => void;
+  // ── C4 deprecation shims ──
+  /** @deprecated C4 controller no longer reads jumpTarget — the
+   *  scrollTo* primitives own jump semantics.  C5 will remove this
+   *  entirely when ChatPanel moves off v1. */
+  readonly jumpTarget?: "top" | "bottom" | null;
+  /** @deprecated See jumpTarget. */
+  clearJumpTarget?: () => void;
+  /** @deprecated Replaced by scrollToBottom() (C4). */
+  jumpToLatest?: () => Promise<void>;
+  /** @deprecated Replaced by scrollToTop() (C4). */
+  jumpToOldest?: () => Promise<void>;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -251,12 +270,44 @@ export function useChatListAdapter(
   // The controller checks totalHeight vs viewportHeight and calls
   // loadPrevPage/loadNextPage directly, with state machine guards.
 
+  // ADR-050 C4 shim implementations — see useChatListAdapter.ts type
+  // notes.  v1 ChatListAdapter must satisfy the v2 controller contract
+  // during the C4/C5 transition.  isAtTail is the "window covers tail"
+  // check; hasPendingFlush inspects the liveBuffer via the
+  // chatAdapterStore hook.
+  const isAtTail = useCallback((): boolean => {
+    return messageLimit > 0 && messageOffset + messageLimit >= messageTotal;
+  }, [messageLimit, messageOffset, messageTotal]);
+  const hasPendingFlush = useCallback((): boolean => {
+    return useLiveStream(agentId, sessionId).optimisticEntries.length > 0;
+  }, [agentId, sessionId]);
+  const scrollToBottom = useCallback(async (): Promise<void> => {
+    if (!agentId || !sessionId) return;
+    await useChatStore.getState().ensureLatestInCache(agentId, sessionId);
+  }, [agentId, sessionId]);
+  const scrollToTop = useCallback(async (): Promise<void> => {
+    if (!agentId || !sessionId) return;
+    await useChatStore.getState().ensureOldestInCache(agentId, sessionId);
+  }, [agentId, sessionId]);
+  const subscribe = useCallback(
+    (_cb: (event: { type: string; [k: string]: unknown }) => void): (() => void) => {
+      // v1 has no event surface yet — C5 will hook ChatPanel up to the
+      // v2 adapter events directly.  Returning a no-op unsubscribe keeps
+      // the C4 controller's subscribe contract satisfied.
+      return () => {};
+    },
+    [],
+  );
+
   return useMemo<ChatListAdapter>(
     () => ({
       blocks, hasOlder, hasNewer, isLoading: isLoadingMore,
       messageOffset, messageLimit, messageTotal,
       loadPrevPage, loadNextPage, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
+      isAtTail, hasPendingFlush,
+      scrollToTop, scrollToBottom,
+      subscribe,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -264,6 +315,9 @@ export function useChatListAdapter(
       messageOffset, messageLimit, messageTotal,
       loadPrevPage, loadNextPage, jumpToLatest, jumpToOldest,
       jumpTarget, clearJumpTarget,
+      isAtTail, hasPendingFlush,
+      scrollToTop, scrollToBottom,
+      subscribe,
       jumpVersion,
     ],
   );

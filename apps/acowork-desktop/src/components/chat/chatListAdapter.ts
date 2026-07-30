@@ -61,8 +61,14 @@ export type AdapterEvent =
   | { type: "pageLoaded"; direction: "prev" | "next"; offset: number; limit: number; total: number }
   | { type: "flushAvailable"; pendingCount: number };
 
-/** UI command surface for the v2 adapter.  See ADR-050 §4.1. */
-export interface ChatListAdapter {
+/**
+ * UI command surface for the v2 adapter.  See ADR-050 §4.1.
+ *
+ * Note: named `ChatListAdapterV2` (NOT `ChatListAdapter`) because
+ * v1 (`useChatListAdapter.ts`) exports an interface of the same name.
+ * C5 will resolve the collision by removing v1 and renaming v2.
+ */
+export interface ChatListAdapterV2 {
   // ── Data output ──
   readonly blocks: readonly MessageBlock[];
   readonly totalBlocks: number;
@@ -454,7 +460,7 @@ function getOrCreateStore(agentId: string, sessionId: string): AdapterStore {
 export function useChatListAdapter(
   agentId: string | null,
   sessionId: string | null,
-): ChatListAdapter {
+): ChatListAdapterV2 {
   // We need a stable store reference across renders.  We track the
   // current (agentId, sessionId) and, if it changes, drop the old
   // store from the singleton map (after the current render's snapshot
@@ -488,13 +494,13 @@ export function useChatListAdapter(
  * For "no current session" — return a frozen noop adapter so the
  * renderer can show the empty state without conditional render.
  */
-function useNoopAdapter(): ChatListAdapter {
+function useNoopAdapter(): ChatListAdapterV2 {
   // The returned object identity must be stable across renders.  A
   // module-level singleton is the simplest implementation.
   return NOOP_ADAPTER;
 }
 
-const NOOP_ADAPTER: ChatListAdapter = {
+const NOOP_ADAPTER: ChatListAdapterV2 = {
   blocks: EMPTY_BLOCKS,
   totalBlocks: 0,
   messageOffset: 0,
@@ -522,7 +528,7 @@ const NOOP_ADAPTER: ChatListAdapter = {
 function useAdapterFacade(
   store: AdapterStore,
   snapshot: AdapterSnapshot,
-): ChatListAdapter {
+): ChatListAdapterV2 {
   // We don't use useMemo here because the snapshot itself is the
   // single source of truth.  Returning a freshly-constructed facade
   // on every render would force a re-render of every consumer; we
