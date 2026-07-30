@@ -251,18 +251,14 @@ describe("ADR-047: openSession includes loadSession call", () => {
 
 // ─────────────────────────────────────────────────────────────────────
 // mergeMessageWindow — the single source of truth for combining the
-// server-authoritative HTTP window, the local cache, and the optimistic
-// user-message overlay. The contract pins:
+// server-authoritative HTTP window with the local cache. The contract pins:
 //
 //   P0-1  Server is ts-ordered; final array is sorted by timestamp;
 //         entries with the same id collapse to a single copy (server wins).
-//   P0-2  Optimistic entries not yet echoed back by the server stay in
-//         the overlay and are sorted by timestamp into the final array.
 //   P0-3  An HTTP window that doesn't overlap the cache (e.g. fresh
-//         initial load on a brand-new session) still merges correctly
-//         without wiping the optimistic overlay.
+//         initial load on a brand-new session) still merges correctly.
 // ─────────────────────────────────────────────────────────────────────
-describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge", () => {
+describe("mergeMessageWindow: backend-authoritative ts ordering", () => {
   // Helper: build a ChatMessage with a stable id and a chosen timestamp.
   // We use offset-from-base milliseconds so test fixtures read like the
   // real wire order: older = smaller timestamp.
@@ -274,10 +270,9 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
     timestamp,
   });
 
-  it("returns empty arrays when all inputs are empty", () => {
-    const result = mergeMessageWindow([], [], []);
+  it("returns empty array when all inputs are empty", () => {
+    const result = mergeMessageWindow([], []);
     expect(result.messages).toEqual([]);
-    expect(result.remainingOptimistic).toEqual([]);
   });
 
   it("preserves server order when only server is provided", () => {
@@ -285,9 +280,8 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
       msg("u1", ts(100)),
       msg("a1", ts(200)),
     ];
-    const result = mergeMessageWindow([], [], server);
+    const result = mergeMessageWindow([], server);
     expect(result.messages.map((m) => m.id)).toEqual(["u1", "a1"]);
-    expect(result.remainingOptimistic).toEqual([]);
   });
 
   it("P0-1: sorts by timestamp regardless of input order", () => {
@@ -298,14 +292,14 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
       msg("u1", ts(100)),
       msg("a1", ts(200)),
     ];
-    const result = mergeMessageWindow([], [], server);
+    const result = mergeMessageWindow([], server);
     expect(result.messages.map((m) => m.id)).toEqual(["u1", "a1", "a2"]);
   });
 
   it("P0-1: deduplicates by id — server wins over cache", () => {
     const cache = [msg("u1", ts(100), "user"), msg("stale", ts(50), "user")];
     const server = [msg("u1", ts(150), "user"), msg("a1", ts(200))];
-    const result = mergeMessageWindow(cache, [], server);
+    const result = mergeMessageWindow(cache, server);
     // Final array sorted by timestamp. u1 has server's ts (150), stale
     // is preserved (no overlap).
     expect(result.messages.map((m) => m.id)).toEqual(["stale", "u1", "a1"]);
@@ -313,37 +307,6 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
     // explicitly states "backend wins").
     const u1 = result.messages.find((m) => m.id === "u1")!;
     expect(u1.timestamp).toBe(150);
-  });
-
-  it("P0-2: optimistic user message persists when server has not echoed it back", () => {
-    const server = [msg("a1", ts(200))];
-    const optimistic = [msg("optimistic-user", ts(100))];
-    const result = mergeMessageWindow([], optimistic, server);
-    expect(result.messages.map((m) => m.id)).toEqual(["optimistic-user", "a1"]);
-    expect(result.remainingOptimistic.map((m) => m.id)).toEqual(["optimistic-user"]);
-  });
-
-  it("P0-2: optimistic entry disappears from overlay when server confirms same id", () => {
-    const server = [msg("user-1", ts(150), "user"), msg("a1", ts(200))];
-    const optimistic = [msg("user-1", ts(100), "user")];
-    const result = mergeMessageWindow([], optimistic, server);
-    expect(result.messages.map((m) => m.id)).toEqual(["user-1", "a1"]);
-    // Crucially: the optimistic copy is no longer pending. Otherwise the
-    // adapter would render the user entry twice (once via messages[],
-    // once via optimisticEntries[]).
-    expect(result.remainingOptimistic).toEqual([]);
-    // Server wins on content — the merged copy has the server timestamp.
-    expect(result.messages[0].timestamp).toBe(150);
-  });
-
-  it("P0-3: initial load preserves optimistic overlay even when server returns []", () => {
-    // Brand-new session: user hit send before the first HTTP response
-    // landed. The response is empty (backend hasn't written the user
-    // entry yet). The overlay MUST survive.
-    const optimistic = [msg("optimistic-1", ts(100))];
-    const result = mergeMessageWindow([], optimistic, []);
-    expect(result.messages.map((m) => m.id)).toEqual(["optimistic-1"]);
-    expect(result.remainingOptimistic.map((m) => m.id)).toEqual(["optimistic-1"]);
   });
 
   it("P0-3: merges attachment system rows next to their owning user entry", () => {
@@ -356,7 +319,7 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
       msg("attach-2", ts(100), "system"),
       msg("a1", ts(200)),
     ];
-    const result = mergeMessageWindow([], [], server);
+    const result = mergeMessageWindow([], server);
     // Stable sort on equal timestamps preserves server order.
     expect(result.messages.map((m) => m.id)).toEqual([
       "attach-1",
@@ -366,13 +329,13 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
     ]);
   });
 
-  it("preserves older cache entries not in the server window (loadBefore)", () => {
-    // Cache holds older rows from a previous `loadBefore` request.
+  it("preserves older cache entries not in the server window (loadPrevPage)", () => {
+    // Cache holds older rows from a previous `loadPrevPage` request.
     // Server returns a newer page; the older rows must remain at the
     // tail of the merged array.
     const cache = [msg("old-1", ts(10)), msg("old-2", ts(20))];
     const server = [msg("user-1", ts(100)), msg("a1", ts(200))];
-    const result = mergeMessageWindow(cache, [], server);
+    const result = mergeMessageWindow(cache, server);
     expect(result.messages.map((m) => m.id)).toEqual([
       "old-1",
       "old-2",
@@ -383,45 +346,22 @@ describe("mergeMessageWindow: backend-authoritative ts ordering + overlay merge"
 
   it("does not mutate the input arrays", () => {
     const cache = [msg("c1", ts(100))];
-    const optimistic = [msg("o1", ts(150))];
     const server = [msg("s1", ts(200))];
     const cacheLen = cache.length;
-    const optLen = optimistic.length;
     const serverLen = server.length;
-    mergeMessageWindow(cache, optimistic, server);
+    mergeMessageWindow(cache, server);
     expect(cache.length).toBe(cacheLen);
-    expect(optimistic.length).toBe(optLen);
     expect(server.length).toBe(serverLen);
   });
 
-  it("handles many optimistic + many server entries without dropping any", () => {
+  it("handles many server entries without dropping any", () => {
     const server = [
       msg("s1", ts(110)),
       msg("s2", ts(130)),
       msg("s3", ts(170)),
     ];
-    const optimistic = [
-      msg("o1", ts(100)),
-      msg("o2", ts(120)),
-      msg("o3", ts(140)),
-      msg("o4", ts(180)),
-    ];
-    const result = mergeMessageWindow([], optimistic, server);
-    expect(result.messages.map((m) => m.id)).toEqual([
-      "o1",
-      "s1",
-      "o2",
-      "s2",
-      "o3",
-      "s3",
-      "o4",
-    ]);
-    expect(result.remainingOptimistic.map((m) => m.id)).toEqual([
-      "o1",
-      "o2",
-      "o3",
-      "o4",
-    ]);
+    const result = mergeMessageWindow([], server);
+    expect(result.messages.map((m) => m.id)).toEqual(["s1", "s2", "s3"]);
   });
 });
 

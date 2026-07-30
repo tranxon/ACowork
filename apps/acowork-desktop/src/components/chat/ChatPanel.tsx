@@ -17,6 +17,7 @@ import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
+import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./useChatListAdapter";
 import { useScrollController } from "./useScrollController";
 
@@ -356,23 +357,29 @@ export function ChatPanel() {
   // state transitions (idle→streaming→idle).  Keeping them separate
   // prevents sessionStatus-derived values (sending, etc.) from
   // re-evaluating on every poll tick.
+  //
+  // ADR-050 C2: `currentSessionId` is read EARLY so the live-stream
+  // subscription (`useLiveStream`) can target the right session.  The
+  // old code bound currentSessionId further below, after a long list
+  // of toolbar refs; we keep the early read here so all subsequent
+  // selectors (including the adapter live hook) see a stable session
+  // id.  This is the same `useChatStore` selector that used to live
+  // ~310 lines lower.
+  const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
   const messages = useChatStore((s) => {
     if (!selectedAgentId) return EMPTY_MESSAGES;
     const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return EMPTY_MESSAGES;
-    return agent.sessionStates[agent.activeSessionId]?.messages ?? EMPTY_MESSAGES;
+    if (!currentSessionId) return EMPTY_MESSAGES;
+    return agent?.sessionStates[currentSessionId]?.messages ?? EMPTY_MESSAGES;
   });
-  // Optimistic user-message overlay. Mirrored from chatStore so the
-  // working-indicator walk below can see "just sent" bubbles that have
-  // not yet been confirmed by the server. Same merge contract as
-  // `useChatListAdapter` (defensive dedupe + timestamp sort) so the two
-  // views can never disagree.
-  const optimisticEntries = useChatStore((s) => {
-    if (!selectedAgentId) return EMPTY_MESSAGES;
-    const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return EMPTY_MESSAGES;
-    return agent.sessionStates[agent.activeSessionId]?.optimisticEntries ?? EMPTY_MESSAGES;
-  });
+  // ADR-050 C2: live-stream state (optimisticEntries + isThinking +
+  // thinkingContent + assistantStreamingContent + isPinnedToBottom)
+  // now lives in chatAdapterStore.  ChatPanel subscribes via
+  // `useLiveStream(selectedAgentId, currentSessionId)` and the same
+  // shape is forwarded to the v1 components (VirtualMessageList /
+  // ExploreBlock) until C5 fully takes over.
+  const liveState = useLiveStream(selectedAgentId, currentSessionId);
+  const optimisticEntries = liveState.optimisticEntries;
   const displayMessages = useMemo<ChatMessage[]>(() => {
     if (optimisticEntries.length === 0) return messages;
     const seen = new Set(messages.map((m) => m.id));
@@ -383,15 +390,15 @@ export function ChatPanel() {
   const sessionStatus = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
+    if (!currentSessionId) return null;
+    return agent?.sessionStates[currentSessionId]?.sessionStatus ?? null;
   });
   // Remaining session fields — change infrequently, single selector is fine.
   const sessionState = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
-    if (!agent?.activeSessionId) return null;
-    return agent.sessionStates[agent.activeSessionId] ?? null;
+    if (!currentSessionId) return null;
+    return agent?.sessionStates[currentSessionId] ?? null;
   });
   const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
   const loopDetectedPaused = sessionState?.loopDetectedPaused ?? null;
@@ -412,23 +419,12 @@ export function ChatPanel() {
   const todos = sessionState?.todos ?? [];
   /** Per-session queued messages — persisted in chatStore across agent switches */
   const queuedMessages = sessionState?.queuedMessages ?? [];
-  /** True while an assistant stream has accumulated more than the line
-   *  threshold (see chatStore.ASSISTANT_REPLYING_LINE_THRESHOLD) and is
-   *  still streaming.  Cleared by the record_complete handler.  Drives
-   *  the trailing "replying" indicator virtual item rendered INSIDE
-   *  VirtualMessageList (see `extraItems` math below), so the indicator
-   *  physically anchors to the last message bubble — the same slot the
-   *  final reply will occupy once it lands. */
-  const isAssistantReplying = sessionState?.isAssistantReplying ?? false;
-  const isThinking = sessionState?.isThinking ?? false;
-  const thinkingStartTime = sessionState?.thinkingStartTime ?? null;
-  const thinkingContent = sessionState?.thinkingContent ?? "";
-  // Live assistant streaming preview — pushed by chatStore during
-  // stream_delta, cleared on record_complete.  Rendered inside the
-  // trailing replying virtual item via StreamingSourceBlock variant=
-  // "assistant" (replaces the old static "Replying..." indicator).
-  const assistantStreamingContent = sessionState?.assistantStreamingContent ?? "";
-  const assistantStreamingStartTime = sessionState?.assistantStreamingStartTime ?? null;
+  const isAssistantReplying = liveState.isAssistantReplying;
+  const isThinking = liveState.isThinking;
+  const thinkingStartTime = liveState.thinkingStartTime;
+  const thinkingContent = liveState.thinkingContent;
+  const assistantStreamingContent = liveState.assistantStreamingContent;
+  const assistantStreamingStartTime = liveState.assistantStreamingStartTime;
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state within ~50ms.
@@ -463,7 +459,9 @@ export function ChatPanel() {
     resolveApprovalByToolCallId,
     clearServerError,
   } = useChatStore.getState();
-  const currentSessionId = useChatStore((s) => selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null);
+  // (currentSessionId is already declared above — ChatPanel hoists it
+  // to the top of the per-session block so the live-stream subscription
+  // can target the right session without a placeholder re-subscribe.)
   const currentScrollKey = selectedAgentId && currentSessionId ? `${selectedAgentId}:${currentSessionId}` : null;
   const gatewayStatus = useGatewayStore((s) => s.status);
   const { activeSkill, clearActiveSkill } = useSkillStore();
@@ -821,7 +819,12 @@ export function ChatPanel() {
     const chatStore = useChatStore.getState();
     const ss0 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessId];
     const existingMessages = ss0?.messages;
-    const existingOptimistic = ss0?.optimisticEntries;
+    // ADR-050 C2: optimistic overlay now lives in chatAdapterStore.
+    // The mount guard's "has data?" check is widened to include the
+    // adapter's optimistic entries (most often a freshly-sent user
+    // message that the HTTP refresh hasn't echoed back yet).
+    const adapterSession = getChatAdapterSession(selectedAgentId, currentSessId);
+    const existingOptimistic = adapterSession.optimisticEntries;
     // Treat the union as "has data" — a freshly-sent optimistic user
     // message MUST NOT cause a redundant reload. The load path will
     // overwrite `messages[]` with whatever the server says; the merge
@@ -893,7 +896,11 @@ export function ChatPanel() {
     const chatStore = useChatStore.getState();
     const ss1 = chatStore.agentStates[selectedAgentId]?.sessionStates[currentSessionId];
     const existingMessages = ss1?.messages;
-    const existingOptimistic = ss1?.optimisticEntries;
+    // ADR-050 C2: see the same pattern in the mount effect above —
+    // the "has data?" check now reads the optimistic overlay from
+    // chatAdapterStore instead of from chatStore.
+    const adapterSession = getChatAdapterSession(selectedAgentId, currentSessionId);
+    const existingOptimistic = adapterSession.optimisticEntries;
     // Same union rule as the mount effect: don't treat "only optimistic"
     // as "empty cache". A session that has an in-flight optimistic
     // insert must NOT trigger a redundant reload — the optimistic user

@@ -1,12 +1,13 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, ActiveStream, AttachedItem } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, AttachedItem } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { releaseAdapterSession, ingestOptimisticUserMessage, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
 import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
@@ -16,96 +17,13 @@ import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
 
 // ---------------------------------------------------------------------------
-// ADR-035 convergent model: per-session active stream tracker.
-// Keyed by sessionId.  Used solely for the isAssistantReplying indicator
-// (lineCount threshold).  No real-time content rendering.
+// ADR-050 C2: the per-session active stream tracker, throttle timestamps,
+// and the 500ms cadence timer all moved to `chatAdapterStore` (see
+// `apps/acowork-desktop/src/components/chat/chatAdapterStore.ts`).
+// chatStore no longer mutates streaming state — it forwards stream_delta
+// and record_complete to the adapter via `ingestStreamDelta` /
+// `ingestRecordComplete` and lets the adapter own the live surface.
 // ---------------------------------------------------------------------------
-
-// ActiveStream type lives in lib/types.ts.
-const activeStreams = new Map<string, ActiveStream>();
-
-// Throttle timestamp for thinking content flush (per session).
-// Limits Zustand set() calls to at most every 500ms during thought streaming.
-const lastThinkingFlush = new Map<string, number>();
-// Throttle timestamp for assistant streaming content flush (per session).
-// Same 500ms cadence as `lastThinkingFlush`. Both share the same intent:
-// stream_delta can arrive every ~50-200ms during long generations, but
-// the trailing preview only needs to update at human-perceptible cadence
-// (500ms = ~2Hz) to look "live" without piling up Zustand re-renders.
-const lastAssistantFlush = new Map<string, number>();
-
-// Debounce timers for HTTP refresh triggered by record_complete.
-// Keyed by `${agentId}:${sessionId}`.  Multiple record_complete events
-// arriving within the debounce window are coalesced into a single HTTP
-// request, reducing redundant fetches during rapid tool-call sequences.
-const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-/**
- * Schedule a debounced HTTP refresh of the session's message window.
- *
- * Called from the `record_complete` handler and from `setPinnedToBottom`
- * (catch-up when the user returns to the bottom).
- *
- * ADR-050: this function is **deprecated** — C2 removes it entirely.
- * The Adapter v2 owns live data absorption and dispatches HTTP refreshes
- * on `flushAvailable` events.  For now, only the offset semantics are
- * updated; the function body is still called by `record_complete` to
- * keep session loading working until C2 lands.
- *
- * Guards:
- *  - isPinnedToBottom (early exit): user is not at the bottom – skip
- *    entirely.  Prevents message array mutations (append/replace) from
- *    causing re-renders while the user is scrolled up.  When the user
- *    returns, `setPinnedToBottom(true)` re-triggers this function.
- *  - isLoadingMore: don't interfere with an in-flight user-initiated
- *    pagination request (loadPrevPage / loadNextPage share the same
- *    per-session AbortController).
- *
- * NOTE: Under forward (ADR-050) semantics, the "is at the tail" check
- * is `messageOffset + messageLimit >= messageTotal`, NOT `messageOffset
- * === 0`.  We rely solely on `isPinnedToBottom` here — the catch-up
- * refresh loads the tail page (`offset = max(0, total - limit)`), which
- * may not be at offset=0 if the cache has previously scrolled back.
- */
-function scheduleRefresh(agentId: string, sessionId: string): void {
-  // Early exit: if the user is not at the bottom, don't even set a timer.
-  // The catch-up is handled by setPinnedToBottom(true) -> scheduleRefresh.
-  {
-    const ss = getSessionState(useChatStore.getState(), agentId, sessionId);
-    if (!ss.isPinnedToBottom) {
-      return;
-    }
-  }
-
-  const key = `${agentId}:${sessionId}`;
-  const prev = refreshTimers.get(key);
-  if (prev) clearTimeout(prev);
-  refreshTimers.set(key, setTimeout(() => {
-    refreshTimers.delete(key);
-    // useChatStore is defined later in this module; safe to reference
-    // here because this callback runs asynchronously after the module
-    // has fully loaded.
-    const store = useChatStore.getState();
-    const ss = getSessionState(store, agentId, sessionId);
-    if (ss.isLoadingMore) {
-      return;
-    }
-    if (!ss.isPinnedToBottom) {
-      return;
-    }
-    // ADR-050: catch-up refresh anchors at the tail (`offset = max(0,
-    // total - limit)`), not at offset=0.  When `messageTotal` is unknown
-    // (fresh session) we delegate to the initial-load path via the
-    // `tail=true` query parameter so the backend can resolve the tail.
-    const limit = 50;
-    if (ss.messageTotal === 0) {
-      void store.loadSessionMessages(agentId, sessionId, undefined, limit);
-    } else {
-      const tailOffset = Math.max(0, ss.messageTotal - limit);
-      void store.loadSessionMessages(agentId, sessionId, tailOffset, limit);
-    }
-  }, 200));
-}
 
 
 
@@ -126,7 +44,7 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
 // Single source of truth for "what should `messages[]` look like after a
 // new HTTP `/sessions/{sid}/messages` response lands?"
 //
-// Invariants (P0-1, P0-2, P0-3 from the messages review):
+// Invariants (P0-1, P0-3 from the messages review):
 //
 //   1. The HTTP response is the authoritative timestamp-ordered window.
 //      Any cache entry whose id appears in the response MUST be replaced
@@ -135,23 +53,24 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
 //
 //   2. Cache entries with ids NOT in the response are preserved (they
 //      belong to a different window — e.g. older entries loaded via
-//      `loadBefore`). They keep their relative timestamp order.
+//      `loadPrevPage`). They keep their relative timestamp order.
 //
-//   3. Optimistic user messages (overlay) are merged in by id and
-//      timestamp. If the response confirms an optimistic user (same id),
-//      the response copy wins and the optimistic copy is dropped from
-//      `remainingOptimistic`. If the response doesn't yet contain the
-//      optimistic user (backend write latency), the optimistic copy is
-//      kept (and will be dropped on the next confirmation).
-//
-//   4. The final array is sorted by `timestamp` ascending. `Array.sort`
+//   3. The final array is sorted by `timestamp` ascending. `Array.sort`
 //      is stable in V8 since ES2019, so rows with identical `timestamp`
 //      keep their input order — important when attachment system rows and
 //      their owning user entry share an ISO millisecond.
 //
-//   5. No path may wipe `messages[]` based on a failed/aborted HTTP
+//   4. No path may wipe `messages[]` based on a failed/aborted HTTP
 //      request. Only the response handler may overwrite the window, and
 //      only with merged content (never an empty reset).
+//
+// ADR-050 C2: the optimistic user-message overlay no longer lives in
+// chatStore — it is owned by `chatAdapterStore`.  The HTTP response
+// handler is responsible for calling `clearOptimisticEntries(agentId,
+// sessionId, confirmedIds)` with the set of server-echoed ids so the
+// adapter can drop the now-confirmed entries from its overlay.  The
+// merge function itself stays a pure `(cache, server) => messages`
+// transformation; the overlay is a separate concern.
 //
 // `mergeMessageWindow` is exported (pure function) so the regression tests
 // in `chatStore.test.ts` can pin the contract without needing a Zustand
@@ -159,17 +78,10 @@ function scheduleRefresh(agentId: string, sessionId: string): void {
 export interface MergedMessageWindow {
   /** Sorted, deduped message array ready to write into `messages[]`. */
   messages: ChatMessage[];
-  /**
-   * Optimistic overlay AFTER the merge — entries the response did NOT
-   * confirm. Empty when every optimistic user was echoed back by the
-   * server (the normal case once `record_complete` lands).
-   */
-  remainingOptimistic: ChatMessage[];
 }
 
 export function mergeMessageWindow(
   cache: ChatMessage[],
-  optimistic: ChatMessage[],
   server: ChatMessage[],
 ): MergedMessageWindow {
   // Step 1: server is authoritative for its ids. Build a Map<id, msg>
@@ -187,80 +99,33 @@ export function mergeMessageWindow(
     if (!byId.has(m.id)) byId.set(m.id, m);
   }
 
-  // Step 3: optimistic overlay — same rule, but track which survived so
-  // the caller can clear confirmed ones from `optimisticEntries`.
-  const remainingOptimistic: ChatMessage[] = [];
-  for (const m of optimistic) {
-    if (byId.has(m.id)) {
-      // Server already confirmed — drop optimistic copy, keep server's.
-      continue;
-    }
-    byId.set(m.id, m);
-    remainingOptimistic.push(m);
-  }
-
-  // Step 4: stable sort by timestamp ascending. The merge Map preserves
+  // Step 3: stable sort by timestamp ascending. The merge Map preserves
   // insertion order on iteration, and Array.sort is stable, so rows
   // sharing an ISO millisecond keep the layered order
-  // (server → cache → optimistic).
+  // (server → cache).
   const messages = Array.from(byId.values()).sort(
     (a, b) => a.timestamp - b.timestamp,
   );
 
-  return { messages, remainingOptimistic };
+  return { messages };
 }
 
 /**
  * Write a single user message into the optimistic overlay.
  *
- * Replaces the old `appendMessageAndAdjustMeta`, which conflated the
- * optimistic insert path with the server-authoritative pagination cursor
- * (messageOffset/limit/total). Those three coordinates now belong
- * exclusively to the server; the overlay is rendered separately by the
- * adapter (`useChatListAdapter` -> `messages + optimisticEntries`)
- * and sorted into display order by `mergeMessageWindow` on every HTTP
- * response.
- *
- * Side effects:
- *   - `optimisticEntries` gains one entry.
- *   - NO change to `messages`, `messageOffset`, `messageLimit`, or
- *     `messageTotal`. This is the difference that fixes P0-1/P0-2/P0-3:
- *     the optimistic insert can no longer race with the HTTP fetch
- *     because they no longer share a mutable array.
+ * ADR-050 C2: this helper is removed.  The optimistic overlay is no
+ * longer owned by chatStore — `chatAdapterStore.ingestOptimisticUserMessage`
+ * receives the same entry list.  chatStore keeps no per-session
+ * optimistic state and the merge function no longer takes an overlay
+ * parameter.
  */
-function appendOptimisticEntries(
-  ss: SessionChatState,
-  entries: ChatMessage[],
-): Partial<SessionChatState> {
-  return {
-    optimisticEntries: [...ss.optimisticEntries, ...entries],
-  };
-}
 
 // ── ADR-035 C2: assistant activeStream safety valve ──
 //
-// assistant content is NEVER truncated for display — the user must see the
-// full reply. But if record_complete is lost (QoS edge case) AND the idle
-// realignment fallback also fails (e.g. session closed mid-stream), the
-// activeStream.lineCount would grow unbounded and leak memory.
-//
-// This cap is a SAFETY VALVE only — set far above any realistic assistant
-// reply (10k lines ≈ 500k chars ≈ a small novel). Normal replies are well
-// under 1k lines. If this cap ever triggers, it indicates a bug in the
-// record_complete delivery path; a warning is logged for diagnosis.
-//
-// thought lines are already capped at 5 (D9.1), so this only applies to
-// assistant. When triggered, we keep the NEWEST lines (slice(-N)) so the
-// end of the reply is preserved; the oldest lines are dropped as they are
-// the least likely to be the user's focus.
-const ASSISTANT_LINE_SAFETY_CAP = 10_000;
-
-/** Minimum number of accumulated streaming lines before the per-session
- *  `isAssistantReplying` flag flips true. Mirrors
- *  `MessageBubble.ASSISTANT_REPLYING_THRESHOLD`; kept here as a chatStore
- *  constant so the streaming pipeline can flip the flag without round-
- *  tripping through the React layer. The two values must stay in sync. */
-const ASSISTANT_REPLYING_LINE_THRESHOLD = 3;
+// ADR-050 C2: the active-stream tracker moved to `chatAdapterStore`,
+// which now owns the `ASSISTANT_LINE_SAFETY_CAP` /
+// `ASSISTANT_REPLYING_LINE_THRESHOLD` constants and the per-session
+// stream bookkeeping.  chatStore no longer mutates streaming state.
 
 // ── Sender info helpers ────────────────────────────────────────────────
 
@@ -290,16 +155,6 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 /** State for a single conversation session within an agent. */
 interface SessionChatState {
   messages: ChatMessage[];
-  /**
-   * Unconfirmed user messages overlay. See `DEFAULT_SESSION_STATE.messages`
-   * for the full rationale. Always rendered after `messages` (timestamp-
-   * merged by `mergeMessageWindow`).
-   */
-  /** Unconfirmed entries (user text + attachment system entries) written
-   *  immediately by `sendMessage` and cleared when the HTTP window lands
-   *  (same id → server copy wins; different id → optimistic copy stays
-   *  and `mergeMessageWindow` sorts it into position by timestamp). */
-  optimisticEntries: ChatMessage[];
   tokenUsage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
   /**
@@ -380,48 +235,6 @@ interface SessionChatState {
   abortController: AbortController | null;
   /** ADR-021: Per-session load sequence number to prevent race conditions */
   loadSequence: number;
-  /**
-   * True while the assistant is actively streaming AND has already
-   * accumulated more than `ASSISTANT_REPLYING_THRESHOLD` lines. Drives the
-   * standalone "replying" indicator rendered OUTSIDE the message list by
-   * ChatPanel — kept as a session-level flag (rather than derived from the
-   * so the indicator is independent
-   * of any single MessageBubble's render lifecycle and can never get stuck
-   * "on" after record_complete.
-   */
-  isAssistantReplying: boolean;
-  /** True while the agent is in the thinking/reasoning phase. */
-  isThinking: boolean;
-  /** Timestamp when the current thinking phase started. */
-  thinkingStartTime: number | null;
-  /** Latest thought lines (cap 5, joined) for ThinkBlock preview. */
-  thinkingContent: string;
-  /**
-   * Latest assistant text lines (joined) for the trailing streaming
-   * preview rendered as a `StreamingSourceBlock variant="assistant"`
-   * virtual item in VirtualMessageList. Mirrors the `thinkingContent`
-   * pattern: live preview during `stream_delta`, cleared on
-   * `record_complete`. Capped at the source (last 5 lines from the
-   * store) to keep DOM memory flat during long streams.
-   */
-  assistantStreamingContent: string;
-  /** Timestamp when the current assistant stream started (used for
-   *  duration display in StreamingSourceBlock). Mirrors
-   *  `thinkingStartTime`. Reset on each new assistant messageId. */
-  assistantStreamingStartTime: number | null;
-  /**
-   * Whether the user is pinned to the bottom of the scrollable area.
-   * Updated by useScrollController's state machine via `setPinnedToBottom`.
-   *
-   * Single source of truth for "is user at the bottom?" – used by:
-   *  - scheduleRefresh: skip HTTP message refresh when not at bottom
-   *  - thinkingContent flush: skip preview update when not at bottom
-   *  - Arrow button: derived (show when !isPinnedToBottom)
-   *
-   * This is a SCROLL-POSITION flag (viewport level), distinct from
-   * `messageOffset` which is a PAGINATION flag (cache-window level).
-   */
-  isPinnedToBottom: boolean;
   /** Whether the agent is currently in reasoning/thinking phase */
   isReasoning: boolean;
   /**
@@ -455,26 +268,6 @@ interface SessionChatState {
 
 const DEFAULT_SESSION_STATE: SessionChatState = {
   messages: [],
-  /**
-   * Unconfirmed user messages — written immediately by `sendMessage` and
-   * removed as soon as the backend confirms them (same `id` shows up in an
-   * HTTP `/sessions/{sid}/messages` response). Rendered as an overlay on
-   * top of the server-authoritative `messages[]`, sorted into display
-   * position by `mergeMessageWindow` using the entry timestamp.
-   *
-   * Why a separate field (not just `messages.push`):
-   *   1. `isInitialLoad` must not wipe optimistic inserts — a freshly
-   *      created session can have `messages[] === []` when the user hits
-   *      send, and the first HTTP response may not yet include the just-
-   *      written user entry.
-   *   2. Backend-attached `system` rows (ADR-046 attachments) arrive in
-   *      the same window; they MUST appear next to their owning user
-   *      entry, not as orphans appended to the tail. The merge function
-   *      sorts all rows by `entry.ts`, which is what the user expects.
-   *   3. When the backend confirms a user (same id), it MUST silently
-   *      disappear from the overlay — no flicker, no duplicate bubble.
-   */
-  optimisticEntries: [],
   tokenUsage: null,
   contextUsage: null,
   messageOffset: 0,
@@ -502,13 +295,6 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   hasMoreIncremental: false,
   abortController: null,
   loadSequence: 0,
-  isAssistantReplying: false,
-  isThinking: false,
-  thinkingStartTime: null,
-  thinkingContent: '',
-  assistantStreamingContent: '',
-  assistantStreamingStartTime: null,
-  isPinnedToBottom: true,
   isReasoning: false,
   isSessionReady: false,
   isLoadingMore: false,
@@ -644,8 +430,9 @@ export function _evictStaleSessions(
   const newSessionStates = { ...agent.sessionStates };
   for (const id of toEvict) {
     delete newSessionStates[id];
-    // Release the evicted session's activeStream tracker.
-    activeStreams.delete(id);
+    // Release the evicted session's adapter-side live state
+    // (activeStream tracker, throttle timestamps, optimisticEntries).
+    releaseAdapterSession(agentId, id);
   }
 
   return {
@@ -859,15 +646,6 @@ interface ChatStore {
   removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
   /** Replace the entire per-session queue (e.g. after sending all) */
   setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => void;
-  /**
-   * Update the scroll-position flag `isPinnedToBottom`.
-   *
-   * Called by useScrollController's `transitionTo` when the state machine
-   * enters/leaves "pinned-bottom".  When transitioning back to bottom
-   * (false -> true), a catch-up `scheduleRefresh` is triggered so that
-   * any messages that arrived while the user was scrolled up are loaded.
-   */
-  setPinnedToBottom: (agentId: string, sessionId: string, value: boolean) => void;
   /** Dismiss the server-side error banner. */
   clearServerError: (agentId: string, sessionId: string) => void;
   /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
@@ -1394,10 +1172,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   clearMessages: (agentId: string) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
     if (!sessionId) return;
+    // ADR-050 C2: optimisticEntries + activeStream + throttle timestamps
+    // live in chatAdapterStore; release them here too.
+    clearAllOptimisticEntries(agentId, sessionId);
     set((state) => ({
       ...updateSessionState(state, agentId, sessionId, {
         messages: [],
-        optimisticEntries: [],
         tokenUsage: null,
         contextUsage: null,
         messageOffset: 0,
@@ -1416,10 +1196,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   clearSessionState: (agentId: string, sessionId: string) => {
+    clearAllOptimisticEntries(agentId, sessionId);
     set((state) => ({
       ...updateSessionState(state, agentId, sessionId, {
         messages: [],
-        optimisticEntries: [],
         tokenUsage: null,
         contextUsage: null,
         messageOffset: 0,
@@ -1438,7 +1218,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   removeSessionState: (agentId: string, sessionId: string) => {
-    activeStreams.delete(sessionId);
+    releaseAdapterSession(agentId, sessionId);
     set((state) => {
       const agent = getAgentState(state, agentId);
       const newSessionStates = { ...agent.sessionStates };
@@ -1537,17 +1317,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
 
     if (sessionId) {
-      set((state) => {
-        const ss = getSessionState(state, agentId, sessionId);
-        return updateSessionState(state, agentId, sessionId,
-          appendOptimisticEntries(ss, [userMsg, ...optimisticAttachments]));
-      });
+      // ADR-050 C2: optimistic overlay is owned by chatAdapterStore.
+      // chatStore no longer carries an `optimisticEntries` field.
+      ingestOptimisticUserMessage(agentId, sessionId, [userMsg, ...optimisticAttachments]);
       // ── DIAG: verify optimistic insert ──
       log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
         sid: sessionId,
         userMsgId,
         attachedItemCount: items.length,
-        optimisticCount: getSessionState(get(), agentId, sessionId).optimisticEntries.length,
       });
     }
 
@@ -1866,20 +1643,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         //     walked back toward the oldest end, smaller offset)
         // The min/max expressions below are direction-agnostic — they
         // always extend the cached range to the union of old + new window.
-        const merged = mergeMessageWindow(
-          ss.messages,
-          ss.optimisticEntries,
-          converted,
+        // ADR-050 C2: mergeMessageWindow is now (cache, server) → messages
+        // (the optimistic overlay lives in chatAdapterStore, not here).
+        // We also notify the adapter of which optimistic ids the server
+        // confirmed so it can drop them from its overlay.
+        const merged = mergeMessageWindow(ss.messages, converted);
+        const confirmedIds = new Set(
+          converted.map((m) => m.id),
         );
+        // Only run the side effect after the setState closure commits —
+        // we don't want a setState on a different store to interleave
+        // with this transition.
+        queueMicrotask(() => {
+          clearOptimisticEntries(agentId, sessionId, confirmedIds);
+        });
 
         let finalOffset = returnedOffset;
         let finalLimit = returnedLimit;
 
         if (isInitialLoad) {
-          // ADR-035 C2: drop any in-flight activeStream tracker so a
+          // ADR-050 C2: drop any in-flight activeStream tracker so a
           // stale lineCount from a previous session incarnation cannot
-          // bleed into the freshly-loaded view.
-          activeStreams.delete(sessionId);
+          // bleed into the freshly-loaded view.  The tracker now lives
+          // in chatAdapterStore; chatStore delegates the cleanup.
+          releaseAdapterSession(agentId, sessionId);
         } else if (returnedOffset > prevOffset) {
           // Loading NEWER messages (scroll-down).  Window slid forward;
           // extend the cached range to include the newer entries the
@@ -1899,9 +1686,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             prevOffset + (ss.messages.length > 0 ? prevLimit : 0),
           ) - finalOffset;
         } else {
-          // returnedOffset === prevOffset: same window (scheduleRefresh,
-          // duplicate load, or a re-fetch of the same page).  No cursor
-          // math change.
+          // returnedOffset === prevOffset: same window (a duplicate load
+          // or a re-fetch of the same page).  No cursor math change.
           finalOffset = Math.min(returnedOffset, prevOffset);
           finalLimit = Math.max(
             returnedOffset + returnedLimit,
@@ -1911,7 +1697,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
         return updateSessionState(state, agentId, sessionId, {
           messages: merged.messages,
-          optimisticEntries: merged.remainingOptimistic,
           messageOffset: finalOffset,
           messageLimit: finalLimit,
           messageTotal: returnedTotal,
@@ -2051,9 +1836,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   /** Release the messages array for a session to free memory. */
   clearSessionMessages: (agentId: string, sessionId: string) => {
+    clearAllOptimisticEntries(agentId, sessionId);
     set((state) => updateSessionState(state, agentId, sessionId, {
       messages: [],
-      optimisticEntries: [],
       messageOffset: 0,
       messageLimit: 0,
       messageTotal: 0,
@@ -2148,19 +1933,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => {
     set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
-  },
-
-  setPinnedToBottom: (agentId: string, sessionId: string, value: boolean) => {
-    const ss = getSessionState(get(), agentId, sessionId);
-    if (ss.isPinnedToBottom === value) return;
-    set((state) => updateSessionState(state, agentId, sessionId, { isPinnedToBottom: value }));
-    // Catch-up: user returned to the bottom.  Trigger scheduleRefresh
-    // so any record_complete events that were blocked while the user
-    // was scrolled up are now loaded.  scheduleRefresh will re-check
-    // isPinnedToBottom (now true) before firing.
-    if (value) {
-      scheduleRefresh(agentId, sessionId);
-    }
   },
 
   clearServerError: (agentId: string, sessionId: string) => {
@@ -2462,153 +2234,37 @@ function handleMessageEvent(
       // processes the interrupt.
       break;
 
-    // ADR-035 convergent model: stream_delta drives ONLY the
-    // isAssistantReplying indicator via activeStreams tracking.  No
-    // placeholder is inserted into messages[].  The final content
-    // arrives via HTTP refresh triggered by record_complete.
+    // ADR-050 C2: stream_delta absorption lives in `chatAdapterStore`.
+    // chatStore no longer mutates per-session streaming state — the
+    // adapter owns the activeStream tracker, throttle timestamps,
+    // isThinking/isAssistantReplying flags, and the trailing preview
+    // content.  This handler is a one-line forwarder that hands the
+    // raw `lines` array to the adapter's ingest entry point.
     case "stream_delta": {
       if (!sid) break;
       const lines = (data.lines as Array<{role:string;message_id:string;line_no:number;content:string}>) ?? [];
-      log.debug("[ChatStore:DEBUG] stream_delta RECEIVED", {
+      log.debug("[ChatStore:DEBUG] stream_delta RECEIVED (forwarded to adapter)", {
         sid,
         eventSessionId: data.session_id,
         msgId: lines[0]?.message_id,
         role: lines[0]?.role,
         lineCount: lines.length,
         seq: data.seq,
-        activeStreamMessageId: activeStreams.get(sid)?.messageId,
       });
       if (!lines.length) break;
-      const role = lines[0].role === 'assistant' ? 'assistant' as const : 'thought' as const;
-
-      if (role === 'thought') {
-        // Lightweight tracking for ThinkBlock preview.
-        // No real-time content rendering. We track only:
-        //   1. isThinking flag (session-level, for ChatPanel)
-        //   2. Last 5 lines (for ThinkBlock expand preview)
-        //   3. startTime (for timer)
-        // thinkingContent is flushed to Zustand state on a 500ms throttle.
-        const thoughtMsgId = lines[0].message_id;
-      let thoughtStream = activeStreams.get(sid);
-      if (!thoughtStream || thoughtStream.messageId !== thoughtMsgId) {
-        thoughtStream = { messageId: thoughtMsgId, role: 'thought', lineCount: 0, lines: [], startTime: Date.now() };
-        activeStreams.set(sid, thoughtStream);
-      }
-      for (const l of lines) {
-        thoughtStream.lines.push({ role: 'thought', lineNo: l.line_no, content: l.content });
-      }
-      if (thoughtStream.lines.length > 5) {
-        thoughtStream.lines = thoughtStream.lines.slice(-5);
-      }
-      // Edge-triggered isThinking + startTime
-      const thoughtState = getSessionState(get(), agentId, sid);
-      if (!thoughtState.isThinking) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          isThinking: true,
-          thinkingStartTime: thoughtStream.startTime,
-          thinkingContent: thoughtStream.lines.map(l => l.content).join('\n'),
-        }));
-        lastThinkingFlush.set(sid, Date.now());
-      } else if (thoughtState.isPinnedToBottom) {
-        // Throttle: flush at most every 500ms.
-        // Only when user is at the bottom (isPinnedToBottom) – when
-        // the ThinkBlock is outside the viewport, skip the Zustand
-        // set() to avoid unnecessary re-renders.
-        const now = Date.now();
-        const lastFlush = lastThinkingFlush.get(sid) ?? 0;
-        if (now - lastFlush >= 500) {
-          const content = thoughtStream.lines.map(l => l.content).join('\n');
-          if (content !== thoughtState.thinkingContent) {
-            set((state) => updateSessionState(state, agentId, sid, {
-              thinkingContent: content,
-            }));
-          }
-          lastThinkingFlush.set(sid, now);
-        }
-      }
-      break;
-      }
-
-      // -- assistant --------------------------------------------------
-      const msgId = lines[0].message_id;
-      let as = activeStreams.get(sid);
-      const sessionState = getSessionState(get(), agentId, sid);
-      const isFirstChunkForNewStream = !as || as.messageId !== msgId;
-      if (isFirstChunkForNewStream) {
-        // Edge-triggered: new messageId → reset startTime for duration.
-        as = { messageId: msgId, role, lineCount: 0, lines: [], startTime: Date.now() };
-        activeStreams.set(sid, as);
-        // Seed the throttle timestamp so the first flush below can run
-        // immediately (delta from a 0 baseline would otherwise be huge).
-        lastAssistantFlush.set(sid, Date.now());
-      }
-      if (!as) break;
-      as.lineCount += lines.length;
-      // ADR-035 C2 safety valve: prevent unbounded memory growth if
-      // record_complete is lost AND idle realignment fails.
-      if (as.lineCount > ASSISTANT_LINE_SAFETY_CAP) {
-        log.warn(
-          `[ChatStore] ADR-035 C2 safety valve: assistant activeStream hit` +
-          ` ${ASSISTANT_LINE_SAFETY_CAP}-line cap (messageId=${as.messageId}).` +
-          ` record_complete likely lost - capping lineCount.`,
-        );
-        as.lineCount = ASSISTANT_LINE_SAFETY_CAP;
-      }
-      // Mirror the thought branch: keep last 5 lines for the trailing
-      // streaming preview (DOM memory stays flat — same <pre> node is
-      // reused via direct textContent mutation in StreamingSourceBlock).
-      for (const l of lines) {
-        as.lines.push({ role: 'assistant', lineNo: l.line_no, content: l.content });
-      }
-      if (as.lines.length > 5) {
-        as.lines = as.lines.slice(-5);
-      }
-      // Edge-triggered isAssistantReplying flip.
-      const shouldBeReplying = as.lineCount > ASSISTANT_REPLYING_LINE_THRESHOLD;
-      const isCurrentlyReplying = sessionState.isAssistantReplying;
-      if (shouldBeReplying !== isCurrentlyReplying) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          isAssistantReplying: shouldBeReplying,
-        }));
-      }
-      // Edge-triggered startTime: only push on the first chunk of a new
-      // stream so the duration timer starts fresh per assistant message.
-      if (isFirstChunkForNewStream) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          assistantStreamingStartTime: as.startTime,
-        }));
-      }
-      // Throttled flush of the trailing 5-line preview.  Mirror of the
-      // thought branch: only push to Zustand when (a) isPinnedToBottom
-      // (user is watching the tail) and (b) at least 500ms since the
-      // previous flush.  Keeps re-render churn flat regardless of how
-      // fast stream_delta events arrive.
-      if (sessionState.isPinnedToBottom) {
-        const now = Date.now();
-        const lastFlush = lastAssistantFlush.get(sid) ?? 0;
-        if (now - lastFlush >= 500) {
-          const content = as.lines.map((l) => l.content).join('\n');
-          if (content !== sessionState.assistantStreamingContent) {
-            set((state) => updateSessionState(state, agentId, sid, {
-              assistantStreamingContent: content,
-            }));
-          }
-          lastAssistantFlush.set(sid, now);
-        }
-      }
+      ingestStreamDelta(agentId, sid, lines);
       break;
     }
 
     case "record_complete": {
       if (!sid) break;
-      log.debug("[ChatStore:DEBUG] record_complete RECEIVED", {
+      log.debug("[ChatStore:DEBUG] record_complete RECEIVED (forwarded to adapter)", {
         sid,
         eventSessionId: data.session_id,
         msgId: data.message_id,
         role: data.role,
         seq: data.seq,
         contentLen: typeof data.content === 'string' ? data.content.length : 0,
-        activeStreamMessageId: activeStreams.get(sid)?.messageId,
       });
       const rawRole = data.role as string;
       const role = (rawRole === 'assistant' || rawRole === 'thought' || rawRole === 'tool_call' || rawRole === 'tool_result')
@@ -2617,45 +2273,12 @@ function handleMessageEvent(
       const msgId = data.message_id as string;
       const toolCallId = (data.tool_call_id as string | undefined) ?? '';
 
-      // Clear isAssistantReplying unconditionally.
-      const curSessionState = getSessionState(get(), agentId, sid);
-      if (curSessionState.isAssistantReplying) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          isAssistantReplying: false,
-        }));
-      }
-      // Clear assistantStreamingContent + assistantStreamingStartTime
-      // unconditionally — the trailing StreamingSourceBlock variant=
-      // "assistant" virtual slot disappears alongside isAssistantReplying,
-      // and we don't want stale preview text / startTime surviving a
-      // session-id reuse (next stream_delta for a new message would race
-      // against a leftover snapshot).
-      if (curSessionState.assistantStreamingContent !== ''
-        || curSessionState.assistantStreamingStartTime !== null) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          assistantStreamingContent: '',
-          assistantStreamingStartTime: null,
-        }));
-        lastAssistantFlush.delete(sid);
-      }
-
-      // Clear isThinking when thought completes.
-      if (role === 'thought' && getSessionState(get(), agentId, sid).isThinking) {
-        set((state) => updateSessionState(state, agentId, sid, {
-          isThinking: false,
-          thinkingContent: '',
-        }));
-        lastThinkingFlush.delete(sid);
-      }
-
-      // Clean up activeStream if it matches.
-      const as = activeStreams.get(sid);
-      if (as && as.messageId === msgId) {
-        activeStreams.delete(sid);
-      }
-
-      // Schedule debounced HTTP refresh to load the completed record.
-      scheduleRefresh(agentId, sid);
+      // ADR-050 C2: the entire "clear isAssistantReplying / isThinking /
+      // assistantStreamingContent / activeStream cleanup / scheduleRefresh"
+      // block was delegated to chatAdapterStore.ingestRecordComplete, which
+      // emits a `recordComplete` event the v2 adapter (C3) can subscribe to
+      // for the actual HTTP refresh.
+      ingestRecordComplete(agentId, sid, { messageId: msgId, role });
 
       // ADR-045: Clean up toolProgress entry when a tool_result arrives.
       if (role === 'tool_result') {
@@ -3161,28 +2784,31 @@ function handleMessageEvent(
             // ADR-021: Start/stop polling based on status transitions.
             const prev = getSessionState(state, agentId, sid);
 
-            // When status transitions TO Idle from non-Idle, clear pending flags
+            // When status transitions TO Idle from non-Idle, clear pending flags.
+            // ADR-050 C2: isAssistantReplying / isThinking / thinkingContent
+            // live in chatAdapterStore now.  The adapter also owns the
+            // activeStream tracker, so the "record_complete lost" recovery
+            // path delegates to `releaseAdapterSession` to drop the stale
+            // tracker before the HTTP realignment fires.
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestions = [];
               sessionPatch.iterationLimitPaused = null;
               sessionPatch.loopDetectedPaused = null;
-              sessionPatch.isAssistantReplying = false;
-              sessionPatch.isThinking = false;
-              sessionPatch.thinkingContent = '';
 
-              // ADR-035 C2/O2: if activeStream still has unfrozen content at
-              // idle, record_complete was lost (QoS edge case). Trigger HTTP
-              // full realignment to recover.
-              const activeStream = activeStreams.get(sid);
-              if (activeStream) {
+              // ADR-035 C2/O2: if activeStream still has unfrozen content
+              // at idle, record_complete was lost (QoS edge case). Trigger
+              // HTTP full realignment to recover.  The tracker itself now
+              // lives in chatAdapterStore; we delegate cleanup to the
+              // adapter and then run the realignment from chatStore.
+              const adapter = getChatAdapterSession(agentId, sid);
+              if (adapter.isThinking || adapter.isAssistantReplying) {
                 log.warn(
-                  `[ChatStore] ADR-035 C2: activeStream still present at idle` +
-                  ` (messageId=${activeStream.messageId}, role=${activeStream.role},` +
-                  ` lineCount=${activeStream.lineCount}) - record_complete likely lost,` +
-                  ` triggering HTTP realignment`,
+                  `[ChatStore] ADR-035 C2: adapter still streaming at idle ` +
+                  `(isThinking=${adapter.isThinking}, isAssistantReplying=${adapter.isAssistantReplying}) ` +
+                  ` - record_complete likely lost, triggering HTTP realignment`,
                 );
-                activeStreams.delete(sid);
+                releaseAdapterSession(agentId, sid);
                 queueMicrotask(() => {
                   get().loadSessionMessages(agentId, sid);
                 });

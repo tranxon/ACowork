@@ -34,7 +34,7 @@ import { useRef, useState, useCallback, useEffect, useLayoutEffect } from "react
 import type { ChatListAdapter } from "./useChatListAdapter";
 import type { VirtualMessageListHandle } from "./VirtualMessageList";
 import type { MessageBlock } from "./messageFolder";
-import { useChatStore } from "../../stores/chatStore";
+import { setPinnedToBottom as setAdapterPinnedToBottom } from "./chatAdapterStore";
 import { log } from "../../lib/logger";
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -229,7 +229,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
         const aid = agentIdRef.current;
         const sid = sessionIdRef.current;
         if (aid && sid) {
-          useChatStore.getState().setPinnedToBottom(aid, sid, isPinned);
+          // ADR-050 C2: pinned-to-bottom signal lives in chatAdapterStore.
+          // C4 will turn this into an event-driven subscription; for now
+          // the controller still owns the call site.
+          setAdapterPinnedToBottom(aid, sid, isPinned);
         }
       }
     }

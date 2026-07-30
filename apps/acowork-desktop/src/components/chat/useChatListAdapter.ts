@@ -25,6 +25,7 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useChatStore } from "../../stores/chatStore";
+import { useLiveStream } from "./chatAdapterStore";
 import { foldMessages, type MessageBlock } from "./messageFolder";
 import type { ChatMessage } from "../../lib/types";
 
@@ -92,22 +93,15 @@ export function useChatListAdapter(
     return agent.sessionStates[sessionId]?.messages ?? EMPTY_MESSAGES;
   });
 
-  // Optimistic user-message overlay. The chatStore merges this into
-  // `messages[]` whenever the HTTP window lands (same id → optimistic
-  // copy is dropped, server copy kept; different id → optimistic copy
-  // stays and `mergeMessageWindow` sorts it into position by timestamp).
-  //
-  // We re-derive a display array by appending, then sorting by timestamp,
-  // so the block fold sees the exact same ordered stream the merge
-  // function would have produced. This keeps the block layer
-  // (`foldMessages`) ignorant of overlay mechanics while guaranteeing
-  // the user sees their optimistic bubble in the right place.
-  const optimisticEntries = useChatStore((s) => {
-    if (!agentId) return EMPTY_MESSAGES;
-    const agent = s.agentStates[agentId];
-    if (!agent || !sessionId) return EMPTY_MESSAGES;
-    return agent.sessionStates[sessionId]?.optimisticEntries ?? EMPTY_MESSAGES;
-  });
+  // ADR-050 C2: optimistic user-message overlay now lives in
+  // chatAdapterStore (via `ingestOptimisticUserMessage`).  The v1
+  // adapter keeps consuming the overlay for backward compatibility
+  // (ChatPanel and VirtualMessageList still expect a flat message
+  // list), but reads the overlay from the adapter store, not from
+  // chatStore.  C3 will fold the overlay into MessageBlock via a real
+  // `liveBuffer`; for now we just re-derive a display array so the
+  // rest of the v1 adapter pipeline is unchanged.
+  const optimisticEntries = useLiveStream(agentId, sessionId).optimisticEntries;
 
   const displayMessages = useMemo<ChatMessage[]>(() => {
     if (optimisticEntries.length === 0) return messages;
