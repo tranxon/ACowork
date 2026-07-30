@@ -268,6 +268,33 @@ pub struct SessionMeta {
 pub enum WriterCommand {
     /// Append a conversation entry to the JSONL file.
     AppendEntry(ConversationEntry),
+    /// Append a compaction marker entry synchronously.
+    ///
+    /// Behaviourally identical to [`WriterCommand::AppendEntry`] for a
+    /// `kind == "compaction"` entry, but the writer sends a reply on
+    /// `done` only **after** it has seeked, written the entry, and updated
+    /// the shared `last_compaction_offset` Arc.
+    ///
+    /// This synchronous handshake is required so that the caller (typically
+    /// `ConversationSession::append_compaction_event`) can guarantee that
+    /// the very next `write_meta()` reads a non-stale `last_compaction_offset`
+    /// from the shared Arc. Without it, the writer thread is fire-and-forget
+    /// and any `write_meta()` racing the writer would observe `None`
+    /// and persist a stale meta file, defeating ADR-024's O(1) restore offset.
+    ///
+    /// Uses `std::sync::mpsc::SyncSender` rather than `tokio::sync::oneshot`
+    /// because the writer is a `std::thread` (uses `blocking_recv` on the
+    /// tokio mpsc above) and the caller is invoked from inside the async
+    /// session-task loop — `tokio::oneshot::blocking_recv` panics if called
+    /// from within a tokio runtime context, while a std sync_channel is
+    /// safe to block on from any context (async task or not).
+    ///
+    /// Compaction is rare (only at 80%+ context pressure), so the
+    /// synchronous blocking cost is negligible.
+    AppendCompactionEntry {
+        entry: ConversationEntry,
+        done: std::sync::mpsc::SyncSender<()>,
+    },
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
@@ -279,9 +306,11 @@ pub enum WriterCommand {
 pub struct ConversationWriter {
     file: std::fs::File,
     receiver: mpsc::UnboundedReceiver<WriterCommand>,
-    /// Absolute byte offset of the most recent compaction marker.
+    /// ADR-024: absolute byte offset of the most recent compaction marker,
+    /// shared with `ConversationSession` (the writer updates it on every
+    /// compaction write; the session reads it in `build_meta`).
     /// `None` if no compaction has been written during this writer's lifetime.
-    last_compaction_offset: Option<u64>,
+    last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
     /// ADR-022: Committed line count — incremented after each successful
     /// disk write so `read_messages_since` never sees a count ahead of
     /// the actual file.
@@ -293,12 +322,13 @@ impl ConversationWriter {
     fn new(
         file: std::fs::File,
         receiver: mpsc::UnboundedReceiver<WriterCommand>,
+        last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
         committed_lines: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             file,
             receiver,
-            last_compaction_offset: None,
+            last_compaction_offset,
             committed_lines,
         }
     }
@@ -333,13 +363,50 @@ impl ConversationWriter {
                         self.committed_lines.fetch_add(1, Ordering::Relaxed);
                         if let Some(abs) = abs_offset {
                             // ADR-024: absolute offset (no header to subtract from).
-                            self.last_compaction_offset = Some(abs);
+                            if let Ok(mut guard) = self.last_compaction_offset.lock() {
+                                *guard = Some(abs);
+                            }
                             tracing::debug!(
                                 abs_offset = abs,
                                 "Recorded compaction offset"
                             );
                         }
                     }
+                }
+                WriterCommand::AppendCompactionEntry { entry, done } => {
+                    // Synchronous compaction write: capture the offset,
+                    // write the entry, and update the shared Arc — all
+                    // before sending the reply on `done`. Callers (see
+                    // `ConversationSession::append_compaction_event`) block
+                    // on `done` so the very next `write_meta()` is
+                    // guaranteed to read a fresh `last_compaction_offset`.
+                    let abs_offset = match self.file.seek(std::io::SeekFrom::End(0)) {
+                        Ok(pos) => Some(pos),
+                        Err(e) => {
+                            tracing::error!("Failed to seek for compaction entry: {}", e);
+                            None
+                        }
+                    };
+                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some()) {
+                        tracing::error!("Failed to write compaction entry: {}", e);
+                    } else {
+                        self.committed_lines.fetch_add(1, Ordering::Relaxed);
+                        if let Some(abs) = abs_offset {
+                            if let Ok(mut guard) = self.last_compaction_offset.lock() {
+                                *guard = Some(abs);
+                            }
+                            tracing::debug!(
+                                abs_offset = abs,
+                                "Recorded compaction offset (sync)"
+                            );
+                        }
+                    }
+                    // Always reply, even on failure, so the caller never
+                    // deadlocks waiting for a `done` that never arrives.
+                    // The std sync_channel `send` only fails if the
+                    // receiver was dropped (caller panicked before
+                    // `recv`), which we treat as benign.
+                    let _ = done.send(());
                 }
                 WriterCommand::Shutdown(tx) => {
                     if let Err(e) = self.file.flush() {
@@ -459,6 +526,14 @@ pub struct ConversationSession {
     last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
     last_context_usage: std::sync::Mutex<String>,
+    /// ADR-024: absolute byte offset of the most recent compaction marker
+    /// in the JSONL. Shared with `ConversationWriter` (the writer updates
+    /// it synchronously on every compaction write via
+    /// `WriterCommand::AppendCompactionEntry`). `build_meta` reads it for
+    /// persistence to `meta.json`. On `resume()` this is initialized from
+    /// `meta.last_compaction_offset` so the next restore can use O(1)
+    /// offset skip instead of falling back to the O(N) rposition scan.
+    last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -506,6 +581,16 @@ impl ConversationSession {
     fn build_meta(&self) -> SessionMeta {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let tokens = self.tokens.lock().ok().and_then(|t| t.clone());
+        // ADR-024: read the absolute byte offset of the most recent
+        // compaction marker from the shared Arc. The writer updates this
+        // synchronously via `WriterCommand::AppendCompactionEntry`, so the
+        // value is fresh as long as compaction writes are awaited
+        // (see `append_compaction_event`).
+        let last_compaction_offset = self
+            .last_compaction_offset
+            .lock()
+            .ok()
+            .and_then(|g| *g);
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -520,7 +605,7 @@ impl ConversationSession {
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
-            last_compaction_offset: None,
+            last_compaction_offset,
             corrupted: false,
         }
     }
@@ -682,9 +767,19 @@ impl ConversationSession {
 
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
+        // ADR-024: shared `last_compaction_offset` between writer and
+        // session. Brand-new session starts with `None` — no compaction
+        // has occurred yet.
+        let last_compaction_offset = Arc::new(std::sync::Mutex::new(None));
+
         // ADR-024: no JSONL header — file starts at line 0.
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, rx, committed_lines);
+        let writer = ConversationWriter::new(
+            file,
+            rx,
+            last_compaction_offset.clone(),
+            committed_lines,
+        );
         std::thread::spawn(move || writer.run());
 
         // Meta-change notification channel. The receiver is consumed by the
@@ -723,6 +818,7 @@ impl ConversationSession {
             last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(0.0),
             last_context_usage: std::sync::Mutex::new(String::new()),
+            last_compaction_offset,
         };
 
         // ADR-024: write per-session meta file (replaces index.json update).
@@ -772,8 +868,19 @@ impl ConversationSession {
         let existing_lines = count_jsonl_lines(&file_path).unwrap_or(0);
         committed_lines.store(existing_lines, Ordering::Relaxed);
 
+        // ADR-024: restore the absolute byte offset of the most recent
+        // compaction marker from meta, so the next restore (or any code
+        // path that reads `build_meta()` immediately) sees the persisted
+        // value instead of starting from `None`.
+        let last_compaction_offset = Arc::new(std::sync::Mutex::new(meta.last_compaction_offset));
+
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer = ConversationWriter::new(file, rx, committed_lines);
+        let writer = ConversationWriter::new(
+            file,
+            rx,
+            last_compaction_offset.clone(),
+            committed_lines,
+        );
         std::thread::spawn(move || writer.run());
 
         let (config_tx, config_rx) = mpsc::unbounded_channel::<ConfigChange>();
@@ -803,6 +910,7 @@ impl ConversationSession {
                 last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(0.0),
                 last_context_usage: std::sync::Mutex::new(String::new()),
+                last_compaction_offset,
             },
             config_rx,
             state_rx,
@@ -876,6 +984,14 @@ impl ConversationSession {
     /// surviving messages. The session restorer uses the most recent such
     /// event to determine the replay window.
     ///
+    /// Synchronous: blocks until the writer has seeked, written the entry,
+    /// and updated the shared `last_compaction_offset` Arc. Compaction is
+    /// rare (only at 80%+ context pressure), so the blocking cost is
+    /// negligible, but the guarantee is required so the very next
+    /// `write_meta()` reads a fresh `last_compaction_offset` instead of
+    /// racing the writer thread (which would otherwise persist `None` and
+    /// force the next restore to fall back to the O(N) rposition scan).
+    ///
     /// The entry's `role` is set to `"system"` so legacy v1 readers (and any
     /// frontend that ignores `kind`) treat it as a benign system note.
     pub fn append_compaction_event(&self, summary: &str, meta: CompactionEventMeta) {
@@ -888,8 +1004,27 @@ impl ConversationSession {
             metadata: metadata_value,
             kind: Some(ENTRY_KIND_COMPACTION.to_string()),
         };
-        if let Err(e) = self.sender.send(WriterCommand::AppendEntry(entry)) {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        if let Err(e) = self
+            .sender
+            .send(WriterCommand::AppendCompactionEntry { entry, done: done_tx })
+        {
             tracing::error!("Failed to send compaction event to conversation writer: {}", e);
+            return;
+        }
+        // Block until the writer has flushed the entry + updated the shared
+        // `last_compaction_offset`. The writer always sends on `done` (even
+        // on write failure) so this cannot deadlock under normal conditions.
+        // A std `sync_channel(0)` `recv` is safe to block on from any context
+        // — including inside an async tokio task — unlike
+        // `tokio::sync::oneshot::blocking_recv` which panics when invoked
+        // from within a tokio runtime.
+        match done_rx.recv() {
+            Ok(()) => {}
+            Err(e) => tracing::error!(
+                "Compaction writer dropped its done channel before reply: {}",
+                e
+            ),
         }
     }
 
@@ -1228,6 +1363,103 @@ impl ConversationSession {
         // Hot field — the relay task coalesces these behind a 3 s cooldown.
         self.notify_state_change();
     }
+
+    /// Persist a compaction LLM call's raw `usage` into the session token
+    /// accumulator.
+    ///
+    /// Unlike [`Self::accumulate_llm_usage`], this method does **not** overwrite
+    /// `last_input` with the compaction LLM's `prompt_tokens`. The compaction
+    /// LLM was given the **full pre-compaction history** plus a summary
+    /// instruction as input, so its prompt size is unrepresentative of the
+    /// post-compaction session state — overwriting `last_input` would inflate
+    /// the displayed context usage until the next main-dialog LLM call
+    /// recalibrates it via `accumulate_llm_usage`.
+    ///
+    /// What this method does:
+    /// - Accumulates `total_input` / `total_output` for billing/metrics parity
+    ///   with main-dialog calls (the tokens really were spent, just on a
+    ///   meta-call).
+    /// - Preserves the previous `last_input` / `last_output` so the next
+    ///   `emit_session_state()` push continues to reflect the most recent
+    ///   user-facing LLM call.
+    /// - Writes meta and notifies the state relay so the cumulative totals
+    ///   appear in the next `SessionStateChanged` push.
+    ///
+    /// **Caller contract**: invoke exactly once per successful compaction,
+    /// after the summary LLM call returns and before
+    /// [`Self::set_history_anchor`] (which anchors `last_input` to the
+    /// post-compaction `history.token_count()`).
+    pub fn accumulate_compaction_usage(&self, usage: &UsageInfo) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            let prev_last_input = guard.as_ref().map(|t| t.last_input).unwrap_or(0);
+            let prev_last_output = guard.as_ref().map(|t| t.last_output).unwrap_or(0);
+            let total_input = if usage.prompt_tokens > 0 {
+                guard
+                    .as_ref()
+                    .map(|t| t.total_input)
+                    .unwrap_or(0)
+                    .saturating_add(usage.prompt_tokens)
+            } else {
+                guard.as_ref().map(|t| t.total_input).unwrap_or(0)
+            };
+            let total_output = guard
+                .as_ref()
+                .map(|t| t.total_output)
+                .unwrap_or(0)
+                .saturating_add(usage.completion_tokens);
+            *guard = Some(SessionTokens {
+                last_input: prev_last_input,
+                last_output: prev_last_output,
+                total_input,
+                total_output,
+            });
+        }
+        self.write_meta();
+        self.notify_state_change();
+    }
+
+    /// Anchor `last_input` to the post-compaction history size so the next
+    /// `emit_session_state()` push reports the new (smaller) `usage_percent`
+    /// **immediately**, without waiting for the next main-dialog LLM call.
+    ///
+    /// `new_tokens` typically comes from `history.token_count()` after
+    /// `replace_middle_with_summary`. It is a **heuristic** local estimate,
+    /// not a Provider-reported value — the next `accumulate_llm_usage()`
+    /// call will overwrite it with the API's authoritative `prompt_tokens`
+    /// for the next main dialog turn.
+    ///
+    /// Why this is needed:
+    /// - `emit_session_state()` derives `context_usage.usage_percent` from
+    ///   `tokens.last_input`. Before this anchor, that field still reflects
+    ///   the pre-compaction LLM call's `prompt_tokens`, which is much
+    ///   larger than the post-compaction history.
+    /// - Without this anchor, the `SessionStateChanged` push sent via
+    ///   `notify_state_change()` (triggered by `accumulate_compaction_usage`)
+    ///   carries a stale, inflated percentage that contradicts the
+    ///   standalone `ContextUsage` event also published at the same instant.
+    ///   Frontends that key off `SessionStateChanged` then show a confusing
+    ///   "70% before, 20% after next message" jump.
+    ///
+    /// `last_output` is set to 0 because there is no completion event
+    /// associated with the compaction event itself; the summary's completion
+    /// tokens were already counted into `total_output` by
+    /// `accumulate_compaction_usage`.
+    pub fn set_history_anchor(&self, new_tokens: u64) {
+        if let Ok(mut guard) = self.tokens.lock() {
+            let (total_input, total_output) = guard
+                .as_ref()
+                .map(|t| (t.total_input, t.total_output))
+                .unwrap_or((0, 0));
+            *guard = Some(SessionTokens {
+                last_input: new_tokens,
+                last_output: 0,
+                total_input,
+                total_output,
+            });
+        }
+        self.write_meta();
+        self.notify_state_change();
+    }
 }
 
 // Send + Sync are auto-derived: all fields (String, Mutex<X: Send>,
@@ -1289,6 +1521,11 @@ impl Clone for ConversationSession {
             last_context_usage: std::sync::Mutex::new(
                 self.last_context_usage.lock().ok().map(|s| s.clone()).unwrap_or_default(),
             ),
+            // ADR-024: share the same Arc with the original — clones observe
+            // future compaction writes from the writer thread exactly like
+            // the parent does. This matches the comment above that the
+            // sender is shared for the same reason.
+            last_compaction_offset: self.last_compaction_offset.clone(),
         }
     }
 }
@@ -2609,6 +2846,207 @@ mod tests {
         assert_eq!(t.last_output, 0);
         assert_eq!(t.total_input, 0);
         assert_eq!(t.total_output, 0);
+    }
+
+    /// Regression: a compaction summary LLM call must NOT overwrite
+    /// `last_input` with the summary's `prompt_tokens`. The summary LLM
+    /// was given the full pre-compaction history as input, so its prompt
+    /// size is unrepresentative of the post-compaction session state.
+    /// Overwriting would inflate the displayed context usage until the
+    /// next main-dialog LLM call recalibrates it.
+    #[test]
+    fn test_accumulate_compaction_usage_preserves_last_input() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) = ConversationSession::new(
+                &dir,
+                "tok_compaction_preserve",
+                cfg,
+                0,
+                committed,
+            )
+            .unwrap();
+
+            // Simulate a previous main-dialog LLM call: 10_000 input, 500 output.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 10_000,
+                completion_tokens: 500,
+                ..Default::default()
+            });
+            let before = session.tokens().expect("tokens should be set");
+            assert_eq!(before.last_input, 10_000);
+            assert_eq!(before.last_output, 500);
+            assert_eq!(before.total_input, 10_000);
+            assert_eq!(before.total_output, 500);
+
+            // Simulate the compaction summary LLM call: the summary was
+            // generated from the full pre-compaction history, so its
+            // prompt_tokens are large (much larger than the post-compaction
+            // session state). Its completion_tokens count the summary output.
+            let summary_prompt_tokens = 80_000;
+            let summary_completion_tokens = 1_200;
+            session.accumulate_compaction_usage(&UsageInfo {
+                prompt_tokens: summary_prompt_tokens,
+                completion_tokens: summary_completion_tokens,
+                ..Default::default()
+            });
+
+            let after = session.tokens().expect("tokens should be set");
+            // last_input / last_output MUST be preserved — the compaction
+            // LLM's prompt is not a representative measurement of the
+            // current session's input size.
+            assert_eq!(
+                after.last_input, 10_000,
+                "accumulate_compaction_usage must preserve last_input"
+            );
+            assert_eq!(
+                after.last_output, 500,
+                "accumulate_compaction_usage must preserve last_output"
+            );
+            // Cumulative totals MUST still absorb the summary LLM's tokens
+            // for billing/metrics parity with main-dialog calls.
+            assert_eq!(
+                after.total_input,
+                10_000 + summary_prompt_tokens,
+                "accumulate_compaction_usage must accumulate total_input"
+            );
+            assert_eq!(
+                after.total_output,
+                500 + summary_completion_tokens,
+                "accumulate_compaction_usage must accumulate total_output"
+            );
+        });
+    }
+
+    /// Regression: `set_history_anchor` must overwrite `last_input` to the
+    /// post-compaction history size so `emit_session_state()` reports the
+    /// new (smaller) `usage_percent` immediately. `last_output` resets to 0
+    /// because no completion event is associated with the compaction event
+    /// itself; the summary's completion tokens were already counted into
+    /// `total_output` by `accumulate_compaction_usage`.
+    #[test]
+    fn test_set_history_anchor_overwrites_last_input() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) = ConversationSession::new(
+                &dir,
+                "tok_history_anchor",
+                cfg,
+                0,
+                committed,
+            )
+            .unwrap();
+
+            // Pre-anchor state: simulate a previous main-dialog call (last_input
+            // = 10_000) followed by a compaction summary call that preserves
+            // last_input.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 10_000,
+                completion_tokens: 500,
+                ..Default::default()
+            });
+            session.accumulate_compaction_usage(&UsageInfo {
+                prompt_tokens: 80_000,
+                completion_tokens: 1_200,
+                ..Default::default()
+            });
+
+            // Anchor to the post-compaction history size. Typical numbers:
+            // pre-compaction history ~80K tokens, summary trims it to ~20K.
+            let post_compaction_tokens: u64 = 20_000;
+            session.set_history_anchor(post_compaction_tokens);
+
+            let after = session.tokens().expect("tokens should be set");
+            assert_eq!(
+                after.last_input, post_compaction_tokens,
+                "set_history_anchor must overwrite last_input with the post-compaction size"
+            );
+            assert_eq!(
+                after.last_output, 0,
+                "set_history_anchor must reset last_output (no completion event)"
+            );
+            // Cumulative totals must NOT change — anchor only updates the
+            // display anchor.
+            assert_eq!(after.total_input, 10_000 + 80_000);
+            assert_eq!(after.total_output, 500 + 1_200);
+        });
+    }
+
+    /// Regression: ordering matters — `set_history_anchor` must run AFTER
+    /// `accumulate_compaction_usage` so the final `last_input` is the
+    /// post-compaction history size (heuristic), not the summary LLM's
+    /// pre-compaction prompt size. Simulates the exact ordering in
+    /// `AgentLoop::compact_history_if_needed`.
+    #[test]
+    fn test_compaction_pipeline_ordering() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "tok_compaction_order", cfg, 0, committed).unwrap();
+
+            // 1. Last main-dialog LLM call before compaction.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 144_000,
+                completion_tokens: 600,
+                ..Default::default()
+            });
+
+            // 2. Compaction summary LLM call (preserves last_input=144_000).
+            session.accumulate_compaction_usage(&UsageInfo {
+                prompt_tokens: 144_000,
+                completion_tokens: 1_500,
+                ..Default::default()
+            });
+
+            // 3. History replace_middle_with_summary — token_count() drops
+            //    to ~20K. Anchor to that.
+            session.set_history_anchor(20_000);
+
+            // 4. Next user message → main-dialog LLM call.
+            //    This overwrites last_input with the real API value.
+            session.accumulate_llm_usage(&UsageInfo {
+                prompt_tokens: 23_500,
+                completion_tokens: 800,
+                ..Default::default()
+            });
+
+            let final_tokens = session.tokens().expect("tokens should be set");
+            assert_eq!(
+                final_tokens.last_input, 23_500,
+                "final last_input must come from the most recent main-dialog call"
+            );
+            assert_eq!(final_tokens.last_output, 800);
+            // Cumulative totals include all four events.
+            assert_eq!(final_tokens.total_input, 144_000 + 144_000 + 23_500);
+            assert_eq!(final_tokens.total_output, 600 + 1_500 + 800);
+        });
     }
 
     #[test]

@@ -962,30 +962,25 @@ impl SessionManager {
         if let Some(outcome) = restored {
             session_state.history_mut().load_restored(outcome.messages);
 
-            // ── ADR-032 C5: re-apply in-memory compression ────────────────
-            // The JSONL always stores raw tool output — compression state is
-            // derived at runtime by rules (core principle #6), not persisted.
-            // Restore must re-drive compression so that a resumed session
-            // starts with the same look as a continuously-running session.
+            // NOTE: restore no longer re-applies `compress_tool_results` here.
             //
-            // This runs *before* `fit_to_budget_lossless` so that compression
-            // (lossless) recovers as much headroom as possible before the
-            // lossy trim (which discards entire messages).
-            let n = self.core.tool_result_keep_recent_n();
-            let soft_threshold = self.core.tool_result_soft_threshold_chars();
-            let compressed = session_state
-                .history_mut()
-                .compress_tool_results(soft_threshold, n as usize);
-            if compressed > 0 {
-                session_state.history_mut().recalibrate_tokens();
-                tracing::info!(
-                    compressed,
-                    keep_recent_n = n,
-                    soft_threshold_chars = soft_threshold,
-                    "ADR-032 restore: compressed oversized tool results"
-                );
-            }
-
+            // ADR-032 compression operates on the in-memory history. Re-running
+            // it on resume would shrink the post-restore context but leave
+            // `SessionTokens.last_input` (restored from meta) untouched,
+            // causing `emit_session_state` to surface a stale, inflated
+            // `usage_percent` that immediately collapses to a smaller value
+            // after the first new LLM call (the live call sends the
+            // just-compressed history, so its `prompt_tokens` is much smaller
+            // than `last_input`).
+            //
+            // Compression during the original session is event-driven (assistant
+            // long text / todos completion / manual). If none of those fired
+            // before the session ended, the JSONL stores uncompressed tool
+            // output and `last_input` already reflects that state — no restore
+            // re-compression needed.
+            //
+            // `fit_to_budget_lossless` remains the safety net for the
+            // "resumed under a smaller model" case.
             let dropped = session_state.history_mut().fit_to_budget_lossless();
             if dropped > 0 {
                 tracing::warn!(
