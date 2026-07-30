@@ -71,9 +71,51 @@ const STREAM_FLUSH_THROTTLE_MS = 500;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-/** Per-session state owned by chatAdapterStore.  C2 keeps the legacy
- *  field shape verbatim so consumers can be migrated one-by-one. */
+/** Per-session state owned by chatAdapterStore.  C3 splits the
+ *  surface into two layers:
+ *
+ *  - **liveBuffer**: structured ChatMessage[] entries (4 fields) that
+ *    the v2 adapter folds into MessageBlock (marked `isLive: true`).
+ *  - **legacy projection fields**: text / timestamp previews kept
+ *    so C2 consumers (ChatPanel → VML → StreamingSourceBlock) keep
+ *    working without a behavior change.  C5 will drop these when
+ *    the rendering layer fully consumes `adapter.blocks`.
+ */
+export interface LiveBuffer {
+  /**
+   * Mid-stream thought (reasoning) text.  Populated as a single
+   * rolling ChatMessage keyed by `messageId`.  Cleared on
+   * `record_complete (role: thought)`.
+   */
+  thinkingStream: ChatMessage | null;
+  /**
+   * Mid-stream assistant text.  Populated as a single rolling
+   * ChatMessage keyed by `messageId`.  Cleared on
+   * `record_complete (role: assistant)`.
+   */
+  assistantStream: ChatMessage | null;
+  /**
+   * User message just sent (optimistic).  Persists until the
+   * matching server record arrives via `loadSessionMessages`.
+   */
+  pendingUserMessage: ChatMessage | null;
+  /**
+   * Records that have completed via `record_complete` but have
+   * not yet been confirmed by an HTTP refresh.  Each entry is a
+   * fully-formed ChatMessage ready to be folded into blocks.
+   * Cleared when the matching server id arrives.
+   */
+  pendingRecordComplete: ChatMessage[];
+}
+
 export interface AdapterSessionState {
+  // ── liveBuffer (v2 adapter primary source) ──
+  /** The 4-field live buffer — see {@link LiveBuffer}. */
+  liveBuffer: LiveBuffer;
+  /** Pinned-to-bottom signal — set by the scroll controller. */
+  isPinnedToBottom: boolean;
+
+  // ── legacy projection fields (C2 compat) ──
   /** True while the agent is in the thinking/reasoning phase. */
   isThinking: boolean;
   /** Timestamp when the current thinking phase started. */
@@ -96,15 +138,26 @@ export interface AdapterSessionState {
    * Unconfirmed user messages (text + attachment system entries)
    * written by `sendMessage` and dropped when the matching server
    * record arrives (same `id`).
+   *
+   * ADR-050 C3: prefer `liveBuffer.pendingUserMessage` (single
+   * rolling entry).  This field is kept as the multi-entry
+   * projection for C2 consumers (ChatPanel builds a
+   * `[messages, optimisticEntries]` display array).
    */
   optimisticEntries: ChatMessage[];
-  /** Pinned-to-bottom signal — set by the scroll controller.  C2 keeps
-   *  the field here so existing consumers don't break; C4 will move
-   *  the read/write to the scroll controller's own subscription model. */
-  isPinnedToBottom: boolean;
 }
 
+const DEFAULT_LIVE_BUFFER: LiveBuffer = {
+  thinkingStream: null,
+  assistantStream: null,
+  pendingUserMessage: null,
+  pendingRecordComplete: [],
+};
+
 const DEFAULT_ADAPTER_SESSION_STATE: AdapterSessionState = {
+  liveBuffer: { ...DEFAULT_LIVE_BUFFER },
+  isPinnedToBottom: true,
+  // Legacy fields (C2 compat)
   isThinking: false,
   thinkingStartTime: null,
   thinkingContent: "",
@@ -112,7 +165,6 @@ const DEFAULT_ADAPTER_SESSION_STATE: AdapterSessionState = {
   assistantStreamingStartTime: null,
   isAssistantReplying: false,
   optimisticEntries: [],
-  isPinnedToBottom: true,
 };
 
 /** Event payload emitted by `subscribe()`.  ADR-050 §3.5: C3 will use
@@ -239,9 +291,17 @@ export function ingestOptimisticUserMessage(
   sessionId: string,
   entries: ChatMessage[],
 ): void {
+  if (entries.length === 0) return;
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
+  // ADR-050 C3: liveBuffer.pendingUserMessage holds the LATEST
+  // optimistic user message (single rolling slot — sent messages are
+  // typically replied to one at a time).  We also append to
+  // optimisticEntries so C2 consumers (ChatPanel's display array)
+  // keep working until C5.
+  const head = entries[entries.length - 1];
   patchSession(key, {
+    liveBuffer: { ...current.liveBuffer, pendingUserMessage: head },
     optimisticEntries: [...current.optimisticEntries, ...entries],
   });
   emit({ kind: "flushAvailable", sessionKey: key });
@@ -260,16 +320,38 @@ export function clearOptimisticEntries(
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
   const remaining = current.optimisticEntries.filter((m) => !ids.has(m.id));
-  if (remaining.length === current.optimisticEntries.length) return;
-  patchSession(key, { optimisticEntries: remaining });
+  // ADR-050 C3: also drop the liveBuffer.pendingUserMessage if it was
+  // confirmed, and prune the matching id from pendingRecordComplete[].
+  const lb = current.liveBuffer;
+  const nextLb: LiveBuffer = {
+    ...lb,
+    pendingUserMessage: lb.pendingUserMessage && ids.has(lb.pendingUserMessage.id) ? null : lb.pendingUserMessage,
+    pendingRecordComplete: lb.pendingRecordComplete.filter((m) => !ids.has(m.id)),
+  };
+  if (remaining.length === current.optimisticEntries.length && lb === nextLb) return;
+  patchSession(key, {
+    optimisticEntries: remaining,
+    liveBuffer: nextLb,
+  });
 }
 
 /** Drop every optimistic entry for a session.  Used on session close. */
 export function clearAllOptimisticEntries(agentId: string, sessionId: string): void {
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
-  if (current.optimisticEntries.length === 0) return;
-  patchSession(key, { optimisticEntries: [] });
+  const lb = current.liveBuffer;
+  const hasOptimistic = current.optimisticEntries.length > 0
+    || lb.pendingUserMessage !== null
+    || lb.pendingRecordComplete.length > 0;
+  if (!hasOptimistic) return;
+  patchSession(key, {
+    optimisticEntries: [],
+    liveBuffer: {
+      ...lb,
+      pendingUserMessage: null,
+      pendingRecordComplete: [],
+    },
+  });
 }
 
 /**
@@ -287,12 +369,13 @@ export function ingestStreamDelta(
   if (lines.length === 0) return;
   const key = sessionKey(agentId, sessionId);
   const role = lines[0].role === "assistant" ? "assistant" : "thought";
+  const msgId = lines[0].message_id;
+  const now = Date.now();
 
   if (role === "thought") {
-    const msgId = lines[0].message_id;
     let stream = activeStreams.get(key);
     if (!stream || stream.messageId !== msgId) {
-      stream = { messageId: msgId, role: "thought", lineCount: 0, lines: [], startTime: Date.now() };
+      stream = { messageId: msgId, role: "thought", lineCount: 0, lines: [], startTime: now };
       activeStreams.set(key, stream);
     }
     for (const l of lines) {
@@ -302,24 +385,52 @@ export function ingestStreamDelta(
       stream.lines = stream.lines.slice(-PREVIEW_LINE_CAP);
     }
     const current = readSession(key);
-    if (!current.isThinking) {
-      // Edge-trigger: first chunk of a new thought → flip on + seed.
+    // ADR-050 C3: write the rolling ChatMessage to liveBuffer.thinkingStream
+    // so the v2 adapter can fold it into MessageBlock.  We construct a
+    // synthetic ChatMessage that mirrors what the server would emit for
+    // the completed thought (same id, joined content, same startTime).
+    const lb = current.liveBuffer;
+    if (!lb.thinkingStream || lb.thinkingStream.id !== msgId) {
+      // First chunk of a new thought → edge-trigger the rolling entry.
+      const draft: ChatMessage = {
+        id: msgId,
+        type: "thought",
+        content: stream.lines.map((l) => l.content).join("\n"),
+        timestamp: stream.startTime,
+      };
       patchSession(key, {
+        liveBuffer: { ...lb, thinkingStream: draft },
         isThinking: true,
         thinkingStartTime: stream.startTime,
-        thinkingContent: stream.lines.map((l) => l.content).join("\n"),
+        thinkingContent: draft.content,
       });
-      lastThinkingFlush.set(key, Date.now());
+      lastThinkingFlush.set(key, now);
     } else if (current.isPinnedToBottom) {
       // Throttled trailing preview flush — only when user is at the
       // bottom (the ThinkBlock is in the viewport).  Mirrors the
       // pre-ADR-050 store's "skip flush when not at bottom" rule.
-      const now = Date.now();
       const last = lastThinkingFlush.get(key) ?? 0;
       if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
         const content = stream.lines.map((l) => l.content).join("\n");
         if (content !== current.thinkingContent) {
-          patchSession(key, { thinkingContent: content });
+          patchSession(key, {
+            liveBuffer: { ...lb, thinkingStream: { ...lb.thinkingStream, content } },
+            thinkingContent: content,
+          });
+        }
+        lastThinkingFlush.set(key, now);
+      }
+    } else {
+      // Off-bottom throttled flush — still update liveBuffer so the v2
+      // adapter's blocks stay fresh, but skip the legacy text field
+      // (it would force a re-render of a block the user can't see).
+      const last = lastThinkingFlush.get(key) ?? 0;
+      if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
+        const content = stream.lines.map((l) => l.content).join("\n");
+        if (content !== lb.thinkingStream?.content) {
+          patchSession(key, {
+            liveBuffer: { ...lb, thinkingStream: { ...lb.thinkingStream, content } },
+          });
         }
         lastThinkingFlush.set(key, now);
       }
@@ -329,13 +440,12 @@ export function ingestStreamDelta(
   }
 
   // ── assistant ──
-  const msgId = lines[0].message_id;
   let stream = activeStreams.get(key);
   const isFirstChunk = !stream || stream.messageId !== msgId;
   if (isFirstChunk) {
-    stream = { messageId: msgId, role: "assistant", lineCount: 0, lines: [], startTime: Date.now() };
+    stream = { messageId: msgId, role: "assistant", lineCount: 0, lines: [], startTime: now };
     activeStreams.set(key, stream);
-    lastAssistantFlush.set(key, Date.now());
+    lastAssistantFlush.set(key, now);
   }
   if (!stream) return;
   stream.lineCount += lines.length;
@@ -356,23 +466,40 @@ export function ingestStreamDelta(
   }
   const current = readSession(key);
   const shouldBeReplying = stream.lineCount > ASSISTANT_REPLYING_LINE_THRESHOLD;
+  const content = stream.lines.map((l) => l.content).join("\n");
+  // ADR-050 C3: write the rolling ChatMessage to liveBuffer.assistantStream.
+  const lb = current.liveBuffer;
+  const newLbEntry: ChatMessage = isFirstChunk
+    ? {
+        id: msgId,
+        type: "assistant",
+        content,
+        timestamp: stream.startTime,
+      }
+    : { ...(lb.assistantStream ?? { id: msgId, type: "assistant", timestamp: stream.startTime }), content };
+  const patch: Partial<AdapterSessionState> = {
+    liveBuffer: { ...lb, assistantStream: newLbEntry },
+  };
   if (shouldBeReplying !== current.isAssistantReplying) {
-    patchSession(key, { isAssistantReplying: shouldBeReplying });
+    patch.isAssistantReplying = shouldBeReplying;
   }
   if (isFirstChunk) {
-    patchSession(key, { assistantStreamingStartTime: stream.startTime });
+    patch.assistantStreamingStartTime = stream.startTime;
   }
+  // Throttled trailing preview flush — only when at-bottom (C2
+  // optimization).  C3 must still update liveBuffer even when not at
+  // bottom so the v2 adapter's block list stays consistent; the
+  // legacy text field stays as a re-render guard.
   if (current.isPinnedToBottom) {
-    const now = Date.now();
     const last = lastAssistantFlush.get(key) ?? 0;
     if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
-      const content = stream.lines.map((l) => l.content).join("\n");
       if (content !== current.assistantStreamingContent) {
-        patchSession(key, { assistantStreamingContent: content });
+        patch.assistantStreamingContent = content;
       }
       lastAssistantFlush.set(key, now);
     }
   }
+  patchSession(key, patch);
   emit({ kind: "liveUpdate", sessionKey: key });
 }
 
@@ -390,20 +517,55 @@ export function ingestRecordComplete(
 ): void {
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
+  const lb = current.liveBuffer;
   const patch: Partial<AdapterSessionState> = {};
-  if (current.isAssistantReplying) {
+
+  // ADR-050 C3: the completed record enters pendingRecordComplete[] so
+  // the v2 adapter can fold it into blocks until the HTTP refresh
+  // confirms.  For thought / assistant we already have a draft
+  // (liveBuffer.thinkingStream / assistantStream) — we promote that
+  // draft, then clear the rolling entry.
+  if (args.role === "thought" && lb.thinkingStream && lb.thinkingStream.id === args.messageId) {
+    patch.liveBuffer = {
+      ...lb,
+      thinkingStream: null,
+      pendingRecordComplete: [...lb.pendingRecordComplete, lb.thinkingStream],
+    };
+    if (current.isThinking) patch.isThinking = false;
+    if (current.thinkingContent !== "") patch.thinkingContent = "";
+    lastThinkingFlush.delete(key);
+  } else if (args.role === "assistant" && lb.assistantStream && lb.assistantStream.id === args.messageId) {
+    patch.liveBuffer = {
+      ...lb,
+      assistantStream: null,
+      pendingRecordComplete: [...lb.pendingRecordComplete, lb.assistantStream],
+    };
+    if (current.isAssistantReplying) patch.isAssistantReplying = false;
+    if (current.assistantStreamingContent !== "") patch.assistantStreamingContent = "";
+    if (current.assistantStreamingStartTime !== null) patch.assistantStreamingStartTime = null;
+    lastAssistantFlush.delete(key);
+  }
+
+  // ADR-050 C3: for tool_call / tool_result records that arrive without
+  // a prior draft (e.g. rapid parallel tool invocations), we don't have
+  // a draft to promote.  In that case we just clear the per-stream
+  // tracker; the HTTP refresh will surface the record.
+  if (current.isAssistantReplying && !patch.isAssistantReplying) {
     patch.isAssistantReplying = false;
   }
-  if (current.assistantStreamingContent !== "" || current.assistantStreamingStartTime !== null) {
+  if (current.assistantStreamingContent !== "" && !("assistantStreamingContent" in patch)) {
     patch.assistantStreamingContent = "";
+  }
+  if (current.assistantStreamingStartTime !== null && !("assistantStreamingStartTime" in patch)) {
     patch.assistantStreamingStartTime = null;
     lastAssistantFlush.delete(key);
   }
-  if (args.role === "thought" && current.isThinking) {
+  if (current.isThinking && args.role === "thought" && !("isThinking" in patch)) {
     patch.isThinking = false;
-    patch.thinkingContent = "";
+    if (current.thinkingContent !== "") patch.thinkingContent = "";
     lastThinkingFlush.delete(key);
   }
+
   if (Object.keys(patch).length > 0) {
     patchSession(key, patch);
   }
@@ -412,7 +574,6 @@ export function ingestRecordComplete(
     activeStreams.delete(key);
   }
   emit({ kind: "recordComplete", sessionKey: key });
-  // C3 will also wire flushAvailable → HTTP refresh here.
 }
 
 /**
@@ -443,6 +604,42 @@ export function getChatAdapterSession(
   sessionId: string,
 ): AdapterSessionState {
   return readSession(sessionKey(agentId, sessionId));
+}
+
+/** Read the liveBuffer for a single (agent, session).  Used by the v2
+ *  adapter's blocksSelector. */
+export function getLiveBuffer(agentId: string, sessionId: string): LiveBuffer {
+  return readSession(sessionKey(agentId, sessionId)).liveBuffer;
+}
+
+// ── Adapter ingest API (C3 additions) ─────────────────────────────────────
+//
+// `ingestSessionMessagesWindow` is the v2 adapter's bridge from the HTTP
+// layer to the liveBuffer.  When an HTTP response lands, the v2 adapter
+// tells chatAdapterStore which ids the server confirmed so the matching
+// liveBuffer entries (pendingUserMessage / pendingRecordComplete[]) can
+// be cleared.  It also emits a `pageLoaded` event for downstream
+// subscribers (scrollController / ChatPanel).
+
+export function ingestSessionMessagesWindow(
+  agentId: string,
+  sessionId: string,
+  confirmedIds: ReadonlySet<string>,
+  meta: { direction: "prev" | "next" | "initial"; offset: number; limit: number; total: number },
+): void {
+  const key = sessionKey(agentId, sessionId);
+  // Clear any pending entries the server confirmed.
+  if (confirmedIds.size > 0) {
+    clearOptimisticEntries(agentId, sessionId, confirmedIds);
+  }
+  emit({ kind: "pageLoaded", sessionKey: key });
+  // The direction/offset/limit/total is exposed via the event for
+  // diagnostic consumers (C4 scrollController).  v2 adapter itself
+  // already has these in chatStore; this event is for downstream
+  // listeners that don't read chatStore directly.
+  // We attach a no-op extension: subscribers can read the latest
+  // chatStore cursor themselves.
+  void meta;
 }
 
 /** Release all per-session state (used on session close / eviction). */

@@ -41,6 +41,17 @@ const ATTACHMENT_FOLD_WINDOW_MS = 100;
  * - `hasFollowUpReply` true iff an `assistant` (or other non-explore) message
  *                    follows this explore block in display order.
  *                    Only meaningful for `type === "explore_group"`.
+ *
+ * ADR-050 C3 extension:
+ *  - `isLive`        : true iff at least one `items` entry originated in
+ *                    the adapter's `liveBuffer` (stream delta / optimistic
+ *                    user / record-complete) rather than the server-
+ *                    authoritative HTTP window.  VML routes
+ *                    `isLive === true` blocks through
+ *                    `StreamingSourceBlock`.  `foldMessages` itself is
+ *                    pure — it never sets `isLive`; the v2 adapter
+ *                    applies the flag in a post-fold pass based on
+ *                    `liveBuffer.containsId(item.id)`.
  */
 export interface MessageBlock {
   /** Content-derived stable ID: `block-${items[0].id}`. Survives prepend/append. */
@@ -50,6 +61,13 @@ export interface MessageBlock {
   rawCount: number;
   anchorToLatest: boolean;
   hasFollowUpReply: boolean;
+  /**
+   * ADR-050 C3: true iff at least one `items` entry originated in the
+   * adapter's liveBuffer.  VML routes `isLive === true` blocks through
+   * `StreamingSourceBlock` so the trailing preview + duration timer
+   * remain functional during streaming.  Default false (history-only).
+   */
+  isLive: boolean;
 }
 
 /** Check if a system message is an attachment entry (ADR-046 §2.5). */
@@ -93,6 +111,10 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
         exploreStartMsgIdx + items.length - 1 === lastIdx,
       // Backfilled in the second pass below.
       hasFollowUpReply: false,
+      // ADR-050 C3: set by the v2 adapter in a post-fold pass, never
+      // by foldMessages itself.  Default to false here so the
+      // legacy / pre-v2 callers keep working.
+      isLive: false,
     });
     exploreBuffer = [];
     exploreStartMsgIdx = -1;
@@ -135,6 +157,8 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
             rawCount: items.length,
             anchorToLatest: j - 1 === lastIdx,
             hasFollowUpReply: false,
+            // ADR-050 C3: see note in the explore_group branch above.
+            isLive: false,
           });
           i = j - 1; // skip the consumed attachment entries
           continue;
@@ -149,6 +173,8 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
         rawCount: 1,
         anchorToLatest: i === lastIdx,
         hasFollowUpReply: false,
+        // ADR-050 C3: see note in the explore_group branch above.
+        isLive: false,
       });
     }
   }
