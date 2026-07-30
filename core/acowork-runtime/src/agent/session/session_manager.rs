@@ -1834,6 +1834,16 @@ After installation, ask the user to re-enable the MCP server.",
     /// bypassing the serial inference queue. LLM-side effects (provider
     /// rebuild, context builder update) are deferred to the next turn
     /// boundary via version polling in SessionTask.
+    ///
+    /// The new model's default `reasoning_effort` is resolved here and
+    /// pre-set on the `ConversationSession` **before** `apply_config()`
+    /// so that the single `notify_config_change()` inside `apply_config`
+    /// publishes a snapshot with the correct `reasoning_effort`.
+    /// Previously, `apply_config` published a stale value from the
+    /// previous model, and `apply_llm_effects` (deferred to the next
+    /// turn boundary) cleared it too late - the frontend received the
+    /// stale value and its preserve-on-null rule prevented the
+    /// subsequent clear signal from taking effect.
     pub fn route_model_switch(
         &self,
         session_id: &str,
@@ -1851,6 +1861,26 @@ After installation, ask the user to re-enable the MCP server.",
             .get(session_id)
             .ok_or_else(|| RuntimeError::Config(format!("Session not found: {}", session_id)))?;
         if let Some(ref conv) = handle.conversation {
+            // Resolve the new model's default reasoning_effort using the
+            // same three-level priority chain as session init and HTTP GET:
+            //   1. persisted (None on model switch - clears any user override)
+            //   2. caps.default_reasoning_effort
+            //   3. supports_reasoning -> Auto
+            //   4. None (model doesn't support reasoning)
+            let caps = self.core.get_model_capabilities(&model);
+            let default_effort =
+                crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
+                    caps.as_ref(),
+                    None, // model switch: no persisted override
+                );
+            let effort_str = default_effort.as_ref().map(|e| e.to_string());
+
+            // Pre-set reasoning_effort without notify_config_change.
+            // apply_config's notify_config_change will publish the
+            // correct combined state (new model + new reasoning_effort)
+            // in a single MQTT message.
+            conv.set_reasoning_effort_raw(effort_str);
+
             let delta = crate::agent::session_config::SessionConfigDelta {
                 model: Some(model),
                 provider,

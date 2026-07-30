@@ -160,26 +160,19 @@ pub fn apply_llm_effects(
         // Update context builder for next iteration
         context_builder.set_override_model(model.clone());
 
-        // Model switch resets reasoning_effort to new model's default
-        // (clears any user override). Three-level priority chain —
-        // same logic as session resume and HTTP/MQTT read paths;
-        // see `resolve_effective_reasoning_effort` for the rationale.
-        let caps = agent_loop.core.get_model_capabilities(model);
-        let default_effort = crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
-            caps.as_ref(),
-            None, // model switch: no persisted override yet (clears any prior user-set value)
-        );
-        agent_loop.session.set_reasoning_effort(default_effort.clone());
-
-        // Persist new default effort to ConversationSession so resume
-        // is consistent. This does NOT go through apply_config() (which
-        // would increment config_version and trigger another cycle);
-        // it's a direct write of the LLM-side reset, not an external
-        // config mutation.
-        if let Some(conv) = agent_loop.session.conversation() {
-            let effort_str = default_effort.as_ref().map(|e| e.to_string());
-            conv.update_reasoning_effort(effort_str);
-        }
+        // Model switch: sync runtime LLM reasoning_effort state.
+        //
+        // The persisted `reasoning_effort` on `ConversationSession`
+        // is already correct - it was resolved and set atomically by
+        // `route_model_switch` via `set_reasoning_effort_raw` before
+        // `apply_config` called `notify_config_change`.  Here we only
+        // sync the runtime `SessionState` (used by the LLM call layer)
+        // to match the already-correct persisted value.
+        let runtime_effort = snapshot
+            .reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::from_str_loose);
+        agent_loop.session.set_reasoning_effort(runtime_effort);
     }
 
     // ── ReasoningEffort change (without model switch) ──────────────

@@ -1053,6 +1053,25 @@ impl ConversationSession {
         );
     }
 
+    /// Update `reasoning_effort` in-memory **without** calling
+    /// `write_meta()` or `notify_config_change()`.
+    ///
+    /// Used by `SessionManager::route_model_switch` to pre-set the
+    /// new model's default `reasoning_effort` **before** calling
+    /// `apply_config()`.  This way, the single `notify_config_change()`
+    /// inside `apply_config()` publishes a snapshot that already
+    /// contains the correct `reasoning_effort` for the new model —
+    /// there is no window where a stale value from the previous model
+    /// is published.
+    ///
+    /// `write_meta()` and `config_version` increment are handled by
+    /// the subsequent `apply_config()` call.
+    pub fn set_reasoning_effort_raw(&self, effort: Option<String>) {
+        if let Ok(mut r) = self.reasoning_effort.lock() {
+            *r = effort;
+        }
+    }
+
     /// Return the persisted temperature, if any.
     pub fn temperature(&self) -> Option<f32> {
         self.temperature.lock().ok().and_then(|t| *t)
