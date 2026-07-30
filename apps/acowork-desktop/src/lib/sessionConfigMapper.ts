@@ -1,15 +1,24 @@
-//! Session config mapping — single source of truth for HTTP and MQTT.
+//! Session config mapping - single source of truth for HTTP and MQTT.
 //!
 //! Both `fetchSessionConfig` (HTTP `GET /api/agents/{id}/sessions/{sid}/config`)
 //! and the MQTT `session_config` handler (retained on
 //! `acowork/agents/{id}/sessions/{sid}/config`) need to translate their
-//! payload into a `Partial<SessionChatState>` patch. Previously each
-//! caller did its own field-by-field mapping, and the two implementations
-//! drifted — the HTTP path cleared `reasoning_effort` to `null` on
-//! "no override" while the MQTT path didn't, which hid the ChatPanel
-//! reasoning-effort toggle button for every model until the session was
-//! reopened. This module fixes that by giving both callers one function
-//! with explicit semantics for "absent / null / no override".
+//! payload into a `Partial<SessionChatState>` patch. This module is the
+//! single mapping function used by both call sites.
+//!
+//! # Design principle: backend is the source of truth
+//!
+//! The backend resolves `reasoning_effort` through a three-level priority
+//! chain (persisted -> provider default -> supports_reasoning -> Auto ->
+//! None) and always publishes the effective value. The frontend must use
+//! the backend value directly - no preserve-on-null, no caching, no state
+//! stitching. This is the only way to guarantee the UI reflects the true
+//! backend state.
+//!
+//! Both HTTP and MQTT paths use `clearOnNull: true` because both deliver
+//! a full snapshot of the session config (not a partial delta). An
+//! absent/null field means "the session has no value for this field" and
+//! must overwrite any stale value from a previous session or model.
 
 /**
  * Unified session config input shape used by both HTTP and MQTT paths.
@@ -24,7 +33,7 @@
  *     "no override" is `""` for strings and `NaN` for floats
  *
  * The HTTP caller passes the deserialized JSON as-is. The MQTT caller
- * must rename `model_id` → `model`, `provider_id` → `provider` and convert
+ * must rename `model_id` -> `model`, `provider_id` -> `provider` and convert
  * `""` to `null` / `NaN` to `null` before calling.
  */
 export interface SessionConfigInput {
@@ -41,7 +50,7 @@ export interface SessionConfigInput {
  * stays decoupled from `SessionChatState`'s ~30 unrelated fields
  * (`messages`, `tokenUsage`, `isAssistantReplying`, ...). The patch
  * shape is structurally compatible with `Partial<SessionChatState>`
- * — TypeScript accepts it because the subset is a subset.
+ * - TypeScript accepts it because the subset is a subset.
  */
 export interface SessionConfigPatch {
   model?: string | null;
@@ -55,20 +64,9 @@ export interface SessionConfigPatchOptions {
    * Whether absent / null values should be propagated as explicit `null`
    * in the patch (true), or simply left out of the patch (false).
    *
-   * - `true`  → HTTP path. `fetchSessionConfig` runs on cold-load /
-   *              session-switch. A null field means "session has no value",
-   *              and we must wipe the previous session's value from the
-   *              UI, otherwise stale config from the prior session leaks
-   *              through until the next retained MQTT push.
-   *
-   * - `false` → MQTT path. The retained `session_config` envelope only
-   *              carries fields the Runtime explicitly emitted. An absent
-   *              field means "not in this payload", which must NOT clobber
-   *              the existing UI value (think: a `reasoning_effort` change
-   *              shouldn't blank the model).
-   *
-   * Note: this flag does NOT affect `reasoning_effort`, which always
-   * follows the preserve-on-null rule (see below).
+   * Both HTTP and MQTT paths should use `true` because both deliver a
+   * full snapshot. A null field means "session has no value" and must
+   * clear any stale value from the UI.
    */
   clearOnNull: boolean;
 }
@@ -77,29 +75,10 @@ export interface SessionConfigPatchOptions {
  * Single source of truth for mapping a SessionConfig snapshot (HTTP) or
  * `session_config` envelope (MQTT) into a `Partial<SessionChatState>`
  * patch. Both `fetchSessionConfig` and the MQTT `session_config` handler
- * MUST call this function. Do not inline the field-by-field mapping at
- * either call site — that's how the two paths drifted and hid the
- * reasoning-effort toggle button.
+ * MUST call this function.
  *
- * # `reasoning_effort` is special — preserve-on-null, always
- *
- * Regardless of `clearOnNull`, `reasoning_effort` is **never** cleared to
- * `null`. The ChatPanel renders the reasoning-effort toggle button only
- * when `currentReasoningEffort != null` (ChatPanel.tsx:1999). If this
- * mapper cleared `reasoning_effort` to `null` on every "absent" signal,
- * the button would disappear for every session whose backend hasn't
- * emitted an explicit `reasoning_effort` yet — which is **every** fresh
- * session, because the Runtime only populates `reasoning_effort` when
- * the user (or a model switch) explicitly sets it. The previous
- * behaviour (button hidden until next model switch / MQTT confirmation)
- * was the user-visible bug.
- *
- * The correct mental model:
- *   - `reasoning_effort: null` means "not configured yet"
- *   - `reasoning_effort: "auto" | "off" | ...` means "explicitly set"
- *   - Visibility of the toggle is gated on the model's capability
- *     (`ModelEntry.default_reasoning_effort` / `reasoning`), not on
- *     whether the backend has emitted an explicit value.
+ * The backend is the source of truth - the frontend uses the backend
+ * value directly, with no preserve-on-null or state stitching.
  */
 export function sessionConfigToPatch(
   config: SessionConfigInput,
@@ -108,30 +87,32 @@ export function sessionConfigToPatch(
   const patch: SessionConfigPatch = {};
   const { clearOnNull } = options;
 
-  // ── model ────────────────────────────────────────────────────────
+  // -- model --
   if (typeof config.model === "string" && config.model) {
     patch.model = config.model;
   } else if (clearOnNull) {
     patch.model = null;
   }
 
-  // ── provider ─────────────────────────────────────────────────────
+  // -- provider --
   if (typeof config.provider === "string" && config.provider) {
     patch.provider = config.provider;
   } else if (clearOnNull) {
     patch.provider = null;
   }
 
-  // ── temperature (NaN is the Runtime "no override" sentinel) ──────
+  // -- temperature (NaN is the Runtime "no override" sentinel) --
   if (typeof config.temperature === "number" && !Number.isNaN(config.temperature)) {
     patch.temperature = config.temperature;
   } else if (clearOnNull) {
     patch.temperature = null;
   }
 
-  // ── reasoning_effort (always preserve-on-null, see function doc) ─
+  // -- reasoning_effort (same logic as all other fields) --
   if (typeof config.reasoning_effort === "string" && config.reasoning_effort) {
     patch.reasoningEffort = config.reasoning_effort;
+  } else if (clearOnNull) {
+    patch.reasoningEffort = null;
   }
 
   return patch;

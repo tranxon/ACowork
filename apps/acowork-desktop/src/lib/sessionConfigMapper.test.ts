@@ -1,22 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { sessionConfigToPatch } from "./sessionConfigMapper";
 
-// These tests pin down the single source of truth for the HTTP `fetchSessionConfig`
-// path and the MQTT `session_config` retained-event path. They previously
-// existed as duplicated, hand-rolled copies of the production mapping inside
-// chatStore.test.ts — which is exactly how the two implementations drifted
-// and silently hid the reasoning-effort toggle button. If you find yourself
-// adding a "and what about clearOnNull: false" duplicate, add a new case
-// here instead.
+// These tests pin down the single source of truth for the HTTP
+// `fetchSessionConfig` path and the MQTT `session_config` retained-event
+// path. Both paths use `clearOnNull: true` because both deliver a full
+// snapshot of the session config - an absent/null field means "the
+// session has no value" and must clear any stale UI value.
+//
+// Design principle: backend is the source of truth. The frontend uses
+// the backend value directly - no preserve-on-null, no caching, no state
+// stitching.
 
 describe("sessionConfigToPatch", () => {
-  // ── HTTP path (clearOnNull: true) ──────────────────────────────
-  // ADR-047 P1: HTTP fetchSessionConfig runs on cold-load / session-switch.
-  // A null field MUST wipe the previous session's value from the UI,
-  // otherwise stale config from the prior session leaks through until the
-  // next retained MQTT push.
-  describe("clearOnNull: true (HTTP fetchSessionConfig)", () => {
-    it("sets model and provider when both are non-empty strings", () => {
+  // -- Both paths use clearOnNull: true (full snapshot) --
+
+  describe("clearOnNull: true", () => {
+    it("sets all fields when all are present", () => {
       const patch = sessionConfigToPatch(
         {
           model: "claude-3",
@@ -34,7 +33,7 @@ describe("sessionConfigToPatch", () => {
       });
     });
 
-    it("clears model and provider to null when backend returns null", () => {
+    it("clears all fields to null when backend returns null", () => {
       const patch = sessionConfigToPatch(
         {
           model: null,
@@ -44,19 +43,22 @@ describe("sessionConfigToPatch", () => {
         },
         { clearOnNull: true },
       );
-      expect(patch.model).toBeNull();
-      expect(patch.provider).toBeNull();
-      expect(patch.temperature).toBeNull();
+      expect(patch).toEqual({
+        model: null,
+        provider: null,
+        reasoningEffort: null,
+        temperature: null,
+      });
     });
 
-    it("treats empty-string model and provider as null and clears them", () => {
+    it("treats empty-string fields as null and clears them", () => {
       const patch = sessionConfigToPatch(
         { model: "", provider: "", reasoning_effort: "", temperature: 0 },
         { clearOnNull: true },
       );
-      // "" fails `typeof === "string" && truthy`, falls into clearOnNull branch.
       expect(patch.model).toBeNull();
       expect(patch.provider).toBeNull();
+      expect(patch.reasoningEffort).toBeNull();
       expect(patch.temperature).toBe(0); // 0 is a valid temperature
     });
 
@@ -67,38 +69,31 @@ describe("sessionConfigToPatch", () => {
       );
       expect(patch.temperature).toBeNull();
     });
-  });
 
-  // ── The headline test: the bug that motivated this refactor ──
-  // Before refactor, `fetchSessionConfig` cleared reasoning_effort to null
-  // on every cold load, which made ChatPanel hide the toggle button (its
-  // visibility condition is `currentReasoningEffort != null`). The toggle
-  // is gated on model capability, not on whether the backend has emitted
-  // an explicit value yet — so this rule is independent of clearOnNull.
-  describe("reasoning_effort preserve-on-null (both modes)", () => {
-    it("does NOT clear reasoningEffort to null when clearOnNull: true", () => {
-      // The whole point: HTTP cold-load on a fresh session (no
-      // reasoning_effort yet) must NOT hide the toggle button.
+    it("clears reasoningEffort to null when backend returns null", () => {
+      // Backend sends null when model doesn't support reasoning.
+      // Frontend must clear any stale value from a previous model.
       const patch = sessionConfigToPatch(
-        { model: "claude-3", provider: "anthropic", reasoning_effort: null },
+        { model: "glm-5.2", provider: "volcengine", reasoning_effort: null },
         { clearOnNull: true },
       );
-      expect("reasoningEffort" in patch).toBe(false);
-      expect(patch.reasoningEffort).toBeUndefined();
-      // But model/provider ARE cleared-as-set when present:
-      expect(patch.model).toBe("claude-3");
-      expect(patch.provider).toBe("anthropic");
+      expect(patch.reasoningEffort).toBeNull();
+      expect(patch.model).toBe("glm-5.2");
+      expect(patch.provider).toBe("volcengine");
     });
 
-    it("does NOT clear reasoningEffort to null when clearOnNull: false", () => {
+    it("clears reasoningEffort to null on empty string (proto sentinel)", () => {
+      // prost encodes Option<String> as "" for None. The MQTT caller
+      // converts "" to null before calling, but verify the mapper
+      // handles it correctly via clearOnNull.
       const patch = sessionConfigToPatch(
-        { reasoning_effort: null },
-        { clearOnNull: false },
+        { reasoning_effort: "" },
+        { clearOnNull: true },
       );
-      expect("reasoningEffort" in patch).toBe(false);
+      expect(patch.reasoningEffort).toBeNull();
     });
 
-    it("sets reasoningEffort only when a non-empty string is present", () => {
+    it("sets reasoningEffort when a non-empty string is present", () => {
       const patch = sessionConfigToPatch(
         { reasoning_effort: "medium" },
         { clearOnNull: true },
@@ -106,26 +101,17 @@ describe("sessionConfigToPatch", () => {
       expect(patch.reasoningEffort).toBe("medium");
     });
 
-    it("does not set reasoningEffort on empty string", () => {
-      const patch = sessionConfigToPatch(
-        { reasoning_effort: "" },
-        { clearOnNull: true },
-      );
-      expect("reasoningEffort" in patch).toBe(false);
-    });
-
-    it("does not set reasoningEffort on undefined", () => {
-      const patch = sessionConfigToPatch({}, { clearOnNull: true });
-      expect("reasoningEffort" in patch).toBe(false);
+    it("clears all fields for empty input", () => {
+      expect(sessionConfigToPatch({}, { clearOnNull: true })).toEqual({
+        model: null,
+        provider: null,
+        reasoningEffort: null,
+        temperature: null,
+      });
     });
   });
 
-  // ── MQTT path (clearOnNull: false) ─────────────────────────────
-  // The retained `session_config` envelope only carries fields the Runtime
-  // explicitly emitted. An absent field means "not in this payload", which
-  // must NOT clobber the existing UI value — a reasoning_effort change
-  // shouldn't blank the model.
-  describe("clearOnNull: false (MQTT session_config)", () => {
+  describe("clearOnNull: false (not used by current callers, tested for completeness)", () => {
     it("only emits fields that were present in the payload", () => {
       const patch = sessionConfigToPatch(
         { model: "gpt-4o", provider: "openai" },
@@ -145,7 +131,6 @@ describe("sessionConfigToPatch", () => {
     });
 
     it("propagates reasoning_effort change without touching model", () => {
-      // Simulates Runtime emitting a partial update (only reasoning_effort).
       const patch = sessionConfigToPatch(
         { reasoning_effort: "high" },
         { clearOnNull: false },
@@ -153,16 +138,12 @@ describe("sessionConfigToPatch", () => {
       expect(patch).toEqual({ reasoningEffort: "high" });
     });
 
-    it("treats NaN temperature as absent (prost 'no override' sentinel)", () => {
-      const patch = sessionConfigToPatch(
-        { model: "gpt-4o", provider: "openai", temperature: NaN },
-        { clearOnNull: false },
-      );
-      expect(patch).toEqual({ model: "gpt-4o", provider: "openai" });
+    it("returns an empty patch for empty input", () => {
+      expect(sessionConfigToPatch({}, { clearOnNull: false })).toEqual({});
     });
   });
 
-  // ── Idempotence / cross-mode sanity ───────────────────────────
+  // -- Cross-mode sanity --
   it("returns the same patch shape for HTTP and MQTT when values are equal", () => {
     const config = {
       model: "claude-3",
@@ -171,27 +152,10 @@ describe("sessionConfigToPatch", () => {
       temperature: 0.7,
     };
     const httpPatch = sessionConfigToPatch(config, { clearOnNull: true });
-    // MQTT caller normalizes "" → null before calling.
     const mqttPatch = sessionConfigToPatch(
       { ...config },
-      { clearOnNull: false },
+      { clearOnNull: true },
     );
     expect(httpPatch).toEqual(mqttPatch);
-  });
-
-  it("returns an empty patch when given empty input (clearOnNull: true)", () => {
-    // clearOnNull: true means "absent values should be propagated as
-    // explicit null" — so an empty input DOES produce {model: null,
-    // provider: null, temperature: null}. reasoning_effort is the
-    // exception (preserve-on-null, never cleared).
-    expect(sessionConfigToPatch({}, { clearOnNull: true })).toEqual({
-      model: null,
-      provider: null,
-      temperature: null,
-    });
-  });
-
-  it("returns an empty patch when given empty input (clearOnNull: false)", () => {
-    expect(sessionConfigToPatch({}, { clearOnNull: false })).toEqual({});
   });
 });

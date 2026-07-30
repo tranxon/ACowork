@@ -2209,9 +2209,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       // ADR-047 P1: null/empty values clear stale config from the previous
       // session. The mapper is the single source of truth for both HTTP
-      // and MQTT paths -- see sessionConfigMapper.ts for the rationale
-      // behind clearOnNull: true (and the special preserve-on-null rule
-      // for reasoning_effort).
+      // and MQTT paths - see sessionConfigMapper.ts. Both paths use
+      // clearOnNull: true because both deliver a full snapshot.
       const sessionPatch = sessionConfigToPatch(config, { clearOnNull: true });
 
       set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
@@ -3066,16 +3065,17 @@ function handleMessageEvent(
       // MQTT session_config envelope uses model_id / provider_id and encodes
       // "no override" as "" for strings / NaN for floats (prost can't
       // encode Option<T>). Normalize to the unified SessionConfigInput
-      // shape and delegate to the mapper. clearOnNull: false because the
-      // retained payload only carries fields the Runtime explicitly set;
-      // absent fields must NOT clobber the existing UI value.
+      // shape and delegate to the mapper. clearOnNull: true because the
+      // retained session_config is a full snapshot - every field is
+      // always present, and a null/empty value means "session has no
+      // override" which must clear any stale value from the UI.
       const mqttConfig: SessionConfigInput = {
         model: typeof data.model_id === "string" && data.model_id ? data.model_id : null,
         provider: typeof data.provider_id === "string" && data.provider_id ? data.provider_id : null,
         reasoning_effort: typeof data.reasoning_effort === "string" && data.reasoning_effort ? data.reasoning_effort : null,
         temperature: typeof data.temperature === "number" && !Number.isNaN(data.temperature) ? data.temperature : null,
       };
-      const patch = sessionConfigToPatch(mqttConfig, { clearOnNull: false });
+      const patch = sessionConfigToPatch(mqttConfig, { clearOnNull: true });
       if (Object.keys(patch).length > 0) {
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
