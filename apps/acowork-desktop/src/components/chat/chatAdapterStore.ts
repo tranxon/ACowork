@@ -348,11 +348,16 @@ export function ingestStreamDelta(
     const lb = current.liveBuffer;
     if (!lb.thinkingStream || lb.thinkingStream.id !== msgId) {
       // First chunk of a new thought → edge-trigger the rolling entry.
+      // startTime is stamped here (the authoritative moment the thought
+      // began streaming) so downstream rendering can show a live duration
+      // while the thought is in progress.  It is later read from the
+      // liveBuffer entry by chatStore when record_complete lands.
       const draft: ChatMessage = {
         id: msgId,
         type: "thought",
         content: stream.lines.map((l) => l.content).join("\n"),
         timestamp: stream.startTime,
+        startTime: stream.startTime,
       };
       patchSession(key, {
         liveBuffer: { ...lb, thinkingStream: draft },
@@ -469,6 +474,9 @@ export function ingestRecordComplete(
     patch.liveBuffer = { ...lb, thinkingStream: null };
     if (current.isThinking) patch.isThinking = false;
     if (current.thinkingContent !== "") patch.thinkingContent = "";
+    // Reset the legacy projection as well so it cannot leak into a
+    // subsequent thought that arrives without stream_delta.
+    patch.thinkingStartTime = null;
     lastThinkingFlush.delete(key);
   } else if (args.role === "assistant" && lb.assistantStream && lb.assistantStream.id === args.messageId) {
     patch.liveBuffer = { ...lb, assistantStream: null };

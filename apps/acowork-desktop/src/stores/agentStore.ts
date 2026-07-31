@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
 import { clearAgentAvatarCache } from "../lib/avatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus } from "../lib/types";
-import { isSessionActive } from "../lib/types";
+import { isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -602,7 +602,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
           const sessionState = chatStore.getSessionState(agentId, session.session_id);
           const frontendStatus = sessionState?.sessionStatus;
           if (!frontendStatus) {
-            if (isSessionActive(session.status)) {
+            if (isProcessing(session.status)) {
               mismatches.set(session.session_id, session.status);
             }
           } else {

@@ -2082,10 +2082,10 @@ function convertRecordCompleteToChatMessage(
   // by `record_complete` was indistinguishable from an in-flight stream
   // (PairedExploreItem's `isStreaming && !item.msg.endTime` evaluated
   // true forever, so the block stayed expanded and never auto-folded).
-  // The `startTime` is sourced from chatAdapterStore's `thinkingStartTime`
-  // (set when the first `stream_delta` for that messageId landed); the
-  // `endTime` falls back to `Date.now()` if the MQTT payload doesn't
-  // carry an explicit end timestamp.
+  // The `startTime` is sourced from chatAdapterStore's liveBuffer
+  // `thinkingStream` entry (set when the first `stream_delta` for that
+  // messageId landed).  The `endTime` falls back to `Date.now()` if the
+  // MQTT payload doesn't carry an explicit end timestamp.
   thoughtTiming?: { startTime?: number | null; endTime?: number | null },
 ): ChatMessage {
   const role = data.role as string;
@@ -2256,7 +2256,11 @@ const CONTENT_EVENT_TYPES = new Set([
 ]);
 
 
-function handleMessageEvent(
+/**
+ * Process a single MQTT agent-event payload. Exported for unit testing;
+ * production code should route events through the MQTT listener.
+ */
+export function handleMessageEvent(
   data: Record<string, unknown>,
   set: (fn: Partial<ChatStore> | ((state: ChatStore) => Partial<ChatStore>)) => void,
   get: () => ChatStore,
@@ -2364,15 +2368,20 @@ function handleMessageEvent(
             : 0;
           // ADR-050 post-C5 fix: when this record_complete closes a thought,
           // stamp startTime/endTime on the converted message so the renderer
-          // can auto-fold the thought block.  startTime comes from
-          // chatAdapterStore's `thinkingStartTime` (set when the matching
-          // stream_delta first landed).  endTime defaults to "now" — close
-          // enough for the duration display, which is rounded to seconds.
+          // can auto-fold the thought block.  startTime comes from the
+          // adapter's liveBuffer thinkingStream entry (set when the matching
+          // stream_delta first landed).  We read it from there rather than
+          // from `thinkingStartTime`, because the latter is a legacy
+          // projection that is only reset on the next thought's first delta
+          // and can leak a stale value from a previous thought cycle.
+          // endTime defaults to "now" — close enough for the duration display,
+          // which is rounded to seconds.
           let thoughtTiming: { startTime?: number | null; endTime?: number | null } | undefined;
           if (role === "thought") {
             const adapter = getChatAdapterSession(agentId, sid);
+            const liveThought = adapter.liveBuffer.thinkingStream;
             thoughtTiming = {
-              startTime: adapter.thinkingStartTime,
+              startTime: liveThought?.id === msgId ? liveThought.startTime : null,
               endTime: Date.now(),
             };
           }

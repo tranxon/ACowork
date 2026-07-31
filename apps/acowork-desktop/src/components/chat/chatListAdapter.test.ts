@@ -185,6 +185,22 @@ describe("chatListAdapter v2: blocksSelector states", () => {
     expect(thoughtBlock?.isLive).toBe(true);
   });
 
+  it("stream_delta (thought) stamps startTime on the live block so duration can render", () => {
+    seedHistoryInStore([msg("u1", ts(100))], { total: 1 });
+    ingestStreamDelta(AGENT, SESSION, [
+      { role: "thought", message_id: "thought-1", line_no: 0, content: "reasoning..." },
+    ]);
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const snap = store.getSnapshot();
+    const thoughtItem = snap.blocks
+      .flatMap((b) => b.items)
+      .find((i) => i.id === "thought-1");
+    expect(thoughtItem).toBeDefined();
+    expect(thoughtItem!.startTime).toBeDefined();
+    expect(thoughtItem!.startTime).toBeGreaterThan(0);
+  });
+
   it("stream_delta (assistant) followed by record_complete → assistantStream → pendingRecordComplete", () => {
     seedHistoryInStore([msg("u1", ts(100))], { total: 1 });
     ingestStreamDelta(AGENT, SESSION, [

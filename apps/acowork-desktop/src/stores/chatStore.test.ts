@@ -11,7 +11,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mergeMessageWindow } from "./chatStore";
+import { mergeMessageWindow, useChatStore, handleMessageEvent } from "./chatStore";
+import {
+  ingestStreamDelta,
+  ingestRecordComplete,
+  releaseAdapterSession,
+  useChatAdapterStore,
+  type AdapterSessionState,
+} from "../components/chat/chatAdapterStore";
 import type { ChatMessage } from "../lib/types";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -561,5 +568,147 @@ describe("toWireAttachedItems: clientId serialization", () => {
     }]);
     const wire = result[0] as Record<string, unknown>;
     expect(wire.clientId).toBeUndefined();
+  });
+});
+
+// ── thought timing regression tests ───────────────────────────────────────
+
+const AGENT = "com.test.Agent";
+const SESSION = "sess-test";
+
+function seedSessionState(
+  messages: ChatMessage[],
+  opts?: { offset?: number; limit?: number; total?: number },
+) {
+  const offset = opts?.offset ?? 0;
+  const limit = opts?.limit ?? messages.length;
+  const total = opts?.total ?? messages.length;
+  useChatStore.setState((s) => ({
+    ...s,
+    agentStates: {
+      ...s.agentStates,
+      [AGENT]: {
+        ...(s.agentStates[AGENT] ?? {}),
+        activeSessionId: SESSION,
+        sessionStates: {
+          ...(s.agentStates[AGENT]?.sessionStates ?? {}),
+          [SESSION]: {
+            ...(s.agentStates[AGENT]?.sessionStates?.[SESSION] ?? {}),
+            messages,
+            messageOffset: offset,
+            messageLimit: limit,
+            messageTotal: total,
+            lastAccessed: Date.now(),
+          },
+        },
+      },
+    },
+  }));
+}
+
+function clearTestState() {
+  useChatStore.setState((s) => ({ ...s, agentStates: {} }));
+  useChatAdapterStore.setState({ sessions: {} });
+  releaseAdapterSession(AGENT, SESSION);
+}
+
+describe("thought timing: startTime/endTime", () => {
+  beforeEach(() => {
+    clearTestState();
+  });
+
+  afterEach(() => {
+    clearTestState();
+  });
+
+  it("record_complete for a streamed thought stamps startTime from the live thinkingStream", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    ingestStreamDelta(AGENT, SESSION, [
+      { role: "thought", message_id: "thought-1", line_no: 0, content: "reasoning..." },
+    ]);
+
+    const adapter = useChatAdapterStore.getState().sessions[`${AGENT}:${SESSION}`];
+    const expectedStartTime = adapter?.liveBuffer.thinkingStream?.startTime;
+    expect(expectedStartTime).toBeDefined();
+
+    handleMessageEvent(
+      {
+        type: "record_complete",
+        session_id: SESSION,
+        message_id: "thought-1",
+        role: "thought",
+        content: "reasoning...",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    const thought = ss.messages.find((m) => m.id === "thought-1");
+    expect(thought).toBeDefined();
+    expect(thought!.type).toBe("thought");
+    expect(thought!.startTime).toBe(expectedStartTime);
+    expect(thought!.endTime).toBeDefined();
+    expect(thought!.endTime!).toBeGreaterThanOrEqual(expectedStartTime!);
+  });
+
+  it("record_complete resets thinkingStartTime so it cannot leak to the next thought", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    ingestStreamDelta(AGENT, SESSION, [
+      { role: "thought", message_id: "thought-prev", line_no: 0, content: "prev..." },
+    ]);
+    ingestRecordComplete(AGENT, SESSION, { messageId: "thought-prev", role: "thought" });
+
+    const adapter = useChatAdapterStore.getState().sessions[`${AGENT}:${SESSION}`];
+    expect(adapter?.thinkingStartTime).toBeNull();
+  });
+
+  it("record_complete for a non-streamed thought does not inherit stale thinkingStartTime", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    // Simulate a stale adapter state where thinkingStartTime still holds a
+    // value from a previous thought cycle (defensive: this should not happen
+    // after ingestRecordComplete, but consumers must not rely on it).
+    const staleStartTime = Date.now() - 8000;
+    useChatAdapterStore.setState((s) => ({
+      ...s,
+      sessions: {
+        ...s.sessions,
+        [`${AGENT}:${SESSION}`]: {
+          liveBuffer: { thinkingStream: null, assistantStream: null },
+          isThinking: false,
+          thinkingStartTime: staleStartTime,
+          thinkingContent: "",
+          assistantStreamingContent: "",
+          assistantStreamingStartTime: null,
+          isAssistantReplying: false,
+          optimisticEntries: [],
+        } satisfies AdapterSessionState,
+      },
+    }));
+
+    // New thought arrives only via record_complete (no preceding stream_delta).
+    handleMessageEvent(
+      {
+        type: "record_complete",
+        session_id: SESSION,
+        message_id: "thought-next",
+        role: "thought",
+        content: "next thought...",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    const thought = ss.messages.find((m) => m.id === "thought-next");
+    expect(thought).toBeDefined();
+    expect(thought!.type).toBe("thought");
+    expect(thought!.startTime).toBeUndefined();
+    expect(thought!.endTime).toBeDefined();
   });
 });

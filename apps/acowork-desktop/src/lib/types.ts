@@ -861,10 +861,23 @@ export interface SessionInfo {
   workspace_id?: string;
 }
 
-/** ADR-014: Session lifecycle status — read-only from backend */
+/**
+ * ADR-014 + ADR-049: Session lifecycle status — read-only from backend.
+ *
+ * ADR-049 splits the old `streaming` variant into 3 sub-states so the
+ * frontend can derive the processing phase directly from this status
+ * without composing from data parameters (e.g. stream_delta line counts).
+ * This type MUST stay 1:1 in sync with `SessionStatusDto` in
+ * core/acowork-core/src/protocol.rs and `SessionStatus` in
+ * core/acowork-runtime/src/agent/session_state.rs.
+ */
 export type SessionStatus =
   | { status: "idle" }
-  | { status: "streaming"; detail?: { message_id: string | null } }
+  /** ADR-049: TTFT wait phase — HTTP request sent, awaiting first chunk. */
+  | { status: "llm_awaiting_first_chunk" }
+  | { status: "llm_streaming"; detail?: { message_id: string | null } }
+  /** ADR-049: Tool calls dispatched, awaiting tool results. */
+  | { status: "tool_executing" }
   | { status: "waiting_approval"; detail: { request_id: string } }
   | {
     status: "paused";
@@ -881,15 +894,72 @@ export type SessionStatus =
     };
   };
 
-/** Helper: check if a SessionStatus means the session is actively processing (includes paused) */
-export function isSessionActive(s: SessionStatus | undefined | null): boolean {
-  if (!s) return false;
-  return s.status === "streaming" || s.status === "waiting_approval" || s.status === "paused";
+/**
+ * ADR-049: UI-facing coarse processing phase.
+ *
+ * Frontend code should derive `ProcessingPhase` from `SessionStatus` via
+ * the pure `getProcessingPhase()` helper and drive UI behavior from there,
+ * never from the raw status. The phase enum is closed (4 values); adding a
+ * new phase requires a code-level decision, not a silent data drift.
+ */
+export type ProcessingPhase =
+  | "idle"
+  /** Waiting for the model — TTFT wait or inter-step processing */
+  | "waiting"
+  /** LLM is actively streaming visible reply content */
+  | "streaming"
+  /** Tool calls dispatched, results pending */
+  | "tool_executing"
+  /** Tool is asking the user for approval or answer */
+  | "waiting_approval"
+  /** Iteration limit reached, debug pause, or 429 retry wait */
+  | "paused";
+
+/**
+ * ADR-049: Pure mapping from `SessionStatus` to `ProcessingPhase`.
+ *
+ * Single source of truth — every UI decision (`<Indicator />`, `<StreamingPreview />`,
+ * `<SendButton disabled>`) MUST route through this function. The exhaustive
+ * `switch` is checked by the TypeScript compiler: adding a new `SessionStatus`
+ * variant will fail compilation until the mapping is updated.
+ */
+export function getProcessingPhase(s: SessionStatus | undefined | null): ProcessingPhase {
+  if (!s) return "idle";
+  switch (s.status) {
+    case "idle":
+      return "idle";
+    case "llm_awaiting_first_chunk":
+      return "waiting";
+    case "llm_streaming":
+      return "streaming";
+    case "tool_executing":
+      return "tool_executing";
+    case "waiting_approval":
+      return "waiting_approval";
+    case "paused":
+      return "paused";
+  }
 }
 
-/** Helper: get message_id from Streaming status, or null */
+/**
+ * ADR-049: True when the session is actively processing (non-idle).
+ *
+ * Equivalent to `getProcessingPhase(s) !== "idle"`. This replaces the old
+ * `isProcessing()` which covered only 3 of the 6 variants.
+ */
+export function isProcessing(s: SessionStatus | undefined | null): boolean {
+  return getProcessingPhase(s) !== "idle";
+}
+
+/**
+ * Helper: get message_id from LlmStreaming status, or null.
+ *
+ * ADR-049: the old `streaming` variant is now `llm_streaming`. This helper
+ * returns the message_id when the session is in the active streaming phase
+ * (after the first content chunk has arrived, before tools take over).
+ */
 export function getStreamingMessageId(s: SessionStatus | undefined | null): string | null {
-  if (!s || s.status !== "streaming") return null;
+  if (!s || s.status !== "llm_streaming") return null;
   return s.detail?.message_id ?? null;
 }
 
