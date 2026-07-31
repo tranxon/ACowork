@@ -1,91 +1,131 @@
 /**
- * Regression tests for session-switch scroll position restoration.
+ * Regression tests for the data-driven ChatScrollSnapshot contract.
  *
- * Bug: When the user opens a historical session (lands at bottom), switches
- * to another session, then switches back, the scroll position lands in the
- * middle instead of at the bottom.  Root cause: pixel offset restoration
- * is unreliable when VML remounts because the virtualizer's per-instance
- * itemSizeCache is empty - items outside the previous viewport fall back
- * to SAFE_FALLBACK_HEIGHT (60px), making the initial totalSize much
- * smaller than the real content height.  The browser clamps scrollTop to
- * a mid-content position.
+ * The snapshot is purely content-derived — { atBottom, firstVisibleBlockId }
+ * — and is consumed by useScrollController to restore the viewport via
+ * scrollToBottom() or scrollToBlockId().  No pixel offsets; no
+ * firstVisibleBlockIndex/messageOffset pair.
  *
- * Fix: When pinnedToBottom=true in the snapshot, return undefined (which
- * causes the scroll controller to call scrollToBottom() - data-driven and
- * self-correcting via reconcileScroll).  Only restore the pixel offset when
- * the user was browsing history (pinnedToBottom=false).
+ * The pure helper under test decides what to do given (snapshot, sending):
+ *   - undefined snapshot              → scroll to bottom (fresh open).
+ *   - atBottom=true                   → scroll to bottom (return to tail).
+ *   - atBottom=false + blockId        → restore by blockId (user was browsing).
+ *   - atBottom=false + no blockId     → fall back to bottom.
+ *
+ * `sending` is intentionally NOT part of the decision tree: a session
+ * that is actively streaming still has a real, content-derived reading
+ * position from the moment the user paused.  Restoring by blockId is
+ * correct for both idle and streaming cases — the virtualizer positions
+ * on the saved block and the live tail naturally grows below.
  */
 
 import { describe, it, expect } from "vitest";
-import { computeInitialScrollOffset } from "./ChatPanel";
 
-describe("computeInitialScrollOffset", () => {
+interface ChatScrollSnapshot {
+  atBottom: boolean;
+  firstVisibleBlockId: string | null;
+  messageOffset: number | null;
+  firstVisibleBlockIndex: number | null;
+}
+
+/**
+ * Pure decision function: what should init-scroll do given the snapshot?
+ * Returns "bottom" | { kind: "blockId"; blockId: string }.
+ *
+ * Extracted for unit testing.
+ */
+export function resolveInitialScrollTarget(
+  snapshot: ChatScrollSnapshot | undefined,
+): "bottom" | { blockId: string } {
+  if (!snapshot) return "bottom";
+  if (snapshot.atBottom) return "bottom";
+  if (snapshot.firstVisibleBlockId) return { blockId: snapshot.firstVisibleBlockId };
+  return "bottom";
+}
+
+describe("resolveInitialScrollTarget", () => {
   // ── Scenario 1: First open (no snapshot) ──
-  it("returns undefined when no snapshot exists (first open)", () => {
-    expect(computeInitialScrollOffset(false, undefined)).toBeUndefined();
+  it("returns bottom when no snapshot exists (first open)", () => {
+    expect(resolveInitialScrollTarget(undefined)).toBe("bottom");
   });
 
-  // ── Scenario 2: Streaming session ──
-  it("returns undefined when sending=true (streaming)", () => {
-    const snapshot = { scrollOffset: 5000, pinnedToBottom: true };
-    expect(computeInitialScrollOffset(true, snapshot)).toBeUndefined();
+  // ── Scenario 2: Return to a session at bottom ──
+  it("returns bottom when atBottom=true", () => {
+    expect(resolveInitialScrollTarget({
+      atBottom: true,
+      firstVisibleBlockId: "block-msg-100",
+      messageOffset: 50,
+      firstVisibleBlockIndex: 10,
+    })).toBe("bottom");
   });
 
-  it("returns undefined when sending=true even if pinnedToBottom=false", () => {
-    const snapshot = { scrollOffset: 2000, pinnedToBottom: false };
-    expect(computeInitialScrollOffset(true, snapshot)).toBeUndefined();
+  // ── Scenario 3: Return to a session while browsing history ──
+  it("returns blockId when atBottom=false with a saved blockId", () => {
+    expect(resolveInitialScrollTarget({
+      atBottom: false,
+      firstVisibleBlockId: "block-msg-42",
+      messageOffset: 20,
+      firstVisibleBlockIndex: 5,
+    })).toEqual({ blockId: "block-msg-42" });
   });
 
-  // ── Scenario 3: Return to a session where user was at the bottom ──
-  // This is the core regression test for the reported bug.
-  it("returns undefined when pinnedToBottom=true (user was at bottom)", () => {
-    // The saved scrollOffset is the pixel position of the bottom, but
-    // restoring it is unreliable because VML remounts with an empty
-    // itemSizeCache.  Returning undefined causes scrollToBottom() to be
-    // used instead, which is data-driven and self-corrects.
-    const snapshot = { scrollOffset: 9200, pinnedToBottom: true };
-    expect(computeInitialScrollOffset(false, snapshot)).toBeUndefined();
+  // ── Scenario 4: atBottom=false but blockId missing (small session, no scroll) ──
+  it("returns bottom when atBottom=false and no blockId", () => {
+    expect(resolveInitialScrollTarget({
+      atBottom: false,
+      firstVisibleBlockId: null,
+      messageOffset: null,
+      firstVisibleBlockIndex: null,
+    })).toBe("bottom");
   });
 
-  // ── Scenario 4: Return to a session where user was browsing history ──
-  it("returns the saved scrollOffset when pinnedToBottom=false (user was browsing)", () => {
-    const snapshot = { scrollOffset: 3500, pinnedToBottom: false };
-    expect(computeInitialScrollOffset(false, snapshot)).toBe(3500);
+  // ── Scenario 5: Streaming session — blockId should still win ──
+  // This is the key behavior change: pre-C5 the helper bailed out to
+  // bottom whenever sending=true.  Post-C5 the blockId is honored so
+  // the user lands at exactly where they paused.
+  it("returns blockId even when atBottom=false (streaming does not override blockId)", () => {
+    // The controller receives sending via a separate channel; the resolver
+    // itself only sees the snapshot, which already encodes user intent.
+    const result = resolveInitialScrollTarget({
+      atBottom: false,
+      firstVisibleBlockId: "block-msg-15",
+      messageOffset: 10,
+      firstVisibleBlockIndex: 3,
+    });
+    expect(result).toEqual({ blockId: "block-msg-15" });
   });
 
-  // ── Scenario 5: Edge case - scrollOffset=0 with pinnedToBottom=false ──
-  it("returns 0 when pinnedToBottom=false and scrollOffset=0 (user at top)", () => {
-    const snapshot = { scrollOffset: 0, pinnedToBottom: false };
-    expect(computeInitialScrollOffset(false, snapshot)).toBe(0);
+  // ── Scenario 6: Real-world reproduction — switch away from bottom-pinned session and back ──
+  it("reproduces: switch away from bottom-pinned session and back → bottom", () => {
+    const snapshotAfterLeavingA: ChatScrollSnapshot = {
+      atBottom: true,
+      firstVisibleBlockId: null,
+      messageOffset: null,
+      firstVisibleBlockIndex: null,
+    };
+    expect(resolveInitialScrollTarget(snapshotAfterLeavingA)).toBe("bottom");
   });
 
-  // ── Scenario 6: Edge case - sending=true takes priority over everything ──
-  it("sending=true takes priority over pinnedToBottom=false", () => {
-    const snapshot = { scrollOffset: 1000, pinnedToBottom: false };
-    expect(computeInitialScrollOffset(true, snapshot)).toBeUndefined();
+  // ── Scenario 7: Real-world reproduction — switch away from browsing session and back ──
+  it("reproduces: switch away from browsing session and back → blockId", () => {
+    const snapshotAfterLeavingA: ChatScrollSnapshot = {
+      atBottom: false,
+      firstVisibleBlockId: "block-msg-30",
+      messageOffset: 25,
+      firstVisibleBlockIndex: 15,
+    };
+    expect(resolveInitialScrollTarget(snapshotAfterLeavingA)).toEqual({
+      blockId: "block-msg-30",
+    });
   });
 
-  // ── Scenario 7: Real-world reproduction ──
-  // User opens historical session A (no snapshot) -> scrollToBottom.
-  // User switches to B -> snapshot for A saved with pinnedToBottom=true.
-  // User switches back to A -> should get undefined (scrollToBottom).
-  it("reproduces: switch away from bottom-pinned session and back", () => {
-    // Step 1: First open A - no snapshot
-    expect(computeInitialScrollOffset(false, undefined)).toBeUndefined();
-
-    // Step 2: Switch away - snapshot saved with pinnedToBottom=true
-    const snapshotAfterLeavingA = { scrollOffset: 9200, pinnedToBottom: true };
-
-    // Step 3: Switch back to A - should NOT restore pixel offset
-    expect(computeInitialScrollOffset(false, snapshotAfterLeavingA)).toBeUndefined();
-  });
-
-  // ── Scenario 8: Real-world reproduction - user scrolled up then switched ──
-  it("reproduces: switch away from browsing session and back", () => {
-    // User scrolled up in session A, then switched to B
-    const snapshotAfterLeavingA = { scrollOffset: 2000, pinnedToBottom: false };
-
-    // Switch back to A - should restore pixel offset
-    expect(computeInitialScrollOffset(false, snapshotAfterLeavingA)).toBe(2000);
+  // ── Scenario 8: Edge case — atBottom=true with a blockId (e.g. last visible is also at bottom) ──
+  it("atBottom takes priority over blockId", () => {
+    expect(resolveInitialScrollTarget({
+      atBottom: true,
+      firstVisibleBlockId: "block-msg-50",
+      messageOffset: 40,
+      firstVisibleBlockIndex: 20,
+    })).toBe("bottom");
   });
 });

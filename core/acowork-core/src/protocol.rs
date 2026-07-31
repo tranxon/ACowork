@@ -1432,6 +1432,10 @@ pub enum SessionStatusDto {
     /// LLM HTTP request has been sent; waiting for the first content chunk
     /// (TTFT phase).
     LlmAwaitingFirstChunk,
+    /// LLM is producing reasoning/thinking content. Entered when the first
+    /// ReasoningContent stream event arrives, before any visible Content.
+    /// Promotes to LlmStreaming when the first visible content chunk arrives.
+    Thinking,
     /// LLM is actively streaming content. `message_id` matches the streaming
     /// message, if available.
     LlmStreaming { message_id: Option<String> },

@@ -109,6 +109,17 @@ export interface ChatListAdapterV2 {
    * controller calls scrollToPosition.
    */
   loadPageForMessage(messageIndex: number): Promise<void>;
+  /**
+   * Load the page that should contain the given blockId, using
+   * hintMessageIndex (the absolute message index of the first visible
+   * block at save time) to compute the correct page.  If the blockId
+   * is not in the hinted page, tries one page forward (compaction may
+   * have shifted messages).  Used by session-switch restoration to
+   * reload the user's browsing position.  After this resolves, the
+   * controller calls vml.scrollToBlockId(blockId) and falls back to
+   * scrollToBottom if the block is not found.
+   */
+  loadPageForBlockId(blockId: string, hintMessageIndex: number): Promise<void>;
 
   // ── Scroll primitives ──
   scrollToTop(): Promise<void>;
@@ -239,6 +250,31 @@ class AdapterStore {
     const offset = Math.max(0, Math.floor(messageIndex / PAGINATION_PAGE_SIZE) * PAGINATION_PAGE_SIZE);
     await ss.loadSessionMessages(this.agentId, this.sessionId, offset, PAGINATION_PAGE_SIZE, true);
     this.cacheGeneration++;
+  };
+
+  loadPageForBlockId = async (blockId: string, hintMessageIndex: number): Promise<void> => {
+    const ss = useChatStore.getState();
+    const pageOffset = Math.max(0, Math.floor(hintMessageIndex / PAGINATION_PAGE_SIZE) * PAGINATION_PAGE_SIZE);
+
+    // 1. Load the hinted page (replaceCache for a clean window).
+    await ss.loadSessionMessages(this.agentId, this.sessionId, pageOffset, PAGINATION_PAGE_SIZE, true);
+    this.cacheGeneration++;
+
+    // 2. Check if the blockId is in the loaded blocks.
+    if (this.state.snapshot.blocks.some((b) => b.blockId === blockId)) return;
+
+    // 3. Not found - try one page forward.  Compaction may have replaced
+    //    older messages with a summary, shifting the target message to a
+    //    later page.  More than one page of shift is extremely unlikely.
+    const cur = ss.agentStates[this.agentId]?.sessionStates[this.sessionId];
+    const total = cur?.messageTotal ?? 0;
+    const nextOffset = pageOffset + PAGINATION_PAGE_SIZE;
+    if (nextOffset < total) {
+      await ss.loadSessionMessages(this.agentId, this.sessionId, nextOffset, PAGINATION_PAGE_SIZE, true);
+      this.cacheGeneration++;
+    }
+    // If still not found, leave the last loaded page.  The controller's
+    // init-scroll will try scrollToBlockId and fall back to scrollToBottom.
   };
 
   /**
@@ -565,6 +601,7 @@ const NOOP_ADAPTER: ChatListAdapterV2 = {
   loadNextPage: async () => {},
   loadInitialPage: async () => {},
   loadPageForMessage: async () => {},
+  loadPageForBlockId: async () => {},
   scrollToTop: async () => {},
   scrollToBottom: async () => {},
   scrollToPosition: async () => {},
@@ -604,6 +641,7 @@ function useAdapterFacade(
     loadNextPage: store.loadNextPage,
     loadInitialPage: store.loadInitialPage,
     loadPageForMessage: store.loadPageForMessage,
+    loadPageForBlockId: store.loadPageForBlockId,
     scrollToTop: store.scrollToTop,
     scrollToBottom: store.scrollToBottom,
     scrollToPosition: store.scrollToPosition,

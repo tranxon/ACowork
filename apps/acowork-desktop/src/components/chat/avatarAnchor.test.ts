@@ -13,7 +13,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../lib/types";
 import { foldMessages } from "./messageFolder";
-import { isAgentBlock, shouldShowAgentAvatar } from "./avatarAnchor";
+import { isAgentBlock, shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAnchor";
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -331,5 +331,64 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
     ]);
     // The assistant at index 2 should anchor to the second user_with_attachments.
     expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
+  });
+});
+
+// ── shouldShowTrailingAgentHeader ───────────────────────────────────────
+
+describe("shouldShowTrailingAgentHeader", () => {
+  it("returns true when the last block is a user block", () => {
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+    ];
+    const blocks = foldMessages(messages);
+    expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(true);
+  });
+
+  it("returns true when the last block is a user_with_attachments block", () => {
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      attachedFileMsg(1001, "a.ts"),
+    ];
+    const blocks = foldMessages(messages);
+    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(true);
+  });
+
+  it("returns false when the last block is an agent block", () => {
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      assistantMsg(2000),
+    ];
+    const blocks = foldMessages(messages);
+    expect(shouldShowTrailingAgentHeader(blocks, 1)).toBe(false);
+  });
+
+  it("returns false when the user block is not the last block", () => {
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      assistantMsg(2000),
+      userMsg(3000),
+      assistantMsg(4000),
+    ];
+    const blocks = foldMessages(messages);
+    // User at index 0 is NOT the last block
+    expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(false);
+    // User at index 2 is NOT the last block
+    expect(shouldShowTrailingAgentHeader(blocks, 2)).toBe(false);
+  });
+
+  it("returns false for an empty blocks array", () => {
+    const blocks = foldMessages([]);
+    expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(false);
+  });
+
+  it("returns false when the last block is a compaction marker", () => {
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      compactionMsg(1500),
+    ];
+    const blocks = foldMessages(messages);
+    expect(shouldShowTrailingAgentHeader(blocks, 1)).toBe(false);
   });
 });

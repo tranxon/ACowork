@@ -162,6 +162,7 @@
     "working": "正在處理...",
     "compacting": "上下文壓縮中...",
     "phaseWaiting": "等待模型回應...",
+    "phaseThinking": "正在思考...",
     "phaseStreaming": "正在產生回覆...",
     "phaseToolExecuting": "正在執行工具...",
     "phaseWaitingApproval": "等待工具授權...",

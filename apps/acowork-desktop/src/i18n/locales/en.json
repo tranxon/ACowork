@@ -77,6 +77,7 @@
     "working": "working ...",
     "compacting": "Context compacting...",
     "phaseWaiting": "Waiting for model...",
+    "phaseThinking": "Thinking...",
     "phaseStreaming": "Generating reply...",
     "phaseToolExecuting": "Running tool...",
     "phaseWaitingApproval": "Waiting for tool approval...",

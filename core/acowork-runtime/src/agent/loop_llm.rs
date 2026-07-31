@@ -233,6 +233,10 @@ impl AgentLoop {
                     // Record start of reasoning on first chunk
                     if reasoning_started_at.is_none() {
                         reasoning_started_at = Some(Utc::now().timestamp_millis());
+                        // ADR-049: Transition to Thinking on the first reasoning
+                        // chunk. This lets the frontend show "Thinking…" instead
+                        // of the generic "Waiting for model…" during reasoning.
+                        self.transition_status(SessionStatus::Thinking);
                     }
                     reasoning_in_progress = true;
                     accumulated_reasoning_content.push_str(&chunk);

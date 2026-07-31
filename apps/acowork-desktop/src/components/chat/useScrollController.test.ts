@@ -247,3 +247,129 @@ describe("useScrollController: subscription", () => {
     expect(subscribe).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("useScrollController: data-driven init scroll", () => {
+  // Helper: build a vmlRef with the imperative methods the controller calls.
+  function makeMockVml() {
+    return {
+      current: {
+        scrollToBottom: vi.fn(),
+        scrollToTop: vi.fn(),
+        scrollToIndex: vi.fn(),
+        scrollToBlockId: vi.fn(() => true),
+        getFirstVisibleBlockIndex: vi.fn(() => null),
+        getFirstVisibleBlockId: vi.fn(() => null),
+        getLastVisibleBlockIndex: vi.fn(() => null),
+        isStreamingBlockInViewport: vi.fn(() => false),
+      } as any,
+    };
+  }
+
+  it("calls scrollToBottom when initialAtBottom=true", () => {
+    const vml = makeMockVml();
+    const adapter = makeMockAdapter();
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: true,
+        initialFirstVisibleBlockId: "block-msg-99",
+      }),
+    );
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(vml.current.scrollToBlockId).not.toHaveBeenCalled();
+  });
+
+  it("calls scrollToBlockId when initialAtBottom=false and blockId is set", () => {
+    const vml = makeMockVml();
+    const adapter = makeMockAdapter();
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: false,
+        initialFirstVisibleBlockId: "block-msg-30",
+      }),
+    );
+    expect(vml.current.scrollToBlockId).toHaveBeenCalledWith("block-msg-30");
+    expect(vml.current.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it("falls back to scrollToBottom when atBottom=false and no blockId", () => {
+    const vml = makeMockVml();
+    const adapter = makeMockAdapter();
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: false,
+        initialFirstVisibleBlockId: null,
+      }),
+    );
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+    expect(vml.current.scrollToBlockId).not.toHaveBeenCalled();
+  });
+
+  it("falls back to scrollToBottom when no initial props (fresh open)", () => {
+    const vml = makeMockVml();
+    const adapter = makeMockAdapter();
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+      }),
+    );
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-run init scroll when sessionKey changes within an already-initialized session", () => {
+    // The reset effect resets initializedRef on sessionKey change, so the
+    // next render with new blocks will run init scroll once for the new
+    // session.  We verify that within the same session, a re-render with
+    // the same blocksLen does not call scrollToBlockId a second time.
+    const vml = makeMockVml();
+    const adapter = makeMockAdapter();
+    const { rerender } = renderHook(
+      ({ sessionKey }) =>
+        useScrollController({
+          containerRef: { current: null },
+          adapter,
+          vmlRef: vml,
+          sessionKey,
+          initialAtBottom: false,
+          initialFirstVisibleBlockId: "block-msg-30",
+        }),
+      { initialProps: { sessionKey: "agent:sess" } },
+    );
+    expect(vml.current.scrollToBlockId).toHaveBeenCalledTimes(1);
+    rerender({ sessionKey: "agent:sess" });
+    expect(vml.current.scrollToBlockId).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to scrollToBottom when scrollToBlockId returns false (block not found)", () => {
+    const vml = makeMockVml();
+    // Override: scrollToBlockId returns false (block not in loaded page).
+    (vml.current.scrollToBlockId as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    const adapter = makeMockAdapter();
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: vml,
+        sessionKey: "agent:sess",
+        initialAtBottom: false,
+        initialFirstVisibleBlockId: "block-msg-999",
+      }),
+    );
+    expect(vml.current.scrollToBlockId).toHaveBeenCalledWith("block-msg-999");
+    expect(vml.current.scrollToBottom).toHaveBeenCalledTimes(1);
+  });
+});

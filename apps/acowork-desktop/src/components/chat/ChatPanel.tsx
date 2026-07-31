@@ -85,43 +85,27 @@ import { log } from "../../lib/logger";
 // exist. The same pattern is already used in ResultsPanel.tsx.
 const EMPTY_MESSAGES: ChatMessage[] = [];
 
-interface ChatScrollSnapshot {
-  scrollOffset: number;
-  pinnedToBottom: boolean;
-  /** Index of the first visible block in the adapter's blocks array at save time. */
-  firstVisibleBlockIndex?: number | null;
-  /** The adapter's messageOffset at save time (absolute page cursor). */
-  messageOffset?: number;
-}
-
 /**
- * Pure function: decide whether to restore the saved pixel scrollOffset or
- * let the init-scroll effect call scrollToBottom() (data-driven).
+ * Data-driven scroll snapshot.  Stored per session key when the user
+ * navigates away, consumed by useScrollController on return.
  *
- * When pinnedToBottom is true, returning undefined causes the scroll
- * controller's init effect to call vmlRef.scrollToBottom(), which uses
- * virtualizer.scrollToIndex(count-1, {align:"end"}).  This is critical
- * because pixel offset restoration is unreliable when VML remounts: the
- * virtualizer's per-instance itemSizeCache is empty, and items outside the
- * previous viewport fall back to SAFE_FALLBACK_HEIGHT (60px), making the
- * initial totalSize much smaller than the real content height.  The
- * browser clamps scrollTop to the wrong position, landing the user in the
- * middle instead of at the bottom.
- *
- * When pinnedToBottom is false (user was browsing history), the pixel
- * offset is restored verbatim - it represents the user's last deliberate
- * reading position.
- *
- * Extracted as a standalone function for unit testing.
+ *   - atBottom: true when the user was viewing the latest content
+ *     (or the session was streaming).  On return, the controller
+ *     calls scrollToBottom().
+ *   - firstVisibleBlockId: content-derived blockId of the first
+ *     visible block when the user left.  Used to restore the exact
+ *     reading position via vml.scrollToBlockId().  Stable across
+ *     session switches (survives VML remount, page reload, etc.).
  */
-export function computeInitialScrollOffset(
-  sending: boolean,
-  snapshot: ChatScrollSnapshot | undefined,
-): number | undefined {
-  if (sending) return undefined;
-  if (!snapshot) return undefined;
-  if (snapshot.pinnedToBottom) return undefined;
-  return snapshot.scrollOffset;
+interface ChatScrollSnapshot {
+  atBottom: boolean;
+  firstVisibleBlockId: string | null;
+  /** Adapter messageOffset at save time. Pagination cursor (data, not pixels). */
+  messageOffset: number | null;
+  /** Index of the first visible block in the adapter's blocks array at save time.
+   *  Combined with messageOffset, approximates the absolute message index to
+   *  locate the correct page on restore (merged cache may span multiple pages). */
+  firstVisibleBlockIndex: number | null;
 }
 
 // Bounded LRU: cap snapshot entries to MAX_SCROLL_SNAPSHOTS so a long-lived
@@ -512,8 +496,12 @@ export function ChatPanel() {
   // the user would be restored to the TOP of every previously-visited session.
   const lastScrollTopRef = useRef(0);
   const lastScrollHeightRef = useRef(0);
-  const lastFirstVisibleBlockRef = useRef<number | null>(null);
-  const lastMessageOffsetRef = useRef(0);
+  /** Content-derived blockId of the first visible block (data-driven restoration). */
+  const lastFirstVisibleBlockIdRef = useRef<string | null>(null);
+  /** Index of the first visible block in the adapter's blocks array (for page hint). */
+  const lastFirstVisibleBlockIdxRef = useRef<number | null>(null);
+  /** Adapter messageOffset at the time of the last scroll event (for snapshot). */
+  const lastMessageOffsetRef = useRef<number | null>(null);
   useInsertionEffect(() => {
     // GUARD: only update refs when the current session has rendered blocks.
     // During a session switch the new session's adapter has NO blocks yet
@@ -533,8 +521,10 @@ export function ChatPanel() {
         lastScrollTopRef.current = container.scrollTop;
         lastScrollHeightRef.current = container.scrollHeight;
       }
-      const fvb = vmlRef.current?.getFirstVisibleBlockIndex();
-      if (fvb != null) lastFirstVisibleBlockRef.current = fvb;
+      const fvbId = vmlRef.current?.getFirstVisibleBlockId();
+      if (fvbId != null) lastFirstVisibleBlockIdRef.current = fvbId;
+      const fvbIdx = vmlRef.current?.getFirstVisibleBlockIndex();
+      if (fvbIdx != null) lastFirstVisibleBlockIdxRef.current = fvbIdx;
       lastMessageOffsetRef.current = adapter.messageOffset;
     }
   });
@@ -555,82 +545,27 @@ export function ChatPanel() {
 
   const agentDisplayName = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.profile?.displayName : undefined) ?? selectedAgent?.display_name ?? selectedAgent?.name;
 
-  // Read saved scroll snapshot for nav-back restoration.
-  // VirtualMessageList uses this as initialOffset so the Virtualizer renders
-  // the correct items from the first frame, preventing a top→position flash.
+  // Read saved scroll snapshot for data-driven restoration.
+  // The snapshot carries { atBottom, firstVisibleBlockId } and is consumed
+  // by useScrollController to call scrollToBottom() or scrollToBlockId().
   const scrollSnapshot = currentScrollKey
     ? chatScrollSnapshots.get(currentScrollKey)
     : undefined;
-  // Decide whether to restore the saved scrollOffset or scroll to bottom.
-  //
-  // Single source of truth: `sending` (derived from sessionStatus — the
-  // backend's view of whether the agent is actively streaming).  Two
-  // branches, by user intent:
-  //
-  //   sending=true   → scroll to bottom unconditionally.  The user just
-  //                    returned to a session that's still producing output;
-  //                    they want to see the latest in-flight message.  The
-  //                    saved scrollOffset is also stale by definition (the
-  //                    list grows every poll), so restoring it would land
-  //                    the user on wrong/no content.
-  //
-  //   sending=false  → restore the saved scrollOffset verbatim — "leave
-  //                    it where the user left it".  The list is stable,
-  //                    the offset is the user's last deliberate position.
-  //
-  // Previous gate (`!pinnedToBottom && scrollOffset > 0`) was the source of
-  // the session-switch-scroll bug: pinnedToBottom is a side-effect of the
-  // scroll state machine (transient during pagination / mid-load) rather
-  // than user intent, and `scrollOffset > 0` falsely bailed out when the
-  // user was genuinely at the top.  Using `sending` alone is both more
-  // stable and easier to reason about.
-  const initialScrollOffset = computeInitialScrollOffset(sending, scrollSnapshot);
-  // Content-based restoration: absolute message index the user was viewing.
-  // The controller uses this (via adapter.scrollToPosition) instead of raw
-  // pixel scrollTop when available — reliable across session switches where
-  // the loaded page (and thus scrollHeight) differs.
-  const initialMessageIndex = (!sending && scrollSnapshot && !scrollSnapshot.pinnedToBottom
-    && scrollSnapshot.firstVisibleBlockIndex != null && scrollSnapshot.messageOffset != null)
-    ? scrollSnapshot.messageOffset + scrollSnapshot.firstVisibleBlockIndex
-    : undefined;
-  // DIAGNOSTIC — log only when the (key, sending, snapshot) signature actually
-  // changes, not on every render. ChatPanel re-renders frequently for many
-  // unrelated reasons (other state updates in parent stores), and a
-  // per-render log here flooded the console with hundreds of identical lines
-  // during the reload-resume investigation.  Snapshot is an object reference
-  // that may be recreated without changing values, so we compare via a
-  // JSON-encoded signature of the few fields that actually matter.
-  const snapshotSig = `${currentScrollKey}|${sending}|${scrollSnapshot?.pinnedToBottom ? 1 : 0}|${scrollSnapshot?.scrollOffset ?? ""}|${initialScrollOffset ?? ""}|${scrollSnapshot?.firstVisibleBlockIndex ?? ""}|${scrollSnapshot?.messageOffset ?? ""}`;
-  const lastSnapshotSigRef = useRef("");
-  if (snapshotSig !== lastSnapshotSigRef.current) {
-    lastSnapshotSigRef.current = snapshotSig;
-    console.warn("[CP:snapshot-read]", {
-      currentScrollKey,
-      scrollSnapshot,
-      sending,
-      initialScrollOffset,
-      initialMessageIndex,
-    });
-  }
-
   // ADR-041 C4 / ADR-050 C5: messageBlocks comes from the v2 adapter.
   // No trailing extra items (replying / compacting / working indicators)
-  // — the virtualizer count === messageBlocks.length.  Live streaming
+  // - the virtualizer count === messageBlocks.length.  Live streaming
   // content is folded into blocks by the adapter (isLive: true).
   const messageBlocks = adapter.blocks;
 
-  // ── ScrollController ─────────────────────────────────────────────
-  // ADR-050 C5: event-driven pagination + scroll-position controller.
-  // Owns: pagination tick, scroll-arrow visibility, jump buttons,
-  // adapter event subscription.  No state machine, no DOM-side scroll
-  // state — all derived from the adapter.
+  // ScrollController owns pagination, scroll-arrow visibility, and init-scroll
+  // restoration via the data-driven snapshot { atBottom, firstVisibleBlockId }.
   const scrollController = useScrollController({
     containerRef: messagesContainerRef,
     adapter,
     vmlRef,
     sessionKey: currentScrollKey,
-    initialScrollOffset,
-    initialMessageIndex,
+    initialAtBottom: scrollSnapshot?.atBottom,
+    initialFirstVisibleBlockId: scrollSnapshot?.firstVisibleBlockId,
   });
 
   // Load available models: configured providers (from vault) + capabilities (from models API)
@@ -706,17 +641,15 @@ export function ChatPanel() {
       //     content (guard prevents overwrite on session-switch render)
       const scrollOffset = lastScrollTopRef.current;
       const scrollHeight = lastScrollHeightRef.current;
-      const firstVisibleBlockIndex = lastFirstVisibleBlockRef.current;
-      const messageOffset = lastMessageOffsetRef.current;
+      const firstVisibleBlockId = lastFirstVisibleBlockIdRef.current;
       const container = messagesContainerRef.current;
       const clientHeight = container?.clientHeight ?? 0;
       const distFromBottom = scrollHeight - scrollOffset - clientHeight;
-      console.warn("[CP:snapshot-write]", { key, scrollOffset, scrollHeight, clientHeight, sending, distFromBottom, firstVisibleBlockIndex, messageOffset });
       setScrollSnapshot(key, {
-        scrollOffset,
-        pinnedToBottom: sending || distFromBottom <= 120,
-        firstVisibleBlockIndex,
-        messageOffset,
+        atBottom: sending || distFromBottom <= 120,
+        firstVisibleBlockId,
+        messageOffset: lastMessageOffsetRef.current,
+        firstVisibleBlockIndex: lastFirstVisibleBlockIdxRef.current,
       });
     };
   }, [currentScrollKey]);
@@ -771,18 +704,18 @@ export function ChatPanel() {
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
     if (!hasMessages) {
       // 2a. No messages in store — load from backend (first mount or new session).
-      // Determine head/tail preference from the saved scroll snapshot.
-      const mountKey = `${selectedAgentId}:${currentSessId}`;
-      const mountSnap = chatScrollSnapshots.get(mountKey);
-      const mountMsgIdx = (mountSnap && !mountSnap.pinnedToBottom
-        && mountSnap.firstVisibleBlockIndex != null && mountSnap.messageOffset != null)
-        ? mountSnap.messageOffset + mountSnap.firstVisibleBlockIndex
-        : undefined;
-
-      session.scope.current.isInitialLoad = currentSessId;
-      const mountLoad = mountMsgIdx !== undefined
-        ? adapter.loadPageForMessage(mountMsgIdx)
+      // The scroll controller handles positioning after blocks arrive:
+      // scrollToBottom() for atBottom/no-snapshot, scrollToBlockId() for browsing.
+      // If the user was browsing history, load the page at their saved position
+      // so the controller can restore via scrollToBlockId.  Otherwise load tail.
+      const mountSnap = chatScrollSnapshots.get(`${selectedAgentId}:${currentSessId}`);
+      const mountHint = (mountSnap && !mountSnap.atBottom && mountSnap.firstVisibleBlockId
+        && mountSnap.messageOffset != null && mountSnap.firstVisibleBlockIndex != null)
+        ? mountSnap.messageOffset + mountSnap.firstVisibleBlockIndex : null;
+      const mountLoad = (mountHint != null && mountSnap)
+        ? adapter.loadPageForBlockId(mountSnap.firstVisibleBlockId!, mountHint)
         : adapter.loadInitialPage();
+      session.scope.current.isInitialLoad = currentSessId;
       mountLoad
         .then(() => chatStore.loadSession(selectedAgentId, currentSessId))
         .finally(() => {
@@ -858,20 +791,15 @@ export function ChatPanel() {
       sessionId: currentSessionId,
     });
 
-    // Determine which page to load based on the saved content position.
-    // If the snapshot has a block index, load the page containing that
-    // message (content-based, reliable).  Otherwise fall back to tail.
-    const targetKey = `${selectedAgentId}:${currentSessionId}`;
-    const targetSnap = chatScrollSnapshots.get(targetKey);
-    const targetMsgIdx = (targetSnap && !targetSnap.pinnedToBottom
-      && targetSnap.firstVisibleBlockIndex != null && targetSnap.messageOffset != null)
-      ? targetSnap.messageOffset + targetSnap.firstVisibleBlockIndex
-      : undefined;
-
-    session.scope.current.isInitialLoad = currentSessionId;
-    const loadPromise = targetMsgIdx !== undefined
-      ? adapter.loadPageForMessage(targetMsgIdx)
-      : adapter.loadInitialPage();
+      // The scroll controller handles positioning after blocks arrive.
+      const targetSnap = chatScrollSnapshots.get(`${selectedAgentId}:${currentSessionId}`);
+      const targetHint = (targetSnap && !targetSnap.atBottom && targetSnap.firstVisibleBlockId
+        && targetSnap.messageOffset != null && targetSnap.firstVisibleBlockIndex != null)
+        ? targetSnap.messageOffset + targetSnap.firstVisibleBlockIndex : null;
+      const loadPromise = (targetHint != null && targetSnap)
+        ? adapter.loadPageForBlockId(targetSnap.firstVisibleBlockId!, targetHint)
+        : adapter.loadInitialPage();
+      session.scope.current.isInitialLoad = currentSessionId;
     loadPromise
       .then(() => chatStore.loadSession(selectedAgentId, currentSessionId))
       .finally(() => {
@@ -880,23 +808,19 @@ export function ChatPanel() {
   }, [currentSessionId, selectedAgentId]);
 
   // ── Scroll restoration ──
-  // Handled by ScrollController's init scroll effect (section 1).
-  // Primary path: `initialMessageIndex` (content-based) → adapter.loadPageForMessage
-  // → adapter.scrollToPosition → vml.scrollToIndex.
-  // Fallback: `initialScrollOffset` (pixel-based) for nav-back within same mount.
+// Handled by ScrollController init-scroll: scrollToBottom() when atBottom
+// or no snapshot, scrollToBlockId() when restoring a browsing position.
 
   // ── Retry session load ──────────────────────────────────────────
   // Called from VirtualMessageList when user clicks retry on load error.
   const handleRetryLoadSession = useCallback(() => {
     if (!selectedAgentId || !currentSessionId) return;
-    const retryKey = `${selectedAgentId}:${currentSessionId}`;
-    const retrySnap = chatScrollSnapshots.get(retryKey);
-    const retryMsgIdx = (retrySnap && !retrySnap.pinnedToBottom
-      && retrySnap.firstVisibleBlockIndex != null && retrySnap.messageOffset != null)
-      ? retrySnap.messageOffset + retrySnap.firstVisibleBlockIndex
-      : undefined;
-    if (retryMsgIdx !== undefined) {
-      adapter.loadPageForMessage(retryMsgIdx);
+    const retrySnap = chatScrollSnapshots.get(`${selectedAgentId}:${currentSessionId}`);
+    const retryHint = (retrySnap && !retrySnap.atBottom && retrySnap.firstVisibleBlockId
+      && retrySnap.messageOffset != null && retrySnap.firstVisibleBlockIndex != null)
+      ? retrySnap.messageOffset + retrySnap.firstVisibleBlockIndex : null;
+    if (retryHint != null && retrySnap) {
+      adapter.loadPageForBlockId(retrySnap.firstVisibleBlockId!, retryHint);
     } else {
       adapter.loadInitialPage();
     }
@@ -1399,8 +1323,10 @@ export function ChatPanel() {
             onScroll={() => {
                               lastScrollTopRef.current = (messagesContainerRef.current?.scrollTop ?? 0);
                               lastScrollHeightRef.current = (messagesContainerRef.current?.scrollHeight ?? 0);
-                              const fvb = vmlRef.current?.getFirstVisibleBlockIndex();
-                              if (fvb != null) lastFirstVisibleBlockRef.current = fvb;
+                              const fvbId = vmlRef.current?.getFirstVisibleBlockId();
+                              if (fvbId != null) lastFirstVisibleBlockIdRef.current = fvbId;
+                              const fvbIdx = vmlRef.current?.getFirstVisibleBlockIndex();
+                              if (fvbIdx != null) lastFirstVisibleBlockIdxRef.current = fvbIdx;
                               lastMessageOffsetRef.current = adapter.messageOffset;
                               scrollController.handleScroll();
                             }}
@@ -1419,7 +1345,6 @@ export function ChatPanel() {
             <VirtualMessageList
               key={currentScrollKey ?? "__no_session__"}
               ref={vmlRef}
-              initialScrollOffset={initialScrollOffset}
               onRetryLoadSession={handleRetryLoadSession}
               messageBlocks={messageBlocks}
               sending={sending}
@@ -1462,20 +1387,17 @@ export function ChatPanel() {
                 wrapper ownership as DebugPausedBanner. */}
             <RetryWaitBanner />
             {/* ADR-049: Phase indicators driven by getProcessingPhase().
-                Style mirrors ResultsPanel Compacting indicator
-                (ResultsPanel.tsx:441-446): left-aligned, flex items-center gap-1.5,
-                no banner container, no border. Indicator dot uses animate-pulse,
-                label uses the global thinking-shimmer class (CSS gradient text-fill
-                animation defined in globals.css:1216) — same 圆点闪烁 + 文字闪烁
-                treatment as the legacy trailing pulse-dot indicator. Color comes
-                from each phase semantic palette. paused is intentionally not
-                handled here: DebugPausedBanner / RetryWaitBanner / iterationLimitPaused
-                / loopDetectedPaused already cover all 4 backend paths to Paused.
-
-                The streaming indicator coexists with the inline StreamingSourceBlock:
-                if the live block is in the adapter snapshot the block is the primary
-                feedback, the indicator here is a fallback for when the live block is
-                outside the viewport or foldMessages has not yet produced one. */}
+                Each phase maps to a dot color + i18n label. paused is not
+                handled here: DebugPausedBanner / RetryWaitBanner /
+                iterationLimitPaused / loopDetectedPaused cover all paths. */}
+            {phase === "thinking" && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.phaseThinking", { defaultValue: "Thinking…" })}
+                </span>
+              </div>
+            )}
             {phase === "waiting" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />

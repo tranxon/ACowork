@@ -162,6 +162,7 @@
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
     "phaseWaiting": "모델 응답 대기 중...",
+    "phaseThinking": "생각하는 중...",
     "phaseStreaming": "응답 생성 중...",
     "phaseToolExecuting": "도구 실행 중...",
     "phaseWaitingApproval": "도구 승인 대기 중...",

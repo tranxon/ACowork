@@ -875,6 +875,7 @@ export type SessionStatus =
   | { status: "idle" }
   /** ADR-049: TTFT wait phase — HTTP request sent, awaiting first chunk. */
   | { status: "llm_awaiting_first_chunk" }
+  | { status: "thinking" }
   | { status: "llm_streaming"; detail?: { message_id: string | null } }
   /** ADR-049: Tool calls dispatched, awaiting tool results. */
   | { status: "tool_executing" }
@@ -906,6 +907,8 @@ export type ProcessingPhase =
   | "idle"
   /** Waiting for the model — TTFT wait or inter-step processing */
   | "waiting"
+  /** LLM is producing reasoning/thinking content */
+  | "thinking"
   /** LLM is actively streaming visible reply content */
   | "streaming"
   /** Tool calls dispatched, results pending */
@@ -930,6 +933,8 @@ export function getProcessingPhase(s: SessionStatus | undefined | null): Process
       return "idle";
     case "llm_awaiting_first_chunk":
       return "waiting";
+    case "thinking":
+      return "thinking";
     case "llm_streaming":
       return "streaming";
     case "tool_executing":

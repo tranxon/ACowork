@@ -105,30 +105,22 @@ export interface ScrollControllerConfig {
   /** Session key — used to reset the tick on session change. */
   sessionKey: string | null;
   /**
-   * Saved pixel scroll offset for nav-back restoration.  When undefined,
-   * the init-scroll effect scrolls to bottom on first data arrival.
-   * When defined, the init-scroll useLayoutEffect sets
-   * `container.scrollTop = initialScrollOffset` synchronously (before
-   * paint) to restore the user's reading position.  The virtualizer's
-   * `initialOffset` option alone does NOT set the DOM scrollTop — it
-   * only seeds the virtualizer's internal scroll-offset state.
+   * Content-derived blockId of the first visible block when the user
+   * left the session.  Data-driven replacement for pixel scroll offset.
    */
-  initialScrollOffset?: number;
+  initialFirstVisibleBlockId?: string | null;
   /**
-   * Absolute message index the user was viewing when they left the
-   * session.  When set, the init-scroll effect uses the adapter's
-   * scrollToPosition (index-based, virtualizer-aware) instead of raw
-   * pixel scrollTop — this is reliable across session switches where
-   * the loaded page (and thus scrollHeight) may differ.
-   * Takes priority over initialScrollOffset when both are set.
+   * Whether the user was at the bottom (near the latest content) when
+   * they left the session.  When true, init-scroll scrolls to bottom;
+   * otherwise it scrolls to initialFirstVisibleBlockId.
    */
-  initialMessageIndex?: number;
+  initialAtBottom?: boolean;
 }
 
 // ── Hook ───────────────────────────────────────────────────────────────────
 
 export function useScrollController(config: ScrollControllerConfig): ScrollController {
-  const { containerRef, adapter, vmlRef, sessionKey, initialScrollOffset, initialMessageIndex } = config;
+  const { containerRef, adapter, vmlRef, sessionKey, initialFirstVisibleBlockId, initialAtBottom } = config;
 
   // Mirrors of the latest adapter / vmlRef / container refs so the
   // interval callback (registered with stable deps) reads current
@@ -197,15 +189,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   }, [sessionKey]);
 
   // ── Init-scroll effect (useLayoutEffect — before paint) ──
-  // When blocks first arrive for a session, position the container:
-  //   - No saved offset (initialScrollOffset === undefined): scroll to
-  //     bottom — the user expects to see the latest messages.
-  //   - Saved offset provided: set container.scrollTop to the saved
-  //     pixel offset.  The virtualizer's `initialOffset` option only
-  //     seeds its INTERNAL scroll-offset state; it does NOT write the
-  //     DOM element's scrollTop.  Without this explicit assignment the
-  //     container starts at scrollTop=0 and the user sees the top of
-  //     the page instead of their saved reading position.
+  // Data-driven restoration: the saved snapshot carries a stable
+  // content-derived blockId and an atBottom flag.  We never restore
+  // raw pixel offsets because VML remounts with an empty per-instance
+  // measurement cache; pixel offsets land in the middle of the list.
   // useLayoutEffect (not useEffect) so the scroll is applied BEFORE
   // the browser paints — no top→position flash.
   // The initializedRef guard makes it a one-shot per session.
@@ -213,43 +200,27 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   useLayoutEffect(() => {
     if (initializedRef.current) return;
     if (blocksLen === 0) return;
-    console.warn("[SC:init-scroll]", {
-      sessionKey,
-      blocksLen,
-      initialMessageIndex,
-      initialScrollOffset,
-      messageOffset: adapter.messageOffset,
-    });
-    if (initialMessageIndex !== undefined) {
-      // Content-based restoration: compute the block index relative to
-      // the currently-loaded window and delegate to the adapter's
-      // scrollToPosition (which emits scrollToIndex → vml.scrollToIndex).
-      // This is reliable regardless of scrollHeight differences between
-      // the saving and restoring sessions.
-      const relativeIndex = Math.max(0, Math.min(
-        initialMessageIndex - adapter.messageOffset,
-        blocksLen - 1,
-      ));
-      console.warn("[SC:init-scroll] content-based →", { relativeIndex, initialMessageIndex, adapterOffset: adapter.messageOffset });
-      adapter.scrollToPosition(relativeIndex);
-    } else if (initialScrollOffset !== undefined) {
-      // Pixel-based fallback (nav-back within same mount, no remount).
-      const container = containerRefRef.current.current;
-      console.warn("[SC:init-scroll] pixel-based →", { initialScrollOffset });
-      if (container) {
-        container.scrollTop = initialScrollOffset;
-      }
-    } else {
-      // Fresh open / sending — scroll to bottom.
-      console.warn("[SC:init-scroll] scroll-to-bottom (no snapshot)");
-      const vml = vmlRefRef.current.current;
-      if (vml) {
+    const vml = vmlRefRef.current.current;
+    if (!vml) {
+      initializedRef.current = true;
+      return;
+    }
+    if (initialAtBottom) {
+      // User left at the tail — show the latest content.
+      vml.scrollToBottom();
+    } else if (initialFirstVisibleBlockId) {
+      // User was browsing - restore the first visible block by stable id.
+      // If the block isn't in the loaded page (e.g. compaction removed it),
+      // fall back to bottom so the user isn't stuck at an arbitrary position.
+      if (!vml.scrollToBlockId(initialFirstVisibleBlockId)) {
         vml.scrollToBottom();
       }
+    } else {
+      // Fresh open / no useful snapshot — scroll to bottom.
+      vml.scrollToBottom();
     }
-    // Whether we scrolled or relied on initialOffset, mark done.
     initializedRef.current = true;
-  }, [blocksLen, sessionKey, initialScrollOffset, initialMessageIndex, adapter]);
+  }, [blocksLen, sessionKey, initialAtBottom, initialFirstVisibleBlockId, adapter]);
 
   // ── Scroll preservation on prepend (useLayoutEffect) ──
   // When loadPrevPage() prepends older messages, the virtualizer's

@@ -132,6 +132,11 @@ pub enum SessionStatus {
     /// streaming. Frontend renders a "waiting" indicator without a row count
     /// threshold (the pre-ADR-049 3-line visual delay is gone).
     LlmAwaitingFirstChunk,
+    /// LLM is producing reasoning/thinking content. Entered when the first
+    /// `ReasoningContent` stream event arrives. Promotes to `LlmStreaming`
+    /// when the first visible `Content` chunk arrives, or to `ToolExecuting`
+    /// if tool calls follow directly after reasoning.
+    Thinking,
     /// LLM is actively streaming content. The first chunk has arrived.
     /// `message_id` matches the streaming message, if available.
     LlmStreaming { message_id: Option<String> },
@@ -183,6 +188,7 @@ impl SessionStatus {
         matches!(
             self,
             Self::LlmAwaitingFirstChunk
+                | Self::Thinking
                 | Self::LlmStreaming { .. }
                 | Self::ToolExecuting
                 | Self::WaitingApproval { .. }

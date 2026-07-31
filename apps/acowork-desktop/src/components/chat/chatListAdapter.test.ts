@@ -134,21 +134,24 @@ describe("chatListAdapter v2: blocksSelector states", () => {
     expect(snap.blocks.find((b) => b.items.some((i) => i.id === "pending-user"))).toBeUndefined();
   });
 
-  it("atTail=true with non-empty liveBuffer → blocks include live entries, isLive=true", () => {
+  it("atTail=true with non-empty liveBuffer -> blocks include live entries, isLive=true", () => {
     seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { total: 2 });
-    ingestOptimisticUserMessage(AGENT, SESSION, [
-      msg("pending-user", ts(50), "user"),
+    // Post-C5: ingestOptimisticUserMessage is a no-op (user messages go
+    // directly to messages[]).  Use ingestStreamDelta to populate the
+    // liveBuffer, which is the actual source of isLive blocks.
+    ingestStreamDelta(AGENT, SESSION, [
+      { role: "thought", message_id: "live-thought", line_no: 0, content: "thinking..." },
     ]);
     const store = freshStore();
     if (!store) throw new Error("store missing");
     const snap = store.getSnapshot();
     expect(snap.atTail).toBe(true);
     expect(snap.hasPendingFlush).toBe(true);
-    const pendingBlock = snap.blocks.find((b) =>
-      b.items.some((i) => i.id === "pending-user"),
+    const liveBlock = snap.blocks.find((b) =>
+      b.items.some((i) => i.id === "live-thought"),
     );
-    expect(pendingBlock).toBeDefined();
-    expect(pendingBlock?.isLive).toBe(true);
+    expect(liveBlock).toBeDefined();
+    expect(liveBlock?.isLive).toBe(true);
   });
 
   it("dedup: liveBuffer entry with id already in history → no duplicate, history wins", () => {
@@ -201,25 +204,30 @@ describe("chatListAdapter v2: blocksSelector states", () => {
     expect(thoughtItem!.startTime).toBeGreaterThan(0);
   });
 
-  it("stream_delta (assistant) followed by record_complete → assistantStream → pendingRecordComplete", () => {
+  it("stream_delta (assistant) followed by record_complete -> stream cleared from liveBuffer", () => {
     seedHistoryInStore([msg("u1", ts(100))], { total: 1 });
     ingestStreamDelta(AGENT, SESSION, [
       { role: "assistant", message_id: "a-1", line_no: 0, content: "hi" },
     ]);
-    // record_complete promotes the draft from assistantStream into
-    // pendingRecordComplete[] — it should still be in the snapshot.
+    // Pre-record_complete: assistant stream is live in blocks.
+    let store = freshStore();
+    if (!store) throw new Error("store missing");
+    let snap = store.getSnapshot();
+    expect(snap.blocks.some((b) => b.items.some((i) => i.id === "a-1"))).toBe(true);
+    // Post-C5: record_complete clears the streaming preview from
+    // liveBuffer.  The completed record is written directly to
+    // messages[] by chatStore (not by the adapter), so it disappears
+    // from the liveBuffer snapshot until the store picks it up.
     ingestRecordComplete(AGENT, SESSION, {
       messageId: "a-1",
       role: "assistant",
     });
-    const store = freshStore();
+    store = freshStore();
     if (!store) throw new Error("store missing");
-    const snap = store.getSnapshot();
-    const aBlock = snap.blocks.find((b) =>
-      b.items.some((i) => i.id === "a-1"),
-    );
-    expect(aBlock).toBeDefined();
-    expect(aBlock?.isLive).toBe(true);
+    snap = store.getSnapshot();
+    expect(snap.hasPendingFlush).toBe(false);
+    // The stream preview is gone from liveBuffer.
+    expect(snap.blocks.some((b) => b.items.some((i) => i.id === "a-1"))).toBe(false);
   });
 
   it("pageLoaded event fires when chatStore's messageOffset/limit/total changes", () => {

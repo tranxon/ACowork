@@ -23,6 +23,7 @@ const USER_ANCHOR_TYPES: ReadonlySet<MessageBlock["type"]> = new Set([
 const SKIP_TYPES: ReadonlySet<MessageBlock["type"]> = new Set([
   "compaction",
   "system",
+  "explore_group",
 ]);
 
 /**
@@ -72,4 +73,28 @@ export function shouldShowAgentAvatar(
     return false;
   }
   return false;
+}
+
+/**
+ * Decide whether to show the agent avatar header as a **trailing**
+ * element after the last user block, before the agent has replied.
+ *
+ * This provides the "agent is about to respond" visual anchor: the
+ * avatar + name + role appear immediately after the user sends a
+ * message, without waiting for the first agent block to arrive.
+ * When the agent reply arrives, the user block is no longer the last
+ * block, so this returns false, and the existing `shouldShowAgentAvatar`
+ * rule takes over on the new agent block.
+ *
+ * Returns true iff:
+ *  1. `currentIndex` is the last index in `blocks`, AND
+ *  2. `blocks[currentIndex]` is a user-anchored block.
+ */
+export function shouldShowTrailingAgentHeader(
+  blocks: readonly MessageBlock[],
+  currentIndex: number,
+): boolean {
+  if (currentIndex < 0 || currentIndex >= blocks.length) return false;
+  if (currentIndex !== blocks.length - 1) return false;
+  return USER_ANCHOR_TYPES.has(blocks[currentIndex].type);
 }

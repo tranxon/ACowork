@@ -6,7 +6,7 @@ import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
 import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
 import type { MessageBlock } from "./messageFolder";
-import { shouldShowAgentAvatar } from "./avatarAnchor";
+import { shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAnchor";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
@@ -76,8 +76,6 @@ interface VirtualMessageListProps {
   loadError: string | null;
   /** Raw messages array (for empty-state check). */
   messages: ChatMessage[];
-  /** If provided, restore this scroll offset on mount (nav-back from Settings). */
-  initialScrollOffset?: number;
   /** Called when user clicks retry after session load failure. */
   onRetryLoadSession?: () => void;
 }
@@ -100,6 +98,11 @@ export interface VirtualMessageListHandle {
    * layout yet (e.g. immediately after mount).
    */
   getFirstVisibleBlockIndex: () => number | null;
+  /**
+   * Content-derived blockId of the first visible block, or null.
+   * Stable across session switches; used for data-driven scroll restoration.
+   */
+  getFirstVisibleBlockId: () => string | null;
   /**
    * Index of the last block currently visible in the viewport, or null.
    */
@@ -126,6 +129,12 @@ export interface VirtualMessageListHandle {
    * to fulfill `adapter.scrollToPosition()` requests.
    */
   scrollToIndex: (index: number) => void;
+  /**
+   * Scroll to the block with the given content-derived blockId.
+   * Data-driven replacement for pixel-based restoration.
+   * Returns true if the block was found and scrolled to, false otherwise.
+   */
+  scrollToBlockId: (blockId: string) => boolean;
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -169,7 +178,6 @@ export const VirtualMessageList = React.forwardRef<
     isLoadingSession,
     loadError,
     messages,
-    initialScrollOffset,
     onRetryLoadSession,
   } = props;
 
@@ -214,15 +222,16 @@ export const VirtualMessageList = React.forwardRef<
   });
 
   // ── Virtualizer ──────────────────────────────────────────────────
-  // Created fresh on every mount (thanks to parent's key={currentScrollKey}).
-  // initialOffset: 0 ensures getScrollOffset() returns 0 on the first render,
-  // before any scroll event has fired.
-  //
-  // estimateSize delegates to the data-driven estimator in
-  // `blockHeightEstimator.ts`.  ResizeObserver + module-level measurement
-  // cache (blockHeightEstimator.ts) feed real DOM heights back into the
-  // estimator, so after each block is in view once its height in the
-  // virtualizer's measurementsCache is exact.
+    // Created fresh on every mount (thanks to parent's key={currentScrollKey}).
+    // initialOffset: 0 — scroll restoration is data-driven (blockId) and is
+    // performed by the scroll controller after blocks arrive, so the
+    // virtualizer starts from the top and is then positioned imperatively.
+    //
+    // estimateSize delegates to the data-driven estimator in
+    // `blockHeightEstimator.ts`.  ResizeObserver + module-level measurement
+    // cache (blockHeightEstimator.ts) feed real DOM heights back into the
+    // estimator, so after each block is in view once its height in the
+    // virtualizer's measurementsCache is exact.
   const messageBlocksRef = useRef(messageBlocks);
   messageBlocksRef.current = messageBlocks;
   const containerWidthRef = useRef(containerWidth);
@@ -244,7 +253,7 @@ export const VirtualMessageList = React.forwardRef<
     estimateSize,
     overscan: 5,
     gap: 4,
-    initialOffset: initialScrollOffset ?? 0,
+    initialOffset: 0,
     // getItemKey: use content-derived blockId so the virtualizer's internal
     // measurement cache survives prepend/append. Without this, the cache is
     // keyed by index and all measurements shift when items are prepended,
@@ -381,6 +390,11 @@ export const VirtualMessageList = React.forwardRef<
         const items = virtualizer.getVirtualItems();
         return items.length > 0 ? items[0].index : null;
       },
+      getFirstVisibleBlockId: () => {
+        const items = virtualizer.getVirtualItems();
+        if (items.length === 0) return null;
+        return messageBlocksRef.current[items[0].index]?.blockId ?? null;
+      },
       getLastVisibleBlockIndex: () => {
         const items = virtualizer.getVirtualItems();
         return items.length > 0 ? items[items.length - 1].index : null;
@@ -412,6 +426,13 @@ export const VirtualMessageList = React.forwardRef<
         if (count === 0) return;
         const clamped = Math.max(0, Math.min(index, count - 1));
         virtualizer.scrollToIndex(clamped, { align: "start" });
+      },
+      scrollToBlockId: (blockId: string) => {
+        const blocks = messageBlocksRef.current;
+        const idx = blocks.findIndex((b) => b.blockId === blockId);
+        if (idx < 0) return false;
+        virtualizer.scrollToIndex(idx, { align: "start" });
+        return true;
       },
     }),
     [virtualizer, messageBlocks],
@@ -606,6 +627,36 @@ export const VirtualMessageList = React.forwardRef<
                     />
                   );
                 })()}
+
+                {/* Trailing agent header - shown after the last user block,
+                    before the agent has replied.  Provides the "agent is
+                    about to respond" visual anchor.  When the agent reply
+                    arrives, the user block is no longer last and this
+                    disappears; the agent block's own header (via
+                    shouldShowAgentAvatar) takes over. */}
+                {shouldShowTrailingAgentHeader(messageBlocks, virtualRow.index) && (
+                  <div className="flex items-center gap-2 mb-2 mt-1">
+                    <AgentAvatar
+                      agentId={selectedAgentId ?? ""}
+                      displayName={agentDisplayName}
+                      avatarUrl={selectedAgent?.avatar}
+                      version={selectedAgent?.version}
+                      builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
+                      size={40}
+                      className="shrink-0"
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        {agentDisplayName}
+                      </span>
+                      {selectedAgent?.role && (
+                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                          {selectedAgent.role}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
