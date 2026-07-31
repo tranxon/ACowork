@@ -7,6 +7,7 @@ import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
+import { isProcessing, getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
@@ -421,13 +422,22 @@ export function ChatPanel() {
   // are no longer passed to VML — the v2 adapter folds the live assistant
   // stream into blocks (isLive: true) rendered via MessageBubble.
 
-  // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
-  // No optimistic flags — the backend pushes session_state within ~50ms.
-  const sending = sessionStatus
-    ? (sessionStatus.status === "streaming"
-      || sessionStatus.status === "waiting_approval"
-      || sessionStatus.status === "paused")
-    : false;
+  // ADR-021 + ADR-049: "sending" is derived purely from sessionStatus
+  // (backend source of truth). No optimistic flags — the backend pushes
+  // session_state within ~50ms.
+  //
+  // ADR-049: instead of enumerating 4 status strings, use the pure
+  // `isProcessing()` derived from `getProcessingPhase()`. The TypeScript
+  // compiler will fail if any new processing phase is added without
+  // updating the indicator bindings (single source of truth principle).
+  const sending = isProcessing(sessionStatus);
+  // ADR-049: phase is the single source of truth for indicator visibility.
+  // UI banners (waiting / tool_executing / waiting_approval) are derived
+  // directly from this — no flag composition. `paused` is intentionally
+  // not handled here: DebugPausedBanner / RetryWaitBanner /
+  // iterationLimitPaused / loopDetectedPaused already cover all 4
+  // backend paths to the `Paused` state.
+  const phase = getProcessingPhase(sessionStatus);
   const currentModel = sessionState?.model ?? null;
   const currentProvider = sessionState?.provider ?? null;
   const currentReasoningEffort = sessionState?.reasoningEffort ?? null;
@@ -1451,7 +1461,54 @@ export function ChatPanel() {
                 when LLM provider returns 429 with Retry-After > 10s. Same
                 wrapper ownership as DebugPausedBanner. */}
             <RetryWaitBanner />
-            {/* Iteration limit pause — hint + Continue button */}
+            {/* ADR-049: Phase indicators driven by getProcessingPhase().
+                Style mirrors ResultsPanel Compacting indicator
+                (ResultsPanel.tsx:441-446): left-aligned, flex items-center gap-1.5,
+                no banner container, no border. Indicator dot uses animate-pulse,
+                label uses the global thinking-shimmer class (CSS gradient text-fill
+                animation defined in globals.css:1216) — same 圆点闪烁 + 文字闪烁
+                treatment as the legacy trailing pulse-dot indicator. Color comes
+                from each phase semantic palette. paused is intentionally not
+                handled here: DebugPausedBanner / RetryWaitBanner / iterationLimitPaused
+                / loopDetectedPaused already cover all 4 backend paths to Paused.
+
+                The streaming indicator coexists with the inline StreamingSourceBlock:
+                if the live block is in the adapter snapshot the block is the primary
+                feedback, the indicator here is a fallback for when the live block is
+                outside the viewport or foldMessages has not yet produced one. */}
+            {phase === "waiting" && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.phaseWaiting", { defaultValue: "Waiting for model…" })}
+                </span>
+              </div>
+            )}
+            {phase === "streaming" && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.phaseStreaming", { defaultValue: "Generating reply…" })}
+                </span>
+              </div>
+            )}
+            {phase === "tool_executing" && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.phaseToolExecuting", { defaultValue: "Running tool…" })}
+                </span>
+              </div>
+            )}
+            {phase === "waiting_approval" && (
+              <div className="mt-1 ml-12 flex items-center gap-1.5">
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-yellow-500 animate-pulse" />
+                <span className="thinking-shimmer text-zinc-500 dark:text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
+                  {t("chatPanel.phaseWaitingApproval", { defaultValue: "Waiting for tool approval…" })}
+                </span>
+              </div>
+            )}
+{/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
                 <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]">

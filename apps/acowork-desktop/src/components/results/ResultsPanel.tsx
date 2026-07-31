@@ -3,6 +3,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
 import type { ChatMessage, SessionStatus } from "../../lib/types";
+import { getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import {
   WifiOff,
@@ -482,11 +483,17 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   <span
                     className={cn(
                       "inline-block h-2 w-2 rounded-full",
-                      sessionStatus?.status === "streaming" && "bg-[var(--color-accent)]",
-                      sessionStatus?.status === "idle" && "bg-zinc-300 dark:bg-zinc-600",
-                      sessionStatus?.status === "paused" && "bg-amber-400",
-                      sessionStatus?.status === "waiting_approval" && "bg-yellow-400",
-                      !sessionStatus && "bg-zinc-300 dark:bg-zinc-600",
+                      // ADR-049: 6-state color map. Each phase gets its own
+                      // visual cue so the operator can distinguish "waiting"
+                      // (gray), "streaming" (accent), "tool_executing"
+                      // (blue), "waiting_approval" (yellow), "paused"
+                      // (amber), and "idle" / unknown (zinc).
+                      getProcessingPhase(sessionStatus) === "streaming" && "bg-[var(--color-accent)]",
+                      getProcessingPhase(sessionStatus) === "waiting" && "bg-zinc-400 dark:bg-zinc-500",
+                      getProcessingPhase(sessionStatus) === "tool_executing" && "bg-blue-400",
+                      getProcessingPhase(sessionStatus) === "waiting_approval" && "bg-yellow-400",
+                      getProcessingPhase(sessionStatus) === "paused" && "bg-amber-400",
+                      (getProcessingPhase(sessionStatus) === "idle" || !sessionStatus) && "bg-zinc-300 dark:bg-zinc-600",
                     )}
                   />
                   {sessionStatus ? sessionStatus.status.replace(/_/g, " ") : "\u2014"}

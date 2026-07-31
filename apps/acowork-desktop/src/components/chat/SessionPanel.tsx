@@ -3,6 +3,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { MessageSquarePlus, Clock, MessageCircle, ChevronDown, Loader2, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { isProcessing } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 
@@ -133,9 +134,7 @@ export function SessionPanel({ agentId }: SessionPanelProps) {
                 const agent = useChatStore.getState().agentStates[agentId];
                 const sessionState = agent?.sessionStates[session.session_id];
                 if (!sessionState) return false;
-                return sessionState.sessionStatus?.status === "streaming"
-                  || sessionState.sessionStatus?.status === "waiting_approval"
-                  || sessionState.sessionStatus?.status === "paused";
+                return isProcessing(sessionState.sessionStatus);
               })();
               return (
                 <div

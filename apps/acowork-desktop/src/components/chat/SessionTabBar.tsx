@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
-import { isSessionActive } from "../../lib/types";
+import { isProcessing } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare } from "lucide-react";
@@ -144,7 +144,7 @@ function SessionListDropdown({ agentId, onClose }: SessionListDropdownProps) {
           const isOpen = openSessionIds.includes(session.session_id);
           const isDeleting = confirmDelete === session.session_id;
           const sessionState = useChatStore.getState().getSessionState(agentId, session.session_id);
-          const isActive = isSessionActive(sessionState?.sessionStatus);
+          const isActive = isProcessing(sessionState?.sessionStatus);
 
           return (
             <div
@@ -285,7 +285,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     const status = getStatus(sessionId);
 
     // If session is looping, ask confirmation before closing
-    if (isSessionActive(status)) {
+    if (isProcessing(status)) {
       setClosingSessionId(sessionId);
       return;
     }
@@ -349,7 +349,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const handleContextCloseChat = async (sessionId: string) => {
     setTabContextMenu(null);
     const status = getStatus(sessionId);
-    if (isSessionActive(status)) {
+    if (isProcessing(status)) {
       setClosingSessionId(sessionId);
       return;
     }
@@ -368,7 +368,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       // a live response. The user can right-click them individually to
       // get the explicit confirm dialog.
       const status = getStatus(id);
-      if (isSessionActive(status)) continue;
+      if (isProcessing(status)) continue;
       await closeSession(agentId, id);
     }
   };
@@ -410,7 +410,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
         {openSessionIds.map((sessionId) => {
           const isActive = sessionId === activeSessionId;
           const status = getStatus(sessionId);
-          const isProcessing = isSessionActive(status);
+          const isProc = isProcessing(status);
 
           return (
             <TabItem
@@ -421,13 +421,13 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               active={isActive}
             >
               {/* Streaming indicator dot (only when processing and not active) */}
-              {isProcessing && !isActive && (
+              {isProc && !isActive && (
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
               )}
               {/* Title */}
               <span className={cn(
                 "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
-                isProcessing && isActive && "text-zinc-700 dark:text-zinc-200",
+                isProc && isActive && "text-zinc-700 dark:text-zinc-200",
               )}>
                 {getTitle(sessionId)}
               </span>

@@ -14,7 +14,7 @@ import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
-import { isSessionActive, type CloneResponse } from "../../lib/types";
+import { isProcessing, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 
@@ -47,7 +47,7 @@ export function AgentList({ width }: AgentListProps) {
     for (const [agentId, agentState] of Object.entries(sessionStatesByAgent)) {
       const sessionStates = agentState.sessionStates ?? {};
       for (const sess of Object.values(sessionStates)) {
-        if (isSessionActive(sess.sessionStatus)) {
+        if (isProcessing(sess.sessionStatus)) {
           ids.add(agentId);
           break;
         }

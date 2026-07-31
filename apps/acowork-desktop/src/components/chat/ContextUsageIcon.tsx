@@ -3,6 +3,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
+import { getProcessingPhase } from "../../lib/types";
 
 /** Circular progress ring showing context usage percentage.
  *  Starts from bottom (6 o'clock), goes clockwise.
@@ -95,7 +96,10 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   }, []);
 
   const usagePercent = contextUsage?.usage_percent ?? 0;
-  const isIdle = !sessionStatus || sessionStatus.status === "idle";
+  // ADR-049: derive from `getProcessingPhase()` instead of comparing status
+  // string literals. The compiler checks exhaustiveness — adding a new
+  // non-idle phase will not silently bypass this check.
+  const isIdle = getProcessingPhase(sessionStatus) === "idle";
   const canAct = isIdle && !isCompacting && contextUsage != null;
 
   const handleCompressTools = () => {
