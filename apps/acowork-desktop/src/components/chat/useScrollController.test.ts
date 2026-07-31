@@ -1,19 +1,20 @@
 /**
- * useScrollController — unit tests for the C4 event-driven controller.
+ * useScrollController — unit tests for the C5 event-driven controller.
  *
- * ADR-050 §7 C4 verification:
+ * ADR-050 §7 C5 verification:
  *   - tsc --noEmit: clean (smoke-checked outside)
  *   - Manual tests in §8 acceptance matrix
  *   - Unit tests pin the data-derived flag contract (the only piece
  *     that doesn't need a DOM):
  *       showScrollToBottom = !adapter.isAtTail() || adapter.hasPendingFlush()
- *       showScrollToTop    = adapter.hasOlder
- *       isPinnedToBottom   = adapter.isAtTail() && !adapter.hasPendingFlush()
+ *       showScrollToTop    = !isNearTop || adapter.hasOlder
+ *       isAtLatest   = adapter.isAtTail() && !adapter.hasPendingFlush()
  *       jumpToBottom / jumpToTop  delegate to adapter
  *
- * The 150ms pagination tick reads DOM and is covered indirectly: any
- * provider that toggles `isLoading` correctly would dedupe concurrent
- * loads, so we don't need to drive `setInterval` in unit tests.
+ * The event-driven pagination trigger (checkEdges via rAF) reads DOM
+ * and is covered indirectly: any provider that toggles `isLoading`
+ * correctly would dedupe concurrent loads, so we don't need to drive
+ * scroll events in unit tests.
  */
 import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
@@ -82,7 +83,8 @@ describe("useScrollController: data-derived flags", () => {
     expect(result.current.showScrollToBottom).toBe(true);
   });
 
-  it("showScrollToTop=hasOlder", () => {
+  it("showScrollToTop: hasOlder=true always shows; hasOlder=false depends on isNearTop", () => {
+    // hasOlder=true → always show (can load older pages)
     const adapter1 = makeMockAdapter({ hasOlder: true });
     const { result: r1 } = renderHook(() =>
       useScrollController({
@@ -94,6 +96,8 @@ describe("useScrollController: data-derived flags", () => {
     );
     expect(r1.current.showScrollToTop).toBe(true);
 
+    // hasOlder=false + initial isNearTop=false (not at top) → show
+    // (user is mid-list, can scroll up within current page)
     const adapter2 = makeMockAdapter({ hasOlder: false });
     const { result: r2 } = renderHook(() =>
       useScrollController({
@@ -103,10 +107,11 @@ describe("useScrollController: data-derived flags", () => {
         sessionKey: "agent:sess",
       }),
     );
-    expect(r2.current.showScrollToTop).toBe(false);
+    // isNearTop defaults to false → !isNearTop=true → showScrollToTop=true
+    expect(r2.current.showScrollToTop).toBe(true);
   });
 
-  it("isPinnedToBottom() returns true when at tail and no pending flush", () => {
+  it("isAtLatest() returns true when at tail and no pending flush", () => {
     const adapter = makeMockAdapter({ isAtTail: () => true, hasPendingFlush: () => false });
     const { result } = renderHook(() =>
       useScrollController({
@@ -116,10 +121,10 @@ describe("useScrollController: data-derived flags", () => {
         sessionKey: "agent:sess",
       }),
     );
-    expect(result.current.isPinnedToBottom()).toBe(true);
+    expect(result.current.isAtLatest()).toBe(true);
   });
 
-  it("isPinnedToBottom() returns false when not at tail", () => {
+  it("isAtLatest() returns false when not at tail", () => {
     const adapter = makeMockAdapter({ isAtTail: () => false });
     const { result } = renderHook(() =>
       useScrollController({
@@ -129,10 +134,10 @@ describe("useScrollController: data-derived flags", () => {
         sessionKey: "agent:sess",
       }),
     );
-    expect(result.current.isPinnedToBottom()).toBe(false);
+    expect(result.current.isAtLatest()).toBe(false);
   });
 
-  it("isPinnedToBottom() returns false when pending flush (streaming not yet caught up)", () => {
+  it("isAtLatest() returns false when pending flush (streaming not yet caught up)", () => {
     const adapter = makeMockAdapter({ isAtTail: () => true, hasPendingFlush: () => true });
     const { result } = renderHook(() =>
       useScrollController({
@@ -142,7 +147,7 @@ describe("useScrollController: data-derived flags", () => {
         sessionKey: "agent:sess",
       }),
     );
-    expect(result.current.isPinnedToBottom()).toBe(false);
+    expect(result.current.isAtLatest()).toBe(false);
   });
 });
 
@@ -215,27 +220,5 @@ describe("useScrollController: subscription", () => {
     rerender({ sessionKey: "agent:sess2" });
     expect(unsub).toHaveBeenCalledTimes(1);
     expect(subscribe).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("useScrollController: deprecation shims accepted", () => {
-  it("ignores sending/virtualCount/messageBlocks/initialScrollOffset/agentId/sessionId", () => {
-    const adapter = makeMockAdapter();
-    expect(() => {
-      renderHook(() =>
-        useScrollController({
-          containerRef: { current: null },
-          adapter,
-          vmlRef: { current: null },
-          sessionKey: "agent:sess",
-          sending: true,
-          virtualCount: 50,
-          messageBlocks: [],
-          initialScrollOffset: 0,
-          agentId: "agent",
-          sessionId: "sess",
-        }),
-      );
-    }).not.toThrow();
   });
 });

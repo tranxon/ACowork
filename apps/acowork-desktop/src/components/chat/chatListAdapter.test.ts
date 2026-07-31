@@ -233,5 +233,121 @@ describe("chatListAdapter v2: blocksSelector states", () => {
   });
 });
 
+// ── Pagination primitives ─────────────────────────────────────────────────
+
+describe("chatListAdapter v2: loadPrevPage / loadNextPage", () => {
+  beforeEach(() => {
+    clearAllState();
+  });
+
+  afterEach(() => {
+    clearAllState();
+  });
+
+  it("loadPrevPage is no-op when hasOlder=false (offset=0)", async () => {
+    seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { offset: 0, limit: 2, total: 2 });
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const snap = store.getSnapshot();
+    expect(snap.hasOlder).toBe(false);
+    // Should not throw, should not change state.
+    await store.loadPrevPage();
+    const after = store.getSnapshot();
+    expect(after.messageOffset).toBe(0);
+  });
+
+  it("loadNextPage is no-op when hasNewer=false (at tail)", async () => {
+    seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { offset: 0, limit: 2, total: 2 });
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const snap = store.getSnapshot();
+    expect(snap.hasNewer).toBe(false);
+    await store.loadNextPage();
+    const after = store.getSnapshot();
+    expect(after.messageOffset).toBe(0);
+    expect(after.messageLimit).toBe(2);
+  });
+
+  it("hasOlder/hasNewer derive correctly from forward offset", () => {
+    // Window [50, 100) out of 200 total → hasOlder=true, hasNewer=true
+    seedHistoryInStore(
+      Array.from({ length: 50 }, (_, i) => msg(`m${i}`, ts(i))),
+      { offset: 50, limit: 50, total: 200 },
+    );
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const snap = store.getSnapshot();
+    expect(snap.hasOlder).toBe(true);  // offset > 0
+    expect(snap.hasNewer).toBe(true);  // offset + limit < total
+    expect(snap.atTail).toBe(false);
+  });
+
+  it("atTail=true when offset+limit >= total", () => {
+    seedHistoryInStore(
+      Array.from({ length: 50 }, (_, i) => msg(`m${i}`, ts(i))),
+      { offset: 150, limit: 50, total: 200 },
+    );
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    const snap = store.getSnapshot();
+    expect(snap.atTail).toBe(true);    // 150 + 50 >= 200
+    expect(snap.hasNewer).toBe(false); // offset + limit >= total
+    expect(snap.hasOlder).toBe(true);  // offset > 0
+  });
+});
+
+describe("chatListAdapter v2: scrollToBottom / scrollToTop", () => {
+  beforeEach(() => {
+    clearAllState();
+  });
+
+  afterEach(() => {
+    clearAllState();
+  });
+
+  it("scrollToBottom is no-op when already at tail", async () => {
+    seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { offset: 0, limit: 2, total: 2 });
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    expect(store.getSnapshot().atTail).toBe(true);
+    // Should complete without error and not change offset.
+    await store.scrollToBottom();
+    expect(store.getSnapshot().messageOffset).toBe(0);
+  });
+
+  it("scrollToTop is no-op when already at head (offset=0)", async () => {
+    seedHistoryInStore([msg("u1", ts(100)), msg("a1", ts(200))], { offset: 0, limit: 2, total: 2 });
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    expect(store.getSnapshot().hasOlder).toBe(false);
+    await store.scrollToTop();
+    expect(store.getSnapshot().messageOffset).toBe(0);
+  });
+
+  it("scrollToPosition records pendingScrollIndex", async () => {
+    seedHistoryInStore(
+      [msg("u1", ts(100)), msg("a1", ts(200)), msg("u2", ts(300))],
+      { offset: 0, limit: 3, total: 3 },
+    );
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    await store.scrollToPosition(2);
+    expect(store.pendingScrollIndex).toBe(2);
+  });
+
+  it("scrollToPosition clamps out-of-range index", async () => {
+    seedHistoryInStore(
+      [msg("u1", ts(100)), msg("a1", ts(200))],
+      { offset: 0, limit: 2, total: 2 },
+    );
+    const store = freshStore();
+    if (!store) throw new Error("store missing");
+    await store.scrollToPosition(999);
+    // blocks.length is likely 1-2 depending on folding; clamped to max.
+    expect(store.pendingScrollIndex).toBeLessThanOrEqual(store.getSnapshot().blocks.length - 1);
+    expect(store.pendingScrollIndex).toBeGreaterThanOrEqual(0);
+  });
+});
+
 // Ensure unused-import warnings stay clean.
 void releaseAdapterSession;

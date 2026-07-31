@@ -2,7 +2,7 @@
  * useScrollController - Event-driven pagination + scroll-position
  * controller for the chat list.
  *
- * ADR-050 C4 — replaces the v1 782-line state machine with a ~150-line
+ * ADR-050 C5 — replaces the v1 782-line state machine with a ~150-line
  * event-driven pipeline.  The controller is the ONLY layer that reads
  * DOM (scrollTop / scrollHeight) and writes scroll-side effects.  It
  * does NOT carry any per-render scroll state — every value is derived
@@ -10,20 +10,20 @@
  *
  * Adapter compatibility
  * ---------------------
- * The controller accepts both v1 `ChatListAdapter` (still consumed by
- * ChatPanel in C4) and v2 `ChatListAdapterV2` — they share the same
- * read shape (`isAtTail / hasPendingFlush / hasOlder / hasNewer /
- * loadPrevPage / loadNextPage / scrollToBottom / scrollToTop /
- * subscribe`).  C5 will drop v1 entirely; once ChatPanel binds v2,
- * the controller's `adapter` type narrows to `ChatListAdapterV2`.
+ * The controller accepts ONLY the v2 `ChatListAdapterV2` (from
+ * `chatListAdapter.ts`).  The v1 `useChatListAdapter.ts` is no longer
+ * referenced.
  *
  * Responsibilities
  * ----------------
- * 1. **Pagination tick** (150ms `setInterval`):
+ * 1. **Pagination trigger** (event-driven, rAF-throttled):
+ *      - On scroll events (user-initiated), check proximity to edges.
  *      - If user is near the TOP of the scroll container, call
  *        `adapter.loadPrevPage()`.
  *      - If user is near the BOTTOM, call `adapter.loadNextPage()`.
- *      - Otherwise, idle.
+ *      - On `liveUpdate` adapter events (content growth), re-check
+ *        edges to handle passive proximity (content shrank/grew).
+ *      - Zero CPU when idle — no polling timer.
  *
  * 2. **Scroll arrow visibility** (data-driven, no DOM read):
  *      - `showScrollToBottom` = `!adapter.isAtTail() || adapter.hasPendingFlush()`.
@@ -33,16 +33,13 @@
  *      - `jumpToBottom` = `adapter.scrollToBottom()`
  *      - `jumpToTop`    = `adapter.scrollToTop()`
  *
- * 4. **Event subscription** (C4 new):
+ * 4. **Event subscription** (C5 wired):
  *      The controller subscribes to `adapter.subscribe(...)` and on
- *      `liveUpdate` events would check whether the streaming block is
- *      in the viewport (via `vmlRef.getLastVisibleBlockIndex`).  When
- *      in viewport, the VML is asked to refresh its streaming block
- *      (`vmlRef.refreshStreamingBlock` — added in C5).  When out of
- *      viewport, the controller skips the refresh entirely to avoid
- *      off-screen DOM churn.  For C4 the subscription is a no-op
- *      (vmlRef doesn't yet expose `refreshStreamingBlock`); C5 will
- *      wire the full chain.
+ *      `liveUpdate` events checks whether the streaming block is
+ *      in the viewport (via `vmlRef.isStreamingBlockInViewport()`).
+ *      When in viewport, the browser naturally keeps the user at the
+ *      bottom as scrollHeight grows.  When out of viewport, the
+ *      user's reading position is preserved (no forced scroll).
  *
  * Why no state
  * ------------
@@ -66,44 +63,20 @@
  * content accumulate BELOW the current viewport.  Clicking the
  * "jump to latest" button re-anchors at any time.
  */
-import { useCallback, useEffect, useRef } from "react";
-import type { ChatListAdapter as ChatListAdapterV1 } from "./useChatListAdapter";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
 import type { VirtualMessageListHandle } from "./VirtualMessageList";
-
-/**
- * Minimal adapter shape required by the C4 controller.  Both v1
- * (`useChatListAdapter.ts`) and v2 (`chatListAdapter.ts`) satisfy
- * this; C5 will drop v1 and the controller will accept
- * `ChatListAdapterV2` directly.
- */
-type ControllerAdapter = ChatListAdapterV1 | ChatListAdapterV2;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /**
- * Distance from the top edge of the scroll container (in px) below
- * which we trigger `loadPrevPage`.  Small enough that prepending is
- * seamless (the user doesn't see the threshold line) and large enough
- * that a single scroll event doesn't oscillate between triggering and
- * idle.
+ * Distance from the top/bottom edge of the scroll container (in px)
+ * within which we trigger pagination.  Small enough that prepending /
+ * appending is seamless (the user doesn't see the threshold line) and
+ * large enough that a single scroll event doesn't oscillate between
+ * triggering and idle.
  */
 const EDGE_THRESHOLD_PX = 50;
-
-/**
- * Polling cadence for the pagination tick.  The controller reads DOM
- * (scrollTop / scrollHeight) on each tick, not via scroll listeners,
- * so the rate caps the "load older / newer" trigger rate regardless of
- * how fast the user scrolls.  150ms ≈ 6.6 Hz — fast enough to keep
- * up with scroll-driven loads, slow enough that a brief stall during
- * loadPrevPage doesn't immediately re-trigger.
- *
- * Pre-ADR-050, the controller relied on scroll listeners + a state
- * machine to throttle loads.  C4 simplifies: tick at 6.6Hz, call the
- * adapter, done.  The adapter itself deduplicates concurrent loads
- * via `isLoading`.
- */
-const TIMER_INTERVAL_MS = 150;
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -118,46 +91,44 @@ export interface ScrollController {
   jumpToBottom: () => void;
   /** User clicked "jump to oldest". */
   jumpToTop: () => void;
-  /** Whether the user is currently pinned to the bottom. */
-  isPinnedToBottom: () => boolean;
+  /** Whether the user is viewing the latest content (at tail, no pending). */
+  isAtLatest: () => boolean;
 }
 
 export interface ScrollControllerConfig {
   /** Ref to the scroll container (owned by ChatPanel). */
   containerRef: React.RefObject<HTMLDivElement | null>;
-  /** The chat list adapter (v1 OR v2). */
-  adapter: ControllerAdapter;
-  /** Imperative handle to VirtualMessageList (scrollToBottom / scrollToTop). */
+  /** The v2 chat list adapter (single source of truth). */
+  adapter: ChatListAdapterV2;
+  /** Imperative handle to VirtualMessageList (scrollToBottom / scrollToTop / isStreamingBlockInViewport). */
   vmlRef: React.RefObject<VirtualMessageListHandle | null>;
   /** Session key — used to reset the tick on session change. */
   sessionKey: string | null;
-
-  // ── C4 deprecation shims ──
-  // The fields below are accepted but ignored by the C4 controller.
-  // They are kept in the config interface so ChatPanel can keep
-  // passing the same shape; C5 will remove the callsite once the
-  // v2 adapter fully replaces v1.
-  /** @deprecated Removed in C4 — C5 caller cleanup. */
-  sending?: boolean;
-  /** @deprecated Removed in C4 — replaced by adapter.totalBlocks. */
-  virtualCount?: number;
-  /** @deprecated Removed in C4 — adapter now owns block bookkeeping. */
-  messageBlocks?: unknown[];
-  /** @deprecated Removed in C4 — nav-back scroll restore deferred to a
-   *  follow-up; C5 will wire `sessionStorage`-backed initial offset. */
+  /**
+   * Saved pixel scroll offset for nav-back restoration.  When undefined,
+   * the init-scroll effect scrolls to bottom on first data arrival.
+   * When defined, the init-scroll useLayoutEffect sets
+   * `container.scrollTop = initialScrollOffset` synchronously (before
+   * paint) to restore the user's reading position.  The virtualizer's
+   * `initialOffset` option alone does NOT set the DOM scrollTop — it
+   * only seeds the virtualizer's internal scroll-offset state.
+   */
   initialScrollOffset?: number;
-  /** @deprecated Removed in C4 — adapter is the single source of truth
-   *  for scroll position; agentId/sessionId no longer need to be passed
-   *  through the controller. */
-  agentId?: string | null;
-  /** @deprecated Removed in C4 — see agentId note above. */
-  sessionId?: string | null;
+  /**
+   * Absolute message index the user was viewing when they left the
+   * session.  When set, the init-scroll effect uses the adapter's
+   * scrollToPosition (index-based, virtualizer-aware) instead of raw
+   * pixel scrollTop — this is reliable across session switches where
+   * the loaded page (and thus scrollHeight) may differ.
+   * Takes priority over initialScrollOffset when both are set.
+   */
+  initialMessageIndex?: number;
 }
 
 // ── Hook ───────────────────────────────────────────────────────────────────
 
 export function useScrollController(config: ScrollControllerConfig): ScrollController {
-  const { containerRef, adapter, vmlRef, sessionKey } = config;
+  const { containerRef, adapter, vmlRef, sessionKey, initialScrollOffset, initialMessageIndex } = config;
 
   // Mirrors of the latest adapter / vmlRef / container refs so the
   // interval callback (registered with stable deps) reads current
@@ -171,94 +142,316 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   const containerRefRef = useRef(containerRef);
   containerRefRef.current = containerRef;
 
-  // `showScrollToBottom` is data-driven.  Read directly from the
-  // adapter on every render — no useState, no useMemo.  React's
-  // re-render is already triggered by `adapter` updating through
-  // `useChatListAdapter`, so deriving flags inline is free.
-  const showScrollToBottom = !adapter.isAtTail() || adapter.hasPendingFlush();
-  const showScrollToTop = adapter.hasOlder;
+  // ── Scroll-position tracking ──
+  // Two boolean states track whether the viewport is near each edge.
+  // They flip when the user crosses the EDGE_THRESHOLD_PX boundary,
+  // driving a minimal re-render to update arrow-button visibility.
+  // Without these, button visibility is purely data-derived and misses
+  // the case where the user scrolls within a page that's already at
+  // the data-window tail/head.
+  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [isNearTop, setIsNearTop] = useState(false);
 
-  // ── Pagination tick ──
-  // 150ms setInterval.  On each tick, read scrollTop from the DOM and
-  // decide whether to loadPrevPage / loadNextPage.  The interval is
-  // stable across renders; only restart on sessionKey change.
-  useEffect(() => {
-    const tick = () => {
-      const container = containerRefRef.current.current;
-      const a = adapterRef.current;
-      if (!container || !a) return;
-      if (a.isLoading) return;
-      const scrollTop = container.scrollTop;
-      // near-top → load older
-      if (scrollTop <= EDGE_THRESHOLD_PX && a.hasOlder) {
-        void a.loadPrevPage();
-        return;
-      }
-      // near-bottom → load newer
-      const distFromBottom =
-        container.scrollHeight - (scrollTop + container.clientHeight);
-      if (distFromBottom <= EDGE_THRESHOLD_PX && a.hasNewer) {
-        void a.loadNextPage();
-      }
-    };
-    const id = window.setInterval(tick, TIMER_INTERVAL_MS);
-    return () => {
-      window.clearInterval(id);
-    };
+  // `showScrollToBottom`: show when the user is NOT viewing the latest
+  // content.  Three triggers:
+  //   1. User scrolled away from bottom (!isNearBottom)
+  //   2. Data window doesn't cover the tail (!isAtTail)
+  //   3. Live content waiting to be flushed (hasPendingFlush)
+  const showScrollToBottom = !isNearBottom || !adapter.isAtTail() || adapter.hasPendingFlush();
+  // `showScrollToTop`: show when the user is NOT at the very top of
+  // the content, OR when older pages exist beyond the current window.
+  const showScrollToTop = !isNearTop || adapter.hasOlder;
+
+  // ── Initial positioning gate ──
+  // Prevents edge-detection from triggering loadPrevPage before the
+  // scroll container has been positioned (scroll-to-bottom on fresh
+  // open, or restored via initialOffset).  Without this gate, the
+  // first scroll event reads scrollTop=0 (the virtualizer's
+  // initialOffset) and mistakes it for "user scrolled to top" —
+  // cascading loadPrevPage until all messages are loaded.
+  const initializedRef = useRef(false);
+
+  // Reset on session switch.  Also reset prepend-tracking refs so the
+  // scroll-preservation effect doesn't misfire across sessions.
+  // MUST be useLayoutEffect (not useEffect) so it fires BEFORE the
+  // init-scroll useLayoutEffect below — both are useLayoutEffect and
+  // React fires them in definition order.  If this were useEffect it
+  // would fire AFTER the init-scroll, leaving initializedRef=true
+  // when the init-scroll checks it (skipping the scroll restoration).
+  useLayoutEffect(() => {
+    initializedRef.current = false;
+    setIsNearBottom(true); // fresh session starts at bottom
+    setIsNearTop(false);   // ...not at top
   }, [sessionKey]);
 
-  // ── Event subscription ──
-  // The controller subscribes to adapter events.  On `liveUpdate`,
-  // check whether the streaming block is in viewport and ask VML to
-  // refresh it; otherwise skip to avoid off-screen DOM churn.
-  //
-  // C4 keeps this as a no-op stub — VML's `isStreamingBlockInViewport`
-  // and `refreshStreamingBlock` are added in C5.  Until then the
-  // subscription is registered but does nothing.
-  useEffect(() => {
-    const unsub = adapter.subscribe((event) => {
-      if (event.type !== "liveUpdate") return;
-      const vml = vmlRefRef.current.current;
-      if (!vml) return;
-      // C5 will add: vml.isStreamingBlockInViewport() + vml.refreshStreamingBlock()
-      // For C4 we no-op so the subscription contract is testable.
-      void vml;
+  // ── Init-scroll effect (useLayoutEffect — before paint) ──
+  // When blocks first arrive for a session, position the container:
+  //   - No saved offset (initialScrollOffset === undefined): scroll to
+  //     bottom — the user expects to see the latest messages.
+  //   - Saved offset provided: set container.scrollTop to the saved
+  //     pixel offset.  The virtualizer's `initialOffset` option only
+  //     seeds its INTERNAL scroll-offset state; it does NOT write the
+  //     DOM element's scrollTop.  Without this explicit assignment the
+  //     container starts at scrollTop=0 and the user sees the top of
+  //     the page instead of their saved reading position.
+  // useLayoutEffect (not useEffect) so the scroll is applied BEFORE
+  // the browser paints — no top→position flash.
+  // The initializedRef guard makes it a one-shot per session.
+  const blocksLen = adapter.blocks.length;
+  useLayoutEffect(() => {
+    if (initializedRef.current) return;
+    if (blocksLen === 0) return;
+    console.warn("[SC:init-scroll]", {
+      sessionKey,
+      blocksLen,
+      initialMessageIndex,
+      initialScrollOffset,
+      messageOffset: adapter.messageOffset,
     });
-    return unsub;
-  }, [adapter, sessionKey]);
+    if (initialMessageIndex !== undefined) {
+      // Content-based restoration: compute the block index relative to
+      // the currently-loaded window and delegate to the adapter's
+      // scrollToPosition (which emits scrollToIndex → vml.scrollToIndex).
+      // This is reliable regardless of scrollHeight differences between
+      // the saving and restoring sessions.
+      const relativeIndex = Math.max(0, Math.min(
+        initialMessageIndex - adapter.messageOffset,
+        blocksLen - 1,
+      ));
+      console.warn("[SC:init-scroll] content-based →", { relativeIndex, initialMessageIndex, adapterOffset: adapter.messageOffset });
+      adapter.scrollToPosition(relativeIndex);
+    } else if (initialScrollOffset !== undefined) {
+      // Pixel-based fallback (nav-back within same mount, no remount).
+      const container = containerRefRef.current.current;
+      console.warn("[SC:init-scroll] pixel-based →", { initialScrollOffset });
+      if (container) {
+        container.scrollTop = initialScrollOffset;
+      }
+    } else {
+      // Fresh open / sending — scroll to bottom.
+      console.warn("[SC:init-scroll] scroll-to-bottom (no snapshot)");
+      const vml = vmlRefRef.current.current;
+      if (vml) {
+        vml.scrollToBottom();
+      }
+    }
+    // Whether we scrolled or relied on initialOffset, mark done.
+    initializedRef.current = true;
+  }, [blocksLen, sessionKey, initialScrollOffset, initialMessageIndex, adapter]);
 
-  // ── handleScroll ──
-  // Called from the scroll container's onScroll event.  The handler
-  // exists to satisfy the legacy interface (ChatPanel still binds
-  // onScroll) and to give the React event loop a chance to re-render
-  // the showScrollToTop flag (which depends on hasOlder — already
-  // driven by adapter re-renders).  C4 does not need DOM-side work
-  // here; the 150ms tick already covers near-edge detection.
-  const handleScroll = useCallback(() => {
-    // Intentionally empty: the 150ms tick reads DOM, the adapter
-    // re-renders drive showScrollToBottom.  Keeping the callback as
-    // a no-op preserves the public interface for ChatPanel's
-    // onScroll binding without re-introducing scroll listeners.
+  // ── Scroll preservation on prepend (useLayoutEffect) ──
+  // When loadPrevPage() prepends older messages, the virtualizer's
+  // totalSize grows but the browser keeps scrollTop unchanged.  Without
+  // correction the user's viewport shows the SAME pixels — the newly
+  // loaded content is above the fold and invisible.  The user perceives
+  // "scrolling doesn't work" because repeated scroll-up → loadPrevPage
+  // cycles produce no visible change.
+  //
+  // Fix: in a useLayoutEffect (runs after DOM commit, before paint),
+  // detect prepend (first blockId changed + block count grew) and
+  // shift scrollTop by the scrollHeight delta.  This keeps the user's
+  // viewport anchored to the same content while new content appears
+  // above — the standard chat-app "infinite scroll up" behavior.
+  //
+  // Detection uses blockId (content-derived, stable) rather than
+  // messageOffset to avoid false positives when a session reload
+  // resets offset to 0.
+  const firstBlockId = blocksLen > 0 ? adapter.blocks[0].blockId : null;
+  const cacheGeneration = adapter.cacheGeneration;
+  const prevBlocksLenRef = useRef(0);
+  const prevFirstBlockIdRef = useRef<string | null>(null);
+  const prevScrollHeightRef = useRef(0);
+  const prevSessionKeyForPrependRef = useRef<string | null | undefined>(undefined);
+  const prevCacheGenRef = useRef(cacheGeneration);
+
+  // Capture scrollHeight BEFORE the DOM commit (during render) so the
+  // useLayoutEffect can compute the delta after the commit.
+  const containerNow = containerRef.current;
+  if (containerNow) {
+    prevScrollHeightRef.current = containerNow.scrollHeight;
+  }
+
+  useLayoutEffect(() => {
+    const container = containerRefRef.current.current;
+
+    // Session changed — reset tracking refs, skip adjustment.
+    if (prevSessionKeyForPrependRef.current !== sessionKey) {
+      prevSessionKeyForPrependRef.current = sessionKey;
+      prevBlocksLenRef.current = blocksLen;
+      prevFirstBlockIdRef.current = firstBlockId;
+      prevCacheGenRef.current = cacheGeneration;
+      if (container) prevScrollHeightRef.current = container.scrollHeight;
+      return;
+    }
+
+    // Cache replaced (jump operation) — NOT a prepend.  Reset refs
+    // and skip anchoring; the caller (scrollToTop/Bottom/Position)
+    // owns the subsequent scroll placement.
+    if (prevCacheGenRef.current !== cacheGeneration) {
+      prevCacheGenRef.current = cacheGeneration;
+      prevBlocksLenRef.current = blocksLen;
+      prevFirstBlockIdRef.current = firstBlockId;
+      if (container) prevScrollHeightRef.current = container.scrollHeight;
+      return;
+    }
+
+    const prevLen = prevBlocksLenRef.current;
+    const prevId = prevFirstBlockIdRef.current;
+    prevBlocksLenRef.current = blocksLen;
+    prevFirstBlockIdRef.current = firstBlockId;
+
+    if (!container) return;
+    // Guard: only adjust on genuine prepend within the same session.
+    // - prevId !== null: not the first data arrival (initial load).
+    // - blocksLen > prevLen: content grew (not a clear / replace).
+    // - firstBlockId changed: the head of the list is different
+    //   (prepend), not just an append or in-place update.
+    if (prevId === null || blocksLen <= prevLen || firstBlockId === prevId) {
+      prevScrollHeightRef.current = container.scrollHeight;
+      return;
+    }
+
+    // Prepend detected — shift scrollTop by the height delta so the
+    // user's viewport stays anchored to the same content.
+    const delta = container.scrollHeight - prevScrollHeightRef.current;
+    if (delta > 0) {
+      container.scrollTop += delta;
+    }
+    prevScrollHeightRef.current = container.scrollHeight;
+  }, [blocksLen, firstBlockId, sessionKey, cacheGeneration]);
+
+  // ── Edge-detection (shared by scroll handler + adapter events) ──
+  // Reads DOM scrollTop/scrollHeight and triggers pagination when the
+  // user is within EDGE_THRESHOLD_PX of either edge.  Called from:
+  //   1. handleScroll (user-initiated scroll, rAF-throttled)
+  //   2. adapter liveUpdate event (content growth may passively push
+  //      the viewport near an edge)
+  // Gated by initializedRef and adapter.isLoading.
+  // Also updates `isNearBottom` state for arrow-button visibility.
+  const checkEdges = useCallback(() => {
+    if (!initializedRef.current) return;
+    const container = containerRefRef.current.current;
+    const a = adapterRef.current;
+    if (!container) return;
+
+    // ── Update scroll-position state (drives arrow buttons) ──
+    const scrollTop = container.scrollTop;
+    const distFromBottom =
+      container.scrollHeight - (scrollTop + container.clientHeight);
+    const nearBottom = distFromBottom <= EDGE_THRESHOLD_PX;
+    const nearTop = scrollTop <= EDGE_THRESHOLD_PX;
+    setIsNearBottom((prev) => (prev === nearBottom ? prev : nearBottom));
+    setIsNearTop((prev) => (prev === nearTop ? prev : nearTop));
+
+    // ── Pagination trigger ──
+    if (!a) return;
+    if (a.isLoading) return;
+    // near-top → load older
+    if (scrollTop <= EDGE_THRESHOLD_PX && a.hasOlder) {
+      void a.loadPrevPage();
+      return;
+    }
+    // near-bottom → load newer
+    if (distFromBottom <= EDGE_THRESHOLD_PX && a.hasNewer) {
+      void a.loadNextPage();
+    }
   }, []);
 
+  // rAF gate — coalesces multiple scroll events within a single frame
+  // into one checkEdges call.  Prevents layout thrashing on high-freq
+  // scroll events (trackpad / 120Hz displays can fire 120+ events/s).
+  const rafPendingRef = useRef(false);
+  const scheduleEdgeCheck = useCallback(() => {
+    if (rafPendingRef.current) return;
+    rafPendingRef.current = true;
+    requestAnimationFrame(() => {
+      rafPendingRef.current = false;
+      checkEdges();
+    });
+  }, [checkEdges]);
+
+  // ── Event subscription ──
+  // The controller subscribes to adapter events:
+  //   - `liveUpdate`: content grew (stream delta / record complete).
+  //     Re-check edges — content growth may passively push the viewport
+  //     within EDGE_THRESHOLD_PX of an edge (e.g. total shrank after
+  //     compaction, or user was already near bottom and new content
+  //     arrived).  Also runs the streaming-block viewport diagnostic.
+  //   - `pageLoaded`: a page was loaded (prepend/append).  Re-check
+  //     edges in case the new content didn't push the viewport far
+  //     enough from the threshold (rapid consecutive scrolls).
+  //   - `scrollToIndex`: adapter.scrollToPosition() was called.  The
+  //     controller executes the DOM scroll via vmlRef.scrollToIndex().
+  useEffect(() => {
+    const unsub = adapter.subscribe((event) => {
+      switch (event.type) {
+        case "liveUpdate": {
+          const vml = vmlRefRef.current.current;
+          if (vml) {
+            void vml.isStreamingBlockInViewport();
+          }
+          // Content grew — passive edge proximity may have changed.
+          scheduleEdgeCheck();
+          break;
+        }
+        case "pageLoaded":
+          // Page loaded — re-check in case user is still at edge.
+          scheduleEdgeCheck();
+          break;
+        case "scrollToIndex": {
+          // adapter.scrollToPosition() requests a DOM scroll to a
+          // specific block index.  The controller owns DOM side-effects.
+          const vml = vmlRefRef.current.current;
+          if (vml) {
+            vml.scrollToIndex(event.index);
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    });
+    return unsub;
+  }, [adapter, sessionKey, scheduleEdgeCheck]);
+
+  // ── handleScroll ──
+  // Called from the scroll container's onScroll event (bound in
+  // ChatPanel).  This is the PRIMARY pagination trigger — event-driven,
+  // rAF-throttled.  Zero CPU when the user is not scrolling.
+  const handleScroll = useCallback(() => {
+    // NOTE: do NOT set initializedRef here.  When a session switches,
+    // the old content is removed → scrollHeight shrinks → the browser
+    // fires an async scroll event (clamping scrollTop).  This event
+    // arrives AFTER the reset effect (initializedRef=false) but BEFORE
+    // the new session's data loads.  Setting initializedRef=true here
+    // would block the init-scroll effect from restoring the position.
+    scheduleEdgeCheck();
+  }, [scheduleEdgeCheck]);
+
   // ── Jump primitives ──
-  // Both jumps delegate to the adapter, which owns the
-  // "load-then-scroll" walk.
+  // Two-phase: (1) adapter loads data pages until the window covers
+  // the target edge; (2) controller commands VML to scroll the DOM.
+  // The adapter only owns data — the controller owns DOM side-effects.
   const jumpToBottom = useCallback(() => {
-    void adapter.scrollToBottom();
+    void adapter.scrollToBottom().then(() => {
+      const vml = vmlRefRef.current.current;
+      if (vml) vml.scrollToBottom();
+    });
   }, [adapter]);
 
   const jumpToTop = useCallback(() => {
-    void adapter.scrollToTop();
+    void adapter.scrollToTop().then(() => {
+      const vml = vmlRefRef.current.current;
+      if (vml) vml.scrollToTop();
+    });
   }, [adapter]);
 
-  // ── isPinnedToBottom ──
-  // ADR-050 §7 C4: the pre-existing `isPinnedToBottom` getter is
-  // preserved so ChatPanel's existing `isPinnedToBottomRef`-style
-  // consumers keep working.  The semantics are the SAME as
-  // `showScrollToBottom` (data-driven, no DOM read).  C5 will remove
-  // this once ChatPanel's consumer is fully migrated.
-  const isPinnedToBottom = useCallback((): boolean => {
+  // ── isAtLatest ──
+  // Preserved for ChatPanel's scroll-snapshot logic (nav-back restore).
+  // Pure data derivation — no DOM read, no stored state.  ADR-050:
+  // replaces the removed `isPinnedToBottom` stored field with a
+  // computed query on the adapter.
+  const isAtLatest = useCallback((): boolean => {
     return adapter.isAtTail() && !adapter.hasPendingFlush();
   }, [adapter]);
 
@@ -268,6 +461,6 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     handleScroll,
     jumpToBottom,
     jumpToTop,
-    isPinnedToBottom,
+    isAtLatest,
   };
 }

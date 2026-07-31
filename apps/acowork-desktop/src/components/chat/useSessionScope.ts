@@ -64,11 +64,6 @@ export interface SessionScopeAPI {
 
   todosCollapsed: boolean;
   setTodosCollapsed: (v: boolean) => void;
-
-  showScrollToBottom: boolean;
-  setShowScrollToBottom: (v: boolean) => void;
-  showScrollToTop: boolean;
-  setShowScrollToTop: (v: boolean) => void;
 }
 
 /**
@@ -98,8 +93,6 @@ export function useSessionScope(
   const [showImageUnsupportedDialog, setShowImageUnsupportedDialog] = useState(false);
   const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
   const [todosCollapsed, setTodosCollapsed] = useState(false);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [showScrollToTop, setShowScrollToTop] = useState(false);
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
@@ -134,8 +127,6 @@ export function useSessionScope(
     setShowImageUnsupportedDialog(false);
     setImageCapableModels([]);
     setTodosCollapsed(false);
-    setShowScrollToBottom(false);
-    setShowScrollToTop(false);
     onSessionChange?.();
   }, [currentSessionId, onSessionChange]);
 
@@ -151,9 +142,5 @@ export function useSessionScope(
     setImageCapableModels,
     todosCollapsed,
     setTodosCollapsed,
-    showScrollToBottom,
-    setShowScrollToBottom,
-    showScrollToTop,
-    setShowScrollToTop,
   };
 }

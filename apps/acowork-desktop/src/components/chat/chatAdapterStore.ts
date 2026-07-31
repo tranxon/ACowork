@@ -112,8 +112,6 @@ export interface AdapterSessionState {
   // ── liveBuffer (v2 adapter primary source) ──
   /** The 4-field live buffer — see {@link LiveBuffer}. */
   liveBuffer: LiveBuffer;
-  /** Pinned-to-bottom signal — set by the scroll controller. */
-  isPinnedToBottom: boolean;
 
   // ── legacy projection fields (C2 compat) ──
   /** True while the agent is in the thinking/reasoning phase. */
@@ -156,7 +154,6 @@ const DEFAULT_LIVE_BUFFER: LiveBuffer = {
 
 const DEFAULT_ADAPTER_SESSION_STATE: AdapterSessionState = {
   liveBuffer: { ...DEFAULT_LIVE_BUFFER },
-  isPinnedToBottom: true,
   // Legacy fields (C2 compat)
   isThinking: false,
   thinkingStartTime: null,
@@ -405,10 +402,11 @@ export function ingestStreamDelta(
         thinkingContent: draft.content,
       });
       lastThinkingFlush.set(key, now);
-    } else if (current.isPinnedToBottom) {
-      // Throttled trailing preview flush — only when user is at the
-      // bottom (the ThinkBlock is in the viewport).  Mirrors the
-      // pre-ADR-050 store's "skip flush when not at bottom" rule.
+    } else {
+      // Throttled trailing preview flush — updates both liveBuffer and
+      // the legacy text field at a bounded rate (500ms).  ADR-050:
+      // no scroll-position gate; the v2 adapter's blocks are always
+      // kept fresh regardless of viewport position.
       const last = lastThinkingFlush.get(key) ?? 0;
       if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
         const content = stream.lines.map((l) => l.content).join("\n");
@@ -416,20 +414,6 @@ export function ingestStreamDelta(
           patchSession(key, {
             liveBuffer: { ...lb, thinkingStream: { ...lb.thinkingStream, content } },
             thinkingContent: content,
-          });
-        }
-        lastThinkingFlush.set(key, now);
-      }
-    } else {
-      // Off-bottom throttled flush — still update liveBuffer so the v2
-      // adapter's blocks stay fresh, but skip the legacy text field
-      // (it would force a re-render of a block the user can't see).
-      const last = lastThinkingFlush.get(key) ?? 0;
-      if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
-        const content = stream.lines.map((l) => l.content).join("\n");
-        if (content !== lb.thinkingStream?.content) {
-          patchSession(key, {
-            liveBuffer: { ...lb, thinkingStream: { ...lb.thinkingStream, content } },
           });
         }
         lastThinkingFlush.set(key, now);
@@ -486,11 +470,10 @@ export function ingestStreamDelta(
   if (isFirstChunk) {
     patch.assistantStreamingStartTime = stream.startTime;
   }
-  // Throttled trailing preview flush — only when at-bottom (C2
-  // optimization).  C3 must still update liveBuffer even when not at
-  // bottom so the v2 adapter's block list stays consistent; the
-  // legacy text field stays as a re-render guard.
-  if (current.isPinnedToBottom) {
+  // Throttled trailing preview flush — updates the legacy text field
+  // at a bounded rate (500ms).  ADR-050: no scroll-position gate;
+  // liveBuffer is always kept fresh regardless of viewport position.
+  {
     const last = lastAssistantFlush.get(key) ?? 0;
     if (now - last >= STREAM_FLUSH_THROTTLE_MS) {
       if (content !== current.assistantStreamingContent) {
@@ -576,26 +559,7 @@ export function ingestRecordComplete(
   emit({ kind: "recordComplete", sessionKey: key });
 }
 
-/**
- * Update the pinned-to-bottom signal.  Owned by the scroll controller
- * (C4 will turn the controller into an event-driven subscription that
- * writes this field through this single function).
- */
-export function setPinnedToBottom(
-  agentId: string,
-  sessionId: string,
-  value: boolean,
-): void {
-  const key = sessionKey(agentId, sessionId);
-  const current = readSession(key);
-  if (current.isPinnedToBottom === value) return;
-  patchSession(key, { isPinnedToBottom: value });
-}
 
-/** Read the pinned-to-bottom signal.  Used by the scroll controller. */
-export function isPinnedToBottom(agentId: string, sessionId: string): boolean {
-  return readSession(sessionKey(agentId, sessionId)).isPinnedToBottom;
-}
 
 /** Read a snapshot of a session's adapter state — used by chatStore to
  *  detect the "record_complete lost" edge case at idle. */
@@ -670,7 +634,6 @@ export interface LiveStateForConsumer {
   assistantStreamingStartTime: number | null;
   isAssistantReplying: boolean;
   optimisticEntries: ChatMessage[];
-  isPinnedToBottom: boolean;
 }
 
 /**

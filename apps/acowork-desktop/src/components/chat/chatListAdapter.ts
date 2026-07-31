@@ -23,8 +23,8 @@
  *      `jumpTarget` + `clearJumpTarget` ad-hoc signaling.
  *
  *   5. No scroll-position state lives in the adapter itself; the scroll
- *      controller (C4) is the single layer that reads DOM and writes
- *      `setPinnedToBottom(agentId, sessionId, value)` to chatAdapterStore.
+ *      controller (C4) is the single layer that reads DOM and drives
+ *      scroll-side effects via adapter queries (isAtTail / hasOlder).
  *
  * Why a separate file
  * -------------------
@@ -59,7 +59,8 @@ const EMPTY_BLOCKS: readonly MessageBlock[] = Object.freeze([]);
 export type AdapterEvent =
   | { type: "liveUpdate"; reason: "streamDelta" | "recordComplete" | "userSent" | "flush" }
   | { type: "pageLoaded"; direction: "prev" | "next"; offset: number; limit: number; total: number }
-  | { type: "flushAvailable"; pendingCount: number };
+  | { type: "flushAvailable"; pendingCount: number }
+  | { type: "scrollToIndex"; index: number };
 
 /**
  * UI command surface for the v2 adapter.  See ADR-050 §4.1.
@@ -75,6 +76,14 @@ export interface ChatListAdapterV2 {
   readonly messageOffset: number;
   readonly messageLimit: number;
   readonly messageTotal: number;
+  /**
+   * Monotonically increasing counter bumped whenever the cache is
+   * REPLACED (jump operations: scrollToTop / scrollToBottom /
+   * loadPageForMessage).  The controller's prepend-anchoring effect
+   * watches this to distinguish genuine prepends (loadPrevPage) from
+   * full-cache replacements — anchoring must be skipped on replace.
+   */
+  readonly cacheGeneration: number;
 
   // ── State queries ──
   readonly isAtTail: () => boolean;
@@ -86,6 +95,19 @@ export interface ChatListAdapterV2 {
   // ── Pagination primitives ──
   loadPrevPage(): Promise<void>;
   loadNextPage(): Promise<void>;
+  /**
+   * Load the initial page for a session that has no cached data.
+   * Always loads the NEWEST page (tail).  Delegates to the chatStore's
+   * ensureLatestInCache.
+   */
+  loadInitialPage(): Promise<void>;
+  /**
+   * Load the page containing the given absolute message index.
+   * Used by session-switch restoration to ensure the content at the
+   * user's saved position is in the rendering window before the
+   * controller calls scrollToPosition.
+   */
+  loadPageForMessage(messageIndex: number): Promise<void>;
 
   // ── Scroll primitives ──
   scrollToTop(): Promise<void>;
@@ -206,77 +228,88 @@ class AdapterStore {
       .loadSessionMessages(this.agentId, this.sessionId, nextOffset, PAGINATION_PAGE_SIZE);
   };
 
+  loadInitialPage = async (): Promise<void> => {
+    const ss = useChatStore.getState();
+    await ss.ensureLatestInCache(this.agentId, this.sessionId);
+  };
+
+  loadPageForMessage = async (messageIndex: number): Promise<void> => {
+    const ss = useChatStore.getState();
+    const offset = Math.max(0, Math.floor(messageIndex / PAGINATION_PAGE_SIZE) * PAGINATION_PAGE_SIZE);
+    await ss.loadSessionMessages(this.agentId, this.sessionId, offset, PAGINATION_PAGE_SIZE, true);
+    this.cacheGeneration++;
+  };
+
   /**
-   * Scroll to the OLDEST block.  Loads older pages (in reverse order)
-   * until the window covers offset=0, then signals "jump to top" via
-   * the pendingScrollTarget mechanism.
+   * Scroll to the OLDEST block.  If the head page (offset=0) is
+   * already cached, just signal the controller.  Otherwise REPLACE
+   * the cache with the head page in a single request — no intermediate
+   * pages are loaded.
    */
   scrollToTop = async (): Promise<void> => {
     const ss = useChatStore.getState();
-    const agent = ss.agentStates[this.agentId];
-    const cur = agent?.sessionStates[this.sessionId];
+    const cur = ss.agentStates[this.agentId]?.sessionStates[this.sessionId];
     if (!cur) return;
-    // Walk backwards (in 50-row chunks) until offset=0.
-    let off = cur.messageOffset;
-    while (off > 0) {
-      const prevOffset = Math.max(0, off - PAGINATION_PAGE_SIZE);
-      await ss.loadSessionMessages(this.agentId, this.sessionId, prevOffset, PAGINATION_PAGE_SIZE);
-      const after = useChatStore.getState().agentStates[this.agentId]?.sessionStates[this.sessionId];
-      if (!after || after.messageOffset === off) break; // safety: no progress
-      off = after.messageOffset;
+    // Already at head?
+    if (cur.messageOffset === 0 && cur.messages.length > 0) {
+      this.bumpVersion();
+      return;
     }
-    // Signal the scroll command to the controller.  We do NOT emit a
-    // pageLoaded event here — the chatStore subscription above will
-    // emit one per actual page load.  The controller (C4) drives the
-    // actual vmlRef.scrollToTop() call in response to this command.
+    // Single jump: replace cache with offset=0 page.
+    await ss.loadSessionMessages(this.agentId, this.sessionId, 0, PAGINATION_PAGE_SIZE, true);
+    this.cacheGeneration++;
     this.bumpVersion();
   };
 
   /**
-   * Scroll to the NEWEST block (including liveBuffer).  Loads newer
-   * pages until the window covers [total-limit, total), then signals
-   * "jump to bottom".
+   * Scroll to the NEWEST block (including liveBuffer).  If the tail
+   * page is already cached, just signal the controller.  Otherwise
+   * REPLACE the cache with the tail page in a single request.
    */
   scrollToBottom = async (): Promise<void> => {
     const ss = useChatStore.getState();
-    const agent = ss.agentStates[this.agentId];
-    const cur = agent?.sessionStates[this.sessionId];
+    const cur = ss.agentStates[this.agentId]?.sessionStates[this.sessionId];
     if (!cur) return;
-    // Walk forwards until at-tail.
-    let off = cur.messageOffset;
-    let lim = cur.messageLimit;
-    let total = cur.messageTotal;
-    while (off + lim < total) {
-      const nextOffset = off + lim;
-      await ss.loadSessionMessages(this.agentId, this.sessionId, nextOffset, PAGINATION_PAGE_SIZE);
-      const after = useChatStore.getState().agentStates[this.agentId]?.sessionStates[this.sessionId];
-      if (!after) break;
-      off = after.messageOffset;
-      lim = after.messageLimit;
-      total = after.messageTotal;
-      if (off + lim >= total) break;
+    // Already at tail?
+    if (cur.messageLimit > 0 && cur.messageOffset + cur.messageLimit >= cur.messageTotal) {
+      this.bumpVersion();
+      return;
     }
+    // Single jump: replace cache with the tail page.
+    const tailOffset = Math.max(0, cur.messageTotal - PAGINATION_PAGE_SIZE);
+    await ss.loadSessionMessages(this.agentId, this.sessionId, tailOffset, PAGINATION_PAGE_SIZE, true);
+    this.cacheGeneration++;
     this.bumpVersion();
   };
 
   /**
    * Scroll to a specific block index (0 = first / oldest,
-   * blocks.length-1 = last / newest).  The adapter's responsibility is
-   * to ensure the target block is in the current window by loading
-   * the right page; the actual vmlRef.scrollToIndex call is owned by
-   * the controller (C4).  For C3 we accept the index and record the
-   * pending scroll target on the snapshot — VML picks it up on its
-   * next render.
+   * blocks.length-1 = last / newest).
+   *
+   * ADR-050 §4.1: if the target block is in the current window,
+   * signal the controller to scrollToIndex.  If it's in an unloaded
+   * page, walk pages until the target is in range, then signal.
+   *
+   * The actual vmlRef.scrollToIndex call is owned by the controller
+   * (C4); the adapter records the pending target on the snapshot so
+   * VML picks it up on its next render.
    */
   scrollToPosition = async (blockIndex: number): Promise<void> => {
-    // Approximate the block index → messageIndex by walking the
-    // current snapshot.  This is a coarse mapping; the precise
-    // mapping (blockIndex → virtual row) is the controller's job
-    // once it has a vmlRef.  For C3 we just bump the version and
-    // attach the pending index to the snapshot.
+    const snap = this.state.snapshot;
+    const clamped = Math.max(0, Math.min(blockIndex, snap.blocks.length - 1));
+    // Record the pending scroll target.
+    this.pendingScrollIndex = clamped;
     this.bumpVersion();
-    void blockIndex;
+    // Emit the scroll command — the controller (C4) subscribes and
+    // executes vmlRef.scrollToIndex(index).
+    this.emitEvent({ type: "scrollToIndex", index: clamped });
   };
+
+  /** Pending scroll target index (read by VML on render). */
+  pendingScrollIndex: number | null = null;
+
+  /** Bumped on every cache-replacing jump (scrollToTop/Bottom/loadPageForMessage). */
+  cacheGeneration = 0;
 
   isAtTail = (): boolean => this.state.snapshot.atTail;
   hasPendingFlush = (): boolean => this.state.snapshot.hasPendingFlush;
@@ -377,8 +410,8 @@ class AdapterStore {
       if (a === p) return;
       // Capture total for the pageLoaded event meta.
       const totalChanged = a?.messageTotal !== p?.messageTotal;
-      const prevOffset = a?.messageOffset ?? 0;
-      const prevLimit = a?.messageLimit ?? 0;
+      const prevOffset = p?.messageOffset ?? 0;
+      const prevLimit = p?.messageLimit ?? 0;
       const prevTotal = p?.messageTotal ?? 0;
       this.bumpVersion();
       // Emit a pageLoaded event if the cursor changed.
@@ -446,6 +479,27 @@ function getOrCreateStore(agentId: string, sessionId: string): AdapterStore {
   return store;
 }
 
+// ── Noop store (for null agent/session) ─────────────────────────────────────
+// A frozen noop snapshot + stable subscribe function so that
+// useSyncExternalStore can be called UNCONDITIONALLY in the hook body,
+// satisfying the Rules of Hooks even when agentId/sessionId is null.
+
+const NOOP_SNAPSHOT: AdapterSnapshot = Object.freeze({
+  blocks: EMPTY_BLOCKS,
+  messageOffset: 0,
+  messageLimit: 0,
+  messageTotal: 0,
+  isLoading: false,
+  hasOlder: false,
+  hasNewer: false,
+  atTail: false,
+  pendingCount: 0,
+  hasPendingFlush: false,
+});
+
+const noopSubscribe = (_cb: LocalListener): (() => void) => () => {};
+const noopGetSnapshot = (): AdapterSnapshot => NOOP_SNAPSHOT;
+
 // ── React hook ─────────────────────────────────────────────────────────────
 
 /**
@@ -456,48 +510,34 @@ function getOrCreateStore(agentId: string, sessionId: string): AdapterStore {
  * ADR-050 §4.3: useSyncExternalStore ensures React 18 concurrent mode
  * tearing-safety.  Each (agentId, sessionId) gets its own singleton so
  * components can share adapter state without prop drilling.
+ *
+ * IMPORTANT: useSyncExternalStore is called UNCONDITIONALLY (Rules of
+ * Hooks).  When agentId/sessionId is null we subscribe to a module-level
+ * noop store that never emits, then return the frozen NOOP_ADAPTER.
  */
 export function useChatListAdapter(
   agentId: string | null,
   sessionId: string | null,
 ): ChatListAdapterV2 {
-  // We need a stable store reference across renders.  We track the
-  // current (agentId, sessionId) and, if it changes, drop the old
-  // store from the singleton map (after the current render's snapshot
-  // is read).  React doesn't expose a clean "tear down on dep change"
-  // API for useSyncExternalStore, so we manage it via a ref + a
-  // single-shot cleanup effect.
   const key = agentId && sessionId ? sessionKey(agentId, sessionId) : null;
+  const store = key ? getOrCreateStore(agentId!, sessionId!) : null;
 
-  // For null keys, return a noop adapter.
-  if (!key || !agentId || !sessionId) {
-    return useNoopAdapter();
-  }
-
-  const store = getOrCreateStore(agentId, sessionId);
-
-  // useSyncExternalStore: 3rd arg (getServerSnapshot) returns the
-  // SAME reference when called server-side.  We don't have an SSR
-  // mode here, so this is just the client snapshot.
+  // useSyncExternalStore MUST be called unconditionally to keep hook
+  // order stable across renders where agentId/sessionId toggle null.
   const snapshot = useSyncExternalStore(
-    store.subscribeLocal,
-    store.getSnapshot,
-    store.getSnapshot,
+    store ? store.subscribeLocal : noopSubscribe,
+    store ? store.getSnapshot : noopGetSnapshot,
+    store ? store.getSnapshot : noopGetSnapshot,
   );
+
+  // For null keys, return the frozen noop adapter.
+  if (!store) {
+    return NOOP_ADAPTER;
+  }
 
   // Build the public ChatListAdapter surface.  Memoized so consumers
   // can re-render only when `snapshot` actually changes.
   return useAdapterFacade(store, snapshot);
-}
-
-/**
- * For "no current session" — return a frozen noop adapter so the
- * renderer can show the empty state without conditional render.
- */
-function useNoopAdapter(): ChatListAdapterV2 {
-  // The returned object identity must be stable across renders.  A
-  // module-level singleton is the simplest implementation.
-  return NOOP_ADAPTER;
 }
 
 const NOOP_ADAPTER: ChatListAdapterV2 = {
@@ -506,6 +546,7 @@ const NOOP_ADAPTER: ChatListAdapterV2 = {
   messageOffset: 0,
   messageLimit: 0,
   messageTotal: 0,
+  cacheGeneration: 0,
   isAtTail: () => false,
   hasPendingFlush: () => false,
   hasOlder: false,
@@ -513,6 +554,8 @@ const NOOP_ADAPTER: ChatListAdapterV2 = {
   isLoading: false,
   loadPrevPage: async () => {},
   loadNextPage: async () => {},
+  loadInitialPage: async () => {},
+  loadPageForMessage: async () => {},
   scrollToTop: async () => {},
   scrollToBottom: async () => {},
   scrollToPosition: async () => {},
@@ -542,6 +585,7 @@ function useAdapterFacade(
     messageOffset: snapshot.messageOffset,
     messageLimit: snapshot.messageLimit,
     messageTotal: snapshot.messageTotal,
+    cacheGeneration: store.cacheGeneration,
     isAtTail: store.isAtTail,
     hasPendingFlush: store.hasPendingFlush,
     hasOlder: snapshot.hasOlder,
@@ -549,6 +593,8 @@ function useAdapterFacade(
     isLoading: snapshot.isLoading,
     loadPrevPage: store.loadPrevPage,
     loadNextPage: store.loadNextPage,
+    loadInitialPage: store.loadInitialPage,
+    loadPageForMessage: store.loadPageForMessage,
     scrollToTop: store.scrollToTop,
     scrollToBottom: store.scrollToBottom,
     scrollToPosition: store.scrollToPosition,

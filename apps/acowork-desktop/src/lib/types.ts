@@ -997,16 +997,17 @@ export interface ConversationEntry {
  * folded into one chip) is a **frontend UI abstraction only** and is
  * never exposed on the wire.
  *
- * - `offset=0` returns the latest `limit` raw entries.
- * - `offset=K` returns entries[total-K-limit .. total-K) in chronological order.
- * - To scroll older:  `offset += limit`.
- * - To scroll newer:  `offset = max(0, offset - limit)`.
- * - At top (oldest):  `offset + limit >= total`.
- * - At bottom (latest): `offset == 0`.
+ * ADR-050: Forward (oldest-end) offset model.
+ * - `offset=0` returns the **oldest** `limit` raw entries (entries [0, limit)).
+ * - `offset=K` returns entries [K, K+limit) clamped to total.
+ * - To scroll older:  `offset = max(0, offset - limit)`.
+ * - To scroll newer:  `offset = offset + limit`.
+ * - At oldest (head):  `offset == 0`.
+ * - At newest (tail):  `offset + limit >= total`.
  */
 export interface PaginatedMessages {
   messages: ConversationEntry[];
-  /** Echo of the requested offset, in raw entries (0 = newest). */
+  /** Echo of the requested offset, in raw entries (0 = oldest). */
   offset: number;
   /** Number of raw entries actually returned (≤ requested limit). */
   limit: number;
@@ -1061,7 +1062,7 @@ export interface SessionDataStore {
   sessionId: string;
   messages: ConversationEntry[];
   activeStream: ActiveStream | null;
-  /** Window's starting offset (from newest, going older; 0 = newest). */
+  /** Window's starting offset (forward semantics: 0 = oldest entry). */
   loadedOffset: number;
   /** Number of message entries in the cache window. */
   loadedCount: number;

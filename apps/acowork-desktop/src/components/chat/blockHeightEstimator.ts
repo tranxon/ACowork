@@ -82,8 +82,6 @@ import {
   EXPLORE_CONTENT_PADDING_Y,
   EXPLORE_ITEM_ROW_HEIGHT,
   SYSTEM_BUBBLE_HEIGHT,
-  COMPACTING_INDICATOR_HEIGHT,
-  REPLYING_INDICATOR_HEIGHT,
   SAFE_FALLBACK_HEIGHT,
   CODE_BLOCK_MIN_HEIGHT_PX,
   MERMAID_BLOCK_MIN_HEIGHT_PX,
@@ -171,65 +169,30 @@ function estimateTextBubbleHeight(
 /**
  * Compute the height (in px) of one virtual item at `index`.
  *
- * Two extra virtual items can sit past the message blocks; their slot
- * indices are fixed so the renderer can dispatch by `index`:
- *   - replying indicator (if shown) is at `index === messageBlocks.length`
- *   - compacting indicator (if shown) is at the LAST slot, i.e.
- *     `index === messageBlocks.length + extraCount - 1`
+ * ADR-050 C5: the virtualizer count === messageBlocks.length.  No
+ * trailing extra slots (replying / compacting indicators) exist; all
+ * indices map directly to message blocks.
  *
- * Both can technically co-exist on paper, but in practice compacting is a
- * session-wide system operation that runs while the user is idle, and
- * replying only fires mid-stream after the user has already received at
- * least the line threshold of content.  The layout supports both anyway
- * so callers don't have to coordinate them.
- *
- * @param index                Virtual item index (0 .. virtualCount-1).
+ * @param index                Virtual item index (0 .. messageBlocks.length-1).
  * @param messageBlocks        The strict intermediate MessageBlock array.
  * @param containerWidth       Current rendered width of the messages scroll
  *                             container in px.  Used for text-bubble line
  *                             wrap calculations; pass 0 if not yet measured
  *                             (the function falls back to a safe constant).
- * @param showCompactingItem   True when a virtual item is reserved for the
- *                             compacting indicator.
- * @param showReplyingItem     True when a virtual item is reserved for the
- *                             replying indicator (assistant long-stream).
  */
 export function estimateBlockHeight(
   index: number,
-  messageBlocks: MessageBlock[],
+  messageBlocks: readonly MessageBlock[],
   containerWidth: number,
-  showCompactingItem: boolean,
-  showReplyingItem: boolean,
 ): number {
-  // Trailing extra slot indices.  Replying (if active) sits IMMEDIATELY
-  // after messageBlocks; compacting (if active) always sits LAST so the
-  // sticky-bottom effect never has to reason about reordering them.
-  const extraCount =
-    (showReplyingItem ? 1 : 0) + (showCompactingItem ? 1 : 0);
-  const replyingIdx = showReplyingItem ? messageBlocks.length : -1;
-  const compactingIdx = showCompactingItem
-    ? messageBlocks.length + extraCount - 1
-    : -1;
+  // ADR-050 C5: trailing extra slots (replying / compacting indicators)
+  // removed.  The virtualizer count === messageBlocks.length; all indices
+  // map directly to message blocks.
 
-  // Consult the module-level measured-height cache for real block indices.
-  // Extra slots (replying / compacting) are always pure chrome, so the
-  // data-driven return below is fine — no cache lookup needed there.
+  // Consult the module-level measured-height cache.
   if (index >= 0 && index < messageBlocks.length) {
     const cached = measuredHeightsByBlockId.get(messageBlocks[index].blockId);
     if (cached !== undefined) return cached;
-  }
-
-  if (index === replyingIdx) {
-    return REPLYING_INDICATOR_HEIGHT;
-  }
-  if (index === compactingIdx) {
-    return COMPACTING_INDICATOR_HEIGHT;
-  }
-  // Past-the-end indices are treated like the nearest trailing indicator so
-  // we never accidentally return the safe-fallback for slots the caller
-  // forgot to account for.
-  if (index >= messageBlocks.length && index < messageBlocks.length + extraCount) {
-    return REPLYING_INDICATOR_HEIGHT;
   }
 
   const block = messageBlocks[index];

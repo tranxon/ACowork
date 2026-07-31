@@ -6,9 +6,12 @@ import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
 import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
 import type { MessageBlock } from "./messageFolder";
-import type { ChatListAdapter } from "./useChatListAdapter";
+import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
-import { StreamingSourceBlock } from "./StreamingSourceBlock";
+// ADR-050 C5: StreamingSourceBlock is no longer rendered directly by VML.
+// Live streaming content arrives via adapter.blocks (isLive: true) and is
+// rendered through ExploreBlock (thought preview) or MessageBubble (assistant
+// content).  ExploreBlock imports StreamingSourceBlock internally.
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
@@ -18,46 +21,29 @@ const resizeObservers = new WeakMap<HTMLElement, ResizeObserver>();
 
 interface VirtualMessageListProps {
   /**
-   * ADR-041 C4: The ChatListAdapter - single bridge between chatStore
-   * and VML. Provides blocks, pagination state/actions, scroll anchoring,
-   * sticky-bottom, and ensure-renderable (onLayout).
+   * ADR-050 C5: The v2 ChatListAdapter — single bridge between
+   * chatStore + chatAdapterStore and VML.  Provides blocks (with
+   * isLive marking), pagination state/actions, and event subscription.
    */
-  adapter: ChatListAdapter;
+  adapter: ChatListAdapterV2;
   /**
    * Pre-folded display blocks from the adapter (adapter.blocks).
    * Kept as a separate prop for direct access in the virtualizer's
    * estimateSize and render functions.
    */
-  messageBlocks: MessageBlock[];
-  /**
-   * Total virtual item count, owned by ChatPanel - already includes the
-   * trailing extras (compacting indicator and/or replying indicator).
-   */
-  virtualCount: number;
-  /** Whether to show the compacting indicator as an extra virtual item. */
-  showCompactingItem: boolean;
-  /** Whether to show the replying indicator as an extra virtual item. */
-  showReplyingItem: boolean;
-  /** Whether the session is currently streaming. */
+  messageBlocks: readonly MessageBlock[];
+  /** Whether the session is currently streaming (sessionStatus-derived).
+   *  Used by ExploreBlock to mark the last group as streaming. */
   sending: boolean;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   currentSessionId: string | null;
   /** ADR-045: Per-tool progress heartbeat, keyed by tool_call_id. */
   toolProgress?: Record<string, { elapsedMs: number; timeoutMs: number }>;
-  /** Live thinking state from the store, propagated to the last explore
-   *  group so it can render a real-time ThinkBlock inside its expanded
-   *  area before the HTTP refresh lands. */
+  /** Live thinking state — propagated to the last explore group so it
+   *  can render a real-time ThinkBlock. */
   isThinking: boolean;
   thinkingContent: string;
   thinkingStartTime: number | null;
-  /** Live assistant streaming text (last 5 lines, joined). Rendered
-   *  inside the trailing replying slot via StreamingSourceBlock.
-   *  Mirrors the `thinkingContent` pattern: throttled flush from the
-   *  store, cleared on record_complete. */
-  assistantStreamingContent: string;
-  /** When the current assistant stream started — used by the trailing
-   *  StreamingSourceBlock's duration timer. */
-  assistantStreamingStartTime: number | null;
   /** ADR-045: Cancel a single in-flight tool execution. */
   onCancelTool?: (toolCallId: string) => void;
   /** Current agent ID (for AgentAvatar). */
@@ -118,6 +104,13 @@ export interface VirtualMessageListHandle {
    */
   getLastVisibleBlockIndex: () => number | null;
   /**
+   * ADR-050 C5: returns true when the trailing live (isLive) block is
+   * within the current viewport.  Used by the scroll controller to gate
+   * streaming-block refreshes — when the live block is off-screen the
+   * controller skips DOM churn entirely.
+   */
+  isStreamingBlockInViewport: () => boolean;
+  /**
    * Scroll to the last virtual item, using virtualizer.scrollToIndex
    * (data-driven).  No-op if there are zero virtual items.
    */
@@ -127,6 +120,11 @@ export interface VirtualMessageListHandle {
    * with align: "start".  No-op if there are zero virtual items.
    */
   scrollToTop: () => void;
+  /**
+   * Scroll to a specific block index.  Used by the scroll controller
+   * to fulfill `adapter.scrollToPosition()` requests.
+   */
+  scrollToIndex: (index: number) => void;
 }
 
 // ── Component ───────────────────────────────────────────────────────
@@ -150,9 +148,6 @@ export const VirtualMessageList = React.forwardRef<
   const {
     adapter,
     messageBlocks,
-    virtualCount,
-    showCompactingItem,
-    showReplyingItem,
     sending,
     pendingApproval,
     currentSessionId,
@@ -161,8 +156,6 @@ export const VirtualMessageList = React.forwardRef<
     isThinking,
     thinkingContent,
     thinkingStartTime,
-    assistantStreamingContent,
-    assistantStreamingStartTime,
     selectedAgentId,
     agentDisplayName,
     selectedAgent,
@@ -233,10 +226,6 @@ export const VirtualMessageList = React.forwardRef<
   messageBlocksRef.current = messageBlocks;
   const containerWidthRef = useRef(containerWidth);
   containerWidthRef.current = containerWidth;
-  const showCompactingItemRef = useRef(showCompactingItem);
-  showCompactingItemRef.current = showCompactingItem;
-  const showReplyingItemRef = useRef(showReplyingItem);
-  showReplyingItemRef.current = showReplyingItem;
 
   const estimateSize = React.useCallback(
     (index: number) =>
@@ -244,14 +233,12 @@ export const VirtualMessageList = React.forwardRef<
         index,
         messageBlocksRef.current,
         containerWidthRef.current,
-        showCompactingItemRef.current,
-        showReplyingItemRef.current,
       ),
     [], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const virtualizer = useVirtualizer({
-    count: virtualCount,
+    count: messageBlocks.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize,
     overscan: 5,
@@ -397,6 +384,18 @@ export const VirtualMessageList = React.forwardRef<
         const items = virtualizer.getVirtualItems();
         return items.length > 0 ? items[items.length - 1].index : null;
       },
+      isStreamingBlockInViewport: () => {
+        // Find the trailing live block index (last block with isLive).
+        const blocks = messageBlocksRef.current;
+        let liveIdx = -1;
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          if (blocks[i].isLive) { liveIdx = i; break; }
+        }
+        if (liveIdx < 0) return false;
+        const items = virtualizer.getVirtualItems();
+        if (items.length === 0) return false;
+        return liveIdx >= items[0].index && liveIdx <= items[items.length - 1].index;
+      },
       scrollToBottom: () => {
         const count = virtualizer.options.count;
         if (count === 0) return;
@@ -406,6 +405,12 @@ export const VirtualMessageList = React.forwardRef<
         const count = virtualizer.options.count;
         if (count === 0) return;
         virtualizer.scrollToIndex(0, { align: "start" });
+      },
+      scrollToIndex: (index: number) => {
+        const count = virtualizer.options.count;
+        if (count === 0) return;
+        const clamped = Math.max(0, Math.min(index, count - 1));
+        virtualizer.scrollToIndex(clamped, { align: "start" });
       },
     }),
     [virtualizer, messageBlocks],
@@ -469,85 +474,12 @@ export const VirtualMessageList = React.forwardRef<
           }}
         >
           {virtualizer.getVirtualItems().map((virtualRow) => {
-            // Trailing extra-item slot indices.  These match the slot
-            // mapping in `estimateBlockHeight` (blockHeightEstimator.ts)
-            // and the `virtualCount` math in ChatPanel: replying (when
-            // shown) sits IMMEDIATELY after messageBlocks, compacting
-            // (when shown) sits LAST.  Keeping these computations local to
-            // the renderer means the renderer is self-sufficient and the
-            // estimator and virtualCount math don't have to align via
-            // ChatPanel.
-            //
-            // Both branches share identical chrome (`ml-12 py-1.5` + dot
-            // + shimmer label) so the upcoming reply lands in the same
-            // visual region as the previous placeholder, with no jump.
-            const extraCount =
-              (showReplyingItem ? 1 : 0) + (showCompactingItem ? 1 : 0);
-            const replyingIdx = showReplyingItem ? messageBlocks.length : -1;
-            const compactingIdx = showCompactingItem
-              ? messageBlocks.length + extraCount - 1
-              : -1;
-
-            // --- Replying indicator (extra virtual item, slot 0) ---
-            // Same chrome as the thought preview (StreamingSourceBlock
-            // variant="thought" inside ExploreBlock) but rendered as a
-            // trailing virtual item with ml-12 offset matching the agent
-            // message column.  When record_complete freezes the message
-            // and `isAssistantReplying` clears, the slot collapses onto
-            // the now-real bubble content with no jump — the same layout
-            // contract the old "Replying..." dot indicator provided, but
-            // now showing live streamed text instead of a static label.
-            if (virtualRow.index === replyingIdx) {
-              return (
-                <div
-                  key={virtualRow.key}
-                  ref={measureRef}
-                  data-index={virtualRow.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
-                  <div className="ml-12" aria-label={t("chatPanel.replying")}>
-                    <StreamingSourceBlock
-                      content={assistantStreamingContent}
-                      isStreaming={true}
-                      startTime={assistantStreamingStartTime ?? undefined}
-                      variant="assistant"
-                      showTruncationNotice={false}
-                    />
-                  </div>
-                </div>
-              );
-            }
-
-            // --- Compacting indicator (extra virtual item, last slot) ---
-            if (virtualRow.index === compactingIdx) {
-              return (
-                <div
-                  key={virtualRow.key}
-                  ref={measureRef}
-                  data-index={virtualRow.index}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
-                  <div className="flex items-center gap-1.5 ml-12 py-1.5 select-none">
-                    <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                    <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.compacting")}</span>
-                  </div>
-                </div>
-              );
-            }
-
-            // --- Regular message item ---
+            // ADR-050 C5: trailing extra-item slots (replying / compacting
+            // indicators) removed.  The virtualizer count === messageBlocks.length;
+            // every virtualRow.index maps directly to a MessageBlock.  Live
+            // streaming content is rendered inside the trailing isLive block
+            // via StreamingSourceBlock (see explore_group / assistant rendering
+            // below).
             const item = messageBlocks[virtualRow.index];
 
             return (

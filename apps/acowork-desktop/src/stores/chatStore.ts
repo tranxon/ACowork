@@ -515,6 +515,8 @@ interface ChatStore {
     sessionId: string,
     offset?: number,
     limit?: number,
+    /** When true, REPLACE the cached window with the fetched page instead of merging. */
+    replaceCache?: boolean,
   ) => Promise<{ offset: number; limit: number; total: number } | undefined>;
   abortSessionLoad: (agentId: string, sessionId: string) => void;
   /**
@@ -527,15 +529,6 @@ interface ChatStore {
    *
    */
   ensureLatestInCache: (agentId: string, sessionId: string) => Promise<void>;
-  /**
-   * One-shot jump to the oldest page: replace cache with the FIRST
-   * raw entries (offset=messageTotal-limit).
-   *
-   * Symmetric to ensureLatestInCache. Used by the scroll-to-top button
-   * to jump directly to the beginning of the conversation without
-   * paginating one page at a time.
-   */
-  ensureOldestInCache: (agentId: string, sessionId: string) => Promise<void>;
   /**
    * Release the messages array for a session to free memory.
    * Called on closeSession and session switch.  The session state
@@ -1535,6 +1528,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     sessionId: string,
     offset?: number,
     limit: number = 50,
+    replaceCache = false,
   ): Promise<{ offset: number; limit: number; total: number } | undefined> => {
     // ADR-021: Per-session abortController + loadSequence (no cross-session interference).
     const sessionState = getSessionState(get(), agentId, sessionId);
@@ -1647,7 +1641,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // (the optimistic overlay lives in chatAdapterStore, not here).
         // We also notify the adapter of which optimistic ids the server
         // confirmed so it can drop them from its overlay.
-        const merged = mergeMessageWindow(ss.messages, converted);
+        const merged = replaceCache
+          ? { messages: converted }
+          : mergeMessageWindow(ss.messages, converted);
         const confirmedIds = new Set(
           converted.map((m) => m.id),
         );
@@ -1661,7 +1657,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         let finalOffset = returnedOffset;
         let finalLimit = returnedLimit;
 
-        if (isInitialLoad) {
+        if (replaceCache) {
+          // Jump operation: the fetched page REPLACES the cache.
+          // Cursor is exactly what the server returned.
+          finalOffset = returnedOffset;
+          finalLimit = returnedLimit;
+        } else if (isInitialLoad) {
           // ADR-050 C2: drop any in-flight activeStream tracker so a
           // stale lineCount from a previous session incarnation cannot
           // bleed into the freshly-loaded view.  The tracker now lives
@@ -1803,32 +1804,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const tailOffset = Math.max(0, messageTotal - limit);
         await get().loadSessionMessages(agentId, sessionId, tailOffset, limit);
       }
-    } finally {
-      set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
-    }
-  },
-
-  /**
-   * ADR-050: One-shot jump to the oldest page (offset = 0 in forward semantics).
-   *
-   * Used by the scroll-to-top button to jump directly to the beginning of
-   * the conversation without paginating one page at a time.
-   */
-  ensureOldestInCache: async (agentId: string, sessionId: string) => {
-    const sessionState = getSessionState(get(), agentId, sessionId);
-    if (sessionState.isLoadingMore) return;
-    const { messageOffset, messages } = sessionState;
-    // Already at the oldest page?
-    //   - messageOffset === 0 (window anchored at the oldest entry), AND
-    //   - messages.length > 0 (the cache has at least some data).
-    const headCovered =
-      messageOffset === 0 &&
-      messages.length > 0;
-    if (headCovered) return;
-    set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: true }));
-    try {
-      // Forward semantics: offset = 0 means the OLDEST entry.
-      await get().loadSessionMessages(agentId, sessionId, 0, 50);
     } finally {
       set((state) => updateSessionState(state, agentId, sessionId, { isLoadingMore: false }));
     }

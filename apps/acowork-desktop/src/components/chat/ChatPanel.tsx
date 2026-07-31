@@ -18,7 +18,7 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
 import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
-import { useChatListAdapter } from "./useChatListAdapter";
+import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
 
 /**
@@ -66,7 +66,6 @@ import { RetryWaitBanner } from "./RetryWaitBanner";
 import { SessionTabBar } from "./SessionTabBar";
 import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
-import { AgentAvatar } from "../common/AgentAvatar";
 import { DocumentChip } from "./DocumentChip";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
@@ -88,6 +87,10 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 interface ChatScrollSnapshot {
   scrollOffset: number;
   pinnedToBottom: boolean;
+  /** Index of the first visible block in the adapter's blocks array at save time. */
+  firstVisibleBlockIndex?: number | null;
+  /** The adapter's messageOffset at save time (absolute page cursor). */
+  messageOffset?: number;
 }
 
 /**
@@ -136,10 +139,6 @@ function setScrollSnapshot(key: string, snapshot: ChatScrollSnapshot): void {
     const oldestKey = chatScrollSnapshots.keys().next().value;
     if (oldestKey !== undefined) chatScrollSnapshots.delete(oldestKey);
   }
-}
-
-function getDistanceFromBottom(container: HTMLElement): number {
-  return container.scrollHeight - container.scrollTop - container.clientHeight;
 }
 
 export function ChatPanel() {
@@ -379,14 +378,8 @@ export function ChatPanel() {
   // shape is forwarded to the v1 components (VirtualMessageList /
   // ExploreBlock) until C5 fully takes over.
   const liveState = useLiveStream(selectedAgentId, currentSessionId);
-  const optimisticEntries = liveState.optimisticEntries;
-  const displayMessages = useMemo<ChatMessage[]>(() => {
-    if (optimisticEntries.length === 0) return messages;
-    const seen = new Set(messages.map((m) => m.id));
-    const pending = optimisticEntries.filter((m) => !seen.has(m.id));
-    if (pending.length === 0) return messages;
-    return [...messages, ...pending].sort((a, b) => a.timestamp - b.timestamp);
-  }, [messages, optimisticEntries]);
+  // ADR-050 C5: optimisticEntries is no longer needed at ChatPanel level;
+  // the send-message duplicate guard reads from adapterSession directly.
   const sessionStatus = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -419,12 +412,14 @@ export function ChatPanel() {
   const todos = sessionState?.todos ?? [];
   /** Per-session queued messages — persisted in chatStore across agent switches */
   const queuedMessages = sessionState?.queuedMessages ?? [];
-  const isAssistantReplying = liveState.isAssistantReplying;
+  // ADR-050 C5: isAssistantReplying no longer drives a trailing virtual
+  // item; the v2 adapter folds the live assistant stream into blocks.
   const isThinking = liveState.isThinking;
   const thinkingStartTime = liveState.thinkingStartTime;
   const thinkingContent = liveState.thinkingContent;
-  const assistantStreamingContent = liveState.assistantStreamingContent;
-  const assistantStreamingStartTime = liveState.assistantStreamingStartTime;
+  // ADR-050 C5: assistantStreamingContent / assistantStreamingStartTime
+  // are no longer passed to VML — the v2 adapter folds the live assistant
+  // stream into blocks (isLive: true) rendered via MessageBubble.
 
   // ADR-021: "sending" is derived purely from sessionStatus (backend source of truth).
   // No optimistic flags — the backend pushes session_state within ~50ms.
@@ -506,10 +501,31 @@ export function ChatPanel() {
   // Without this ref, every session switch would snapshot scrollOffset=0 and
   // the user would be restored to the TOP of every previously-visited session.
   const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const lastFirstVisibleBlockRef = useRef<number | null>(null);
+  const lastMessageOffsetRef = useRef(0);
   useInsertionEffect(() => {
-    const container = messagesContainerRef.current;
-    if (container) {
-      lastScrollTopRef.current = container.scrollTop;
+    // GUARD: only update refs when the current session has rendered blocks.
+    // During a session switch the new session's adapter has NO blocks yet
+    // (data not loaded).  Without this guard, useInsertionEffect (which
+    // fires BEFORE useLayoutEffect cleanup) would overwrite the refs with
+    // 0/null — causing the snapshot-write cleanup to save garbage
+    // (scrollOffset=0, firstVisibleBlockIndex=null) instead of the old
+    // session's actual position.
+    //
+    // For small sessions (content fits viewport, no scrollbar), onScroll
+    // never fires — this effect is the ONLY ref updater.  The guard
+    // `adapter.blocks.length > 0` correctly allows updates for small
+    // sessions WITH data while blocking the empty-session-switch render.
+    if (adapter.blocks.length > 0) {
+      const container = messagesContainerRef.current;
+      if (container) {
+        lastScrollTopRef.current = container.scrollTop;
+        lastScrollHeightRef.current = container.scrollHeight;
+      }
+      const fvb = vmlRef.current?.getFirstVisibleBlockIndex();
+      if (fvb != null) lastFirstVisibleBlockRef.current = fvb;
+      lastMessageOffsetRef.current = adapter.messageOffset;
     }
   });
   /** Timestamp of the last compositionEnd event. On macOS WKWebView, compositionEnd
@@ -559,6 +575,14 @@ export function ChatPanel() {
   // user was genuinely at the top.  Using `sending` alone is both more
   // stable and easier to reason about.
   const initialScrollOffset = computeInitialScrollOffset(sending, scrollSnapshot);
+  // Content-based restoration: absolute message index the user was viewing.
+  // The controller uses this (via adapter.scrollToPosition) instead of raw
+  // pixel scrollTop when available — reliable across session switches where
+  // the loaded page (and thus scrollHeight) differs.
+  const initialMessageIndex = (!sending && scrollSnapshot && !scrollSnapshot.pinnedToBottom
+    && scrollSnapshot.firstVisibleBlockIndex != null && scrollSnapshot.messageOffset != null)
+    ? scrollSnapshot.messageOffset + scrollSnapshot.firstVisibleBlockIndex
+    : undefined;
   // DIAGNOSTIC — log only when the (key, sending, snapshot) signature actually
   // changes, not on every render. ChatPanel re-renders frequently for many
   // unrelated reasons (other state updates in parent stores), and a
@@ -566,142 +590,37 @@ export function ChatPanel() {
   // during the reload-resume investigation.  Snapshot is an object reference
   // that may be recreated without changing values, so we compare via a
   // JSON-encoded signature of the few fields that actually matter.
-  const snapshotSig = `${currentScrollKey}|${sending}|${scrollSnapshot?.pinnedToBottom ? 1 : 0}|${scrollSnapshot?.scrollOffset ?? ""}|${initialScrollOffset ?? ""}`;
+  const snapshotSig = `${currentScrollKey}|${sending}|${scrollSnapshot?.pinnedToBottom ? 1 : 0}|${scrollSnapshot?.scrollOffset ?? ""}|${initialScrollOffset ?? ""}|${scrollSnapshot?.firstVisibleBlockIndex ?? ""}|${scrollSnapshot?.messageOffset ?? ""}`;
   const lastSnapshotSigRef = useRef("");
   if (snapshotSig !== lastSnapshotSigRef.current) {
     lastSnapshotSigRef.current = snapshotSig;
-    log.debug("[CP:snapshot-read]", {
+    console.warn("[CP:snapshot-read]", {
       currentScrollKey,
       scrollSnapshot,
       sending,
       initialScrollOffset,
+      initialMessageIndex,
     });
   }
 
-  // ADR-041 C4: messageBlocks now comes from the adapter.
+  // ADR-041 C4 / ADR-050 C5: messageBlocks comes from the v2 adapter.
+  // No trailing extra items (replying / compacting / working indicators)
+  // — the virtualizer count === messageBlocks.length.  Live streaming
+  // content is folded into blocks by the adapter (isLive: true).
   const messageBlocks = adapter.blocks;
-  // Show compacting indicator below messages when compaction is in progress
-  const isCompacting = sessionState?.isCompacting ?? false;
-  const showCompactingItem = isCompacting;
-
-  // Working indicator — shown ONLY when the agent has not yet produced any
-  // visible reply (streaming delta OR frozen record_complete) to the most
-  // recent user turn.  Once the agent has produced any visible content
-  // (placeholder isStreaming=true OR frozen isStreaming=false), the working
-  // indicator must NOT reappear.
-  //
-  // ADR-035 D5/Race: the previous gate `sending && !hasStreamingPlaceholder`
-  // flickered between `record_complete` (assistant.isStreaming: true→false)
-  // and the follow-up `session_state(idle)` (sending: true→false),
-  // because the backend emits them in order on the same chunk channel
-  // (`poll_stop()` → `transition_status(Idle)` at loop_.rs:912-914).  In
-  // that ~tens-of-ms window the working indicator reappeared above the
-  // just-rendered final assistant reply.
-  //
-  // Anchoring on "the last visible message is a user message" makes the
-  // gate independent of that race.  This also naturally suppresses the
-  // working indicator during inter-tool iterations (after tool_result) and
-  // during continuation thinking — both of which legitimately have
-  // `sending=true` without needing a working indicator.
-  // Working indicator has two trigger conditions, but renders through ONE
-  // shared visual block (AgentAvatar header gated separately, then the
-  // single "正在处理..." line). Both cases share the same chrome
-  // (`flex items-center gap-1.5 ml-12 py-1.5` + pulse + `thinking-shimmer`)
-  // so the transition between after-user and inter-step phases is
-  // visually seamless.
-  //
-  //   - showWorkingItemAfterUser: classic case — last visible raw entry is a
-  //     user message, agent hasn't produced any visible reply yet.
-  //   - showInterStepProcessing: inter-tool / inter-thought gap — agent
-  //     already has explore_block visible (last raw entry is an agent-side
-  //     message), `sending=true`, but no new thought/assistant stream_delta
-  //     has landed yet (e.g. just after tool_result, before the next LLM
-  //     response starts). Without this branch the user sees a static
-  //     "finished" explore_block during the LLM round-trip window.
-  //
-  // Both branches are mutually exclusive with `showReplyingItem` (assistant
-  // streaming has crossed the threshold) and `showCompactingItem` (session
-  // compacting), so the four indicators cannot overlap.
-  const canShowWorkingItemAfterUser = (() => {
-    for (let i = displayMessages.length - 1; i >= 0; i--) {
-      const msg = displayMessages[i];
-      if (msg.type === "user") return true;
-      // Skip non-message items that may be interleaved between the user
-      // message and the working indicator (e.g., a compaction event loaded
-      // via poll after the user message was optimistically added).
-      if (
-        msg.type === "compaction" ||
-        msg.type === "system"
-      ) {
-        continue;
-      }
-      // assistant / thought / tool_call / tool_result / error — agent has
-      // produced a visible reply; working indicator is forbidden here, but
-      // the inter-step branch (see showInterStepProcessing) may still apply
-      // if sending remains true and no fresh streaming has started.
-      return false;
-    }
-    return false;
-  })();
-  const showWorkingItemAfterUser = sending && canShowWorkingItemAfterUser;
-  const showWorkingItemHeader = showWorkingItemAfterUser;
-
-  // Virtual scrolling: only render visible items (messages + trailing extra
-  // items).  Both extras sit AFTER messageBlocks so the sticky-bottom effect
-  // can keep the user's reading position stable as they flip on and off:
-  //
-  //   - showReplyingItem: trailing "replying" indicator on long assistant
-  //     streams (line count > chatStore.ASSISTANT_REPLYING_LINE_THRESHOLD).
-  //     Lives at `index === messageBlocks.length`.  When record_complete
-  //     freezes the message and isAssistantReplying clears, this slot
-  //     collapses onto the just-rendered bubble content — the visual frame
-  //     the user was waiting on becomes the frame the reply fills.
-  //     See blockHeightEstimator.ts and VirtualMessageList.tsx for the
-  //     matching slot rendering and height math.
-  //
-  //   - showCompactingItem: trailing "compacting" indicator during a
-  //     session-wide compaction.  Always at the LAST slot (after replying)
-  //     if both are present.
-  //
-  // (The Working indicator renders OUTSIDE the virtual list on purpose —
-  // see below — so it does NOT contribute to virtualCount.)
-  const showReplyingItem = isAssistantReplying;
-  // Inter-step processing indicator — fires when the agent already has an
-  // explore_block visible (last raw entry is agent-side, so
-  // canShowWorkingItemAfterUser=false), `sending=true` is still on, but no
-  // fresh thought/assistant stream_delta has landed yet (e.g. just after
-  // tool_result, before the next LLM round-trip). Mutually exclusive with
-  // `showReplyingItem` (assistant crossed threshold) and
-  // `showCompactingItem` (session compacting). Both branches of
-  // `showWorkingItem` share the same visual chrome; only the AgentAvatar
-  // header is gated to the after-user branch (see `showWorkingItemHeader`).
-  const showInterStepProcessing =
-    sending
-    && !canShowWorkingItemAfterUser
-    && !showReplyingItem
-    && !showCompactingItem;
-  const showWorkingItem = showWorkingItemAfterUser || showInterStepProcessing;
-  let extraItems = 0;
-  if (showReplyingItem) extraItems++;
-  if (showCompactingItem) extraItems++;
-  const virtualCount = messageBlocks.length + extraItems;
 
   // ── ScrollController ─────────────────────────────────────────────
-  // Centralized scroll state machine. Owns: init scroll, scrollHeight
-  // delta (prepend adjustment), sticky-bottom (auto-scroll + arrow
-  // buttons), ensureRenderable, jump target, pagination timer.
-  // Replaces all previously scattered scroll effects in VML and ChatPanel.
+  // ADR-050 C5: event-driven pagination + scroll-position controller.
+  // Owns: pagination tick, scroll-arrow visibility, jump buttons,
+  // adapter event subscription.  No state machine, no DOM-side scroll
+  // state — all derived from the adapter.
   const scrollController = useScrollController({
     containerRef: messagesContainerRef,
     adapter,
     vmlRef,
-    sending,
-    virtualCount,
-    messageBlocks,
-    initialScrollOffset,
     sessionKey: currentScrollKey,
-    agentId: selectedAgentId,
-    sessionId: currentSessionId,
+    initialScrollOffset,
+    initialMessageIndex,
   });
 
   // Load available models: configured providers (from vault) + capabilities (from models API)
@@ -768,28 +687,26 @@ export function ChatPanel() {
   useLayoutEffect(() => {
     return () => {
       const key = currentScrollKey;
-      const container = messagesContainerRef.current;
-      if (!key || !container) return;
+      if (!key) return;
 
-      // CRITICAL: read scrollOffset from lastScrollTopRef, NOT container.scrollTop.
-      // Cleanup runs AFTER mutation — the previous VML has been unmounted and
-      // the browser has clamped scrollTop to 0.  lastScrollTopRef was captured
-      // PRE-mutation by useInsertionEffect above (BEFORE VML unmount), so it
-      // reflects the user’s actual position.  See the ref declaration for why.
+      // Read from the guarded refs.  These hold the OLD session's
+      // last-known values because:
+      //   - onScroll updates them during user interaction (primary)
+      //   - useInsertionEffect updates them ONLY when the container has
+      //     content (guard prevents overwrite on session-switch render)
       const scrollOffset = lastScrollTopRef.current;
-      const distFromBottom = getDistanceFromBottom(container);
-      log.debug("[CP:snapshot-write]", { key, scrollOffset, sending, distFromBottom });
+      const scrollHeight = lastScrollHeightRef.current;
+      const firstVisibleBlockIndex = lastFirstVisibleBlockRef.current;
+      const messageOffset = lastMessageOffsetRef.current;
+      const container = messagesContainerRef.current;
+      const clientHeight = container?.clientHeight ?? 0;
+      const distFromBottom = scrollHeight - scrollOffset - clientHeight;
+      console.warn("[CP:snapshot-write]", { key, scrollOffset, scrollHeight, clientHeight, sending, distFromBottom, firstVisibleBlockIndex, messageOffset });
       setScrollSnapshot(key, {
         scrollOffset,
-        // Use a generous threshold (120px) for snapshot: if the user was only
-        // slightly scrolled up, treat it as pinned so nav-back re-pins to bottom.
-        //
-        // During streaming we ALWAYS record pinnedToBottom=true, because the
-        // message list is growing on every poll and the saved scrollOffset
-        // would point to stale (or prepended) content after nav-back.
-        // Otherwise, use the ScrollController's state machine as the source
-        // of truth for whether the user is pinned to the bottom.
-        pinnedToBottom: sending || scrollController.isPinnedToBottom(),
+        pinnedToBottom: sending || distFromBottom <= 120,
+        firstVisibleBlockIndex,
+        messageOffset,
       });
     };
   }, [currentScrollKey]);
@@ -844,9 +761,19 @@ export function ChatPanel() {
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
     if (!hasMessages) {
       // 2a. No messages in store — load from backend (first mount or new session).
-      // 2a. No messages in store — load from backend (first mount or new session).
+      // Determine head/tail preference from the saved scroll snapshot.
+      const mountKey = `${selectedAgentId}:${currentSessId}`;
+      const mountSnap = chatScrollSnapshots.get(mountKey);
+      const mountMsgIdx = (mountSnap && !mountSnap.pinnedToBottom
+        && mountSnap.firstVisibleBlockIndex != null && mountSnap.messageOffset != null)
+        ? mountSnap.messageOffset + mountSnap.firstVisibleBlockIndex
+        : undefined;
+
       session.scope.current.isInitialLoad = currentSessId;
-      chatStore.ensureLatestInCache(selectedAgentId, currentSessId)
+      const mountLoad = mountMsgIdx !== undefined
+        ? adapter.loadPageForMessage(mountMsgIdx)
+        : adapter.loadInitialPage();
+      mountLoad
         .then(() => chatStore.loadSession(selectedAgentId, currentSessId))
         .finally(() => {
           session.scope.current.isInitialLoad = null;
@@ -921,8 +848,21 @@ export function ChatPanel() {
       sessionId: currentSessionId,
     });
 
+    // Determine which page to load based on the saved content position.
+    // If the snapshot has a block index, load the page containing that
+    // message (content-based, reliable).  Otherwise fall back to tail.
+    const targetKey = `${selectedAgentId}:${currentSessionId}`;
+    const targetSnap = chatScrollSnapshots.get(targetKey);
+    const targetMsgIdx = (targetSnap && !targetSnap.pinnedToBottom
+      && targetSnap.firstVisibleBlockIndex != null && targetSnap.messageOffset != null)
+      ? targetSnap.messageOffset + targetSnap.firstVisibleBlockIndex
+      : undefined;
+
     session.scope.current.isInitialLoad = currentSessionId;
-    chatStore.ensureLatestInCache(selectedAgentId, currentSessionId)
+    const loadPromise = targetMsgIdx !== undefined
+      ? adapter.loadPageForMessage(targetMsgIdx)
+      : adapter.loadInitialPage();
+    loadPromise
       .then(() => chatStore.loadSession(selectedAgentId, currentSessionId))
       .finally(() => {
         session.scope.current.isInitialLoad = null;
@@ -931,15 +871,26 @@ export function ChatPanel() {
 
   // ── Scroll restoration ──
   // Handled by ScrollController's init scroll effect (section 1).
-  // The controller uses `initialScrollOffset` (derived from the snapshot
-  // above) to restore the scroll position on the first data arrival.
+  // Primary path: `initialMessageIndex` (content-based) → adapter.loadPageForMessage
+  // → adapter.scrollToPosition → vml.scrollToIndex.
+  // Fallback: `initialScrollOffset` (pixel-based) for nav-back within same mount.
 
   // ── Retry session load ──────────────────────────────────────────
   // Called from VirtualMessageList when user clicks retry on load error.
   const handleRetryLoadSession = useCallback(() => {
     if (!selectedAgentId || !currentSessionId) return;
-    useChatStore.getState().ensureLatestInCache(selectedAgentId, currentSessionId);
-  }, [selectedAgentId, currentSessionId]);
+    const retryKey = `${selectedAgentId}:${currentSessionId}`;
+    const retrySnap = chatScrollSnapshots.get(retryKey);
+    const retryMsgIdx = (retrySnap && !retrySnap.pinnedToBottom
+      && retrySnap.firstVisibleBlockIndex != null && retrySnap.messageOffset != null)
+      ? retrySnap.messageOffset + retrySnap.firstVisibleBlockIndex
+      : undefined;
+    if (retryMsgIdx !== undefined) {
+      adapter.loadPageForMessage(retryMsgIdx);
+    } else {
+      adapter.loadInitialPage();
+    }
+  }, [selectedAgentId, currentSessionId, adapter]);
 
   // ADR-041 C4: Pagination state (hasOlder, hasNewer, isLoading) and
   // actions (loadBefore, loadAfter, jumpToLatest) are now managed by the
@@ -1435,7 +1386,14 @@ export function ChatPanel() {
         <div className="relative flex-1 overflow-hidden">
           <div
             ref={messagesContainerRef}
-            onScroll={scrollController.handleScroll}
+            onScroll={() => {
+                              lastScrollTopRef.current = (messagesContainerRef.current?.scrollTop ?? 0);
+                              lastScrollHeightRef.current = (messagesContainerRef.current?.scrollHeight ?? 0);
+                              const fvb = vmlRef.current?.getFirstVisibleBlockIndex();
+                              if (fvb != null) lastFirstVisibleBlockRef.current = fvb;
+                              lastMessageOffsetRef.current = adapter.messageOffset;
+                              scrollController.handleScroll();
+                            }}
             className="relative h-full overflow-y-auto px-4 py-3 select-text cursor-text"
             role="log"
             aria-label={t("chatPanel.ariaLabelChatMessages")}
@@ -1454,9 +1412,6 @@ export function ChatPanel() {
               initialScrollOffset={initialScrollOffset}
               onRetryLoadSession={handleRetryLoadSession}
               messageBlocks={messageBlocks}
-              virtualCount={virtualCount}
-              showCompactingItem={showCompactingItem}
-              showReplyingItem={showReplyingItem}
               sending={sending}
               pendingApproval={pendingApproval}
               currentSessionId={currentSessionId}
@@ -1472,8 +1427,6 @@ export function ChatPanel() {
               isThinking={isThinking}
               thinkingContent={thinkingContent}
               thinkingStartTime={thinkingStartTime}
-              assistantStreamingContent={assistantStreamingContent}
-              assistantStreamingStartTime={assistantStreamingStartTime}
               t={t}
               adapter={adapter}
               scrollContainerRef={messagesContainerRef}
@@ -1481,70 +1434,10 @@ export function ChatPanel() {
               loadError={loadError}
               messages={messages}
             />
-            {/* Working indicator — shown OUTSIDE the virtual list so it doesn't
-                affect virtualCount and cause other messages to disappear.
-                Shows while the session is "streaming" but no streaming placeholder
-                message exists yet (gap between session_status→streaming and the
-                first new_data_available poll response, ~500-2000ms).
-                Includes the agent header (avatar + name + role) above the status
-                line so the user sees WHO is preparing to respond before the
-                streaming content arrives; otherwise the working status appears
-                alone and the agent header suddenly pops in when the first
-                streaming event arrives, which feels jarring.
-                Header markup is identical to the one rendered before
-                explore_group (see "Agent header" comment above), so the
-                transition working → streaming explore_block is seamless. */}
-            {showWorkingItem && (
-              <div className="select-none">
-                {showWorkingItemHeader && (
-                  <div className="flex items-center gap-2 mb-2 mt-1">
-                    <AgentAvatar
-                      agentId={selectedAgentId ?? ""}
-                      displayName={agentDisplayName}
-                      avatarUrl={selectedAgent?.avatar}
-                      version={selectedAgent?.version}
-                      builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
-                      size={40}
-                      className="shrink-0"
-                    />
-                    <div className="flex flex-col">
-                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                        {agentDisplayName}
-                      </span>
-                      {selectedAgent?.role && (
-                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
-                          {selectedAgent.role}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-                <div className="ml-12 py-1.5">
-                  {/* ThinkBlock intentionally NEVER renders here in the
-                      outer working indicator.  Live thinking always
-                      belongs inside ExploreBlock (the only context
-                      where the "think + tool" sequence is meaningful)
-                      — see ExploreBlock's paired-items render where
-                      the live thought is anchored at the bottom as
-                      the freshest item.  When the last messageBlocks
-                      entry is an explore_group, the working indicator
-                      just shows the status line so the agent header
-                      transitions seamlessly into the explore_block
-                      content. */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                    <span className="thinking-shimmer" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>{t("chatPanel.working")}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* Replying indicator is rendered INSIDE VirtualMessageList as
-                a trailing extra virtual item (see showReplyingItem prop
-                above), so it physically anchors to the last message bubble
-                — same conversation slot the final reply will occupy.
-                When record_complete freezes the message and
-                isAssistantReplying clears, the virtual slot collapses onto
-                the just-rendered bubble content without a jump. */}
+            {/* ADR-050 C5: Working indicator removed.  The v2 adapter folds
+                live streaming content into blocks (isLive: true); the trailing
+                live block renders via ExploreBlock / StreamingSourceBlock which
+                provides more information than a static "working..." label. */}
             {/* Debug paused banner — shown when the agent is in dev_mode and
                 the debugger is currently in Stepping/Paused state. Provides
                 F5 (resume) and F10 (step) actions directly from the chat.
