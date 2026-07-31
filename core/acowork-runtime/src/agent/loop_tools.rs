@@ -981,6 +981,14 @@ impl AgentLoop {
         blocked_info: &[(usize, LoopPattern)],
         context_builder: &mut ContextBuilder,
     ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
+        // ADR-049: Transition from `LlmStreaming` to `ToolExecuting` at the
+        // entry of tool dispatch. The frontend then shows the "running tool"
+        // indicator instead of "replying". Special tools (`ask_user_question`,
+        // `todo_write`) and parallel tool execution are all covered — they
+        // share the same `ToolExecuting` semantic ("LLM produced tool calls,
+        // awaiting results").
+        self.transition_status(SessionStatus::ToolExecuting);
+
         // Intercept special tools
         let mut ask_question_results: Vec<(usize, (String, bool))> = Vec::new();
         let mut todo_write_results: Vec<(usize, (String, bool))> = Vec::new();

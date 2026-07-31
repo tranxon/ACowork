@@ -227,12 +227,16 @@ impl ReliableProvider {
         }
     }
 
-    /// Restore [`SessionStatus::Streaming`] after retry wait (timeout or skip).
+    /// Restore [`SessionStatus::LlmAwaitingFirstChunk`] after retry wait (timeout or skip).
+    ///
+    /// ADR-049: `Streaming` is split into 3 sub-states. After a retry wait we
+    /// are about to issue a new LLM HTTP request, so we re-enter the TTFT
+    /// wait phase (`LlmAwaitingFirstChunk`), not active streaming.
     fn emit_streaming_resume(&self) {
         if let Some(ref status_lock) = self.session_status
             && let Ok(mut guard) = status_lock.write()
         {
-            *guard = SessionStatus::Streaming { message_id: None };
+            *guard = SessionStatus::LlmAwaitingFirstChunk;
         }
         if let Some(ref tx) = self.chunk_sender
             && let Some(ref sid) = self.session_id
@@ -265,7 +269,8 @@ impl ReliableProvider {
     /// 1. Emits [`SessionStatus::Paused`] with `retry_info` → frontend countdown
     /// 2. Uses `tokio::select!` so a `skip_notify` from the outside wakes
     ///    the loop immediately
-    /// 3. Restores [`SessionStatus::Streaming`] on wake
+    /// 3. Restores [`SessionStatus::LlmAwaitingFirstChunk`] on wake
+    ///    (ADR-049: the post-wake HTTP request is in the TTFT wait phase)
     ///
     /// When UX is not wired up (CLI mode, or short waits), falls back to
     /// plain `sleep(wait).await`.

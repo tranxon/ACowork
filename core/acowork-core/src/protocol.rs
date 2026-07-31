@@ -1418,16 +1418,29 @@ pub struct SessionInfoDto {
 ///
 /// Mirrors `SessionStatus` from acowork-runtime but is defined in
 /// acowork-core so Gateway can use it without depending on runtime.
+///
+/// ADR-049: `Streaming` is split into 3 sub-states (`LlmAwaitingFirstChunk`,
+/// `LlmStreaming`, `ToolExecuting`) so the frontend can derive the processing
+/// phase directly from session status without composing from data parameters.
+/// This DTO must stay 1:1 in sync with the runtime enum (Gateway deserializes
+/// `GET /api/agents/{id}/sessions/{sid}/state` into this type).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "status", content = "detail")]
 pub enum SessionStatusDto {
-    /// Session is idle — no LLM call in progress
+    /// Session is idle — no LLM call in progress.
     Idle,
-    /// LLM is generating a response
-    Streaming { message_id: Option<String> },
-    /// A tool requires user approval before execution
+    /// LLM HTTP request has been sent; waiting for the first content chunk
+    /// (TTFT phase).
+    LlmAwaitingFirstChunk,
+    /// LLM is actively streaming content. `message_id` matches the streaming
+    /// message, if available.
+    LlmStreaming { message_id: Option<String> },
+    /// Tool calls have been dispatched to the tool registry; waiting for
+    /// their results.
+    ToolExecuting,
+    /// A tool requires user approval before execution.
     WaitingApproval { request_id: String },
-    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision
+    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision.
     Paused {
         iteration: Option<u32>,
         max_iterations: Option<u32>,

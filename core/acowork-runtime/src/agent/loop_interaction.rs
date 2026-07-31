@@ -94,7 +94,8 @@ impl AgentLoop {
             });
 
         // Transition back to Streaming (the loop will continue)
-        self.transition_status(SessionStatus::Streaming { message_id: None });
+        // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+        self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
 
         tracing::info!(
             request_id = %request_id,

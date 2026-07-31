@@ -111,18 +111,40 @@ pub enum TodoStatus {
 /// State transitions are emitted as `ChunkEvent::SessionStateChanged` via
 /// the chunk channel, so the Gateway and frontend stay in sync without
 /// optimistic local writes.
+///
+/// ADR-049: `Streaming` is split into three semantic sub-states so the
+/// frontend can derive the processing phase directly from `SessionStatus`
+/// without composing from data parameters (e.g. `stream_delta` line counts).
+/// The 6-variant state machine eliminates the "semantic black hole" where
+/// TTFT wait, streaming output, and tool execution all looked identical
+/// to the UI.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case", tag = "status", content = "detail")]
 #[derive(Default)]
 pub enum SessionStatus {
-    /// Session is idle — no LLM call in progress
+    /// Session is idle — no LLM call in progress.
     #[default]
     Idle,
-    /// LLM is generating a response. `message_id` matches the streaming message.
-    Streaming { message_id: Option<String> },
-    /// A tool requires user approval before execution
+    /// LLM HTTP request has been sent; waiting for the first content chunk
+    /// (TTFT phase — TCP/TLS/HTTP-headers/SSE-first-chunk, can take 10-30s).
+    ///
+    /// ADR-049: distinguishes the "waiting for reply" perception from active
+    /// streaming. Frontend renders a "waiting" indicator without a row count
+    /// threshold (the pre-ADR-049 3-line visual delay is gone).
+    LlmAwaitingFirstChunk,
+    /// LLM is actively streaming content. The first chunk has arrived.
+    /// `message_id` matches the streaming message, if available.
+    LlmStreaming { message_id: Option<String> },
+    /// Tool calls have been dispatched to the tool registry; waiting for
+    /// their results. Covers both parallel tool execution and special
+    /// tools (`ask_user_question`, `todo_write`).
+    ///
+    /// ADR-049: distinct from `LlmStreaming` so the UI can show a "tool
+    /// running" indicator instead of generic "replying".
+    ToolExecuting,
+    /// A tool requires user approval before execution.
     WaitingApproval { request_id: String },
-    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision
+    /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision.
     Paused {
         iteration: Option<u32>,
         max_iterations: Option<u32>,
@@ -151,9 +173,21 @@ pub struct RetryPauseInfo {
 
 
 impl SessionStatus {
-    /// Returns true if the session is actively processing (streaming or awaiting approval).
+    /// Returns true if the session is actively processing (non-idle).
+    ///
+    /// ADR-049: covers all 6 variants of the state machine. Previously this
+    /// excluded `Paused`, which caused a semantic mismatch with the
+    /// frontend's `isSessionActive()` (frontend considered `Paused` as
+    /// active, backend considered it inactive — a latent bug).
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Streaming { .. } | Self::WaitingApproval { .. })
+        matches!(
+            self,
+            Self::LlmAwaitingFirstChunk
+                | Self::LlmStreaming { .. }
+                | Self::ToolExecuting
+                | Self::WaitingApproval { .. }
+                | Self::Paused { .. }
+        )
     }
 }
 

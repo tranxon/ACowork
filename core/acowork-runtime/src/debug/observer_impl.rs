@@ -126,11 +126,13 @@ impl DebugObserverImpl {
             };
             match state {
                 DebugState::Running => {
-                    transition_status(SessionStatus::Streaming { message_id: None });
+                    // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+                    transition_status(SessionStatus::LlmAwaitingFirstChunk);
                     return true;
                 }
                 DebugState::Stepping => {
-                    transition_status(SessionStatus::Streaming { message_id: None });
+                    // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+                    transition_status(SessionStatus::LlmAwaitingFirstChunk);
                     return true;
                 }
                 DebugState::Stopped => {

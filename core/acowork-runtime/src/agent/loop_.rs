@@ -652,7 +652,11 @@ impl AgentLoop {
         let _cancel_handle = self.session_core.begin_new_request();
 
         // ADR-014: Idle → Streaming
-        self.transition_status(SessionStatus::Streaming { message_id: None });
+        // ADR-049: Streaming is split into LlmAwaitingFirstChunk / LlmStreaming /
+        // ToolExecuting. The HTTP request is about to be sent here, so we are
+        // in the TTFT wait phase — LlmAwaitingFirstChunk. The transition to
+        // LlmStreaming happens in loop_llm.rs on the first content chunk.
+        self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
 
         if !replay {
             // Add user message to history
@@ -880,7 +884,8 @@ impl AgentLoop {
                                 "User chose to continue, resetting iteration counter"
                             );
                             // ADR-014: Paused → Streaming
-                            self.transition_status(SessionStatus::Streaming { message_id: None });
+                            // ADR-049: HTTP request not yet sent → LlmAwaitingFirstChunk.
+                            self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                             iteration = 0; // Reset counter
 
                             // Trim history before resuming to avoid context window overflow
@@ -901,9 +906,7 @@ impl AgentLoop {
                                         reason = %reason,
                                         "UserOp: continue loop via fast channel"
                                     );
-                                    self.transition_status(SessionStatus::Streaming {
-                                        message_id: None,
-                                    });
+                                    self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
                                     self.trim_history_to_budget(&current_model);
                                     break;
@@ -1028,9 +1031,7 @@ impl AgentLoop {
                                         "Long retry wait completed, auto-resuming"
                                     );
                                     self.transition_status(
-                                        SessionStatus::Streaming {
-                                            message_id: None,
-                                        },
+                                        SessionStatus::LlmAwaitingFirstChunk,
                                     );
                                     break;
                                 }
@@ -1041,9 +1042,7 @@ impl AgentLoop {
                                                 "User chose to retry immediately"
                                             );
                                             self.transition_status(
-                                                SessionStatus::Streaming {
-                                                    message_id: None,
-                                                },
+                                                SessionStatus::LlmAwaitingFirstChunk,
                                             );
                                             break;
                                         }
@@ -1149,9 +1148,8 @@ impl AgentLoop {
                                         reason = %reason,
                                         "User chose to continue after loop detection"
                                     );
-                                    self.transition_status(SessionStatus::Streaming {
-                                        message_id: None,
-                                    });
+                                    // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+                                    self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
                                     self.trim_history_to_budget(&current_model);
                                     break; // Resume main loop
@@ -1299,11 +1297,13 @@ impl AgentLoop {
                 };
                 match state {
                     crate::debug::controller::DebugState::Running => {
-                        self.transition_status(SessionStatus::Streaming { message_id: None });
+                        // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+                        self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                         break;
                     }
                     crate::debug::controller::DebugState::Stepping => {
-                        self.transition_status(SessionStatus::Streaming { message_id: None });
+                        // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+                        self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                         break;
                     }
                     crate::debug::controller::DebugState::Stopped => {

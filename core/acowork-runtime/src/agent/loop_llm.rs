@@ -18,6 +18,7 @@ use futures::StreamExt;
 
 use super::context::ContextBuilder;
 use super::loop_::{AgentLoop, ChunkEvent, ControlDecision};
+use crate::agent::session_state::SessionStatus;
 use crate::cancellation::select_on_cancel;
 use crate::error::{Result, RuntimeError};
 
@@ -197,6 +198,19 @@ impl AgentLoop {
                             }
                             match event {
                 StreamEvent::Content(chunk) => {
+                    // ADR-049: First content chunk after `LlmAwaitingFirstChunk`
+                    // promotes to `LlmStreaming`. The `accumulated_content.is_empty()`
+                    // check is the precise first-content-event marker — reasoning
+                    // deltas go to `accumulated_reasoning_content` (a separate
+                    // accumulator) so a `Content` event here is always the first
+                    // visible reply byte, even after reasoning → assistant role
+                    // transition. Frontend flips from "waiting" → "replying".
+                    if accumulated_content.is_empty() {
+                        self.transition_status(SessionStatus::LlmStreaming {
+                            message_id: None,
+                        });
+                    }
+
                     // Mark reasoning finished when content starts after reasoning
                     if reasoning_in_progress {
                         reasoning_finished_at = Some(Utc::now().timestamp_millis());

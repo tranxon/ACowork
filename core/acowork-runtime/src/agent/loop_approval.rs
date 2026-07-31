@@ -429,7 +429,8 @@ impl AgentLoop {
                 });
 
             // ADR-014: WaitingApproval → Streaming (resume after approval/rejection)
-            self.transition_status(SessionStatus::Streaming { message_id: None });
+            // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
+            self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
 
             // 3. Resolve the spawned task's oneshot
             let _ = decision_tx.send(decision);

@@ -207,7 +207,7 @@ impl SessionCore {
             current_cancel_handle: Arc::new(parking_lot::Mutex::new(CancelHandle::new())),
             status_tx: None,
             retry_session_status: Some(Arc::new(std::sync::RwLock::new(
-                SessionStatus::Streaming { message_id: None },
+                SessionStatus::LlmAwaitingFirstChunk,
             ))),
             retry_wait_handle: Some(RetryWaitHandle::new()),
             current_work_dir,
@@ -1055,13 +1055,15 @@ mod tests {
 
     #[test]
     fn test_retry_ux_initial_status_is_streaming() {
-        // The initial retry_session_status should be Streaming
-        // (the session hasn't been paused yet).
+        // The initial retry_session_status should be LlmAwaitingFirstChunk
+        // (the session hasn't been paused yet — ADR-049 splits the old
+        // `Streaming` variant into 3 sub-states; the pre-request TTFT wait
+        // maps to LlmAwaitingFirstChunk).
         let (core, _rx) = make_core();
         let guard = core.retry_session_status.as_ref().unwrap().read().unwrap();
         assert!(
-            matches!(*guard, SessionStatus::Streaming { .. }),
-            "Initial retry status should be Streaming, got {:?}",
+            matches!(*guard, SessionStatus::LlmAwaitingFirstChunk),
+            "Initial retry status should be LlmAwaitingFirstChunk, got {:?}",
             *guard
         );
     }
