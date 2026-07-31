@@ -8,20 +8,53 @@
 - ADR-021（Session 数据加载统一 — HTTP Pull + 通知机制）
 - ADR-035（MQTT 流式传输重构 — `activeStream` 缓冲 + `stream_delta` 推送），尤其 D9.2『StreamingSourceBlock `<pre>` DOM 复用模式』
 - ADR-043（Session 配置与运行时状态拆分 — `SessionState` 协议结构）
+- **ADR-050 §3.3（liveBuffer 设计）+ §16（post-C5 修订记录）** — 流式数据归属 `chatAdapterStore`，`messages[]` 为已确认消息唯一容器。本 ADR 的"流式字段"全部在 `chatAdapterStore` 而非 `chatStore` 中；trailing virtual item 已废弃，改用 `adapter.blocks` 中 `isLive: true` block 路由。
 
 **影响范围**：
 - `core/acowork-runtime/src/agent/session_state.rs` — `SessionStatus` enum 定义
 - `core/acowork-runtime/src/agent/` 6 个 loop 模块 — 状态迁移点
 - `core/acowork-runtime/src/providers/reliable.rs` — 429 重试后恢复状态
 - `core/acowork-core/src/protocol.rs` — `SessionStatusDto` 结构体
-- `apps/acowork-desktop/src/lib/types.ts` — 前端 `SessionStatus` 类型 + `StreamLine`/`ActiveStream`
-- `apps/acowork-desktop/src/stores/chatStore.ts` — 状态推导逻辑 + `assistantStreamingContent` 节流推送
-- `apps/acowork-desktop/src/components/chat/ChatPanel.tsx` — 指示器渲染逻辑
-- `apps/acowork-desktop/src/components/chat/SessionPanel.tsx` — Tab 栏状态
+- `apps/acowork-desktop/src/lib/types.ts` — 前端 `SessionStatus` 类型 + `StreamLine`/`ActiveStream`；`isProcessing()` 替代 `isSessionActive()`
+- `apps/acowork-desktop/src/stores/chatStore.ts` — `record_complete` 主路径写入 `messages[]`；`sendMessage` 乐观写入 `messages[]`；不再持有 `assistantStreamingContent` 等流式字段（见 ADR-050 C2 + §16）
+- `apps/acowork-desktop/src/components/chat/chatAdapterStore.ts` — **v1.1 新增**：liveBuffer（仅 `thinkingStream` / `assistantStream` 两字段）+ legacy 投影字段（`isThinking` / `thinkingContent` / `assistantStreamingContent` / `assistantStreamingStartTime` / `isAssistantReplying` / `isPinnedToBottom` / `optimisticEntries`）+ 模块级 `activeStreams` / `lastThinkingFlush` / `lastAssistantFlush` 节流 Map
+- `apps/acowork-desktop/src/components/chat/chatListAdapter.ts` — **v1.1 新增**：`isAtTail()` 判定（`limit === 0` 视为 atTail）；`buildSnapshot` 仅取 `thinkingStream` / `assistantStream`
+- `apps/acowork-desktop/src/lib/paginationUtils.ts` — **v1.1 新增**：`isAtTail(offset, limit, total)` 共享 helper
+- `apps/acowork-desktop/src/components/chat/ChatPanel.tsx` — 指示器渲染逻辑；通过 `useLiveStream()` 订阅 chatAdapterStore
+- `apps/acowork-desktop/src/components/chat/SessionPanel.tsx` — Tab 栏状态（`isStreaming` → `isProcessing()`）
 - `apps/acowork-desktop/src/components/chat/StreamingSourceBlock.tsx` — 通用流式预览组件（variant=thought|assistant）
 - `apps/acowork-desktop/src/components/chat/ThinkBlock.tsx` — 简化为 StreamingSourceBlock 薄包装
-- `apps/acowork-desktop/src/components/chat/VirtualMessageList.tsx` — Replying slot 渲染 StreamingSourceBlock
-- `apps/acowork-desktop/src/components/chat/blockLayout.ts` — `REPLYING_INDICATOR_HEIGHT` 高度估算
+- `apps/acowork-desktop/src/components/chat/VirtualMessageList.tsx` — **v1.1 修订**：assistant 流式预览改为 `isLive && type === "assistant"` block 路由到 StreamingSourceBlock；trailing virtual item 已废弃
+- `apps/acowork-desktop/src/components/chat/ExploreBlock.tsx` — **v1.1 修订**：新增 `isLive` prop，避免与已折叠的 live thought 重复渲染
+- `apps/acowork-desktop/src/components/chat/blockLayout.ts` — `REPLYING_INDICATOR_HEIGHT` 高度估算（trailing slot 废弃后可考虑删除，见 §不做事项）
+
+---
+
+## 修订记录
+
+### v1.1（2025-01-16）— 与 ADR-050 post-C5 对齐
+
+**背景**：ADR-050 C1-C5 + post-C5（commit `dcc182b2`）已全部落地，重构了流式数据归属：
+- 流式字段从 `chatStore` 迁移到 `chatAdapterStore`
+- `messages[]` 成为已确认消息的唯一容器（HTTP 历史 + MQTT `record_complete` 直接写入）
+- `liveBuffer` 从 4 字段缩为 2 字段（`thinkingStream` + `assistantStream`）
+- Trailing virtual item 废弃，assistant 流式预览改为 `adapter.blocks` 中 `isLive: true` block 路由
+
+**修订要点**（详见 `docs/review/zh/29-adr-049-vs-adr-050-post-c5-alignment.md`）：
+
+1. §前置：增 ADR-050 §3.3 + §16 交叉引用
+2. §影响范围：增 `chatAdapterStore.ts` / `chatListAdapter.ts` / `paginationUtils.ts`；`VirtualMessageList.tsx` / `ExploreBlock.tsx` 标注 post-C5 路由变更
+3. §前端新类型定义：增 `isProcessing()` 替代 `isSessionActive()`
+4. §Frontend assistant live preview：删除 trailing slot 描述；数据流图改为 `isLive` block 路由
+5. §Tab 栏状态：列出 4 个 `sessionStatus` 引用点（`ChatPanel` / `SessionPanel` / `ContextUsageIcon` / `ResultsPanel`）作为同步替换目标
+6. §实施步骤 Commit 5 第 4 条：record_complete 主路径改为写 `messages[]`，清空字段改为副作用
+7. §A.2 末尾：删除「`isAssistantReplying` 仍是 DOM 提示灯」表述（post-C5 已无任何 DOM 元素以其为判据）
+8. §不做事项：新增 chatAdapterStore legacy 投影字段退役归 ADR-050 后续
+9. §迁移风险：新增 chatStore ↔ chatAdapterStore 协调遗漏风险
+
+**未变**：核心 6 变体 SessionStatus 设计、`ProcessingPhase` 派生、`getProcessingPhase()` 穷举映射、Commit 1-2 后端逻辑、Commit 4 Tab 栏 `isProcessing()` 替换意图。
+
+**适用范围**：本 v1.1 适用于 ADR-050 post-C5 架构（commit `dcc182b2` 及之后）。实施前需先在 PR 中确认 chatAdapterStore 投影字段已就位（避免在 chatStore 中反向"复活"已被 ADR-050 删除的字段）。
 
 ---
 
@@ -239,8 +272,8 @@ graph LR
 |---------|------|------|
 | `thinkingContent` | `stream_delta` (role=thought) | 渲染数据，非状态信息 |
 | `thinkingStartTime` | `stream_delta` (role=thought) | 渲染数据，非状态信息 |
-| `assistantStreamingContent` | `stream_delta` (role=assistant) | 渲染数据，非状态信息；用于 trailing virtual item 的 live preview（见下一子节） |
-| `assistantStreamingStartTime` | `stream_delta` 首个 chunk for new messageId | 渲染数据；与 `thinkingStartTime` 字段对称，仅供 `StreamingSourceBlock variant="assistant"` 的 duration timer 使用 |
+| `assistantStreamingContent` | `stream_delta` (role=assistant) | **v1.1 修订**：渲染数据，非状态信息；归属 `chatAdapterStore` 作为 legacy 投影字段。trailing virtual item 已废弃（ADR-050 C5）；assistant live preview 现在通过 `adapter.blocks` 中 `isLive && type === "assistant"` block 路由到 `StreamingSourceBlock variant="assistant"` |
+| `assistantStreamingStartTime` | `stream_delta` 首个 chunk for new messageId | 渲染数据；与 `thinkingStartTime` 字段对称；**v1.1 修订**归属 `chatAdapterStore`，仅供兼容消费者读取 |
 | `CompactingStarted`/`CompactingEnded` | ChunkEvent | 独立事件，与本状态机正交 |
 
 ### 前端新类型定义
@@ -283,6 +316,25 @@ export function getProcessingPhase(s: SessionStatus | undefined | null): Process
 export function isProcessing(s: SessionStatus | undefined | null): boolean {
   return getProcessingPhase(s) !== "idle";
 }
+
+/**
+ * v1.1: 替代旧 `isSessionActive()` helper。
+ *
+ * 旧实现（`lib/types.ts:885-888`）：
+ * ```typescript
+ * export function isSessionActive(s: SessionStatus | undefined | null): boolean {
+ *   return s.status === "streaming" || s.status === "waiting_approval" || s.status === "paused";
+ * }
+ * ```
+ *
+ * 旧函数仅适配 4 变体 SessionStatus。本 ADR 上线后 6 变体下的"非 idle"
+ * 判断必须用 `isProcessing()`：`isSessionActive` 应在所有调用点
+ * （agentStore / chatStore / SessionPanel / ContextUsageIcon / ResultsPanel）
+ * 替换为 `isProcessing()`，并在 `lib/types.ts` 中标记 `@deprecated`。
+ */
+export function isSessionActive_REPLACED(): never {
+  throw new Error("isSessionActive() is removed in v1.1; use isProcessing() instead.");
+}
 ```
 
 ### Frontend assistant live preview（实施期补遗）
@@ -291,12 +343,14 @@ export function isProcessing(s: SessionStatus | undefined | null): boolean {
 >
 > 同时 ADR-035 D9.2 已经定义 `StreamingSourceBlock` 用 `<pre>` 直接 `textContent` 复用模式作为 `role=thought` 的内存友好流式渲染。但 assistant 侧没有同等机制，导致两个流式数据源的处理路径不对称。
 >
-> **本次修订**：
+> **v1.0 修订**（2026-07-29）：
 > 1. `chatStore` 在 `stream_delta (role=assistant)` 中镜像 thought 的累积+节流模式，节流 500ms 推 `assistantStreamingContent` 到 Zustand
 > 2. `VirtualMessageList` 的 trailing "replying slot" 改为渲染 `<StreamingSourceBlock variant="assistant">`，DOM 复用同 `thought` 分支
 > 3. assistant 完成态仍走 `StreamMarkdown → ReactMarkdown` 渲染，**保留** markdown 格式（标题/列表/代码块/Mermaid）
+>
+> **v1.1 修订（2025-01-16）— 与 ADR-050 post-C5 对齐**：上述第 2 项已过时。Trailing virtual item 已在 ADR-050 C5 中废弃，改为 `adapter.blocks` 中 `isLive: true` 的 message block 路由。详见以下 v1.1 数据流图与 ADR-050 §16。
 
-#### 数据流图
+#### 数据流图（v1.1 — post-C5 修订）
 
 ```mermaid
 graph LR
@@ -305,46 +359,64 @@ graph LR
         RC[record_complete]
     end
 
-    subgraph chatStore
+    subgraph chatAdapterStore
         AS[activeStreams Map<br/>per sid]
         LF[lastAssistantFlush<br/>500ms 节流]
-        SS[SessionState]
+        LB[liveBuffer<br/>assistantStream]
+        LEG[legacy 投影字段<br/>assistantStreamingContent<br/>assistantStreamingStartTime<br/>isAssistantReplying]
+    end
+
+    subgraph chatStore
+        MSG[messages[]<br/>HTTP 历史 + record_complete<br/>直接写入]
+    end
+
+    subgraph Adapter[chatListAdapter.ts]
+        BLK[adapter.blocks<br/>isLive: true 标记]
     end
 
     subgraph UI
-        VML[VirtualMessageList<br/>trailing slot]
+        VML[VirtualMessageList<br/>常规渲染循环<br/>isLive && type === "assistant"]
         SSB[StreamingSourceBlock<br/>variant=assistant]
         MB[MessageBubble<br/>完成态 ReactMarkdown]
     end
 
     SD -->|cumulate lines<br/>slice -5| AS
     AS -.throttle 500ms.-> LF
-    LF -->|assistantStreamingContent| SS
-    RC -->|清空| SS
-    SS -->|isAssistantReplying +<br/>assistantStreamingContent| VML
+    LF --> LEG
+    SD --> LB
+    RC -->|主路径<br/>直接 append| MSG
+    RC -.副作用.-> LB
+    LB --> BLK
+    MSG --> BLK
+    BLK -->|isLive && assistant| VML
     VML --> SSB
-    SS -.record_complete.-> MB
+    MSG -.同 id 气泡挂载.-> MB
 
     style SSB fill:#fef3c7,stroke:#f59e0b
 ```
 
-#### 节流策略
+**v1.1 关键变化**：
+- 流式数据从 `chatStore` 全部迁出，归属 `chatAdapterStore`（`liveBuffer` + legacy 投影 + 模块级 `activeStreams` / `lastAssistantFlush` / `lastThinkingFlush`）
+- `record_complete` 主路径由 `chatStore` 通过 `convertRecordCompleteToChatMessage` **直接写入 `messages[]`**（见 ADR-050 §16）；清空 stream / 投影字段是副作用
+- Trailing virtual item 废弃；assistant 流式预览在 VML 渲染循环中识别 `item.isLive && msg.type === "assistant"` 的 block 后路由到 `StreamingSourceBlock variant="assistant"`。`virtualCount` 不再 `+1`
 
-与 `thinkingContent` 完全对称——`lastAssistantFlush: Map<sid, number>` + 500ms 节流，叠加 `isPinnedToBottom` 守卫（用户滚到上方时不推送，避免无谓的 Zustand 写入和重渲染）。
+#### 节流策略（v1.1 修订）
+
+与 `thinkingContent` 完全对称——`lastAssistantFlush: Map<sid, number>` + 500ms 节流，**位置在 `chatAdapterStore` 模块级**（非 `chatStore` 字段，也非 zustand state —— 模块级 Map 直接 mutate，配套 zustand 状态推流）。叠加 `isPinnedToBottom` 守卫——`isPinnedToBottom` 同样是 `chatAdapterStore` 的 legacy 投影字段（见 `chatAdapterStore.ts:106-119`），与 `assistantStreamingContent` 同属 C2 兼容保留。
 
 #### DOM 复用机制
 
 `StreamingSourceBlock` 在挂载时创建一个 `<pre>` DOM 节点；mount-to-unmount 期间不销毁。`useEffect([content])` 内直接写 `preRef.current.textContent = 新内容`——React 不参与文本内容管理，没有 AST、没有元素树、没有 reconciliation。
 
-#### 完成态切换
+#### 完成态切换（v1.1 修订）
 
-`record_complete` 触发：
-1. `isAssistantReplying = false` → `showReplyingItem = false` → VirtualMessageList `virtualCount` 减 1 → 指示器 slot 消失
-2. `assistantStreamingContent = ''` 清空（防止 session-id 重用时遗留）
-3. HTTP refresh 拉回完整 content
-4. 同一消息号（`messageId`）的消息气泡挂载，走 `StreamMarkdown → ReactMarkdown` 渲染
+`record_complete` 触发（**主路径**）：
+1. **chatStore 写 `messages[]`**：`convertRecordCompleteToChatMessage` 把完整内容追加到 `messages[]`，并通过 `mergeMessageWindow` 的 id 去重避免 HTTP 刷新重复（见 ADR-050 §16）
+2. **chatAdapterStore 清空 stream（副作用）**：`ingestRecordComplete(agentId, sid, role, messageId)` 触发 `liveBuffer.thinkingStream` 或 `liveBuffer.assistantStream` 清空；legacy 投影字段（`assistantStreamingContent` / `assistantStreamingStartTime` / `isAssistantReplying`）随之重置
+3. `isAssistantReplying = false` 是**纯安全阀标志翻转**，不再驱动任何 DOM 渲染（v1.1 删除「DOM 提示灯」表述，详见 §A.2 末尾）
+4. 同一消息号（`messageId`）的消息气泡在 `messages[]` 中挂载，走 `StreamMarkdown → ReactMarkdown` 渲染
 
-slot 的塌缩是无跳变（layout-stable），因为 slot 高度（`REPLYING_INDICATOR_HEIGHT = 178px`，5 行 × 1.5rem + header + padding）和真实气泡首屏高度在同一量级，ResizeObserver 立刻校正。
+**trailing slot 塌缩问题已不存在**：`assistantStream` 流式预览是 `adapter.blocks` 的常规成员，与后续完整消息气泡共用 `foldMessages` 排序；ResizeObserver 不需要校正 178px → 完整气泡的跳变。
 
 #### 与 ADR-035 D9.2 的对称性
 
@@ -397,6 +469,17 @@ const isStreaming = sessionState?.sessionStatus?.status === "streaming"
 const isActive = isProcessing(sessionState?.sessionStatus);
 ```
 
+**v1.1 同步替换清单**：以下 4 个文件中 `sessionStatus.status === "..."` 的 4 变体判断必须同步改为 6 变体语义（`isProcessing()` 或 `phase !== "idle"`）：
+
+| # | 文件 | 行 | 当前（4 变体） | 改为（6 变体） |
+|---|------|---|----------------|----------------|
+| 1 | `apps/acowork-desktop/src/components/chat/ChatPanel.tsx` | 427-429 | `sending = streaming \|\| waiting_approval \|\| paused` | `sending = phase !== "idle"` |
+| 2 | `apps/acowork-desktop/src/components/chat/SessionPanel.tsx` | 136-138 | `isStreaming = streaming \|\| waiting_approval \|\| paused` | `isActive = isProcessing(...)` |
+| 3 | `apps/acowork-desktop/src/components/chat/ContextUsageIcon.tsx` | 98 | `isIdle = !s \|\| s.status === "idle"` | `isIdle = phase === "idle"` |
+| 4 | `apps/acowork-desktop/src/components/results/ResultsPanel.tsx` | 485-488 | 4 态分别染色（streaming / idle / paused / waiting_approval） | 6 态映射：waiting / streaming / tool_executing / waiting_approval / paused 各对应一种颜色 |
+
+Commit 4 默认仅列了 SessionPanel.tsx；其余 3 处需要在 Commit 4 PR review 中通过 `grep -n 'sessionStatus?.status === "'` 全量锁定。
+
 ---
 
 ## 实施步骤
@@ -442,16 +525,16 @@ const isActive = isProcessing(sessionState?.sessionStatus);
 
 ### Commit 5：ADR 文档 + Frontend assistant live preview 实施
 
-**文件**：`docs/adr/zh/ADR-049-session-status-substates.md`，`StreamingSourceBlock.tsx`（新增），`ThinkBlock.tsx`，`chatStore.ts`，`VirtualMessageList.tsx`，`ChatPanel.tsx`，`blockLayout.ts`
+**文件**：`docs/adr/zh/ADR-049-session-status-substates.md`，`StreamingSourceBlock.tsx`（新增），`ThinkBlock.tsx`，`chatStore.ts`，`VirtualMessageList.tsx`，`ChatPanel.tsx`，`blockLayout.ts`，**`chatAdapterStore.ts`**（v1.1 新增），**`chatListAdapter.ts`**（v1.1 新增），**`lib/paginationUtils.ts`**（v1.1 新增）
 
 变更（2026-07-29 后置更新）：
 1. 抽出通用 `StreamingSourceBlock` 组件（variant="thought"|"assistant"），`<pre>` DOM 复用模式作为默认渲染
 2. `ThinkBlock` 简化为 `StreamingSourceBlock variant="thought"` 的薄包装
-3. `chatStore` 新增 `assistantStreamingContent` + `assistantStreamingStartTime` 字段、`lastAssistantFlush` 节流 Map、`stream_delta (role=assistant)` 分支的 accumulator + 边缘触发 startTime 推送
-4. `record_complete` 清空 `assistantStreamingContent` + `assistantStreamingStartTime`
-5. VirtualMessageList 的 trailing replying slot 改为 `<StreamingSourceBlock variant="assistant">`，移除旧的「pulse-dot + Replying 文本」纯状态指示器
-6. `REPLYING_INDICATOR_HEIGHT` 从 26 → 178（容纳 5 行 pre + header）
-7. ADR-049 前置章节补充 ADR-035 D9.2 交叉引用；删除变量表修正（`isAssistantReplying` 保留为安全阀而非 UI 判据）；新增强调『Frontend assistant live preview』子节
+3. **`chatStore`**（v1.1 修订）：**不再新增** `assistantStreamingContent` / `assistantStreamingStartTime` / `lastAssistantFlush` 节流 Map —— 这些字段在 ADR-050 C2 已迁移到 `chatAdapterStore`。`stream_delta (role=assistant)` 处理也已在 chatAdapterStore 中。
+4. **`record_complete`**（v1.1 修订 — 主路径）：由 `chatStore` 通过 `convertRecordCompleteToChatMessage` **直接写入 `messages[]`**（ADR-050 §16 主路径），不再走 `assistantStreamingContent` 清空逻辑。清空 stream / legacy 投影字段由 `chatAdapterStore.ingestRecordComplete` 在 chatStore 主路径之后作为副作用调用。
+5. **VirtualMessageList**（v1.1 修订）：trailing replying slot 已在 ADR-050 C5 废弃。改为在常规渲染循环中识别 `item.isLive && msg.type === "assistant"` 的 block 后路由到 `StreamingSourceBlock variant="assistant"`。**不再有 pulse-dot 纯状态指示器，不再有 `virtualCount` extras 派生**。
+6. `REPLYING_INDICATOR_HEIGHT`（v1.1 修订）：trailing slot 废弃后该常量失效，**Commit 5 应删除** `blockLayout.ts` 中 `REPLYING_INDICATOR_HEIGHT` 常量及其引用。
+7. ADR-049 前置章节补充 ADR-035 D9.2 交叉引用；删除变量表修正（`isAssistantReplying` 保留为安全阀而非 UI 判据，**v1.1 删除「DOM 提示灯」表述**）；新增强调『Frontend assistant live preview』子节
 
 ---
 
@@ -465,6 +548,7 @@ const isActive = isProcessing(sessionState?.sessionStatus);
 - **新增 assistant 侧的 `lines (cap 5)`**：仅作为 live preview 用，与 thought 的代码路径完全对称（同样的 `slice(-5)`、同样的 500ms 节流、同样的 `useEffect → textContent` 写入），不引入额外的 trim/buffer 策略
 - **不动 assistant 完成态渲染**：assistant 完成态仍走 `StreamMarkdown → ReactMarkdown`，保留标题/列表/代码块/Mermaid 等格式
 - **不引入新的 i18n 文案**：新状态对应的中文文案在后续前端 PR 中添加
+- **不动 `chatAdapterStore` legacy 投影字段的退役时间表**（v1.1 新增）：`chatAdapterStore.ts:106-135` 中的 legacy 投影（`isThinking` / `thinkingContent` / `assistantStreamingContent` / `assistantStreamingStartTime` / `isAssistantReplying` / `isPinnedToBottom` / `optimisticEntries`）是 ADR-050 C2 为兼容 chatStore 老消费者而保留的字段。C5 之后这些字段仅作 C2 兼容，本 ADR 不负责清理；**退役规划归 ADR-050 后续 C6+ 任务**——尤其是 `optimisticEntries` 何时彻底删除（post-C5 仅由 mount guard 引用，理论上可以删除）和 `isAssistantReplying` 安全阀逻辑是否迁回 `chatStore`（如不迁则需要单独测试）。
 
 ---
 
@@ -472,6 +556,9 @@ const isActive = isProcessing(sessionState?.sessionStatus);
 
 - **后端 emit 点遗漏**：通过 `grep -n 'SessionStatus::Streaming'` 锁定全清单，共 8 处写入点 + 2 处测试断言 + 2 处注释引用，无遗漏风险
 - **前端 `processingPhase` 映射遗漏**：`getProcessingPhase()` 函数使用 `switch` 穷举（TypeScript 编译器检查），加新变体时编译器会提示未处理的 case
+- **`sessionStatus` 4 变体判断的 4 个引用点遗漏**（v1.1 新增）：Commit 4 默认仅列 `SessionPanel.tsx`，其余 3 处（`ChatPanel.tsx:427-429` / `ContextUsageIcon.tsx:98` / `ResultsPanel.tsx:485-488`）需在 PR review 中通过 `grep -n 'sessionStatus?.status === "'` 全量锁定。详见 §"Tab 栏状态" v1.1 同步替换清单。
+- **chatStore ↔ chatAdapterStore 协调遗漏**（v1.1 新增）：本 ADR 实施时如果按 v1.0 prose 在 `chatStore` 反向添加回 `assistantStreamingContent` / `lastAssistantFlush` / `stream_delta (role=assistant)` 分支处理，会与 ADR-050 C2 落地冲突。**前置校验**：实施 Commit 3/5 之前，先确认 `chatAdapterStore.ts` 中 legacy 投影字段已就位（`isAssistantReplying` / `thinkingContent` 等）；如未就位，则按 ADR-050 C2 范围 PR 先补，不在本 ADR 范围内。
+- **`isSessionActive` 替换遗漏**（v1.1 新增）：旧 helper 在 `agentStore.ts:603` / `chatStore.ts:2888-2943` 等多处被引用。Commit 3 必须把这些引用点同步替换为 `isProcessing()`，并在 `lib/types.ts` 中将 `isSessionActive` 标记 `@deprecated`（不直接删除以保持外部依赖方兼容）。
 
 ---
 
@@ -487,42 +574,52 @@ sending = sessionStatus.status === "streaming"
        || sessionStatus.status === "paused"
 ```
 
-### A.2 `chatStore.ts` 中的 `isAssistantReplying` 与 `assistantStreamingContent` 推导（2026-07-29 修订）
+### A.2 `chatAdapterStore.ts` 中的 `isAssistantReplying` 与 `assistantStreamingContent` 推导（v1.1 修订：归属迁移）
+
+> **v1.1 修订**：原 v1.0 §A.2 标题为"`chatStore.ts` 中的 ... 推导"。ADR-050 C2 把这一推导路径从 `chatStore` 完整迁出到 **`chatAdapterStore`** 模块级 zustand + 模块级 `activeStreams` / `lastAssistantFlush` Map。`chatStore` 现在仅承担 `messages[]` 与 server 同步，stream_delta handler 仅作为入口转发给 `chatAdapterStore.ingestStreamDelta`。
 
 ```
 stream_delta (MQTT `messages/stream_delta`)
+  ↓
+chatStore 转发 → chatAdapterStore.ingestStreamDelta(role, line)
   ↓
 lines = data.lines[]
 role = lines[0].role === 'assistant' ? 'assistant' : 'thought'
   ↓
 if role === 'assistant':
   ├─ 边缘触发: new messageId → as.startTime = Date.now()
-  ├─ 边缘触发: assistantStreamingStartTime 推到 Zustand
-  ├─ as.lineCount += lines.length  (驱动 C2 安全阀 ASSISTANT_LINE_SAFETY_CAP, 不再驱动 UI 阈值)
+  ├─ 边缘触发: chatAdapterStore.setState({ assistantStreamingStartTime: as.startTime })
+  ├─ as.lineCount += lines.length  (驱动 chatAdapterStore 安全阀 ASSISTANT_LINE_SAFETY_CAP, 不再驱动 UI 阈值)
   ├─ as.lines.push(...); if (as.lines.length > 5) slice(-5)  (live preview 上限)
   ├─ 边缘触发: shouldBeReplying = (lineCount > ASSISTANT_REPLYING_LINE_THRESHOLD)
-  │              → 推到 Zustand (isAssistantReplying)
-  └─ 节流 500ms + isPinnedToBottom 守卫:
+  │              → chatAdapterStore.setState({ isAssistantReplying: true })  (纯安全阀)
+  └─ 节流 500ms + isPinnedToBottom 守卫 (chatAdapterStore 模块级 lastAssistantFlush Map):
        content = as.lines.map(l => l.content).join('\n')
        if (content !== cur.assistantStreamingContent):
-         推到 Zustand (assistantStreamingContent)
+         chatAdapterStore.setState({ assistantStreamingContent: content })
          lastAssistantFlush.set(sid, now)
 ```
 
-**注意**：行数阈值 `ASSISTANT_REPLYING_LINE_THRESHOLD` (3) 在本次修订后**仅保留**用于：(a) `isAssistantReplying` 边缘翻转的兼容触发（仍驱动 Tab 栏活跃状态 / 一些列外的逻辑）；(b) **`isAssistantReplying` 仍是安全的 DOM 提示灯**——它现在不再用作『`showReplyingItem` 是否亮』的判据（`showReplyingItem` 改为 `phase === "streaming" && assistantStreamingContent !== ""`），因此阈值的 UX 副作用被完全消除了：用户不再经历 3 行才能看到内容预览的视觉延迟。
+**注意（v1.1 修订）**：行数阈值 `ASSISTANT_REPLYING_LINE_THRESHOLD` (3) 在本次修订后**仅保留**用于：(a) `isAssistantReplying` 边缘翻转的兼容触发（仍驱动 Tab 栏活跃状态 / 一些列外的逻辑）；(b) **`isAssistantReplying` 仅作为 chatAdapterStore 内部的安全阀状态**——ADR-050 C5 删除 trailing virtual item 后，前端不再有任何 DOM 元素以其为判据；它的作用收敛为：在 `chatAdapterStore.ingestRecordComplete` 内检测 `record_complete 丢失` 边界（`chatAdapterStore.ts:511` 注释），并在 activeStream tracker 超过阈值时触发内部排查。`showReplyingItem` 改为 `phase === "streaming" && assistantStreamingContent !== ""`，阈值的 UX 副作用被完全消除：用户不再经历 3 行才能看到内容预览的视觉延迟。
 
-`assistantStreamingContent` 是新增字段，**不是 `isAssistantReplying` 的派生量**——它直接来自 activeStream 的 `lines (cap 5)`，绕过行数阈值，front-end 可以从首个 chunk 起就显示 live preview。
+`assistantStreamingContent`（**v1.1 已迁移到 `chatAdapterStore` 作为 legacy 投影字段**），**不是 `isAssistantReplying` 的派生量**——它直接来自 activeStream 的 `lines (cap 5)`，绕过行数阈值，front-end 可以从首个 chunk 起就显示 live preview。
 
-### A.3 `chatStore.ts` 中的 `isThinking` 推导
+### A.3 `chatAdapterStore.ts` 中的 `isThinking` 推导（v1.1 修订：归属迁移）
+
+> **v1.1 修订**：原 v1.0 §A.3 标题为"`chatStore.ts` 中的 ... 推导"。与 §A.2 相同，ADR-050 C2 把 thought 流的累积+节流逻辑迁出到 `chatAdapterStore`。`thinkingContent` / `thinkingStartTime` 在 chatAdapterStore 中作为 legacy 投影字段保留。
 
 ```
-stream_delta (MQTT)
+stream_delta (MQTT `messages/stream_delta`)
+  ↓
+chatStore 转发 → chatAdapterStore.ingestStreamDelta(role='thought', line)
   ↓
 role = lines[0].role === 'assistant' ? 'assistant' : 'thought'
   ↓
-if role === 'thought' && !thoughtState.isThinking:
-  isThinking = true
-  thinkingStartTime = Date.now()
+if role === 'thought' && !current.isThinking:
+  chatAdapterStore.setState({
+    isThinking: true,
+    thinkingStartTime: Date.now(),
+  })
 ```
 
 ### A.4 `ChatPanel.tsx` 中的 `showWorkingItemAfterUser` 推导
@@ -559,4 +656,4 @@ ADR-014 中定义的 Session 状态原则：
 3. **每次状态变更都通过 `SessionStateChanged` 事件推送**（Event-Driven）
 4. **前端不做乐观写**（No Optimistic Writes）
 
-ADR-049 延续这四条原则，只改变"状态粒度"，不改变"状态权属"。
+ADR-049 延续这四条原则，只改变"状态粒度"，不改变"状态权属"。条原则，只改变"状态粒度"，不改变"状态权属"。
