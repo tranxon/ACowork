@@ -1715,3 +1715,61 @@ export function ChatPanel() {
 ---
 
 **ADR 状态**：草案，等待实施计划批准。
+
+---
+
+## 16. 后 C5 修复：record_complete 直接写入 messages[]（2025-01-15）
+
+### 16.1 背景与问题
+
+C5 实施完成后，测试发现新 session 与 agent 交互过程中存在三类显示缺陷：
+
+| # | 症状 | 根因 |
+|---|------|------|
+| **F1** | 空 session 输入用户消息后聊天界面一片空白；切换 session 再切回来才能看到 | `atTail` 在 `limit === 0`（fresh session）时为 false，liveBuffer 不拼接到 blocks；用户消息存在 `liveBuffer.pendingUserMessage` 但永远不显示 |
+| **F2** | agent 的 tool_call / tool_result 全都不显示，只显示思考消息 | `ingestRecordComplete` 只处理 thought / assistant 的 draft promotion，tool_call / tool_result 没有 draft stream，注释说"HTTP refresh will surface"但 HTTP 刷新要等 `session_state -> idle` 才触发 |
+| **F3** | assistant 流式预览没有走 StreamingSourceBlock，而是被 MessageBubble 当成普通 markdown 渲染，显示不完整片段 | `assistantStream` 是 `type="assistant"` 的单条 ChatMessage，foldMessages 把它路由到 assistant block（非 explore_group），VML 无 isLive 路由 -> 走 MessageBubble |
+
+**统一根因**：C5 实现偏离了 ADR-050 §3.3 的设计意图。原设计是 `messages[]` 只存 HTTP 历史数据，所有实时数据走 liveBuffer -> HTTP 刷新对齐。但实际使用中 MQTT record_complete 已经携带了完整的消息内容（role / message_id / content / tool_name / tool_call_id / is_error / seq），完全可以直接写入 `messages[]`，不需要额外 HTTP 请求。
+
+### 16.2 修正后的数据模型
+
+```
+messages[]  = 所有已确认落地的消息（连续的）
+              ├── HTTP 初始加载的历史窗口
+              └── MQTT record_complete 直接写入（不再等 HTTP 刷新）
+                  thought / assistant / tool_call / tool_result 全部直接写入
+
+liveBuffer  = 只存流式预览（stream_delta 已到，record_complete 未到）
+              ├── thinkingStream (type="thought")
+              └── assistantStream (type="assistant")
+              （删除了 pendingUserMessage 和 pendingRecordComplete）
+
+adapter.blocks = foldMessages([...messages[], ...liveBuffer.streams()])
+                 连续的已确认数据 + 流式预览拼在最后面
+```
+
+**连续性保证**：
+- `record_complete` 到达时，如果 `atTail` 且无 gap，直接追加到 `messages[]`
+- 如果有 gap（MQTT QoS 丢包等），`session_state -> idle` 时的 HTTP 对齐兜底
+- `mergeMessageWindow` 的 id 去重保证 HTTP 刷新返回时不会重复（server 版本覆盖乐观版本）
+
+### 16.3 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `chatStore.ts` | record_complete handler 增加 `convertRecordCompleteToChatMessage` + atTail 时直接追加到 `messages[]`；sendMessage 改为乐观写入 `messages[]`（不再走 `ingestOptimisticUserMessage`） |
+| `chatAdapterStore.ts` | `LiveBuffer` 删除 `pendingUserMessage` / `pendingRecordComplete` 字段；`ingestRecordComplete` 只清空对应 stream；`ingestOptimisticUserMessage` 变为 no-op |
+| `chatListAdapter.ts` | `atTail` 修正：`limit === 0` 时视为 atTail；`buildSnapshot` 只取 `thinkingStream` / `assistantStream` |
+| `VirtualMessageList.tsx` | `isLive && type === "assistant"` 的 block 路由到 `StreamingSourceBlock variant="assistant"` |
+| `StreamingSourceBlock.tsx` | 无改动（已有 `variant="assistant"` 支持） |
+
+### 16.4 设计原则修正
+
+原 ADR-050 §3.3 的 `liveBuffer` 包含 4 个字段（thinkingStream / assistantStream / pendingUserMessage / pendingRecordComplete），设计意图是"所有实时数据都走 liveBuffer，HTTP 刷新后对齐"。
+
+修正后 `liveBuffer` 只保留 2 个字段（thinkingStream / assistantStream），核心原则变为：
+
+> **`messages[]` 是所有已确认消息的唯一容器**（HTTP 历史 + record_complete 直接写入）。`liveBuffer` 只存"尚未完成的流式预览"。UI 永远从 `foldMessages([...messages[], ...liveBuffer.streams()])` 得到连续的数据。
+
+这简化了数据流：record_complete 不再需要 liveBuffer -> pendingRecordComplete -> HTTP 刷新 -> dedup 的三步走，而是一步直达 `messages[]`。HTTP 刷新仅在 gap 检测和 idle 对齐时触发（兜底机制不变）。

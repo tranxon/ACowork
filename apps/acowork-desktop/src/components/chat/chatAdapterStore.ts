@@ -85,27 +85,17 @@ export interface LiveBuffer {
   /**
    * Mid-stream thought (reasoning) text.  Populated as a single
    * rolling ChatMessage keyed by `messageId`.  Cleared on
-   * `record_complete (role: thought)`.
+   * `record_complete (role: thought)` - the completed record is
+   * written directly into `messages[]` by chatStore.
    */
   thinkingStream: ChatMessage | null;
   /**
    * Mid-stream assistant text.  Populated as a single rolling
    * ChatMessage keyed by `messageId`.  Cleared on
-   * `record_complete (role: assistant)`.
+   * `record_complete (role: assistant)` - the completed record is
+   * written directly into `messages[]` by chatStore.
    */
   assistantStream: ChatMessage | null;
-  /**
-   * User message just sent (optimistic).  Persists until the
-   * matching server record arrives via `loadSessionMessages`.
-   */
-  pendingUserMessage: ChatMessage | null;
-  /**
-   * Records that have completed via `record_complete` but have
-   * not yet been confirmed by an HTTP refresh.  Each entry is a
-   * fully-formed ChatMessage ready to be folded into blocks.
-   * Cleared when the matching server id arrives.
-   */
-  pendingRecordComplete: ChatMessage[];
 }
 
 export interface AdapterSessionState {
@@ -148,8 +138,6 @@ export interface AdapterSessionState {
 const DEFAULT_LIVE_BUFFER: LiveBuffer = {
   thinkingStream: null,
   assistantStream: null,
-  pendingUserMessage: null,
-  pendingRecordComplete: [],
 };
 
 const DEFAULT_ADAPTER_SESSION_STATE: AdapterSessionState = {
@@ -278,30 +266,19 @@ function readSession(key: string): AdapterSessionState {
 
 /**
  * Push a freshly-sent user message into the optimistic overlay.
- * Called from chatStore.sendMessage after the MQTT publish succeeds.
- * The overlay is consumed by the v2 adapter (C3) which sorts it into
- * display position; the legacy path (ChatPanel) reads it directly via
- * a subscription so the message is visible immediately.
+ *
+ * ADR-050 post-C5 fix: the user message is now written directly into
+ * `messages[]` by `chatStore.sendMessage`.  This function is kept as a
+ * no-op stub for backward compatibility with any caller that still
+ * references it, but it no longer modifies `liveBuffer` (which only
+ * stores streaming previews).
  */
 export function ingestOptimisticUserMessage(
-  agentId: string,
-  sessionId: string,
-  entries: ChatMessage[],
+  _agentId: string,
+  _sessionId: string,
+  _entries: ChatMessage[],
 ): void {
-  if (entries.length === 0) return;
-  const key = sessionKey(agentId, sessionId);
-  const current = readSession(key);
-  // ADR-050 C3: liveBuffer.pendingUserMessage holds the LATEST
-  // optimistic user message (single rolling slot — sent messages are
-  // typically replied to one at a time).  We also append to
-  // optimisticEntries so C2 consumers (ChatPanel's display array)
-  // keep working until C5.
-  const head = entries[entries.length - 1];
-  patchSession(key, {
-    liveBuffer: { ...current.liveBuffer, pendingUserMessage: head },
-    optimisticEntries: [...current.optimisticEntries, ...entries],
-  });
-  emit({ kind: "flushAvailable", sessionKey: key });
+  // No-op: user messages are written directly to messages[] by chatStore.
 }
 
 /**
@@ -317,18 +294,9 @@ export function clearOptimisticEntries(
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
   const remaining = current.optimisticEntries.filter((m) => !ids.has(m.id));
-  // ADR-050 C3: also drop the liveBuffer.pendingUserMessage if it was
-  // confirmed, and prune the matching id from pendingRecordComplete[].
-  const lb = current.liveBuffer;
-  const nextLb: LiveBuffer = {
-    ...lb,
-    pendingUserMessage: lb.pendingUserMessage && ids.has(lb.pendingUserMessage.id) ? null : lb.pendingUserMessage,
-    pendingRecordComplete: lb.pendingRecordComplete.filter((m) => !ids.has(m.id)),
-  };
-  if (remaining.length === current.optimisticEntries.length && lb === nextLb) return;
+  if (remaining.length === current.optimisticEntries.length) return;
   patchSession(key, {
     optimisticEntries: remaining,
-    liveBuffer: nextLb,
   });
 }
 
@@ -336,18 +304,9 @@ export function clearOptimisticEntries(
 export function clearAllOptimisticEntries(agentId: string, sessionId: string): void {
   const key = sessionKey(agentId, sessionId);
   const current = readSession(key);
-  const lb = current.liveBuffer;
-  const hasOptimistic = current.optimisticEntries.length > 0
-    || lb.pendingUserMessage !== null
-    || lb.pendingRecordComplete.length > 0;
-  if (!hasOptimistic) return;
+  if (current.optimisticEntries.length === 0) return;
   patchSession(key, {
     optimisticEntries: [],
-    liveBuffer: {
-      ...lb,
-      pendingUserMessage: null,
-      pendingRecordComplete: [],
-    },
   });
 }
 
@@ -487,11 +446,13 @@ export function ingestStreamDelta(
 }
 
 /**
- * Ingest a `record_complete` event.  Clears the per-stream active
- * tracker, resets the trailing preview flags, and notifies subscribers.
- * The pre-ADR-050 chatStore also called `scheduleRefresh` here — that
- * responsibility moves to the adapter (C3 will turn it into a
- * `flushAvailable` subscriber that triggers an HTTP refresh).
+ * Ingest a `record_complete` event.
+ *
+ * ADR-050 post-C5 fix: only clears the corresponding liveBuffer stream
+ * (thinkingStream / assistantStream).  The completed record itself is
+ * written directly into `messages[]` by chatStore.record_complete handler
+ * (via `convertRecordCompleteToChatMessage`), so this function no longer
+ * pushes anything into pendingRecordComplete (that field is removed).
  */
 export function ingestRecordComplete(
   agentId: string,
@@ -503,36 +464,21 @@ export function ingestRecordComplete(
   const lb = current.liveBuffer;
   const patch: Partial<AdapterSessionState> = {};
 
-  // ADR-050 C3: the completed record enters pendingRecordComplete[] so
-  // the v2 adapter can fold it into blocks until the HTTP refresh
-  // confirms.  For thought / assistant we already have a draft
-  // (liveBuffer.thinkingStream / assistantStream) — we promote that
-  // draft, then clear the rolling entry.
+  // Clear the corresponding streaming preview.
   if (args.role === "thought" && lb.thinkingStream && lb.thinkingStream.id === args.messageId) {
-    patch.liveBuffer = {
-      ...lb,
-      thinkingStream: null,
-      pendingRecordComplete: [...lb.pendingRecordComplete, lb.thinkingStream],
-    };
+    patch.liveBuffer = { ...lb, thinkingStream: null };
     if (current.isThinking) patch.isThinking = false;
     if (current.thinkingContent !== "") patch.thinkingContent = "";
     lastThinkingFlush.delete(key);
   } else if (args.role === "assistant" && lb.assistantStream && lb.assistantStream.id === args.messageId) {
-    patch.liveBuffer = {
-      ...lb,
-      assistantStream: null,
-      pendingRecordComplete: [...lb.pendingRecordComplete, lb.assistantStream],
-    };
+    patch.liveBuffer = { ...lb, assistantStream: null };
     if (current.isAssistantReplying) patch.isAssistantReplying = false;
     if (current.assistantStreamingContent !== "") patch.assistantStreamingContent = "";
     if (current.assistantStreamingStartTime !== null) patch.assistantStreamingStartTime = null;
     lastAssistantFlush.delete(key);
   }
 
-  // ADR-050 C3: for tool_call / tool_result records that arrive without
-  // a prior draft (e.g. rapid parallel tool invocations), we don't have
-  // a draft to promote.  In that case we just clear the per-stream
-  // tracker; the HTTP refresh will surface the record.
+  // Defensive: clear any stale streaming flags regardless of role.
   if (current.isAssistantReplying && !patch.isAssistantReplying) {
     patch.isAssistantReplying = false;
   }

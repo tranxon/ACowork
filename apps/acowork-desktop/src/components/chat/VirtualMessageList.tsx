@@ -6,12 +6,13 @@ import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
 import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
 import type { MessageBlock } from "./messageFolder";
+import { shouldShowAgentAvatar } from "./avatarAnchor";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
-// ADR-050 C5: StreamingSourceBlock is no longer rendered directly by VML.
-// Live streaming content arrives via adapter.blocks (isLive: true) and is
-// rendered through ExploreBlock (thought preview) or MessageBubble (assistant
-// content).  ExploreBlock imports StreamingSourceBlock internally.
+import { StreamingSourceBlock } from "./StreamingSourceBlock";
+// ADR-050 post-C5 fix: StreamingSourceBlock is used by VML to render
+// isLive assistant blocks (streaming preview).  Thought streaming
+// previews are still rendered inside ExploreBlock via ThinkBlock.
 
 // ResizeObserver instances per element.  WeakMap so they're GC'd when the
 // element is removed from the DOM (virtual list recycling).
@@ -495,55 +496,31 @@ export const VirtualMessageList = React.forwardRef<
                   transform: `translateY(${virtualRow.start}px)`,
                 }}
               >
-                {/* Agent header — shown before first agent message after a user message. */}
-                {(() => {
-                  let isPrevUser = false;
-                  for (let i = virtualRow.index - 1; i >= 0; i--) {
-                    const prev = messageBlocks[i];
-                    const prevType = prev.type;
-                    if (prevType === "user") {
-                      isPrevUser = true;
-                      break;
-                    }
-                    if (
-                      prevType === "compaction" ||
-                      prevType === "system"
-                    ) {
-                      continue;
-                    }
-                    break;
-                  }
-                  if (!isPrevUser) return null;
-                  const t = item.type;
-                  const isAgent = t === "explore_group"
-                    || (t !== "user"
-                      && t !== "system"
-                      && t !== "compaction");
-                  if (!isAgent) return null;
-                  return (
-                    <div className="flex items-center gap-2 mb-2 mt-1">
-                      <AgentAvatar
-                        agentId={selectedAgentId ?? ""}
-                        displayName={agentDisplayName}
-                        avatarUrl={selectedAgent?.avatar}
-                        version={selectedAgent?.version}
-                        builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
-                        size={40}
-                        className="shrink-0"
-                      />
-                      <div className="flex flex-col">
-                        <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
-                          {agentDisplayName}
+                {/* Agent header — shown before first agent message after a user block.
+                    Anchoring logic lives in ./avatarAnchor.ts. */}
+                {shouldShowAgentAvatar(messageBlocks, virtualRow.index) && (
+                  <div className="flex items-center gap-2 mb-2 mt-1">
+                    <AgentAvatar
+                      agentId={selectedAgentId ?? ""}
+                      displayName={agentDisplayName}
+                      avatarUrl={selectedAgent?.avatar}
+                      version={selectedAgent?.version}
+                      builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
+                      size={40}
+                      className="shrink-0"
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        {agentDisplayName}
+                      </span>
+                      {selectedAgent?.role && (
+                        <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
+                          {selectedAgent.role}
                         </span>
-                        {selectedAgent?.role && (
-                          <span className="text-[10px] leading-tight text-zinc-400 dark:text-zinc-500">
-                            {selectedAgent.role}
-                          </span>
-                        )}
-                      </div>
+                      )}
                     </div>
-                  );
-                })()}
+                  </div>
+                )}
 
                 {/* Explore group - aggregated think + tool calls/results */}
                 {item.type === "explore_group" && (() => {
@@ -579,6 +556,7 @@ export const VirtualMessageList = React.forwardRef<
                         isThinking={liveThoughtAttaches}
                         thinkingContent={liveThoughtAttaches ? thinkingContent : ""}
                         thinkingStartTime={liveThoughtAttaches ? thinkingStartTime : null}
+                        isLive={item.isLive}
                       />
                     </div>
                   );
@@ -587,6 +565,20 @@ export const VirtualMessageList = React.forwardRef<
                 {/* Regular message */}
                 {item.type !== "explore_group" && item.type !== "user_with_attachments" && (() => {
                   const msg = item.items[0];
+                  // ADR-050 post-C5 fix: isLive assistant block -> streaming preview
+                  if (item.isLive && msg.type === "assistant") {
+                    return (
+                      <div className="ml-12">
+                        <StreamingSourceBlock
+                          content={msg.content}
+                          isStreaming={true}
+                          startTime={msg.timestamp}
+                          variant="assistant"
+                        />
+                      </div>
+                    );
+                  }
+                  // Normal message (history or non-streaming)
                   return (
                     <MessageBubble
                       message={msg}

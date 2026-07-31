@@ -125,7 +125,7 @@ export function UserWithAttachmentsBubble({
     [currentSessionId],
   );
 
-  const fontSizeStyle: React.CSSProperties | undefined = undefined;
+  const fontSizeStyle: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
 
   return (
     <div className="flex items-start justify-end gap-2">

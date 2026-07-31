@@ -26,6 +26,17 @@ interface ExploreBlockProps {
   isThinking?: boolean;
   thinkingContent?: string;
   thinkingStartTime?: number | null;
+  /**
+   * ADR-050: true iff at least one item in this block originated from the
+   * adapter's liveBuffer (streaming preview).  When `isLive=true`, the
+   * live thought from `liveBuffer.thinkingStream` is already folded into
+   * `items[]` by the adapter - so the `liveThoughtNotYetLoaded` ThinkBlock
+   * must NOT render (it would duplicate the PairedExploreItem that already
+   * renders the same thought).  When `isLive=false` (user scrolled away
+   * from the tail, liveBuffer entries are excluded from blocks), the live
+   * ThinkBlock is the only way to show the streaming preview.
+   */
+  isLive?: boolean;
 }
 
 const SHELL_TOOLS = ["bash", "powershell", "shell"];
@@ -257,7 +268,7 @@ function approvalMatchesSession(
  *   message appears after this explore block in display order.
  * - Collapse (manual): user can collapse at any time.
  */
-export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime }: ExploreBlockProps) {
+export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime, isLive }: ExploreBlockProps) {
   const { t } = useTranslation();
   // Start collapsed only if this block already has a follow-up reply (historical/loaded).
   // For new active blocks, always start expanded — collapses ONLY when
@@ -291,11 +302,23 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   const isExploring = isStreaming || hasPendingTools;
 
   // Live ThinkBlock: shown only when (a) the agent is actively thinking,
-  // AND (b) the thought message has NOT yet been loaded into items[].
-  // Once HTTP refresh lands, pairedItems will contain a thought item and
-  // the frozen ThinkBlock takes over - no duplicate rendering.
-  const liveThoughtNotYetLoaded = !!isThinking
-    && (pairedItems.length === 0 || pairedItems[0].kind !== "thought");
+  // AND (b) the live thought is NOT already folded into this block's
+  // items[] by the adapter.
+  //
+  // ADR-050: when atTail, the adapter folds `liveBuffer.thinkingStream`
+  // into the explore_group's items[] and marks the block `isLive: true`.
+  // In that case the PairedExploreItem already renders the thought, so
+  // the live ThinkBlock must NOT render (it would be a duplicate).
+  //
+  // When NOT atTail (user scrolled away), the adapter excludes
+  // liveBuffer entries from blocks, so `isLive=false` and the live
+  // ThinkBlock is the only way to show the streaming preview.
+  //
+  // Pre-ADR-050, this checked `pairedItems[0].kind !== "thought"`, which
+  // only looked at the FIRST item.  When tool_calls preceded the live
+  // thought in the same explore_group, the check passed incorrectly and
+  // the live ThinkBlock rendered as a duplicate of PairedExploreItem.
+  const liveThoughtNotYetLoaded = !!isThinking && !isLive;
 
   // Auto-expand when exploring starts (respect user manual collapse),
   // but only if no follow-up reply has appeared (once collapsed by reply, stay collapsed)
@@ -428,7 +451,8 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     && prev.onCancelTool === next.onCancelTool
     && prev.isThinking === next.isThinking
     && prev.thinkingContent === next.thinkingContent
-    && prev.thinkingStartTime === next.thinkingStartTime;
+    && prev.thinkingStartTime === next.thinkingStartTime
+    && prev.isLive === next.isLive;
 });
 
 /** Pair tool_call with its corresponding tool_result.

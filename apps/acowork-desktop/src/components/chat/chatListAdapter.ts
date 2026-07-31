@@ -44,6 +44,7 @@ import {
 } from "./chatAdapterStore";
 import { foldMessages, type MessageBlock } from "./messageFolder";
 import type { ChatMessage } from "../../lib/types";
+import { isAtTail } from "../../lib/paginationUtils";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -270,7 +271,9 @@ class AdapterStore {
     const ss = useChatStore.getState();
     const cur = ss.agentStates[this.agentId]?.sessionStates[this.sessionId];
     if (!cur) return;
-    // Already at tail?
+    // Already at tail?  NOTE: this intentionally uses `limit > 0`
+    // (NOT `isAtTail()`) because `limit === 0` means "no page loaded" -
+    // scrollToBottom must still trigger an HTTP load in that case.
     if (cur.messageLimit > 0 && cur.messageOffset + cur.messageLimit >= cur.messageTotal) {
       this.bumpVersion();
       return;
@@ -327,19 +330,25 @@ class AdapterStore {
     const total = cur?.messageTotal ?? 0;
     const isLoading = cur?.isLoadingMore ?? false;
 
-    // atTail: window covers [total-limit, total).  `limit > 0` guards
-    // the "fresh session, no messages loaded yet" case — that's
-    // considered at-tail (the liveBuffer should fold in).
-    const atTail = limit > 0 && offset + limit >= total;
+    // atTail: window covers [total-limit, total).  ADR-050 post-C5 fix:
+    // `limit === 0` (fresh session, no messages loaded yet) is also
+    // considered at-tail so the liveBuffer streams fold into blocks
+    // immediately - the user must see their optimistic message and any
+    // streaming preview even before the initial HTTP load completes.
+    //
+    // Shared with chatStore's record_complete handler via
+    // `isAtTail()` to prevent definition drift.
+    const atTail = isAtTail(offset, limit, total);
 
-    // liveBuffer projection
+    // liveBuffer projection - only streaming previews (thinkingStream /
+    // assistantStream).  ADR-050 post-C5 fix: pendingUserMessage and
+    // pendingRecordComplete are removed; completed records are written
+    // directly into messages[] by chatStore.
     const lb = getLiveBuffer(this.agentId, this.sessionId);
     const liveEntries: ChatMessage[] = [];
     if (atTail) {
       if (lb.thinkingStream) liveEntries.push(lb.thinkingStream);
       if (lb.assistantStream) liveEntries.push(lb.assistantStream);
-      if (lb.pendingUserMessage) liveEntries.push(lb.pendingUserMessage);
-      if (lb.pendingRecordComplete.length > 0) liveEntries.push(...lb.pendingRecordComplete);
     }
     // Dedup by id — history wins.
     const historyIds = new Set(historyMessages.map((m) => m.id));

@@ -157,10 +157,18 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   //   1. User scrolled away from bottom (!isNearBottom)
   //   2. Data window doesn't cover the tail (!isAtTail)
   //   3. Live content waiting to be flushed (hasPendingFlush)
-  const showScrollToBottom = !isNearBottom || !adapter.isAtTail() || adapter.hasPendingFlush();
-  // `showScrollToTop`: show when the user is NOT at the very top of
-  // the content, OR when older pages exist beyond the current window.
-  const showScrollToTop = !isNearTop || adapter.hasOlder;
+  // Guard: hide both arrows when there are no blocks (empty session).
+  // Without this, `isNearTop` defaults to `false` (set on session switch)
+  // which makes `!isNearTop = true` -> `showScrollToTop = true` even though
+  // there is no content to scroll.  `checkEdges()` (which updates
+  // `isNearTop`) only runs after `initializedRef` is set, and
+  // `initializedRef` is only set when `blocksLen > 0` - so for an empty
+  // session the initial state never gets corrected.
+  const hasBlocks = adapter.blocks.length > 0;
+  const showScrollToBottom = hasBlocks
+    && (!isNearBottom || !adapter.isAtTail() || adapter.hasPendingFlush());
+  const showScrollToTop = hasBlocks
+    && (!isNearTop || adapter.hasOlder);
 
   // ── Initial positioning gate ──
   // Prevents edge-detection from triggering loadPrevPage before the

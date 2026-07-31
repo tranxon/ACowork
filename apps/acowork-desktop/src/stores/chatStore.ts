@@ -3,11 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, ModelEntry, TodoItem, AttachedItem } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
+import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import { releaseAdapterSession, ingestOptimisticUserMessage, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
+import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
 import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
@@ -1310,11 +1311,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
 
     if (sessionId) {
-      // ADR-050 C2: optimistic overlay is owned by chatAdapterStore.
-      // chatStore no longer carries an `optimisticEntries` field.
-      ingestOptimisticUserMessage(agentId, sessionId, [userMsg, ...optimisticAttachments]);
-      // ── DIAG: verify optimistic insert ──
-      log.debug("[ChatStore:DEBUG] sendMessage optimistic insert", {
+      // ADR-050 post-C5 fix: user message is written directly into
+      // messages[] (optimistic insert).  The id (crypto.randomUUID)
+      // survives the round-trip to the backend, so when the HTTP refresh
+      // returns the same message, mergeMessageWindow deduplicates by id
+      // (server version wins).  This replaces the old liveBuffer.
+      // pendingUserMessage path and ensures the user sees their message
+      // immediately even in a fresh session where limit === 0.
+      set((state) => {
+        const ss = getSessionState(state, agentId, sessionId!);
+        // Guard against duplicate (rapid double-send of same id).
+        if (ss.messages.some(m => m.id === userMsgId)) return {};
+        return updateSessionState(state, agentId, sessionId!, {
+          messages: [...ss.messages, userMsg, ...optimisticAttachments],
+          messageTotal: ss.messageTotal + 1 + optimisticAttachments.length,
+          messageLimit: ss.messageLimit + 1 + optimisticAttachments.length,
+        });
+      });
+      log.debug("[ChatStore:DEBUG] sendMessage optimistic insert to messages[]", {
         sid: sessionId,
         userMsgId,
         attachedItemCount: items.length,
@@ -2040,6 +2054,87 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
 // ── Conversation entry conversion ─────────────────────────────────────
 
+/**
+ * Convert an MQTT `record_complete` payload into a `ChatMessage` ready for
+ * direct insertion into `messages[]`.
+ *
+ * ADR-050 post-C5 fix: record_complete carries the COMPLETE content for
+ * assistant / thought / tool_call / tool_result records.  Instead of
+ * waiting for an HTTP refresh to surface these, we write them directly
+ * into `messages[]` so the user sees the finished message immediately.
+ *
+ * The MQTT payload mirrors the JSONL entry fields (role / message_id /
+ * content / tool_name / tool_call_id / is_error / seq) but is NOT a
+ * `ConversationEntry` - it lacks `ts` and `metadata`.  We synthesize a
+ * `timestamp` from `Date.now()` (clamped to be strictly greater than the
+ * last cached message's timestamp so `foldMessages` sort order is
+ * preserved) and reconstruct the `toolData` / `toolStatus` fields from
+ * the flat MQTT fields.
+ */
+function convertRecordCompleteToChatMessage(
+  data: Record<string, unknown>,
+  agentId: string,
+  lastTimestamp: number,
+  // ADR-050 post-C5 fix: when set, these are written onto thought
+  // messages so the renderer (PairedExploreItem / StreamingSourceBlock)
+  // can distinguish a completed thought (`endTime` set) from a still-
+  // streaming one.  Without `endTime`, a thought written to messages[]
+  // by `record_complete` was indistinguishable from an in-flight stream
+  // (PairedExploreItem's `isStreaming && !item.msg.endTime` evaluated
+  // true forever, so the block stayed expanded and never auto-folded).
+  // The `startTime` is sourced from chatAdapterStore's `thinkingStartTime`
+  // (set when the first `stream_delta` for that messageId landed); the
+  // `endTime` falls back to `Date.now()` if the MQTT payload doesn't
+  // carry an explicit end timestamp.
+  thoughtTiming?: { startTime?: number | null; endTime?: number | null },
+): ChatMessage {
+  const role = data.role as string;
+  const msgId = data.message_id as string;
+  const content = (data.content as string) ?? "";
+  const toolName = data.tool_name as string | undefined;
+  const toolCallId = data.tool_call_id as string | undefined;
+  const isError = data.is_error as boolean | undefined;
+  const seq = data.seq as number | undefined;
+
+  const agentInfo = getAgentSenderInfo(agentId);
+
+  const msg: ChatMessage = {
+    id: msgId,
+    type: (role === "think" ? "thought" : role) as ChatMessage["type"],
+    content,
+    // Clamp to lastTimestamp + 1 so the new entry sorts AFTER every
+    // cached message in foldMessages' timestamp-ascending sort.
+    timestamp: Math.max(Date.now(), lastTimestamp + 1),
+    senderDisplayName: agentInfo.senderDisplayName,
+    senderRole: agentInfo.senderRole,
+  };
+  if (seq != null) msg.seq = seq;
+
+  if (role === "tool_call" || role === "tool_result") {
+    msg.toolName = toolName;
+    msg.toolCallId = toolCallId;
+    msg.toolData = {
+      tool_name: toolName,
+      tool_call_id: toolCallId,
+      is_error: isError,
+    } as Record<string, unknown>;
+    if (role === "tool_result") {
+      msg.toolStatus = isError ? "error" : "success";
+    }
+  }
+
+  // ADR-050 post-C5 fix: stamp startTime/endTime on completed thoughts so
+  // the rendering layer can auto-fold them.  See comment on the
+  // `thoughtTiming` parameter above for the root-cause analysis.
+  if (role === "think" || role === "thought") {
+    if (thoughtTiming?.startTime != null) msg.startTime = thoughtTiming.startTime;
+    if (thoughtTiming?.endTime != null) msg.endTime = thoughtTiming.endTime;
+    else msg.endTime = Date.now();
+  }
+
+  return msg;
+}
+
 /** Strip leading/trailing `<summary>...</summary>` tags from a compaction
  *  summary string (the LLM is instructed to wrap output in those tags;
  *  we don't need them in the UI). Returns the inner text trimmed. If the
@@ -2233,7 +2328,7 @@ function handleMessageEvent(
 
     case "record_complete": {
       if (!sid) break;
-      log.debug("[ChatStore:DEBUG] record_complete RECEIVED (forwarded to adapter)", {
+      log.debug("[ChatStore:DEBUG] record_complete RECEIVED", {
         sid,
         eventSessionId: data.session_id,
         msgId: data.message_id,
@@ -2248,11 +2343,57 @@ function handleMessageEvent(
       const msgId = data.message_id as string;
       const toolCallId = (data.tool_call_id as string | undefined) ?? '';
 
-      // ADR-050 C2: the entire "clear isAssistantReplying / isThinking /
-      // assistantStreamingContent / activeStream cleanup / scheduleRefresh"
-      // block was delegated to chatAdapterStore.ingestRecordComplete, which
-      // emits a `recordComplete` event the v2 adapter (C3) can subscribe to
-      // for the actual HTTP refresh.
+      // ADR-050 post-C5 fix: record_complete carries the COMPLETE content.
+      // Write it directly into messages[] when atTail so the user sees the
+      // finished message immediately, without waiting for an HTTP refresh.
+      // This closes the "tool_call/tool_result not visible during streaming"
+      // gap and eliminates the need for scheduleRefresh.
+      //
+      // atTail uses the shared `isAtTail()` function (same definition as
+      // chatListAdapter's buildSnapshot) so that `limit === 0` (fresh
+      // session before initial HTTP load) is also treated as at-tail.
+      // This ensures record_complete writes to messages[] even before the
+      // first HTTP response arrives - the message will be deduped by
+      // mergeMessageWindow when the HTTP response eventually lands.
+      {
+        const ss = getSessionState(get(), agentId, sid);
+        const atTail = isAtTail(ss.messageOffset, ss.messageLimit, ss.messageTotal);
+        if (atTail) {
+          const lastTs = ss.messages.length > 0
+            ? ss.messages[ss.messages.length - 1].timestamp
+            : 0;
+          // ADR-050 post-C5 fix: when this record_complete closes a thought,
+          // stamp startTime/endTime on the converted message so the renderer
+          // can auto-fold the thought block.  startTime comes from
+          // chatAdapterStore's `thinkingStartTime` (set when the matching
+          // stream_delta first landed).  endTime defaults to "now" — close
+          // enough for the duration display, which is rounded to seconds.
+          let thoughtTiming: { startTime?: number | null; endTime?: number | null } | undefined;
+          if (role === "thought") {
+            const adapter = getChatAdapterSession(agentId, sid);
+            thoughtTiming = {
+              startTime: adapter.thinkingStartTime,
+              endTime: Date.now(),
+            };
+          }
+          const chatMsg = convertRecordCompleteToChatMessage(data, agentId, lastTs, thoughtTiming);
+          set((state) => {
+            const ss2 = getSessionState(state, agentId, sid!);
+            // Dedup: if the id is already in messages[] (e.g. MQTT QoS 1
+            // duplicate delivery, or HTTP refresh already landed), skip.
+            if (ss2.messages.some(m => m.id === msgId)) return {};
+            return updateSessionState(state, agentId, sid!, {
+              messages: [...ss2.messages, chatMsg],
+              messageTotal: ss2.messageTotal + 1,
+              messageLimit: ss2.messageLimit + 1,
+            });
+          });
+        }
+      }
+
+      // Clear the corresponding liveBuffer stream (thinkingStream /
+      // assistantStream).  Only clears - does NOT push into
+      // pendingRecordComplete (that concept is removed in the post-C5 fix).
       ingestRecordComplete(agentId, sid, { messageId: msgId, role });
 
       // ADR-045: Clean up toolProgress entry when a tool_result arrives.
