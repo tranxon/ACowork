@@ -6,7 +6,7 @@
  *   - Manual tests in §8 acceptance matrix
  *   - Unit tests pin the data-derived flag contract (the only piece
  *     that doesn't need a DOM):
- *       showScrollToBottom = !adapter.isAtTail() || adapter.hasPendingFlush()
+ *       showScrollToBottom = !isNearBottom || !adapter.isAtTail()
  *       showScrollToTop    = !isNearTop || adapter.hasOlder
  *       isAtLatest   = adapter.isAtTail() && !adapter.hasPendingFlush()
  *       jumpToBottom / jumpToTop  delegate to adapter
@@ -20,11 +20,22 @@ import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useScrollController } from "./useScrollController";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
+import type { MessageBlock } from "./messageFolder";
+
+const DUMMY_BLOCK: MessageBlock = {
+  blockId: "block-1",
+  type: "user",
+  items: [],
+  rawCount: 1,
+  anchorToLatest: false,
+  hasFollowUpReply: false,
+  isLive: false,
+};
 
 function makeMockAdapter(overrides: Partial<ChatListAdapterV2> = {}): ChatListAdapterV2 {
   return {
-    blocks: [],
-    totalBlocks: 0,
+    blocks: [DUMMY_BLOCK],
+    totalBlocks: 1,
     messageOffset: 0,
     messageLimit: 0,
     messageTotal: 0,
@@ -70,7 +81,7 @@ describe("useScrollController: data-derived flags", () => {
     expect(result.current.showScrollToBottom).toBe(false);
   });
 
-  it("showScrollToBottom=true when at tail but pending flush (streaming)", () => {
+  it("showScrollToBottom=false when at tail with pending flush but near bottom", () => {
     const adapter = makeMockAdapter({ isAtTail: () => true, hasPendingFlush: () => true });
     const { result } = renderHook(() =>
       useScrollController({
@@ -80,7 +91,21 @@ describe("useScrollController: data-derived flags", () => {
         sessionKey: "agent:sess",
       }),
     );
-    expect(result.current.showScrollToBottom).toBe(true);
+    expect(result.current.showScrollToBottom).toBe(false);
+  });
+
+  it("showScrollToBottom=false and showScrollToTop=false when no blocks (empty session)", () => {
+    const adapter = makeMockAdapter({ blocks: [], totalBlocks: 0 });
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: null },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+    expect(result.current.showScrollToBottom).toBe(false);
+    expect(result.current.showScrollToTop).toBe(false);
   });
 
   it("showScrollToTop: hasOlder=true always shows; hasOlder=false depends on isNearTop", () => {

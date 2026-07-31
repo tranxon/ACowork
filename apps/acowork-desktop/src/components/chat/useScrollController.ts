@@ -26,8 +26,8 @@
  *      - Zero CPU when idle — no polling timer.
  *
  * 2. **Scroll arrow visibility** (data-driven, no DOM read):
- *      - `showScrollToBottom` = `!adapter.isAtTail() || adapter.hasPendingFlush()`.
- *      - `showScrollToTop`    = `adapter.hasOlder`.
+ *      - `showScrollToBottom` = `!isNearBottom || !adapter.isAtTail()`.
+ *      - `showScrollToTop`    = `!isNearTop || adapter.hasOlder`.
  *
  * 3. **Jump buttons** (delegate to the adapter):
  *      - `jumpToBottom` = `adapter.scrollToBottom()`
@@ -153,10 +153,14 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   const [isNearTop, setIsNearTop] = useState(false);
 
   // `showScrollToBottom`: show when the user is NOT viewing the latest
-  // content.  Three triggers:
+  // content.  Two triggers:
   //   1. User scrolled away from bottom (!isNearBottom)
   //   2. Data window doesn't cover the tail (!isAtTail)
-  //   3. Live content waiting to be flushed (hasPendingFlush)
+  // Note: `adapter.hasPendingFlush()` is intentionally NOT used here.
+  // A pending flush only means there are live stream entries (e.g. a
+  // thinking block) that are already folded into `adapter.blocks` at the
+  // tail.  Those entries are already rendered, so they do not imply the
+  // user is behind the latest content.
   // Guard: hide both arrows when there are no blocks (empty session).
   // Without this, `isNearTop` defaults to `false` (set on session switch)
   // which makes `!isNearTop = true` -> `showScrollToTop = true` even though
@@ -166,7 +170,7 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // session the initial state never gets corrected.
   const hasBlocks = adapter.blocks.length > 0;
   const showScrollToBottom = hasBlocks
-    && (!isNearBottom || !adapter.isAtTail() || adapter.hasPendingFlush());
+    && (!isNearBottom || !adapter.isAtTail());
   const showScrollToTop = hasBlocks
     && (!isNearTop || adapter.hasOlder);
 
