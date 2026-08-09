@@ -1,17 +1,19 @@
 //! Heuristic conflict detection for memory nodes.
 //!
 //! Two-layer detection:
-//! - Layer 1: Semantic similarity (embedding cosine distance) — gate
-//! - Layer 2: Temporal proximity (< 24 h) — confidence boost
+//! - Layer 1: Semantic similarity (embedding cosine distance) - gate
+//! - Layer 2: Temporal proximity (< 24 h) - confidence boost
 //!
 //! All heuristic conflicts default to [`ConflictType::Ambiguous`].
 //! Actual classification (Evolution / Correction / Ambiguous) is deferred to
 //! Phase 3 offline LLM arbitration ([`crate::consolidation::conflict_llm`]).
 
 use acowork_memory::{ConflictSignal, ConflictType};
-use grafeo_common::types::NodeId;
 
 use crate::types::NodeStatus;
+
+// Re-export ConflictAction from acowork-memory (u64-based, storage-agnostic).
+pub use acowork_memory::consolidation::ConflictAction;
 
 /// Default semantic similarity thresholds by node sub-type.
 pub const FACT_THRESHOLD: f32 = 0.85;
@@ -21,20 +23,6 @@ pub const PROCEDURE_THRESHOLD: f32 = 0.85;
 
 /// Default temporal conflict window in hours.
 pub const TEMPORAL_WINDOW_HOURS: u64 = 24;
-
-/// Action recommended by the conflict resolver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConflictAction {
-    /// Auto-resolve: new replaces old.
-    AutoReplace {
-        old_node_id: NodeId,
-        new_status: NodeStatus,
-    },
-    /// Both kept, marked for user confirmation.
-    MarkAmbiguous { conflict_group_id: String },
-    /// Defer to LLM offline arbitration (Phase 3).
-    DeferToLLM,
-}
 
 /// Extended conflict resolution with action recommendations.
 #[derive(Debug, Clone)]
@@ -50,10 +38,10 @@ pub struct ConflictResolution {
 /// Resolve a conflict signal into an actionable resolution.
 ///
 /// Heuristic fast-path:
-/// - `Evolution` → auto-replace (old → Dormant).
-/// - `Correction` → auto-replace (old → Dormant).
-/// - `Ambiguous` → mark for user confirmation.
-pub fn resolve_conflict(signal: &ConflictSignal, existing_node_id: NodeId) -> ConflictResolution {
+/// - `Evolution` -> auto-replace (old -> Dormant).
+/// - `Correction` -> auto-replace (old -> Dormant).
+/// - `Ambiguous` -> mark for user confirmation.
+pub fn resolve_conflict(signal: &ConflictSignal, existing_node_id: u64) -> ConflictResolution {
     let action = match signal.suggested_type {
         ConflictType::Evolution => ConflictAction::AutoReplace {
             old_node_id: existing_node_id,
@@ -64,7 +52,7 @@ pub fn resolve_conflict(signal: &ConflictSignal, existing_node_id: NodeId) -> Co
             new_status: NodeStatus::Dormant,
         },
         ConflictType::Ambiguous => ConflictAction::MarkAmbiguous {
-            conflict_group_id: format!("cg_{}", existing_node_id.as_u64()),
+            conflict_group_id: format!("cg_{}", existing_node_id),
         },
     };
 
@@ -164,14 +152,14 @@ mod tests {
         // All heuristic conflicts are Ambiguous — resolve_conflict always
         // returns MarkAmbiguous + requires_llm.
         let signal = detect_conflict(0.88, 0.85, 200.0).unwrap();
-        let existing = NodeId::new(42);
+        let existing = 42u64;
         let resolution = resolve_conflict(&signal, existing);
         assert_eq!(resolution.signal.suggested_type, ConflictType::Ambiguous);
         assert!(resolution.requires_llm);
         assert_eq!(
             resolution.action,
             ConflictAction::MarkAmbiguous {
-                conflict_group_id: format!("cg_{}", existing.as_u64()),
+                conflict_group_id: format!("cg_{}", existing),
             }
         );
     }

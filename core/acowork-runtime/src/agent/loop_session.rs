@@ -249,7 +249,7 @@ impl super::loop_::AgentLoop {
                 );
             } else {
                 let provider = self.core.provider.clone();
-                let memory_store = self.core.memory_store().cloned();
+                let memory_provider = self.core.memory_provider().cloned();
                 let emb_provider = self.core.embedding_provider.clone();
                 // ADR-027: clone ConversationSession so the spawned task can
                 // record raw Provider usage from the tail-distillation call
@@ -304,10 +304,10 @@ impl super::loop_::AgentLoop {
                             // so the agent-total line in Results Panel
                             // accounts for this distillation call.
                             core_clone.accumulate_llm_usage(&usage);
-                            crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
+                            crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
                                 &summary,
                                 &session_id,
-                                &memory_store,
+                                &memory_provider,
                                 emb_provider.as_deref(),
                             )
                             .await;

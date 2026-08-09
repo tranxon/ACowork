@@ -1,108 +1,14 @@
-//! RAG standard query protocol types
+//! RAG standard query protocol types.
 //!
-//! Defines the request/response JSON schemas for the ACowork RAG protocol.
-//! Enterprises adapt their RAG services to comply with this protocol.
+//! All types are defined in `acowork_core::rag` (migrated in ADR-051 C1).
+//! This module re-exports them for backward compatibility with code that
+//! imports from `crate::tools::rag::types`.
 //!
-//! Protocol version: 1.0
-//! Future: Phase 6 may evolve RagClient into RemoteMemoryStore (MemoryStore trait),
-//! supporting hybrid_search + graph_expand. The `protocol_version` field and
-//! reserved extension fields ensure forward compatibility.
+//! Design ref: ADR-051 §5.1 - RAG protocol types migrated to acowork-core.
 
-use serde::{Deserialize, Serialize};
-
-/// Current protocol version
-pub const PROTOCOL_VERSION: &str = "1.0";
-
-// ── Request types ────────────────────────────────────────────────────────
-
-/// RAG standard query request
-///
-/// Sent as `POST <endpoint>` with JSON body.
-/// Enterprise RAG services must accept this format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RagQueryRequest {
-    /// Protocol version (currently "1.0")
-    pub protocol_version: String,
-    /// Query text
-    pub query: String,
-    /// Collection / index name (optional, from manifest config)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub collection: Option<String>,
-    /// Maximum number of results to return
-    pub top_k: u32,
-    /// Minimum score threshold (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub score_threshold: Option<f32>,
-    /// Additional filters (optional, for enterprise-specific filtering)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub filters: Option<serde_json::Value>,
-    /// Reserved for future protocol extensions (Phase 6)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<serde_json::Value>,
-}
-
-impl RagQueryRequest {
-    /// Create a new query request with defaults
-    pub fn new(query: String, top_k: u32) -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            query,
-            collection: None,
-            top_k,
-            score_threshold: None,
-            filters: None,
-            extensions: None,
-        }
-    }
-}
-
-// ── Response types ───────────────────────────────────────────────────────
-
-/// RAG standard query response
-///
-/// Enterprise RAG services must return this format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RagQueryResponse {
-    /// Protocol version (must match request)
-    pub protocol_version: String,
-    /// Query results, sorted by relevance (highest first)
-    pub results: Vec<RagResultItem>,
-    /// Reserved for future protocol extensions (Phase 6)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<serde_json::Value>,
-}
-
-/// A single RAG query result item
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RagResultItem {
-    /// Content text of the result chunk
-    pub content: String,
-    /// Source URL or document reference
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_url: Option<String>,
-    /// Chunk identifier within the source document
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chunk_id: Option<String>,
-    /// Relevance score (0.0 - 1.0, higher = more relevant)
-    #[serde(default)]
-    pub score: f32,
-}
-
-// ── RAG source annotation ───────────────────────────────────────────────
-
-/// Annotated RAG result for injection into LLM context.
-///
-/// Wraps a RagResultItem with source annotation for the
-/// MemoryManager dual-channel retrieve (S4.5).
-#[derive(Debug, Clone)]
-pub struct AnnotatedRagResult {
-    /// The result item
-    pub item: RagResultItem,
-    /// Source label for context annotation (e.g., "[RAG:enterprise_knowledge]")
-    pub source_label: String,
-    /// Tool name that produced this result
-    pub tool_name: String,
-}
+pub use acowork_core::rag::{
+    AnnotatedRagResult, PROTOCOL_VERSION, RagQueryRequest, RagQueryResponse, RagResultItem,
+};
 
 #[cfg(test)]
 mod tests {

@@ -9,10 +9,8 @@ use grafeo_engine::GrafeoDB;
 
 use crate::types::labels;
 use crate::types::{
-    AutobioCategory as GrafeoAutobioCategory, AutobiographicalNode as GrafeoAutobiographicalNode,
-    Episode as GrafeoEpisode, GrafeoConfig, KnowledgeNode as GrafeoKnowledgeNode,
-    KnowledgeSubType as GrafeoKnowledgeSubType, NodeStatus as GrafeoNodeStatus,
-    ProceduralNode as GrafeoProceduralNode,
+    AutobiographicalNode as GrafeoAutobiographicalNode, Episode as GrafeoEpisode, GrafeoConfig,
+    KnowledgeNode as GrafeoKnowledgeNode, ProceduralNode as GrafeoProceduralNode,
 };
 use acowork_memory::types::{ResultSource, SearchResult};
 use acowork_memory::{
@@ -642,19 +640,11 @@ impl MemoryStore for GrafeoStore {
             subject: node.subject.clone(),
             predicate: node.predicate.clone(),
             object: node.object.clone(),
-            sub_type: match node.sub_type {
-                acowork_memory::KnowledgeSubType::Fact => GrafeoKnowledgeSubType::Fact,
-                acowork_memory::KnowledgeSubType::Preference => GrafeoKnowledgeSubType::Preference,
-                acowork_memory::KnowledgeSubType::Relation => GrafeoKnowledgeSubType::Relation,
-            },
+            sub_type: node.sub_type.clone(),
             confidence: node.confidence,
             source_episode_id: None,
             embedding: node.embedding.clone(),
-            status: match node.status {
-                acowork_memory::NodeStatus::Active => GrafeoNodeStatus::Active,
-                acowork_memory::NodeStatus::Dormant => GrafeoNodeStatus::Dormant,
-                acowork_memory::NodeStatus::Pending => GrafeoNodeStatus::Pending,
-            },
+            status: node.status.clone(),
             created_at: node.created_at,
             updated_at: node.updated_at,
             metadata: node.metadata.clone(),
@@ -677,11 +667,7 @@ impl MemoryStore for GrafeoStore {
             source_skill: node.source_skill.clone(),
             learned_from: node.learned_from.clone(),
             embedding: node.embedding.clone(),
-            status: match node.status {
-                acowork_memory::NodeStatus::Active => GrafeoNodeStatus::Active,
-                acowork_memory::NodeStatus::Dormant => GrafeoNodeStatus::Dormant,
-                acowork_memory::NodeStatus::Pending => GrafeoNodeStatus::Pending,
-            },
+            status: node.status.clone(),
             created_at: node.created_at,
             updated_at: node.updated_at,
             metadata: node.metadata.clone(),
@@ -697,26 +683,13 @@ impl MemoryStore for GrafeoStore {
     ) -> acowork_core::error::Result<()> {
         let grafeo_node = GrafeoAutobiographicalNode {
             id: None,
-            category: match node.category {
-                acowork_memory::AutobioCategory::Identity => GrafeoAutobioCategory::Identity,
-                acowork_memory::AutobioCategory::Capability => GrafeoAutobioCategory::Capability,
-                acowork_memory::AutobioCategory::Limitation => GrafeoAutobioCategory::Limitation,
-                acowork_memory::AutobioCategory::Preference => GrafeoAutobioCategory::Preference,
-                acowork_memory::AutobioCategory::History => GrafeoAutobioCategory::History,
-                acowork_memory::AutobioCategory::Relationship => {
-                    GrafeoAutobioCategory::Relationship
-                }
-            },
+            category: node.category.clone(),
             key: node.key.clone(),
             value: node.value.clone(),
             confidence: node.confidence,
             source_episode_id: None,
             embedding: node.embedding.clone(),
-            status: match node.status {
-                acowork_memory::NodeStatus::Active => GrafeoNodeStatus::Active,
-                acowork_memory::NodeStatus::Dormant => GrafeoNodeStatus::Dormant,
-                acowork_memory::NodeStatus::Pending => GrafeoNodeStatus::Pending,
-            },
+            status: node.status.clone(),
             created_at: node.created_at,
             updated_at: node.updated_at,
             metadata: node.metadata.clone(),

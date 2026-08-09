@@ -17,19 +17,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
 use acowork_core::providers::traits::{Provider, UsageInfo};
+use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
-use acowork_grafeo::consolidation::ConsolidationScheduler;
 use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::retrieval_metrics::MetricsAggregator;
 use acowork_grafeo::types::GrafeoConfig;
 use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
+use acowork_memory::MemoryProvider;
 use chrono::Utc;
 
 use crate::config::RuntimeConfig;
 use crate::debug::DebugObserverSlot;
 use crate::embedding::EmbeddingProvider;
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
-use crate::memory::ConsolidationBgTask;
 use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
 use acowork_core::ShellApprovalThreshold;
@@ -166,7 +165,15 @@ pub struct AgentCore {
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
-    pub(crate) memory_store: Option<Arc<GrafeoStore>>,
+    /// ADR-051 C3: Primary field is now `memory_provider` (trait object).
+    /// `grafeo_store` is kept as compat for callers needing concrete type.
+    pub(crate) memory_provider: Option<Arc<dyn MemoryProvider>>,
+    /// Compat: concrete GrafeoStore reference for MemoryManager and HTTP admin.
+    /// C4 will remove this field.
+    pub(crate) grafeo_store: Option<Arc<GrafeoStore>>,
+    /// RAG provider (enterprise knowledge retrieval, orthogonal to MemoryProvider).
+    /// ADR-051 C3: New field, independent from memory_provider.
+    pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
     /// Debug observer slot — Production (no-op) or Dev (real observer).
     pub(crate) debug_observer: DebugObserverSlot,
     /// ADR-046: blob store for `file_upload` / `image_upload` items
@@ -184,11 +191,13 @@ pub struct AgentCore {
     /// Embedding provider for vector-based memory retrieval.
     pub(crate) embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// P3-1: Retrieval quality metrics aggregator (shared across sessions).
-    pub(crate) metrics_aggregator: Arc<std::sync::Mutex<MetricsAggregator>>,
-    /// P3: Consolidation scheduler — decides when to run offline consolidation.
-    pub(crate) consolidation_scheduler: Option<Arc<ConsolidationScheduler>>,
-    /// P3: Background consolidation task handle.
-    pub(crate) consolidation_bg_task: Option<ConsolidationBgTask>,
+    /// ADR-051 C3: Replaced grafeo MetricsAggregator with Runtime-internal
+    /// RetrievalMetricsAggregator (data from acowork_memory::RetrievalMetrics).
+    pub(crate) metrics_aggregator: Arc<std::sync::Mutex<crate::memory::RetrievalMetricsAggregator>>,
+    // ADR-051 C3: consolidation_scheduler field removed.
+    // Consolidation control is delegated to MemoryProvider trait.
+    // Background task handle kept for lifecycle management.
+    pub(crate) consolidation_bg_task: Option<crate::memory::ConsolidationBgTask>,
     /// ADR-028: cumulative input tokens across every LLM call made by this
     /// agent process. Sourced from `accumulate_llm_usage` on every LLM call
     /// and from `merge_token_totals` on every `list_sessions` scan. Not
@@ -253,16 +262,17 @@ impl AgentCore {
             compression_mode_override: None,
             soft_threshold_chars_override: None,
             system_prompt_override: None,
-            memory_store: None,
+            memory_provider: None,
+            grafeo_store: None,
+            rag_provider: None,
             memory_session: None,
             debug_observer: observer,
             approval_gate: None,
             shell_approval_threshold,
             embedding_provider: None,
-            metrics_aggregator: Arc::new(std::sync::Mutex::new(MetricsAggregator::with_defaults(
-                1.0,
-            ))),
-            consolidation_scheduler: None,
+            metrics_aggregator: Arc::new(std::sync::Mutex::new(
+                crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
+            )),
             consolidation_bg_task: None,
             // ADR-046: blob store slot is empty by default; Phase B
             // populates it via `set_attachment_service` once the work_dir
@@ -585,9 +595,9 @@ impl AgentCore {
         }
     }
 
-    pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
-        if self.memory_store.is_some() {
-            tracing::debug!("init_memory_store: already initialized, skipping");
+    pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
+        if self.memory_provider.is_some() {
+            tracing::debug!("init_memory_provider: already initialized, skipping");
             return;
         }
         let memory_dir = work_dir.join("memory");
@@ -617,9 +627,10 @@ impl AgentCore {
                 let store_arc = Arc::new(store);
                 self.bootstrap_autobiographical_from_manifest(&store_arc);
                 if let Some(ref session) = self.memory_session {
-                    session.set_store(store_arc.clone());
+                    session.set_provider(store_arc.clone());
                 }
-                self.memory_store = Some(store_arc);
+                self.grafeo_store = Some(store_arc.clone());
+                self.memory_provider = Some(store_arc);
                 self.start_consolidation_pipeline();
             }
             Err(e) => {
@@ -628,8 +639,19 @@ impl AgentCore {
         }
     }
 
-    pub fn memory_store(&self) -> Option<&Arc<GrafeoStore>> {
-        self.memory_store.as_ref()
+    pub fn memory_provider(&self) -> Option<&Arc<dyn MemoryProvider>> {
+        self.memory_provider.as_ref()
+    }
+
+    /// Compat accessor: returns concrete GrafeoStore for callers that need
+    /// GrafeoStore-specific methods (MemoryManager, HTTP admin). C4 will remove.
+    pub fn grafeo_store(&self) -> Option<&Arc<GrafeoStore>> {
+        self.grafeo_store.as_ref()
+    }
+
+    /// Backward-compat alias for memory_provider(). ADR-051 C3.
+    pub fn memory_store(&self) -> Option<&Arc<dyn MemoryProvider>> {
+        self.memory_provider.as_ref()
     }
 
     fn bootstrap_autobiographical_from_manifest(&self, store: &GrafeoStore) {
@@ -685,15 +707,15 @@ impl AgentCore {
     }
 
     pub fn start_consolidation_pipeline(&mut self) {
-        let Some(ref store) = self.memory_store else {
-            tracing::debug!("Cannot start consolidation: memory store not initialized");
+        let Some(ref provider) = self.memory_provider else {
+            tracing::debug!("Cannot start consolidation: memory provider not initialized");
             return;
         };
         let Some(ref embedding) = self.embedding_provider else {
-            tracing::warn!("⚠️ Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back.");
+            tracing::warn!("Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back.");
             return;
         };
-        if self.consolidation_scheduler.is_some() {
+        if self.consolidation_bg_task.is_some() {
             tracing::debug!("Consolidation pipeline already running");
             return;
         }
@@ -705,20 +727,24 @@ impl AgentCore {
             list.iter().flat_map(|p| p.models.iter()).next().map(|m| m.id.clone()).unwrap_or_else(|| "default".to_string())
         };
         let params = ConsolidationParams {
-            store: store.clone(), provider: self.provider.clone(), model,
+            provider: provider.clone(), llm_provider: self.provider.clone(), model,
             embedding_provider: embedding.clone(), scheduler_config: SchedulerConfig::default(),
             poll_interval: Duration::from_secs(60),
             work_dir: Some(std::path::PathBuf::from(&self.config.work_dir)),
         };
-        let (scheduler, bg_task) = start_consolidation_pipeline(params);
-        self.consolidation_scheduler = Some(scheduler);
+        let (_scheduler, bg_task) = start_consolidation_pipeline(params);
         self.consolidation_bg_task = Some(bg_task);
+        // ADR-051 C3: Also notify the provider to start its internal consolidation.
+        if let Some(ref provider) = self.memory_provider {
+            let _ = provider.start_consolidation(&SchedulerConfig::default());
+        }
         tracing::info!("Consolidation background pipeline started");
     }
 
     pub async fn notify_consolidation_active(&self) {
-        if let Some(ref scheduler) = self.consolidation_scheduler {
-            scheduler.notify_active().await;
+        // ADR-051 C3: Delegate to MemoryProvider trait method.
+        if let Some(ref provider) = self.memory_provider {
+            provider.notify_consolidation_active().await;
         }
     }
 
@@ -902,14 +928,15 @@ impl Clone for AgentCore {
             compression_mode_override: self.compression_mode_override.clone(),
             soft_threshold_chars_override: self.soft_threshold_chars_override,
             system_prompt_override: self.system_prompt_override.clone(),
-            memory_store: self.memory_store.clone(),
+            memory_provider: self.memory_provider.clone(),
+            grafeo_store: self.grafeo_store.clone(),
+            rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             embedding_provider: self.embedding_provider.clone(),
             metrics_aggregator: self.metrics_aggregator.clone(),
-            consolidation_scheduler: self.consolidation_scheduler.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
             attachment_service: self.attachment_service.clone(),
             // ADR-028: agent-scoped counters are intentionally SHARED across

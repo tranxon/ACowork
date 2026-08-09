@@ -16,19 +16,20 @@ use std::collections::HashMap;
 
 use acowork_core::providers::traits::ToolCall;
 use acowork_grafeo::judge::{JudgeConfig, should_sample};
-use acowork_grafeo::retrieval_metrics::{MetricsAlertType, OnlineRetrievalMetrics};
+use acowork_memory::MemoryProvider;
+use crate::memory::metrics::MetricsAlertType;
 
 use crate::agent::context::ContextBuilder;
 
 impl super::loop_::AgentLoop {
     // ── Memory system methods ──────────────────────────────────────────────
 
-    /// Initialize the Grafeo memory store at the given workspace path.
+    /// Initialize the memory provider at the given workspace path.
     ///
-    /// Delegates to `AgentCore::init_memory_store()`.
+    /// Delegates to `AgentCore::init_memory_provider()`.
     /// Opens or creates `{work_dir}/memory/private.grafeo`.
     pub fn init_memory_store(&mut self, work_dir: &std::path::Path) {
-        self.core.init_memory_store(work_dir);
+        self.core.init_memory_provider(work_dir);
     }
 
     /// Retrieve relevant long-term memories from Grafeo and inject them into
@@ -50,7 +51,7 @@ impl super::loop_::AgentLoop {
         // without this, stale memory leaks into the next LLM call.
         context_builder.clear_retrieved_memory();
 
-        let store = match self.core.memory_store() {
+        let provider = match self.core.memory_provider() {
             Some(s) => s,
             None => return vec![], // No store available, already cleared above
         };
@@ -81,7 +82,7 @@ impl super::loop_::AgentLoop {
 
         // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
         // so we can capture the node IDs of retrieved memories for traceability.
-        match manager.retrieve(store, &mut query, emb_provider).await {
+        match manager.retrieve(provider.as_ref(), &mut query, emb_provider).await {
             Ok(retrieval) => {
                 // Capture node IDs before inject (inject discards the RetrievalResult)
                 let memory_ids: Vec<String> = retrieval
@@ -93,41 +94,15 @@ impl super::loop_::AgentLoop {
 
                 let metrics = retrieval.metrics.clone();
 
-                // P3-1: Feed retrieval metrics into MetricsAggregator.
-                // Convert acowork-memory::RetrievalMetrics →
-                // acowork-grafeo::OnlineRetrievalMetrics.
-                let online_metrics = OnlineRetrievalMetrics {
-                    result_count: metrics.result_count,
-                    avg_score: metrics.avg_score,
-                    max_score: metrics.max_score,
-                    abstention_triggered: metrics.abstention_triggered,
-                    retrieval_level: metrics.retrieval_level,
-                    graph_expand_nodes: metrics.graph_expand_nodes,
-                    hint_type: match metrics.hint_type {
-                        acowork_memory::HintType::Semantic => {
-                            acowork_grafeo::retrieval_metrics::HintType::Semantic
-                        }
-                        acowork_memory::HintType::Factual => {
-                            acowork_grafeo::retrieval_metrics::HintType::FullText
-                        }
-                        acowork_memory::HintType::Relational => {
-                            acowork_grafeo::retrieval_metrics::HintType::Hybrid
-                        }
-                        acowork_memory::HintType::Identity => {
-                            acowork_grafeo::retrieval_metrics::HintType::GraphExpand
-                        }
-                    },
-                };
-
+                // P3-1: Feed retrieval metrics into RetrievalMetricsAggregator.
+                // ADR-051 C3: No more HintType conversion - the aggregator
+                // accepts acowork_memory::RetrievalMetrics directly.
                 let alerts = {
                     let mut agg = self.core.metrics_aggregator.lock().unwrap();
-                    // Update max_possible_score if we have a better reference.
-                    // RRF hybrid scores are typically 0.01–0.05, so use a
-                    // sensible default of 1.0 unless we observe higher.
-                    if online_metrics.max_score > agg.max_possible_score() {
-                        agg.set_max_possible_score(online_metrics.max_score);
+                    if metrics.max_score > agg.max_possible_score() {
+                        agg.set_max_possible_score(metrics.max_score);
                     }
-                    agg.record_retrieval(&online_metrics)
+                    agg.record_retrieval(&metrics)
                 };
 
                 // P3-2: Log alerts via tracing::warn! so Desktop App can
@@ -174,7 +149,7 @@ impl super::loop_::AgentLoop {
 
                 // Activate ProceduralNodes: increment activation_count for
                 // retrieved procedures whose trigger matches the query context.
-                self.activate_procedural_nodes(store, &retrieval.memories);
+                self.activate_procedural_nodes(provider.as_ref(), &retrieval.memories);
 
                 let injected = manager.inject(&retrieval);
                 if !injected.formatted_text.is_empty() {
@@ -191,8 +166,8 @@ impl super::loop_::AgentLoop {
                 // user confirmation. If ≥ 3 pending conflicts, inject a
                 // hint into the next turn's context to guide the Agent to
                 // naturally ask the user for disambiguation.
-                if let Ok(true) = store.should_trigger_confirmation()
-                    && let Ok(Some(hint)) = store.generate_confirmation_hint() {
+                if let Ok(true) = provider.should_trigger_confirmation()
+                    && let Ok(Some(hint)) = provider.generate_confirmation_hint() {
                         tracing::info!(
                             "Injecting ambiguous conflict confirmation hint into context"
                         );
@@ -370,7 +345,7 @@ impl super::loop_::AgentLoop {
         tool_calls: &[ToolCall],
         tool_results: &[String],
     ) {
-        let store = match self.core.memory_store() {
+        let provider = match self.core.memory_provider() {
             Some(s) => s,
             None => return,
         };
@@ -387,7 +362,7 @@ impl super::loop_::AgentLoop {
 
             if is_error && !is_unknown
                 && let Err(e) =
-                    manager.record_procedural_from_failure(store, &tc.function.name, result)
+                    manager.record_procedural_from_failure(provider.as_ref(), &tc.function.name, result)
                 {
                     tracing::debug!(
                         tool_name = %tc.function.name,
@@ -406,7 +381,7 @@ impl super::loop_::AgentLoop {
     /// and confidence boosting.
     fn activate_procedural_nodes(
         &self,
-        store: &acowork_grafeo::grafeo::GrafeoStore,
+        provider: &dyn MemoryProvider,
         memories: &[crate::memory::manager::RetrievedMemory],
     ) {
         use acowork_grafeo::types::labels;
@@ -416,11 +391,10 @@ impl super::loop_::AgentLoop {
                 continue;
             }
 
-            let node_id = grafeo_common::types::NodeId::new(memory.node_id);
-            if let Some(mut node) = store.get_procedural(node_id).ok().flatten() {
+            if let Some(mut node) = provider.get_procedural(memory.node_id).ok().flatten() {
                 node.activation_count = node.activation_count.saturating_add(1);
                 node.updated_at = chrono::Utc::now();
-                if let Err(e) = store.update_procedural(&node) {
+                if let Err(e) = provider.update_procedural(&node) {
                     tracing::debug!(
                         node_id = memory.node_id,
                         error = %e,
@@ -442,7 +416,7 @@ impl super::loop_::AgentLoop {
     /// block the main agent loop. LLM-driven pattern discovery is
     /// deferred until a `TripleExtractorLlm` adapter is implemented.
     pub(crate) async fn run_generalization_if_possible(&self) {
-        let store = match self.core.memory_store() {
+        let provider = match self.core.memory_provider() {
             Some(s) => s,
             None => return,
         };
@@ -468,7 +442,7 @@ impl super::loop_::AgentLoop {
         let zero_embedding_arc: std::sync::Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> =
             std::sync::Arc::new(zero_embedding);
 
-        match store
+        match provider
             .run_generalization(None, &zero_embedding_arc, &config)
             .await
         {
@@ -492,7 +466,7 @@ impl super::loop_::AgentLoop {
         }
 
         // P2-3: Compress History autobiographical nodes if > 10.
-        match store.compress_history_nodes(10) {
+        match provider.compress_history_nodes(10) {
             Ok(compressed) => {
                 if compressed > 0 {
                     tracing::info!(
@@ -522,15 +496,15 @@ impl super::loop_::AgentLoop {
     /// This is a best-effort operation — failures are logged but never
     /// block the main agent loop.
     pub(crate) fn self_evaluate_skill_performance(&self) {
-        let store = match self.core.memory_store() {
+        let provider = match self.core.memory_provider() {
             Some(s) => s,
             None => return,
         };
 
-        use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
+        use acowork_memory::{AutobioCategory, AutobiographicalNode, NodeStatus};
 
         // Gather all procedural nodes and compute per-skill success rates.
-        let nodes = match store.get_all_procedural_nodes() {
+        let nodes = match provider.get_all_procedural_nodes() {
             Ok(n) => n,
             Err(e) => {
                 tracing::debug!(error = %e, "Failed to get procedural nodes for self-evaluation");
@@ -573,12 +547,12 @@ impl super::loop_::AgentLoop {
             );
 
             // Check if a Limitation node already exists for this skill.
-            match store.find_autobiographical_by_key(&key) {
+            match provider.find_autobiographical_by_key(&key) {
                 Ok(Some(mut existing)) => {
                     // Update the existing node with new stats.
                     existing.value = value;
                     existing.updated_at = chrono::Utc::now();
-                    if let Err(e) = store.update_autobiographical(&existing) {
+                    if let Err(e) = provider.update_autobiographical(&existing) {
                         tracing::debug!(
                             key = %key,
                             error = %e,
@@ -607,7 +581,7 @@ impl super::loop_::AgentLoop {
                         updated_at: chrono::Utc::now(),
                         metadata: HashMap::new(),
                     };
-                    if let Err(e) = store.store_autobiographical(&node) {
+                    if let Err(e) = provider.store_autobiographical(&node) {
                         tracing::debug!(
                             skill = %skill,
                             error = %e,
@@ -647,39 +621,28 @@ impl super::loop_::AgentLoop {
     /// This is a best-effort operation — failures are logged but never
     /// block the session close flow.
     pub(crate) fn auto_generate_relationship(&self) {
-        let store = match self.core.memory_store() {
+        let provider = match self.core.memory_provider() {
             Some(s) => s,
             None => return,
         };
 
-        use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus, labels};
-        use grafeo_common::types::Value;
+        use acowork_memory::{AutobioCategory, AutobiographicalNode, NodeStatus};
 
-        // Find the earliest episode in the Grafeo store.
-        let db = store.db();
-        let graph = db.graph_store();
-        let episodic_ids = graph.nodes_by_label(labels::EPISODIC);
-
-        let mut earliest_time: Option<chrono::DateTime<chrono::Utc>> = None;
-        let mut episode_count: u32 = 0;
-
-        for id in episodic_ids {
-            if let Some(n) = db.get_node(id) {
-                episode_count += 1;
-                if let Some(ts) = n.get_property("created_at").and_then(Value::as_timestamp)
-                    && let Some(dt) = chrono::DateTime::from_timestamp_micros(ts.as_micros()) {
-                        match earliest_time {
-                            None => earliest_time = Some(dt),
-                            Some(earliest) if dt < earliest => earliest_time = Some(dt),
-                            _ => {}
-                        }
-                    }
+        // ADR-051 C4: Use provider.get_episodes() instead of direct graph access.
+        let episodes = match provider.get_episodes(None, usize::MAX) {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::debug!(error = %e, "Failed to get episodes for relationship tracking");
+                return;
             }
-        }
+        };
+
+        let episode_count = episodes.len() as u32;
+        let earliest_time = episodes.iter().map(|e| e.timestamp).min();
 
         let earliest = match earliest_time {
             Some(t) => t,
-            None => return, // No episodes → nothing to track
+            None => return, // No episodes -> nothing to track
         };
 
         let now = chrono::Utc::now();
@@ -695,11 +658,11 @@ impl super::loop_::AgentLoop {
         let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
 
         // Check if a Relationship node already exists.
-        match store.find_autobiographical_by_key(&key) {
+        match provider.find_autobiographical_by_key(&key) {
             Ok(Some(mut existing)) => {
                 existing.value = value;
                 existing.updated_at = now;
-                if let Err(e) = store.update_autobiographical(&existing) {
+                if let Err(e) = provider.update_autobiographical(&existing) {
                     tracing::debug!(
                         key = %key,
                         error = %e,
@@ -727,7 +690,7 @@ impl super::loop_::AgentLoop {
                     updated_at: now,
                     metadata: HashMap::new(),
                 };
-                if let Err(e) = store.store_autobiographical(&node) {
+                if let Err(e) = provider.store_autobiographical(&node) {
                     tracing::debug!(
                         error = %e,
                         "Failed to store Relationship node (non-fatal)"

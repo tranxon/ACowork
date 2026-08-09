@@ -1,31 +1,34 @@
-//! RAG query tool — explicit LLM-triggered enterprise knowledge retrieval
+//! RAG query tool - explicit LLM-triggered enterprise knowledge retrieval
 //!
 //! This is the 16th built-in tool (only registered when manifest declares RAG).
 //! It allows the LLM to explicitly query the enterprise RAG service for
 //! targeted deep queries (as opposed to the automatic MemoryManager retrieve).
 //!
 //! Permission: `rag:query` + `network:<endpoint_url>`
+//!
+//! ADR-051 C3: Now holds `Arc<dyn RagProvider>` instead of `Arc<RagClient>`.
 
+use std::sync::Arc;
+
+use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::tools::rag::client::RagClient;
-
-/// RAG query tool — explicit enterprise knowledge retrieval
+/// RAG query tool - explicit enterprise knowledge retrieval
 ///
 /// Registered only when the manifest declares `[[tools]] type = "rag"`.
 /// The LLM can call this tool for targeted deep queries with custom
 /// parameters (different query, higher top_k, specific filters).
 pub struct RagQueryTool {
-    /// Shared RagClient instance (shared with MemoryManager for auto-retrieve)
-    client: std::sync::Arc<RagClient>,
+    /// Shared RagProvider trait object (ADR-051 C3).
+    provider: Arc<dyn RagProvider>,
 }
 
 impl RagQueryTool {
-    /// Create a new RAG query tool with the given client
-    pub fn new(client: std::sync::Arc<RagClient>) -> Self {
-        Self { client }
+    /// Create a new RAG query tool with the given provider.
+    pub fn new(provider: Arc<dyn RagProvider>) -> Self {
+        Self { provider }
     }
 
     fn spec_value() -> ToolSpec {
@@ -89,7 +92,7 @@ impl Tool for RagQueryTool {
         let filters = params.get("filters").cloned();
 
         let results = self
-            .client
+            .provider
             .query_with_params(query, top_k, score_threshold, filters)
             .await;
 
@@ -133,10 +136,10 @@ impl Tool for RagQueryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::rag::client::{RagAuthCredential, RagClientConfig};
+    use crate::tools::rag::client::{HttpRagProvider, RagAuthCredential, RagClientConfig};
     use std::time::Duration;
 
-    fn test_rag_client() -> std::sync::Arc<RagClient> {
+    fn test_rag_provider() -> Arc<dyn RagProvider> {
         let config = RagClientConfig {
             endpoint: "https://10.255.255.1/v1/query".to_string(), // non-routable
             collection: Some("test_docs".to_string()),
@@ -146,7 +149,7 @@ mod tests {
             timeout: Duration::from_millis(100),
             tool_name: "enterprise_knowledge".to_string(),
         };
-        std::sync::Arc::new(RagClient::new(config))
+        Arc::new(HttpRagProvider::new(config))
     }
 
     #[test]
@@ -166,8 +169,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rag_query_tool_missing_query() {
-        let client = test_rag_client();
-        let tool = RagQueryTool::new(client);
+        let provider = test_rag_provider();
+        let tool = RagQueryTool::new(provider);
         let result = tool.execute(serde_json::json!({}), None).await.unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("Missing 'query'"));
@@ -175,8 +178,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_rag_query_tool_empty_query() {
-        let client = test_rag_client();
-        let tool = RagQueryTool::new(client);
+        let provider = test_rag_provider();
+        let tool = RagQueryTool::new(provider);
         let result = tool
             .execute(serde_json::json!({ "query": "" }), None)
             .await
@@ -186,13 +189,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_rag_query_tool_timeout_degrades_gracefully() {
-        let client = test_rag_client();
-        let tool = RagQueryTool::new(client);
+        let provider = test_rag_provider();
+        let tool = RagQueryTool::new(provider);
         let result = tool
             .execute(serde_json::json!({ "query": "test query" }), None)
             .await
             .unwrap();
-        // RAG unavailable → graceful degradation, ok=true with "no results" message
+        // RAG unavailable -> graceful degradation, ok=true with "no results" message
         assert!(result.ok);
         assert!(result.content.contains("No relevant results"));
     }

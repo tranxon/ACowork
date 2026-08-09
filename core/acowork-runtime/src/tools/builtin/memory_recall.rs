@@ -158,9 +158,11 @@ impl Tool for MemoryRecallTool {
             .and_then(Value::as_u64)
             .map_or(10, |v| v.min(20)) as usize;
 
-        // Resolve store and session context.
-        let store = match self.handle.as_ref().and_then(|h| h.store()) {
-            Some(s) => s,
+        // Resolve provider and session context.
+        // ADR-051 C3: Use grafeo_store() compat accessor for MemoryManager
+        // (which still takes &GrafeoStore in C3; C4 will migrate to trait).
+        let provider = match self.handle.as_ref().and_then(|h| h.provider()) {
+            Some(p) => p,
             None => {
                 return Ok(ToolResult {
                     ok: true,
@@ -187,7 +189,7 @@ impl Tool for MemoryRecallTool {
         let emb_deref = emb_provider.as_deref();
 
         match manager
-            .retrieve(&store, &mut memory_query, emb_deref)
+            .retrieve(provider.as_ref(), &mut memory_query, emb_deref)
             .await
         {
             Ok(retrieval) => {
@@ -236,7 +238,7 @@ mod tests {
     fn test_tool() -> MemoryRecallTool {
         let store = Arc::new(GrafeoStore::new_in_memory().unwrap());
         let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
-        handle.set_store(store);
+        handle.set_provider(store);
         MemoryRecallTool {
             agent_id: "com.test.agent".to_string(),
             handle: Some(handle),
@@ -411,5 +413,89 @@ mod tests {
             .await
             .unwrap();
         assert!(result.ok);
+    }
+
+    // ── ADR-051 C5: InMemoryProvider tests ──────────────────────────────
+    // These tests prove the Runtime can work without GrafeoStore.
+
+    use crate::test_support::InMemoryProvider;
+    use acowork_memory::{MemoryProvider, MemoryStoreInput};
+
+    /// Helper: create a MemoryRecallTool backed by InMemoryProvider.
+    fn test_tool_inmemory() -> (MemoryRecallTool, Arc<InMemoryProvider>) {
+        let provider = Arc::new(InMemoryProvider::new());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        handle.set_provider(provider.clone());
+        let tool = MemoryRecallTool {
+            agent_id: "com.test.agent".to_string(),
+            handle: Some(handle),
+        };
+        (tool, provider)
+    }
+
+    /// Migrated from test_memory_recall_empty_result: uses InMemoryProvider
+    /// instead of GrafeoStore to verify empty retrieval works.
+    #[tokio::test]
+    async fn test_memory_recall_empty_result_inmemory() {
+        let (tool, _provider) = test_tool_inmemory();
+        let result = tool
+            .execute(serde_json::json!({ "query": "nonexistent content" }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("No relevant memories found"));
+    }
+
+    /// Full cycle: store a memory via InMemoryProvider, then recall it
+    /// through the memory_recall tool. Proves the retrieval pipeline
+    /// works end-to-end without GrafeoStore.
+    #[tokio::test]
+    async fn test_memory_recall_store_and_recall_inmemory() {
+        let (tool, provider) = test_tool_inmemory();
+
+        // Store a fact via the provider directly.
+        let input = MemoryStoreInput {
+            content: "User lives in Shanghai".to_string(),
+            sub_type: acowork_memory::KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: None,
+        };
+        let result = provider.process_memory_store(&input).unwrap();
+        assert!(result.is_some());
+
+        // Recall it through the tool.
+        let result = tool
+            .execute(serde_json::json!({ "query": "Shanghai" }), None)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(
+            result.content.contains("Shanghai"),
+            "Expected recall result to contain 'Shanghai', got: {}",
+            result.content
+        );
+    }
+
+    /// Verify that valid search modes work with InMemoryProvider.
+    #[tokio::test]
+    async fn test_memory_recall_valid_search_modes_inmemory() {
+        for mode in &["bm25", "embedding", "hybrid"] {
+            let (tool, _provider) = test_tool_inmemory();
+            let result = tool
+                .execute(
+                    serde_json::json!({
+                        "query": "test",
+                        "search_mode": mode
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(result.ok, "search_mode '{}' should be valid", mode);
+        }
     }
 }

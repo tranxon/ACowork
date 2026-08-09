@@ -13,16 +13,14 @@
 //! - Integration with the offline consolidation pipeline
 //!
 //! Design: `docs/05-memory.md` §4.2 (step ④), §4.3
-
-use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Arc;
 
-/// Shared embedding function type used across consolidation pipelines.
-pub type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use grafeo_common::types::Value;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::consolidation::triple_extraction::{LlmMessage, TripleExtractorLlm};
 use crate::error::{GrafeoError, Result};
@@ -30,120 +28,12 @@ use crate::grafeo::GrafeoStore;
 use crate::types::{NodeStatus, ProceduralNode, labels};
 
 // ---------------------------------------------------------------------------
-// Generalization types
+// Generalization types (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
 
-/// Category of a behavior pattern — used for grouping and dedup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PatternCategory {
-    /// Tool usage pattern (e.g., "use http_request for weather lookups").
-    ToolUsage,
-    /// User preference pattern (e.g., "user prefers concise output").
-    UserPreference,
-    /// Workflow pattern (e.g., "when asked for a report, first gather data, then format").
-    Workflow,
-    /// Error recovery pattern (e.g., "on API timeout, retry once").
-    ErrorRecovery,
-}
-
-impl PatternCategory {
-    /// Returns the string representation used in ProceduralNode metadata.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            PatternCategory::ToolUsage => "ToolUsage",
-            PatternCategory::UserPreference => "UserPreference",
-            PatternCategory::Workflow => "Workflow",
-            PatternCategory::ErrorRecovery => "ErrorRecovery",
-        }
-    }
-}
-
-impl std::str::FromStr for PatternCategory {
-    type Err = GrafeoError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "ToolUsage" => Ok(PatternCategory::ToolUsage),
-            "UserPreference" => Ok(PatternCategory::UserPreference),
-            "Workflow" => Ok(PatternCategory::Workflow),
-            "ErrorRecovery" => Ok(PatternCategory::ErrorRecovery),
-            _ => Err(GrafeoError::Memory(format!("unknown PatternCategory: {s}"))),
-        }
-    }
-}
-
-/// A detected behavior pattern from episodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BehaviorPattern {
-    /// Human-readable name for the pattern.
-    pub name: String,
-    /// Trigger condition description.
-    pub trigger_condition: String,
-    /// Action pattern description.
-    pub action_pattern: String,
-    /// Number of episodes this pattern was observed in.
-    pub observation_count: usize,
-    /// Confidence in the pattern [0.0, 1.0].
-    pub confidence: f32,
-    /// Pattern category (for grouping and dedup).
-    #[serde(default = "default_pattern_category")]
-    pub category: PatternCategory,
-}
-
-fn default_pattern_category() -> PatternCategory {
-    PatternCategory::ToolUsage
-}
-
-/// Result of the generalization process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeneralizationResult {
-    /// Detected patterns.
-    pub patterns: Vec<BehaviorPattern>,
-    /// Number of new ProceduralNodes created.
-    pub nodes_created: usize,
-    /// Number of existing ProceduralNodes boosted (confidence incremented).
-    pub nodes_boosted: usize,
-    /// Number of patterns deduplicated against existing nodes.
-    pub patterns_deduplicated: usize,
-    /// Timestamp of the generalization.
-    pub generalized_at: DateTime<Utc>,
-}
-
-// ---------------------------------------------------------------------------
-// Generalization configuration
-// ---------------------------------------------------------------------------
-
-/// Configuration for the experience generalization process.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeneralizationConfig {
-    /// Minimum number of observations before a pattern is considered valid.
-    /// Default: 3.
-    pub min_observations: usize,
-    /// Maximum number of unconsolidated episodes to scan per run.
-    /// Default: 100.
-    pub max_episodes_scan: usize,
-    /// Confidence boost applied when a pattern reinforces an existing node.
-    /// Default: 0.05.
-    pub confidence_boost: f32,
-    /// Maximum confidence for a ProceduralNode (cap after boosting).
-    /// Default: 0.98.
-    pub max_confidence: f32,
-    /// Whether to use LLM for pattern discovery when available.
-    /// Default: true.
-    pub use_llm: bool,
-}
-
-impl Default for GeneralizationConfig {
-    fn default() -> Self {
-        Self {
-            min_observations: 3,
-            max_episodes_scan: 100,
-            confidence_boost: 0.05,
-            max_confidence: 0.98,
-            use_llm: true,
-        }
-    }
-}
+pub use acowork_memory::consolidation::{
+    BehaviorPattern, EmbeddingFn, GeneralizationConfig, GeneralizationResult, PatternCategory,
+};
 
 // ---------------------------------------------------------------------------
 // Simple pattern detection (rule-based, no LLM)

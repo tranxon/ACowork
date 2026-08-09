@@ -381,7 +381,7 @@ impl AgentLoop {
                 .as_deref()
                 .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
             let provider = self.core.provider.clone();
-            let memory_store = self.core.memory_store().cloned();
+            let memory_provider = self.core.memory_provider().cloned();
 
             match self
                 .session
@@ -473,10 +473,10 @@ impl AgentLoop {
                         .as_ref()
                         .map(|c| c.session_id().to_string())
                         .unwrap_or_default();
-                    crate::episode_distill::EpisodeDistiller::write_summary_to_grafeo(
+                    crate::episode_distill::EpisodeDistiller::write_summary_to_provider(
                         &summary,
                         &session_id,
-                        &memory_store,
+                        &memory_provider,
                         self.core.embedding_provider.as_deref(),
                     )
                     .await;

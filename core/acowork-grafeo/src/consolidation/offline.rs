@@ -16,76 +16,24 @@ use crate::grafeo::GrafeoStore;
 use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeStatus, labels};
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration & Result (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
 
-/// Offline consolidation configuration.
-#[derive(Debug, Clone)]
-pub struct OfflineConsolidationConfig {
-    /// Maximum number of pending nodes to process per batch.
-    /// Default: 50.
-    pub batch_size: usize,
-    /// Minimum age (in hours) before a Pending node is eligible for
-    /// offline processing. Default: 1.
-    pub min_pending_age_hours: u64,
-}
-
-impl Default for OfflineConsolidationConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 50,
-            min_pending_age_hours: 1,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Result
-// ---------------------------------------------------------------------------
+pub use acowork_memory::consolidation::{OfflineConsolidationConfig, OfflineConsolidationResult};
 
 /// Result of LLM conflict resolution during offline consolidation.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConflictResolutionResult {
     /// Total conflicts resolved.
     pub resolved: usize,
-    /// Conflicts classified as Evolution (old → Dormant).
+    /// Conflicts classified as Evolution (old -> Dormant).
     pub evolution: usize,
-    /// Conflicts classified as Correction (old → Dormant).
+    /// Conflicts classified as Correction (old -> Dormant).
     pub correction: usize,
     /// Conflicts classified as Ambiguous (both kept).
     pub ambiguous: usize,
 }
 
-/// Result of an offline consolidation run.
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct OfflineConsolidationResult {
-    /// Number of nodes upgraded from Pending → Active.
-    pub upgraded: usize,
-    /// Number of nodes kept as Pending (not old enough or not enough evidence).
-    pub kept_pending: usize,
-    /// Number of nodes marked Dormant (low confidence after re-evaluation).
-    pub marked_dormant: usize,
-    /// Number of new ProceduralNodes created by generalization.
-    pub procedural_created: usize,
-    /// Number of existing ProceduralNodes boosted by generalization.
-    pub procedural_boosted: usize,
-    /// Number of History nodes compressed into summaries.
-    pub history_compressed: usize,
-    /// Number of triples extracted from unconsolidated episodes.
-    pub triples_extracted: usize,
-    /// Number of conflicts resolved by LLM arbitration.
-    pub conflicts_resolved: usize,
-    /// Number of conflicts classified as Evolution (old → Dormant, new → Active).
-    pub conflicts_evolution: usize,
-    /// Number of conflicts classified as Correction (old → Dormant, new → Active).
-    pub conflicts_correction: usize,
-    /// Number of conflicts classified as Ambiguous (both kept, user confirmation needed).
-    pub conflicts_ambiguous: usize,
-    /// Number of episodic nodes cleaned up (transitioned to Dormant by §2 rules).
-    pub episodic_cleaned: usize,
-}
-
-// ---------------------------------------------------------------------------
 // GrafeoStore methods
 // ---------------------------------------------------------------------------
 

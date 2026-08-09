@@ -67,32 +67,17 @@ const DIRECT_ACTIVE_THRESHOLD: f32 = 0.85;
 const DEFAULT_CONFIDENCE: f32 = 0.7;
 
 // ---------------------------------------------------------------------------
-// Input type
+// Types (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
 
-/// Input from LLM's `memory_store` tool call.
-#[derive(Debug, Clone)]
-pub struct MemoryStoreInput {
-    /// Natural language content from LLM.
-    pub content: String,
-    /// Knowledge sub-type: Fact | Preference | Relation.
-    pub sub_type: KnowledgeSubType,
-    /// Optional subject hint (defaults to "user").
-    pub subject: Option<String>,
-    /// Optional predicate hint.
-    pub predicate: Option<String>,
-    /// Optional object hint.
-    pub object: Option<String>,
-    /// LLM's confidence in this knowledge (default 0.7).
-    pub confidence: Option<f32>,
-    /// Source episode ID for traceability.
-    pub source_episode_id: Option<NodeId>,
-    /// Pre-computed embedding vector.
-    pub embedding: Option<Vec<f32>>,
-}
+pub use acowork_memory::consolidation::{
+    ConflictAction, ConflictResolutionDetail, MemoryStoreInput, MemoryStoreResult,
+};
+/// Backward-compatible alias.
+pub use acowork_memory::consolidation::MemoryStoreResult as ProcessResult;
 
 // ---------------------------------------------------------------------------
-// Conflict candidate
+// Conflict candidate (grafeo-internal, uses NodeId)
 // ---------------------------------------------------------------------------
 
 /// A candidate conflict found during instant extraction.
@@ -102,30 +87,6 @@ pub struct ConflictCandidate {
     pub existing_node_id: NodeId,
     /// Conflict signal details from the three-layer detector.
     pub conflict_signal: ConflictSignal,
-}
-
-// ---------------------------------------------------------------------------
-// Process result
-// ---------------------------------------------------------------------------
-
-/// Detailed record of a single conflict resolution action.
-#[derive(Debug, Clone)]
-pub struct ConflictResolutionDetail {
-    /// The existing node involved in the conflict.
-    pub existing_node_id: NodeId,
-    /// The resolution action taken.
-    pub action: crate::conflict::ConflictAction,
-    /// The conflict signal that triggered the resolution.
-    pub signal: ConflictSignal,
-}
-
-/// Result of processing a `memory_store` tool call.
-#[derive(Debug, Clone)]
-pub struct ProcessResult {
-    /// The ID of the newly created (or updated) knowledge node.
-    pub node_id: NodeId,
-    /// Detailed conflict resolution records.
-    pub conflict_resolutions: Vec<ConflictResolutionDetail>,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +161,7 @@ impl GrafeoStore {
             object,
             sub_type: input.sub_type.clone(),
             confidence,
-            source_episode_id: input.source_episode_id,
+            source_episode_id: input.source_episode_id.map(NodeId::new),
             embedding: input.embedding.clone(),
             status: status.clone(),
             created_at: Utc::now(),
@@ -223,7 +184,7 @@ impl GrafeoStore {
         for conflict in &conflicts {
             let resolution = crate::conflict::resolve_conflict(
                 &conflict.conflict_signal,
-                conflict.existing_node_id,
+                conflict.existing_node_id.as_u64(),
             );
 
             // Tag both the existing and new node with the same conflict_group_id.
@@ -245,14 +206,14 @@ impl GrafeoStore {
             self.update_knowledge(&updated_new)?;
 
             conflict_resolutions.push(ConflictResolutionDetail {
-                existing_node_id: conflict.existing_node_id,
+                existing_node_id: conflict.existing_node_id.as_u64(),
                 action: resolution.action,
                 signal: conflict.conflict_signal.clone(),
             });
         }
 
         Ok(Some(ProcessResult {
-            node_id: new_id,
+            node_id: new_id.as_u64(),
             conflict_resolutions,
         }))
     }
@@ -287,7 +248,7 @@ impl GrafeoStore {
 
                     // Confidence boosted via reinforcement (dedup).
                     return Ok(Some(ProcessResult {
-                        node_id: existing_id,
+                        node_id: existing_id.as_u64(),
                         conflict_resolutions: Vec::new(),
                     }));
                 }
@@ -332,7 +293,7 @@ impl GrafeoStore {
         let new_id = self.store_procedural(&node)?;
 
         Ok(Some(ProcessResult {
-            node_id: new_id,
+            node_id: new_id.as_u64(),
             conflict_resolutions: Vec::new(),
         }))
     }
@@ -653,7 +614,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let id = result.unwrap().node_id;
+        let id = NodeId::new(result.unwrap().node_id);
         let node = store.get_knowledge(id).unwrap().unwrap();
         assert_eq!(node.status, NodeStatus::Active);
         assert_eq!(node.subject, "user");
@@ -681,7 +642,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let id = result.unwrap().node_id;
+        let id = NodeId::new(result.unwrap().node_id);
         let node = store.get_knowledge(id).unwrap().unwrap();
         assert_eq!(node.status, NodeStatus::Pending);
     }
@@ -706,7 +667,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let id = result.unwrap().node_id;
+        let id = NodeId::new(result.unwrap().node_id);
         let node = store.get_knowledge(id).unwrap().unwrap();
         assert_eq!(node.status, NodeStatus::Pending);
         assert_eq!(node.subject, "user"); // default subject
@@ -733,7 +694,7 @@ mod tests {
         };
         let id1 = store.process_memory_store(&input1).unwrap();
         assert!(id1.is_some());
-        let _id1 = id1.unwrap().node_id;
+        let _id1 = NodeId::new(id1.unwrap().node_id);
 
         // Second store with same embedding → should be skipped as duplicate.
         let input2 = MemoryStoreInput {
@@ -852,7 +813,7 @@ mod tests {
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
         let node = store
-            .get_knowledge(result.unwrap().node_id)
+            .get_knowledge(NodeId::new(result.unwrap().node_id))
             .unwrap()
             .unwrap();
         assert_eq!(node.status, NodeStatus::Active);
@@ -898,7 +859,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let new_id = result.unwrap().node_id;
+        let new_id = NodeId::new(result.unwrap().node_id);
 
         // Old node stays Active (Ambiguous — no auto-demotion).
         let old_node = store.get_knowledge(existing_id).unwrap().unwrap();
@@ -957,7 +918,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let new_id = result.unwrap().node_id;
+        let new_id = NodeId::new(result.unwrap().node_id);
 
         // Both should be Active.
         let old_node = store.get_knowledge(existing_id).unwrap().unwrap();
@@ -1156,7 +1117,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         let node = store
-            .get_knowledge(result.unwrap().node_id)
+            .get_knowledge(NodeId::new(result.unwrap().node_id))
             .unwrap()
             .unwrap();
         assert_eq!(node.object, "User prefers concise answers");
@@ -1201,7 +1162,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let new_id = result.unwrap().node_id;
+        let new_id = NodeId::new(result.unwrap().node_id);
 
         // Old node stays Active (Ambiguous — Phase 3 LLM will decide).
         let old_node = store.get_knowledge(existing_id).unwrap().unwrap();
@@ -1251,7 +1212,7 @@ mod tests {
 
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
-        let new_id = result.unwrap().node_id;
+        let new_id = NodeId::new(result.unwrap().node_id);
 
         // No auto CORRECTS or EVOLUTION_FROM edges — Phase 3 LLM creates them.
         let edges = store.get_edges(new_id, grafeo_core::graph::Direction::Outgoing);
@@ -1388,7 +1349,7 @@ mod tests {
         };
         let result1 = store.process_memory_store(&input1).unwrap();
         assert!(result1.is_some());
-        let id1 = result1.unwrap().node_id;
+        let id1 = NodeId::new(result1.unwrap().node_id);
 
         // Second procedure with same embedding → should boost, not create.
         let input2 = MemoryStoreInput {
@@ -1403,7 +1364,7 @@ mod tests {
         };
         let result2 = store.process_memory_store(&input2).unwrap();
         assert!(result2.is_some());
-        let id2 = result2.unwrap().node_id;
+        let id2 = NodeId::new(result2.unwrap().node_id);
 
         // Same node ID — boosted, not created.
         assert_eq!(id1, id2, "duplicate procedure should return existing ID");

@@ -329,17 +329,17 @@ pub(crate) async fn phase_b_init_session(
 
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = ctx.emb_provider.clone();
-        c.init_memory_store(work_dir_path);
+        c.init_memory_provider(work_dir_path);
 
         // ADR-033 (Phase 2): Publish the late-bound Grafeo store to the
         // shared handle consumed by the Runtime HTTP server. The HTTP
         // server was already started in Phase A holding this same Arc,
-        // so handlers that fired while `init_memory_store` was still
+        // so handlers that fired while `init_memory_provider` was still
         // running will get a stable "no store" response until this
         // mutation completes. After this point every memory_* endpoint
         // (/memory/nodes, /memory/stats, /memory/nodes/{nid},
         // /memory/consolidate) sees the live store.
-        let published_store = c.memory_store().cloned();
+        let published_store = c.grafeo_store().cloned();
         if let Some(store) = published_store {
             match ctx.memory_store_shared.write() {
                 Ok(mut slot) => *slot = Some(store),

@@ -28,6 +28,7 @@ pub mod permission;
 pub mod process;
 pub mod protocol;
 pub mod providers;
+pub mod rag;
 pub mod shutdown;
 pub mod supervisor;
 pub mod timeout_config;
@@ -58,6 +59,10 @@ pub use process::{
 pub use providers::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, Provider, ProviderError,
     ProviderErrorType, StreamEvent,
+};
+pub use rag::{
+    AnnotatedRagResult, PROTOCOL_VERSION as RAG_PROTOCOL_VERSION, RagProvider, RagQueryRequest,
+    RagQueryResponse, RagResultItem,
 };
 pub use shutdown::{Shutdown, install_signal_handlers};
 pub use timeout_config::{RetryConfig, Timeouts};

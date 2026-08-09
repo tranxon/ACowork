@@ -1,7 +1,11 @@
 //! MemoryStore trait for storage backend abstraction.
 //!
-//! This trait defines the interface for memory storage backends.
+//! This trait defines the original interface for memory storage backends.
 //! Grafeo (acowork-grafeo) is the primary implementation.
+//!
+//! The extended `MemoryProvider` trait (ADR-051) supersedes this trait.
+//! During the migration period, both traits coexist. Once all callers
+//! have migrated to `MemoryProvider`, this trait will be deprecated.
 
 use std::time::Duration;
 
@@ -12,7 +16,7 @@ use crate::types::{
     ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 
-/// MemoryStore trait — standardized interface for memory storage backends.
+/// MemoryStore trait - standardized interface for memory storage backends.
 ///
 /// Implementations can be: grafeo-engine (current), Sled, LMDB, remote service,
 /// or in-memory mock for testing.

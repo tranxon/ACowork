@@ -1,80 +1,63 @@
-//! Memory session handle — shared state between agent loop and memory tools.
+//! Memory session handle - shared state between agent loop and memory tools.
 //!
 //! Memory tools (memory_recall, memory_store) are created once per agent,
-//! but sessions change dynamically and the Grafeo store may be initialized
+//! but sessions change dynamically and the memory provider may be initialized
 //! lazily (after tool creation). This handle provides a shared, lock-protected
 //! context for session-scoped operations without changing the Tool trait.
+//!
+//! ADR-051 C3: Primary type is now `Arc<dyn MemoryProvider>`.
+//! ADR-051 C4: grafeo_store compat field removed; all callers use trait methods.
 
 use std::sync::{Arc, RwLock};
 
-use acowork_grafeo::GrafeoStore;
+use acowork_memory::MemoryProvider;
 
 use crate::embedding::EmbeddingProvider;
 
 /// Lightweight session context shared between the agent loop (writer)
 /// and memory tools (readers).
-///
-/// # Design
-///
-/// - `store`: lazily initialized; tools check availability on each call.
-/// - `current_session_id`: written by `SessionTask` before each turn,
-///   read by tools during `execute()`.  Uses `RwLock` because writes are
-///   infrequent (once per turn switch) and reads far more common.
-/// - `embedding_provider`: set once at construction, immutable thereafter.
-///   Tools and agent loop pass it to [`MemoryManager::retrieve`] for
-///   auto-embedding.
-///
-/// This separation avoids the need to inject session context through the
-/// [`Tool`](acowork_core::tools::traits::Tool) trait, keeping tool
-/// signatures simple while still providing session-aware behaviour.
 pub struct MemorySessionHandle {
-    /// Grafeo memory store (lazily initialized, shared across all sessions).
-    store: RwLock<Option<Arc<GrafeoStore>>>,
+    /// Memory provider (lazily initialized, shared across all sessions).
+    /// ADR-051 C3: Changed from `Arc<GrafeoStore>` to `Arc<dyn MemoryProvider>`.
+    provider: RwLock<Option<Arc<dyn MemoryProvider>>>,
     /// ID of the currently active session.
-    ///
-    /// `None` when no session is active (e.g. between session switches).
-    /// Memory tools use this to exclude current-session nodes from recall,
-    /// since they are already present in the conversation context window.
     current_session_id: RwLock<Option<String>>,
     /// Embedding provider (set once at construction, immutable thereafter).
-    /// Used by memory tools and agent loop for vector-based retrieval.
     embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
 }
 
 impl MemorySessionHandle {
-    /// Create a new handle with no store (lazy initialization).
+    /// Create a new handle with no provider (lazy initialization).
     pub fn new(embedding_provider: Option<Arc<dyn EmbeddingProvider>>) -> Self {
         Self {
-            store: RwLock::new(None),
+            provider: RwLock::new(None),
             current_session_id: RwLock::new(None),
             embedding_provider,
         }
     }
 
-    /// Set the Grafeo store once it becomes available.
+    /// Set the memory provider once it becomes available.
     ///
     /// Called by `AgentCore` when memory initialization completes.
-    /// Panics if a store is already set (store is set exactly once).
-    pub fn set_store(&self, store: Arc<GrafeoStore>) {
+    /// Both the trait object and the concrete GrafeoStore reference are set.
+    pub fn set_provider(&self, provider: Arc<dyn MemoryProvider>) {
         let mut guard = self
-            .store
+            .provider
             .write()
-            .expect("MemorySessionHandle store lock poisoned");
+            .expect("MemorySessionHandle provider lock poisoned");
         assert!(
             guard.is_none(),
-            "MemorySessionHandle store already initialized"
+            "MemorySessionHandle provider already initialized"
         );
-        *guard = Some(store);
+        *guard = Some(provider);
     }
 
-    /// Read a clone of the store, if initialized.
-    pub fn store(&self) -> Option<Arc<GrafeoStore>> {
-        self.store.read().ok().and_then(|guard| guard.clone())
+    /// Read a clone of the provider, if initialized.
+    pub fn provider(&self) -> Option<Arc<dyn MemoryProvider>> {
+        self.provider.read().ok().and_then(|guard| guard.clone())
     }
 
     /// Set the current session ID.
-    ///
-    /// Called by `SessionTask` whenever a session becomes active or switches.
     pub fn set_session_id(&self, id: String) {
         if let Ok(mut guard) = self.current_session_id.write() {
             *guard = Some(id);
@@ -89,8 +72,6 @@ impl MemorySessionHandle {
     }
 
     /// Read the current session ID.
-    ///
-    /// Returns a cloned copy so readers don't hold the lock.
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session_id
             .read()

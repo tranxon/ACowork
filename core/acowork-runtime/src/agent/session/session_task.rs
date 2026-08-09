@@ -1258,13 +1258,13 @@ impl SessionTask {
                     // HNSW indexes before switching to the new provider.
                     let needs_migration = agent_loop
                         .core
-                        .memory_store
+                        .grafeo_store
                         .as_ref()
                         .map(|store| store.embedding_dim() != embed_dimension)
                         .unwrap_or(false);
 
                     if needs_migration
-                        && let Some(ref store) = agent_loop.core.memory_store
+                        && let Some(ref store) = agent_loop.core.grafeo_store
                     {
                             let store = store.clone();
                             let old_dim = store.embedding_dim();

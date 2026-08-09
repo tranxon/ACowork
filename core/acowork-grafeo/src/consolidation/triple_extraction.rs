@@ -6,12 +6,10 @@
 //! the runtime's provider implementation.
 //!
 //! Design: `docs/05-memory.md` §4.3
-
-use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Arc;
 
-/// Shared embedding function type used during triple extraction.
-type EmbeddingFn = Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>;
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,37 +19,13 @@ use crate::grafeo::GrafeoStore;
 use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus};
 
 // ---------------------------------------------------------------------------
-// LLM abstraction
+// LLM abstraction (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
 
-/// A single message in the LLM conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmMessage {
-    /// Role: "system", "user", or "assistant".
-    pub role: String,
-    /// Message content.
-    pub content: String,
-}
+pub use acowork_memory::consolidation::{LlmMessage, LlmResponse, TripleExtractorLlm};
 
-/// Response from the LLM abstraction.
-#[derive(Debug, Clone)]
-pub struct LlmResponse {
-    /// The text content of the assistant's reply.
-    pub content: String,
-    /// Token usage (if available).
-    pub usage_tokens: Option<u64>,
-}
-
-/// Trait for making LLM calls. Implemented by the runtime layer
-/// using the active Provider.
-///
-/// This trait keeps the grafeo crate independent of the provider
-/// ecosystem while still supporting LLM-driven consolidation.
-#[async_trait::async_trait]
-pub trait TripleExtractorLlm: Send + Sync {
-    /// Send a chat request and return the response text.
-    async fn chat(&self, messages: Vec<LlmMessage>) -> std::result::Result<LlmResponse, String>;
-}
+/// Shared embedding function type used during triple extraction.
+pub type EmbeddingFn = acowork_memory::consolidation::EmbeddingFn;
 
 // ---------------------------------------------------------------------------
 // Extraction types

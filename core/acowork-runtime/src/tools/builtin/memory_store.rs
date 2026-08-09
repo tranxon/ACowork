@@ -160,13 +160,13 @@ impl Tool for MemoryStoreTool {
             })
         });
 
-        // --- Resolve GrafeoStore via late-binding handle ---
-        // The store may be None if AgentCore::init_memory_store hasn't
+        // --- Resolve MemoryProvider via late-binding handle ---
+        // The provider may be None if AgentCore::init_memory_provider hasn't
         // completed yet (Phase B of startup). We fall back to a fake
         // confirmation in that case.
-        let store = self.handle.as_ref().and_then(|h| h.store());
-        match store {
-            Some(store) => {
+        let provider = self.handle.as_ref().and_then(|h| h.provider());
+        match provider {
+            Some(provider) => {
                 let category_display = sub_type.as_str();
                 let input = MemoryStoreInput {
                     content: content.clone(),
@@ -179,7 +179,7 @@ impl Tool for MemoryStoreTool {
                     embedding: None,
                 };
 
-                match store.process_memory_store(&input) {
+                match provider.process_memory_store(&input) {
                     Ok(Some(result)) => Ok(ToolResult {
                         ok: true,
                         content: format!(
@@ -187,7 +187,7 @@ impl Tool for MemoryStoreTool {
                             cat = category_display,
                             content = content,
                             conf = confidence,
-                            id = result.node_id.0
+                            id = result.node_id
                         ),
                         error: None,
                         token_usage: None,
@@ -213,7 +213,7 @@ impl Tool for MemoryStoreTool {
                 }
             }
             None => {
-                // GrafeoStore not available — return confirmation (Phase 1 fallback)
+                // MemoryProvider not available — return confirmation (Phase 1 fallback)
                 let memory_id = format!(
                     "mem_{}",
                     &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
@@ -472,5 +472,102 @@ mod tests {
             .unwrap();
         assert!(result.ok);
         assert!(result.content.contains("Procedure"));
+    }
+
+    // ── ADR-051 C5: InMemoryProvider tests ──────────────────────────────
+    // These tests prove the memory_store tool can work without GrafeoStore,
+    // using the actual process_memory_store() pipeline instead of the
+    // degraded fallback path.
+
+    use crate::test_support::InMemoryProvider;
+    use acowork_memory::MemoryProvider;
+
+    /// Helper: create a MemoryStoreTool backed by InMemoryProvider.
+    fn test_tool_with_provider() -> (MemoryStoreTool, Arc<InMemoryProvider>) {
+        let provider = Arc::new(InMemoryProvider::new());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        handle.set_provider(provider.clone());
+        let tool = MemoryStoreTool::new("com.test.agent", Some(handle));
+        (tool, provider)
+    }
+
+    /// Migrated from test_memory_store_basic_fact: uses InMemoryProvider
+    /// instead of None. Verifies the actual storage path (process_memory_store)
+    /// is invoked, not the degraded fallback.
+    #[tokio::test]
+    async fn test_memory_store_basic_fact_inmemory() {
+        let (tool, provider) = test_tool_with_provider();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User lives in Beijing",
+                    "category": "fact",
+                    "confidence": 0.9
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("User lives in Beijing"));
+        assert!(result.content.contains("Fact"));
+        // Verify the result includes a real node_id (numeric, not "mem_" prefix).
+        assert!(
+            result.content.contains("id: "),
+            "Expected content to include node id, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("mem_"),
+            "Should not use fallback 'mem_' id when provider is available"
+        );
+
+        // Verify the node was actually stored in the provider.
+        let stats = provider.stats().unwrap();
+        assert_eq!(stats.node_count, 1);
+    }
+
+    /// Verify preference storage via InMemoryProvider.
+    #[tokio::test]
+    async fn test_memory_store_preference_inmemory() {
+        let (tool, _provider) = test_tool_with_provider();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers dark mode",
+                    "category": "preference",
+                    "confidence": 0.6
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("Preference"));
+        assert!(result.content.contains("0.60"));
+    }
+
+    /// Verify procedure storage via InMemoryProvider.
+    #[tokio::test]
+    async fn test_memory_store_procedure_inmemory() {
+        let (tool, provider) = test_tool_with_provider();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "When user asks for summary, reply concisely",
+                    "category": "procedure",
+                    "confidence": 0.9
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert!(result.content.contains("Procedure"));
+        assert!(result.content.contains("reply concisely"));
+
+        // Verify node was stored.
+        let stats = provider.stats().unwrap();
+        assert_eq!(stats.node_count, 1);
     }
 }

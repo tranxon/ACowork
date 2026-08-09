@@ -1,15 +1,39 @@
-//! acowork-memory — MemoryStore trait and shared memory types
+//! acowork-memory - MemoryProvider trait and shared memory types
 //!
-//! This crate defines the MemoryStore trait abstraction and shared types.
-//! Grafeo (acowork-grafeo) is the primary implementation (Phase 2).
+//! This crate defines the MemoryProvider trait abstraction and shared types.
+//! Grafeo (acowork-grafeo) is the primary implementation.
 //!
-//! Design ref: docs/05-memory.md §10
+//! The `MemoryProvider` trait (ADR-051) extends the original `MemoryStore`
+//! trait with additional methods for consolidation, CRUD, and lifecycle
+//! control. During the migration period, both traits coexist:
+//! - `MemoryStore` (16 methods) - existing impls remain valid
+//! - `MemoryProvider` (35+ methods) - full trait for Runtime decoupling
+//!
+//! Design ref: ADR-051, docs/05-memory.md §10
 
+pub mod consolidation;
+pub mod provider;
 pub mod store;
 pub mod types;
 
-// Re-exports for convenience
+// Re-exports: MemoryProvider trait (new, for ADR-051 migration)
+pub use provider::MemoryProvider;
+
+// Re-exports: MemoryStore trait (original, for backward compatibility)
 pub use store::MemoryStore;
+
+// Re-exports: consolidation types
+pub use consolidation::{
+    BehaviorPattern, ConflictAction, ConflictResolutionDetail, EmbeddingFn, GeneralizationConfig,
+    GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput, MemoryStoreResult,
+    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, SchedulerConfig,
+    TripleExtractorLlm,
+};
+
+// Backward-compatible alias: grafeo used `ProcessResult` for this type.
+pub use consolidation::MemoryStoreResult as ProcessResult;
+
+// Re-exports: core memory types
 pub use types::{
     AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType, ContextSource,
     DecayConfig, DecayScanResult, Episode, KnowledgeNode, KnowledgeSubType, MemoryContext,

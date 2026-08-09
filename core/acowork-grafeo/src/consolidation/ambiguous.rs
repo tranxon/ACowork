@@ -423,9 +423,9 @@ mod tests {
         let group_id = pending[0].conflict_group_id.clone();
 
         // Resolve: keep the new node.
-        store.resolve_ambiguous(&group_id, new_id).unwrap();
+        store.resolve_ambiguous(&group_id, NodeId::new(new_id)).unwrap();
 
-        let kept = store.get_knowledge(new_id).unwrap().unwrap();
+        let kept = store.get_knowledge(NodeId::new(new_id)).unwrap().unwrap();
         assert_eq!(kept.status, NodeStatus::Active);
         assert!(!kept.metadata.contains_key("conflict_group_id"));
 

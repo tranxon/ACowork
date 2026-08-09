@@ -25,4 +25,6 @@ pub mod skills;
 pub mod token;
 pub mod startup;
 pub mod tools;
+#[cfg(test)]
+pub mod test_support;
 pub mod usecases;

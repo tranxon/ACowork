@@ -296,13 +296,13 @@ impl EpisodeDistiller {
     /// If `embedding_provider` is `Some`, generates an embedding vector
     /// from the summary text (200ms timeout) and stores it on the node
     /// for future vector-based retrieval.
-    pub async fn write_summary_to_grafeo(
+    pub async fn write_summary_to_provider(
         summary_text: &str,
         session_id: &str,
-        memory_store: &Option<Arc<acowork_grafeo::GrafeoStore>>,
+        memory_provider: &Option<Arc<dyn acowork_memory::MemoryProvider>>,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) {
-        let Some(store) = memory_store else {
+        let Some(provider) = memory_provider else {
             return;
         };
         let manager =
@@ -317,13 +317,13 @@ impl EpisodeDistiller {
             triples: parsed.triples,
         };
         if let Err(e) = manager
-            .record_distilled(store, &episode, embedding_provider)
+            .record_distilled(provider.as_ref(), &episode, embedding_provider)
             .await
         {
             tracing::warn!(
                 error = %e,
                 session_id = %session_id,
-                "Failed to write summary to Grafeo (non-fatal)"
+                "Failed to write summary to provider (non-fatal)"
             );
         }
     }

@@ -1,13 +1,20 @@
-//! RagClient — HTTP client for the ACowork RAG standard query protocol
+//! HttpRagProvider - HTTP client for the ACowork RAG standard query protocol.
 //!
-//! RagClient is a pure HTTP client. It does NOT implement any RAG engine logic.
-//! It sends standard query requests to enterprise RAG endpoints and parses
-//! the responses. Timeout and error handling ensure RAG unavailability never
-//! blocks Agent execution.
+//! Formerly known as `RagClient` (renamed in ADR-051 C3).
+//! `RagClient` is kept as a type alias for backward compatibility.
+//!
+//! HttpRagProvider is a pure HTTP client. It does NOT implement any RAG engine
+//! logic. It sends standard query requests to enterprise RAG endpoints and
+//! parses the responses. Timeout and error handling ensure RAG unavailability
+//! never blocks Agent execution.
+//!
+//! Implements `acowork_core::rag::RagProvider` trait (ADR-051 §5.1).
 
 use std::time::Duration;
 
+use acowork_core::rag::RagProvider;
 use acowork_core::RagToolConfig;
+use async_trait::async_trait;
 
 use super::types::{AnnotatedRagResult, RagQueryRequest, RagQueryResponse, RagResultItem};
 
@@ -27,7 +34,7 @@ impl RagAuthCredential {
     ///
     /// `auth_ref` format: "vault:<provider_name>" (e.g., "vault:rag_enterprise_key")
     /// The actual key value is obtained from Vault via the gRPC handshake
-/// (AgentHello carries the API key distribution).
+    /// (AgentHello carries the API key distribution).
     ///
     /// # Arguments
     /// * `auth_ref` - Vault reference string from manifest
@@ -53,19 +60,12 @@ impl RagAuthCredential {
     ///
     /// Returns `Some(provider_name)` if auth_ref starts with "vault:",
     /// otherwise `None`.
-    ///
-    /// # Example
-    /// ```
-    /// # use acowork_runtime::tools::rag::client::RagAuthCredential;
-    /// let name = RagAuthCredential::vault_provider_name("vault:rag_enterprise_key");
-    /// assert_eq!(name, Some("rag_enterprise_key"));
-    /// ```
     pub fn vault_provider_name(auth_ref: &str) -> Option<&str> {
         auth_ref.strip_prefix("vault:")
     }
 }
 
-/// Configuration for RagClient, derived from manifest `RagToolConfig`
+/// Configuration for HttpRagProvider, derived from manifest `RagToolConfig`.
 #[derive(Debug, Clone)]
 pub struct RagClientConfig {
     /// RAG service endpoint URL
@@ -85,7 +85,7 @@ pub struct RagClientConfig {
 }
 
 impl RagClientConfig {
-    /// Build RagClientConfig from manifest RagToolConfig + resolved auth
+    /// Build RagClientConfig from manifest RagToolConfig + resolved auth.
     pub fn from_manifest(rag: &RagToolConfig, tool_name: String, auth: RagAuthCredential) -> Self {
         Self {
             endpoint: rag.endpoint.clone(),
@@ -99,14 +99,20 @@ impl RagClientConfig {
     }
 }
 
-/// RAG query client — sends standard protocol requests to enterprise RAG services
-pub struct RagClient {
+/// HTTP-based RAG provider - sends standard protocol requests to enterprise RAG services.
+///
+/// Implements `acowork_core::rag::RagProvider` trait.
+/// Renamed from `RagClient` in ADR-051 C3. `RagClient` remains as a type alias.
+pub struct HttpRagProvider {
     config: RagClientConfig,
     http: reqwest::Client,
 }
 
-impl RagClient {
-    /// Create a new RagClient with the given configuration
+/// Backward-compat type alias (ADR-051 C3).
+pub type RagClient = HttpRagProvider;
+
+impl HttpRagProvider {
+    /// Create a new HttpRagProvider with the given configuration.
     pub fn new(config: RagClientConfig) -> Self {
         let http = reqwest::Client::builder()
             .timeout(config.timeout)
@@ -146,7 +152,7 @@ impl RagClient {
             Ok(resp) => self.annotate_results(resp.results),
             Err(e) => {
                 tracing::warn!(
-                    "RAG query failed (endpoint={}): {} — degrading to empty results",
+                    "RAG query failed (endpoint={}): {} - degrading to empty results",
                     self.config.endpoint,
                     e
                 );
@@ -212,6 +218,32 @@ impl RagClient {
     }
 }
 
+/// Implement RagProvider trait (ADR-051 §5.1).
+///
+/// HttpRagProvider is the default production implementation of RagProvider.
+/// The trait methods delegate to the existing query methods.
+#[async_trait]
+impl RagProvider for HttpRagProvider {
+    async fn query(&self, query_text: &str) -> Vec<AnnotatedRagResult> {
+        // Delegate to the inherent method (same name, same behavior).
+        HttpRagProvider::query(self, query_text).await
+    }
+
+    async fn query_with_params(
+        &self,
+        query_text: &str,
+        top_k: Option<u32>,
+        score_threshold: Option<f32>,
+        filters: Option<serde_json::Value>,
+    ) -> Vec<AnnotatedRagResult> {
+        HttpRagProvider::query_with_params(self, query_text, top_k, score_threshold, filters).await
+    }
+
+    fn name(&self) -> &str {
+        &self.config.tool_name
+    }
+}
+
 /// RAG client errors
 #[derive(Debug, thiserror::Error)]
 pub enum RagClientError {
@@ -239,14 +271,27 @@ mod tests {
 
     #[test]
     fn test_rag_client_new() {
-        let client = RagClient::new(test_config());
+        let client = HttpRagProvider::new(test_config());
         assert_eq!(client.endpoint(), "https://rag.example.com/v1/query");
         assert_eq!(client.tool_name(), "enterprise_knowledge");
     }
 
     #[test]
+    fn test_rag_client_alias_compat() {
+        // Verify RagClient alias works
+        let client: RagClient = RagClient::new(test_config());
+        assert_eq!(client.tool_name(), "enterprise_knowledge");
+    }
+
+    #[test]
+    fn test_rag_provider_name() {
+        let client = HttpRagProvider::new(test_config());
+        assert_eq!(RagProvider::name(&client), "enterprise_knowledge");
+    }
+
+    #[test]
     fn test_annotate_results() {
-        let client = RagClient::new(test_config());
+        let client = HttpRagProvider::new(test_config());
         let items = vec![
             RagResultItem {
                 content: "test content 1".to_string(),
@@ -295,9 +340,20 @@ mod tests {
         let mut config = test_config();
         config.endpoint = "https://10.255.255.1/v1/query".to_string();
         config.timeout = Duration::from_millis(100);
-        let client = RagClient::new(config);
+        let client = HttpRagProvider::new(config);
         let results = client.query("test query").await;
         // Should gracefully degrade to empty results
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rag_provider_trait_query_degrades() {
+        // Verify trait method also degrades gracefully
+        let mut config = test_config();
+        config.endpoint = "https://10.255.255.1/v1/query".to_string();
+        config.timeout = Duration::from_millis(100);
+        let provider = HttpRagProvider::new(config);
+        let results = RagProvider::query(&provider, "test query").await;
         assert!(results.is_empty());
     }
 
@@ -330,11 +386,11 @@ mod tests {
         );
         assert!(matches!(cred, RagAuthCredential::ApiKey(ref s) if s == "my-api-key"));
 
-        // No auth_ref → None
+        // No auth_ref -> None
         let cred = RagAuthCredential::from_vault_ref(None, "bearer", None);
         assert!(matches!(cred, RagAuthCredential::None));
 
-        // auth_ref but no key_value → None (key not found in Vault)
+        // auth_ref but no key_value -> None (key not found in Vault)
         let cred =
             RagAuthCredential::from_vault_ref(Some("vault:rag_enterprise_key"), "bearer", None);
         assert!(matches!(cred, RagAuthCredential::None));

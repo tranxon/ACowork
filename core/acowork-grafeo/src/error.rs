@@ -18,6 +18,9 @@ pub enum GrafeoError {
     #[error("Memory error: {0}")]
     Memory(String),
 
+    #[error("Parse error: {0}")]
+    Parse(String),
+
     #[error("Invalid embedding dimension: expected {expected}, got {got}")]
     InvalidDimension {
         /// Expected dimension (EMBEDDING_DIM).
@@ -30,6 +33,12 @@ pub enum GrafeoError {
 impl From<AcoworkError> for GrafeoError {
     fn from(e: AcoworkError) -> Self {
         GrafeoError::Memory(e.to_string())
+    }
+}
+
+impl From<String> for GrafeoError {
+    fn from(s: String) -> Self {
+        GrafeoError::Parse(s)
     }
 }
 

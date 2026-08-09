@@ -264,6 +264,8 @@ pub enum KnowledgeSubType {
     Preference,
     /// Relationship between entities.
     Relation,
+    /// Behavioral pattern / procedure ("when X, do Y").
+    Procedure,
 }
 
 impl KnowledgeSubType {
@@ -272,6 +274,7 @@ impl KnowledgeSubType {
             KnowledgeSubType::Fact => "Fact",
             KnowledgeSubType::Preference => "Preference",
             KnowledgeSubType::Relation => "Relation",
+            KnowledgeSubType::Procedure => "Procedure",
         }
     }
 }
@@ -283,6 +286,7 @@ impl std::str::FromStr for KnowledgeSubType {
             "Fact" => Ok(KnowledgeSubType::Fact),
             "Preference" => Ok(KnowledgeSubType::Preference),
             "Relation" => Ok(KnowledgeSubType::Relation),
+            "Procedure" => Ok(KnowledgeSubType::Procedure),
             _ => Err(format!("unknown KnowledgeSubType: {s}")),
         }
     }
@@ -428,6 +432,10 @@ pub struct KnowledgeNode {
 /// Procedural memory node — behavior pattern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProceduralNode {
+    /// Node ID (None for new nodes, Some for existing nodes from retrieval).
+    /// ADR-051 C4: Added to support update operations through the trait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     /// Human-readable name.
     pub name: String,
     /// Trigger condition description.
@@ -469,6 +477,10 @@ fn default_learned_from() -> String {
 /// Autobiographical memory node — self-knowledge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutobiographicalNode {
+    /// Node ID (None for new nodes, Some for existing nodes from retrieval).
+    /// ADR-051 C4: Added to support update operations through the trait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     /// Category of self-knowledge.
     pub category: AutobioCategory,
     /// Key (e.g. "name", "language", "location").

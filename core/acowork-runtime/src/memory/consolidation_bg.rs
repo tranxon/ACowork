@@ -20,7 +20,6 @@ use acowork_grafeo::consolidation::triple_extraction::TripleExtractorLlm;
 use acowork_grafeo::consolidation::{
     ConsolidationScheduler, GeneralizationConfig, OfflineConsolidationConfig, SchedulerConfig,
 };
-use acowork_grafeo::grafeo::GrafeoStore;
 use tokio::sync::Mutex;
 
 use crate::embedding::EmbeddingProvider;
@@ -43,7 +42,7 @@ impl ConsolidationBgTask {
     /// Spawn the background consolidation task.
     pub fn spawn(
         scheduler: Arc<ConsolidationScheduler>,
-        store: Arc<GrafeoStore>,
+        provider: Arc<dyn acowork_memory::MemoryProvider>,
         llm: Arc<dyn TripleExtractorLlm>,
         embedding_provider: Arc<dyn EmbeddingProvider>,
         poll_interval: Duration,
@@ -52,7 +51,7 @@ impl ConsolidationBgTask {
         let join_handle = tokio::spawn(async move {
             run_consolidation_loop(
                 scheduler,
-                store,
+                provider,
                 llm,
                 embedding_provider,
                 poll_interval,
@@ -82,7 +81,7 @@ impl Drop for ConsolidationBgTask {
 
 async fn run_consolidation_loop(
     scheduler: Arc<ConsolidationScheduler>,
-    store: Arc<GrafeoStore>,
+    provider: Arc<dyn acowork_memory::MemoryProvider>,
     llm: Arc<dyn TripleExtractorLlm>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     poll_interval: Duration,
@@ -102,8 +101,8 @@ async fn run_consolidation_loop(
 
         // Update pending count from the store.
         // GrafeoStore is Sync, so we can call methods directly on the Arc.
-        let pending_count = match store.get_pending_for_consolidation(0, 10_000) {
-            Ok(nodes) => nodes.len(),
+        let pending_count = match provider.get_pending_consolidation_count() {
+            Ok(count) => count,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to count pending nodes for scheduler");
                 continue;
@@ -174,8 +173,8 @@ async fn run_consolidation_loop(
         };
         let gen_config = GeneralizationConfig::default();
 
-        let result = store
-            .run_offline_consolidation_with_generalization(
+        let result = provider
+            .run_offline_consolidation(
                 &offline_config,
                 Some(llm.as_ref()),
                 Some(embedding_fn),
@@ -203,8 +202,8 @@ async fn run_consolidation_loop(
         }
 
         // After running, update pending count again.
-        let new_pending = match store.get_pending_for_consolidation(0, 10_000) {
-            Ok(nodes) => nodes.len(),
+        let new_pending = match provider.get_pending_consolidation_count() {
+            Ok(count) => count,
             Err(_) => 0,
         };
         scheduler.update_pending_count(new_pending).await;
@@ -261,10 +260,10 @@ fn release_consolidation_lock(lock_path: &std::path::Path) {
 
 /// Parameters needed to create the consolidation background pipeline.
 pub struct ConsolidationParams {
-    /// GrafeoStore (shared, already initialized).
-    pub store: Arc<GrafeoStore>,
+    /// Memory provider (shared, already initialized).
+    pub provider: Arc<dyn acowork_memory::MemoryProvider>,
     /// LLM Provider for triple extraction and conflict resolution.
-    pub provider: Arc<dyn acowork_core::providers::traits::Provider>,
+    pub llm_provider: Arc<dyn acowork_core::providers::traits::Provider>,
     /// Model name for the LLM adapter.
     pub model: String,
     /// Embedding provider for generalization.
@@ -298,11 +297,11 @@ pub fn start_consolidation_pipeline(
     // internal state — the scheduler's `run_now()` is not used by our
     // background task; we call the store methods directly.
     let scheduler_store = Arc::new(Mutex::new(
-        GrafeoStore::new_in_memory().expect("in-memory store for scheduler should not fail"),
+        acowork_grafeo::GrafeoStore::new_in_memory().expect("in-memory store for scheduler should not fail"),
     ));
 
     // Create the LLM adapter.
-    let llm_adapter = Arc::new(ProviderLlmAdapter::new(params.provider, params.model));
+    let llm_adapter = Arc::new(ProviderLlmAdapter::new(params.llm_provider, params.model));
 
     // Create the scheduler (uses its own store for `run_now()`, but we
     // use the shared store for our direct consolidation calls).
@@ -314,7 +313,7 @@ pub fn start_consolidation_pipeline(
     // Spawn the background task with the REAL store.
     let bg_task = ConsolidationBgTask::spawn(
         scheduler.clone(),
-        params.store,
+        params.provider,
         llm_adapter,
         params.embedding_provider,
         params.poll_interval,
@@ -332,6 +331,7 @@ pub fn start_consolidation_pipeline(
 mod tests {
     use super::*;
     use acowork_grafeo::consolidation::triple_extraction::{LlmMessage, LlmResponse};
+    use acowork_grafeo::grafeo::GrafeoStore;
     use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
 
     /// A mock TripleExtractorLlm that returns a fixed empty JSON array.
@@ -380,8 +380,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_consolidation_bg_task_starts_and_stops() {
-        let store = Arc::new(GrafeoStore::new_in_memory().unwrap());
-        let scheduler_store = Arc::new(Mutex::new(GrafeoStore::new_in_memory().unwrap()));
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
+        let scheduler_store = Arc::new(Mutex::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap()));
 
         let scheduler = Arc::new(ConsolidationScheduler::new(
             scheduler_store,
@@ -411,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_notify_active() {
-        let scheduler_store = Arc::new(Mutex::new(GrafeoStore::new_in_memory().unwrap()));
+        let scheduler_store = Arc::new(Mutex::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap()));
         let scheduler = Arc::new(ConsolidationScheduler::new(
             scheduler_store,
             SchedulerConfig::default(),

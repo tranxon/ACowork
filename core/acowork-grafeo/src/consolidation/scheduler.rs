@@ -15,36 +15,10 @@ use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Configuration (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
 
-/// Configuration for the consolidation scheduler.
-#[derive(Debug, Clone)]
-pub struct SchedulerConfig {
-    /// Idle timeout in seconds before automatic consolidation.
-    /// Default: 1800 (30 minutes).
-    pub idle_timeout_secs: u64,
-    /// Minimum number of pending nodes before triggering consolidation.
-    /// Default: 50.
-    pub accumulation_threshold: usize,
-    /// Batch size per consolidation run.
-    /// Default: 50 (inherited from OfflineConsolidationConfig).
-    pub batch_size: usize,
-    /// Minimum age (in hours) before a Pending node is eligible.
-    /// Default: 1 (inherited from OfflineConsolidationConfig).
-    pub min_pending_age_hours: u64,
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            idle_timeout_secs: 1800,
-            accumulation_threshold: 50,
-            batch_size: 50,
-            min_pending_age_hours: 1,
-        }
-    }
-}
+pub use acowork_memory::consolidation::SchedulerConfig;
 
 // ---------------------------------------------------------------------------
 // Trigger reason

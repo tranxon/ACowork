@@ -8,21 +8,15 @@
 //! Grafeo (local) + RAG (enterprise) in parallel, with source annotations.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use acowork_grafeo::{
-    grafeo::GrafeoStore,
-    spreading::{config_from_hint, get_hint_weights},
-    types::labels,
+use acowork_memory::{
+    labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
-use acowork_memory::{HintType, MemoryQuery, RetrievalMetrics};
 use chrono::{DateTime, Utc};
-use grafeo_common::types::{NodeId, Timestamp, Value};
 
 use crate::embedding::EmbeddingProvider;
 use crate::episode_distill::DistilledEpisode;
 use crate::error::{Result, RuntimeError};
-use crate::tools::rag::client::RagClient;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -154,37 +148,17 @@ pub struct ConversationRecord {
 
 /// Orchestrates the three-phase memory lifecycle.
 ///
-/// When `rag_client` is Some, retrieve() runs dual-channel:
-/// Grafeo (local) + RAG (enterprise) in parallel.
+/// ADR-051 C4: RAG channel removed from MemoryManager.
+/// RAG retrieval is now handled by `loop_memory.rs` which calls
+/// `rag_provider.query()` separately and merges results by score.
 pub struct MemoryManager {
     config: MemoryManagerConfig,
-    /// Optional RAG client for enterprise knowledge retrieval (Phase 4 S4.5).
-    /// None = no RAG declared in manifest, behavior identical to Phase 3.
-    rag_client: Option<Arc<RagClient>>,
 }
 
 impl MemoryManager {
     /// Create a new MemoryManager with the given configuration.
     pub fn new(config: MemoryManagerConfig) -> Self {
-        Self {
-            config,
-            rag_client: None,
-        }
-    }
-
-    /// Create a new MemoryManager with RAG support.
-    ///
-    /// When rag_client is Some, retrieve() will run dual-channel retrieval.
-    pub fn with_rag(config: MemoryManagerConfig, rag_client: Arc<RagClient>) -> Self {
-        Self {
-            config,
-            rag_client: Some(rag_client),
-        }
-    }
-
-    /// Check if this manager has RAG enabled
-    pub fn has_rag(&self) -> bool {
-        self.rag_client.is_some()
+        Self { config }
     }
 
     /// Retrieve relevant memories for the current query.
@@ -196,14 +170,14 @@ impl MemoryManager {
     ///
     /// Pipeline: (auto-embed) → Grafeo hybrid_search → graph_expand → dedup →
     /// PageRank boost (topology re-rank) → merge & rank
-    /// + RAG channel (if rag_client is Some, run in parallel).
+    /// + RAG channel (if rag_provider is Some, run in parallel).
     ///
     /// RAG channel uses the user message as query with default top_k=3.
     /// Results from both channels are merged and sorted by score.
     /// Source annotations distinguish [Grafeo] vs [RAG:<tool_name>].
     pub async fn retrieve(
         &self,
-        store: &GrafeoStore,
+        provider: &dyn MemoryProvider,
         query: &mut MemoryQuery,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<RetrievalResult> {
@@ -211,12 +185,12 @@ impl MemoryManager {
         // Timeout is handled by FallbackEmbeddingProvider internally
         // (200ms per attempt, then fallback to next provider).
         if query.embedding.is_none()
-            && let Some(provider) = embedding_provider {
-                match provider.embed(&query.query_text).await {
+            && let Some(emb_prov) = embedding_provider {
+                match emb_prov.embed(&query.query_text).await {
                     Ok(vec) => {
                         tracing::debug!(
                             dim = vec.len(),
-                            provider = provider.name(),
+                            provider = emb_prov.name(),
                             "Auto-generated query embedding"
                         );
                         query.embedding = Some(vec);
@@ -237,7 +211,7 @@ impl MemoryManager {
         };
         let min_score = query.min_score.unwrap_or(self.config.default_min_score);
         let hint_type = query.hint_type;
-        let (vector_weight, text_weight, _graph_weight) = get_hint_weights(hint_type.as_str());
+        let (vector_weight, text_weight, _graph_weight) = hint_weights(hint_type);
 
         // Determine which labels to search based on hint type.
         let search_labels: Vec<&str> = match hint_type {
@@ -255,7 +229,7 @@ impl MemoryManager {
 
         for label in &search_labels {
             let search_result = if let Some(ref embedding) = query.embedding {
-                store
+                provider
                     .hybrid_search_full(
                         label,
                         &query.query_text,
@@ -268,7 +242,7 @@ impl MemoryManager {
                     .map_err(|e| RuntimeError::Tool(format!("Hybrid search failed: {e}")))
             } else {
                 // Fallback to text search when no embedding is available.
-                store
+                provider
                     .text_search_with_filter(
                         label,
                         "content",
@@ -292,7 +266,7 @@ impl MemoryManager {
                         } else {
                             "text".to_string()
                         };
-                        all_results.push((node_id.as_u64(), score, label.to_string(), source));
+                        all_results.push((node_id, score, label.to_string(), source));
                     }
                 }
                 Err(e) => {
@@ -305,25 +279,19 @@ impl MemoryManager {
         // Graph expansion (if enabled and we have seed results).
         let mut graph_expand_count = 0;
         if self.config.enable_graph_expand && !all_results.is_empty() {
-            let expand_config = config_from_hint(hint_type.as_str());
-            let seeds: Vec<(NodeId, f64)> = all_results
+            let seeds: Vec<(u64, f64)> = all_results
                 .iter()
-                .map(|(id, score, _, _)| (NodeId::new(*id), *score))
+                .map(|(id, score, _, _)| (*id, *score))
                 .collect();
 
-            match store
-                .graph_expand(&seeds, &expand_config)
+            match provider
+                .graph_expand_seeded(&seeds, hint_type.as_str())
                 .map_err(|e| RuntimeError::Tool(format!("Graph expand failed: {e}")))
             {
                 Ok(expanded) => {
                     graph_expand_count = expanded.len();
-                    for node in expanded {
-                        all_results.push((
-                            node.node_id.as_u64(),
-                            node.accumulated_score,
-                            node.label,
-                            "graph".to_string(),
-                        ));
+                    for (node_id, score, label) in expanded {
+                        all_results.push((node_id, score, label, "graph".to_string()));
                     }
                 }
                 Err(e) => {
@@ -353,13 +321,9 @@ impl MemoryManager {
         if let Some(ref exclude_sid) = query.filters.exclude_session_id {
             let before = best_by_id.len();
             best_by_id.retain(|node_id, _| {
-                let nid = NodeId::new(*node_id);
-                match store.db().get_node(nid) {
-                    Some(node) => node
-                        .get_property("session_id")
-                        .map(|v| v.to_string().trim_matches('"') != *exclude_sid)
-                        .unwrap_or(true),
-                    None => true,
+                match provider.get_node_session_id(*node_id) {
+                    Ok(Some(sid)) => sid != *exclude_sid,
+                    _ => true, // No session_id or error -> keep
                 }
             });
             tracing::debug!(
@@ -376,17 +340,17 @@ impl MemoryManager {
             && self.config.pagerank_weight > 0.0
             && !best_by_id.is_empty()
         {
-            let mut scored: Vec<(NodeId, f64)> = best_by_id
+            let mut scored: Vec<(u64, f64)> = best_by_id
                 .iter()
-                .map(|(id, (score, _, _))| (NodeId::new(*id), *score))
+                .map(|(id, (score, _, _))| (*id, *score))
                 .collect();
 
-            if let Err(e) = store.apply_pagerank_boost(&mut scored, self.config.pagerank_weight) {
+            if let Err(e) = provider.apply_pagerank_boost(&mut scored, self.config.pagerank_weight) {
                 tracing::warn!("PageRank boost failed, continuing with unboosted scores: {e}");
             } else {
                 // Map boosted scores back to best_by_id.
                 for (node_id, boosted_score) in scored {
-                    if let Some(entry) = best_by_id.get_mut(&node_id.as_u64()) {
+                    if let Some(entry) = best_by_id.get_mut(&node_id) {
                         entry.0 = boosted_score;
                     }
                 }
@@ -396,7 +360,14 @@ impl MemoryManager {
         // Build RetrievedMemory list, sorted by score descending.
         let mut memories: Vec<RetrievedMemory> = Vec::new();
         for (node_id, (score, label, source)) in best_by_id {
-            let content = extract_node_content(store, node_id);
+            let content = match provider.get_node_content(node_id) {
+                Ok(Some(c)) => c,
+                Ok(None) => String::new(),
+                Err(e) => {
+                    tracing::warn!(node_id, error = %e, "Failed to extract node content");
+                    String::new()
+                }
+            };
             memories.push(RetrievedMemory {
                 content,
                 label,
@@ -408,30 +379,6 @@ impl MemoryManager {
             });
         }
 
-        // RAG channel: parallel query when rag_client is configured (S4.5)
-        //
-        // Uses the user message as query with top_k=3 (lightweight).
-        // RAG unavailability is non-blocking — timeout returns empty.
-        let mut rag_result_count = 0;
-        if let Some(ref rag_client) = self.rag_client {
-            let rag_results = rag_client.query(&query.query_text).await;
-            rag_result_count = rag_results.len();
-            for annotated in rag_results {
-                memories.push(RetrievedMemory {
-                    content: annotated.item.content,
-                    label: annotated
-                        .source_label
-                        .trim_start_matches('[')
-                        .trim_end_matches(']')
-                        .to_string(),
-                    score: annotated.item.score as f64,
-                    source: "rag".to_string(),
-                    node_id: 0, // RAG results have no Grafeo node
-                    source_url: annotated.item.source_url,
-                    chunk_id: annotated.item.chunk_id,
-                });
-            }
-        }
         memories.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -466,12 +413,11 @@ impl MemoryManager {
         };
 
         tracing::debug!(
-            "Retrieved {} memories (max_score={:.3}, avg_score={:.3}, graph_expanded={}, rag_results={})",
+            "Retrieved {} memories (max_score={:.3}, avg_score={:.3}, graph_expanded={})",
             result_count,
             max_score,
             avg_score,
             graph_expand_count,
-            rag_result_count
         );
 
         Ok(RetrievalResult { memories, metrics })
@@ -612,13 +558,13 @@ impl MemoryManager {
     pub fn inject_with_ambiguous_hints(
         &self,
         retrieval: &RetrievalResult,
-        store: &GrafeoStore,
+        provider: &dyn MemoryProvider,
     ) -> InjectedMemory {
         let mut injected = self.inject(retrieval);
 
         // Check for pending ambiguous conflicts.
-        if let Ok(true) = store.should_trigger_confirmation()
-            && let Ok(Some(hint)) = store.generate_confirmation_hint() {
+        if let Ok(true) = provider.should_trigger_confirmation()
+            && let Ok(Some(hint)) = provider.generate_confirmation_hint() {
                 let hint_line = format!("[Ambiguous] {}", hint);
                 let hint_tokens = estimate_tokens(&hint_line);
                 injected.formatted_text = format!("{}\n{}", injected.formatted_text, hint_line);
@@ -632,40 +578,44 @@ impl MemoryManager {
     /// Record a conversation turn as an episode.
     ///
     /// In production this runs asynchronously; for now synchronous.
-    pub fn record(&self, store: &GrafeoStore, record: &ConversationRecord) -> Result<()> {
+    pub fn record(
+        &self,
+        provider: &dyn MemoryProvider,
+        record: &ConversationRecord,
+    ) -> Result<()> {
         let content = format!(
             "User: {}\nAssistant: {}",
             record.user_message, record.assistant_response
         );
 
-        let mut props = vec![
-            ("session_id", Value::from(record.session_id.as_str())),
-            ("turn_index", Value::from(i64::from(record.turn_index))),
-            ("role", Value::from("conversation")),
-            ("content", Value::from(content.as_str())),
-            (
-                "created_at",
-                Value::from(Timestamp::from_micros(record.timestamp.timestamp_micros())),
-            ),
-            ("consolidated", Value::from(false)),
-        ];
-
-        // Store retrieved memory IDs as metadata.
+        let mut metadata = HashMap::new();
         if !record.retrieved_memory_ids.is_empty() {
-            let ids_json =
-                serde_json::to_string(&record.retrieved_memory_ids).map_err(RuntimeError::Json)?;
-            props.push(("metadata", Value::from(ids_json.as_str())));
+            metadata.insert(
+                "retrieved_memory_ids".to_string(),
+                serde_json::to_value(&record.retrieved_memory_ids)
+                    .map_err(RuntimeError::Json)?,
+            );
         }
 
-        let node_id = store
-            .store_node(labels::EPISODIC, props)
+        let episode = Episode {
+            session_id: record.session_id.clone(),
+            turn_index: record.turn_index,
+            role: "conversation".to_string(),
+            content,
+            embedding: None,
+            timestamp: record.timestamp,
+            consolidated: false,
+            metadata,
+            importance: 0.5,
+        };
+
+        provider
+            .store_episode(&episode)
             .map_err(|e| RuntimeError::Tool(format!("Failed to record episode: {e}")))?;
 
         tracing::info!(
-            node_id = node_id.0,
             session_id = %record.session_id,
             turn_index = record.turn_index,
-            content_len = content.len(),
             "MemoryManager: recorded episode"
         );
 
@@ -683,19 +633,17 @@ impl MemoryManager {
     /// the summary text (200ms timeout) for future vector retrieval.
     pub async fn record_distilled(
         &self,
-        store: &GrafeoStore,
+        provider: &dyn MemoryProvider,
         episode: &DistilledEpisode,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<()> {
-        // ── Auto-generate episode embedding ──
-        // Timeout is handled by FallbackEmbeddingProvider internally
-        // (200ms per attempt, then fallback to next provider).
-        let episode_embedding: Option<Vec<f32>> = if let Some(provider) = embedding_provider {
-            match provider.embed(&episode.summary).await {
+        // Auto-generate episode embedding (200ms timeout via FallbackEmbeddingProvider).
+        let episode_embedding: Option<Vec<f32>> = if let Some(emb_prov) = embedding_provider {
+            match emb_prov.embed(&episode.summary).await {
                 Ok(vec) => {
                     tracing::debug!(
                         dim = vec.len(),
-                        provider = provider.name(),
+                        provider = emb_prov.name(),
                         "Auto-generated episode embedding"
                     );
                     Some(vec)
@@ -716,38 +664,35 @@ impl MemoryManager {
         let triples_json =
             serde_json::to_string(&episode.triples).unwrap_or_else(|_| "[]".to_string());
 
-        let props = vec![
-            ("session_id", Value::from(episode.session_id.as_str())),
-            ("role", Value::from("distilled")),
-            ("content", Value::from(episode.summary.as_str())),
-            (
-                "created_at",
-                Value::from(Timestamp::from_micros(
-                    chrono::Utc::now().timestamp_micros(),
-                )),
-            ),
-            ("consolidated", Value::from(false)),
-            ("importance", Value::from(0.7_f64)),
-            (
-                "source_session_id",
-                Value::from(episode.source_session_id.as_str()),
-            ),
-            ("entities", Value::from(entities_str.as_str())),
-            ("triples", Value::from(triples_json.as_str())),
-        ];
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "source_session_id".to_string(),
+            serde_json::Value::String(episode.source_session_id.clone()),
+        );
+        metadata.insert(
+            "entities".to_string(),
+            serde_json::Value::String(entities_str),
+        );
+        metadata.insert(
+            "triples".to_string(),
+            serde_json::Value::String(triples_json),
+        );
 
-        let node_id = store
-            .store_node(labels::EPISODIC, props)
+        let ep = Episode {
+            session_id: episode.session_id.clone(),
+            turn_index: 0,
+            role: "distilled".to_string(),
+            content: episode.summary.clone(),
+            embedding: episode_embedding,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata,
+            importance: 0.7,
+        };
+
+        provider
+            .store_episode(&ep)
             .map_err(|e| RuntimeError::Tool(format!("Failed to record distilled episode: {e}")))?;
-
-        // Store embedding vector on the node for future vector retrieval.
-        if let Some(ref emb) = episode_embedding {
-            store.db().set_node_property(
-                node_id,
-                "embedding",
-                grafeo_common::types::Value::Vector(std::sync::Arc::from(emb.as_slice())),
-            );
-        }
 
         tracing::debug!(
             session_id = %episode.session_id,
@@ -776,15 +721,15 @@ impl MemoryManager {
     /// `fail_count` is incremented instead.
     pub fn record_procedural_from_failure(
         &self,
-        store: &GrafeoStore,
+        provider: &dyn MemoryProvider,
         tool_name: &str,
         error_message: &str,
     ) -> Result<()> {
-        use acowork_grafeo::types::{NodeStatus, ProceduralNode};
+        use acowork_memory::{NodeStatus, ProceduralNode};
 
         // Check for an existing procedure with the same trigger.
         let trigger = format!("使用 {} 工具时", tool_name);
-        let existing = store
+        let existing = provider
             .find_procedural_by_trigger(&trigger, 1)
             .map_err(|e| RuntimeError::Tool(format!("Failed to find procedure: {e}")))?;
 
@@ -792,12 +737,11 @@ impl MemoryManager {
             // Reinforce existing: increment fail count.
             node.fail_count += 1;
             node.updated_at = chrono::Utc::now();
-            store
+            provider
                 .update_procedural(&node)
                 .map_err(|e| RuntimeError::Tool(format!("Failed to update procedure: {e}")))?;
 
             tracing::info!(
-                node_id = node.id.map(|id| id.as_u64()).unwrap_or(0),
                 tool_name,
                 fail_count = node.fail_count,
                 "Path B: reinforced existing ProceduralNode on failure"
@@ -835,11 +779,10 @@ impl MemoryManager {
             metadata: std::collections::HashMap::new(),
         };
 
-        let id = store
+        provider
             .store_procedural(&node)
             .map_err(|e| RuntimeError::Tool(format!("Failed to store procedure: {e}")))?;
         tracing::info!(
-            node_id = id.as_u64(),
             tool_name,
             "Path B: created ProceduralNode from execution failure"
         );
@@ -853,11 +796,11 @@ impl MemoryManager {
     /// 3. Return injection text + metrics
     pub async fn process_turn(
         &self,
-        store: &GrafeoStore,
+        provider: &dyn MemoryProvider,
         query: &mut MemoryQuery,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<(InjectedMemory, RetrievalMetrics)> {
-        let retrieval = self.retrieve(store, query, embedding_provider).await?;
+        let retrieval = self.retrieve(provider, query, embedding_provider).await?;
         let metrics = retrieval.metrics.clone();
         let injected = self.inject(&retrieval);
         Ok((injected, metrics))
@@ -868,79 +811,17 @@ impl MemoryManager {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract human-readable content from a Grafeo node.
-fn extract_node_content(store: &GrafeoStore, node_id: u64) -> String {
-    let nid = NodeId::new(node_id);
-    let Some(node) = store.get_node(nid) else {
-        return String::new();
-    };
-
-    // Autobiographical nodes: include category for disambiguation.
-    // Without this, the LLM cannot distinguish "agent's own capability"
-    // from "learned user preference" — both show as [Autobiographical].
-    // inject() prepends the label, so final output is:
-    //   [Autobiographical] Capability: language: Rust
-    //   [Autobiographical] Preference: answer_style: 大鱼 prefers concise answers
-    if let Some(category) = node.get_property("category").and_then(|v| v.as_str()) {
-        let key = node
-            .get_property("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let value = node
-            .get_property("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !key.is_empty() && !value.is_empty() {
-            return format!("{category}: {key}: {value}");
-        }
-        if !value.is_empty() {
-            return format!("{category}: {value}");
-        }
+/// Get hybrid search weights based on hint type.
+///
+/// Returns `(vector_weight, text_weight, graph_weight)`.
+/// Inlined from `acowork_grafeo::spreading::get_hint_weights` (ADR-051 C4).
+fn hint_weights(hint_type: HintType) -> (f64, f64, f64) {
+    match hint_type {
+        HintType::Semantic => (0.8, 0.2, 0.0),
+        HintType::Factual => (0.5, 0.5, 0.0),
+        HintType::Relational => (0.6, 0.2, 0.2),
+        HintType::Identity => (0.3, 0.7, 0.0),
     }
-
-    // Procedural nodes: format as behavioral guideline.
-    // Must come before the generic "content" fallback, because
-    // ProceduralNode.to_properties() stores a combined "content" field
-    // that doesn't use the guideline format.
-    // "当 [trigger_condition] 时，优先 [action_pattern]"
-    let trigger = node
-        .get_property("trigger_condition")
-        .and_then(|v| v.as_str());
-    let action = node.get_property("action_pattern").and_then(|v| v.as_str());
-    if let (Some(t), Some(a)) = (trigger, action) {
-        return format!("当 {} 时，优先 {}", t, a);
-    }
-
-    // Try common content fields in priority order.
-    if let Some(content) = node.get_property("content").and_then(|v| v.as_str()) {
-        return content.to_string();
-    }
-    if let Some(value) = node.get_property("value").and_then(|v| v.as_str()) {
-        return value.to_string();
-    }
-
-    // Knowledge nodes: combine subject + predicate + object.
-    let subject = node.get_property("subject").and_then(|v| v.as_str());
-    let predicate = node.get_property("predicate").and_then(|v| v.as_str());
-    let object = node.get_property("object").and_then(|v| v.as_str());
-
-    if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
-        return format!("{s} {p} {o}");
-    }
-
-    // Generic action_pattern fallback (non-procedural nodes with action_pattern).
-    if let Some(action) = node.get_property("action_pattern").and_then(|v| v.as_str()) {
-        return action.to_string();
-    }
-
-    // Fallback: use any string property.
-    for key in ["name", "key", "description"] {
-        if let Some(v) = node.get_property(key).and_then(|v| v.as_str()) {
-            return v.to_string();
-        }
-    }
-
-    String::new()
 }
 
 /// Classification of autobiographical memory subcategory for budget
@@ -992,12 +873,13 @@ fn estimate_tokens(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_grafeo::types::{DEFAULT_EMBEDDING_DIM, labels};
-    use grafeo_common::types::Value;
+    use acowork_grafeo::grafeo::GrafeoStore as TestStore;
+    use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
+    use grafeo_common::types::{NodeId, Value};
 
-    /// Helper: create an in-memory GrafeoStore for testing.
-    fn test_store() -> GrafeoStore {
-        GrafeoStore::new_in_memory().unwrap()
+    /// Helper: create an in-memory TestStore for testing.
+    fn test_store() -> TestStore {
+        TestStore::new_in_memory().unwrap()
     }
 
     /// Helper: generate a test embedding vector.
@@ -1006,7 +888,7 @@ mod tests {
     }
 
     /// Helper: store an Episodic node with content and embedding.
-    fn store_episode(store: &GrafeoStore, content: &str, embedding: &[f32]) -> u64 {
+    fn store_episode(store: &TestStore, content: &str, embedding: &[f32]) -> u64 {
         let id = store
             .store_node(labels::EPISODIC, [("content", Value::from(content))])
             .unwrap();
@@ -1020,7 +902,7 @@ mod tests {
 
     /// Helper: store a Knowledge node with embedding.
     fn store_knowledge(
-        store: &GrafeoStore,
+        store: &TestStore,
         subject: &str,
         predicate: &str,
         object: &str,
@@ -1050,7 +932,7 @@ mod tests {
     /// Helper: store an Autobiographical node.
     #[allow(dead_code)]
     fn store_autobiographical(
-        store: &GrafeoStore,
+        store: &TestStore,
         key: &str,
         value: &str,
         embedding: &[f32],
@@ -1077,7 +959,7 @@ mod tests {
 
     /// Helper: store a Procedural node with trigger and action.
     #[allow(dead_code)]
-    fn store_procedure(store: &GrafeoStore, trigger: &str, action: &str, embedding: &[f32]) -> u64 {
+    fn store_procedure(store: &TestStore, trigger: &str, action: &str, embedding: &[f32]) -> u64 {
         use acowork_grafeo::types::{NodeStatus, ProceduralNode};
         let node = ProceduralNode {
             id: None,
@@ -1154,7 +1036,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty(), "expected at least one result");
         assert!(!result.metrics.abstention_triggered);
     }
@@ -1180,7 +1062,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         assert_eq!(result.metrics.result_count, 0);
@@ -1208,7 +1090,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(result.metrics.abstention_triggered);
     }
 
@@ -1234,7 +1116,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         // Text search should still find results.
         assert!(!result.memories.is_empty());
     }
@@ -1370,7 +1252,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        manager.record(&store, &record).unwrap();
+        manager.record(&store as &dyn MemoryProvider, &record).unwrap();
 
         // Verify the episode was stored by searching.
         let text_results = store
@@ -1487,7 +1369,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(
             !result.memories.is_empty(),
             "should retrieve Rust-related nodes"
@@ -1526,7 +1408,7 @@ mod tests {
             hint_type: HintType::Semantic,
         };
 
-        let result = manager.retrieve(&store, &mut query, None).await.unwrap();
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty());
     }
 
@@ -1853,8 +1735,7 @@ mod tests {
         let id = store.store_procedural(&node).unwrap();
 
         // extract_node_content should format it as "当 X 时，优先 Y".
-        let content = extract_node_content(&store, id.as_u64());
-        assert!(
+        let content = store.get_node_content(id.as_u64()).ok().flatten().unwrap_or_default();        assert!(
             content.starts_with("当"),
             "Procedural content should start with '当', got: {}",
             content

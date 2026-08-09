@@ -17,6 +17,7 @@ pub mod eval;
 pub mod export;
 pub mod forgetting;
 pub mod grafeo;
+pub mod provider_impl;
 pub mod graph;
 pub mod index_config;
 pub mod judge;
@@ -38,9 +39,10 @@ pub use conflict::{
 };
 pub use consolidation::{
     BehaviorPattern, ConflictCandidate, ConsolidationRun, ConsolidationScheduler,
-    EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput,
-    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, SchedulerConfig,
-    TriggerReason,
+    ConflictResolutionDetail, EmbeddingFn, GeneralizationConfig, GeneralizationResult,
+    LlmMessage, LlmResponse, MemoryStoreInput, MemoryStoreResult,
+    OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory, ProcessResult,
+    SchedulerConfig, TripleExtractorLlm, TriggerReason,
 };
 pub use engineering::{
     CapacityConfig, CapacityStatus, ConcurrencyConfig, EmbeddingLevel, HealthCheckResult,
