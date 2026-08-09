@@ -201,6 +201,12 @@ pub struct AgentCore {
     // Consolidation control is delegated to MemoryProvider trait.
     // Background task handle kept for lifecycle management.
     pub(crate) consolidation_bg_task: Option<crate::memory::ConsolidationBgTask>,
+    /// ADR-051 P4: Runtime-internal consolidation timer.
+    /// Replaces grafeo's `ConsolidationScheduler`. The timer implements
+    /// idle-timeout + accumulation-threshold scheduling policy without
+    /// holding a store reference. `notify_consolidation_active()` resets
+    /// the idle timer so consolidation doesn't run during active use.
+    pub(crate) consolidation_timer: Option<Arc<crate::memory::ConsolidationTimer>>,
     /// ADR-028: cumulative input tokens across every LLM call made by this
     /// agent process. Sourced from `accumulate_llm_usage` on every LLM call
     /// and from `merge_token_totals` on every `list_sessions` scan. Not
@@ -277,6 +283,7 @@ impl AgentCore {
                 crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
             )),
             consolidation_bg_task: None,
+            consolidation_timer: None,
             // ADR-046: blob store slot is empty by default; Phase B
             // populates it via `set_attachment_service` once the work_dir
             // is known. Until then, multimodal image parts cannot be
@@ -758,8 +765,9 @@ impl AgentCore {
             poll_interval: Duration::from_secs(60),
             work_dir: Some(std::path::PathBuf::from(&self.config.work_dir)),
         };
-        let (_scheduler, bg_task) = start_consolidation_pipeline(params);
+        let (timer, bg_task) = start_consolidation_pipeline(params);
         self.consolidation_bg_task = Some(bg_task);
+        self.consolidation_timer = Some(timer);
         // ADR-051 C3: Also notify the provider to start its internal consolidation.
         if let Some(ref provider) = self.memory_provider {
             let _ = provider.start_consolidation(&SchedulerConfig::default());
@@ -768,7 +776,13 @@ impl AgentCore {
     }
 
     pub async fn notify_consolidation_active(&self) {
-        // ADR-051 C3: Delegate to MemoryProvider trait method.
+        // ADR-051 P4: Reset the Runtime-internal ConsolidationTimer's idle
+        // timer so consolidation doesn't run during active use.
+        if let Some(ref timer) = self.consolidation_timer {
+            timer.notify_active().await;
+        }
+        // Also notify the Provider (for engines that manage their own
+        // scheduling internally). GrafeoStore's impl is a no-op today.
         if let Some(ref provider) = self.memory_provider {
             provider.notify_consolidation_active().await;
         }
@@ -964,6 +978,7 @@ impl Clone for AgentCore {
             embedding_provider: self.embedding_provider.clone(),
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_bg_task: None, // sessions don't own bg task
+            consolidation_timer: self.consolidation_timer.clone(), // shared timer for idle reset
             attachment_service: self.attachment_service.clone(),
             // ADR-028: agent-scoped counters are intentionally SHARED across
             // clones. Cloning an `AtomicU64` snapshots the *current value*

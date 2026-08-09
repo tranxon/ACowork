@@ -17,7 +17,8 @@ pub use acowork_memory::{
 };
 
 pub use consolidation_bg::{
-    ConsolidationBgTask, ConsolidationParams, start_consolidation_pipeline,
+    ConsolidationBgTask, ConsolidationParams, ConsolidationTimer, TriggerReason,
+    start_consolidation_pipeline,
 };
 pub use judge_llm::evaluate_retrieval_llm;
 pub use llm_adapter::ProviderLlmAdapter;

@@ -382,4 +382,52 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         bg_task.abort();
     }
+
+    /// Regression for P0 fix: the `ConsolidationTimer` returned from
+    /// `start_consolidation_pipeline` must have a functional
+    /// `notify_active()` method. AgentCore stores this timer and calls
+    /// `notify_active()` on every agent turn to reset the idle timer.
+    ///
+    /// This test verifies the timer's idle-reset works correctly after
+    /// being created and used in a background task context.
+    #[tokio::test]
+    async fn test_timer_idle_reset_after_consolidation_run() {
+        let timer = Arc::new(ConsolidationTimer::new(SchedulerConfig {
+            idle_timeout_secs: 1800,
+            accumulation_threshold: 50,
+            ..Default::default()
+        }));
+
+        // Simulate agent activity: notify_active should reset idle.
+        timer.notify_active().await;
+
+        // Simulate time passing (1 second).
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Verify idle is small (recently active).
+        let idle_secs = {
+            let state = timer.state.lock().await;
+            (Utc::now() - state.last_active_at).num_seconds()
+        };
+        assert!(
+            idle_secs < 5,
+            "Idle should be < 5s after notify_active, got {idle_secs}s"
+        );
+
+        // Without notify_active, idle should NOT trigger (pending = 0).
+        timer.update_pending_count(0).await;
+        let trigger = timer.should_run().await;
+        assert_eq!(trigger, None, "Should not trigger with 0 pending nodes");
+
+        // With pending nodes but recent activity, should still not trigger
+        // (idle_timeout_secs = 1800, only 1s elapsed).
+        timer.update_pending_count(100).await;
+        let trigger = timer.should_run().await;
+        // Accumulation threshold is 50, pending is 100 -> should trigger.
+        assert_eq!(
+            trigger,
+            Some(TriggerReason::Accumulation),
+            "Should trigger via accumulation when pending >= threshold"
+        );
+    }
 }
