@@ -655,3 +655,42 @@ pub struct StoreStats {
     /// Number of indexes (vector + full-text).
     pub index_count: usize,
 }
+
+// ============================================================================
+// Distilled Episode Types (migrated from acowork-runtime::episode_distill)
+// ADR-051 P2: Moved here so MemoryManager (in acowork-memory) can use
+// DistilledEpisode without depending on acowork-runtime.
+// ============================================================================
+
+/// A simple subject-predicate-object triple extracted during compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Triple {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
+
+/// A compacted/distilled episode - natural-language summary of a conversation segment.
+///
+/// Per [ADR-011], the summary is plain natural language text. No structured JSON
+/// fields (intent_type, decision, keywords, etc.) - the summary text IS the
+/// distillation result and is directly suitable for semantic retrieval.
+///
+/// Entities and triples are extracted during compaction by the compact model
+/// (replaces per-round memory_hint LLM extraction).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistilledEpisode {
+    /// Session that produced this episode.
+    pub session_id: String,
+    /// Natural-language summary of the conversation (or conversation segment).
+    pub summary: String,
+    /// Source session ID for traceability.
+    pub source_session_id: String,
+    /// Whether this episode has been consolidated to the semantic layer.
+    /// Initial value is always `false`.
+    pub consolidated: bool,
+    /// Entities extracted during compaction (max 10, comma-separated in prompt output).
+    pub entities: Vec<String>,
+    /// Knowledge triples (subject|predicate|object) extracted during compaction.
+    pub triples: Vec<Triple>,
+}

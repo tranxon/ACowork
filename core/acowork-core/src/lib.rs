@@ -15,6 +15,7 @@ pub mod mqtt_proto {
 pub mod budget;
 pub mod crlf;
 pub mod defaults;
+pub mod embedding;
 pub mod error;
 pub mod event_bus;
 pub mod health;
@@ -45,6 +46,7 @@ pub use protocol::{
 };
 
 pub use budget::{Budget, UsageReport};
+pub use embedding::{EmbeddingError, EmbeddingProvider};
 pub use error::AcoworkError;
 pub use intent::Intent;
 pub use packaging::{

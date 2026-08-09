@@ -22,7 +22,10 @@ use std::sync::Arc;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+
+// ADR-051 P2: DistilledEpisode + Triple moved to acowork-memory.
+pub use acowork_memory::{DistilledEpisode, Triple};
 
 use crate::agent::loop_session::strip_think_block;
 use crate::embedding::EmbeddingProvider;
@@ -32,38 +35,8 @@ use crate::error::{Result, RuntimeError};
 // Data types
 // ---------------------------------------------------------------------------
 
-/// A simple subject-predicate-object triple extracted during compaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Triple {
-    pub subject: String,
-    pub predicate: String,
-    pub object: String,
-}
-
-/// A compacted/distilled episode — natural-language summary of a conversation segment.
-///
-/// Per [ADR-011], the summary is plain natural language text. No structured JSON
-/// fields (intent_type, decision, keywords, etc.) — the summary text IS the
-/// distillation result and is directly suitable for Grafeo semantic retrieval.
-///
-/// Entities and triples are extracted during compaction by the compact model
-/// (replaces per-round memory_hint LLM extraction).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DistilledEpisode {
-    /// Session that produced this episode.
-    pub session_id: String,
-    /// Natural-language summary of the conversation (or conversation segment).
-    pub summary: String,
-    /// Source session ID for traceability.
-    pub source_session_id: String,
-    /// Whether this episode has been consolidated to the semantic layer.
-    /// Initial value is always `false`.
-    pub consolidated: bool,
-    /// Entities extracted during compaction (max 10, comma-separated in prompt output).
-    pub entities: Vec<String>,
-    /// Knowledge triples (subject|predicate|object) extracted during compaction.
-    pub triples: Vec<Triple>,
-}
+// Triple and DistilledEpisode are now defined in acowork-memory (ADR-051 P2).
+// Re-exported at the top of this file: pub use acowork_memory::{DistilledEpisode, Triple};
 
 // ---------------------------------------------------------------------------
 // Prompt templates

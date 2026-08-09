@@ -13,46 +13,11 @@
 pub mod ollama;
 pub mod remote;
 
+// ADR-051 P2: EmbeddingProvider trait + EmbeddingError moved to acowork-core.
+pub use acowork_core::{EmbeddingError, EmbeddingProvider};
+
 use async_trait::async_trait;
 use std::sync::Arc;
-
-/// Embedding generation trait
-#[async_trait]
-pub trait EmbeddingProvider: Send + Sync {
-    /// Provider name
-    fn name(&self) -> &str;
-
-    /// Generate embedding for a single text
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
-
-    /// Generate embeddings for multiple texts (batch)
-    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError>;
-
-    /// Get the dimension of embeddings produced by this provider
-    fn dimension(&self) -> usize;
-
-    /// Check if this provider is available (e.g., model loaded, API reachable)
-    async fn is_available(&self) -> bool;
-}
-
-/// Embedding generation errors
-#[derive(Debug, thiserror::Error)]
-pub enum EmbeddingError {
-    #[error("Local embedding error: {0}")]
-    Local(String),
-
-    #[error("Remote embedding error: {0}")]
-    Remote(String),
-
-    #[error("Timeout: embedding generation exceeded {0}ms")]
-    Timeout(u64),
-
-    #[error("Provider unavailable: {0}")]
-    Unavailable(String),
-
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-}
 
 /// Configuration for the embedding fallback chain
 #[derive(Debug, Clone)]

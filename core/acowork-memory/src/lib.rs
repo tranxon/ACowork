@@ -12,6 +12,7 @@
 //! Design ref: ADR-051, docs/05-memory.md §10
 
 pub mod consolidation;
+pub mod manager;
 pub mod provider;
 pub mod store;
 pub mod types;
@@ -21,6 +22,12 @@ pub use provider::MemoryProvider;
 
 // Re-exports: MemoryStore trait (original, for backward compatibility)
 pub use store::MemoryStore;
+
+// Re-exports: MemoryManager + associated types (ADR-051 P2, moved from runtime)
+pub use manager::{
+    ConversationRecord, InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult,
+    RetrievedMemory,
+};
 
 // Re-exports: consolidation types
 pub use consolidation::{
@@ -36,9 +43,9 @@ pub use consolidation::MemoryStoreResult as ProcessResult;
 // Re-exports: core memory types
 pub use types::{
     AutobioCategory, AutobiographicalNode, ConflictSignal, ConflictType, ContextSource,
-    DecayConfig, DecayScanResult, Episode, KnowledgeNode, KnowledgeSubType, MemoryContext,
-    MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource,
-    RetrievalMetrics, SearchResult, StoreHealth, StoreStats,
+    DecayConfig, DecayScanResult, DistilledEpisode, Episode, KnowledgeNode, KnowledgeSubType,
+    MemoryContext, MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult,
+    ResultSource, RetrievalMetrics, SearchResult, StoreHealth, StoreStats, Triple,
 };
 
 // Label and edge type constants
