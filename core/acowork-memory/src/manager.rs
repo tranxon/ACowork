@@ -8,10 +8,12 @@
 //! Error type changed from RuntimeError::Tool to AcoworkError::Memory.
 //! EmbeddingProvider trait imported from acowork-core.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::{
     labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
+use crate::consolidation::GeneralizationConfig;
 use chrono::{DateTime, Utc};
 
 use acowork_core::EmbeddingProvider;
@@ -123,6 +125,20 @@ pub struct InjectedMemory {
     pub memory_count: usize,
     /// Whether results were truncated by token budget.
     pub truncated: bool,
+}
+
+/// Result of `retrieve_and_inject()` - the combined retrieve+inject+activate
+/// operation. ADR-051 P3.
+#[derive(Debug)]
+pub struct RetrieveAndInjectResult {
+    /// Injected memory text ready for ContextBuilder.
+    pub injected: InjectedMemory,
+    /// Retrieval metrics for monitoring.
+    pub metrics: RetrievalMetrics,
+    /// Node IDs of retrieved memories (for traceability in record_turn).
+    pub memory_ids: Vec<String>,
+    /// Pending ambiguous conflict hint, if any.
+    pub ambiguous_hint: Option<String>,
 }
 
 /// Record of a conversation turn for episodic storage.
@@ -804,6 +820,368 @@ impl MemoryManager {
         let metrics = retrieval.metrics.clone();
         let injected = self.inject(&retrieval);
         Ok((injected, metrics))
+    }
+
+    // ── ADR-051 P3: High-level semantic methods ─────────────────────────
+    //
+    // These methods encapsulate all direct provider CRUD operations.
+    // loop_memory.rs should only call these, never raw provider methods.
+
+    /// Retrieve memories, inject them, activate procedural nodes, and check
+    /// for ambiguous conflicts - all in one call.
+    ///
+    /// This is the primary entry point for per-turn memory injection.
+    /// The caller receives the formatted text, metrics, memory IDs for
+    /// traceability, and an optional ambiguous conflict hint to inject
+    /// into the context.
+    ///
+    /// ADR-051 P3: Replaces the inline retrieve+inject+activate+ambiguity
+    /// logic that was in loop_memory.rs.
+    pub async fn retrieve_and_inject(
+        &self,
+        provider: &dyn MemoryProvider,
+        query: &mut MemoryQuery,
+        embedding_provider: Option<&dyn EmbeddingProvider>,
+    ) -> Result<RetrieveAndInjectResult> {
+        let retrieval = self.retrieve(provider, query, embedding_provider).await?;
+        let metrics = retrieval.metrics.clone();
+
+        // Capture node IDs before inject (for traceability).
+        let memory_ids: Vec<String> = retrieval
+            .memories
+            .iter()
+            .filter(|m| m.node_id != 0)
+            .map(|m| m.node_id.to_string())
+            .collect();
+
+        // Activate ProceduralNodes that were retrieved.
+        self.activate_procedural_nodes(provider, &retrieval.memories);
+
+        // Inject with ambiguous conflict hints.
+        let injected = self.inject_with_ambiguous_hints(&retrieval, provider);
+
+        // Extract ambiguous hint separately for the caller.
+        let ambiguous_hint = if injected.formatted_text.contains("[Ambiguous]") {
+            // Extract the hint text after the last "[Ambiguous] " marker.
+            injected
+                .formatted_text
+                .rsplit_once("[Ambiguous] ")
+                .map(|(_, hint)| hint.to_string())
+        } else {
+            None
+        };
+
+        Ok(RetrieveAndInjectResult {
+            injected,
+            metrics,
+            memory_ids,
+            ambiguous_hint,
+        })
+    }
+
+    /// Record a conversation turn as an episodic memory.
+    ///
+    /// ADR-051 P3: Wraps `record()` with a more descriptive name.
+    /// The caller provides the conversation record; this method handles
+    /// episode creation and storage.
+    pub fn record_turn(
+        &self,
+        provider: &dyn MemoryProvider,
+        record: &ConversationRecord,
+    ) -> Result<()> {
+        self.record(provider, record)
+    }
+
+    /// Record tool execution failures as ProceduralNodes (Path B).
+    ///
+    /// For each (tool_name, error_message) pair, creates or reinforces a
+    /// low-confidence ProceduralNode via `record_procedural_from_failure`.
+    ///
+    /// ADR-051 P3: Replaces the inline loop in loop_memory.rs.
+    pub fn record_tool_failures(
+        &self,
+        provider: &dyn MemoryProvider,
+        failures: &[(&str, &str)],
+    ) {
+        for (tool_name, error_message) in failures {
+            if let Err(e) = self.record_procedural_from_failure(provider, tool_name, error_message)
+            {
+                tracing::debug!(
+                    tool_name,
+                    error = %e,
+                    "Failed to record ProceduralNode from tool failure (non-fatal)"
+                );
+            }
+        }
+    }
+
+    /// Run all post-compaction maintenance tasks.
+    ///
+    /// Executes in sequence:
+    /// 1. Experience generalization (Path C) - extract behavior patterns
+    /// 2. History compression - mark old History nodes as Dormant
+    /// 3. Self-evaluation - create Limitation nodes for low-performing skills
+    /// 4. Relationship auto-generation - track collaboration span
+    ///
+    /// Each step is best-effort: failures are logged but do not block
+    /// subsequent steps.
+    ///
+    /// ADR-051 P3: Replaces run_generalization_if_possible(),
+    /// self_evaluate_skill_performance(), and auto_generate_relationship()
+    /// in loop_memory.rs.
+    pub async fn run_post_compaction_tasks(
+        &self,
+        provider: &dyn MemoryProvider,
+        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
+    ) {
+        // Step 1: Experience generalization (Path C).
+        self.run_generalization_step(provider, embedding_fn).await;
+
+        // Step 2: History compression.
+        self.run_history_compression(provider);
+
+        // Step 3: Self-evaluation (Limitation nodes).
+        self.run_self_evaluation(provider);
+
+        // Step 4: Relationship auto-generation.
+        self.run_relationship_generation(provider);
+    }
+
+    /// Activate ProceduralNodes that were retrieved and matched the context.
+    ///
+    /// For each retrieved memory with label "Procedural", increments the
+    /// `activation_count`. This tracks how often a procedure is actually
+    /// used, feeding into self-evaluation and confidence boosting.
+    fn activate_procedural_nodes(
+        &self,
+        provider: &dyn MemoryProvider,
+        memories: &[RetrievedMemory],
+    ) {
+        for memory in memories {
+            if memory.label != labels::PROCEDURAL || memory.node_id == 0 {
+                continue;
+            }
+
+            if let Some(mut node) = provider.get_procedural(memory.node_id).ok().flatten() {
+                node.activation_count = node.activation_count.saturating_add(1);
+                node.updated_at = chrono::Utc::now();
+                if let Err(e) = provider.update_procedural(&node) {
+                    tracing::debug!(
+                        node_id = memory.node_id,
+                        error = %e,
+                        "Failed to increment activation_count (non-fatal)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Step 1: Experience generalization (Path C).
+    async fn run_generalization_step(
+        &self,
+        provider: &dyn MemoryProvider,
+        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
+    ) {
+        let config = GeneralizationConfig {
+            min_observations: 3,
+            max_episodes_scan: 100,
+            confidence_boost: 0.05,
+            max_confidence: 0.98,
+            use_llm: false,
+        };
+
+        // Use provided embedding function, or fallback to zero vector.
+        let zero_fn: Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync> =
+            Arc::new(|_| vec![0.0f32; 128]);
+        let emb_fn = embedding_fn.unwrap_or(zero_fn);
+
+        match provider.run_generalization(None, &emb_fn, &config).await {
+            Ok(result) => {
+                if result.nodes_created > 0 || result.nodes_boosted > 0 {
+                    tracing::info!(
+                        patterns = result.patterns.len(),
+                        nodes_created = result.nodes_created,
+                        nodes_boosted = result.nodes_boosted,
+                        deduplicated = result.patterns_deduplicated,
+                        "Path C: generalization completed after compaction"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "Generalization failed (non-fatal)");
+            }
+        }
+    }
+
+    /// Step 2: Compress old History autobiographical nodes.
+    fn run_history_compression(&self, provider: &dyn MemoryProvider) {
+        match provider.compress_history_nodes(10) {
+            Ok(compressed) => {
+                if compressed > 0 {
+                    tracing::info!(
+                        compressed,
+                        "History compression: marked old History nodes as Dormant"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "History compression failed (non-fatal)");
+            }
+        }
+    }
+
+    /// Step 3: Self-evaluate skill performance and create Limitation nodes.
+    ///
+    /// Scans all ProceduralNodes, groups by `source_skill`, and calculates
+    /// success rate. If below 60% with >= 5 observations, creates/updates
+    /// a Limitation autobiographical node.
+    fn run_self_evaluation(&self, provider: &dyn MemoryProvider) {
+        use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
+
+        let nodes = match provider.get_all_procedural_nodes() {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(error = %e, "Failed to get procedural nodes for self-evaluation");
+                return;
+            }
+        };
+
+        let mut skill_stats: HashMap<String, (u32, u32)> = HashMap::new();
+        for node in &nodes {
+            if let Some(ref skill) = node.source_skill {
+                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
+                entry.0 += node.success_count;
+                entry.1 += node.fail_count;
+            }
+        }
+
+        let min_observations: u32 = 5;
+        let max_success_rate: f32 = 0.60;
+
+        for (skill, (success, fail)) in skill_stats {
+            let total = success + fail;
+            if total < min_observations {
+                continue;
+            }
+
+            let success_rate = success as f32 / total as f32;
+            if success_rate >= max_success_rate {
+                continue;
+            }
+
+            let key = format!("skill_{}", skill.to_lowercase());
+            let value = format!(
+                "{} 成功率仅 {:.0}%（{} 次成功 / {} 次失败）",
+                skill,
+                success_rate * 100.0,
+                success,
+                fail
+            );
+
+            match provider.find_autobiographical_by_key(&key) {
+                Ok(Some(mut existing)) => {
+                    existing.value = value;
+                    existing.updated_at = chrono::Utc::now();
+                    if let Err(e) = provider.update_autobiographical(&existing) {
+                        tracing::debug!(key = %key, error = %e, "Failed to update Limitation node (non-fatal)");
+                    } else {
+                        tracing::info!(skill = %skill, success_rate, "Updated existing Limitation node for skill");
+                    }
+                }
+                Ok(None) => {
+                    let node = AutobiographicalNode {
+                        id: None,
+                        category: AutobioCategory::Limitation,
+                        key,
+                        value,
+                        confidence: 0.8,
+                        source_episode_id: None,
+                        embedding: None,
+                        status: NodeStatus::Active,
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        metadata: HashMap::new(),
+                    };
+                    if let Err(e) = provider.store_autobiographical(&node) {
+                        tracing::debug!(skill = %skill, error = %e, "Failed to store Limitation node (non-fatal)");
+                    } else {
+                        tracing::info!(skill = %skill, success_rate, observations = total, "Created Limitation node for low-performing skill");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(key = %key, error = %e, "Failed to query Limitation node (non-fatal)");
+                }
+            }
+        }
+    }
+
+    /// Step 4: Auto-generate Relationship nodes at session-end.
+    ///
+    /// Checks if the earliest episode is > 30 days old. If so, creates or
+    /// updates an AutobiographicalNode with category: Relationship.
+    fn run_relationship_generation(&self, provider: &dyn MemoryProvider) {
+        use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
+
+        let episodes = match provider.get_episodes(None, usize::MAX) {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::debug!(error = %e, "Failed to get episodes for relationship tracking");
+                return;
+            }
+        };
+
+        let episode_count = episodes.len() as u32;
+        let earliest_time = episodes.iter().map(|e| e.timestamp).min();
+
+        let earliest = match earliest_time {
+            Some(t) => t,
+            None => return,
+        };
+
+        let now = chrono::Utc::now();
+        let span_days = (now - earliest).num_days();
+
+        if span_days < 30 {
+            return;
+        }
+
+        let key = "collaboration_span".to_string();
+        let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
+
+        match provider.find_autobiographical_by_key(&key) {
+            Ok(Some(mut existing)) => {
+                existing.value = value;
+                existing.updated_at = now;
+                if let Err(e) = provider.update_autobiographical(&existing) {
+                    tracing::debug!(key = %key, error = %e, "Failed to update Relationship node (non-fatal)");
+                } else {
+                    tracing::info!(span_days, episode_count, "Updated Relationship node for long-standing collaboration");
+                }
+            }
+            Ok(None) => {
+                let node = AutobiographicalNode {
+                    id: None,
+                    category: AutobioCategory::Relationship,
+                    key,
+                    value,
+                    confidence: 0.9,
+                    source_episode_id: None,
+                    embedding: None,
+                    status: NodeStatus::Active,
+                    created_at: now,
+                    updated_at: now,
+                    metadata: HashMap::new(),
+                };
+                if let Err(e) = provider.store_autobiographical(&node) {
+                    tracing::debug!(error = %e, "Failed to store Relationship node (non-fatal)");
+                } else {
+                    tracing::info!(span_days, episode_count, "Created Relationship node for long-standing collaboration");
+                }
+            }
+            Err(e) => {
+                tracing::debug!(key = %key, error = %e, "Failed to query Relationship node (non-fatal)");
+            }
+        }
     }
 }
 

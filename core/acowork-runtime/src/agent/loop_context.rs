@@ -484,15 +484,10 @@ impl AgentLoop {
                     // Mark session as compacted (zero new messages since compaction)
                     self.session.is_compacted = true;
 
-                    // Path C: Run generalization after successful compaction.
-                    // Scans unconsolidated episodes for behavior patterns and
-                    // creates/boosts ProceduralNodes (rule-based only, no LLM).
-                    self.run_generalization_if_possible().await;
-
-                    // P2-1: Self-evaluate skill performance after generalization.
-                    // Checks ProceduralNode success/fail rates and creates
-                    // Limitation autobiographical nodes for low-performing skills.
-                    self.self_evaluate_skill_performance();
+                    // ADR-051 P3: Run all post-compaction maintenance tasks
+                    // (generalization + self-eval + relationship + history compression)
+                    // via a single MemoryManager high-level method.
+                    self.run_post_compaction_memory_tasks().await;
 
                     tracing::info!(
                         removed,

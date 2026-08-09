@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
-use serde::Deserialize;
 
 // ADR-051 P2: DistilledEpisode + Triple moved to acowork-memory.
 pub use acowork_memory::{DistilledEpisode, Triple};

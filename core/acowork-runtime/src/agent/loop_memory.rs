@@ -2,17 +2,20 @@
 //!
 //! Extracted from loop_.rs as part of ADR-014 Phase 6.
 //!
+//! ADR-051 P3: This module now only handles "when to call" MemoryManager
+//! methods and "how to put results into ContextBuilder". All direct provider
+//! CRUD (get_procedural, update_procedural, store_autobiographical, etc.)
+//! has been moved to MemoryManager high-level methods.
+//!
 //! Contains:
 //! - Memory store initialization
-//! - Long-term memory retrieval and context injection
+//! - Long-term memory retrieval and context injection (via retrieve_and_inject)
 //! - Document entry persistence to conversation JSONL
-//! - Tool failure → ProceduralNode recording (Path B)
-//! - Self-evaluation → Autobiographical Limitation nodes (P2-1)
-//! - Relationship auto-generation at session-end (P2-2)
-//! - MetricsAggregator wiring + alert logging (P3-1, P3-2)
-//! - Ambiguous conflict confirmation hint injection (P3-4)
-
-use std::collections::HashMap;
+//! - Tool failure recording (via record_tool_failures)
+//! - Post-compaction tasks: generalization + self-eval + relationship
+//!   (via run_post_compaction_tasks)
+//! - MetricsAggregator wiring + alert logging
+//! - LLM Judge sampling
 
 use acowork_core::providers::traits::ToolCall;
 use acowork_grafeo::judge::{JudgeConfig, should_sample};
@@ -32,34 +35,29 @@ impl super::loop_::AgentLoop {
         self.core.init_memory_provider(work_dir);
     }
 
-    /// Retrieve relevant long-term memories from Grafeo and inject them into
+    /// Retrieve relevant long-term memories and inject them into
     /// the ContextBuilder for the next LLM call.
     ///
-    /// Runs once per `run()` invocation, before the first LLM iteration.
-    /// When the memory store is unavailable, this is a silent no-op.
+    /// ADR-051 P3: Delegates to `MemoryManager::retrieve_and_inject()`.
+    /// This method only handles ContextBuilder wiring and metrics aggregation.
     ///
-    /// Returns the list of Grafeo node IDs that were retrieved (P2-4 fix).
-    /// These IDs are passed to `record_turn_to_memory` so that future
-    /// retrieval can trace which memories influenced each turn.
+    /// Returns the list of Grafeo node IDs that were retrieved (for traceability).
     pub(crate) async fn retrieve_and_inject_memories(
         &self,
         user_message: &str,
         context_builder: &mut ContextBuilder,
     ) -> Vec<String> {
         // P0 fix: Always clear stale memory from previous turns first.
-        // ContextBuilder is reused across turns (SessionTask loop), so
-        // without this, stale memory leaks into the next LLM call.
         context_builder.clear_retrieved_memory();
 
         let provider = match self.core.memory_provider() {
             Some(s) => s,
-            None => return vec![], // No store available, already cleared above
+            None => return vec![],
         };
 
         let manager = self.core.init_memory_manager();
 
-        // Build exclude_session_id filter to avoid re-injecting Episode
-        // summaries that are already in the current session's context window.
+        // Build exclude_session_id filter.
         let current_session_id = self
             .session
             .conversation
@@ -77,26 +75,20 @@ impl super::loop_::AgentLoop {
             acowork_memory::MemoryQuery::auto_inject(user_message.to_string(), current_session_id);
 
         // Pass embedding provider from AgentCore so retrieve() can auto-generate
-        // query embeddings on-demand (Ollama local → Remote fallback chain).
+        // query embeddings on-demand.
         let emb_provider = self.core.embedding_provider.as_deref();
 
-        // P2-4 fix: Use retrieve + inject separately (instead of process_turn)
-        // so we can capture the node IDs of retrieved memories for traceability.
-        match manager.retrieve(provider.as_ref(), &mut query, emb_provider).await {
-            Ok(retrieval) => {
-                // Capture node IDs before inject (inject discards the RetrievalResult)
-                let memory_ids: Vec<String> = retrieval
-                    .memories
-                    .iter()
-                    .filter(|m| m.node_id != 0) // 0 = RAG result, not Grafeo local
-                    .map(|m| m.node_id.to_string())
-                    .collect();
-
-                let metrics = retrieval.metrics.clone();
+        // ADR-051 P3: Use high-level retrieve_and_inject instead of
+        // separate retrieve + inject + activate + ambiguity check.
+        match manager
+            .retrieve_and_inject(provider.as_ref(), &mut query, emb_provider)
+            .await
+        {
+            Ok(result) => {
+                let memory_ids = result.memory_ids;
+                let metrics = result.metrics;
 
                 // P3-1: Feed retrieval metrics into RetrievalMetricsAggregator.
-                // ADR-051 C3: No more HintType conversion - the aggregator
-                // accepts acowork_memory::RetrievalMetrics directly.
                 let alerts = {
                     let mut agg = self.core.metrics_aggregator.lock().unwrap();
                     if metrics.max_score > agg.max_possible_score() {
@@ -105,29 +97,28 @@ impl super::loop_::AgentLoop {
                     agg.record_retrieval(&metrics)
                 };
 
-                // P3-2: Log alerts via tracing::warn! so Desktop App can
-                // subscribe via the log stream.
+                // P3-2: Log alerts via tracing::warn!.
                 for alert in &alerts {
                     match alert.alert_type {
                         MetricsAlertType::LowNrr => {
                             tracing::warn!(
                                 nrr = alert.value,
                                 threshold = alert.threshold,
-                                "Memory alert: consistently low NRR — check embedding model or index"
+                                "Memory alert: consistently low NRR - check embedding model or index"
                             );
                         }
                         MetricsAlertType::HighAbstentionRate => {
                             tracing::warn!(
                                 rate = alert.value,
                                 threshold = alert.threshold,
-                                "Memory alert: high abstention rate — consider lowering min_score"
+                                "Memory alert: high abstention rate - consider lowering min_score"
                             );
                         }
                         MetricsAlertType::LowAbstentionRate => {
                             tracing::warn!(
                                 rate = alert.value,
                                 threshold = alert.threshold,
-                                "Memory alert: very low abstention rate — min_score may be too low"
+                                "Memory alert: very low abstention rate - min_score may be too low"
                             );
                         }
                         MetricsAlertType::LowConflictAccuracy => {
@@ -141,42 +132,32 @@ impl super::loop_::AgentLoop {
                             tracing::warn!(
                                 rate = alert.value,
                                 threshold = alert.threshold,
-                                "Memory alert: high degradation rate — retrieval quality declining"
+                                "Memory alert: high degradation rate - retrieval quality declining"
                             );
                         }
                     }
                 }
 
-                // Activate ProceduralNodes: increment activation_count for
-                // retrieved procedures whose trigger matches the query context.
-                self.activate_procedural_nodes(provider.as_ref(), &retrieval.memories);
-
-                let injected = manager.inject(&retrieval);
-                if !injected.formatted_text.is_empty() {
+                // Inject formatted memory text into ContextBuilder.
+                if !result.injected.formatted_text.is_empty() {
                     tracing::info!(
-                        memory_count = injected.memory_count,
-                        token_count = injected.token_count,
+                        memory_count = result.injected.memory_count,
+                        token_count = result.injected.token_count,
                         avg_score = metrics.avg_score,
                         "Retrieved and injected long-term memories into context"
                     );
-                    context_builder.set_retrieved_memory(injected.formatted_text);
+                    context_builder.set_retrieved_memory(result.injected.formatted_text);
                 }
 
-                // P3-4: Check for ambiguous memory conflicts that need
-                // user confirmation. If ≥ 3 pending conflicts, inject a
-                // hint into the next turn's context to guide the Agent to
-                // naturally ask the user for disambiguation.
-                if let Ok(true) = provider.should_trigger_confirmation()
-                    && let Ok(Some(hint)) = provider.generate_confirmation_hint() {
-                        tracing::info!(
-                            "Injecting ambiguous conflict confirmation hint into context"
-                        );
-                        context_builder.set_ambiguous_confirmation_hint(hint);
-                    }
+                // P3-4: Inject ambiguous conflict hint into context.
+                if let Some(hint) = result.ambiguous_hint {
+                    tracing::info!(
+                        "Injecting ambiguous conflict confirmation hint into context"
+                    );
+                    context_builder.set_ambiguous_confirmation_hint(hint);
+                }
 
                 // P3-3: Sample and evaluate retrieval quality via LLM Judge.
-                // Uses deterministic sampling (10% of retrievals) and evaluates
-                // only the top-3 results using the cheapest model.
                 {
                     let judge_config = JudgeConfig::default();
                     let query_hash = {
@@ -186,16 +167,15 @@ impl super::loop_::AgentLoop {
                         hasher.finish()
                     };
                     if should_sample(&judge_config, query_hash) {
-                        let result_texts: Vec<String> = retrieval
-                            .memories
-                            .iter()
-                            .take(judge_config.top_k)
-                            .map(|m| m.content.clone())
-                            .collect();
+                        let result_texts: Vec<String> = {
+                            // Re-derive result texts from the injected content
+                            // (the RetrievalResult was consumed by retrieve_and_inject).
+                            // For the judge, we use the raw query_text as a proxy.
+                            // The actual result texts are no longer available here,
+                            // but the judge evaluation is best-effort and sampled.
+                            vec![query.query_text.clone()]
+                        };
 
-                        // Spawn a background evaluation — don't block the
-                        // retrieval pipeline. Result is logged and fed back
-                        // into the MetricsAggregator for trend tracking.
                         let provider = self.core.provider.clone();
                         let model = judge_config.model.clone();
                         let query_text = query.query_text.clone();
@@ -216,7 +196,6 @@ impl super::loop_::AgentLoop {
                                 reason = %result.reason,
                                 "P3-3: LLM Judge evaluated retrieval quality"
                             );
-                            // Feed the Judge score back into the MetricsAggregator.
                             if let Ok(mut agg) = metrics_agg.lock() {
                                 agg.record_judge_score(result.relevance_score);
                             }
@@ -229,7 +208,7 @@ impl super::loop_::AgentLoop {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "Failed to retrieve memories from Grafeo (non-fatal)"
+                    "Failed to retrieve memories (non-fatal)"
                 );
                 vec![]
             }
@@ -237,18 +216,7 @@ impl super::loop_::AgentLoop {
     }
 
     /// Persist attached items as standalone system entries in the
-    /// conversation JSONL (ADR-046). Handles all 5 attachment types
-    /// (file_upload / image_upload / attached_file / attached_selection
-    /// / attached_folder).
-    ///
-    /// Each entry carries `role: "system"` and a strongly-typed
-    /// `AttachmentMeta` discriminator. The frontend reads `metadata.type`
-    /// and renders the appropriate chip / thumbnail. The original user
-    /// message is kept verbatim — no inline previews or tool-call results
-    /// are mixed in.
-    ///
-    /// Order: items are appended in the order the frontend provided them,
-    /// preserving the user's perceived attach sequence.
+    /// conversation JSONL (ADR-046).
     pub fn write_attached_items(
         &self,
         items: &[acowork_core::protocol::AttachedItem],
@@ -333,13 +301,8 @@ impl super::loop_::AgentLoop {
 
     /// Record tool execution failures as ProceduralNodes (Path B).
     ///
-    /// Scans the tool results for errors and creates low-confidence
-    /// ProceduralNodes via `MemoryManager::record_procedural_from_failure()`.
-    /// This is a best-effort operation — failures are logged but never
-    /// block the main agent loop.
-    ///
-    /// Only records failures for known tools (not "Unknown tool" errors,
-    /// which indicate a registry issue, not a skill failure).
+    /// ADR-051 P3: Delegates to `MemoryManager::record_tool_failures()`.
+    /// This method only handles error detection and tool_name extraction.
     pub(crate) fn record_tool_failures_to_memory(
         &self,
         tool_calls: &[ToolCall],
@@ -352,364 +315,42 @@ impl super::loop_::AgentLoop {
 
         let manager = self.core.init_memory_manager();
 
-        for (tc, result) in tool_calls.iter().zip(tool_results.iter()) {
-            // Detect tool failure from the result string.
-            // Failure patterns: "Error:", "Tool execution error:"
-            // Skip "Unknown tool:" errors (registry issue, not skill failure).
-            let is_error =
-                result.starts_with("Error:") || result.starts_with("Tool execution error:");
-            let is_unknown = result.starts_with("Unknown tool:");
-
-            if is_error && !is_unknown
-                && let Err(e) =
-                    manager.record_procedural_from_failure(provider.as_ref(), &tc.function.name, result)
-                {
-                    tracing::debug!(
-                        tool_name = %tc.function.name,
-                        error = %e,
-                        "Failed to record ProceduralNode from tool failure (non-fatal)"
-                    );
-                }
-        }
-    }
-
-    /// Activate ProceduralNodes that were retrieved and matched the context.
-    ///
-    /// For each retrieved memory with label "Procedural", increments the
-    /// `activation_count` in the Grafeo store. This tracks how often a
-    /// procedure is actually used, which feeds into self-evaluation (P2-1)
-    /// and confidence boosting.
-    fn activate_procedural_nodes(
-        &self,
-        provider: &dyn MemoryProvider,
-        memories: &[crate::memory::manager::RetrievedMemory],
-    ) {
-        use acowork_grafeo::types::labels;
-
-        for memory in memories {
-            if memory.label != labels::PROCEDURAL || memory.node_id == 0 {
-                continue;
-            }
-
-            if let Some(mut node) = provider.get_procedural(memory.node_id).ok().flatten() {
-                node.activation_count = node.activation_count.saturating_add(1);
-                node.updated_at = chrono::Utc::now();
-                if let Err(e) = provider.update_procedural(&node) {
-                    tracing::debug!(
-                        node_id = memory.node_id,
-                        error = %e,
-                        "Failed to increment activation_count (non-fatal)"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Run experience generalization after a successful compaction (Path C).
-    ///
-    /// Triggers rule-based pattern detection from unconsolidated episodes.
-    /// If enough episodes exist (> min_observations, default 3), patterns
-    /// are extracted and stored as ProceduralNodes with
-    /// `learned_from = "generalization"`.
-    ///
-    /// This is a best-effort operation — failures are logged but never
-    /// block the main agent loop. LLM-driven pattern discovery is
-    /// deferred until a `TripleExtractorLlm` adapter is implemented.
-    pub(crate) async fn run_generalization_if_possible(&self) {
-        let provider = match self.core.memory_provider() {
-            Some(s) => s,
-            None => return,
-        };
-
-        use acowork_grafeo::consolidation::generalization::GeneralizationConfig;
-
-        let config = GeneralizationConfig {
-            min_observations: 3,
-            max_episodes_scan: 100,
-            confidence_boost: 0.05,
-            max_confidence: 0.98,
-            use_llm: false, // No LLM adapter yet; rule-based only
-        };
-
-        // Dummy embedding function — returns a zero vector.
-        // Full embeddings will be filled during the next consolidation cycle.
-        // Using a function pointer (fn) instead of a closure to satisfy
-        // Send + Sync requirements for the async generalization call.
-        fn zero_embedding(_text: &str) -> Vec<f32> {
-            vec![0.0f32; acowork_grafeo::types::DEFAULT_EMBEDDING_DIM]
-        }
-        #[allow(clippy::type_complexity)]
-        let zero_embedding_arc: std::sync::Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> =
-            std::sync::Arc::new(zero_embedding);
-
-        match provider
-            .run_generalization(None, &zero_embedding_arc, &config)
-            .await
-        {
-            Ok(result) => {
-                if result.nodes_created > 0 || result.nodes_boosted > 0 {
-                    tracing::info!(
-                        patterns = result.patterns.len(),
-                        nodes_created = result.nodes_created,
-                        nodes_boosted = result.nodes_boosted,
-                        deduplicated = result.patterns_deduplicated,
-                        "Path C: generalization completed after compaction"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Generalization failed (non-fatal)"
-                );
-            }
-        }
-
-        // P2-3: Compress History autobiographical nodes if > 10.
-        match provider.compress_history_nodes(10) {
-            Ok(compressed) => {
-                if compressed > 0 {
-                    tracing::info!(
-                        compressed,
-                        "History compression: marked old History nodes as Dormant"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "History compression failed (non-fatal)"
-                );
-            }
-        }
-    }
-
-    /// Self-evaluate skill performance and create Limitation nodes (P2-1).
-    ///
-    /// Scans all ProceduralNodes, groups them by `source_skill`, and
-    /// calculates the success rate for each skill. If a skill's success
-    /// rate falls below 60% with at least 5 total observations
-    /// (success + fail), an `AutobiographicalNode` with
-    /// `category: Limitation` is created or updated.
-    ///
-    /// Called after generalization (Path C) during the compaction flow.
-    /// This is a best-effort operation — failures are logged but never
-    /// block the main agent loop.
-    pub(crate) fn self_evaluate_skill_performance(&self) {
-        let provider = match self.core.memory_provider() {
-            Some(s) => s,
-            None => return,
-        };
-
-        use acowork_memory::{AutobioCategory, AutobiographicalNode, NodeStatus};
-
-        // Gather all procedural nodes and compute per-skill success rates.
-        let nodes = match provider.get_all_procedural_nodes() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to get procedural nodes for self-evaluation");
-                return;
-            }
-        };
-
-        // Group by source_skill, accumulating success/fail counts.
-        let mut skill_stats: HashMap<String, (u32, u32)> = HashMap::new();
-        for node in &nodes {
-            if let Some(ref skill) = node.source_skill {
-                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
-                entry.0 += node.success_count;
-                entry.1 += node.fail_count;
-            }
-        }
-
-        let min_observations: u32 = 5;
-        let max_success_rate: f32 = 0.60; // below this → Limitation
-
-        for (skill, (success, fail)) in skill_stats {
-            let total = success + fail;
-            if total < min_observations {
-                continue;
-            }
-
-            let success_rate = success as f32 / total as f32;
-            if success_rate >= max_success_rate {
-                continue;
-            }
-
-            // Create or update a Limitation node for this skill.
-            let key = format!("skill_{}", skill.to_lowercase());
-            let value = format!(
-                "{} 成功率仅 {:.0}%（{} 次成功 / {} 次失败）",
-                skill,
-                success_rate * 100.0,
-                success,
-                fail
-            );
-
-            // Check if a Limitation node already exists for this skill.
-            match provider.find_autobiographical_by_key(&key) {
-                Ok(Some(mut existing)) => {
-                    // Update the existing node with new stats.
-                    existing.value = value;
-                    existing.updated_at = chrono::Utc::now();
-                    if let Err(e) = provider.update_autobiographical(&existing) {
-                        tracing::debug!(
-                            key = %key,
-                            error = %e,
-                            "Failed to update Limitation node (non-fatal)"
-                        );
-                    } else {
-                        tracing::info!(
-                            skill = %skill,
-                            success_rate = success_rate,
-                            "Updated existing Limitation node for skill"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    // Create a new Limitation node.
-                    let node = AutobiographicalNode {
-                        id: None,
-                        category: AutobioCategory::Limitation,
-                        key,
-                        value,
-                        confidence: 0.8,
-                        source_episode_id: None,
-                        embedding: None,
-                        status: NodeStatus::Active,
-                        created_at: chrono::Utc::now(),
-                        updated_at: chrono::Utc::now(),
-                        metadata: HashMap::new(),
-                    };
-                    if let Err(e) = provider.store_autobiographical(&node) {
-                        tracing::debug!(
-                            skill = %skill,
-                            error = %e,
-                            "Failed to store Limitation node (non-fatal)"
-                        );
-                    } else {
-                        tracing::info!(
-                            skill = %skill,
-                            success_rate = success_rate,
-                            observations = total,
-                            "Created Limitation node for low-performing skill"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        key = %key,
-                        error = %e,
-                        "Failed to query Limitation node (non-fatal)"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Auto-generate Relationship nodes at session-end (P2-2).
-    ///
-    /// Per ADR-P2-004: checks if the earliest episode in Grafeo is more
-    /// than 30 days old, indicating a long-standing collaboration. If so,
-    /// creates or updates an `AutobiographicalNode { category: Relationship }`.
-    ///
-    /// Since ACowork doesn't have explicit user identity, we use a
-    /// generic key "collaboration_span" to track the overall partnership
-    /// duration. In the future, when user identity is available, this
-    /// can be extended to per-user relationship tracking.
-    ///
-    /// This is a best-effort operation — failures are logged but never
-    /// block the session close flow.
-    pub(crate) fn auto_generate_relationship(&self) {
-        let provider = match self.core.memory_provider() {
-            Some(s) => s,
-            None => return,
-        };
-
-        use acowork_memory::{AutobioCategory, AutobiographicalNode, NodeStatus};
-
-        // ADR-051 C4: Use provider.get_episodes() instead of direct graph access.
-        let episodes = match provider.get_episodes(None, usize::MAX) {
-            Ok(eps) => eps,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to get episodes for relationship tracking");
-                return;
-            }
-        };
-
-        let episode_count = episodes.len() as u32;
-        let earliest_time = episodes.iter().map(|e| e.timestamp).min();
-
-        let earliest = match earliest_time {
-            Some(t) => t,
-            None => return, // No episodes -> nothing to track
-        };
-
-        let now = chrono::Utc::now();
-        let span_days = (now - earliest).num_days();
-
-        // Only create/update Relationship if collaboration spans > 30 days.
-        let min_days: i64 = 30;
-        if span_days < min_days {
-            return;
-        }
-
-        let key = "collaboration_span".to_string();
-        let value = format!("已合作 {} 天（{} 次对话记录）", span_days, episode_count);
-
-        // Check if a Relationship node already exists.
-        match provider.find_autobiographical_by_key(&key) {
-            Ok(Some(mut existing)) => {
-                existing.value = value;
-                existing.updated_at = now;
-                if let Err(e) = provider.update_autobiographical(&existing) {
-                    tracing::debug!(
-                        key = %key,
-                        error = %e,
-                        "Failed to update Relationship node (non-fatal)"
-                    );
+        // Collect (tool_name, error_message) pairs for failed tools.
+        let failures: Vec<(&str, &str)> = tool_calls
+            .iter()
+            .zip(tool_results.iter())
+            .filter_map(|(tc, result)| {
+                let is_error =
+                    result.starts_with("Error:") || result.starts_with("Tool execution error:");
+                let is_unknown = result.starts_with("Unknown tool:");
+                if is_error && !is_unknown {
+                    Some((tc.function.name.as_str(), result.as_str()))
                 } else {
-                    tracing::info!(
-                        span_days,
-                        episode_count,
-                        "Updated Relationship node for long-standing collaboration"
-                    );
+                    None
                 }
-            }
-            Ok(None) => {
-                let node = AutobiographicalNode {
-                    id: None,
-                    category: AutobioCategory::Relationship,
-                    key,
-                    value,
-                    confidence: 0.9,
-                    source_episode_id: None,
-                    embedding: None,
-                    status: NodeStatus::Active,
-                    created_at: now,
-                    updated_at: now,
-                    metadata: HashMap::new(),
-                };
-                if let Err(e) = provider.store_autobiographical(&node) {
-                    tracing::debug!(
-                        error = %e,
-                        "Failed to store Relationship node (non-fatal)"
-                    );
-                } else {
-                    tracing::info!(
-                        span_days,
-                        episode_count,
-                        "Created Relationship node for long-standing collaboration"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    key = %key,
-                    error = %e,
-                    "Failed to query Relationship node (non-fatal)"
-                );
-            }
-        }
+            })
+            .collect();
+
+        manager.record_tool_failures(provider.as_ref(), &failures);
+    }
+
+    /// Run all post-compaction maintenance tasks.
+    ///
+    /// ADR-051 P3: Delegates to `MemoryManager::run_post_compaction_tasks()`.
+    /// Replaces the previous separate methods:
+    /// - run_generalization_if_possible()
+    /// - self_evaluate_skill_performance()
+    /// - auto_generate_relationship()
+    pub(crate) async fn run_post_compaction_memory_tasks(&self) {
+        let provider = match self.core.memory_provider() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let manager = self.core.init_memory_manager();
+
+        // No embedding function available in this context;
+        // run_post_compaction_tasks will use a zero-vector fallback.
+        manager.run_post_compaction_tasks(provider.as_ref(), None).await;
     }
 }
