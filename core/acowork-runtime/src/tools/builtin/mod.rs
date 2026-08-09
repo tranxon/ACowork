@@ -1,7 +1,8 @@
 //! Built-in tools module
 //!
 //! Phase 1: 13 built-in tools per design doc (12-tool-system.md)
-//! Phase 4 (S4.4): +1 RAG tool (rag_query, conditional on manifest RAG declaration)
+//! Phase 4 (S4.4): +1 RAG tool (rag_query, registered in agent_init.rs when
+//!                   manifest declares a RAG tool entry)
 //!
 //! | Tool | Permission |
 //! |------|------------|
@@ -18,7 +19,7 @@
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
-//! | rag_query | rag:query + network:<rag_url> (conditional) |
+//! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
 //! | context_recall | context:read — retrieve original tool result content |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 

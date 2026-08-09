@@ -329,6 +329,7 @@ pub(crate) async fn phase_b_init_session(
 
         c.memory_session = Some(ctx.memory_session.clone());
         c.embedding_provider = ctx.emb_provider.clone();
+        c.rag_provider = ctx.rag_provider.take();
         c.init_memory_provider(work_dir_path);
 
         // ADR-033 (Phase 2): Publish the late-bound memory admin service

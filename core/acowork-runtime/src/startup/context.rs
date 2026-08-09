@@ -94,6 +94,12 @@ pub(crate) struct AgentBootContext {
     pub mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier>,
     pub workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
 
+    /// ADR-051: RAG provider (None when manifest has no RAG tool declaration).
+    /// Constructed in Phase A from manifest `RagToolConfig`; injected into
+    /// `AgentCore` in Phase B. The `rag_query` tool is registered in the
+    /// tool registry when this is `Some`.
+    pub rag_provider: Option<Arc<dyn acowork_core::rag::RagProvider>>,
+
     // Context builder (standalone mode only)
     pub context_builder: Option<crate::agent::context::ContextBuilder>,
 

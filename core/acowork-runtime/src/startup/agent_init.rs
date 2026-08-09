@@ -532,6 +532,85 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         registry.register(tool);
     }
 
+    // ── ADR-051: Conditionally register rag_query tool ─────────────
+    //
+    // When the manifest declares a `[[tools]]` entry with `type = "rag"`,
+    // construct an `HttpRagProvider` from the manifest `RagToolConfig`
+    // and register the `rag_query` tool. The LLM invokes this tool
+    // on-demand when it decides external knowledge is needed (tool-based
+    // RAG, not automatic pre-retrieval merge - see ADR-051 §4.1.4 H
+    // design变更).
+    //
+    // Auth resolution: the manifest `auth_ref` (e.g., "vault:rag_key")
+    // is resolved from the `provider_key_vault` populated by the MQTT
+    // available cache. If the key is not yet available at this point
+    // (MQTT race), the provider is constructed with `None` auth and
+    // RAG queries will return empty results until the key is available.
+    // A follow-up enhancement could make the credential dynamic.
+    let rag_provider: Option<Arc<dyn acowork_core::rag::RagProvider>> =
+        if let Some((tool_name, rag_config)) = loaded.manifest.rag_config() {
+            tracing::info!(
+                tool_name = %tool_name,
+                endpoint = %rag_config.endpoint,
+                "Manifest declares RAG tool - constructing HttpRagProvider"
+            );
+
+            // Best-effort auth resolution: try to find the RAG key in the
+            // MQTT available cache's provider list. The `auth_ref` format
+            // is "vault:<key_name>" - we look for a provider whose ID
+            // matches <key_name>. If not found, the provider is
+            // constructed with `None` auth; RAG queries will return
+            // empty results until the key is available.
+            let auth = {
+                let key_value: Option<String> = available_cache.as_ref().and_then(|cache| {
+                    let cache_read = cache.blocking_read();
+                    cache_read.providers.as_ref().and_then(|p| {
+                        rag_config
+                            .auth_ref
+                            .as_deref()
+                            .and_then(|ref_str| {
+                                crate::tools::rag::client::RagAuthCredential::vault_provider_name(ref_str)
+                            })
+                            .and_then(|key_name| {
+                                p.providers
+                                    .iter()
+                                    .find(|pr| pr.id == key_name)
+                                    .map(|pr| pr.api_key.clone())
+                            })
+                    })
+                });
+                crate::tools::rag::client::RagAuthCredential::from_vault_ref(
+                    rag_config.auth_ref.as_deref(),
+                    &rag_config.auth_type,
+                    key_value.as_deref(),
+                )
+            };
+            if matches!(auth, crate::tools::rag::client::RagAuthCredential::None)
+                && rag_config.auth_ref.is_some()
+            {
+                tracing::warn!(
+                    auth_ref = ?rag_config.auth_ref,
+                    "RAG auth_ref declared but key not found in available cache - RAG queries will fail until key is available"
+                );
+            }
+
+            let rag_client_config = crate::tools::rag::client::RagClientConfig::from_manifest(
+                rag_config,
+                tool_name.to_string(),
+                auth,
+            );
+            let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(rag_client_config));
+
+            // Register the rag_query tool so the LLM can invoke it.
+            let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider.clone());
+            registry.register(Arc::new(rag_tool) as Arc<dyn acowork_core::tools::traits::Tool>);
+            tracing::info!("rag_query tool registered");
+
+            Some(provider as Arc<dyn acowork_core::rag::RagProvider>)
+        } else {
+            None
+        };
+
     // ── ADR-029: Resolve `agent_tools.json` enabled flags ──────────
     //
     // 1. If `{work_dir}/config/agent_tools.json` exists -> load it,
@@ -773,6 +852,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_session,
         mcp_notifier,
         workspace_resolver,
+        rag_provider,
         context_builder: Some(context_builder),
         identity_context,
         chunk_tx,

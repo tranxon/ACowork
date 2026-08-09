@@ -406,12 +406,13 @@ pub async fn write_summary_to_provider(
 
 > 后续 P3 可以进一步将 poll 逻辑也下沉到 Provider。
 
-**H. RAG 独立 trait 化**
+**H. RAG 独立 trait 化（设计变更：tool-based RAG）**
 
 `RagClient` 改名为 `HttpRagProvider`，实现 `acowork_core::rag::RagProvider` trait。`AgentCore` 新增 `rag_provider: Option<Arc<dyn RagProvider>>` 字段。
 
 - 移除 `MemoryManager::with_rag` / `rag_client` 字段 / `has_rag()` 方法。
-- `loop_memory.rs` 中双通道 merge 逻辑改为：先调 `MemoryManager::retrieve(provider, ...)` 获取本地记忆，再调 `self.core.rag_provider.query(...)` 获取企业知识，按 score 合并。当前 `MemoryManager::retrieve()` 内部的 RAG channel 代码（`manager.rs:411-430`）移出到 `loop_memory.rs`。
+- ~~`loop_memory.rs` 中双通道 merge 逻辑改为：先调 `MemoryManager::retrieve(provider, ...)` 获取本地记忆，再调 `self.core.rag_provider.query(...)` 获取企业知识，按 score 合并。~~
+  **设计变更（2026-08-06）**：RAG 不再作为自动 pre-retrieval merge，改为 **LLM 按需调用 `rag_query` tool**。理由：(1) token 效率——仅 LLM 判断需要时才查 RAG；(2) 延迟——不每轮增加网络往返；(3) 查询质量——LLM 可基于完整上下文构造精确查询；(4) 与 RAG 作为独立 `RagProvider` trait 的正交设计一致。`MemoryManager::retrieve()` 中的 RAG channel 代码已移除，`rag_query` tool 在 `agent_init.rs` 中根据 manifest RAG 声明条件注册。
 - `RagQueryTool` 持有 `Arc<dyn RagProvider>` 而非 `Arc<RagClient>`。
 - RAG 协议类型（`RagQueryRequest`、`RagQueryResponse`、`RagResultItem`、`AnnotatedRagResult`）从 `acowork-runtime/src/tools/rag/types.rs` 迁移到 `acowork-core/src/rag.rs`。
 
@@ -506,7 +507,7 @@ RAG 协议类型（`RagQueryRequest`、`RagQueryResponse`、`RagResultItem`、`A
 - `AgentCore` 新增 `rag_provider: Option<Arc<dyn RagProvider>>` 字段。
 - 移除 `MemoryManager::with_rag` 和 `rag_client` 字段。
 - `RagQueryTool` 持有 `Arc<dyn RagProvider>` 而非 `Arc<RagClient>`。
-- `loop_memory.rs` 中双通道 merge 逻辑：先调 `MemoryManager::retrieve()`，再调 `rag_provider.query()`，按 score 合并。
+- `loop_memory.rs` 中双通道 merge 逻辑~~：先调 `MemoryManager::retrieve()`，再调 `rag_provider.query()`，按 score 合并~~。**设计变更**：改为 LLM 按需调用 `rag_query` tool（见 §4.1.4 H 变更说明）。`agent_init.rs` 在 manifest 声明 RAG 时注册 `RagQueryTool`，同时设置 `AgentCore.rag_provider`。
 - `MemorySessionHandle` 可选持有 `rag_provider` 引用供 `memory_recall` tool 使用（或由 Runtime 在 tool 构造时注入）。
 
 ### 5.2 MetricsAggregator 留在 Runtime，数据源来自 Provider 返回值
