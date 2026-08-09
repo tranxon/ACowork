@@ -99,12 +99,16 @@ pub enum RuntimeHttpServerError {
 /// forwarded to the right session's AgentLoop via `send_inbound()`.
 pub type SharedDispatchSender = Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<(String, InboundMessage)>>>>;
 
-/// Shared handle to the Runtime's Grafeo memory store.
+/// Shared handle to the Runtime's memory admin service.
 ///
-/// `None` until Phase B (`init_memory_store`) finishes; HTTP handlers
+/// `None` until Phase B (`init_memory_provider`) finishes; HTTP handlers
 /// report a graceful "no store" response when it is still empty
 /// (see [`memory_query`]).
-pub type SharedMemoryStore = Arc<std::sync::RwLock<Option<Arc<acowork_grafeo::grafeo::GrafeoStore>>>>;
+///
+/// ADR-051 P4: type changed from `Arc<GrafeoStore>` to
+/// `Arc<dyn MemoryAdminService>` so the Runtime does not depend on
+/// the concrete grafeo type for HTTP admin endpoints.
+pub type SharedMemoryStore = Arc<std::sync::RwLock<Option<Arc<dyn acowork_memory::admin::MemoryAdminService>>>>;
 
 /// Shared handle to the Runtime's `AgentCore`.
 ///

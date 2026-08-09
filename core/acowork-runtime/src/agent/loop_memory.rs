@@ -18,8 +18,7 @@
 //! - LLM Judge sampling
 
 use acowork_core::providers::traits::ToolCall;
-use acowork_grafeo::judge::{JudgeConfig, should_sample};
-use acowork_memory::MemoryProvider;
+use acowork_memory::judge::{JudgeConfig, should_sample};
 use crate::memory::metrics::MetricsAlertType;
 
 use crate::agent::context::ContextBuilder;

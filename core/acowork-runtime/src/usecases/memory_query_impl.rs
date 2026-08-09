@@ -1,8 +1,10 @@
-//! GrafeoMemoryAdapter — implements MemoryQueryService via GrafeoStore.
+//! GrafeoMemoryAdapter - implements MemoryQueryService via MemoryAdminService.
 //!
-//! ADR-040: delegates to the shared `memory_query` module which already
-//! provides the business logic; this adapter simply holds the late-bind
-//! store reference and dimension.
+//! ADR-040: delegates to the shared `memory_query` module which provides
+//! thin wrappers over `dyn MemoryAdminService`.
+//!
+//! ADR-051 P4: `SharedMemoryStore` is now `Arc<dyn MemoryAdminService>`
+//! instead of concrete `Arc<GrafeoStore>`.
 
 
 use std::collections::HashMap;
@@ -84,11 +86,6 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
     }
 
     async fn get_stats(&self) -> Result<MemoryStats> {
-        // ADR-040: the service is a thin facade over the shared
-        // `memory_query` business logic. The HTTP handler ferries the
-        // returned `MemoryStats` straight into the wire format via
-        // `serde_json::to_value`, so the field set must stay aligned with
-        // `MemoryStatsResponse` in `acowork-gateway::http::memory_api`.
         let store = self
             .memory_store
             .read()

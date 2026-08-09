@@ -11,7 +11,7 @@
 //! - Cost controlled by `sample_rate` and `top_k` in JudgeConfig
 
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
-use acowork_grafeo::judge::{JudgeConfig, JudgeResult};
+use acowork_memory::judge::{JudgeConfig, JudgeResult};
 
 /// Evaluate retrieval quality using an actual LLM call.
 ///

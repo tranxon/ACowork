@@ -1253,21 +1253,24 @@ impl SessionTask {
                     );
 
                     // Check if dimension migration is needed.
-                    // When the Grafeo store already has data with a different
+                    // When the memory store already has data with a different
                     // dimension, we must re-embed all nodes and rebuild the
                     // HNSW indexes before switching to the new provider.
+                    //
+                    // ADR-051 P4: Uses `memory_admin` (dyn MemoryAdminService)
+                    // instead of concrete `grafeo_store`.
                     let needs_migration = agent_loop
                         .core
-                        .grafeo_store
+                        .memory_admin
                         .as_ref()
-                        .map(|store| store.embedding_dim() != embed_dimension)
+                        .map(|admin| admin.embedding_dim() != embed_dimension)
                         .unwrap_or(false);
 
                     if needs_migration
-                        && let Some(ref store) = agent_loop.core.grafeo_store
+                        && let Some(ref admin) = agent_loop.core.memory_admin
                     {
-                            let store = store.clone();
-                            let old_dim = store.embedding_dim();
+                            let admin = admin.clone();
+                            let old_dim = admin.embedding_dim();
                             tracing::info!(
                                 old_dim,
                                 new_dim = embed_dimension,
@@ -1291,7 +1294,7 @@ impl SessionTask {
                                     as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
 
                             // Bridge async embed into a sync closure for
-                            // GrafeoStore::migrate_embedding_dimension.
+                            // MemoryAdminService::migrate_embedding_dimension.
                             let handle = tokio::runtime::Handle::current();
                             let provider_for_fn = migration_provider.clone();
                             let embed_fn = move |text: &str| -> Option<Vec<f32>> {
@@ -1308,7 +1311,7 @@ impl SessionTask {
                                 }
                             };
 
-                            match store.migrate_embedding_dimension(embed_fn, embed_dimension) {
+                            match admin.migrate_embedding_dimension(&embed_fn, embed_dimension) {
                                 Ok(stats) => {
                                     tracing::info!(
                                         rebuilt = stats.rebuilt,

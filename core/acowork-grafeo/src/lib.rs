@@ -7,6 +7,7 @@
 //! - Privacy level filtering
 
 pub mod abstention;
+pub mod admin_impl;
 pub mod backup;
 pub mod conflict;
 pub mod consolidation;

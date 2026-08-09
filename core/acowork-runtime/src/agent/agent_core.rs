@@ -19,10 +19,12 @@ use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
 use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
-use acowork_grafeo::grafeo::GrafeoStore;
-use acowork_grafeo::types::GrafeoConfig;
-use acowork_grafeo::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
+use acowork_memory::admin::MemoryAdminService;
+use acowork_memory::consolidation::SchedulerConfig;
+#[cfg(feature = "grafeo-backend")]
+use acowork_memory::types::{AutobioCategory, AutobiographicalNode, NodeStatus};
 use acowork_memory::MemoryProvider;
+#[cfg(feature = "grafeo-backend")]
 use chrono::Utc;
 
 use crate::config::RuntimeConfig;
@@ -165,12 +167,13 @@ pub struct AgentCore {
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
-    /// ADR-051 C3: Primary field is now `memory_provider` (trait object).
-    /// `grafeo_store` is kept as compat for callers needing concrete type.
+    /// ADR-051 P4: Primary field is `memory_provider` (trait object).
+    /// `memory_admin` is the admin interface for HTTP endpoints and
+    /// embedding migration.
     pub(crate) memory_provider: Option<Arc<dyn MemoryProvider>>,
-    /// Compat: concrete GrafeoStore reference for MemoryManager and HTTP admin.
-    /// C4 will remove this field.
-    pub(crate) grafeo_store: Option<Arc<GrafeoStore>>,
+    /// Admin service for HTTP memory endpoints and embedding migration.
+    /// ADR-051 P4: Replaces the former `grafeo_store` compat field.
+    pub(crate) memory_admin: Option<Arc<dyn MemoryAdminService>>,
     /// RAG provider (enterprise knowledge retrieval, orthogonal to MemoryProvider).
     /// ADR-051 C3: New field, independent from memory_provider.
     pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
@@ -263,7 +266,7 @@ impl AgentCore {
             soft_threshold_chars_override: None,
             system_prompt_override: None,
             memory_provider: None,
-            grafeo_store: None,
+            memory_admin: None,
             rag_provider: None,
             memory_session: None,
             debug_observer: observer,
@@ -605,17 +608,40 @@ impl AgentCore {
             tracing::warn!(error = %e, dir = %memory_dir.display(), "Failed to create memory directory, memory features disabled");
             return;
         }
+        #[cfg(feature = "grafeo-backend")]
+        {
+            self.init_grafeo_backend(&memory_dir);
+        }
+
+        #[cfg(not(feature = "grafeo-backend"))]
+        {
+            let _ = &memory_dir;
+            tracing::warn!(
+                "init_memory_provider: grafeo-backend feature not enabled, memory features disabled"
+            );
+        }
+    }
+
+    /// Create and initialise a GrafeoStore as the memory provider.
+    ///
+    /// ADR-051 P4: Feature-gated behind `grafeo-backend`. When the feature
+    /// is disabled, `init_memory_provider` logs a warning and skips.
+    #[cfg(feature = "grafeo-backend")]
+    fn init_grafeo_backend(&mut self, memory_dir: &std::path::Path) {
+        use acowork_grafeo::grafeo::GrafeoStore;
+        use acowork_grafeo::types::{GrafeoConfig, DEFAULT_EMBEDDING_DIM};
+
         let db_path = memory_dir.join("private.grafeo");
         let embedding_dim = self.embedding_provider.as_ref().map(|p| p.dimension()).unwrap_or_else(|| {
             tracing::warn!(
-                default_dim = acowork_grafeo::types::DEFAULT_EMBEDDING_DIM,
-                "⚠️ Embedding provider unavailable — opening GrafeoStore with default dim {}. \
+                default_dim = DEFAULT_EMBEDDING_DIM,
+                "⚠️ Embedding provider unavailable - opening GrafeoStore with default dim {}. \
                  If the on-disk store was created with a different dim, vector search will fail \
                  (HNSW index creation will warn) and memory will fall back to text-only search. \
                  Restart runtime after the embedding service is back online to use vector search.",
-                acowork_grafeo::types::DEFAULT_EMBEDDING_DIM
+                DEFAULT_EMBEDDING_DIM
             );
-            acowork_grafeo::types::DEFAULT_EMBEDDING_DIM
+            DEFAULT_EMBEDDING_DIM
         });
         let config = GrafeoConfig { db_path: db_path.clone(), embedding_dim };
         match GrafeoStore::open(&config) {
@@ -625,11 +651,11 @@ impl AgentCore {
                     .iter().map(|l| graph.nodes_by_label(l).len()).sum();
                 tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
                 let store_arc = Arc::new(store);
-                self.bootstrap_autobiographical_from_manifest(&store_arc);
+                self.bootstrap_autobiographical_from_manifest(&*store_arc);
                 if let Some(ref session) = self.memory_session {
                     session.set_provider(store_arc.clone());
                 }
-                self.grafeo_store = Some(store_arc.clone());
+                self.memory_admin = Some(store_arc.clone());
                 self.memory_provider = Some(store_arc);
                 self.start_consolidation_pipeline();
             }
@@ -643,10 +669,10 @@ impl AgentCore {
         self.memory_provider.as_ref()
     }
 
-    /// Compat accessor: returns concrete GrafeoStore for callers that need
-    /// GrafeoStore-specific methods (MemoryManager, HTTP admin). C4 will remove.
-    pub fn grafeo_store(&self) -> Option<&Arc<GrafeoStore>> {
-        self.grafeo_store.as_ref()
+    /// Admin service for HTTP memory endpoints and embedding migration.
+    /// ADR-051 P4: Replaces the former `grafeo_store()` accessor.
+    pub fn memory_admin(&self) -> Option<&Arc<dyn MemoryAdminService>> {
+        self.memory_admin.as_ref()
     }
 
     /// Backward-compat alias for memory_provider(). ADR-051 C3.
@@ -654,8 +680,9 @@ impl AgentCore {
         self.memory_provider.as_ref()
     }
 
-    fn bootstrap_autobiographical_from_manifest(&self, store: &GrafeoStore) {
-        match store.find_autobiographical_by_category(AutobioCategory::Identity) {
+    #[cfg(feature = "grafeo-backend")]
+    fn bootstrap_autobiographical_from_manifest(&self, provider: &dyn MemoryProvider) {
+        match provider.find_autobiographical_by_category(AutobioCategory::Identity) {
             Ok(existing) if !existing.is_empty() => {
                 tracing::debug!(count = existing.len(), "Autobiographical nodes already exist, skipping manifest bootstrap");
                 return;
@@ -684,7 +711,7 @@ impl AgentCore {
                 embedding: None, status: NodeStatus::Active,
                 created_at: now, updated_at: now, metadata: HashMap::new(),
             };
-            if let Err(e) = store.store_autobiographical(&node) {
+            if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node");
             }
         }
@@ -695,7 +722,7 @@ impl AgentCore {
                 embedding: None, status: NodeStatus::Active,
                 created_at: now, updated_at: now, metadata: HashMap::new(),
             };
-            if let Err(e) = store.store_autobiographical(&node) {
+            if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node");
             }
         }
@@ -720,7 +747,6 @@ impl AgentCore {
             return;
         }
         use crate::memory::consolidation_bg::{ConsolidationParams, start_consolidation_pipeline};
-        use acowork_grafeo::consolidation::SchedulerConfig;
         use std::time::Duration;
         let model = {
             let list = self.global_provider_list.read().unwrap();
@@ -929,7 +955,7 @@ impl Clone for AgentCore {
             soft_threshold_chars_override: self.soft_threshold_chars_override,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_provider: self.memory_provider.clone(),
-            grafeo_store: self.grafeo_store.clone(),
+            memory_admin: self.memory_admin.clone(),
             rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),

@@ -21,7 +21,9 @@ use crate::error::{GrafeoError, Result};
 /// Default embedding vector dimension (384d).
 /// When an embedding provider is available, the actual dimension is configured
 /// via [`GrafeoConfig::embedding_dim`] at [`GrafeoStore::open`] time.
-pub const DEFAULT_EMBEDDING_DIM: usize = 384;
+///
+/// ADR-051 P4: Re-exported from `acowork_memory::types::DEFAULT_EMBEDDING_DIM`.
+pub use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
 
 /// Configuration for opening a Grafeo persistence store.
 pub struct GrafeoConfig {

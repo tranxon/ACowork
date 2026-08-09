@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 // Re-export from acowork-core
 pub use acowork_core::memory::traits::{MemoryNode, PrivacyLevel};
 
+/// Default embedding dimension when no embedding provider is available.
+///
+/// ADR-051 P4: Moved from `acowork_grafeo::types::DEFAULT_EMBEDDING_DIM`
+/// to decouple Runtime from the grafeo crate.
+pub const DEFAULT_EMBEDDING_DIM: usize = 384;
+
 // ============================================================================
 // Query Types
 // ============================================================================

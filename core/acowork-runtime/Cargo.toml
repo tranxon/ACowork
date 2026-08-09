@@ -12,11 +12,15 @@ name = "acowork-runtime"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["grafeo-backend"]
 # WASM tool sandbox (Wasmtime-based)
 wasm-tools = ["wasmtime", "wasmtime-wasi"]
 # Interactive CLI approval (dialoguer-based confirmation prompts)
 interactive-cli = ["dialoguer"]
+# ADR-051 P4: Grafeo memory backend (default production storage engine).
+# When disabled, Runtime compiles without acowork-grafeo dependency;
+# memory features are unavailable unless another MemoryProvider is injected.
+grafeo-backend = ["acowork-grafeo", "grafeo-common", "grafeo-core"]
 
 [dependencies]
 acowork-core.workspace = true
@@ -24,10 +28,11 @@ acowork-memory.workspace = true
 
 # ADR-039 Phase 2: shared MQTT session lifecycle
 acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
-acowork-grafeo.workspace = true
+# ADR-051 P4: grafeo is an optional dependency behind `grafeo-backend` feature.
+acowork-grafeo = { workspace = true, optional = true }
 acowork-mcp.workspace = true
-grafeo-common.workspace = true
-grafeo-core.workspace = true
+grafeo-common = { workspace = true, optional = true }
+grafeo-core = { workspace = true, optional = true }
 async-trait.workspace = true
 tokio.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
@@ -90,6 +95,10 @@ wasmtime-wasi = { workspace = true, optional = true }
 [dev-dependencies]
 acowork-core = { workspace = true }
 acowork-gateway = { workspace = true }
+# ADR-051 P4: grafeo needed for integration tests that construct GrafeoStore
+acowork-grafeo = { workspace = true }
+grafeo-common = { workspace = true }
+grafeo-core = { workspace = true }
 # ADR-044 Phase 1: test-util enables paused time + auto-advance helpers used by
 # cancellation/integration_tests.rs (tokio::time::timeout + spawned tasks).
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

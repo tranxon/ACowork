@@ -7,8 +7,8 @@
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
-use acowork_grafeo::consolidation::MemoryStoreInput;
-use acowork_grafeo::types::KnowledgeSubType;
+use acowork_memory::consolidation::MemoryStoreInput;
+use acowork_memory::types::KnowledgeSubType;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;

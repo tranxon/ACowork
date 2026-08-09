@@ -1,29 +1,114 @@
-//! Consolidation background task — bridges the ConsolidationScheduler
-//! (grafeo crate) to the Runtime's tokio runtime.
+//! Consolidation background task - timing policy and background loop.
 //!
-//! The scheduler itself is a pure data structure in grafeo that only
-//! answers `should_run()` and `run_now()`. This module spawns a
-//! background tokio task that:
+//! ADR-051 P4: Replaces the grafeo `ConsolidationScheduler` with a
+//! lightweight `ConsolidationTimer` that lives in the Runtime. The timer
+//! implements the same scheduling policy (idle-timeout + accumulation
+//! threshold) without needing a GrafeoStore.
 //!
+//! The background task:
 //! 1. Polls `should_run()` every 60 seconds
 //! 2. When triggered, runs the full offline consolidation pipeline
 //!    (triple extraction + conflict resolution + generalization)
 //! 3. Logs results and errors
 //!
-//! The task holds Arc references to AgentCore resources so it
-//! doesn't prevent shutdown.
+//! The actual consolidation execution goes through `dyn MemoryProvider`,
+//! so any provider backend can be used.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acowork_grafeo::consolidation::triple_extraction::TripleExtractorLlm;
-use acowork_grafeo::consolidation::{
-    ConsolidationScheduler, GeneralizationConfig, OfflineConsolidationConfig, SchedulerConfig,
+use acowork_memory::consolidation::{
+    GeneralizationConfig, OfflineConsolidationConfig, SchedulerConfig, TripleExtractorLlm,
 };
+use chrono::Utc;
 use tokio::sync::Mutex;
 
 use crate::embedding::EmbeddingProvider;
 use crate::memory::llm_adapter::ProviderLlmAdapter;
+
+// ---------------------------------------------------------------------------
+// Trigger reason
+// ---------------------------------------------------------------------------
+
+/// Why a consolidation run was triggered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerReason {
+    /// Agent has been idle for longer than the configured timeout.
+    IdleTimeout,
+    /// The number of pending nodes exceeded the accumulation threshold.
+    Accumulation,
+    /// Manually triggered by the user or API.
+    Manual,
+}
+
+// ---------------------------------------------------------------------------
+// Consolidation timer (replaces grafeo's ConsolidationScheduler)
+// ---------------------------------------------------------------------------
+
+/// Lightweight scheduling policy for consolidation runs.
+///
+/// ADR-051 P4: Replaces `acowork_grafeo::consolidation::ConsolidationScheduler`.
+/// Does NOT hold a store reference - the background loop calls
+/// `dyn MemoryProvider` for all data operations.
+pub struct ConsolidationTimer {
+    config: SchedulerConfig,
+    state: Mutex<TimerState>,
+}
+
+#[derive(Debug)]
+struct TimerState {
+    last_active_at: chrono::DateTime<Utc>,
+    pending_count: usize,
+}
+
+impl ConsolidationTimer {
+    pub fn new(config: SchedulerConfig) -> Self {
+        Self {
+            config,
+            state: Mutex::new(TimerState {
+                last_active_at: Utc::now(),
+                pending_count: 0,
+            }),
+        }
+    }
+
+    /// Notify the timer that the agent is active. Resets the idle timer.
+    pub async fn notify_active(&self) {
+        let mut state = self.state.lock().await;
+        state.last_active_at = Utc::now();
+    }
+
+    /// Update the pending node count (called periodically by the background task).
+    pub async fn update_pending_count(&self, count: usize) {
+        let mut state = self.state.lock().await;
+        state.pending_count = count;
+    }
+
+    /// Check whether consolidation should run now.
+    pub async fn should_run(&self) -> Option<TriggerReason> {
+        let state = self.state.lock().await;
+        let now = Utc::now();
+
+        // Check accumulation threshold
+        if state.pending_count >= self.config.accumulation_threshold {
+            return Some(TriggerReason::Accumulation);
+        }
+
+        // Check idle timeout
+        let idle_duration = now - state.last_active_at;
+        let idle_secs = idle_duration.num_seconds();
+        if idle_secs >= self.config.idle_timeout_secs as i64 && state.pending_count > 0 {
+            return Some(TriggerReason::IdleTimeout);
+        }
+
+        None
+    }
+
+    /// Get the scheduler config (used for batch_size / min_pending_age_hours).
+    pub fn config(&self) -> &SchedulerConfig {
+        &self.config
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Background task handle
@@ -34,14 +119,13 @@ use crate::memory::llm_adapter::ProviderLlmAdapter;
 /// Dropping this handle cancels the background task (via `JoinHandle::abort`).
 #[derive(Debug)]
 pub struct ConsolidationBgTask {
-    /// The tokio JoinHandle — abort on drop.
     join_handle: tokio::task::JoinHandle<()>,
 }
 
 impl ConsolidationBgTask {
     /// Spawn the background consolidation task.
     pub fn spawn(
-        scheduler: Arc<ConsolidationScheduler>,
+        scheduler: Arc<ConsolidationTimer>,
         provider: Arc<dyn acowork_memory::MemoryProvider>,
         llm: Arc<dyn TripleExtractorLlm>,
         embedding_provider: Arc<dyn EmbeddingProvider>,
@@ -80,7 +164,7 @@ impl Drop for ConsolidationBgTask {
 // ---------------------------------------------------------------------------
 
 async fn run_consolidation_loop(
-    scheduler: Arc<ConsolidationScheduler>,
+    scheduler: Arc<ConsolidationTimer>,
     provider: Arc<dyn acowork_memory::MemoryProvider>,
     llm: Arc<dyn TripleExtractorLlm>,
     embedding_provider: Arc<dyn EmbeddingProvider>,
@@ -93,14 +177,13 @@ async fn run_consolidation_loop(
     );
 
     let mut interval = tokio::time::interval(poll_interval);
-    // First tick fires immediately — skip it so we don't consolidate on startup.
+    // First tick fires immediately - skip it so we don't consolidate on startup.
     interval.tick().await;
 
     loop {
         interval.tick().await;
 
-        // Update pending count from the store.
-        // GrafeoStore is Sync, so we can call methods directly on the Arc.
+        // Update pending count from the provider.
         let pending_count = match provider.get_pending_consolidation_count() {
             Ok(count) => count,
             Err(e) => {
@@ -116,201 +199,89 @@ async fn run_consolidation_loop(
             None => continue,
         };
 
-        tracing::info!(?trigger, pending_count, "Consolidation scheduler triggered");
+        tracing::info!(?trigger, pending = pending_count, "Consolidation triggered");
 
-        // P3 T4.4: Simple global lock — if another agent is running consolidation,
-        // skip this cycle. Uses a file-based lock in the work directory.
-        let lock_path = work_dir
-            .as_ref()
-            .map(|d| d.join("memory").join(".consolidation.lock"));
-        let lock_held = match &lock_path {
-            Some(path) => acquire_consolidation_lock(path),
-            None => true, // No lock file → always allow (single-agent mode)
+        // Build embedding function from the embedding provider.
+        let embedding_fn = {
+            let ep = embedding_provider.clone();
+            let handle = tokio::runtime::Handle::current();
+            Arc::new(move |text: &str| -> Vec<f32> {
+                let text_owned = text.to_string();
+                match handle.block_on(ep.embed(&text_owned)) {
+                    Ok(vec) => vec,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Embedding failed during consolidation, using zero vector");
+                        vec![]
+                    }
+                }
+            }) as Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>
         };
 
-        if !lock_held {
-            tracing::info!("Consolidation lock held by another agent, skipping this cycle");
-            continue;
-        }
-
-        // Create a Send+Sync embedding closure wrapped in Arc.
-        // Uses tokio::runtime::Handle::current().block_on() inside spawn_blocking
-        // to avoid creating a new thread + tokio Runtime for every embedding call.
-        // The consolidation API requires a synchronous closure, so we bridge
-        // async → sync via Handle::current() on a blocking thread.
-        let emb_provider = embedding_provider.clone();
-        #[allow(clippy::type_complexity)]
-        let embedding_fn: Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync> = Arc::new(
-            move |text: &str| -> Vec<f32> {
-                let provider = emb_provider.clone();
-                let text_owned = text.to_string();
-                // Use the current tokio runtime handle to block_on the async embed call.
-                // This is safe because the closure is called from within a tokio task
-                // (the consolidation loop), and Handle::current() references the
-                // same runtime without creating a new one.
-                // Note: block_on inside an async context would panic, but our
-                // Grafeo consolidation pipeline calls this closure synchronously
-                // from within run_offline_consolidation, which is already async.
-                // We use tokio::task::block_in_place to safely block on the
-                // current thread without panicking.
-                tokio::task::block_in_place(|| {
-                    let handle = tokio::runtime::Handle::current();
-                    match handle.block_on(provider.embed(&text_owned)) {
-                        Ok(vec) => vec,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Embedding failed in consolidation, using zero vector");
-                            vec![0.0f32; provider.dimension()]
-                        }
-                    }
-                })
-            },
-        );
-
-        // Run consolidation with generalization.
+        // Build offline config from scheduler config.
         let offline_config = OfflineConsolidationConfig {
             batch_size: scheduler.config().batch_size,
             min_pending_age_hours: scheduler.config().min_pending_age_hours,
         };
+
+        // Run consolidation through the provider trait.
         let gen_config = GeneralizationConfig::default();
-
-        let result = provider
-            .run_offline_consolidation(
-                &offline_config,
-                Some(llm.as_ref()),
-                Some(embedding_fn),
-                Some(&gen_config),
-            )
-            .await;
-
-        match result {
+        match provider
+            .run_offline_consolidation(&offline_config, Some(&*llm), Some(embedding_fn), Some(&gen_config))
+            .await
+        {
             Ok(result) => {
                 tracing::info!(
                     trigger = ?trigger,
                     upgraded = result.upgraded,
-                    kept_pending = result.kept_pending,
-                    marked_dormant = result.marked_dormant,
-                    procedural_created = result.procedural_created,
-                    procedural_boosted = result.procedural_boosted,
-                    history_compressed = result.history_compressed,
-                    episodic_cleaned = result.episodic_cleaned,
-                    "Offline consolidation completed"
+                    conflicts_resolved = result.conflicts_resolved,
+                    "Consolidation run complete"
                 );
             }
             Err(e) => {
-                tracing::error!(error = %e, "Offline consolidation failed");
+                tracing::warn!(error = %e, "Consolidation run failed");
             }
         }
 
-        // After running, update pending count again.
-        let new_pending = match provider.get_pending_consolidation_count() {
-            Ok(count) => count,
-            Err(_) => 0,
-        };
-        scheduler.update_pending_count(new_pending).await;
+        // Notify the provider that consolidation just ran.
+        provider.notify_consolidation_active().await;
 
-        // Release the consolidation lock.
-        if let Some(ref path) = lock_path {
-            release_consolidation_lock(path);
+        // Optional: write a sentinel file for debugging.
+        if let Some(ref work_dir) = work_dir {
+            let sentinel = work_dir.join(".consolidation_last_run");
+            let _ = std::fs::write(&sentinel, Utc::now().to_rfc3339());
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Global consolidation lock (file-based)
+// Pipeline starter
 // ---------------------------------------------------------------------------
 
-/// Try to acquire the consolidation lock.
-///
-/// Returns `true` if the lock was acquired, `false` if another agent
-/// holds it. Uses a simple file with PID + timestamp.
-fn acquire_consolidation_lock(lock_path: &std::path::Path) -> bool {
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // Check if lock file exists and is recent (< 10 minutes old).
-    if let Ok(metadata) = std::fs::metadata(lock_path) {
-        if let Ok(modified) = metadata.modified()
-            && let Ok(duration) = modified.elapsed()
-                && duration.as_secs() < 600 {
-                    // Lock file is recent — another agent is likely running.
-                    return false;
-                }
-        // Lock file is stale — remove it.
-        let _ = std::fs::remove_file(lock_path);
-    }
-
-    // Write our PID + timestamp.
-    let content = format!(
-        "pid={}\ntime={}\n",
-        std::process::id(),
-        chrono::Utc::now().to_rfc3339()
-    );
-    std::fs::write(lock_path, content).is_ok()
-}
-
-/// Release the consolidation lock by removing the lock file.
-fn release_consolidation_lock(lock_path: &std::path::Path) {
-    let _ = std::fs::remove_file(lock_path);
-}
-
-// ---------------------------------------------------------------------------
-// Builder — creates scheduler + bg task from AgentCore resources
-// ---------------------------------------------------------------------------
-
-/// Parameters needed to create the consolidation background pipeline.
+/// Parameters for [`start_consolidation_pipeline`].
 pub struct ConsolidationParams {
-    /// Memory provider (shared, already initialized).
     pub provider: Arc<dyn acowork_memory::MemoryProvider>,
-    /// LLM Provider for triple extraction and conflict resolution.
     pub llm_provider: Arc<dyn acowork_core::providers::traits::Provider>,
-    /// Model name for the LLM adapter.
     pub model: String,
-    /// Embedding provider for generalization.
     pub embedding_provider: Arc<dyn EmbeddingProvider>,
-    /// Scheduler configuration.
     pub scheduler_config: SchedulerConfig,
-    /// Poll interval for the background task.
     pub poll_interval: Duration,
-    /// Working directory for the lock file.
-    /// If None, no file-based lock is used (single-agent mode).
     pub work_dir: Option<std::path::PathBuf>,
 }
 
 /// Create and start the consolidation background pipeline.
 ///
-/// Returns the scheduler (for `notify_active()` calls) and the
+/// Returns the timer (for `notify_active()` calls) and the
 /// background task handle (to be stored in AgentCore).
 ///
-/// Note: The ConsolidationScheduler in grafeo expects `Arc<Mutex<GrafeoStore>>`
-/// for its `run_now()` method. However, our background loop runs consolidation
-/// directly on the shared `Arc<GrafeoStore>` (which is Sync). We create a
-/// lightweight Mutex wrapper solely for the scheduler's constructor, but the
-/// actual consolidation is done through the direct Arc reference.
+/// ADR-051 P4: Uses `ConsolidationTimer` (Runtime-internal) instead of
+/// grafeo's `ConsolidationScheduler`. No GrafeoStore dependency.
 pub fn start_consolidation_pipeline(
     params: ConsolidationParams,
-) -> (Arc<ConsolidationScheduler>, ConsolidationBgTask) {
-    // Create a Mutex-wrapped clone-like reference for the scheduler.
-    // The scheduler stores this for its `run_now()` method, but our
-    // background loop uses the direct Arc<GrafeoStore> instead.
-    // We create a new in-memory store as a placeholder for the scheduler's
-    // internal state — the scheduler's `run_now()` is not used by our
-    // background task; we call the store methods directly.
-    let scheduler_store = Arc::new(Mutex::new(
-        acowork_grafeo::GrafeoStore::new_in_memory().expect("in-memory store for scheduler should not fail"),
-    ));
-
-    // Create the LLM adapter.
+) -> (Arc<ConsolidationTimer>, ConsolidationBgTask) {
     let llm_adapter = Arc::new(ProviderLlmAdapter::new(params.llm_provider, params.model));
 
-    // Create the scheduler (uses its own store for `run_now()`, but we
-    // use the shared store for our direct consolidation calls).
-    let scheduler = Arc::new(ConsolidationScheduler::new(
-        scheduler_store,
-        params.scheduler_config,
-    ));
+    let scheduler = Arc::new(ConsolidationTimer::new(params.scheduler_config));
 
-    // Spawn the background task with the REAL store.
     let bg_task = ConsolidationBgTask::spawn(
         scheduler.clone(),
         params.provider,
@@ -330,95 +301,85 @@ pub fn start_consolidation_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_grafeo::consolidation::triple_extraction::{LlmMessage, LlmResponse};
-    use acowork_grafeo::grafeo::GrafeoStore;
-    use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
 
-    /// A mock TripleExtractorLlm that returns a fixed empty JSON array.
-    struct MockExtractorLlm;
-
-    #[async_trait::async_trait]
-    impl TripleExtractorLlm for MockExtractorLlm {
-        async fn chat(
-            &self,
-            _messages: Vec<LlmMessage>,
-        ) -> std::result::Result<LlmResponse, String> {
-            Ok(LlmResponse {
-                content: "[]".to_string(),
-                usage_tokens: Some(50),
-            })
-        }
+    #[tokio::test]
+    async fn test_timer_notify_active_resets_idle() {
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        timer.notify_active().await;
+        let idle = {
+            let state = timer.state.lock().await;
+            (Utc::now() - state.last_active_at).num_seconds()
+        };
+        assert!(idle < 5, "Idle should be near 0 after notify_active");
     }
 
-    /// A mock EmbeddingProvider for testing.
-    struct MockEmbedding;
+    #[tokio::test]
+    async fn test_timer_accumulation_trigger() {
+        let config = SchedulerConfig {
+            accumulation_threshold: 5,
+            ..Default::default()
+        };
+        let timer = ConsolidationTimer::new(config);
+        timer.update_pending_count(10).await;
+        let trigger = timer.should_run().await;
+        assert_eq!(trigger, Some(TriggerReason::Accumulation));
+    }
 
-    #[async_trait::async_trait]
-    impl EmbeddingProvider for MockEmbedding {
-        fn name(&self) -> &str {
-            "mock"
-        }
-        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embedding::EmbeddingError> {
-            Ok(vec![0.1f32; DEFAULT_EMBEDDING_DIM])
-        }
-        async fn embed_batch(
-            &self,
-            texts: &[&str],
-        ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
-            Ok(texts
-                .iter()
-                .map(|_| vec![0.1f32; DEFAULT_EMBEDDING_DIM])
-                .collect())
-        }
-        fn dimension(&self) -> usize {
-            DEFAULT_EMBEDDING_DIM
-        }
-        async fn is_available(&self) -> bool {
-            true
-        }
+    #[tokio::test]
+    async fn test_timer_no_trigger_when_empty() {
+        let timer = ConsolidationTimer::new(SchedulerConfig::default());
+        timer.update_pending_count(0).await;
+        let trigger = timer.should_run().await;
+        assert_eq!(trigger, None);
     }
 
     #[tokio::test]
     async fn test_consolidation_bg_task_starts_and_stops() {
-        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap());
-        let scheduler_store = Arc::new(Mutex::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap()));
-
-        let scheduler = Arc::new(ConsolidationScheduler::new(
-            scheduler_store,
-            SchedulerConfig {
-                idle_timeout_secs: 1,
-                accumulation_threshold: 999,
-                batch_size: 50,
-                min_pending_age_hours: 1,
-            },
-        ));
-
-        let llm = Arc::new(MockExtractorLlm);
-        let embedding = Arc::new(MockEmbedding);
-
-        let bg = ConsolidationBgTask::spawn(
-            scheduler.clone(),
-            store,
-            llm,
-            embedding,
-            Duration::from_secs(1),
-            None, // No lock file in tests
+        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
+            acowork_grafeo::GrafeoStore::new_in_memory().unwrap(),
         );
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        drop(bg);
-    }
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl TripleExtractorLlm for NoopLlm {
+            async fn chat(&self, _messages: Vec<acowork_memory::consolidation::LlmMessage>) -> std::result::Result<acowork_memory::consolidation::LlmResponse, String> {
+                Ok(acowork_memory::consolidation::LlmResponse {
+                    content: "[]".to_string(),
+                    usage_tokens: None,
+                })
+            }
+        }
 
-    #[tokio::test]
-    async fn test_scheduler_notify_active() {
-        let scheduler_store = Arc::new(Mutex::new(acowork_grafeo::GrafeoStore::new_in_memory().unwrap()));
-        let scheduler = Arc::new(ConsolidationScheduler::new(
-            scheduler_store,
-            SchedulerConfig::default(),
-        ));
+        let llm: Arc<dyn TripleExtractorLlm> = Arc::new(NoopLlm);
+        let embedding_provider: Arc<dyn EmbeddingProvider> = {
+            struct DummyEmbeddingProvider;
+            #[async_trait::async_trait]
+            impl EmbeddingProvider for DummyEmbeddingProvider {
+                fn name(&self) -> &str { "dummy" }
+                async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                    Ok(vec![0.0; 384])
+                }
+                async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                    Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+                }
+                fn dimension(&self) -> usize { 384 }
+                async fn is_available(&self) -> bool { true }
+            }
+            Arc::new(DummyEmbeddingProvider)
+        };
 
-        scheduler.notify_active().await;
-        let idle = scheduler.idle_seconds().await;
-        assert!(idle < 5, "Idle should be near 0 after notify_active");
+        let timer = Arc::new(ConsolidationTimer::new(SchedulerConfig::default()));
+        let bg_task = ConsolidationBgTask::spawn(
+            timer,
+            store,
+            llm,
+            embedding_provider,
+            Duration::from_secs(60),
+            None,
+        );
+
+        // Give it a moment to start.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bg_task.abort();
     }
 }

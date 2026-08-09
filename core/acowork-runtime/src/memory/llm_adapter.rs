@@ -8,7 +8,7 @@
 //! expects, using a low-temperature non-streaming call.
 
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider};
-use acowork_grafeo::consolidation::triple_extraction::{
+use acowork_memory::consolidation::{
     LlmMessage, LlmResponse, TripleExtractorLlm,
 };
 
