@@ -436,6 +436,9 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 | GET | `/api/agents/{id}/memory/stats` | 统计：总数、存储字节、按 type/status 分布、embedding 维度等 | `/memory/stats` |
 | POST | `/api/agents/{id}/memory/consolidate` | 触发记忆整合（`force`、`retention_days`） | `/memory/consolidate` |
 | GET | `/api/agents/{id}/memory/graph` | 整图拉取（前端图谱视图） | `/memory/graph` |
+| GET | `/api/agents/{id}/memory/consolidation/status` | 整合定时器状态（idle 时长、pending 数、调度配置） | `/memory/consolidation/status` |
+| GET | `/api/agents/{id}/rag/status` | RAG 配置状态（是否已配置、provider name） | `/agents/{id}/rag/status` |
+| POST | `/api/agents/{id}/rag/query` | 直接查询 RAG（绕过 LLM，用于调试/连通性验证） | `/agents/{id}/rag/query` |
 
 ### 5.5 工作区 (Workspace)
 
@@ -616,14 +619,100 @@ Authorization: Bearer <token>
 Gateway 收到后 → 查 `RuntimeHttpRegistry` 取 Runtime HTTP 端口 →
 反代 `127.0.0.1:{port}/memory/nodes?...` → verbatim 返回。
 
-### 9.5 拉取消息历史（反向代理）
+### 9.5 查询整合状态（反向代理）
+
+```http
+GET /api/agents/{id}/memory/consolidation/status HTTP/1.1
+Authorization: Bearer <token>
+```
+
+响应：
+
+```json
+{
+  "idle_secs": 42,
+  "pending_count": 3,
+  "idle_timeout_secs": 1800,
+  "accumulation_threshold": 50,
+  "bg_task_running": true
+}
+```
+
+Runtime 未启动整合管线时返回 `503 Service Unavailable`。
+
+### 9.6 查询 RAG 状态（反向代理）
+
+```http
+GET /api/agents/{id}/rag/status HTTP/1.1
+Authorization: Bearer <token>
+```
+
+响应（已配置 RAG）：
+
+```json
+{
+  "configured": true,
+  "provider_name": "enterprise_knowledge",
+  "agent_id": "com.example.sales"
+}
+```
+
+响应（未配置 RAG）：
+
+```json
+{
+  "configured": false,
+  "provider_name": null,
+  "agent_id": "com.example.sales"
+}
+```
+
+### 9.7 直接查询 RAG（反向代理）
+
+绕过 LLM tool-call 路径，直接向 RAG 服务发起查询。用于调试 RAG
+连通性和查询质量。
+
+```http
+POST /api/agents/{id}/rag/query HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "query": "产品 Q3 路线图",
+  "top_k": 5,
+  "score_threshold": 0.7
+}
+```
+
+响应：
+
+```json
+{
+  "query": "产品 Q3 路线图",
+  "results": [
+    {
+      "content": "Q3 路线图包含三个里程碑...",
+      "source_url": "https://wiki.corp.example.com/q3-roadmap",
+      "chunk_id": "chunk-abc123",
+      "score": 0.92,
+      "source_label": "[RAG:enterprise_knowledge]"
+    }
+  ],
+  "result_count": 1,
+  "provider_name": "enterprise_knowledge"
+}
+```
+
+未配置 RAG 时返回 `503`；空 query 返回 `400`。
+
+### 9.8 拉取消息历史（反向代理）
 
 ```http
 GET /api/agents/{id}/sessions/sess-active/messages?cursor=...&limit=50 HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-### 9.6 静态文件直链（iframe / img）
+### 9.9 静态文件直链（iframe / img）
 
 ```html
 <!-- 工作区任意文件，按 workspace_id 解析 -->

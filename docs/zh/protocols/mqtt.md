@@ -775,6 +775,9 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP 反向代理──▶ Ru
 | `GET /api/agents/{id}/sessions` | `GET /sessions` | 全量 session 列表 |
 | `GET /api/agents/{id}/sessions/{sid}/messages` | `GET /sessions/{sid}/messages` | 全量 message 列表 |
 | `GET /api/agents/{id}/memory/graph` | `GET /memory/graph` | 全量 memory graph |
+| `GET /api/agents/{id}/memory/consolidation/status` | `GET /memory/consolidation/status` | 整合定时器状态 |
+| `GET /api/agents/{id}/rag/status` | `GET /agents/{id}/rag/status` | RAG 配置状态 |
+| `POST /api/agents/{id}/rag/query` | `POST /agents/{id}/rag/query` | 直接查询 RAG |
 | `GET /api/files/{id}` | `GET /files/{id}` | 文件内容 |
 
 **与 MQTT retained 的边界**：

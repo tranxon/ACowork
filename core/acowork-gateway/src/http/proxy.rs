@@ -156,6 +156,19 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/memory/graph",
             get(proxy_get_memory_graph),
         )
+        // ADR-051: consolidation status + RAG endpoints.
+        .route(
+            "/api/agents/{id}/memory/consolidation/status",
+            get(proxy_consolidation_status),
+        )
+        .route(
+            "/api/agents/{id}/rag/status",
+            get(proxy_rag_status),
+        )
+        .route(
+            "/api/agents/{id}/rag/query",
+            post(proxy_rag_query),
+        )
         // Route 1: Get single session
         .route(
             "/api/agents/{id}/sessions/{sid}",
@@ -391,6 +404,37 @@ async fn proxy_get_memory_graph(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/memory/graph", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/memory/consolidation/status` to Runtime.
+async fn proxy_consolidation_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime(&state, &id, "/memory/consolidation/status", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/rag/status` to Runtime.
+async fn proxy_rag_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/rag/status", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/rag/query` to Runtime.
+async fn proxy_rag_query(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/rag/query", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes` to Runtime's `GET /memory/nodes`.
