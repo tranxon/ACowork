@@ -108,6 +108,20 @@ impl ConsolidationTimer {
     pub fn config(&self) -> &SchedulerConfig {
         &self.config
     }
+
+    /// Get the current idle duration in seconds (since last `notify_active`).
+    /// Used by the HTTP status endpoint and tests.
+    pub async fn idle_secs(&self) -> i64 {
+        let state = self.state.lock().await;
+        (Utc::now() - state.last_active_at).num_seconds()
+    }
+
+    /// Get the current pending node count.
+    /// Used by the HTTP status endpoint.
+    pub async fn pending_count(&self) -> usize {
+        let state = self.state.lock().await;
+        state.pending_count
+    }
 }
 
 // ---------------------------------------------------------------------------

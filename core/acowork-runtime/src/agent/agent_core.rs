@@ -1484,4 +1484,187 @@ mod tests {
         // keep_recent_n updated.
         assert_eq!(core.tool_result_keep_recent_n_override, Some(4));
     }
+
+    // ── Consolidation timer integration tests (ADR-051 P4) ──────────
+
+    /// G1: Verify that `start_consolidation_pipeline` stores the timer
+    /// in `AgentCore.consolidation_timer` and that `notify_consolidation_active`
+    /// resets the timer's idle clock.
+    ///
+    /// This is the integration-level regression for the P0 bug where the
+    /// timer was created but immediately dropped (not stored), causing
+    /// `notify_consolidation_active` to be a no-op and consolidation to
+    /// fire unconditionally on every idle-timeout tick.
+    #[tokio::test]
+    async fn test_consolidation_timer_stored_and_notify_resets_idle() {
+        use acowork_core::embedding::EmbeddingProvider;
+        use acowork_grafeo::GrafeoStore;
+
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // Set up a real in-memory GrafeoStore as the memory provider.
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        core.memory_provider = Some(store);
+
+        // Set up a dummy embedding provider (required by start_consolidation_pipeline).
+        struct DummyEmbeddingProvider;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for DummyEmbeddingProvider {
+            fn name(&self) -> &str { "dummy" }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                Ok(vec![0.0; 384])
+            }
+            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+            }
+            fn dimension(&self) -> usize { 384 }
+            async fn is_available(&self) -> bool { true }
+        }
+        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
+
+        // Before starting: timer is None.
+        assert!(core.consolidation_timer.is_none());
+        assert!(core.consolidation_bg_task.is_none());
+
+        // Start the consolidation pipeline.
+        core.start_consolidation_pipeline();
+
+        // After starting: timer must be stored.
+        let timer = core.consolidation_timer
+            .clone()
+            .expect("consolidation_timer must be Some after start_consolidation_pipeline");
+        assert!(core.consolidation_bg_task.is_some());
+
+        // Wait a moment to let some "idle" time accumulate.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Call notify_consolidation_active - should reset idle timer.
+        core.notify_consolidation_active().await;
+
+        // Verify idle is near 0 via public accessor.
+        let idle_secs = timer.idle_secs().await;
+        assert!(
+            idle_secs < 5,
+            "Idle should be < 5s after notify_consolidation_active, got {idle_secs}s"
+        );
+
+        // Verify should_run does NOT trigger via idle (recently active, 0 pending).
+        timer.update_pending_count(0).await;
+        let trigger = timer.should_run().await;
+        assert_eq!(trigger, None, "Should not trigger with 0 pending and recent activity");
+
+        // Clean up: abort the bg task.
+        if let Some(bg) = core.consolidation_bg_task.take() {
+            bg.abort();
+        }
+    }
+
+    /// G1b: Verify that `clone_for_session` shares the same timer Arc.
+    /// When a session clone calls `notify_consolidation_active`, the
+    /// original AgentCore's timer must also be reset (shared Arc).
+    #[tokio::test]
+    async fn test_consolidation_timer_shared_across_session_clone() {
+        use acowork_core::embedding::EmbeddingProvider;
+        use acowork_grafeo::GrafeoStore;
+
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        core.memory_provider = Some(store);
+
+        struct DummyEmbeddingProvider;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for DummyEmbeddingProvider {
+            fn name(&self) -> &str { "dummy" }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
+                Ok(vec![0.0; 384])
+            }
+            async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
+                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+            }
+            fn dimension(&self) -> usize { 384 }
+            async fn is_available(&self) -> bool { true }
+        }
+        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
+
+        core.start_consolidation_pipeline();
+        let original_timer = core.consolidation_timer.clone().unwrap();
+
+        // Clone the core (simulates session creation).
+        let session_core = core.clone();
+
+        // The session clone must share the same timer Arc.
+        let session_timer = session_core.consolidation_timer
+            .as_ref()
+            .expect("session clone must have consolidation_timer");
+        assert!(
+            Arc::ptr_eq(session_timer, &original_timer),
+            "session clone must share the same timer Arc (not a copy)"
+        );
+
+        // Session clone resets the timer.
+        session_core.notify_consolidation_active().await;
+
+        // The original core's timer must reflect the reset.
+        let idle_secs = original_timer.idle_secs().await;
+        assert!(
+            idle_secs < 5,
+            "Original timer must reflect session clone's notify_active (shared Arc)"
+        );
+
+        // Clean up.
+        if let Some(bg) = core.consolidation_bg_task.take() {
+            bg.abort();
+        }
+    }
+
+    /// G9: Verify that `AgentCore.rag_provider` is None by default
+    /// and can be set / accessed. This tests the accessor path that
+    /// `session_init` uses to propagate the RAG provider from boot
+    /// context.
+    #[test]
+    fn test_rag_provider_default_none_and_settable() {
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // Default: no RAG provider.
+        assert!(core.rag_provider.is_none());
+
+        // Set a dummy RAG provider.
+        use acowork_core::rag::RagProvider;
+        struct DummyRag;
+        #[async_trait::async_trait]
+        impl RagProvider for DummyRag {
+            fn name(&self) -> &str { "dummy_rag" }
+            async fn query(&self, _query: &str) -> Vec<acowork_core::rag::AnnotatedRagResult> {
+                Vec::new()
+            }
+            async fn query_with_params(
+                &self,
+                _query: &str,
+                _top_k: Option<u32>,
+                _score_threshold: Option<f32>,
+                _filters: Option<serde_json::Value>,
+            ) -> Vec<acowork_core::rag::AnnotatedRagResult> {
+                Vec::new()
+            }
+        }
+        core.rag_provider = Some(Arc::new(DummyRag));
+
+        // Verify it's accessible.
+        assert!(core.rag_provider.is_some());
+        assert_eq!(
+            core.rag_provider.as_ref().unwrap().name(),
+            "dummy_rag"
+        );
+
+        // Verify it survives clone_for_session.
+        let session_core = core.clone();
+        assert!(session_core.rag_provider.is_some());
+        assert_eq!(
+            session_core.rag_provider.as_ref().unwrap().name(),
+            "dummy_rag"
+        );
+    }
 }

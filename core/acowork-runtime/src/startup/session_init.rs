@@ -602,6 +602,29 @@ pub(crate) async fn phase_b_init_session(
             let mut slot = ctx.session_config_slot.lock().await;
             *slot = Some(session_config);
         }
+
+        // Publish consolidation timer + RAG provider to the HTTP server's
+        // late-bind slots. These are set during Phase B (init_memory_provider
+        // calls start_consolidation_pipeline; rag_provider was set above).
+        {
+            // core_clone was moved into RuntimeAgentTokenService above; use
+            // agent_core_shared (which holds a clone) to access the fields.
+            let shared = ctx.agent_core_shared.read();
+            if let Ok(ref guard) = shared {
+                if let Some(core) = guard.as_ref() {
+                    if let Some(ref timer) = core.consolidation_timer {
+                        if let Ok(mut slot) = ctx.consolidation_timer_slot.write() {
+                            *slot = Some(timer.clone());
+                        }
+                    }
+                    if let Some(ref rag) = core.rag_provider {
+                        if let Ok(mut slot) = ctx.rag_provider_slot.write() {
+                            *slot = Some(rag.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let mut session_manager = SessionManager::new(core, session_manager_config);

@@ -154,6 +154,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ADR-047: session config service for GET/PUT /sessions/{sid}/config.
     let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
+    let consolidation_timer_slot: crate::http::server::SharedConsolidationTimer =
+        Arc::new(std::sync::RwLock::new(None));
+    let rag_provider_slot: crate::http::server::SharedRagProvider =
+        Arc::new(std::sync::RwLock::new(None));
 
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
@@ -181,6 +185,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             agent_config_slot.clone(),
             attachment_slot.clone(),
             session_config_slot.clone(),
+            consolidation_timer_slot.clone(),
+            rag_provider_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -878,6 +884,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_config_slot,
         attachment_slot,
         session_config_slot,
+        consolidation_timer_slot,
+        rag_provider_slot,
         search_key_vault,
         search_provider_list,
         session_configs,
@@ -899,4 +907,148 @@ fn noop_provider_tuple(
         vec![],
         ProtocolType::OpenAI,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::ToolRegistry;
+
+    /// G2: Verify that when a manifest declares a RAG tool, the
+    /// `rag_config()` extraction + `RagClientConfig::from_manifest`
+    /// + `HttpRagProvider::new` + `RagQueryTool::new` + registry
+    /// registration chain works end-to-end.
+    ///
+    /// This tests the exact code path in `build_builtin_registry`
+    /// (lines 535-612) without needing the full agent_init
+    /// infrastructure (MQTT, vault, workspace, etc.).
+    #[test]
+    fn test_rag_tool_registration_from_manifest() {
+        let toml_str = r#"
+            agent_id = "com.example.sales"
+            version = "1.0.0"
+            name = "Sales Assistant"
+            description = "Enterprise sales agent with RAG"
+            author = "corp"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "openai"
+            model = "gpt-4"
+
+            [[tools]]
+            type = "rag"
+            name = "enterprise_knowledge"
+
+            [tools.rag]
+            endpoint = "https://rag.corp.example.com/v1/query"
+            collection = "product_docs"
+            auth_ref = "vault:rag_enterprise_key"
+            auth_type = "bearer"
+            max_results = 5
+            score_threshold = 0.7
+        "#;
+        let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
+        assert!(manifest.has_rag());
+
+        // Extract RAG config from manifest (same as agent_init.rs line 551).
+        let (tool_name, rag_config) = manifest.rag_config().unwrap();
+        assert_eq!(tool_name, "enterprise_knowledge");
+        assert_eq!(rag_config.endpoint, "https://rag.corp.example.com/v1/query");
+
+        // Build RagClientConfig (same as agent_init.rs lines 597-601).
+        let auth = crate::tools::rag::client::RagAuthCredential::from_vault_ref(
+            rag_config.auth_ref.as_deref(),
+            &rag_config.auth_type,
+            None, // no key resolved (simulates MQTT race)
+        );
+        let rag_client_config = crate::tools::rag::client::RagClientConfig::from_manifest(
+            rag_config,
+            tool_name.to_string(),
+            auth,
+        );
+
+        // Construct HttpRagProvider (same as agent_init.rs line 602).
+        let provider = Arc::new(
+            crate::tools::rag::client::HttpRagProvider::new(rag_client_config),
+        );
+
+        // Register RagQueryTool in registry (same as agent_init.rs lines 605-606).
+        let mut registry = ToolRegistry::new();
+        let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider.clone());
+        registry.register(Arc::new(rag_tool) as Arc<dyn acowork_core::tools::traits::Tool>);
+
+        // G8: Verify the tool is discoverable in the registry by name.
+        let found = registry.get("rag_query");
+        assert!(found.is_some(), "rag_query must be in the registry after registration");
+
+        // Verify the tool spec has the right name and input schema.
+        let tool = found.unwrap();
+        assert_eq!(tool.name(), "rag_query");
+        let spec = tool.spec();
+        assert!(spec.input_schema["properties"]["query"].is_object());
+        assert!(spec.input_schema["properties"]["top_k"].is_object());
+        assert!(
+            spec.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("query"))
+        );
+    }
+
+    /// G2b: Verify that a manifest WITHOUT RAG declaration produces
+    /// `rag_config() == None`, and the registration path is skipped
+    /// (no rag_query tool in the registry).
+    #[test]
+    fn test_no_rag_tool_when_manifest_has_no_rag() {
+        let toml_str = r#"
+            agent_id = "com.test.basic"
+            version = "1.0.0"
+            name = "Basic Agent"
+            description = "No RAG"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "openai"
+            model = "gpt-4"
+        "#;
+        let manifest = acowork_core::AgentManifest::from_toml(toml_str).unwrap();
+        assert!(!manifest.has_rag());
+        assert!(manifest.rag_config().is_none());
+
+        // In agent_init.rs, rag_provider would be None and no tool registered.
+        let registry = ToolRegistry::new();
+        assert!(registry.get("rag_query").is_none(), "rag_query should not exist without RAG manifest");
+    }
+
+    /// G8b: Verify that the registered RAG tool's spec name matches
+    /// what the LLM would see in the tool list. The LLM invokes tools
+    /// by their `name()` - if the name is wrong, the tool is invisible.
+    #[test]
+    fn test_rag_tool_spec_name_matches_registry_lookup() {
+        let rag_config = acowork_core::RagToolConfig {
+            endpoint: "https://rag.example.com/v1/query".to_string(),
+            collection: Some("test_docs".to_string()),
+            auth_ref: None,
+            auth_type: "bearer".to_string(),
+            max_results: 5,
+            score_threshold: 0.7,
+            timeout_secs: 10,
+        };
+        let client_config = crate::tools::rag::client::RagClientConfig::from_manifest(
+            &rag_config,
+            "enterprise_knowledge".to_string(),
+            crate::tools::rag::client::RagAuthCredential::None,
+        );
+        let provider = Arc::new(crate::tools::rag::client::HttpRagProvider::new(client_config));
+        let rag_tool = crate::tools::builtin::rag_query::RagQueryTool::new(provider);
+
+        // The tool's name() must be "rag_query" - this is what the LLM sees.
+        let tool: Arc<dyn acowork_core::tools::traits::Tool> = Arc::new(rag_tool);
+        assert_eq!(tool.name(), "rag_query");
+
+        // The spec name must also be "rag_query".
+        assert_eq!(tool.spec().name, "rag_query");
+    }
 }

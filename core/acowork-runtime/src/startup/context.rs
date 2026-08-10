@@ -202,6 +202,14 @@ pub(crate) struct AgentBootContext {
     /// ADR-047: Late-bind slot for session config service
     /// (`GET/PUT /sessions/{sid}/config`). Populated in Phase B.
     pub session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+    /// Late-bind slot for the consolidation timer. Populated in Phase B
+    /// after `AgentCore::start_consolidation_pipeline()` stores the timer.
+    /// Used by `GET /memory/consolidation/status`.
+    pub consolidation_timer_slot: crate::http::server::SharedConsolidationTimer,
+    /// Late-bind slot for the RAG provider. Populated in Phase B from
+    /// `AgentBootContext.rag_provider`. Used by `GET /agents/{id}/rag/status`
+    /// and `POST /agents/{id}/rag/query`.
+    pub rag_provider_slot: crate::http::server::SharedRagProvider,
 
     /// Shared search key vault (provider_id -> decrypted API key).
     /// Created in Phase A, passed to `WebSearchEngine` (via

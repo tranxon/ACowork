@@ -394,5 +394,219 @@ impl RetrievalMetricsAggregator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acowork_memory::{HintType, RetrievalMetrics};
+
+    fn make_metrics(avg_score: f32, abstention: bool, level: u8) -> RetrievalMetrics {
+        RetrievalMetrics {
+            result_count: 5,
+            avg_score,
+            max_score: avg_score + 0.1,
+            abstention_triggered: abstention,
+            filtered_count: 0,
+            retrieval_level: level,
+            graph_expand_nodes: 0,
+            hint_type: HintType::Semantic,
+        }
+    }
+
+    #[test]
+    fn test_record_retrieval_increments_total() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        assert_eq!(agg.total_retrievals(), 0);
+
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        assert_eq!(agg.total_retrievals(), 1);
+
+        agg.record_retrieval(&make_metrics(0.6, false, 0));
+        assert_eq!(agg.total_retrievals(), 2);
+    }
+
+    #[test]
+    fn test_nrr_computation() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        // NRR = avg_score / max_possible_score = 0.8 / 1.0 = 0.8
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        assert!((agg.current_nrr() - 0.8).abs() < 0.01);
+
+        // Add a second retrieval with lower score.
+        agg.record_retrieval(&make_metrics(0.4, false, 0));
+        // avg NRR = (0.8 + 0.4) / 2 = 0.6
+        assert!((agg.current_nrr() - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_nrr_clamped_to_1() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(0.5);
+        // avg_score=0.8, max_possible=0.5 -> NRR = 1.6 -> clamped to 1.0
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        assert!((agg.current_nrr() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_nrr_zero_max_possible() {
+        let mut agg = RetrievalMetricsAggregator::new(0.0, AlertThresholds::default());
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        // max_possible_score=0 -> NRR=0
+        assert!((agg.current_nrr() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_abstention_rate_tracking() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        // 3 retrievals, 1 abstention -> rate = 1/3
+        agg.record_retrieval(&make_metrics(0.8, true, 0));
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        assert!((agg.abstention_rate() - (1.0 / 3.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_high_abstention_rate_alert() {
+        let mut thresholds = AlertThresholds::default();
+        thresholds.abstention_rate_high = 0.3; // 30%
+        let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
+
+        // 4 retrievals, 2 abstentions -> rate = 50% > 30%
+        for _ in 0..2 {
+            agg.record_retrieval(&make_metrics(0.8, true, 0));
+        }
+        for _ in 0..2 {
+            agg.record_retrieval(&make_metrics(0.8, false, 0));
+        }
+
+        let alerts = agg.record_retrieval(&make_metrics(0.8, true, 0));
+        // Now 3/5 = 60% abstention
+        let has_alert = alerts.iter().any(|a| a.alert_type == MetricsAlertType::HighAbstentionRate);
+        assert!(has_alert, "Should alert on high abstention rate");
+    }
+
+    #[test]
+    fn test_degradation_rate_tracking() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        // level 2+ counts as high degradation
+        agg.record_retrieval(&make_metrics(0.8, false, 2));
+        agg.record_retrieval(&make_metrics(0.8, false, 0));
+        // 1 out of 2 = 50%
+        assert!((agg.degradation_rate() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_low_nrr_consecutive_alert() {
+        let mut thresholds = AlertThresholds::default();
+        thresholds.nrr_warning = 0.5;
+        thresholds.nrr_consecutive_limit = 3;
+        let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
+
+        // 3 consecutive low-NRR retrievals (score=0.3, max=1.0 -> NRR=0.3 < 0.5)
+        for _ in 0..3 {
+            let alerts = agg.record_retrieval(&make_metrics(0.3, false, 0));
+            // Alert only fires when consecutive count reaches the limit
+            if agg.total_retrievals() >= 3 {
+                let has_alert = alerts.iter().any(|a| a.alert_type == MetricsAlertType::LowNrr);
+                assert!(has_alert, "Should alert on consecutive low NRR");
+            }
+        }
+    }
+
+    #[test]
+    fn test_conflict_accuracy_tracking() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+
+        let record = ConflictResolutionRecord {
+            heuristic_type: "Evolution".into(),
+            final_type: "Evolution".into(),
+            correct: true,
+            auto_resolved: true,
+        };
+        agg.record_conflict(&record);
+        agg.record_conflict(&record);
+
+        assert_eq!(agg.conflict_stats().total, 2);
+        assert_eq!(agg.conflict_stats().correct, 2);
+        assert_eq!(agg.conflict_stats().auto_resolved, 2);
+        assert!((agg.conflict_stats().accuracy() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_low_conflict_accuracy_alert() {
+        let mut thresholds = AlertThresholds::default();
+        thresholds.conflict_accuracy_min = 0.8;
+        let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
+
+        // 5 records: 2 correct, 3 incorrect -> accuracy = 40% < 80%
+        for _ in 0..2 {
+            agg.record_conflict(&ConflictResolutionRecord {
+                heuristic_type: "Evolution".into(),
+                final_type: "Evolution".into(),
+                correct: true,
+                auto_resolved: true,
+            });
+        }
+        for _ in 0..3 {
+            let alert = agg.record_conflict(&ConflictResolutionRecord {
+                heuristic_type: "Evolution".into(),
+                final_type: "Correction".into(),
+                correct: false,
+                auto_resolved: false,
+            });
+            // Alert fires once we have >= 5 total and accuracy < threshold
+            if agg.conflict_stats().total >= 5 {
+                assert!(alert.is_some(), "Should alert on low conflict accuracy");
+            }
+        }
+    }
+
+    #[test]
+    fn test_judge_score_tracking() {
+        let mut agg = RetrievalMetricsAggregator::with_defaults(1.0);
+
+        agg.record_judge_score(5); // normalized: 1.0
+        agg.record_judge_score(3); // normalized: 0.6
+        agg.record_judge_score(4); // normalized: 0.8
+
+        assert_eq!(agg.judge_eval_count(), 3);
+        // avg = (1.0 + 0.6 + 0.8) / 3 ≈ 0.8
+        assert!((agg.avg_judge_score() - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_judge_score_empty_returns_one() {
+        let agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        assert!((agg.avg_judge_score() - 1.0).abs() < 0.01);
+        assert_eq!(agg.judge_eval_count(), 0);
+    }
+
+    #[test]
+    fn test_nrr_sliding_window_eviction() {
+        let mut thresholds = AlertThresholds::default();
+        thresholds.nrr_consecutive_limit = 100; // prevent alert noise
+        let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
+        agg.window_size = 3; // small window for testing
+
+        agg.record_retrieval(&make_metrics(0.9, false, 0)); // NRR=0.9
+        agg.record_retrieval(&make_metrics(0.5, false, 0)); // NRR=0.5
+        agg.record_retrieval(&make_metrics(0.1, false, 0)); // NRR=0.1
+        // window = [0.9, 0.5, 0.1], avg = 0.5
+
+        agg.record_retrieval(&make_metrics(0.3, false, 0)); // NRR=0.3
+        // window should evict 0.9 -> [0.5, 0.1, 0.3], avg = 0.3
+        assert!((agg.current_nrr() - 0.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_empty_aggregator_defaults() {
+        let agg = RetrievalMetricsAggregator::with_defaults(1.0);
+        assert_eq!(agg.total_retrievals(), 0);
+        assert!((agg.current_nrr() - 1.0).abs() < 0.01); // optimistic default
+        assert!((agg.abstention_rate() - 0.0).abs() < 0.01);
+        assert!((agg.degradation_rate() - 0.0).abs() < 0.01);
+        assert_eq!(agg.conflict_stats().total, 0);
+        assert!((agg.conflict_stats().accuracy() - 1.0).abs() < 0.01); // no conflicts = perfect
+    }
+}
+
 // Note: HintType from acowork_memory is used implicitly through RetrievalMetrics.
 // No explicit HintType import needed - the aggregator accepts RetrievalMetrics directly.
