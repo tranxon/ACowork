@@ -2997,7 +2997,8 @@ mod tests {
             .unwrap();
         assert!(response.status().is_success());
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["consolidated"], 0);
+        assert_eq!(body["started"], false);
+        assert_eq!(body["episodes_consolidated"], 0);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -4494,11 +4495,28 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), 200, "POST /memory/consolidate should be 200");
         let body: serde_json::Value = resp.json().await.unwrap();
-        // consolidated should be a number (may be 0 if no consolidation needed).
+        // Response must match the ConsolidationReport contract:
+        // {started, duration_ms, episodes_consolidated, knowledge_nodes_generated, message}
+        assert_eq!(body["started"], true);
         assert!(
-            body["consolidated"].is_u64(),
-            "consolidated should be a number, got: {}",
-            body["consolidated"]
+            body["duration_ms"].is_u64(),
+            "duration_ms should be a number, got: {}",
+            body["duration_ms"]
+        );
+        assert!(
+            body["episodes_consolidated"].is_u64(),
+            "episodes_consolidated should be a number, got: {}",
+            body["episodes_consolidated"]
+        );
+        assert!(
+            body["knowledge_nodes_generated"].is_u64(),
+            "knowledge_nodes_generated should be a number, got: {}",
+            body["knowledge_nodes_generated"]
+        );
+        assert!(
+            body["message"].is_string(),
+            "message should be a string, got: {}",
+            body["message"]
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();

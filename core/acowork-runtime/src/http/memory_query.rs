@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use acowork_memory::admin::{
-    AdminConsolidateResult, AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
+    AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail,
     AdminStats, MemoryAdminService,
 };
 use serde::Serialize;
@@ -53,9 +53,18 @@ pub(crate) struct ListNodesOutput {
 pub(crate) type StatsOutput = MemoryStats;
 
 /// Result of a consolidation query.
-#[derive(Debug, Clone)]
+///
+/// Mirrors the enriched `AdminConsolidateResult` so the usecase layer
+/// can construct a full `ConsolidationReport` for the frontend.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ConsolidateOutput {
-    pub episodes_consolidated: u64,
+    pub upgraded: u64,
+    pub kept_pending: u64,
+    pub marked_dormant: u64,
+    pub triples_extracted: u64,
+    pub procedural_created: u64,
+    pub episodic_cleaned: u64,
+    pub started: bool,
 }
 
 /// Result of a single-node GET query.
@@ -288,14 +297,18 @@ pub(crate) fn trigger_consolidate(
     let svc = match admin {
         Some(s) => s,
         None => {
-            return ConsolidateOutput {
-                episodes_consolidated: 0,
-            };
+            return ConsolidateOutput::default();
         }
     };
-    let result: AdminConsolidateResult = svc.consolidate(force);
+    let result = svc.consolidate(force);
     ConsolidateOutput {
-        episodes_consolidated: result.episodes_consolidated,
+        upgraded: result.upgraded,
+        kept_pending: result.kept_pending,
+        marked_dormant: result.marked_dormant,
+        triples_extracted: result.triples_extracted,
+        procedural_created: result.procedural_created,
+        episodic_cleaned: result.episodic_cleaned,
+        started: result.started,
     }
 }
 
@@ -354,7 +367,8 @@ mod tests {
     #[test]
     fn trigger_consolidate_reports_unavailable_without_store() {
         let out = trigger_consolidate(None, true, 30);
-        assert_eq!(out.episodes_consolidated, 0);
+        assert!(!out.started);
+        assert_eq!(out.upgraded, 0);
     }
 
     #[test]

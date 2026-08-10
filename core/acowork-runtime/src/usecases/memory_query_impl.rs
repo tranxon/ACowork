@@ -101,12 +101,37 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             .read()
             .ok()
             .and_then(|g| g.clone());
+
+        let start = std::time::Instant::now();
         let out = memory_query::trigger_consolidate(store.as_ref(), force, retention_days);
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let episodes_consolidated =
+            out.upgraded + out.kept_pending + out.marked_dormant;
+        let knowledge_nodes_generated =
+            out.triples_extracted + out.procedural_created;
+
+        let message = if !out.started {
+            "Memory store unavailable, consolidation skipped".to_string()
+        } else if episodes_consolidated == 0 && knowledge_nodes_generated == 0 {
+            "No pending memories to consolidate".to_string()
+        } else {
+            format!(
+                "Consolidated {} episodes ({} upgraded, {} dormant), generated {} knowledge nodes, cleaned {} episodic",
+                episodes_consolidated,
+                out.upgraded,
+                out.marked_dormant,
+                knowledge_nodes_generated,
+                out.episodic_cleaned,
+            )
+        };
 
         Ok(ConsolidationReport {
-            consolidated: out.episodes_consolidated as usize,
-            failed: 0,
-            retention_days,
+            started: out.started,
+            duration_ms,
+            episodes_consolidated,
+            knowledge_nodes_generated,
+            message,
         })
     }
 

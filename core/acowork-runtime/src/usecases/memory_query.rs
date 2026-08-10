@@ -90,11 +90,23 @@ pub struct MemoryStats {
 }
 
 /// Result of a consolidation run.
+///
+/// This is the wire-format struct serialized by the HTTP handler and
+/// consumed by the Desktop Memory panel (`ConsolidateResponse` in
+/// `apps/acowork-desktop/src/lib/types.ts`). Field names MUST stay
+/// in sync with the frontend TypeScript type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidationReport {
-    pub consolidated: usize,
-    pub failed: usize,
-    pub retention_days: u32,
+    /// Whether consolidation actually started (false if store unavailable).
+    pub started: bool,
+    /// Wall-clock duration of the consolidation run in milliseconds.
+    pub duration_ms: u64,
+    /// Number of pending knowledge nodes processed (upgraded + kept + dormant).
+    pub episodes_consolidated: u64,
+    /// Number of new knowledge nodes created (triples extracted + procedural).
+    pub knowledge_nodes_generated: u64,
+    /// Human-readable summary message for the UI.
+    pub message: String,
 }
 
 /// Memory query methods.

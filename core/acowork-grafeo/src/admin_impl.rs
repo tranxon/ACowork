@@ -378,13 +378,17 @@ impl MemoryAdminService for GrafeoStore {
         };
         match self.run_offline_consolidation(&config) {
             Ok(result) => AdminConsolidateResult {
-                episodes_consolidated: result.upgraded as u64,
+                upgraded: result.upgraded as u64,
+                kept_pending: result.kept_pending as u64,
+                marked_dormant: result.marked_dormant as u64,
+                triples_extracted: result.triples_extracted as u64,
+                procedural_created: result.procedural_created as u64,
+                episodic_cleaned: result.episodic_cleaned as u64,
+                started: true,
             },
             Err(e) => {
                 tracing::warn!(error = %e, "Consolidation failed");
-                AdminConsolidateResult {
-                    episodes_consolidated: 0,
-                }
+                AdminConsolidateResult::default()
             }
         }
     }

@@ -640,6 +640,46 @@ Authorization: Bearer <token>
 
 Runtime 未启动整合管线时返回 `503 Service Unavailable`。
 
+### 9.5.1 触发记忆整合（反向代理）
+
+```http
+POST /api/agents/{id}/memory/consolidate HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "force": false,
+  "retention_days": 7
+}
+```
+
+响应：
+
+```json
+{
+  "started": true,
+  "duration_ms": 142,
+  "episodes_consolidated": 12,
+  "knowledge_nodes_generated": 3,
+  "message": "Consolidated 12 episodes (8 upgraded, 2 dormant), generated 3 knowledge nodes, cleaned 1 episodic"
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `started` | `bool` | 整合是否实际执行（store 不可用时为 `false`） |
+| `duration_ms` | `u64` | 整合耗时（毫秒） |
+| `episodes_consolidated` | `u64` | 处理的 pending 节点总数（upgraded + kept_pending + marked_dormant） |
+| `knowledge_nodes_generated` | `u64` | 新生成的知识节点数（triples_extracted + procedural_created） |
+| `message` | `string` | 人类可读的摘要信息 |
+
+> **注意**：HTTP 手动触发仅执行 Phase 2 基础策略（基于置信度的升级/降级），
+> 不包含 LLM triple extraction / conflict resolution / generalization。
+> 完整 Phase 3 pipeline 由后台 `ConsolidationTimer` 自动调度（idle 30min 或
+> pending ≥ 50 时触发）。
+
 ### 9.6 查询 RAG 状态（反向代理）
 
 ```http

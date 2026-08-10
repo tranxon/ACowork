@@ -110,10 +110,25 @@ pub struct AdminStats {
 }
 
 /// Result of a consolidation trigger.
-#[derive(Debug, Clone)]
+///
+/// Carries the full set of counters from `OfflineConsolidationResult`
+/// so the HTTP layer can construct a rich response for the frontend.
+#[derive(Debug, Clone, Default)]
 pub struct AdminConsolidateResult {
-    /// Number of episodes consolidated into knowledge nodes.
-    pub episodes_consolidated: u64,
+    /// Number of pending knowledge nodes upgraded to Active.
+    pub upgraded: u64,
+    /// Number of pending nodes kept as Pending (insufficient evidence).
+    pub kept_pending: u64,
+    /// Number of pending nodes marked Dormant (low confidence).
+    pub marked_dormant: u64,
+    /// Number of new knowledge triples extracted from episodes (Phase 3).
+    pub triples_extracted: u64,
+    /// Number of new ProceduralNodes created by generalization (Phase 3).
+    pub procedural_created: u64,
+    /// Number of episodic nodes cleaned up (transitioned to Dormant).
+    pub episodic_cleaned: u64,
+    /// Whether the consolidation actually ran (false if store unavailable).
+    pub started: bool,
 }
 
 /// Statistics returned by embedding dimension migration.
