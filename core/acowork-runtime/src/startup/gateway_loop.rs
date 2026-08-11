@@ -519,7 +519,8 @@ async fn mqtt_only_loop(
 ///   sets `session_core.notify_enabled` AtomicBool)
 /// - `CompressAction` → `SessionMessage::CompressAction(CompressionAction)`
 ///   with explicit CompressType i32 → CompressionAction mapping
-///   (1=SUMMARY → CompressSummary, 2=TOOL_RESULTS → CompressToolResults)
+///   (1=SUMMARY → CompressSummary; ADR-052 removed TOOL_RESULTS because
+///   tool-result compression is now LLM-initiated via `context_abandon`)
 /// - `SystemNotification` → legacy fallback (Phase 7: no longer produced by control path)
 async fn dispatch_inbound(
     session_manager: &mut crate::agent::session::SessionManager,
@@ -807,14 +808,12 @@ async fn dispatch_inbound(
         // ⑫ CompressAction — explicit CompressType i32 → CompressionAction mapping
         // (Phase 2-7: two paths must not cross).
         // CompressType::SUMMARY (1)     → CompressionAction::CompressSummary
-        // CompressType::TOOL_RESULTS(2)→ CompressionAction::CompressToolResults
         // Anything else is rejected (forwarded to session_task which emits an error).
         InboundMessage::CompressAction {
             compress_type, ..
         } => {
             let action = match compress_type {
                 1 => CompressionAction::CompressSummary,
-                2 => CompressionAction::CompressToolResults,
                 other => {
                     return Err(RuntimeError::Config(format!(
                         "CompressAction: invalid compress_type {} (expected 1=SUMMARY or 2=TOOL_RESULTS)",

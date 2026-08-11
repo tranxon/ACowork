@@ -841,16 +841,10 @@ pub enum GatewayRequest {
         /// ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<AgentToolEntry>).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_all_json: Option<String>,
-        /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
+        /// ADR-052: Whether context_retrieve + context_abandon tools are
+        /// registered. `None` = not set / use default (true).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_result_compression_mode: Option<String>,
-        /// ADR-032 C4a: Tool-result **soft compression** threshold in
-        /// characters. `None` = not set / use default
-        /// (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`). Stored as `u64` for
-        /// protobuf / serde parity with `max_output_tokens`; the runtime
-        /// widens it to `usize` before invoking `compress_tool_results`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_result_soft_threshold_chars: Option<u64>,
+        tool_compression_enabled: Option<bool>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1216,19 +1210,12 @@ pub enum GatewayResponse {
         /// None means don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_enabled: Option<Vec<String>>,
-        /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
-        /// None means "keep current value" (no change).
-        /// Some("") means "use default" (typically "auto").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_result_compression_mode: Option<String>,
-        /// ADR-032 C4a: Tool-result **soft compression** threshold in
-        /// characters. `None` = keep current value. Boot-only semantics
-        /// on the runtime side — see `cli.rs::RuntimeConfigUpdate::is_*_boot_only`
-        /// taxonomy. The runtime still accepts it via this push for shape
-        /// symmetry; the value is consumed at the next session restore
+        /// ADR-052: Whether context_retrieve + context_abandon tools are
+        /// registered. None means "keep current value" (no change).
+        /// Boot-only: changes take effect at the next session restore
         /// or process restart.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_result_soft_threshold_chars: Option<u64>,
+        tool_compression_enabled: Option<bool>,
     },
     /// Query config request (Gateway → Runtime)
     ///

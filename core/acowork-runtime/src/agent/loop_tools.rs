@@ -481,7 +481,7 @@ impl AgentLoop {
 ///
 /// Returns `(content, is_transient)` where `is_transient` indicates whether
 /// the tool result should be treated as one-shot (ADR-032 C3a).
-/// Tools that retrieve pre-existing data (e.g. context_recall) return
+/// Tools that retrieve pre-existing data (e.g. context_retrieve) return
 /// transient results that are injected once without permanently appending
 /// to history.  Error paths that don't reach the tool's `execute()` method
 /// always return `is_transient = false`.
@@ -545,14 +545,13 @@ pub(crate) async fn execute_single_tool(
     match tool {
             Some(tool) => match tool.execute(params, work_dir).await {
                 Ok(result) => {
-        // ADR-032: `context_recall` returns transient tool results — the
-        // full recalled content is injected into the next LLM request only
-        // (via `pending_transient_tool_msgs`) and is NEVER appended to
-        // permanent history. This breaks the
-        // recall → compress → recall loop that would otherwise form when
-        // the recalled content exceeds `soft_threshold_chars` again on the
-        // following iteration.
-        let transient = tool_name == "context_recall";
+        // ADR-052: All tools return non-transient results. The transient
+        // mechanism was specific to `context_recall` (ADR-032) to prevent a
+        // recall -> compress -> recall death loop. ADR-052 has removed the
+        // automatic compression trigger, so the death loop premise no longer
+        // exists. `context_retrieve` now uses in-place restore via
+        // `retrieve_queue` and returns only a short confirmation.
+        let transient = false;
                     let content = if result.ok {
                     result.content
                 } else {
@@ -1220,4 +1219,97 @@ fn looks_like_tool_error(result_content: &str) -> bool {
         || trimmed.starts_with("error:")
         || trimmed.starts_with("Loop detected")
         || trimmed.starts_with("Tool call")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::builtin::context_abandon::{AbandonQueue, ContextAbandonTool};
+    use crate::tools::builtin::context_retrieve::{ContextRetrieveTool, RetrieveQueue};
+    use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+    fn make_tool_call(name: &str, arguments: &str, id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    /// ADR-052 §6.1: `context_retrieve` MUST return `is_transient = false`.
+    /// ADR-052 removed the transient mechanism entirely; the tool result
+    /// is now permanently appended to history for multi-turn reasoning.
+    #[tokio::test]
+    async fn test_execute_single_tool_context_retrieve_not_transient() {
+        // Use an empty queue and a fake agent_home path; the call will fail
+        // at JSONL scan (returns short error) but that's fine — we only
+        // care about the `is_transient` flag.
+        let retrieve_queue: RetrieveQueue = Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::new(),
+        ));
+        let tool: Arc<dyn Tool> = Arc::new(ContextRetrieveTool::new("/tmp", retrieve_queue));
+        let tools = vec![tool];
+
+        let tc = make_tool_call(
+            "context_retrieve",
+            r#"{"tool_call_id": "toolu_xyz"}"#,
+            "call_xyz",
+        );
+
+        let (content, is_transient) = execute_single_tool(&tools, &tc, None).await;
+        assert!(
+            !is_transient,
+            "context_retrieve must return is_transient=false (ADR-052 removed transient); \
+             got content={content:?}, is_transient={is_transient}"
+        );
+    }
+
+    /// ADR-052 §6.2: `context_abandon` MUST return `is_transient = false`.
+    /// The tool pushes to abandon_queue and returns a short confirmation;
+    /// the confirmation is permanently written to history.
+    #[tokio::test]
+    async fn test_execute_single_tool_context_abandon_not_transient() {
+        let abandon_queue: AbandonQueue = Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::new(),
+        ));
+        let tool: Arc<dyn Tool> = Arc::new(ContextAbandonTool::new(abandon_queue));
+        let tools = vec![tool];
+
+        let tc = make_tool_call(
+            "context_abandon",
+            r#"{"tool_call_id": "toolu_xyz"}"#,
+            "call_xyz",
+        );
+
+        let (content, is_transient) = execute_single_tool(&tools, &tc, None).await;
+        assert!(
+            !is_transient,
+            "context_abandon must return is_transient=false; \
+             got content={content:?}, is_transient={is_transient}"
+        );
+
+        // Sanity: the tool returned a short confirmation (not the full content)
+        assert!(
+            content.contains("placeholder") || content.contains("Tool result"),
+            "context_abandon should return a short confirmation; got: {content:?}"
+        );
+    }
+
+    /// ADR-052 §6.1: For an unknown tool, `is_transient` is also `false`.
+    /// This guards against accidental re-introduction of per-tool transient
+    /// classification.
+    #[tokio::test]
+    async fn test_execute_single_tool_unknown_tool_not_transient() {
+        let tools: Vec<Arc<dyn Tool>> = vec![]; // empty registry
+        let tc = make_tool_call("unknown_tool", "{}", "call_unknown");
+
+        let (content, is_transient) = execute_single_tool(&tools, &tc, None).await;
+        assert!(
+            !is_transient,
+            "Unknown tool must also return is_transient=false; got: {content:?}"
+        );
+    }
 }

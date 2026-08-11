@@ -522,6 +522,29 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     ));
     let mcp_notifier = Arc::new(crate::mcp_notify::McpConfigNotifier::default());
 
+    // ADR-052: Create shared abandon/retrieve queues. These are shared
+    // between the context_abandon/context_retrieve tools (write end) and
+    // the AgentLoop (drain end). The queues are stored in AgentCore so
+    // the AgentLoop can access them at drain time.
+    let abandon_queue: crate::tools::builtin::context_abandon::AbandonQueue =
+        std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::new(),
+        ));
+    let retrieve_queue: crate::tools::builtin::context_retrieve::RetrieveQueue =
+        std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::VecDeque::new(),
+        ));
+
+    // ADR-052: Determine whether tool compression is enabled (default: true).
+    // Boot-only: read from agent_config.json. When enabled, register
+    // context_retrieve + context_abandon tools.
+    let agent_cfg_for_compression = crate::agent_config::load_agent_config(
+        std::path::Path::new(&config.work_dir)
+    ).ok().flatten().unwrap_or_default();
+    let tool_compression_enabled = agent_cfg_for_compression
+        .tool_compression_enabled
+        .unwrap_or(true);
+
     let mut registry = ToolRegistry::new();
     for tool in builtin::all_builtin_tools(
         &workspace_resolver,
@@ -534,6 +557,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         config.work_dir.clone(),
         lsp_relay_endpoint,
         mqtt_client_slot.clone(),
+        abandon_queue.clone(),
+        retrieve_queue.clone(),
+        tool_compression_enabled,
     ) {
         registry.register(tool);
     }
@@ -889,6 +915,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         search_key_vault,
         search_provider_list,
         session_configs,
+        abandon_queue,
+        retrieve_queue,
     })
 }
 

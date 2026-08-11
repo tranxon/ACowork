@@ -83,17 +83,10 @@ pub struct AgentConfigResponse {
     /// ADR-029: Full builtin tools list with enabled flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_tools_all: Option<serde_json::Value>,
-    /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
-    /// None or empty = not set / use default.
+    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
+    /// None = not set / use default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_result_compression_mode: Option<String>,
-
-    /// ADR-032 C4a: Tool-result **soft compression** threshold in characters.
-    /// Tool results whose `content.len()` exceeds this value get replaced
-    /// with a fixed-length placeholder by `compress_tool_results`.
-    /// None = not set / use default (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_result_soft_threshold_chars: Option<usize>,
+    pub tool_compression_enabled: Option<bool>,
 }
 
 /// PUT request body for updating agent config.
@@ -124,25 +117,12 @@ pub struct UpdateAgentConfigRequest {
     /// Some(vec![]) disables all builtin tools. None leaves unchanged.
     #[serde(default)]
     pub builtin_tools: Option<Vec<String>>,
-    /// ADR-032 C4b: Compression trigger mode ("auto" | "manual").
-    /// JSON `null` / field absent → "don't change" (partial-PUT semantics:
-    /// unrelated edits leave this field alone).
-    /// JSON `"auto"` or `"manual"` → explicit value, persisted verbatim.
+    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
+    /// JSON `null` / field absent -> "don't change" (partial-PUT semantics).
+    /// JSON `true` or `false` -> explicit value, persisted verbatim.
+    /// Boot-only: changes take effect at the next session restore.
     #[serde(default)]
-    pub tool_result_compression_mode: Option<String>,
-
-    /// ADR-032 C4a: Tool-result **soft compression** threshold in characters.
-    /// None = don't change, Some(n) = explicit threshold applied to the
-    /// current session.
-    ///
-    /// Note: this field is currently treated as **boot-only** in the Runtime
-    /// (matches `tool_result_keep_recent_n` semantics — see `cli.rs`'s
-    /// `RuntimeConfigUpdate` taxonomy). The PUT path here still forwards
-    /// it through `RuntimeConfigUpdate` for symmetry with the GET response
-    /// shape, but a live change only takes effect for the next session
-    /// restore / process restart.
-    #[serde(default)]
-    pub tool_result_soft_threshold_chars: Option<usize>,
+    pub tool_compression_enabled: Option<bool>,
 }
 
 /// Default global values used as fallback when no override exists.

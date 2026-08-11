@@ -145,25 +145,6 @@ pub struct AgentCore {
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     pub(crate) approval_timeout_secs: Option<u64>,
     /// ADR-032: number of recent tool results preserved raw at every trigger
-    /// point of `compress_tool_results`. `None` means "use the code default
-    /// `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N` (3)". Snapshot is
-    /// taken from the agent-level config at session boot (and updated by
-    /// later `RuntimeConfigUpdate` pushes — see `apply_runtime_config`).
-    pub(crate) tool_result_keep_recent_n_override: Option<u32>,
-    /// ADR-032 C4b: compression trigger mode override ("auto" | "manual").
-    /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
-    pub(crate) compression_mode_override: Option<String>,
-    /// ADR-032 C4a: tool-result **soft compression** threshold in characters.
-    /// Any tool-result message longer than this is replaced with a placeholder.
-    /// `None` falls through to
-    /// `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS` (2048).
-    /// Boot-only: written by `apply_runtime_config_override` from
-    /// `agent_config.json`; intentionally **not** routed through
-    /// `RuntimeConfigUpdate` (see cli.rs taxonomy) because mid-session
-    /// threshold changes can leave dangling byte-offsets in already-
-    /// compressed placeholders. Reads always go through the
-    /// `tool_result_soft_threshold_chars()` accessor.
-    pub(crate) soft_threshold_chars_override: Option<usize>,
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
@@ -216,6 +197,21 @@ pub struct AgentCore {
     /// ADR-028: cumulative output tokens across every LLM call made by this
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
     pub(crate) agent_total_output_tokens: AtomicU64,
+
+    /// ADR-052: Whether context_retrieve and context_abandon tools are registered.
+    /// `None` falls through to `true` (default enabled).
+    /// Boot-only: consumed at session creation time when building the builtin tool list.
+    pub(crate) tool_compression_enabled_override: Option<bool>,
+
+    /// ADR-052: Shared queue for context_abandon tool. Created in agent_init,
+    /// passed to the tool and stored here for the AgentLoop to drain.
+    pub(crate) abandon_queue:
+        crate::tools::builtin::context_abandon::AbandonQueue,
+
+    /// ADR-052: Shared queue for context_retrieve tool. Created in agent_init,
+    /// passed to the tool and stored here for the AgentLoop to drain.
+    pub(crate) retrieve_queue:
+        crate::tools::builtin::context_retrieve::RetrieveQueue,
 }
 
 impl AgentCore {
@@ -267,9 +263,6 @@ impl AgentCore {
             context_window_override: None,
             manifest_context_window,
             approval_timeout_secs: None,
-            tool_result_keep_recent_n_override: None,
-            compression_mode_override: None,
-            soft_threshold_chars_override: None,
             system_prompt_override: None,
             memory_provider: None,
             memory_admin: None,
@@ -293,6 +286,13 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
+            tool_compression_enabled_override: None,
+            abandon_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
         }
     }
 
@@ -579,29 +579,14 @@ impl AgentCore {
             );
             self.approval_timeout_secs = Some(timeout);
         }
-        if let Some(n) = overrides.tool_result_keep_recent_n {
+
+        if let Some(enabled) = overrides.tool_compression_enabled {
             tracing::info!(
-                old = ?self.tool_result_keep_recent_n_override,
-                new = n,
-                "runtime config: tool_result_keep_recent_n updated"
+                old = ?self.tool_compression_enabled_override,
+                new = enabled,
+                "runtime config: tool_compression_enabled updated"
             );
-            self.tool_result_keep_recent_n_override = Some(n);
-        }
-        if let Some(ref mode) = overrides.tool_result_compression_mode {
-            tracing::info!(
-                old = ?self.compression_mode_override,
-                new = %mode,
-                "runtime config: tool_result_compression_mode updated"
-            );
-            self.compression_mode_override = Some(mode.clone());
-        }
-        if let Some(threshold) = overrides.tool_result_soft_threshold_chars {
-            tracing::info!(
-                old = ?self.soft_threshold_chars_override,
-                new = threshold,
-                "runtime config: tool_result_soft_threshold_chars updated"
-            );
-            self.soft_threshold_chars_override = Some(threshold);
+            self.tool_compression_enabled_override = Some(enabled);
         }
     }
 
@@ -848,43 +833,6 @@ impl AgentCore {
     }
     pub fn shell_approval_threshold(&self) -> &ShellApprovalThreshold { &self.shell_approval_threshold }
 
-    /// ADR-032: resolve the effective `keep_recent_n` for `compress_tool_results`.
-    ///
-    /// Resolution chain (Layer 1 = highest priority):
-    /// 1. `self.tool_result_keep_recent_n_override` — set from
-    ///    `agent_config.json` (via `apply_runtime_config_override`) and
-    ///    hot-patched by `RuntimeConfigUpdate` pushes
-    /// 2. `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N` — hardcoded
-    ///    fallback (3; matches the ADR-032 default)
-    ///
-    /// Returns `u32` directly so call sites don't need to deal with `Option`.
-    /// Used by every `compress_tool_results` call site in `loop_context.rs`;
-    /// see ADR-032 core principle #7 for the unified N rule.
-    pub fn tool_result_keep_recent_n(&self) -> u32 {
-        self.tool_result_keep_recent_n_override
-            .unwrap_or(crate::agent::loop_context::DEFAULT_KEEP_RECENT_N as u32)
-    }
-
-    /// ADR-032 C4a: resolve the effective **soft compression threshold** in
-    /// characters for `compress_tool_results`.
-    ///
-    /// Resolution chain (Layer 1 = highest priority):
-    /// 1. `self.soft_threshold_chars_override` — set from
-    ///    `agent_config.json::tool_result_soft_threshold_chars` via
-    ///    `apply_runtime_config_override` (boot-only by design — see
-    ///    `cli.rs::RuntimeConfigUpdate` taxonomy)
-    /// 2. `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS`
-    ///    — hardcoded fallback (2048 chars ≈ 512 tokens, ADR-032 default)
-    ///
-    /// Returns `usize` directly so call sites don't need to deal with
-    /// `Option`. Used by every `compress_tool_results` call site in
-    /// `loop_context.rs`, `loop_.rs`, `loop_session.rs`, `session_manager.rs`,
-    /// and `session_task.rs` — keep all of them funneled through this
-    /// accessor to avoid schema-drift when new override fields are added.
-    pub fn tool_result_soft_threshold_chars(&self) -> usize {
-        self.soft_threshold_chars_override
-            .unwrap_or(crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS)
-    }
 
     /// Resolve the effective context window budget for history trimming.
     ///
@@ -964,9 +912,6 @@ impl Clone for AgentCore {
             context_window_override: self.context_window_override,
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
-            tool_result_keep_recent_n_override: self.tool_result_keep_recent_n_override,
-            compression_mode_override: self.compression_mode_override.clone(),
-            soft_threshold_chars_override: self.soft_threshold_chars_override,
             system_prompt_override: self.system_prompt_override.clone(),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
@@ -992,6 +937,9 @@ impl Clone for AgentCore {
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
             ),
+            tool_compression_enabled_override: self.tool_compression_enabled_override,
+            abandon_queue: self.abandon_queue.clone(),
+            retrieve_queue: self.retrieve_queue.clone(),
         }
     }
 }
@@ -1350,140 +1298,42 @@ mod tests {
         assert_eq!(budget, 100_000);
     }
 
-    // ── apply_runtime_config (ADR-032 live-edit path) ──────────────────
 
-    /// Regression test for the live-edit bug where Desktop edits of
-    /// `tool_result_compression_mode` and `tool_result_keep_recent_n`
-    /// never reached the in-memory `AgentCore` cache because the
-    /// runtime-side handler was discarding the proto fields and writing
-    /// `None` into the override struct.
-    ///
-    /// This unit test sits one layer down — it proves that, *if* the
-    /// override struct is fed a `Some(value)`, `apply_runtime_config`
-    /// correctly writes it into the per-`AgentCore` cache fields that
-    /// `loop_::compression_mode()` / `loop_::tool_result_keep_recent_n()`
-    /// read each turn.
-    ///
-    /// See `cli.rs` 1926-1954 for the matching wiring fix that previously
-    /// forced these fields to `None`.
+    // ── apply_runtime_config (ADR-052 tool_compression_enabled) ──────
+
     #[test]
-    fn apply_runtime_config_persists_compression_mode() {
+    fn apply_runtime_config_persists_tool_compression_enabled() {
         let mut core = make_core(Some(8192), None, None, 0);
-        assert_eq!(core.compression_mode_override, None);
+        assert_eq!(core.tool_compression_enabled_override, None);
 
         let overrides = RuntimeConfigOverrides {
-            tool_result_compression_mode: Some("manual".into()),
+            tool_compression_enabled: Some(false),
             ..Default::default()
         };
         core.apply_runtime_config(&overrides);
 
-        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
-        // The accessor resolves `Some("manual")` to `CompressionMode::Manual`,
-        // anything else falls through to the default (Auto). Construct the
-        // expected value via the loop module to avoid hard-coding the enum.
-        assert_eq!(
-            core.compression_mode_override.as_deref(),
-            Some("manual"),
-            "loop_::compression_mode() will resolve this to CompressionMode::Manual"
-        );
+        assert_eq!(core.tool_compression_enabled_override, Some(false));
     }
 
     #[test]
-    fn apply_runtime_config_persists_keep_recent_n() {
+    fn apply_runtime_config_preserves_tool_compression_enabled_across_none_push() {
         let mut core = make_core(Some(8192), None, None, 0);
-        assert_eq!(core.tool_result_keep_recent_n_override, None);
-
-        let overrides = RuntimeConfigOverrides {
-            tool_result_keep_recent_n: Some(7),
-            ..Default::default()
-        };
-        core.apply_runtime_config(&overrides);
-
-        assert_eq!(core.tool_result_keep_recent_n_override, Some(7));
-    }
-
-    /// ADR-032 C4a: companion to `apply_runtime_config_persists_compression_mode`
-    /// for the soft-threshold field. The push from the gateway carries
-    /// `Some(1024)`; `apply_runtime_config` must update the in-memory
-    /// `soft_threshold_chars_override` cache, and the public accessor
-    /// `tool_result_soft_threshold_chars()` must return that value.
-    ///
-    /// Pre-fix, cli.rs destructured `tool_result_soft_threshold_chars`
-    /// into `_`, so this field never reached `apply_runtime_config` and
-    /// the accessor always returned the default (2048).
-    #[test]
-    fn apply_runtime_config_persists_soft_threshold_chars() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        assert_eq!(core.soft_threshold_chars_override, None);
-
-        let overrides = RuntimeConfigOverrides {
-            tool_result_soft_threshold_chars: Some(1024),
-            ..Default::default()
-        };
-        core.apply_runtime_config(&overrides);
-
-        assert_eq!(core.soft_threshold_chars_override, Some(1024));
-        assert_eq!(
-            core.tool_result_soft_threshold_chars(),
-            1024,
-            "accessor must surface the user-configured value"
-        );
-    }
-
-    /// Companion: a partial push with `tool_result_soft_threshold_chars = None`
-    /// must NOT wipe a previously-cached value. This is the merge semantic
-    /// that keeps an unrelated push (e.g. only changing the model) from
-    /// resetting the threshold back to the default.
-    #[test]
-    fn apply_runtime_config_preserves_soft_threshold_chars_across_none_push() {
-        let mut core = make_core(Some(8192), None, None, 0);
-
-        // First push: user sets 1024.
         core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_result_soft_threshold_chars: Some(1024),
+            tool_compression_enabled: Some(false),
             ..Default::default()
         });
-        assert_eq!(core.tool_result_soft_threshold_chars(), 1024);
+        assert_eq!(core.tool_compression_enabled_override, Some(false));
 
-        // Second push: only changes an unrelated field; the threshold
-        // is `None`, so it must NOT be wiped.
+        // Partial push: only changes an unrelated field.
         core.apply_runtime_config(&RuntimeConfigOverrides {
             max_iterations: Some(50),
             ..Default::default()
         });
-        assert_eq!(
-            core.tool_result_soft_threshold_chars(),
-            1024,
-            "partial push with threshold=None must preserve the cached value"
-        );
-        assert_eq!(core.tool_result_keep_recent_n_override, None);
+
+        // tool_compression_enabled is untouched.
+        assert_eq!(core.tool_compression_enabled_override, Some(false));
     }
 
-    #[test]
-    fn apply_runtime_config_ignores_none_fields() {
-        // After a "boot" write of `tool_result_compression_mode = "manual"`,
-        // a subsequent live-edit push that omits that field (None) must NOT
-        // wipe the cached value. This guards the merge path that broadcasts
-        // overrides to every SessionTask — every task would otherwise
-        // forget the user's mode after the next unrelated push.
-        let mut core = make_core(Some(8192), None, None, 0);
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_result_compression_mode: Some("manual".into()),
-            ..Default::default()
-        });
-        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
-
-        // Partial push: only update keep_recent_n.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_result_keep_recent_n: Some(4),
-            ..Default::default()
-        });
-
-        // Compression mode is untouched.
-        assert_eq!(core.compression_mode_override.as_deref(), Some("manual"));
-        // keep_recent_n updated.
-        assert_eq!(core.tool_result_keep_recent_n_override, Some(4));
-    }
 
     // ── Consolidation timer integration tests (ADR-051 P4) ──────────
 

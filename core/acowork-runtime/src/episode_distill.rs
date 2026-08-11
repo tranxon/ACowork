@@ -793,7 +793,7 @@ mod tests {
         // should still label as "Tool".
         let msg = ChatMessage {
             role: MessageRole::Tool,
-            content: "[Tool result compressed. Call context_recall(id=\"toolu_abc\") to retrieve the full content.]".into(),
+            content: "[Tool result compressed. Call context_retrieve(id=\"toolu_abc\") to retrieve the full content.]".into(),
             name: None,
             tool_call_id: None,
             ..Default::default()
@@ -813,7 +813,7 @@ mod tests {
         // should emit [Tool(name=my_tool, id=toolu_xxx)].
         let msg = ChatMessage {
             role: MessageRole::Tool,
-            content: "[Tool result compressed. Call context_recall(id=\"toolu_xyz\") to retrieve the full content.]".into(),
+            content: "[Tool result compressed. Call context_retrieve(id=\"toolu_xyz\") to retrieve the full content.]".into(),
             name: Some("codebase_reader".to_string()),
             tool_call_id: Some("toolu_xyz".to_string()),
             ..Default::default()

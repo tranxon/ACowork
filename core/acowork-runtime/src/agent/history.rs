@@ -23,35 +23,35 @@ use acowork_core::providers::traits::ChatRequest;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
-// ── ADR-032 placeholder format constants ────────────────────────────────
+// ── ADR-052 placeholder format constants ────────────────────────────────
 //
-// Shared between `HistoryManager::compress_tool_results` (producer) and
+// Shared between `HistoryManager::abandon_tool_result` (producer) and
 // `episode_distill::format_messages` (consumer at LLM-compaction time).
 // Both producer and consumer MUST agree on the prefix string for the
 // idempotency check; centralizing it here prevents the two from drifting.
 
 /// Stable prefix for a compressed tool-result placeholder produced by
-/// [`HistoryManager::compress_tool_results`]. Content with this prefix
+/// [`HistoryManager::abandon_tool_result`]. Content with this prefix
 /// is treated as "already compressed" by both:
-/// - `compress_tool_results` idempotency check
+/// - `abandon_tool_result` idempotency check
+/// - `retrieve_tool_result` round-trip check (placeholder → restored)
 /// - `format_messages` (LLM compaction prompt builder) for richer
 ///   structured labelling in the summary prompt
 ///
-/// Compression placeholder prefix used by [`HistoryManager::compress_tool_results`].
-///
-/// When a tool result exceeds the soft threshold, its content is replaced with:
-///   `[Tool result compressed. Call context_recall(id="{tool_call_id}") to retrieve the full content.]`
+/// ADR-052: When the LLM invokes `context_abandon`, the tool result
+/// content is replaced with:
+///   `[Tool result compressed. Call context_retrieve(id="{tool_call_id}") to retrieve the full content.]`
 ///
 /// ## Format contract
 ///
 /// The exact format string is a contract shared by **three** consumers:
 ///
-/// 1. **`context_recall` built-in tool** — parses `tool_call_id` from the placeholder
+/// 1. **`context_retrieve` built-in tool** — parses `tool_call_id` from the placeholder
 ///    to fetch the original content from the in-memory inverted index.
 /// 2. **`format_messages` in episode_distill** — checks `starts_with` this prefix
 ///    to label compressed tool results correctly in compaction prompts.
 /// 3. **LLM system prompt** — instructs the model to copy the `tool_call_id` from
-///    the placeholder verbatim when calling `context_recall`.
+///    the placeholder verbatim when calling `context_retrieve`.
 ///
 /// **Any change** to this prefix or the placeholder format **must** update all three
 /// consumers in lockstep.
@@ -60,7 +60,7 @@ use crate::token::counter::TokenCounter;
 ///
 /// The placeholder always includes the raw `tool_call_id` embedded inline
 /// (e.g. `toolu_abc123`), so the LLM can copy-paste it without parsing.
-/// Format: prefix + " Call context_recall(id=\"" + tool_call_id + "\") ..."
+/// Format: prefix + " Call context_retrieve(id=\"" + tool_call_id + "\") ..."
 pub(crate) const COMPRESSED_TOOL_PLACEHOLDER_PREFIX: &str = "[Tool result compressed.";
 
 /// Stable identifier string used by [`HistoryManager::replace_middle_with_summary`]
@@ -527,180 +527,58 @@ impl HistoryManager {
         removed
     }
 
-    /// ADR-032: Replace oversized tool result content with compact placeholders.
-    ///
-    /// Scope is intentional and permanent within this ADR: v1 only processes
-    /// `MessageRole::Tool`. Other large messages (User/Assistant) are handled
-    /// by L2 LLM summarization (history > 80%) and L3 emergency_trim (> 95%)
-    /// in `loop_context.rs` — placeholder + recall is one compression tier,
-    /// not a "cover all large messages" mechanism.
-    ///
-    /// ## Behavior
-    ///
-    /// - Iterates `self.messages` and replaces each `MessageRole::Tool` entry
-    ///   whose `content.len() > soft_threshold_chars` with a fixed ~120-char
-    ///   placeholder embedding the tool_call_id for later recall.
-    /// - **Excludes the most recent `keep_recent_n` tool messages** from
-    ///   compression (uniform N rule per ADR-032 core principle #7). Pass
-    ///   `keep_recent_n = 0` to compress all eligible; pass
-    ///   `keep_recent_n >= tool_count` for a no-op.
-    /// - **Idempotent** via two self-describing checks (no persistence flags):
-    ///   1. `content.len() <= soft_threshold_chars` → skip
-    ///   2. `content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX)` → skip
-    ///      (safety net against misconfigured threshold; placeholder prefix
-    ///      is unique)
-    /// - **Does NOT modify `name` field** — preserves tool_use.name ↔
-    ///   tool_result.name protocol pairing.
-    /// - **Does NOT modify `tool_call_id` field** — embedded in the
-    ///   placeholder string, but the field stays intact for restorer.
-    /// - **Pure in-memory**: does not touch JSONL.
-    /// - **Does NOT update `current_tokens`**: caller MUST call
-    ///   [`Self::recalibrate_tokens`] after this returns.
-    ///
-    /// ## Returns
-    ///
-    /// Number of messages whose content was replaced with a placeholder.
-    ///
-    /// ## Do NOT
-    ///
-    /// - Do NOT extend this to other roles without opening a new ADR
-    ///   (planned as ADR-033) with proper id strategy for non-tool messages.
-    /// - Do NOT write a `compressed: bool` field — persistence layer must
-    ///   stay free of derived runtime state (see ADR-032 core principle #6).
-    pub fn compress_tool_results(
-        &mut self,
-        soft_threshold_chars: usize,
-        keep_recent_n: usize,
-    ) -> usize {
-        // Collect indices of Tool-role messages, in order. We exclude the last
-        // `keep_recent_n` from compression; the rest are candidates.
-        let tool_indices: Vec<usize> = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                if matches!(m.role, MessageRole::Tool) {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Slice the candidate set: drop the trailing `keep_recent_n` entries.
-        let candidates_end = tool_indices.len().saturating_sub(keep_recent_n);
-
-        let mut compressed = 0usize;
-        for &i in &tool_indices[..candidates_end] {
-            // Idempotency check 1: skip messages already at or below threshold.
-            // (After first pass, all Tool messages are ≤ ~120 chars placeholder,
-            // so they naturally fall into this branch on subsequent invocations.)
-            if self.messages[i].content.len() <= soft_threshold_chars {
+    /// Returns 1 if replaced, 0 if not found or already compressed.
+    pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
+        for msg in &mut self.messages {
+            if !matches!(msg.role, MessageRole::Tool) {
                 continue;
             }
-
-            // Idempotency check 2: skip messages already compressed via the
-            // placeholder prefix. Defends against misconfigured thresholds
-            // (< 100 chars) and accidental double-processing.
-            if self.messages[i]
-                .content
-                .starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX)
-            {
+            if msg.tool_call_id.as_deref() != Some(tool_call_id) {
                 continue;
             }
-
-            // Need tool_call_id to embed in the placeholder. If absent, the
-            // message is malformed (should have been cleaned by sanitize_messages);
-            // skip silently — no-op is safer than corrupting the message.
-            let Some(tc_id) = self.messages[i].tool_call_id.as_deref() else {
-                tracing::warn!(
-                    history_index = i,
-                    "Tool message missing tool_call_id; skipping compression"
-                );
-                continue;
-            };
-
-            // Replace content with placeholder. `name` field is intentionally
-            // preserved to keep tool_use.name ↔ tool_result.name protocol pairing.
-            self.messages[i].content = format!(
-                "[Tool result compressed. Call context_recall(id=\"{}\") to retrieve the full content.]",
-                tc_id
+            // Idempotency: skip already-compressed messages
+            if msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
+                return 0;
+            }
+            msg.content = format!(
+                "[Tool result compressed. Call context_retrieve(id=\"{}\") to retrieve the full content.]",
+                tool_call_id
             );
-            compressed += 1;
+            return 1;
         }
-
-        if compressed > 0 {
-            tracing::debug!(
-                compressed,
-                soft_threshold_chars,
-                keep_recent_n,
-                candidates = candidates_end,
-                "ADR-032: compressed oversized tool result messages into placeholders"
-            );
-        }
-        compressed
+        0
     }
 
-    /// ADR-032 (revised): Auto-mode trigger — compress tool results **only if**
-    /// the most recent Assistant message in history exceeds `soft_threshold_chars`.
+    /// ADR-052: Restore a Tool message's content from placeholder back to original.
+    /// Called by `drain_retrieve_queue` after the LLM invokes `context_retrieve`.
     ///
-    /// This is the Auto-mode `compress_tool_results` entry point used by the
-    /// agent loop after an Assistant turn commits to history (see
-    /// `loop_session.rs`). It guards the compression call with a guard that
-    /// matches the design rule:
+    /// Idempotent: if the message is already raw (not a placeholder), returns 0.
     ///
-    /// > Auto mode: compression fires only when the latest Assistant message
-    /// > is longer than `soft_threshold_chars`. If the latest message is
-    /// > short, no compression runs even if there are oversized tool results
-    /// > deeper in history.
-    ///
-    /// Manual mode never enters this method; the loop only calls it after
-    /// checking `event_compression_enabled()`.
-    ///
-    /// If the guard fails, the function is a **no-op** and returns `0`. When
-    /// the guard passes, the function delegates to [`Self::compress_tool_results`]
-    /// and reports the count.
-    ///
-    /// Returns the number of tool messages replaced with placeholders.
-    pub fn compress_tool_results_for_long_assistant(
-        &mut self,
-        soft_threshold_chars: usize,
-        keep_recent_n: usize,
-    ) -> usize {
-        // Find the latest Assistant message in history. If none exists, bail.
-        let last_assistant_content_len = self
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, MessageRole::Assistant))
-            .map(|m| m.content.len());
-
-        match last_assistant_content_len {
-            Some(len) if len > soft_threshold_chars => {
-                tracing::debug!(
-                    last_assistant_len = len,
-                    soft_threshold_chars,
-                    "ADR-032: assistant-long-text trigger fired; compressing tool results"
-                );
-                self.compress_tool_results(soft_threshold_chars, keep_recent_n)
+    /// Returns 1 if restored, 0 if not found or already raw.
+    pub fn retrieve_tool_result(&mut self, tool_call_id: &str, original_content: &str) -> usize {
+        for msg in &mut self.messages {
+            if !matches!(msg.role, MessageRole::Tool) {
+                continue;
             }
-            Some(len) => {
-                tracing::trace!(
-                    last_assistant_len = len,
-                    soft_threshold_chars,
-                    "ADR-032: assistant-long-text trigger skipped (latest assistant below threshold)"
-                );
-                0
+            if msg.tool_call_id.as_deref() != Some(tool_call_id) {
+                continue;
             }
-            None => 0,
+            // Idempotency: skip already-restored messages
+            if !msg.content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX) {
+                return 0;
+            }
+            msg.content = original_content.to_string();
+            return 1;
         }
+        0
     }
 
-    /// ADR-032: Recompute `current_tokens` from scratch.
+    /// Recompute `current_tokens` from scratch.
     ///
-    /// Must be called after `compress_tool_results` (which mutates content in
-    /// place but cannot update `current_tokens` under borrow rules).
-    /// O(N) over messages with constant-time token estimation each.
+    /// Must be called after any in-place content mutation (e.g. after
+    /// `abandon_tool_result` or `retrieve_tool_result`) since these mutate
+    /// content in place but cannot update `current_tokens` under borrow
+    /// rules. O(N) over messages with constant-time token estimation each.
     pub fn recalibrate_tokens(&mut self) {
         let model = self.model_for_counting().to_string();
         let pt = self.protocol_type.clone();
@@ -709,43 +587,6 @@ impl HistoryManager {
             total = total.saturating_add(self.counter.count_message(msg, &model, Some(&pt)));
         }
         self.current_tokens = total;
-    }
-
-    /// ADR-032: Return cloned copies of all `MessageRole::Tool` messages
-    /// EXCEPT the most recent `n` (which are protected from compression to
-    /// preserve LLM's current-reasoning input context).
-    ///
-    /// Walks newest-to-oldest, copies the first `tool_count - n` Tool
-    /// messages into the result (in chronological order). Returns an empty
-    /// Vec if `tool_count <= n`.
-    ///
-    /// Note: not used by the in-place `compress_tool_results` (which filters
-    /// and mutates `self.messages` directly), but exposed for testing,
-    /// debugging, and future read-only inspection needs.
-    pub fn tool_results_excluding_recent(&self, n: usize) -> Vec<ChatMessage> {
-        let mut collected = 0usize;
-        let mut result = Vec::new();
-        // Newest → oldest, skip the first `n` Tool messages we encounter.
-        let mut to_skip = n;
-        for m in self.messages.iter().rev() {
-            if !matches!(m.role, MessageRole::Tool) {
-                continue;
-            }
-            if to_skip > 0 {
-                to_skip -= 1;
-                continue;
-            }
-            result.push(m.clone());
-            collected += 1;
-        }
-        // Reverse to restore chronological order (oldest first).
-        result.reverse();
-        tracing::trace!(
-            collected,
-            n,
-            "ADR-032: tool_results_excluding_re Recent returned slice"
-        );
-        result
     }
 
     /// Sanitize message history to remove or fix corrupted entries.
@@ -1082,6 +923,26 @@ mod tests {
         }
     }
 
+    /// Helper: make a Tool-role message with a tool_call_id and optional `name`.
+    fn make_tool_message(content: &str, tool_call_id: &str, name: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Tool,
+            content: content.to_string(),
+            name: name.map(|s| s.to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Helper: make an Assistant-role message (no tool_calls, plain text content).
+    fn make_assistant_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_append_and_count() {
         let mut hm = HistoryManager::new(1000);
@@ -1255,382 +1116,165 @@ mod tests {
         assert!(recomputed > 0);
     }
 
-    // ── compress_tool_results tests (ADR-032) ─────────────────────────
-
-    /// Helper: make a Tool-role message with a tool_call_id and optional `name`.
-    fn make_tool_message(content: &str, tool_call_id: &str, name: Option<&str>) -> ChatMessage {
-        ChatMessage {
-            role: MessageRole::Tool,
-            content: content.to_string(),
-            tool_call_id: Some(tool_call_id.to_string()),
-            name: name.map(String::from),
-            ..Default::default()
-        }
-    }
+    // ── abandon_tool_result / retrieve_tool_result tests (ADR-052) ────
 
     #[test]
-    fn test_compress_tool_results_below_threshold_no_op() {
+    fn test_abandon_tool_result_replaces_content() {
         let mut hm = HistoryManager::new(100_000);
-        hm.append(make_tool_message("short result", "toolu_a", Some("content_search")));
-        let n = hm.compress_tool_results(2048, 0);
-        assert_eq!(n, 0, "messages below threshold must not be compressed");
-        assert_eq!(hm.messages()[0].content, "short result");
-    }
+        let big = "x".repeat(5000);
+        hm.append(make_tool_message(&big, "toolu_abc", Some("content_search")));
 
-    #[test]
-    fn test_compress_tool_results_above_threshold_replaced() {
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000); // 5KB, above 2KB threshold
-        hm.append(make_tool_message(&big, "toolu_xyz", Some("content_search")));
-
-        let n = hm.compress_tool_results(2048, 0);
+        let n = hm.abandon_tool_result("toolu_abc");
         assert_eq!(n, 1);
-        let new_content = &hm.messages()[0].content;
         assert!(
-            new_content.contains("[Tool result compressed."),
-            "content should be replaced with placeholder: got={}",
-            &new_content[..new_content.len().min(80)]
+            hm.messages()[0].content.starts_with("[Tool result compressed."),
+            "content should be replaced with placeholder"
         );
-        assert!(new_content.contains("toolu_xyz"), "placeholder must embed tool_call_id");
         assert!(
-            new_content.len() < big.len(),
-            "placeholder must be smaller than original (got {} vs {})",
-            new_content.len(),
-            big.len()
+            hm.messages()[0].content.contains("context_retrieve(id=\"toolu_abc\")"),
+            "placeholder should contain context_retrieve and the tool_call_id"
         );
     }
 
     #[test]
-    fn test_compress_tool_results_preserves_name_field() {
-        // ADR-032 core invariant: `name` field must NOT be modified by the
-        // compression function. It carries the original tool name for the
-        // provider's tool_use.name ↔ tool_result.name protocol pairing.
+    fn test_abandon_tool_result_not_found_returns_zero() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_tool_message("some content", "toolu_a", Some("shell")));
+
+        let n = hm.abandon_tool_result("toolu_nonexistent");
+        assert_eq!(n, 0);
+        assert_eq!(hm.messages()[0].content, "some content");
+    }
+
+    #[test]
+    fn test_abandon_tool_result_idempotent() {
+        let mut hm = HistoryManager::new(100_000);
+        let big = "x".repeat(5000);
+        hm.append(make_tool_message(&big, "toolu_idem", Some("file_read")));
+
+        let n1 = hm.abandon_tool_result("toolu_idem");
+        assert_eq!(n1, 1);
+        let n2 = hm.abandon_tool_result("toolu_idem");
+        assert_eq!(n2, 0, "already-compressed message should not be re-processed");
+    }
+
+    #[test]
+    fn test_abandon_preserves_name_and_tool_call_id() {
         let mut hm = HistoryManager::new(100_000);
         let big = "y".repeat(5000);
         hm.append(make_tool_message(&big, "toolu_q", Some("content_search")));
 
-        hm.compress_tool_results(2048, 0);
+        hm.abandon_tool_result("toolu_q");
         assert_eq!(
             hm.messages()[0].name.as_deref(),
             Some("content_search"),
-            "name field must be preserved verbatim"
+            "name field must be preserved"
         );
-        // tool_call_id also preserved
         assert_eq!(
             hm.messages()[0].tool_call_id.as_deref(),
             Some("toolu_q"),
-            "tool_call_id field must be preserved verbatim"
+            "tool_call_id must be preserved"
         );
     }
 
     #[test]
-    fn test_compress_tool_results_skips_non_tool_roles() {
+    fn test_abandon_skips_non_tool_roles() {
         let mut hm = HistoryManager::new(100_000);
         let big_user = "u".repeat(5000);
-        let big_assistant = "a".repeat(5000);
-        let big_system = "s".repeat(5000);
         let big_tool = "t".repeat(5000);
         hm.append(make_message(MessageRole::User, &big_user));
-        hm.append(make_message(MessageRole::Assistant, &big_assistant));
-        hm.append(make_message(MessageRole::System, &big_system));
         hm.append(make_tool_message(&big_tool, "toolu_w", Some("shell")));
 
-        let n = hm.compress_tool_results(2048, 0);
+        let n = hm.abandon_tool_result("toolu_w");
         assert_eq!(n, 1, "only the Tool message should be compressed");
-
-        // The non-Tool messages must be byte-identical
+        // Non-Tool message must be byte-identical
         assert_eq!(hm.messages()[0].content, big_user);
-        assert_eq!(hm.messages()[1].content, big_assistant);
-        assert_eq!(hm.messages()[2].content, big_system);
-        // Tool was compressed
-        assert!(hm.messages()[3].content.contains("[Tool result compressed."));
     }
 
     #[test]
-    fn test_compress_tool_results_idempotent_by_content_length() {
-        // After first compression, the placeholder is ~120 chars. A second
-        // pass with the same threshold must be a no-op (the natural
-        // self-describing idempotency).
+    fn test_retrieve_tool_result_restores_content() {
         let mut hm = HistoryManager::new(100_000);
-        hm.append(make_tool_message(&"z".repeat(5000), "toolu_idem", Some("file_read")));
+        let original = "This is the original content".repeat(100);
+        hm.append(make_tool_message(&original, "toolu_abc", Some("file_read")));
 
-        let n1 = hm.compress_tool_results(2048, 0);
+        // Abandon first
+        hm.abandon_tool_result("toolu_abc");
+        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
+
+        // Retrieve
+        let n = hm.retrieve_tool_result("toolu_abc", &original);
+        assert_eq!(n, 1);
+        assert_eq!(hm.messages()[0].content, original);
+    }
+
+    #[test]
+    fn test_retrieve_tool_result_not_found_returns_zero() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_tool_message("content", "toolu_a", Some("shell")));
+
+        let n = hm.retrieve_tool_result("toolu_nonexistent", "some content");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_retrieve_tool_result_idempotent() {
+        let mut hm = HistoryManager::new(100_000);
+        let original = "Original content here".repeat(50);
+        hm.append(make_tool_message(&original, "toolu_r", Some("file_read")));
+
+        // Abandon then retrieve
+        hm.abandon_tool_result("toolu_r");
+        let n1 = hm.retrieve_tool_result("toolu_r", &original);
         assert_eq!(n1, 1);
-        let after_first = hm.messages()[0].content.clone();
 
-        let n2 = hm.compress_tool_results(2048, 0);
-        assert_eq!(n2, 0, "second call must not re-compress");
-        assert_eq!(hm.messages()[0].content, after_first, "content unchanged");
+        // Second retrieve should be a no-op (already raw)
+        let n2 = hm.retrieve_tool_result("toolu_r", &original);
+        assert_eq!(n2, 0, "already-restored message should not be re-processed");
     }
 
     #[test]
-    fn test_compress_tool_results_idempotent_by_prefix() {
-        // Safety net: if threshold is misconfigured (< 120 chars), the prefix
-        // check must still prevent double-processing.
-        let mut hm = HistoryManager::new(100_000);
-        // Pre-load a message that LOOKS like a placeholder but is slightly over
-        // an absurdly low threshold. The prefix check should skip it.
-        let placeholder = "[Tool result compressed. Call context_recall(id=\"toolu_p\") to retrieve the full content.] plus_extra_chars_to_be_above_threshold".to_string();
-        hm.append(make_tool_message(&placeholder, "toolu_p", Some("content_search")));
-
-        let n = hm.compress_tool_results(100, 0); // threshold < placeholder length
-        assert_eq!(n, 0, "prefix check must skip already-compressed messages even if threshold is below their length");
-    }
-
-    #[test]
-    fn test_compress_tool_results_keep_recent_n_protects_tail() {
-        // N=3 means: keep the 3 most recent Tool messages raw; compress the older ones.
-        let mut hm = HistoryManager::new(100_000);
-        let big = "k".repeat(5000);
-        // 5 tool messages, all oversized
-        for i in 0..5 {
-            hm.append(make_tool_message(&big, &format!("toolu_{i}"), Some("content_search")));
-        }
-        assert_eq!(hm.messages().len(), 5);
-
-        let n = hm.compress_tool_results(2048, 3);
-        assert_eq!(n, 2, "exactly the 2 oldest Tool messages should be compressed");
-        // Verify: oldest 2 are compressed, newest 3 are raw
-        assert!(hm.messages()[0].content.contains("[Tool result compressed."));
-        assert!(hm.messages()[1].content.contains("[Tool result compressed."));
-        // Last 3 unchanged
-        for i in 2..5 {
-            assert_eq!(
-                hm.messages()[i].content, big,
-                "Tool message #{i} (within keep_recent_n=3 window) must remain raw"
-            );
-        }
-    }
-
-    #[test]
-    fn test_compress_tool_results_keep_recent_n_zero_compresses_all() {
+    fn test_retrieve_preserves_name_and_tool_call_id() {
+        // ADR-052 §3.3.4 + §3.2.3: retrieve is symmetric to abandon — both
+        // mutate `content` in-place but preserve `name` and `tool_call_id`
+        // to maintain tool_use ↔ tool_result protocol pairing.
         let mut hm = HistoryManager::new(100_000);
         let big = "z".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
-        hm.append(make_tool_message(&big, "toolu_2", Some("content_search")));
-        hm.append(make_tool_message(&big, "toolu_3", Some("content_search")));
+        hm.append(make_tool_message(&big, "toolu_preserve", Some("file_read")));
 
-        let n = hm.compress_tool_results(2048, 0);
-        assert_eq!(n, 3, "N=0 must compress every oversized Tool message");
-        for m in hm.messages() {
-            assert!(m.content.contains("[Tool result compressed."));
-        }
-    }
+        // Abandon then retrieve
+        hm.abandon_tool_result("toolu_preserve");
+        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
+        hm.retrieve_tool_result("toolu_preserve", &big);
 
-    #[test]
-    fn test_compress_tool_results_keep_recent_n_exceeds_total_no_op() {
-        // If N >= total tool_count, nothing is compressed.
-        let mut hm = HistoryManager::new(100_000);
-        let big = "z".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
-        hm.append(make_tool_message(&big, "toolu_2", Some("content_search")));
-
-        let n = hm.compress_tool_results(2048, 100);
-        assert_eq!(n, 0, "keep_recent_n >= tool_count must be a no-op");
-        // All messages still raw
-        for m in hm.messages() {
-            assert_eq!(m.content, big);
-        }
-    }
-
-    #[test]
-    fn test_compress_tool_results_skips_tool_without_tool_call_id() {
-        // A Tool message with no tool_call_id can't be safely compressed
-        // (we can't embed a recall key in the placeholder). Skip silently.
-        let mut hm = HistoryManager::new(100_000);
-        let big = "o".repeat(5000);
-        let msg = ChatMessage {
-            role: MessageRole::Tool,
-            content: big.clone(),
-            tool_call_id: None, // explicitly missing
-            ..Default::default()
-        };
-        hm.append(msg);
-
-        let n = hm.compress_tool_results(2048, 0);
-        assert_eq!(n, 0, "Tool message without tool_call_id must be skipped");
-        assert_eq!(hm.messages()[0].content, big, "raw content must be preserved");
-    }
-
-    #[test]
-    fn test_compress_tool_results_threshold_boundary_equality() {
-        // Per ADR: `content.len() > soft_threshold_chars` is the primary
-        // check. So a message equal to the threshold (in chars) is NOT
-        // compressed. This is the boundary case.
-        let mut hm = HistoryManager::new(100_000);
-        // Build a message whose content.len() equals the threshold exactly
-        let threshold = 100usize;
-        let exact = "x".repeat(threshold);
-        assert_eq!(exact.len(), threshold);
-        hm.append(make_tool_message(&exact, "toolu_eq", Some("shell")));
-
-        let n = hm.compress_tool_results(threshold, 0);
         assert_eq!(
-            n, 0,
-            "content.len() == threshold is NOT strictly greater, so not compressed"
-        );
-        assert_eq!(hm.messages()[0].content, exact);
-    }
-
-    #[test]
-    fn test_recalibrate_tokens_after_compress() {
-        // recompute current_tokens after compress — should be a smaller value
-        // reflecting the placeholder sizes.
-        let mut hm = HistoryManager::new(1_000_000);
-        let big = "r".repeat(20_000); // ~5K tokens char/4
-        hm.append(make_tool_message(&big, "toolu_rec", Some("content_search")));
-        // Force a manual token count by calling existing API
-        let original_tokens = hm.token_count();
-        assert!(original_tokens > 0);
-
-        hm.compress_tool_results(2048, 0);
-        hm.recalibrate_tokens();
-
-        let new_tokens = hm.token_count();
-        assert!(
-            new_tokens < original_tokens,
-            "token count should decrease after compress + recalibrate (was {original_tokens}, now {new_tokens})"
-        );
-        // Note: it WON'T be 0 — placeholder is ~120 chars ≈ 30 tokens
-        assert!(new_tokens < original_tokens / 10);
-    }
-
-    #[test]
-    fn test_tool_results_excluding_recent_basic() {
-        // Sanity check on the helper: newest-to-oldest, skip N recent Tool messages,
-        // return the rest in chronological order.
-        let mut hm = HistoryManager::new(100_000);
-        for i in 0..5 {
-            hm.append(make_tool_message(&format!("raw_{i}"), &format!("toolu_{i}"), Some("content_search")));
-        }
-        hm.append(make_message(MessageRole::User, "user question"));
-        hm.append(make_tool_message("raw_5", "toolu_5", Some("content_search")));
-
-        let older = hm.tool_results_excluding_recent(2);
-        // Should skip the 2 most recent Tool messages: toolu_5 and toolu_4.
-        // Return toolu_0..toolu_3 in chronological order.
-        assert_eq!(older.len(), 4);
-        assert_eq!(older[0].tool_call_id.as_deref(), Some("toolu_0"));
-        assert_eq!(older[3].tool_call_id.as_deref(), Some("toolu_3"));
-        // toolu_4 / toolu_5 must NOT be present
-        assert!(!older.iter().any(|m| m.tool_call_id.as_deref() == Some("toolu_4")));
-        assert!(!older.iter().any(|m| m.tool_call_id.as_deref() == Some("toolu_5")));
-    }
-
-    #[test]
-    fn test_tool_results_excluding_recent_n_exceeds_total_empty() {
-        let mut hm = HistoryManager::new(100_000);
-        hm.append(make_tool_message("only", "toolu_one", Some("content_search")));
-        let older = hm.tool_results_excluding_recent(100);
-        assert!(older.is_empty());
-    }
-
-    // ── compress_tool_results_for_long_assistant tests (ADR-032 fix #3) ──
-
-    /// Helper: make an Assistant-role message (no tool_calls, plain text content).
-    fn make_assistant_message(content: &str) -> ChatMessage {
-        ChatMessage {
-            role: MessageRole::Assistant,
-            content: content.to_string(),
-            tool_calls: None,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_compress_tool_results_for_long_assistant_no_assistant_message_returns_zero() {
-        // ADR-032 fix #3: if there is no Assistant message in history,
-        // the guard must short-circuit and return 0 (no-op).
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
-        hm.append(make_tool_message(&big, "toolu_2", Some("content_search")));
-
-        let n = hm.compress_tool_results_for_long_assistant(2048, 0);
-        assert_eq!(n, 0, "no Assistant message in history -> guard short-circuits");
-        for m in hm.messages() {
-            assert_eq!(m.content, big, "raw tool result content must be preserved");
-        }
-    }
-
-    #[test]
-    fn test_compress_tool_results_for_long_assistant_short_assistant_skips() {
-        // ADR-032 fix #3: when the latest Assistant message is shorter than or
-        // equal to soft_threshold_chars, the guard must skip the call entirely.
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
-        hm.append(make_assistant_message("short answer"));
-
-        let n = hm.compress_tool_results_for_long_assistant(2048, 0);
-        assert_eq!(
-            n, 0,
-            "Assistant message below threshold -> compress_tool_results must NOT be invoked"
+            hm.messages()[0].name.as_deref(),
+            Some("file_read"),
+            "name field must be preserved through retrieve"
         );
         assert_eq!(
-            hm.messages()[0].content, big,
-            "Tool message must remain raw when guard blocks"
+            hm.messages()[0].tool_call_id.as_deref(),
+            Some("toolu_preserve"),
+            "tool_call_id must be preserved through retrieve"
         );
-        assert_eq!(hm.messages()[1].content, "short answer");
     }
 
     #[test]
-    fn test_compress_tool_results_for_long_assistant_long_assistant_compresses() {
-        // ADR-032 fix #3: when the latest Assistant message exceeds threshold,
-        // the guard passes and compress_tool_results is invoked.
-        // We expect: older tool results become placeholders, recent N stay raw.
+    fn test_abandon_retrieve_cycle() {
         let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        // Add 4 tool results, then a long assistant message
-        for i in 1..=4 {
-            hm.append(make_tool_message(
-                &big,
-                &format!("toolu_{i}"),
-                Some("content_search"),
-            ));
-        }
-        let long_assistant = "y".repeat(3000);
-        hm.append(make_assistant_message(&long_assistant));
+        let original = "Cycle test content".repeat(50);
+        hm.append(make_tool_message(&original, "toolu_cycle", Some("shell")));
 
-        // soft_threshold=2048, keep_recent_n=1
-        // Guard: last Assistant (3000 > 2048) passes -> compress invoked.
-        // compress_tool_results compresses older 3 (indices 0..3) preserving the 4th (recent N=1).
-        let n = hm.compress_tool_results_for_long_assistant(2048, 1);
-        assert_eq!(
-            n, 3,
-            "long Assistant (>threshold) must trigger compress_tool_results, compressing 3 older tool results"
-        );
-        // First 3 tool messages: placeholder
-        for i in 0..3 {
-            assert!(
-                hm.messages()[i].content.starts_with(COMPRESSED_TOOL_PLACEHOLDER_PREFIX),
-                "older tool result {i} must be placeholder"
-            );
-        }
-        // 4th tool message: still raw
-        assert_eq!(
-            hm.messages()[3].content, big,
-            "most recent tool result must remain raw (keep_recent_n=1)"
-        );
-        // Assistant message: untouched
-        assert_eq!(hm.messages()[4].content, long_assistant);
-    }
+        // Abandon
+        assert_eq!(hm.abandon_tool_result("toolu_cycle"), 1);
+        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
 
-    #[test]
-    fn test_compress_tool_results_for_long_assistant_boundary_equal_skips() {
-        // Edge case: Assistant message length == threshold must skip (per
-        // guard semantics: > threshold, not >=).
-        let mut hm = HistoryManager::new(100_000);
-        let big = "x".repeat(5000);
-        hm.append(make_tool_message(&big, "toolu_1", Some("content_search")));
-        let threshold = 100usize;
-        let exact = "y".repeat(threshold);
-        assert_eq!(exact.len(), threshold);
-        hm.append(make_assistant_message(&exact));
+        // Retrieve
+        assert_eq!(hm.retrieve_tool_result("toolu_cycle", &original), 1);
+        assert_eq!(hm.messages()[0].content, original);
 
-        let n = hm.compress_tool_results_for_long_assistant(threshold, 0);
-        assert_eq!(n, 0, "Assistant message exactly equal to threshold must skip");
-        assert_eq!(hm.messages()[0].content, big);
+        // Re-abandon (close the loop)
+        assert_eq!(hm.abandon_tool_result("toolu_cycle"), 1);
+        assert!(hm.messages()[0].content.starts_with("[Tool result compressed."));
     }
 
     // ── sanitize_messages tests ─────────────────────────────────────────

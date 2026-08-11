@@ -1045,7 +1045,7 @@ impl SessionTask {
                     let patch_map: std::collections::HashMap<&str, bool> =
                         entries.iter().map(|e| (e.name.as_str(), e.enabled)).collect();
                     /// Platform-protected tools — always enabled, user cannot disable.
-                    const PLATFORM_TOOLS: &[&str] = &["context_recall"];
+                    const PLATFORM_TOOLS: &[&str] = &["context_retrieve", "context_abandon"];
 
                     for entry in agent_loop.core.builtin_tools.iter_mut() {
                         let name = entry.name();
@@ -1213,24 +1213,6 @@ impl SessionTask {
                         "SessionTask: manual compress action triggered"
                     );
                     match action {
-                        crate::agent::loop_::CompressionAction::CompressToolResults => {
-                            let n = agent_loop.core.tool_result_keep_recent_n();
-                            let soft_threshold = agent_loop.core.tool_result_soft_threshold_chars();
-                            let compressed = agent_loop.session.history.compress_tool_results(
-                                soft_threshold,
-                                n as usize,
-                            );
-                            if compressed > 0 {
-                                agent_loop.session.history.recalibrate_tokens();
-                                agent_loop.emit_session_state();
-                            }
-                            tracing::info!(
-                                compressed,
-                                keep_recent_n = n,
-                                soft_threshold_chars = soft_threshold,
-                                "CompressAction::CompressToolResults done"
-                            );
-                        }
                         crate::agent::loop_::CompressionAction::CompressSummary => {
                             let model_name = agent_loop.session.model().unwrap_or("default").to_string();
                             agent_loop

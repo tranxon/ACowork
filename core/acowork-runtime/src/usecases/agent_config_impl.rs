@@ -145,12 +145,8 @@ fn apply_field_patch(cfg: &mut AgentConfig, field: ConfigField, op: &FieldPatch<
         ConfigField::ApprovalTimeoutSecs => {
             cfg.approval_timeout_secs = patch_typed::<u64>(field, op);
         }
-        ConfigField::ToolResultCompressionMode => {
-            cfg.tool_result_compression_mode = patch_typed::<String>(field, op);
-        }
-        ConfigField::ToolResultSoftThresholdChars => {
-            cfg.tool_result_soft_threshold_chars =
-                patch_typed::<u64>(field, op).map(|v| v as usize);
+        ConfigField::ToolCompressionEnabled => {
+            cfg.tool_compression_enabled = patch_typed::<bool>(field, op);
         }
     }
 }

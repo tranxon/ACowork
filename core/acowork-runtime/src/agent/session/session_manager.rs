@@ -146,29 +146,10 @@ pub struct RuntimeConfigOverrides {
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
     pub approval_timeout_secs: Option<u64>,
-    /// ADR-032: number of recent tool results kept raw (not compressed) at
-    /// every trigger point (event / budget / restore / manual). `None`
-    /// means "fall through to `crate::agent::loop_context::DEFAULT_KEEP_RECENT_N`".
-    /// `Some(0)` compresses every eligible tool result; `Some(n)` keeps the
-    /// last `n` tool messages raw. See `docs/adr/zh/ADR-032-context-recall.md`
-    /// core principle #7.
-    pub tool_result_keep_recent_n: Option<u32>,
-
-    /// ADR-032 C4b: compression trigger mode ("auto" | "manual").
-    /// `None` falls through to `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE`.
-    pub tool_result_compression_mode: Option<String>,
-
-    /// ADR-032 C4a: tool-result soft compression threshold in characters.
-    /// `None` falls through to `AgentConfig::tool_result_soft_threshold_chars`,
-    /// then to `crate::agent::loop_context::DEFAULT_SOFT_THRESHOLD_CHARS`.
-    ///
-    /// Marked **boot-only**: the field is populated when `agent_config.json`
-    /// is loaded (`apply_runtime_config_override`) but is intentionally NOT
-    /// routed through `RuntimeConfigUpdate` — recomputing byte-offsets on
-    /// already-active sessions would invalidate in-flight conversation
-    /// history pointers. See ADR-032 C4a, and the matching
-    /// `cli.rs::RuntimeConfigUpdate::is_*_boot_only()` taxonomy.
-    pub tool_result_soft_threshold_chars: Option<usize>,
+    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
+    /// `None` falls through to `true` (default enabled).
+    /// Boot-only: consumed at session creation time.
+    pub tool_compression_enabled: Option<bool>,
 }
 
 impl RuntimeConfigOverrides {
@@ -181,9 +162,7 @@ impl RuntimeConfigOverrides {
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
-            && self.tool_result_keep_recent_n.is_none()
-            && self.tool_result_compression_mode.is_none()
-            && self.tool_result_soft_threshold_chars.is_none()
+            && self.tool_compression_enabled.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -210,14 +189,8 @@ impl RuntimeConfigOverrides {
         if other.approval_timeout_secs.is_some() {
             self.approval_timeout_secs = other.approval_timeout_secs;
         }
-        if other.tool_result_keep_recent_n.is_some() {
-            self.tool_result_keep_recent_n = other.tool_result_keep_recent_n;
-        }
-        if other.tool_result_compression_mode.is_some() {
-            self.tool_result_compression_mode = other.tool_result_compression_mode.clone();
-        }
-        if other.tool_result_soft_threshold_chars.is_some() {
-            self.tool_result_soft_threshold_chars = other.tool_result_soft_threshold_chars;
+        if other.tool_compression_enabled.is_some() {
+            self.tool_compression_enabled = other.tool_compression_enabled;
         }
     }
 
@@ -253,14 +226,8 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.approval_timeout_secs {
             cfg.approval_timeout_secs = Some(v);
         }
-        if let Some(v) = self.tool_result_keep_recent_n {
-            cfg.tool_result_keep_recent_n = Some(v);
-        }
-        if let Some(v) = &self.tool_result_compression_mode {
-            cfg.tool_result_compression_mode = Some(v.clone());
-        }
-        if let Some(v) = self.tool_result_soft_threshold_chars {
-            cfg.tool_result_soft_threshold_chars = Some(v);
+        if let Some(v) = self.tool_compression_enabled {
+            cfg.tool_compression_enabled = Some(v);
         }
     }
 }
@@ -271,11 +238,6 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
     /// avatar, etc.) are applied separately via their own code paths.
     ///
     /// Pass-through projection: every field maps 1:1 from `AgentConfig`.
-    /// In particular, `tool_result_compression_mode = Some("auto")` is
-    /// *not* collapsed to `None` — the on-disk value is the user's
-    /// explicit choice, and the runtime `compression_mode()` accessor
-    /// already maps every non-`"manual"` variant to `Auto`, so the
-    /// behaviour is consistent without touching the data.
     fn from(cfg: &AgentConfig) -> Self {
         Self {
             max_output_tokens: cfg.max_output_tokens,
@@ -285,9 +247,7 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             system_prompt_override: cfg.system_prompt_override.clone(),
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
-            tool_result_keep_recent_n: cfg.tool_result_keep_recent_n,
-            tool_result_compression_mode: cfg.tool_result_compression_mode.clone(),
-            tool_result_soft_threshold_chars: cfg.tool_result_soft_threshold_chars,
+            tool_compression_enabled: cfg.tool_compression_enabled,
         }
     }
 }
@@ -962,22 +922,14 @@ impl SessionManager {
         if let Some(outcome) = restored {
             session_state.history_mut().load_restored(outcome.messages);
 
-            // NOTE: restore no longer re-applies `compress_tool_results` here.
+            // NOTE: restore does not perform placeholder compression.
             //
-            // ADR-032 compression operates on the in-memory history. Re-running
-            // it on resume would shrink the post-restore context but leave
-            // `SessionTokens.last_input` (restored from meta) untouched,
-            // causing `emit_session_state` to surface a stale, inflated
-            // `usage_percent` that immediately collapses to a smaller value
-            // after the first new LLM call (the live call sends the
-            // just-compressed history, so its `prompt_tokens` is much smaller
-            // than `last_input`).
-            //
-            // Compression during the original session is event-driven (assistant
-            // long text / todos completion / manual). If none of those fired
-            // before the session ended, the JSONL stores uncompressed tool
-            // output and `last_input` already reflects that state — no restore
-            // re-compression needed.
+            // History is loaded from JSONL as-is. ADR-052 removed automatic
+            // event-driven compression; tool-result compression is now
+            // LLM-initiated via `context_abandon`. The JSONL stores the
+            // original tool output (placeholders were in-memory only), so
+            // `last_input` (restored from meta) already reflects the
+            // uncompressed state — no re-compression needed at restore time.
             //
             // `fit_to_budget_lossless` remains the safety net for the
             // "resumed under a smaller model" case.
@@ -2849,197 +2801,6 @@ mod tests {
         // None preserves
         ov.merge(&RuntimeConfigOverrides::default());
         assert_eq!(ov.max_output_tokens, Some(200));
-    }
-
-    // ── ADR-032 tool_result_keep_recent_n config wiring ────────────────
-
-    #[test]
-    fn test_overrides_includes_tool_result_keep_recent_n() {
-        // Setting the field flips is_empty from true → false and
-        // surfaces the value through is_empty / direct field read.
-        let mut ov = RuntimeConfigOverrides::default();
-        assert!(ov.is_empty());
-        ov.tool_result_keep_recent_n = Some(5);
-        assert!(!ov.is_empty());
-        assert_eq!(ov.tool_result_keep_recent_n, Some(5));
-    }
-
-    #[test]
-    fn test_overrides_merge_tool_result_keep_recent_n() {
-        // The same merge semantics as the other fields: Some replaces,
-        // None preserves the cached value.
-        let mut ov = RuntimeConfigOverrides::default();
-        ov.merge(&RuntimeConfigOverrides {
-            tool_result_keep_recent_n: Some(3),
-            ..Default::default()
-        });
-        assert_eq!(ov.tool_result_keep_recent_n, Some(3));
-
-        // Some replaces
-        ov.merge(&RuntimeConfigOverrides {
-            tool_result_keep_recent_n: Some(0),
-            ..Default::default()
-        });
-        assert_eq!(ov.tool_result_keep_recent_n, Some(0));
-
-        // None preserves the cached Some(0) (the user explicitly opted
-        // into the "compress every eligible tool result" mode).
-        ov.merge(&RuntimeConfigOverrides::default());
-        assert_eq!(ov.tool_result_keep_recent_n, Some(0));
-    }
-
-    #[test]
-    fn test_agent_config_projects_tool_result_keep_recent_n() {
-        // `From<&AgentConfig>` must surface `tool_result_keep_recent_n`
-        // verbatim so a user value in agent_config.json flows through
-        // to `session_manager.runtime_overrides` at boot.
-        let cfg = crate::agent_config::AgentConfig {
-            tool_result_keep_recent_n: Some(7),
-            ..Default::default()
-        };
-        let ov = RuntimeConfigOverrides::from(&cfg);
-        assert_eq!(ov.tool_result_keep_recent_n, Some(7));
-
-        // None on AgentConfig → None on overrides (caller falls through
-        // to the code default `DEFAULT_KEEP_RECENT_N`).
-        let cfg_empty = crate::agent_config::AgentConfig::default();
-        let ov_empty = RuntimeConfigOverrides::from(&cfg_empty);
-        assert_eq!(ov_empty.tool_result_keep_recent_n, None);
-    }
-
-    #[test]
-    fn test_overrides_apply_to_writes_compression_mode() {
-        // Regression for the live-edit persistence bug: a push carrying
-        // `tool_result_compression_mode = Some("manual")` must land in
-        // the persisted AgentConfig — previously this field was dropped
-        // by the runtime and never reached agent_config.json.
-        let mut cfg = crate::agent_config::AgentConfig::default();
-        let ov = RuntimeConfigOverrides {
-            tool_result_compression_mode: Some("manual".into()),
-            ..Default::default()
-        };
-        ov.apply_to(&mut cfg);
-        assert_eq!(cfg.tool_result_compression_mode.as_deref(), Some("manual"));
-    }
-
-    #[test]
-    fn test_overrides_apply_to_writes_all_some_fields() {
-        // apply_to is the single source of truth for runtime-overrides →
-        // AgentConfig persistence. Every field whose override is Some
-        // must land in the persisted config; None fields must be no-ops
-        // (so partial pushes don't clobber disk values).
-        let mut cfg = crate::agent_config::AgentConfig::default();
-        let ov = RuntimeConfigOverrides {
-            max_output_tokens: Some(2048),
-            max_iterations: Some(20),
-            temperature: Some(0.3),
-            context_window: Some(8192),
-            system_prompt_override: Some("be terse".into()),
-            shell_approval_threshold: Some("low".into()),
-            approval_timeout_secs: Some(15),
-            tool_result_keep_recent_n: Some(3),
-            tool_result_compression_mode: Some("manual".into()),
-            tool_result_soft_threshold_chars: Some(4096),
-        };
-        ov.apply_to(&mut cfg);
-
-        assert_eq!(cfg.max_output_tokens, Some(2048));
-        assert_eq!(cfg.max_iterations, Some(20));
-        assert_eq!(cfg.temperature, Some(0.3));
-        assert_eq!(cfg.context_window, Some(8192));
-        assert_eq!(cfg.system_prompt_override.as_deref(), Some("be terse"));
-        assert_eq!(cfg.shell_approval_threshold.as_deref(), Some("low"));
-        assert_eq!(cfg.approval_timeout_secs, Some(15));
-        assert_eq!(cfg.tool_result_keep_recent_n, Some(3));
-        assert_eq!(cfg.tool_result_compression_mode.as_deref(), Some("manual"));
-        assert_eq!(cfg.tool_result_soft_threshold_chars, Some(4096));
-    }
-
-    #[test]
-    fn test_overrides_apply_to_none_preserves_disk() {
-        // A partial push (override with all-`None`) must not clobber any
-        // existing disk value. This guards the read-modify-write loop in
-        // cli.rs that loads agent_config.json before applying.
-        let mut cfg = crate::agent_config::AgentConfig {
-            max_output_tokens: Some(4096),
-            tool_result_compression_mode: Some("manual".into()),
-            max_sessions: Some(7),
-            ..Default::default()
-        };
-        // Snapshot the fields we expect to be preserved (AgentConfig doesn't
-        // derive PartialEq, so compare each field individually).
-        let pre_max_output_tokens = cfg.max_output_tokens;
-        let pre_tool_result_compression_mode = cfg.tool_result_compression_mode.clone();
-        let pre_max_sessions = cfg.max_sessions;
-
-        let ov = RuntimeConfigOverrides::default();
-        ov.apply_to(&mut cfg);
-
-        assert_eq!(
-            cfg.max_output_tokens, pre_max_output_tokens,
-            "max_output_tokens must be preserved on all-None push"
-        );
-        assert_eq!(
-            cfg.tool_result_compression_mode, pre_tool_result_compression_mode,
-            "tool_result_compression_mode must be preserved on all-None push"
-        );
-        assert_eq!(
-            cfg.max_sessions, pre_max_sessions,
-            "max_sessions (not in overrides) must be preserved on all-None push"
-        );
-    }
-
-    #[test]
-    fn test_overrides_apply_to_partial_push_only_writes_pushed_fields() {
-        // Mixed push: only `tool_result_compression_mode` is Some; every
-        // other field on disk must survive untouched.
-        let mut cfg = crate::agent_config::AgentConfig {
-            max_output_tokens: Some(4096),
-            tool_result_keep_recent_n: Some(5),
-            tool_result_compression_mode: Some("auto".into()),
-            ..Default::default()
-        };
-        let pre_max_output_tokens = cfg.max_output_tokens;
-        let pre_tool_result_keep_recent_n = cfg.tool_result_keep_recent_n;
-
-        let ov = RuntimeConfigOverrides {
-            tool_result_compression_mode: Some("manual".into()),
-            ..Default::default()
-        };
-        ov.apply_to(&mut cfg);
-
-        assert_eq!(
-            cfg.tool_result_compression_mode.as_deref(),
-            Some("manual"),
-            "pushed field must be updated"
-        );
-        assert_eq!(
-            cfg.max_output_tokens, pre_max_output_tokens,
-            "unpushed field must be preserved"
-        );
-        assert_eq!(
-            cfg.tool_result_keep_recent_n, pre_tool_result_keep_recent_n,
-            "unpushed field must be preserved"
-        );
-    }
-
-    #[test]
-    fn test_agent_config_projects_compression_mode() {
-        // `From<&AgentConfig>` must surface `tool_result_compression_mode`
-        // verbatim so the boot path can hydrate runtime_overrides with
-        // whatever mode the user persisted in agent_config.json.
-        let cfg = crate::agent_config::AgentConfig {
-            tool_result_compression_mode: Some("manual".into()),
-            ..Default::default()
-        };
-        let ov = RuntimeConfigOverrides::from(&cfg);
-        assert_eq!(ov.tool_result_compression_mode.as_deref(), Some("manual"));
-
-        // Disk None → override None → caller falls through to the
-        // default (currently `DEFAULT_COMPRESSION_MODE` = Auto).
-        let cfg_empty = crate::agent_config::AgentConfig::default();
-        let ov_empty = RuntimeConfigOverrides::from(&cfg_empty);
-        assert_eq!(ov_empty.tool_result_compression_mode, None);
     }
 
     // ── require_session_id ─────────────────────────────────────────────

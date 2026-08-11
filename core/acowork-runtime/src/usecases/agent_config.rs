@@ -15,7 +15,7 @@
 //! The trait covers **only the persistence of `agent_config.json`** —
 //! the per-agent **runtime** config (temperature, context_window,
 //! max_iterations, shell_approval_threshold, approval_timeout_secs,
-//! tool_result_compression_mode, tool_result_soft_threshold_chars,
+//! tool_compression_enabled,
 //! max_output_tokens, max_sessions). Notably out of scope:
 //!
 //! - `PUT /agents/{id}/builtin-tools` — lives behind
@@ -109,11 +109,8 @@ pub enum ConfigField {
     ShellApprovalThreshold,
     /// `AgentConfig::approval_timeout_secs` — `Option<u64>`.
     ApprovalTimeoutSecs,
-    /// `AgentConfig::tool_result_compression_mode` —
-    /// `Option<String>` (`"auto" | "manual"`).
-    ToolResultCompressionMode,
-    /// `AgentConfig::tool_result_soft_threshold_chars` — `Option<usize>`.
-    ToolResultSoftThresholdChars,
+    /// `AgentConfig::tool_compression_enabled` - `Option<bool>`.
+    ToolCompressionEnabled,
 }
 
 impl ConfigField {
@@ -129,8 +126,7 @@ impl ConfigField {
             ConfigField::ContextWindow => "context_window",
             ConfigField::ShellApprovalThreshold => "shell_approval_threshold",
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
-            ConfigField::ToolResultCompressionMode => "tool_result_compression_mode",
-            ConfigField::ToolResultSoftThresholdChars => "tool_result_soft_threshold_chars",
+            ConfigField::ToolCompressionEnabled => "tool_compression_enabled",
         }
     }
 }
@@ -194,8 +190,7 @@ impl PutAgentConfigBody {
         context_window: Option<serde_json::Value>,
         shell_approval_threshold: Option<serde_json::Value>,
         approval_timeout_secs: Option<serde_json::Value>,
-        tool_result_compression_mode: Option<serde_json::Value>,
-        tool_result_soft_threshold_chars: Option<serde_json::Value>,
+        tool_compression_enabled: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -240,15 +235,9 @@ impl PutAgentConfigBody {
                 op: value_to_patch(&v),
             });
         }
-        if let Some(v) = tool_result_compression_mode {
+        if let Some(v) = tool_compression_enabled {
             patches.push(ConfigFieldPatch {
-                field: ConfigField::ToolResultCompressionMode,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = tool_result_soft_threshold_chars {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::ToolResultSoftThresholdChars,
+                field: ConfigField::ToolCompressionEnabled,
                 op: value_to_patch(&v),
             });
         }

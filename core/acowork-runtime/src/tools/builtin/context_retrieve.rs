@@ -1,58 +1,81 @@
-//! ADR-032 context_recall tool — retrieve original tool result by tool_call_id.
+//! ADR-052 context_retrieve tool - retrieve original tool result by tool_call_id.
 //!
-//! When a Tool message is compressed by `HistoryManager::compress_tool_results`,
-//! its content is replaced with a ~120-char placeholder. The LLM can call this
-//! tool to retrieve the original full content.
+//! When a Tool message is compressed (replaced with a placeholder by
+//! `context_abandon`), the LLM can call this tool to retrieve the
+//! original full content.
 //!
 //! ## Resolution
 //!
 //! The tool searches the current session's JSONL conversation log for an entry
 //! whose `metadata.tool_call_id` matches the requested ID.  This is an O(N)
-//! scan over the JSONL file — acceptable because recall is explicitly LLM-driven
-//! and happens at most a few times per session.
+//! scan over the JSONL file - acceptable because retrieve is explicitly
+//! LLM-driven and happens at most a few times per session.
 //!
 //! ## Parameters
 //!
-//! - `tool_call_id` (string, required) — the `tool_call_id` embedded in the
-//!   placeholder: `Call context_recall(id="toolu_xxx")`.
+//! - `tool_call_id` (string, required) - the `tool_call_id` embedded in the
+//!   placeholder: `Call context_retrieve(id="toolu_xxx")`.
 //!
-//! ## Transient
+//! ## In-place restore (ADR-052)
 //!
-//! This tool returns `transient: true` (ADR-032 C3a) so the recalled content is
-//! injected into the next LLM request without permanently appending to history.
-//! The content is already persisted in the JSONL log; permanently keeping it in
-//! memory would waste context window space.
+//! ADR-032 used a transient channel so the recalled content was visible for
+//! one LLM request only. ADR-052 replaces this with **in-place restore**: the
+//! tool pushes `(tool_call_id, original_content)` into a `retrieve_queue`, and
+//! the agent loop drains the queue on the next iteration, restoring the
+//! original content at the placeholder's original position in history.
+//! The tool itself returns only a short confirmation (~60 chars).
+//!
+//! This breaks the `recall -> compress -> recall` death loop that ADR-032's
+//! transient mechanism was designed to prevent, because ADR-052 has removed
+//! the automatic compression trigger entirely - the LLM must explicitly call
+//! `context_abandon` to re-compress restored content.
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 use tracing;
 
-/// ADR-032 context_recall tool for retrieving compressed tool results.
-pub struct ContextRecallTool {
+/// ADR-052: Type alias for the retrieve queue shared between the tool and the
+/// agent loop. The tool writes `(tool_call_id, original_content)` pairs; the
+/// agent loop drains them and restores the original content in-place
+/// (replacing the placeholder).
+pub type RetrieveQueue = Arc<std::sync::Mutex<std::collections::VecDeque<(String, String)>>>;
+
+/// ADR-052 context_retrieve tool for retrieving compressed tool results.
+///
+/// Unlike ADR-032's `context_recall` (which returned the full content via a
+/// transient channel), this tool pushes the original content into a
+/// `retrieve_queue` and returns only a short confirmation. The agent loop
+/// restores the content in-place on the next iteration.
+pub struct ContextRetrieveTool {
     /// Agent home directory (`config.work_dir`), parent of `conversations/`.
     agent_home: String,
+    /// Shared queue for in-place restore. The tool writes here; the agent
+    /// loop drains and calls `HistoryManager::retrieve_tool_result()`.
+    retrieve_queue: RetrieveQueue,
 }
 
-impl ContextRecallTool {
-    pub fn new(agent_home: &str) -> Self {
+impl ContextRetrieveTool {
+    pub fn new(agent_home: &str, retrieve_queue: RetrieveQueue) -> Self {
         Self {
             agent_home: agent_home.to_string(),
+            retrieve_queue,
         }
     }
 
     fn spec_value() -> ToolSpec {
         ToolSpec {
-            name: "context_recall".to_string(),
+            name: "context_retrieve".to_string(),
             description:
                 "Retrieve the original full content of a compressed tool result by its tool_call_id. \
                  Call this when an earlier tool result was compressed to a placeholder and you need \
                  the complete output. \
                  \
                  The tool_call_id is embedded verbatim in every compressed placeholder: \
-                 `[Tool result compressed. Call context_recall(id=\"toolu_xxx\") to retrieve the full content.]` \
-                 Copy the id from the placeholder and pass it directly — no parsing needed."
+                 `[Tool result compressed. Call context_retrieve(id=\"toolu_xxx\") to retrieve the full content.]` \
+                 Copy the id from the placeholder and pass it directly - no parsing needed."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -60,7 +83,7 @@ impl ContextRecallTool {
                     "tool_call_id": {
                         "type": "string",
                         "description": "The tool_call_id embedded in the compressed placeholder. \
-                                        Example: if the placeholder says `context_recall(id=\"toolu_abc\")`, \
+                                        Example: if the placeholder says `context_retrieve(id=\"toolu_abc\")`, \
                                         pass `toolu_abc`."
                     }
                 },
@@ -71,7 +94,7 @@ impl ContextRecallTool {
 }
 
 #[async_trait]
-impl Tool for ContextRecallTool {
+impl Tool for ContextRetrieveTool {
     fn spec(&self) -> ToolSpec {
         Self::spec_value()
     }
@@ -84,7 +107,7 @@ impl Tool for ContextRecallTool {
         let tool_call_id = match params.get("tool_call_id").and_then(|v| v.as_str()) {
             Some(id) if !id.is_empty() => id.to_string(),
             Some(_) => {
-                tracing::warn!("context_recall called with empty tool_call_id");
+                tracing::warn!("context_retrieve called with empty tool_call_id");
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
@@ -95,7 +118,7 @@ impl Tool for ContextRecallTool {
                 })
             }
             None => {
-                tracing::warn!("context_recall called without tool_call_id parameter");
+                tracing::warn!("context_retrieve called without tool_call_id parameter");
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
@@ -109,9 +132,9 @@ impl Tool for ContextRecallTool {
 
         // Search the conversations directory for a JSONL entry whose
         // metadata.tool_call_id matches.  We scan every line of every
-        // session file under conversations/ — this is an O(total_sessions
+        // session file under conversations/ - this is an O(total_sessions
         // × total_entries) scan, acceptable because:
-        //   - context_recall is called rarely (only when LLM explicitly asks)
+        //   - context_retrieve is called rarely (only when LLM explicitly asks)
         //   - session files are small (typically < 500 entries)
         //   - the search stops at the first match per session, not scanning
         //     the entire file beyond the target entry
@@ -120,12 +143,12 @@ impl Tool for ContextRecallTool {
         tracing::info!(
             conversations_dir = %conversations_dir.display(),
             tool_call_id = %tool_call_id,
-            "context_recall invoked"
+            "context_retrieve invoked"
         );
         if !conversations_dir.exists() {
             tracing::warn!(
                 conversations_dir = %conversations_dir.display(),
-                "context_recall: conversations dir not found"
+                "context_retrieve: conversations dir not found"
             );
             return Ok(ToolResult {
                 ok: true,
@@ -145,7 +168,7 @@ impl Tool for ContextRecallTool {
                 tracing::error!(
                     dir = %conversations_dir.display(),
                     error = %e,
-                    "context_recall: failed to read conversations dir"
+                    "context_retrieve: failed to read conversations dir"
                 );
                 return Ok(ToolResult {
                     ok: true,
@@ -167,7 +190,7 @@ impl Tool for ContextRecallTool {
             }
         }
         // Sort by modification time (newest first) so we check the most
-        // recent session first — the current session is most likely
+        // recent session first - the current session is most likely
         // to contain the matching result.
         files_found.sort_by(|a, b| {
             b.metadata()
@@ -183,22 +206,45 @@ impl Tool for ContextRecallTool {
         tracing::info!(
             files_count = files_found.len(),
             files = ?files_found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-            "context_recall: searching conversation logs"
+            "context_retrieve: searching conversation logs"
         );
 
         for file_path in &files_found {
             tracing::debug!(
                 file = %file_path.display(),
-                "context_recall: checking file"
+                "context_retrieve: checking file"
             );
-            if let Some(result) = find_in_jsonl(file_path, &tool_call_id) {
-                return Ok(result);
+            if let Some(original_content) = find_in_jsonl(file_path, &tool_call_id) {
+                // ADR-052: Push (tool_call_id, original_content) into the
+                // retrieve_queue. The agent loop will drain this on the next
+                // iteration and restore the original content in-place.
+                let content_len = original_content.len();
+                self.retrieve_queue
+                    .lock()
+                    .unwrap()
+                    .push_back((tool_call_id.clone(), original_content));
+
+                tracing::info!(
+                    tool_call_id = %tool_call_id,
+                    content_len,
+                    "context_retrieve: match found, queued for in-place restore"
+                );
+
+                return Ok(ToolResult {
+                    ok: true,
+                    content: format!(
+                        "Retrieved {} ({} chars), original content restored.",
+                        tool_call_id, content_len
+                    ),
+                    error: None,
+                    token_usage: None,
+                });
             }
         }
 
         tracing::warn!(
             tool_call_id = %tool_call_id,
-            "context_recall: not found in any session file"
+            "context_retrieve: not found in any session file"
         );
 
         Ok(ToolResult {
@@ -216,20 +262,19 @@ impl Tool for ContextRecallTool {
 }
 
 /// Scan a single JSONL file for an entry with matching `metadata.tool_call_id`.
-/// Returns `None` if no match is found.
-fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
+/// Returns `Some(original_content)` if found, `None` otherwise.
+fn find_in_jsonl(path: &Path, target_id: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
-
-    // Track whether we found a non-tool_result entry (for better diagnostics)
-    // if we exhaust the file without finding a tool_result.
-    let mut found_non_tool_result: Option<String> = None;
 
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let entry: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        let entry: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
         // Check metadata.tool_call_id
         let tc_id = entry
@@ -243,18 +288,17 @@ fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if role != "tool_result" {
-                    // Entry exists but role is wrong — record it and keep scanning.
-                    // The actual tool_result entry might be further down in the file.
+                    // Entry exists but role is wrong - keep scanning.
+                    // The actual tool_result entry might be further down.
                     tracing::debug!(
                         file = %path.display(),
                         target_id = %target_id,
                         role = %role,
-                        "context_recall: found matching tool_call_id but wrong role"
+                        "context_retrieve: found matching tool_call_id but wrong role"
                     );
-                    found_non_tool_result = Some(role.to_string());
                     continue;
                 }
-                // Found the actual tool_result — return its content.
+                // Found the actual tool_result - return its content.
                 let result_content = entry
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -264,43 +308,18 @@ fn find_in_jsonl(path: &Path, target_id: &str) -> Option<ToolResult> {
                     file = %path.display(),
                     target_id = %target_id,
                     content_len = result_content.len(),
-                    "context_recall: match found"
+                    "context_retrieve: match found"
                 );
-                return Some(ToolResult {
-                    ok: true,
-                    content: result_content,
-                    error: None,
-                    token_usage: None,
-                });
+                return Some(result_content);
             }
             _ => continue,
         }
     }
 
-    // Exhausted the file. Give a diagnostic if we found a non-tool_result entry.
-    if let Some(role) = found_non_tool_result {
-        tracing::debug!(
-            file = %path.display(),
-            target_id = %target_id,
-            non_tool_role = %role,
-            "context_recall: exhausted file, found match with wrong role only"
-        );
-        return Some(ToolResult {
-            ok: true,
-            content: format!(
-                "Found entry with tool_call_id '{}' but its role is '{}', not 'tool_result'. \
-                 Only tool_result entries have content that can be recalled.",
-                target_id, role
-            ),
-            error: None,
-            token_usage: None,
-        });
-    }
-
     tracing::debug!(
         file = %path.display(),
         target_id = %target_id,
-        "context_recall: not found in this file"
+        "context_retrieve: not found in this file"
     );
 
     None
@@ -322,6 +341,11 @@ mod tests {
         writeln!(file, "{}", entry).unwrap();
     }
 
+    /// Helper: create a RetrieveQueue for testing.
+    fn test_queue() -> RetrieveQueue {
+        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()))
+    }
+
     #[test]
     fn test_find_in_jsonl_matches() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
@@ -330,9 +354,7 @@ mod tests {
         write_entry(&mut tmp, "assistant", "Done", "");
 
         let result = find_in_jsonl(tmp.path(), "toolu_abc").unwrap();
-        assert!(result.ok);
-        assert_eq!(result.content, "This is the hidden content");
-        assert!(result.error.is_none());
+        assert_eq!(result, "This is the hidden content");
     }
 
     #[test]
@@ -345,42 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn test_find_in_jsonl_wrong_role() {
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        write_entry(&mut tmp, "assistant", "Some assistant text", "toolu_assistant_id");
-
-        let result = find_in_jsonl(tmp.path(), "toolu_assistant_id").unwrap();
-        assert!(result.ok);
-        assert!(result.content.contains("role is 'assistant'"));
-    }
-
-    #[test]
     fn test_find_in_jsonl_skips_tool_call_finds_tool_result() {
         // Regression test: when both a tool_call (role="tool_call") and a
         // tool_result share the same tool_call_id, and the tool_call appears
         // first in the file, find_in_jsonl must skip the tool_call entry and
         // continue scanning to find the tool_result.
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        // Simulate a tool_call entry (e.g. role="tool_call") with the target id,
-        // written before the tool_result in the log file.
         write_entry(&mut tmp, "tool_call", "", "toolu_shared_id");
-        // Simulate a user message in between (no matching tool_call_id)
         write_entry(&mut tmp, "user", "What was the result?", "");
-        // The actual tool_result with the same id
         write_entry(&mut tmp, "tool_result", "The actual tool result content", "toolu_shared_id");
 
         let result = find_in_jsonl(tmp.path(), "toolu_shared_id").unwrap();
-        assert!(result.ok, "Should succeed in finding the tool_result");
         assert_eq!(
-            result.content, "The actual tool result content",
+            result, "The actual tool result content",
             "Should return the tool_result content, not a role error"
         );
-        assert!(result.error.is_none());
     }
 
     #[test]
     fn test_tool_missing_param() {
-        let tool = ContextRecallTool::new("/tmp");
+        let tool = ContextRetrieveTool::new("/tmp", test_queue());
         let params = serde_json::json!({});
         let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
         assert!(!result.ok);
@@ -389,10 +395,44 @@ mod tests {
 
     #[test]
     fn test_tool_empty_param() {
-        let tool = ContextRecallTool::new("/tmp");
+        let tool = ContextRetrieveTool::new("/tmp", test_queue());
         let params = serde_json::json!({"tool_call_id": ""});
         let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
         assert!(!result.ok);
         assert!(result.error.unwrap().contains("non-empty"));
+    }
+
+    #[test]
+    fn test_retrieve_queue_pushed_on_match() {
+        // ADR-052: when find_in_jsonl succeeds, the tool should push
+        // (tool_call_id, original_content) into the retrieve_queue and
+        // return a short confirmation (not the full content).
+        let dir = tempfile::tempdir().unwrap();
+        let conversations = dir.path().join("conversations");
+        std::fs::create_dir(&conversations).unwrap();
+        let jsonl = conversations.join("test.jsonl");
+        std::fs::write(&jsonl, serde_json::json!({
+            "role": "tool_result",
+            "content": "The hidden content",
+            "metadata": {"tool_call_id": "toolu_test"}
+        }).to_string() + "\n").unwrap();
+
+        let queue = test_queue();
+        let tool = ContextRetrieveTool::new(&dir.path().to_string_lossy(), queue.clone());
+        let params = serde_json::json!({"tool_call_id": "toolu_test"});
+        let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
+
+        assert!(result.ok);
+        // Tool returns short confirmation, NOT the full content
+        assert!(result.content.contains("Retrieved toolu_test"));
+        assert!(result.content.contains("chars"));
+        assert!(!result.content.contains("The hidden content"));
+
+        // Queue should have the entry
+        let q = queue.lock().unwrap();
+        assert_eq!(q.len(), 1);
+        let (id, content) = &q[0];
+        assert_eq!(id, "toolu_test");
+        assert_eq!(content, "The hidden content");
     }
 }

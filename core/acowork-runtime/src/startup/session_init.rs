@@ -524,6 +524,15 @@ pub(crate) async fn phase_b_init_session(
             }
         }
 
+        // ADR-052: Inject the shared abandon/retrieve queues from the
+        // boot context into AgentCore. These are the same queue instances
+        // that were passed to the context_abandon/context_retrieve tools
+        // in agent_init.rs. The AgentLoop reads them from core and drains
+        // them each iteration.
+        c.abandon_queue = ctx.abandon_queue.clone();
+        c.retrieve_queue = ctx.retrieve_queue.clone();
+        c.tool_compression_enabled_override = agent_cfg.tool_compression_enabled;
+
         // ADR-046: Publish attachment blob store to the HTTP server's
         // late-bind slot. The same `Arc` instance is shared with
         // `AgentCore::attachment_service` (set above), so any upload
@@ -698,10 +707,10 @@ pub(crate) async fn phase_b_init_session(
         || agent_cfg.system_prompt_override.is_some()
         || agent_cfg.shell_approval_threshold.is_some()
         || agent_cfg.approval_timeout_secs.is_some()
-        // ADR-032: include the tool-result compression N in the override
+        // ADR-052: include tool_compression_enabled in the override
         // detection so a user-set value in agent_config.json is applied
         // to the SessionManager override cache at boot.
-        || agent_cfg.tool_result_keep_recent_n.is_some();
+        || agent_cfg.tool_compression_enabled.is_some();
     if has_overrides {
         tracing::info!(
             max_output_tokens = ?agent_cfg.max_output_tokens,

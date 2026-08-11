@@ -32,16 +32,15 @@ use crate::tools::builtin::ask_user_question::QuestionOption;
 
 use crate::agent::session_state::SessionStatus;
 
-/// ADR-032 C4b: User-initiated compression actions.
+/// User-initiated compression actions.
 ///
-/// These are triggered via frontend/CLI buttons regardless of the
-/// current `CompressionMode` (Auto/Manual).  In Auto mode the system
-/// also fires at event points; in Manual mode these are the only way.
+/// Triggered via frontend/CLI buttons (the "Compress Summary" button in
+/// `ContextUsageIcon`).  ADR-052 removed the `CompressToolResults` variant
+/// — tool-result compression is now LLM-initiated via `context_abandon`,
+/// not user-triggered. Only LLM-based summary compaction remains here.
 #[derive(Debug, Clone)]
 pub enum CompressionAction {
-    /// Run `compress_tool_results` (L0 placeholder compression).
-    CompressToolResults,
-    /// Run LLM-based summary compaction.
+    /// Run LLM-based summary compaction (ADR-011 L2 layer).
     CompressSummary,
 }
 
@@ -357,7 +356,7 @@ pub struct AgentLoop {
         std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>,
     /// Transient tool results from the previous iteration (ADR-032 C3a).
     ///
-    /// Tools with `transient: true` (e.g., `context_recall`) have their
+    /// Tools with `transient: true` have their
     /// results injected into the *next* `build_chat_request` without being
     /// permanently appended to history.
     ///
@@ -376,6 +375,22 @@ pub struct AgentLoop {
     /// one turn before it is discarded (neither persisted to history nor
     /// retained across iterations).
     pub(crate) pending_transient_tool_msgs: Vec<ChatMessage>,
+
+    /// ADR-052: Shared queue for `context_abandon` tool requests.
+    ///
+    /// The tool writes `tool_call_id` strings here; the agent loop drains
+    /// them before the next `build_chat_request` via
+    /// `drain_abandon_queue()`.
+    pub(crate) abandon_queue:
+        crate::tools::builtin::context_abandon::AbandonQueue,
+
+    /// ADR-052: Shared queue for `context_retrieve` tool requests.
+    ///
+    /// The tool writes `(tool_call_id, original_content)` pairs here; the
+    /// agent loop drains them before the next `build_chat_request` via
+    /// `drain_retrieve_queue()`, restoring the original content in-place.
+    pub(crate) retrieve_queue:
+        crate::tools::builtin::context_retrieve::RetrieveQueue,
 
     /// ADR-032 C4b: Compression action receiver.
     ///
@@ -434,6 +449,8 @@ impl AgentLoop {
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
         let mut loop_ = Self {
+            abandon_queue: core.abandon_queue.clone(),
+            retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
             session: SessionState::new(max_tokens, budget, conversation),
@@ -503,6 +520,8 @@ impl AgentLoop {
             mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let approval_handle = ApprovalHandle::new(approval_tx);
         let mut session_loop = Self {
+            abandon_queue: core.abandon_queue.clone(),
+            retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
             session,
@@ -1375,6 +1394,14 @@ impl AgentLoop {
         // trigger) and manual mode (where manual commands are the only way).
         self.drain_compress_actions();
 
+        // ADR-052: Drain LLM-initiated abandon/retrieve queues.
+        // These replace the old auto-compress trigger. The LLM calls
+        // context_abandon / context_retrieve tools, which push into these
+        // queues. We drain them here so the in-place modifications are
+        // visible to build_chat_request in the same iteration.
+        self.drain_abandon_queue();
+        self.drain_retrieve_queue();
+
         // ── ② Budget + context build ──
         self.core
             .debug_observer
@@ -1555,16 +1582,10 @@ impl AgentLoop {
         // ── ⑧.75 Append tool results to history ──
         //
         // `is_transient` results are queued for the next LLM request but
-        // never permanently stored in history. The current set of transient
-        // tools is: `context_recall`. The transient flag is set in
-        // `execute_single_tool` (loop_tools.rs) — see ADR-032 C3a.
-        //
-        // This is what breaks the
-        // recall → compress → recall loop: the recalled content is visible
-        // to the LLM exactly once (in the next chat request) and then
-        // discarded. The compressed placeholder in history is never
-        // overwritten with the recalled content, so future
-        // `compress_tool_results` calls cannot re-trigger on the same data.
+        // never permanently stored in history. ADR-052 removed the transient
+        // mechanism for `context_retrieve` — all tool results are now
+        // permanently appended. The `is_transient` field on `ToolResult`
+        // is preserved for future hypothetical one-shot tools (ADR-032 C3a).
         for (tc, (result_content, &is_transient)) in
             deduped_calls.iter().zip(tool_contents.iter().zip(transient_flags.iter()))
         {
@@ -1630,28 +1651,15 @@ impl AgentLoop {
     //   - handle_ask_user_question
     //   - handle_todo_write
 
-    // ── ADR-032 C4b: compression action + mode helpers ──
-
-    /// Resolve the effective compression mode for this session.
-    ///
-    /// Resolution chain (Layer 1 = highest priority):
-    /// 1. `self.core.compression_mode_override` — set from agent_config via
-    ///    `apply_runtime_config_override` and hot-patched by RuntimeConfigUpdate
-    /// 2. `crate::agent::loop_context::DEFAULT_COMPRESSION_MODE` — hardcoded (Auto)
-    pub(crate) fn compression_mode(&self) -> crate::agent::loop_context::CompressionMode {
-        let mode_str = self.core.compression_mode_override.as_deref();
-        match mode_str {
-            Some("manual") => crate::agent::loop_context::CompressionMode::Manual,
-            _ => crate::agent::loop_context::CompressionMode::Auto,
-        }
-    }
+    // ── User-initiated compression action helpers ──
 
     /// Drain any pending user-initiated compression actions from the channel.
     ///
     /// Called at the start of each iteration so user-initiated compression
-    /// actions are honored regardless of the current `CompressionMode`.
-    /// Returns `true` if any action was processed (caller may want to
-    /// rebuild the chat request after this).
+    /// actions (e.g. the "Compress Summary" button) are honored promptly.
+    /// ADR-052 removed the `CompressionMode` concept; only `CompressSummary`
+    /// (LLM-based summary) remains. Returns `true` if any action was
+    /// processed.
     pub(crate) fn drain_compress_actions(&mut self) -> bool {
         let Some(rx) = &mut self.compress_action_rx else {
             return false;
@@ -1659,19 +1667,7 @@ impl AgentLoop {
         let mut did_work = false;
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                CompressionAction::CompressToolResults => {
-                    let n = self.core.tool_result_keep_recent_n();
-                    let soft_threshold = self.core.tool_result_soft_threshold_chars();
-                    let compressed = self.session.history.compress_tool_results(
-                        soft_threshold,
-                        n as usize,
-                    );
-                    if compressed > 0 {
-                        self.session.history.recalibrate_tokens();
-                        tracing::info!(compressed, "Manual compress_tool_results executed");
-                    }
-                    did_work = true;
-                }
+
                 CompressionAction::CompressSummary => {
                     // Summary compaction is handled by compact_history_if_needed
                     // (LLM-based). For now, just trigger the budget-trim path.
@@ -1684,13 +1680,72 @@ impl AgentLoop {
         did_work
     }
 
-    /// Check whether compression is enabled for event triggers.
-    pub(crate) fn event_compression_enabled(&self) -> bool {
-        matches!(
-            self.compression_mode(),
-            crate::agent::loop_context::CompressionMode::Auto
-        )
+    /// ADR-052: Drain the abandon queue, replacing tool results with placeholders.
+    ///
+    /// Called at the start of each iteration (after `drain_compress_actions`,
+    /// before `build_chat_request`). Each entry in the queue is a
+    /// `tool_call_id` that the LLM requested to abandon via the
+    /// `context_abandon` tool. The actual replacement is done in-place by
+    /// `HistoryManager::abandon_tool_result()`.
+    ///
+    /// Returns `true` if any replacements were made (caller may want to
+    /// recalibrate tokens - but this method already does it).
+    pub(crate) fn drain_abandon_queue(&mut self) -> bool {
+        let mut ids = self.abandon_queue.lock().unwrap();
+        if ids.is_empty() {
+            return false;
+        }
+        let mut did_work = false;
+        while let Some(tool_call_id) = ids.pop_front() {
+            let compressed = self.session.history.abandon_tool_result(&tool_call_id);
+            if compressed > 0 {
+                tracing::info!(tool_call_id = %tool_call_id, "context_abandon: replaced with placeholder");
+                did_work = true;
+            } else {
+                tracing::debug!(tool_call_id = %tool_call_id, "context_abandon: no matching tool result (already compressed or not found)");
+            }
+        }
+        drop(ids); // release lock before recalibrate
+        if did_work {
+            self.session.history.recalibrate_tokens();
+        }
+        did_work
     }
+
+    /// ADR-052: Drain the retrieve queue, restoring original tool result content.
+    ///
+    /// Called at the start of each iteration (after `drain_abandon_queue`,
+    /// before `build_chat_request`). Each entry is a `(tool_call_id,
+    /// original_content)` pair that the LLM requested to retrieve via the
+    /// `context_retrieve` tool. The restoration is done in-place by
+    /// `HistoryManager::retrieve_tool_result()`.
+    ///
+    /// Returns `true` if any restorations were made.
+    pub(crate) fn drain_retrieve_queue(&mut self) -> bool {
+        let mut items = self.retrieve_queue.lock().unwrap();
+        if items.is_empty() {
+            return false;
+        }
+        let mut did_work = false;
+        while let Some((tool_call_id, original_content)) = items.pop_front() {
+            let restored = self.session.history.retrieve_tool_result(
+                &tool_call_id,
+                &original_content,
+            );
+            if restored > 0 {
+                tracing::info!(tool_call_id = %tool_call_id, "context_retrieve: restored original content in-place");
+                did_work = true;
+            } else {
+                tracing::debug!(tool_call_id = %tool_call_id, "context_retrieve: no matching placeholder (already restored or not found)");
+            }
+        }
+        drop(items);
+        if did_work {
+            self.session.history.recalibrate_tokens();
+        }
+        did_work
+    }
+
 
     // ── LLM streaming methods extracted to loop_llm.rs ──
 
@@ -3446,5 +3501,259 @@ mod tests {
             user_entry.contains("Attached workspace files"),
             "When raw_user_message=None, JSONL should contain enriched hint, got: {user_entry}",
         );
+    }
+
+    // ── ADR-052: drain_abandon_queue / drain_retrieve_queue tests ──────
+
+    /// Helper: build a minimal AgentLoop for drain tests. We use the standard
+    /// `AgentLoop::new()` constructor with default config + mock provider, then
+    /// inject Tool-role messages directly into history.
+    fn make_loop_for_drain_tests() -> AgentLoop {
+        let config = RuntimeConfig::default();
+        let manifest = test_manifest();
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools = entries(vec![]);
+        let budget = test_budget();
+        let (agent_loop, _inbound_tx) =
+            AgentLoop::new(config, manifest, provider, tools, budget, None, None);
+        agent_loop
+    }
+
+    /// Helper: build a Tool-role message for history injection.
+    fn make_tool_message_for_drain(content: &str, tool_call_id: &str) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Tool,
+            content: content.to_string(),
+            name: Some("content_search".to_string()),
+            tool_call_id: Some(tool_call_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_drain_abandon_queue_empty_returns_false() {
+        // ADR-052 §3.3.3: empty queue returns false without recalibrate_tokens
+        let mut agent_loop = make_loop_for_drain_tests();
+        let tokens_before = agent_loop.session.history.token_count();
+
+        let did_work = agent_loop.drain_abandon_queue();
+        assert!(!did_work, "empty queue should return false");
+
+        let tokens_after = agent_loop.session.history.token_count();
+        assert_eq!(
+            tokens_before, tokens_after,
+            "empty drain should not call recalibrate_tokens (no token changes)"
+        );
+    }
+
+    #[test]
+    fn test_drain_abandon_queue_replaces_and_recalibrates() {
+        // ADR-052 §3.3.3: non-empty queue drains, calls abandon_tool_result,
+        // and recalibrate_tokens.
+        let mut agent_loop = make_loop_for_drain_tests();
+        let big = "x".repeat(5000);
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain(&big, "toolu_abc"));
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain(&big, "toolu_def"));
+        let tokens_before = agent_loop.session.history.token_count();
+        assert!(tokens_before > 0);
+
+        // Push two abandon requests
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_abc".to_string());
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_def".to_string());
+
+        let did_work = agent_loop.drain_abandon_queue();
+        assert!(did_work, "non-empty queue should return true");
+
+        // Both messages replaced with placeholders
+        let msgs = agent_loop.session.history.messages();
+        assert!(msgs[0].content.starts_with("[Tool result compressed."));
+        assert!(msgs[1].content.starts_with("[Tool result compressed."));
+
+        // recalibrate_tokens was called - token count should drop significantly
+        let tokens_after = agent_loop.session.history.token_count();
+        assert!(
+            tokens_after < tokens_before,
+            "recalibrate_tokens should reflect new content: before={tokens_before}, after={tokens_after}"
+        );
+
+        // Queue is now empty
+        assert!(agent_loop.abandon_queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_drain_abandon_queue_missing_id_returns_false_work_done() {
+        // ADR-052 §3.3.3: if all IDs in the queue are unknown, did_work=false
+        // (no recalibrate triggered).
+        let mut agent_loop = make_loop_for_drain_tests();
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain("some content", "toolu_known"));
+        let tokens_before = agent_loop.session.history.token_count();
+
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_unknown_1".to_string());
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_unknown_2".to_string());
+
+        let did_work = agent_loop.drain_abandon_queue();
+        assert!(
+            !did_work,
+            "all-unknown IDs should leave did_work=false (no recalibrate)"
+        );
+
+        // Content unchanged
+        let msgs = agent_loop.session.history.messages();
+        assert_eq!(msgs[0].content, "some content");
+        let tokens_after = agent_loop.session.history.token_count();
+        assert_eq!(
+            tokens_before, tokens_after,
+            "no recalibrate should have happened"
+        );
+    }
+
+    #[test]
+    fn test_drain_retrieve_queue_empty_returns_false() {
+        // ADR-052 §3.2.2: empty queue returns false without recalibrate_tokens
+        let mut agent_loop = make_loop_for_drain_tests();
+        let tokens_before = agent_loop.session.history.token_count();
+
+        let did_work = agent_loop.drain_retrieve_queue();
+        assert!(!did_work, "empty queue should return false");
+
+        let tokens_after = agent_loop.session.history.token_count();
+        assert_eq!(
+            tokens_before, tokens_after,
+            "empty drain should not call recalibrate_tokens"
+        );
+    }
+
+    #[test]
+    fn test_drain_retrieve_queue_restores_in_place() {
+        // ADR-052 §3.2.2: non-empty queue drains, calls retrieve_tool_result,
+        // restores original content at the placeholder's position.
+        let mut agent_loop = make_loop_for_drain_tests();
+        let original = "The original full content".repeat(100);
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain(&original, "toolu_abc"));
+
+        // First abandon the message so it becomes a placeholder
+        let n = agent_loop.history_mut().abandon_tool_result("toolu_abc");
+        assert_eq!(n, 1);
+        assert!(agent_loop.session.history.messages()[0]
+            .content
+            .starts_with("[Tool result compressed."));
+
+        // Now queue a retrieve for the same id
+        agent_loop
+            .retrieve_queue
+            .lock()
+            .unwrap()
+            .push_back(("toolu_abc".to_string(), original.clone()));
+
+        let did_work = agent_loop.drain_retrieve_queue();
+        assert!(did_work);
+
+        // Original content restored IN PLACE (not appended)
+        let msgs = agent_loop.session.history.messages();
+        assert_eq!(msgs.len(), 1, "retrieve should NOT add new messages");
+        assert_eq!(
+            msgs[0].content, original,
+            "retrieve should restore content at the original position"
+        );
+
+        // name + tool_call_id preserved
+        assert_eq!(msgs[0].tool_call_id.as_deref(), Some("toolu_abc"));
+        assert_eq!(msgs[0].name.as_deref(), Some("content_search"));
+
+        // Queue is empty
+        assert!(agent_loop.retrieve_queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_drain_retrieve_queue_missing_placeholder_returns_false() {
+        // ADR-052 §3.2.2: if the target is already raw (not a placeholder),
+        // retrieve_tool_result returns 0 and did_work stays false.
+        let mut agent_loop = make_loop_for_drain_tests();
+        let original = "Original content here";
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain(original, "toolu_raw"));
+
+        // Queue retrieve for an already-raw message (no abandon first)
+        agent_loop
+            .retrieve_queue
+            .lock()
+            .unwrap()
+            .push_back(("toolu_raw".to_string(), "new content".to_string()));
+
+        let did_work = agent_loop.drain_retrieve_queue();
+        assert!(
+            !did_work,
+            "already-raw message should not trigger recalibrate"
+        );
+
+        // Content unchanged (still original)
+        let msgs = agent_loop.session.history.messages();
+        assert_eq!(msgs[0].content, original);
+    }
+
+    #[test]
+    fn test_drain_abandon_then_retrieve_round_trip() {
+        // ADR-052 §3.2.3: the abandon↔retrieve symmetry forms a closed loop.
+        let mut agent_loop = make_loop_for_drain_tests();
+        let original = "Round-trip test content".repeat(50);
+        agent_loop
+            .history_mut()
+            .append(make_tool_message_for_drain(&original, "toolu_rt"));
+
+        // Cycle 1: abandon
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_rt".to_string());
+        assert!(agent_loop.drain_abandon_queue());
+        assert!(agent_loop.session.history.messages()[0]
+            .content
+            .starts_with("[Tool result compressed."));
+
+        // Cycle 2: retrieve
+        agent_loop
+            .retrieve_queue
+            .lock()
+            .unwrap()
+            .push_back(("toolu_rt".to_string(), original.clone()));
+        assert!(agent_loop.drain_retrieve_queue());
+        assert_eq!(agent_loop.session.history.messages()[0].content, original);
+
+        // Cycle 3: re-abandon (close the loop)
+        agent_loop
+            .abandon_queue
+            .lock()
+            .unwrap()
+            .push_back("toolu_rt".to_string());
+        assert!(agent_loop.drain_abandon_queue());
+        assert!(agent_loop.session.history.messages()[0]
+            .content
+            .starts_with("[Tool result compressed."));
     }
 }

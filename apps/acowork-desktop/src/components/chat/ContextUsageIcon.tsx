@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useChatStore } from "../../stores/chatStore";
-import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
@@ -64,11 +63,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   const sessionStatus = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.sessionStatus ?? null);
   const sendCompressAction = useChatStore((s) => s.sendCompressAction);
 
-  // Read the current compression mode from agent profile
-  const profile = useAgentStore((s) => (agentId ? s.agents[agentId]?.profile : null));
-  const compressionMode = profile?.toolResultCompressionMode ?? "auto";
-
-  // Open popover on hover (not click), with a small delay before closing
+// Open popover on hover (not click), with a small delay before closing
   const handleMouseEnter = useCallback(() => {
     if (closeTimerRef.current) {
       clearTimeout(closeTimerRef.current);
@@ -102,14 +97,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   const isIdle = getProcessingPhase(sessionStatus) === "idle";
   const canAct = isIdle && !isCompacting && contextUsage != null;
 
-  const handleCompressTools = () => {
-    if (!canAct) return;
-    // 2 = CompressType::TOOL_RESULTS (see core/acowork-core/proto/mqtt_payload.proto).
-    sendCompressAction(agentId, sessionId, 2);
-    setOpen(false);
-  };
-
-  const handleCompressSummary = () => {
+const handleCompressSummary = () => {
     if (!canAct) return;
     // 1 = CompressType::SUMMARY (see core/acowork-core/proto/mqtt_payload.proto).
     sendCompressAction(agentId, sessionId, 1);
@@ -179,30 +167,7 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
             </span>
           </div>
 
-          {/* Line 2: current compression mode indicator */}
-          <div className="px-3 pb-1 text-[9px] text-zinc-400 dark:text-zinc-500 select-none">
-            {compressionMode === "manual"
-              ? "\u{1F6A7} Manual — click to compress"
-              : "\u{2699}\u{FE0F} Auto — compression on event"}
-          </div>
-
-          {/* Line 3: Compress Tools button */}
-          <button
-            onClick={handleCompressTools}
-            disabled={!canAct}
-            className={cn(
-              "mx-1.5 mt-1 flex w-[calc(100%-0.75rem)] items-center justify-center gap-1.5 rounded-md",
-              "bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-700 transition-colors",
-              "hover:bg-zinc-200 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600",
-              "disabled:opacity-40 disabled:cursor-not-allowed",
-            )}
-          >
-            {isCompacting
-              ? t("contextUsage.compressing")
-              : t("contextUsage.compressTools")}
-          </button>
-
-          {/* Line 4: Compress Summary button */}
+          {/* Compress Summary button */}
           <button
             onClick={handleCompressSummary}
             disabled={!canAct}

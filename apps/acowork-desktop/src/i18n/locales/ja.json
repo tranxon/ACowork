@@ -205,7 +205,6 @@
     "compressing": "圧縮中...",
     "agentRunning": "Agent実行中",
     "compressContext": "コンテキストを圧縮",
-    "compressTools": "ツール結果のみ圧縮",
     "compressSummary": "コンテキスト全体を圧縮"
   },
   "agentList": {
@@ -386,7 +385,9 @@
     "applying": "適用中...",
     "resetToDefaults": "デフォルトに戻す",
     "resetAgentSetup": "Agent設定をリセット",
-    "reset": "リセット"
+    "reset": "リセット",
+    "toolCompressionEnabled": "ツール圧縮",
+    "toolCompressionEnabledDesc": "有効にすると、LLMが自律的にツール結果を圧縮・取得できます"
   },
   "harness": {
     "tabProviders": "プロバイダー",

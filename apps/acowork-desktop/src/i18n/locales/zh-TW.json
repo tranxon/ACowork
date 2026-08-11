@@ -203,7 +203,6 @@
     "compressing": "壓縮中...",
     "agentRunning": "Agent 執行中",
     "compressContext": "壓縮上下文",
-    "compressTools": "只壓縮工具結果",
     "compressSummary": "壓縮整個上下文"
   },
   "agentList": {
@@ -384,7 +383,9 @@
     "applying": "套用中...",
     "resetToDefaults": "恢復預設",
     "resetAgentSetup": "重設 Agent 設定",
-    "reset": "重設"
+    "reset": "重設",
+    "toolCompressionEnabled": "工具壓縮",
+    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果"
   },
   "harness": {
     "tabProviders": "模型服務提供者",

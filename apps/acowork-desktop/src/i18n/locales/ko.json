@@ -203,7 +203,6 @@
     "compressing": "압축 중...",
     "agentRunning": "Agent 실행 중",
     "compressContext": "컨텍스트 압축",
-    "compressTools": "도구 결과만 압축",
     "compressSummary": "전체 컨텍스트 압축"
   },
   "agentList": {
@@ -384,7 +383,9 @@
     "resetToDefaults": "기본값으로 초기화",
     "resetAgentSetup": "Agent 설정 초기화",
     "reset": "초기화",
-    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}"
+    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
+    "toolCompressionEnabled": "도구 압축",
+    "toolCompressionEnabledDesc": "활성화하면 LLM이 자율적으로 도구 결과를 압축하고 검색할 수 있습니다"
   },
   "harness": {
     "tabProviders": "제공자",

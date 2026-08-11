@@ -1587,8 +1587,7 @@ async fn put_agent_config(
         req.context_window,
         req.shell_approval_threshold,
         req.approval_timeout_secs,
-        req.tool_result_compression_mode,
-        req.tool_result_soft_threshold_chars,
+        req.tool_compression_enabled,
     );
     let svc = state
         .agent_config
@@ -1671,7 +1670,7 @@ async fn put_agent_config(
 /// Desktop `AgentSetupTab.handleApply` builds from `AgentProfileSettings`.
 /// The handler applies a read-modify-write cycle so partial updates
 /// don't clobber unrelated on-disk values (e.g. touching
-/// `temperature` must not erase an existing `tool_result_keep_recent_n`).
+/// `temperature` must not erase an existing `tool_compression_enabled`).
 ///
 /// Semantics notes:
 ///   - Every field here uses the same `"Some(...)" -> overwrite,
@@ -1684,7 +1683,7 @@ async fn put_agent_config(
 ///     [`AgentToolsService::put_builtin_tools`]) and the Desktop Tools
 ///     panel now calls that endpoint directly.
 ///   - Fields that have no analogue on the wire (e.g.
-///     `tool_result_keep_recent_n`, `avatar`, `builtin_avatar`,
+///     `avatar`, `builtin_avatar`,
 ///     `system_prompt_override`) are deliberately omitted from this
 ///     struct: they aren't exposed in the Setup panel today, so
 ///     accepting them on the wire would silently no-op and confuse
@@ -1730,15 +1729,11 @@ struct UpdateAgentConfigRequest {
     shell_approval_threshold: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_timeout_secs: Option<serde_json::Value>,
-    /// ADR-032 C4b: compression trigger mode (`"auto" | "manual"`).
+    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
     /// Field-absent leaves on-disk value alone (see struct-level note).
+    /// Boot-only: takes effect on next session restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_result_compression_mode: Option<serde_json::Value>,
-    /// ADR-032 C4a: tool-result soft compression threshold (chars).
-    /// Field-absent leaves on-disk value alone. Boot-only: takes
-    /// effect on next session restore.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_result_soft_threshold_chars: Option<serde_json::Value>,
+    tool_compression_enabled: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {
@@ -1776,7 +1771,7 @@ impl UpdateAgentConfigRequest {
 /// above, which already projects the wire shape onto the in-process
 /// struct (and forces boot-only fields to `None` so we never
 /// invalidate in-flight conversation history pointers — see
-/// `RuntimeConfigOverrides::tool_result_soft_threshold_chars` docs).
+/// `RuntimeConfigOverrides::tool_compression_enabled` docs).
 ///
 /// The push goes through `dispatch_tx` (per-session `(String,
 /// InboundMessage)` channel), reusing the exact same routing that
@@ -1788,8 +1783,7 @@ impl UpdateAgentConfigRequest {
 /// context_window / etc. without restarting the session.
 async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfigOverrides) {
     if overrides.is_empty() {
-        // No live-editable fields were pushed (e.g. user only touched
-        // tool_result_soft_threshold_chars). Skip the broadcast entirely
+        // No live-editable fields were pushed. Skip the broadcast entirely
         // so we don't broadcast a no-op UpdateRuntimeConfig that would
         // still trigger `emit_session_state` on every active session.
         return;
@@ -3021,7 +3015,7 @@ mod tests {
     /// PUT listing only one of them as enabled, and asserts that:
     ///   - the listed tool stays `enabled=true`
     ///   - the two **unlisted** tools flip to `enabled=false`
-    ///   - PLATFORM_TOOLS (e.g. `context_recall`) are still force-enabled
+    ///   - PLATFORM_TOOLS (e.g. `context_retrieve`) are still force-enabled
     ///     even when omitted from the PUT body
     #[tokio::test]
     async fn test_put_agent_config_disables_unlisted_builtin_tools() {
@@ -3035,7 +3029,7 @@ mod tests {
         // refresh wiring was completed.
         let initial = crate::agent_config::AgentToolsConfig {
             tools: vec![
-                crate::agent_config::AgentToolEntry::new("context_recall", true),
+                crate::agent_config::AgentToolEntry::new("context_retrieve", true),
                 crate::agent_config::AgentToolEntry::new("http_request", true),
                 crate::agent_config::AgentToolEntry::new("shell", true),
             ],
@@ -3125,7 +3119,7 @@ mod tests {
             "unlisted tool must be disabled — this is the bug regression"
         );
         assert!(
-            map["context_recall"],
+            map["context_retrieve"],
             "PLATFORM_TOOLS are force-enabled regardless of PUT body"
         );
 
@@ -3150,7 +3144,7 @@ mod tests {
             .collect();
         assert!(tool_flags["http_request"]);
         assert!(!tool_flags["shell"]);
-        assert!(tool_flags["context_recall"]);
+        assert!(tool_flags["context_retrieve"]);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

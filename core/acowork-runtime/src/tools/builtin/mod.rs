@@ -20,13 +20,15 @@
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
-//! | context_recall | context:read — retrieve original tool result content |
+//! | context_retrieve | context:read — retrieve original tool result content |
+//! | context_abandon | context:write - replace tool result with placeholder |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 
 pub mod ask_user_question;
 pub mod codebase;
 pub mod content_search;
-pub mod context_recall;
+pub mod context_abandon;
+pub mod context_retrieve;
 pub mod doc_reader;
 pub mod file_edit;
 pub mod file_read;
@@ -73,6 +75,12 @@ use search_backends::WebSearchEngine;
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
 ///   not per-project. No fallback: must always be set explicitly.
+/// * `abandon_queue` - Shared queue for context_abandon tool (ADR-052). When `tool_compression_enabled`
+///   is true, this queue is injected into the tool and the agent loop.
+/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). When `tool_compression_enabled`
+///   is true, this queue is injected into the tool and the agent loop.
+/// * `tool_compression_enabled` - ADR-052: when true (default), register context_retrieve +
+///   context_abandon tools. When false, neither tool is registered.
 #[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
@@ -85,6 +93,9 @@ pub fn all_builtin_tools(
     agent_home: String,
     lsp_relay_endpoint: Option<String>,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
+    abandon_queue: context_abandon::AbandonQueue,
+    retrieve_queue: context_retrieve::RetrieveQueue,
+    tool_compression_enabled: bool,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -131,11 +142,19 @@ pub fn all_builtin_tools(
             mcp_notifier.clone(),
             agent_home.clone(),
         )),
-        // ADR-032: context_recall tool — retrieve original tool result
-        // content that was compressed to a placeholder. Requires the agent
-        // home directory to find the conversations/ path.
-        Arc::new(context_recall::ContextRecallTool::new(&agent_home)),
     ];
+
+    // ADR-052: context_retrieve + context_abandon are conditionally registered
+    // based on tool_compression_enabled config (default: true).
+    if tool_compression_enabled {
+        tools.push(Arc::new(context_retrieve::ContextRetrieveTool::new(
+            &agent_home,
+            retrieve_queue,
+        )));
+        tools.push(Arc::new(context_abandon::ContextAbandonTool::new(
+            abandon_queue,
+        )));
+    }
 
     // Only register web_search when at least one search provider is configured
     // (checked from the shared provider list). Without providers, the tool
@@ -165,4 +184,228 @@ pub fn all_builtin_tools(
     // Append platform-specific shell tools
     tools.extend(shell_tools);
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp_notify::McpConfigNotifier;
+    use crate::memory::MemorySessionHandle;
+    use crate::tools::workspace_resolver::WorkspaceResolver;
+    use std::collections::HashMap;
+
+    /// Build a minimal set of dependencies for `all_builtin_tools` testing.
+    /// Most dependencies are empty/default so the test focuses on the
+    /// compression-enabled switch.
+    fn make_test_deps() -> (
+        SharedResolver,
+        String,                                          // agent_id
+        u64,                                             // tool_http_timeout_ms
+        search_backends::SharedSearchKeyVault,
+        search_backends::SharedSearchProviderList,
+        Option<Arc<MemorySessionHandle>>,
+        McpNotifyRef,
+        String,                                          // agent_home
+        Option<String>,                                  // lsp_relay_endpoint
+        crate::http::server::SharedMqttClientSlot,
+        context_abandon::AbandonQueue,
+        context_retrieve::RetrieveQueue,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
+            dir.path().to_str().unwrap(),
+        )));
+        let search_key_vault: search_backends::SharedSearchKeyVault =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let search_provider_list: search_backends::SharedSearchProviderList =
+            Arc::new(std::sync::RwLock::new(Vec::new()));
+        let memory_session = Some(Arc::new(MemorySessionHandle::new(None)));
+        let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
+        let mqtt_slot: crate::http::server::SharedMqttClientSlot =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let abandon_queue: context_abandon::AbandonQueue =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let retrieve_queue: context_retrieve::RetrieveQueue =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        (
+            resolver,
+            "com.test.agent".to_string(),
+            30_000,
+            search_key_vault,
+            search_provider_list,
+            memory_session,
+            mcp_notifier,
+            "/tmp/test-agent".to_string(),
+            None,
+            mqtt_slot,
+            abandon_queue,
+            retrieve_queue,
+        )
+    }
+
+    /// Collect tool names from a `Vec<Arc<dyn Tool>>`.
+    fn tool_names(tools: &[Arc<dyn Tool>]) -> Vec<String> {
+        let mut names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn test_all_builtin_tools_compression_enabled_registers_both() {
+        // ADR-052 §3.5 + §6.4: when tool_compression_enabled = true (default),
+        // both context_retrieve and context_abandon are registered.
+        let (
+            resolver,
+            agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+        ) = make_test_deps();
+
+        let tools = all_builtin_tools(
+            &resolver,
+            &agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+            true, // tool_compression_enabled
+        );
+
+        let names = tool_names(&tools);
+        assert!(
+            names.contains(&"context_retrieve".to_string()),
+            "context_retrieve should be registered when tool_compression_enabled=true; got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"context_abandon".to_string()),
+            "context_abandon should be registered when tool_compression_enabled=true; got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_all_builtin_tools_compression_disabled_excludes_both() {
+        // ADR-052 §3.5 + §6.4: when tool_compression_enabled = false,
+        // neither context_retrieve nor context_abandon are registered.
+        let (
+            resolver,
+            agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+        ) = make_test_deps();
+
+        let tools = all_builtin_tools(
+            &resolver,
+            &agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+            false, // tool_compression_enabled = false
+        );
+
+        let names = tool_names(&tools);
+        assert!(
+            !names.contains(&"context_retrieve".to_string()),
+            "context_retrieve must NOT be registered when tool_compression_enabled=false; got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"context_abandon".to_string()),
+            "context_abandon must NOT be registered when tool_compression_enabled=false; got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_all_builtin_tools_default_includes_core_tools() {
+        // Regression: the conditional registration only affects the two
+        // compression tools; all other core tools are always present.
+        let (
+            resolver,
+            agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+        ) = make_test_deps();
+
+        let tools = all_builtin_tools(
+            &resolver,
+            &agent_id,
+            timeout,
+            search_kv,
+            search_pl,
+            mem,
+            mcp,
+            agent_home,
+            lsp,
+            mqtt,
+            abandon_q,
+            retrieve_q,
+            true,
+        );
+
+        let names = tool_names(&tools);
+        // Core tools that must always be present (sanity check)
+        for required in [
+            "memory_recall",
+            "memory_store",
+            "http_request",
+            "web_fetch",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "doc_reader",
+            "glob_search",
+            "content_search",
+            "intent_send",
+            "ask_user_question",
+            "todo_write",
+            "mcp_install",
+            "mcp_uninstall",
+        ] {
+            assert!(
+                names.contains(&required.to_string()),
+                "Core tool {required} should always be registered; got: {:?}",
+                names
+            );
+        }
+    }
 }

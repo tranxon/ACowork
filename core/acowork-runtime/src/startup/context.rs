@@ -221,6 +221,15 @@ pub(crate) struct AgentBootContext {
     /// Shared search provider list. Same lifecycle as
     /// [`Self::search_key_vault`].
     pub search_provider_list: crate::tools::builtin::search_backends::SharedSearchProviderList,
+
+    /// ADR-052: Shared abandon queue for context_abandon tool.
+    /// Created in Phase A, passed to the tool and injected into AgentCore
+    /// in Phase B. The AgentLoop drains this queue each iteration.
+    pub abandon_queue: crate::tools::builtin::context_abandon::AbandonQueue,
+
+    /// ADR-052: Shared retrieve queue for context_retrieve tool.
+    /// Same lifecycle as [`Self::abandon_queue`].
+    pub retrieve_queue: crate::tools::builtin::context_retrieve::RetrieveQueue,
 }
 
 /// Context produced by Phase B (per-session initialization).

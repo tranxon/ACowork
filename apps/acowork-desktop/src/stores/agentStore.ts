@@ -38,19 +38,9 @@ export interface AgentProfileSettings {
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
-  /** ADR-032 C4b: Compression trigger mode ("auto" | "manual").
-   *  Undefined/empty = use default ("auto"). */
-  toolResultCompressionMode?: string;
-  /** ADR-032 C4a: Tool-result soft compression threshold in **characters**.
-   *  Tool results whose `content.length` exceeds this value are replaced
-   *  with a fixed-length placeholder by `compress_tool_results`.
-   *  Undefined/0 = use default (`DEFAULT_SOFT_THRESHOLD_CHARS = 2048`).
-   *
-   *  Boot-only semantics on the runtime side (matches `toolResultCompressionMode`
-   *  flow, see `cli.rs::RuntimeConfigUpdate` taxonomy). The UI persists the
-   *  value via PUT `/api/agents/{id}/config`; the runtime consumes it on
-   *  the next session restore / process restart. */
-  toolResultSoftThresholdChars?: number;
+  /** ADR-052: Whether context_retrieve + context_abandon tools are registered.
+   *  Undefined = use default (true). Boot-only: takes effect on next session restore. */
+  toolCompressionEnabled?: boolean;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -64,8 +54,7 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
-  toolResultCompressionMode: undefined,
-  toolResultSoftThresholdChars: undefined,
+  toolCompressionEnabled: undefined,
 };
 
 const STORAGE_KEY = "acowork-agent-profiles";
@@ -127,13 +116,9 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     globalMaxTokens: typeof s.globalMaxTokens === "number" ? s.globalMaxTokens : undefined,
     activeModel: typeof s.activeModel === "string" ? s.activeModel : undefined,
     activeProvider: typeof s.activeProvider === "string" ? s.activeProvider : undefined,
-    toolResultCompressionMode:
-      typeof s.toolResultCompressionMode === "string"
-        ? s.toolResultCompressionMode
-        : undefined,
-    toolResultSoftThresholdChars:
-      typeof s.toolResultSoftThresholdChars === "number" && s.toolResultSoftThresholdChars > 0
-        ? s.toolResultSoftThresholdChars
+    toolCompressionEnabled:
+      typeof s.toolCompressionEnabled === "boolean"
+        ? s.toolCompressionEnabled
         : undefined,
   };
 }

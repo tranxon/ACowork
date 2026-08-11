@@ -16,38 +16,6 @@ use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 
-/// ADR-032 C4b: Compression trigger mode.
-///
-/// - `Auto`: events (todos completion, assistant long message, persist
-///   pre_trim) trigger compress_tool_results automatically. Budget fallback
-///   (pre_trim_for_tool_results, trim_history_to_budget) also active.
-/// - `Manual`: events are all off; user triggers via Gateway API or CLI only.
-///   Budget fallback still active (avoids deadlock if user forgets to compress).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompressionMode {
-    Auto,
-    Manual,
-}
-
-impl std::fmt::Display for CompressionMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompressionMode::Auto => write!(f, "auto"),
-            CompressionMode::Manual => write!(f, "manual"),
-        }
-    }
-}
-
-/// Default compression mode.
-///
-/// ADR-032 (revised): default is `Manual` so that the assistant-long-text
-/// trigger and the todo_write completion trigger do **not** fire unless
-/// the user explicitly opts into `Auto`. Manual mode is the safe default
-/// — the user can still trigger compression through the Gateway API or
-/// CLI on demand. Auto mode is an opt-in productivity shortcut.
-pub const DEFAULT_COMPRESSION_MODE: CompressionMode = CompressionMode::Manual;
-
 // ── Context compression thresholds ─────────────────────────────────────
 // All percentages are relative to the **effective usable input budget**
 // (`ModelCapabilitiesInfo::effective_input_budget`, i.e. context_window
@@ -76,37 +44,6 @@ pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 /// session restorer reads the most recent such event to anchor the replay
 /// window on cold-start resume).
 pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
-
-// ── ADR-032 placeholder compression ──────────────────────────────────
-//
-// C1: the `compress_tool_results` API is in place; this commit only
-// hard-codes the defaults. C4a wires these through the
-// `RuntimeConfigOverrides.tool_result_keep_recent_n` config field with
-// the same three-level fallback (overrides → agent_config → this default).
-//
-// `DEFAULT_SOFT_THRESHOLD_CHARS` — characters; an in-memory tool result
-// longer than this is replaced with a placeholder. 2048 chars ≈ 512
-// tokens, aligned with the typical "LLM context bloat" threshold.
-//
-// This constant is the **Layer-3 fallback** in the three-level
-// resolution chain (ADR-032 core principle #7):
-//   1. `RuntimeConfigOverrides.tool_result_soft_threshold_chars`
-//      (hot-pushed via Gateway `RuntimeConfigUpdate`)
-//   2. `AgentConfig.tool_result_soft_threshold_chars`
-//      (persisted in `agent_config.json`, user-editable via
-//      the Agent Setup panel)
-///   3. `DEFAULT_SOFT_THRESHOLD_CHARS` (this constant)
-///
-/// Call sites should always read through
-/// `AgentCore::tool_result_soft_threshold_chars()` rather than referencing
-/// this constant directly — see `agent_core.rs`.
-pub(crate) const DEFAULT_SOFT_THRESHOLD_CHARS: usize = 2048;
-
-/// Number of recent tool results kept raw (not compressed) at every
-/// trigger point (event / budget / restore / manual). N = 0 compresses
-/// all eligible; N = 3 is the ADR-032 default (skill-typical tool call
-/// depth). See `docs/adr/zh/ADR-032-context-recall.md` core principle #7.
-pub(crate) const DEFAULT_KEEP_RECENT_N: usize = 3;
 
 impl AgentLoop {
     /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
@@ -241,16 +178,13 @@ impl AgentLoop {
     /// No additional margin is applied here — [`compact_history_if_needed`]
     /// provides early warning at 80% usage.
     ///
-    /// **ADR-032 (revised)**: this budget-fallback path is intentionally a
+    /// **ADR-052**: this budget-fallback path is intentionally a
     /// **token-only** fallback. It performs FIFO trim + emergency trim only;
-    /// it does NOT call `compress_tool_results`. Placeholder compression is
-    /// triggered by event-style signals (assistant long message / todo_write
-    /// completion in Auto mode, or explicit user commands in Manual mode) —
-    /// see ADR-032 for the full trigger matrix. Mixing budget-fallback into
-    /// the event-driven trigger path causes the
-    /// recall → compress → recall loop (the budget fall-back fires after
-    /// every tool result append, re-compressing any content that `context_recall`
-    /// just restored, forcing the LLM to recall again).
+    /// it does NOT call any compression/placeholder logic. Placeholder
+    /// compression is now LLM-initiated via the `context_abandon` tool;
+    /// budget fallback must not be conflated with the tool-compression
+    /// path. (Historically this was a fix for the
+    /// recall → compress → recall loop in ADR-032.)
     pub(crate) fn trim_history_to_budget(&mut self, model_name: &str) {
         let budget = self.context_trim_budget(model_name);
 
@@ -738,8 +672,10 @@ impl AgentLoop {
         self.last_input_chars = count_chat_request_chars(&chat_request);
 
         // Inject transient tool results from the previous iteration
-        // (ADR-032 C3a). These are one-shot messages (e.g., non-context_recall
-        // transient results) that are visible to the LLM for one request only.
+        // (ADR-032 C3a — preserved for future tools that need one-shot
+        // injection). ADR-052 removed the `context_retrieve` transient
+        // path; the field is now only populated by hypothetical future
+        // transient tools. Empty vec naturally skips.
         if !self.pending_transient_tool_msgs.is_empty() {
             let count = self.pending_transient_tool_msgs.len();
             chat_request.messages.append(&mut self.pending_transient_tool_msgs);
