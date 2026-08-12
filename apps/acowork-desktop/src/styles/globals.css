@@ -157,6 +157,32 @@
   --ui-radio-label-gap: 0.5rem;
   /* 8px — gap between radio circle and label text */
 
+  /* Switch (toggle) tokens — iOS / Android style track + thumb.
+     The component lives in components/common/Switch.tsx and reads
+     these tokens via inline style; the values are duplicated here as
+     CSS vars so consumers that need a one-off custom switch (e.g. an
+     embedded `<input type="checkbox" class="switch">`) can reference
+     them directly without re-declaring. Both light & dark values are
+     defined; the .dark block below flips the unchecked track fill. */
+  --ui-switch-track-sm: 1.75rem;
+  /* 28px — small track width (used in compact list rows) */
+  --ui-switch-track-md: 2.25rem;
+  /* 36px — default track width (iOS-like) */
+  --ui-switch-track-h: 1.25rem;
+  /* 20px — md track height */
+  --ui-switch-track-h-sm: 1rem;
+  /* 16px — sm track height */
+  --ui-switch-thumb: 0.875rem;
+  /* 14px — md thumb diameter (height - 6px to leave a 3px gap) */
+  --ui-switch-thumb-sm: 0.75rem;
+  /* 12px — sm thumb diameter */
+  --ui-switch-track-bg: #d4d4d8;
+  /* zinc-300 — unchecked track fill (light) */
+  --ui-switch-thumb-bg: #ffffff;
+  /* white — thumb fill (always white, matches iOS) */
+  --ui-switch-duration: 150ms;
+  /* ease-out transition for thumb slide + track color */
+
   /* Scrollbar — light, low-contrast on both light and dark backgrounds */
   --ui-scrollbar-thumb: #d4d4d8;
   /* zinc-300 — light gray, blends into the surface */
@@ -299,6 +325,12 @@
   /* Radio group (dark) */
   --ui-radio-bg: #52525b;
   /* zinc-600 — unchecked radio fill in dark */
+
+  /* Switch (dark) — unchecked track darkens to zinc-600 so the
+     switch still reads as "off" on dark surfaces without losing the
+     accent contrast when flipped on. */
+  --ui-switch-track-bg: #52525b;
+  /* zinc-600 — unchecked track fill (dark) */
 
   /* Scrollbar (dark) */
   --ui-scrollbar-thumb: #3f3f46;

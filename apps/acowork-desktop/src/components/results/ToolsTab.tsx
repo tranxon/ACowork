@@ -4,6 +4,7 @@ import { useMcpStore } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
+import { Switch } from "../common/Switch";
 import type { SearchProviderListItem, AgentSearchProvider } from "../../lib/types";
 
 const EMPTY_ARRAY: string[] = [];
@@ -230,21 +231,21 @@ export function ToolsTab() {
           <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
               {builtinToolsAll.map((entry) => (
-                <label
+                <div
                   key={entry.name}
-                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                 >
-                  <input
-                    type="checkbox"
+                  <Switch
                     checked={entry.enabled}
                     onChange={() => toggleBuiltinTool(entry.name)}
                     disabled={builtinSaving || !selectedAgentId}
-                    className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                    size="sm"
+                    aria-label={entry.name}
                   />
                   <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
                     {entry.name}
                   </span>
-                </label>
+                </div>
               ))}
             </div>
           </div>
@@ -282,12 +283,12 @@ export function ToolsTab() {
                         : "opacity-50"
                         }`}
                     >
-                      <input
-                        type="checkbox"
+                      <Switch
                         checked={isChecked}
                         onChange={() => toggleSearchProvider(sp.id)}
                         disabled={searchSaving || !hasKey}
-                        className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                        size="sm"
+                        aria-label={sp.name || sp.id}
                       />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
@@ -354,16 +355,16 @@ export function ToolsTab() {
               {catalog.map((server) => {
                 const isChecked = activeServers.includes(server.name);
                 return (
-                  <label
+                  <div
                     key={server.name}
-                    className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer"
+                    className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                   >
-                    <input
-                      type="checkbox"
+                    <Switch
                       checked={isChecked}
                       onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
                       disabled={activationLoading || !selectedAgentId}
-                      className="h-3.5 w-3.5 shrink-0 rounded accent-[var(--color-accent)]"
+                      size="sm"
+                      aria-label={server.name}
                     />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -378,7 +379,7 @@ export function ToolsTab() {
                         {server.command || server.url || ""}
                       </span>
                     </div>
-                  </label>
+                  </div>
                 );
               })}
             </div>

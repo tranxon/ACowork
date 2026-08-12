@@ -9,6 +9,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import { Switch } from "../common/Switch";
 import {
   clearAgentAvatarCache,
   fetchAvatarAssets,
@@ -594,19 +595,17 @@ export function AgentSetupTab() {
 
       {/* Tool Compression (ADR-052) */}
       <div className="mb-3 space-y-1">
-        <label className="flex items-center gap-2 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
-          <input
-            type="checkbox"
-            checked={profile.toolCompressionEnabled ?? true}
-            onChange={(e) =>
-              setProfile(selectedAgentId, {
-                toolCompressionEnabled: e.target.checked,
-              })
-            }
-            className="h-3 w-3 rounded border-zinc-300"
-          />
-          {t("agentSetup.toolCompressionEnabled")}
-        </label>
+        <Switch
+          checked={profile.toolCompressionEnabled ?? true}
+          onChange={(checked) =>
+            setProfile(selectedAgentId, {
+              toolCompressionEnabled: checked,
+            })
+          }
+          size="sm"
+          label={t("agentSetup.toolCompressionEnabled")}
+          className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400"
+        />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.toolCompressionEnabledDesc")}
         </p>
