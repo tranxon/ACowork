@@ -28,6 +28,7 @@ Thumbs.db
 # Build artifacts
 *.dll
 .cache/
+.vite/
 *.exe
 *.so
 *.a
