@@ -108,6 +108,18 @@ name = "ask_user_question"
 [[tools]]
 name = "todo_write"
 
+# --- Context compression (ADR-052) ---
+# Boot-only opt-in: `tool_compression_enabled` in agent_config.json
+# also gates whether these tools are registered at runtime (default
+# `true` in `agent_init.rs`). Listing them here exposes them to the
+# LLM; toggling `tool_compression_enabled=false` then unregisters
+# them entirely (no-op for the LLM either way).
+[[tools]]
+name = "context_abandon"
+
+[[tools]]
+name = "context_retrieve"
+
 [llm]
 temperature = 0.25
 max_tokens = 32768
