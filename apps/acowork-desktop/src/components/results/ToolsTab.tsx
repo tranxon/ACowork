@@ -235,6 +235,9 @@ export function ToolsTab() {
                   key={entry.name}
                   className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                 >
+                  <span className="flex-1 min-w-0 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                    {entry.name}
+                  </span>
                   <Switch
                     checked={entry.enabled}
                     onChange={() => toggleBuiltinTool(entry.name)}
@@ -242,9 +245,6 @@ export function ToolsTab() {
                     size="sm"
                     aria-label={entry.name}
                   />
-                  <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                    {entry.name}
-                  </span>
                 </div>
               ))}
             </div>
@@ -283,13 +283,6 @@ export function ToolsTab() {
                         : "opacity-50"
                         }`}
                     >
-                      <Switch
-                        checked={isChecked}
-                        onChange={() => toggleSearchProvider(sp.id)}
-                        disabled={searchSaving || !hasKey}
-                        size="sm"
-                        aria-label={sp.name || sp.id}
-                      />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                           <span className={`text-[11px] font-medium ${hasKey
@@ -326,6 +319,13 @@ export function ToolsTab() {
                           </button>
                         </Tooltip>
                       )}
+                      <Switch
+                        checked={isChecked}
+                        onChange={() => toggleSearchProvider(sp.id)}
+                        disabled={searchSaving || !hasKey}
+                        size="sm"
+                        aria-label={sp.name || sp.id}
+                      />
                     </div>
                   </Tooltip>
                 );
@@ -359,13 +359,6 @@ export function ToolsTab() {
                     key={server.name}
                     className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
                   >
-                    <Switch
-                      checked={isChecked}
-                      onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
-                      disabled={activationLoading || !selectedAgentId}
-                      size="sm"
-                      aria-label={server.name}
-                    />
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
@@ -379,6 +372,13 @@ export function ToolsTab() {
                         {server.command || server.url || ""}
                       </span>
                     </div>
+                    <Switch
+                      checked={isChecked}
+                      onChange={() => selectedAgentId && toggleServer(selectedAgentId, server.name)}
+                      disabled={activationLoading || !selectedAgentId}
+                      size="sm"
+                      aria-label={server.name}
+                    />
                   </div>
                 );
               })}

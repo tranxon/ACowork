@@ -23,9 +23,18 @@ import { cn } from "../../lib/utils";
  *   - `sm` (28 × 16) — inline with 11–12px list-row text
  *   - `md` (36 × 20) — default iOS-style, used for standalone toggles
  *
+ * Layout (`labelPosition`):
+ *   - `"left"` (default, iOS-style) — label on the leading edge, switch
+ *     anchored to the trailing edge. The label gets `flex-1` and the
+ *     wrapper gets `w-full justify-between` so the toggle reaches the
+ *     right side of the row.
+ *   - `"right"` (Material-style) — switch on the leading edge, label
+ *     sits inline to its right.
+ *
  * Usage:
- *   <Switch checked={x} onChange={setX} />
- *   <Switch checked={x} onChange={(v) => save(v)} size="sm" disabled={...} />
+ *   <Switch checked={x} onChange={setX} />                              // bare toggle
+ *   <Switch checked={x} onChange={setX} label="Enable compression" />   // iOS row layout
+ *   <Switch checked={x} onChange={setX} label="..." labelPosition="right" />
  *
  * The component renders its own outer `<label>`, so the track + thumb
  * are clickable as a unit. Do NOT wrap a `<Switch>` inside another
@@ -33,6 +42,7 @@ import { cn } from "../../lib/utils";
  * rely on the inner label association.
  */
 export type SwitchSize = "sm" | "md";
+export type SwitchLabelPosition = "left" | "right";
 
 interface SwitchProps
   extends Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "onChange" | "size"> {
@@ -54,8 +64,19 @@ interface SwitchProps
   onChange: (checked: boolean) => void;
   /** Size preset. Default: `"md"`. */
   size?: SwitchSize;
-  /** Optional label rendered to the right of the switch (inside the component). */
+  /**
+   * Optional label rendered inside the component. Position is
+   * controlled by `labelPosition`. When omitted, the Switch renders
+   * as a bare toggle (callers handle their own layout — typical for
+   * list rows where the label sits in the parent `<div>`).
+   */
   label?: ReactNode;
+  /**
+   * Where to render the label relative to the track.
+   * Default: `"left"` (iOS Settings style — text on the leading edge,
+   * toggle anchored to the trailing edge).
+   */
+  labelPosition?: SwitchLabelPosition;
   /** Extra classes for the outer wrapper. */
   className?: string;
   /** Extra classes for the visible track element. */
@@ -63,21 +84,47 @@ interface SwitchProps
 }
 
 export const Switch = forwardRef<HTMLInputElement, SwitchProps>(function Switch(
-  { checked, onChange, disabled, size = "md", label, className, trackClassName, ...rest },
+  {
+    checked,
+    onChange,
+    disabled,
+    size = "md",
+    label,
+    labelPosition = "left",
+    className,
+    trackClassName,
+    ...rest
+  },
   ref,
 ) {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     onChange(e.target.checked);
   };
 
+  // Only stretch the wrapper when the label actually needs to push the
+  // toggle to the trailing edge. A bare `<Switch />` (no label) inside
+  // a flex row should stay at its intrinsic width — applying `w-full`
+  // unconditionally would make it balloon to fill its parent.
+  const hasLabel = label !== undefined && label !== null;
+  const labelOnLeft = labelPosition === "left";
+
   return (
     <label
       className={cn(
         "inline-flex shrink-0 cursor-pointer items-center gap-2 select-none",
+        // iOS-style "label left, toggle right" — the label gets flex-1
+        // so it claims the middle space and the toggle anchors flush
+        // to the right edge of the wrapper.
+        labelOnLeft && hasLabel && "w-full justify-between",
         disabled && "cursor-not-allowed opacity-50",
         className,
       )}
     >
+      {labelOnLeft && hasLabel && (
+        <span className="flex-1 text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {label}
+        </span>
+      )}
       <span className="relative inline-flex items-center">
         <input
           ref={ref}
@@ -123,7 +170,7 @@ export const Switch = forwardRef<HTMLInputElement, SwitchProps>(function Switch(
           )}
         />
       </span>
-      {label !== undefined && label !== null && (
+      {!labelOnLeft && hasLabel && (
         <span className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {label}
         </span>

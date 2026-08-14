@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { useAgentStore } from "../../stores/agentStore";
+import { useAgentStore, type AgentProfileSettings } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
@@ -38,6 +38,60 @@ function nextAvatarName(assets: AvatarAssetEntry[], ext: string): string {
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 
+// ── Write-through persistence config (ADR-052 follow-up) ──────────────
+//
+// Setup panel writes through to the runtime per-field on change. No more
+// batched "Apply" step — see `saveField` below. A single 500ms debounce
+// applies to every wired field:
+//
+//   - Visual feedback (`setProfile`) is synchronous — users see the
+//     change instantly, regardless of debounce.
+//   - 500ms is the lower bound of "noticeable delay" — short enough that
+//     the saving indicator's transition (`Saving N change(s)...` →
+//     `All changes saved`) feels responsive; long enough that rapid input
+//     ("1" → "12" → "123", slider drag, double-click Switch) collapses
+//     into a single PUT.
+//   - Single value keeps the mental model simple — adding a new wired
+//     field doesn't require picking a debounce bucket.
+//
+// The wire field names mirror `UpdateAgentConfigRequest` in
+// `acowork-runtime/src/http/server.rs`; keep these in lockstep when
+// adding a new field.
+
+type WiredField =
+  | "maxTokens"
+  | "maxIterations"
+  | "maxSessions"
+  | "temperature"
+  | "contextWindow"
+  | "shellApprovalThreshold"
+  | "approvalTimeoutSecs"
+  | "toolCompressionEnabled";
+
+const WIRE_FIELD: Record<WiredField, string> = {
+  maxTokens: "max_output_tokens",
+  maxIterations: "max_iterations",
+  maxSessions: "max_sessions",
+  temperature: "temperature",
+  contextWindow: "context_window",
+  shellApprovalThreshold: "shell_approval_threshold",
+  approvalTimeoutSecs: "approval_timeout_secs",
+  toolCompressionEnabled: "tool_compression_enabled",
+};
+
+const FIELD_DEBOUNCE_MS = 500;
+
+const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
+  toolCompressionEnabled: FIELD_DEBOUNCE_MS,
+  shellApprovalThreshold: FIELD_DEBOUNCE_MS,
+  temperature: FIELD_DEBOUNCE_MS,
+  contextWindow: FIELD_DEBOUNCE_MS,
+  approvalTimeoutSecs: FIELD_DEBOUNCE_MS,
+  maxTokens: FIELD_DEBOUNCE_MS,
+  maxIterations: FIELD_DEBOUNCE_MS,
+  maxSessions: FIELD_DEBOUNCE_MS,
+};
+
 // ── Component ───────────────────────────────────────────────────────────
 
 export function AgentSetupTab() {
@@ -51,8 +105,21 @@ export function AgentSetupTab() {
 
   // Fetch agent runtime config from Gateway API on mount
   const [_configLoading, setConfigLoading] = useState(false);
-  const [configSaving, setConfigSaving] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  // ADR-052 follow-up: Setup panel is now write-through. Each input
+  // change optimistically updates `profile` via `setProfile`, and a
+  // debounced PUT sends the change to the runtime. Per-field debounce
+  // windows are configured in `DEBOUNCE_BY_FIELD` (see file top).
+  //   - `savingFields` lets the status line render an in-flight indicator.
+  //   - `debounceTimersRef` holds pending timers keyed by field name, so
+  //     rapid keystrokes ("1" → "12" → "123") collapse to one PUT.
+  const [savingFields, setSavingFields] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const debounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
 
   // Avatar picker state (ADR-017)
   const [avatarTab, setAvatarTab] = useState<"custom" | "builtin">("custom");
@@ -96,23 +163,27 @@ export function AgentSetupTab() {
         // (e.g. agent_id mismatch) keeps the rest of the panel usable —
         // it just renders the localStorage fallback values.
         const cfg = (data.config ?? {}) as {
-          max_output_tokens?: number;
-          max_iterations?: number;
-          max_sessions?: number;
+          max_output_tokens?: number | null;
+          max_iterations?: number | null;
+          max_sessions?: number | null;
           temperature?: number | null;
           context_window?: number | null;
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
           tool_compression_enabled?: boolean | null;
         };
-        setProfile(selectedAgentId, {
-          maxTokens: cfg.max_output_tokens,
-          maxIterations: cfg.max_iterations,
-          maxSessions: cfg.max_sessions,
-          temperature: cfg.temperature ?? undefined,
-          contextWindow: cfg.context_window ?? undefined,
-          shellApprovalThreshold: cfg.shell_approval_threshold ?? undefined,
-          approvalTimeoutSecs: cfg.approval_timeout_secs ?? 300,
+        // Race-safe merge (ADR-052 follow-up): only overwrite each
+        // local profile field when the server returned a concrete
+        // value. All `AgentConfig` fields use `skip_serializing_if =
+        // "Option::is_none"` (acowork-runtime/src/agent_config.rs), so
+        // the runtime response represents "no opinion" as a missing
+        // or JSON-null field. The old `?? undefined` / `?? 300` shape
+        // would silently clobber a value the user typed into a number
+        // input or clicked on the Switch before this GET returned,
+        // dropping their intent before the next Apply could persist
+        // it (this is the wider pattern behind the original
+        // tool_compression_enabled bug — see `saveField` below).
+        const patch: Partial<typeof profile> = {
           // `global_max_output_tokens` lives on the Gateway
           // AgentConfigResponse (not on Runtime AgentConfig), so the
           // proxy response doesn't carry it. We leave the previously
@@ -120,8 +191,32 @@ export function AgentSetupTab() {
           // `globalMaxTokens` as a "fallback limit" hint.
           activeModel: data.model,
           activeProvider: data.provider,
-          toolCompressionEnabled: cfg.tool_compression_enabled ?? undefined,
-        });
+        };
+        if (typeof cfg.max_output_tokens === "number") {
+          patch.maxTokens = cfg.max_output_tokens;
+        }
+        if (typeof cfg.max_iterations === "number") {
+          patch.maxIterations = cfg.max_iterations;
+        }
+        if (typeof cfg.max_sessions === "number") {
+          patch.maxSessions = cfg.max_sessions;
+        }
+        if (typeof cfg.temperature === "number") {
+          patch.temperature = cfg.temperature;
+        }
+        if (typeof cfg.context_window === "number") {
+          patch.contextWindow = cfg.context_window;
+        }
+        if (typeof cfg.shell_approval_threshold === "string") {
+          patch.shellApprovalThreshold = cfg.shell_approval_threshold;
+        }
+        if (typeof cfg.approval_timeout_secs === "number") {
+          patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
+        }
+        if (typeof cfg.tool_compression_enabled === "boolean") {
+          patch.toolCompressionEnabled = cfg.tool_compression_enabled;
+        }
+        setProfile(selectedAgentId, patch);
       })
       .catch((err) => {
         if (!cancelled) log.debug("[AgentSetup] Agent not ready:", err);
@@ -145,27 +240,54 @@ export function AgentSetupTab() {
             // in lockstep so a refresh event doesn't silently lose the
             // flattening logic.
             const cfg = (data.config ?? {}) as {
-              max_output_tokens?: number;
-              max_iterations?: number;
-              max_sessions?: number;
+              max_output_tokens?: number | null;
+              max_iterations?: number | null;
+              max_sessions?: number | null;
               temperature?: number | null;
               context_window?: number | null;
               shell_approval_threshold?: string | null;
-               approval_timeout_secs?: number | null;
-               tool_compression_enabled?: boolean | null;
-             };
-            setProfile(selectedAgentId, {
-              maxTokens: cfg.max_output_tokens,
-              maxIterations: cfg.max_iterations,
-              maxSessions: cfg.max_sessions,
-              temperature: cfg.temperature ?? undefined,
-              contextWindow: cfg.context_window ?? undefined,
-              shellApprovalThreshold: cfg.shell_approval_threshold ?? undefined,
-              approvalTimeoutSecs: cfg.approval_timeout_secs ?? 300,
+              approval_timeout_secs?: number | null;
+              tool_compression_enabled?: boolean | null;
+            };
+            // Same race-safe merge as the mount effect above. The
+            // retained-MQTT snapshot fires this refresh *after* every
+            // successful PUT, so the clobber-to-undefined path was the
+            // exact mechanism that erased a user's Switch click before
+            // the click even made it into the PUT body. The new
+            // write-through `saveField` (below) makes this race
+            // window much narrower — a user edit lands in the local
+            // store and is sent to the server *before* the
+            // refresh handler can observe the response — but we keep
+            // the typeof-guard as belt-and-suspenders.
+            const patch: Partial<typeof profile> = {
               activeModel: data.model,
               activeProvider: data.provider,
-              toolCompressionEnabled: cfg.tool_compression_enabled ?? undefined,
-            });
+            };
+            if (typeof cfg.max_output_tokens === "number") {
+              patch.maxTokens = cfg.max_output_tokens;
+            }
+            if (typeof cfg.max_iterations === "number") {
+              patch.maxIterations = cfg.max_iterations;
+            }
+            if (typeof cfg.max_sessions === "number") {
+              patch.maxSessions = cfg.max_sessions;
+            }
+            if (typeof cfg.temperature === "number") {
+              patch.temperature = cfg.temperature;
+            }
+            if (typeof cfg.context_window === "number") {
+              patch.contextWindow = cfg.context_window;
+            }
+            if (typeof cfg.shell_approval_threshold === "string") {
+              patch.shellApprovalThreshold = cfg.shell_approval_threshold;
+            }
+            if (typeof cfg.approval_timeout_secs === "number") {
+              patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
+            }
+            if (typeof cfg.tool_compression_enabled === "boolean") {
+              patch.toolCompressionEnabled = cfg.tool_compression_enabled;
+            }
+            setProfile(selectedAgentId, patch);
           })
           .catch(() => { });
       }
@@ -174,65 +296,132 @@ export function AgentSetupTab() {
     return () => window.removeEventListener('acowork:refresh-agent-config', handler);
   }, [selectedAgentId]);
 
-  // ── Apply config to Gateway ────────────────────────────────────────
+  // ── Write-through persistence (ADR-052 follow-up) ──────────────────
+  //
+  // Replaces the old batched `handleApply` / "Apply" button. Every field
+  // mutation now flows through `saveField`:
+  //
+  //   1. Optimistic local update (`setProfile`) so the UI reflects the
+  //      change instantly.
+  //   2. Schedule a PUT to `/api/agents/{id}/config` carrying only the
+  //      changed field. Debounced per field type (see
+  //      `DEBOUNCE_BY_FIELD`), so "1" → "12" → "123" collapses to one PUT.
+  //   3. The runtime's `UpdateAgentConfigRequest` is a partial-PUT DTO
+  //      (each field `Option<serde_json::Value>`, missing = leave alone),
+  //      so per-field PUTs compose cleanly and never clobber unrelated
+  //      on-disk values.
+  //
+  // The race window that used to lose a Switch click (load effect's
+  // `?? undefined` overwriting the user's intent before Apply could
+  // persist it) is now closed two ways:
+  //   - local updates land before the next debounced PUT fires, so the
+  //     PUT body always carries the user's intent.
+  //   - the load effect / refresh handler only overwrite fields the
+  //     server actually returned (typeof-guard, see above).
 
-  const handleApply = async () => {
-    if (!selectedAgentId || !profile) return;
-    setConfigSaving(true);
-    try {
-      const body: Record<string, unknown> = {};
-      if (profile.maxTokens && profile.maxTokens > 0) body.max_output_tokens = profile.maxTokens;
-      if (profile.maxIterations && profile.maxIterations > 0) body.max_iterations = profile.maxIterations;
-      if (profile.maxSessions && profile.maxSessions > 0) body.max_sessions = profile.maxSessions;
-      if (profile.temperature !== undefined) body.temperature = profile.temperature;
-      if (profile.contextWindow !== undefined) body.context_window = profile.contextWindow;
-      if (profile.shellApprovalThreshold) body.shell_approval_threshold = profile.shellApprovalThreshold;
-      if (profile.approvalTimeoutSecs !== undefined && profile.approvalTimeoutSecs > 0) body.approval_timeout_secs = profile.approvalTimeoutSecs;
-      // ADR-052: tool compression toggle. When `undefined`, omit the field
-      // so a partial PUT preserves the on-disk value (any unrelated save
-      // doesn't clobber this setting).
-      if (profile.toolCompressionEnabled !== undefined) {
-        body.tool_compression_enabled = profile.toolCompressionEnabled;
-      }
-
-      const res = await fetch(
-        `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
-        { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-      );
-      if (!res.ok) log.warn("[AgentSetup] Config update failed:", res.status);
-
-      // Immediately sync the new temperature into the chat store so the
-      // ResultsPanel status tab shows the updated value right away,
-      // without waiting for the next WebSocket session_state event
-      // (which may be delayed if the agent is mid-streaming).
-      if (selectedAgentId) {
-        const chatStore = useChatStore.getState();
-        const agentState = chatStore.agentStates[selectedAgentId];
-        if (agentState?.activeSessionId) {
-          const newTemp = profile.temperature ?? null;
-          useChatStore.setState({
-            agentStates: {
-              ...chatStore.agentStates,
-              [selectedAgentId]: {
-                ...agentState,
-                sessionStates: {
-                  ...agentState.sessionStates,
-                  [agentState.activeSessionId]: {
-                    ...(agentState.sessionStates[agentState.activeSessionId] ?? {}),
-                    temperature: newTemp,
-                  },
-                },
-              },
-            },
-          });
+  const putField = useCallback(
+    async (field: WiredField, value: unknown) => {
+      if (!selectedAgentId) return;
+      const body: Record<string, unknown> = { [WIRE_FIELD[field]]: value };
+      try {
+        setSavingFields((prev) => {
+          if (prev.has(field)) return prev;
+          const next = new Set(prev);
+          next.add(field);
+          return next;
+        });
+        const res = await fetch(
+          `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!res.ok) {
+          log.warn("[AgentSetup] Field save failed:", field, res.status);
         }
+      } catch (err) {
+        log.warn("[AgentSetup] Field save error:", field, err);
+      } finally {
+        setSavingFields((prev) => {
+          if (!prev.has(field)) return prev;
+          const next = new Set(prev);
+          next.delete(field);
+          return next;
+        });
       }
-    } catch {
-      // silently ignore network errors
-    } finally {
-      setConfigSaving(false);
-    }
-  };
+    },
+    [selectedAgentId],
+  );
+
+  const saveField = useCallback(
+    (field: WiredField, value: unknown) => {
+      if (!selectedAgentId) return;
+      // Step 1: optimistic local update.
+      setProfile(selectedAgentId, { [field]: value } as Partial<AgentProfileSettings>);
+
+      // Step 2: schedule PUT, debounced per field type.
+      const debounceMs = DEBOUNCE_BY_FIELD[field];
+      const existing = debounceTimersRef.current.get(field);
+      if (existing) clearTimeout(existing);
+
+      if (debounceMs <= 0) {
+        debounceTimersRef.current.delete(field);
+        void putField(field, value);
+        return;
+      }
+      const timer = setTimeout(() => {
+        debounceTimersRef.current.delete(field);
+        void putField(field, value);
+      }, debounceMs);
+      debounceTimersRef.current.set(field, timer);
+    },
+    [selectedAgentId, setProfile, putField],
+  );
+
+  // Flush any pending debounced PUTs when the agent changes or the
+  // panel unmounts. Otherwise a fast user who switches tabs mid-typing
+  // would silently lose the last `debounceMs`-worth of edits.
+  useEffect(() => {
+    return () => {
+      const timers = debounceTimersRef.current;
+      timers.forEach((timer) => clearTimeout(timer));
+      timers.clear();
+    };
+  }, [selectedAgentId]);
+
+  // Sync the new temperature into the chat store so the ResultsPanel
+  // status tab shows the updated value right away, without waiting for
+  // the next WebSocket session_state event (which may be delayed if the
+  // agent is mid-streaming). Lifted out of the old `handleApply` and
+  // driven directly off `profile.temperature` so write-through updates
+  // trigger it too.
+  useEffect(() => {
+    if (!selectedAgentId) return;
+    const newTemp = profile?.temperature ?? null;
+    const chatStore = useChatStore.getState();
+    const agentState = chatStore.agentStates[selectedAgentId];
+    if (!agentState?.activeSessionId) return;
+    const sessionState =
+      agentState.sessionStates[agentState.activeSessionId] ?? {};
+    if (sessionState.temperature === newTemp) return;
+    useChatStore.setState({
+      agentStates: {
+        ...chatStore.agentStates,
+        [selectedAgentId]: {
+          ...agentState,
+          sessionStates: {
+            ...agentState.sessionStates,
+            [agentState.activeSessionId]: {
+              ...sessionState,
+              temperature: newTemp,
+            },
+          },
+        },
+      },
+    });
+  }, [selectedAgentId, profile?.temperature]);
 
   // ── Avatar selection handlers ──────────────────────────────────────
 
@@ -500,9 +689,15 @@ export function AgentSetupTab() {
           value={profile.maxTokens && profile.maxTokens > 0 ? profile.maxTokens : ""}
           onChange={(e) => {
             const v = e.target.value;
-            setProfile(selectedAgentId, {
-              maxTokens: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
-            });
+            // Empty input → omit the field on the wire (don't clobber
+            // the on-disk value). 0 / non-numeric collapses to 0 by
+            // input convention, which is also omitted by the
+            // `> 0` gate in the old handleApply and matches
+            // the pre-write-through behavior.
+            saveField(
+              "maxTokens",
+              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            );
           }}
           placeholder={`${profile.globalMaxTokens ?? 32768} ${t("agentSetup.defaultModelLimit")}`}
           className="rounded-md bg-modal-surface"
@@ -524,9 +719,10 @@ export function AgentSetupTab() {
           value={profile.maxIterations && profile.maxIterations > 0 ? profile.maxIterations : ""}
           onChange={(e) => {
             const v = e.target.value;
-            setProfile(selectedAgentId, {
-              maxIterations: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
-            });
+            saveField(
+              "maxIterations",
+              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            );
           }}
           placeholder={t("agentSetup.defaultIterations")}
           className="rounded-md bg-modal-surface"
@@ -545,9 +741,10 @@ export function AgentSetupTab() {
           value={profile.maxSessions && profile.maxSessions > 0 ? profile.maxSessions : ""}
           onChange={(e) => {
             const v = e.target.value;
-            setProfile(selectedAgentId, {
-              maxSessions: v === "" ? 0 : Math.max(0, parseInt(v, 10) || 0),
-            });
+            saveField(
+              "maxSessions",
+              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            );
           }}
           placeholder="2000 (default)"
           className="rounded-md bg-modal-surface"
@@ -574,11 +771,11 @@ export function AgentSetupTab() {
               const raw = e.target.value;
               if (raw === "" || raw === "0") {
                 // 0 = no limit (use model's full window)
-                setProfile(selectedAgentId, { contextWindow: 0 });
+                saveField("contextWindow", 0);
               } else {
                 const n = parseInt(raw, 10);
                 if (!isNaN(n) && n >= 0) {
-                  setProfile(selectedAgentId, { contextWindow: n });
+                  saveField("contextWindow", n);
                 }
               }
             }}
@@ -597,11 +794,7 @@ export function AgentSetupTab() {
       <div className="mb-3 space-y-1">
         <Switch
           checked={profile.toolCompressionEnabled ?? true}
-          onChange={(checked) =>
-            setProfile(selectedAgentId, {
-              toolCompressionEnabled: checked,
-            })
-          }
+          onChange={(checked) => saveField("toolCompressionEnabled", checked)}
           size="sm"
           label={t("agentSetup.toolCompressionEnabled")}
           className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400"
@@ -625,9 +818,10 @@ export function AgentSetupTab() {
           value={profile.approvalTimeoutSecs && profile.approvalTimeoutSecs > 0 ? profile.approvalTimeoutSecs : ""}
           onChange={(e) => {
             const v = e.target.value;
-            setProfile(selectedAgentId, {
-              approvalTimeoutSecs: v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
-            });
+            saveField(
+              "approvalTimeoutSecs",
+              v === "" ? undefined : Math.max(0, parseInt(v, 10) || 0),
+            );
           }}
           placeholder="300 (5 min)"
           className="rounded-md bg-modal-surface"
@@ -646,9 +840,7 @@ export function AgentSetupTab() {
           value={profile.shellApprovalThreshold ?? "medium"}
           onChange={(e) => {
             const v = e.target.value;
-            setProfile(selectedAgentId, {
-              shellApprovalThreshold: v,
-            });
+            saveField("shellApprovalThreshold", v);
           }}
           className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
           style={{
@@ -681,9 +873,7 @@ export function AgentSetupTab() {
             step={0.05}
             value={profile.temperature ?? 0.3}
             onChange={(e) => {
-              setProfile(selectedAgentId, {
-                temperature: parseFloat(e.target.value),
-              });
+              saveField("temperature", parseFloat(e.target.value));
             }}
             className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
               bg-zinc-200 dark:bg-zinc-700
@@ -698,18 +888,19 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Action buttons */}
-      <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 flex gap-3">
-        <button
-          onClick={handleApply}
-          disabled={configSaving}
-          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+      {/* Footer: saving indicator + reset (ADR-052 follow-up) */}
+      <div className="mt-4 border-t border-zinc-200 pt-3 dark:border-zinc-700 flex items-center gap-3">
+        <span
+          className="flex-1 text-[10px] tabular-nums text-zinc-400 dark:text-zinc-500"
+          aria-live="polite"
         >
-          {configSaving ? t("agentSetup.applying") : t("agentSetup.applyToRuntime")}
-        </button>
+          {savingFields.size > 0
+            ? t("agentSetup.savingChanges", { count: savingFields.size })
+            : t("agentSetup.allChangesSaved")}
+        </span>
         <button
           onClick={() => setShowResetConfirm(true)}
-          className="flex-1 rounded btn-solid px-3 py-1.5 text-xs font-medium"
+          className="rounded btn-solid px-3 py-1.5 text-xs font-medium"
         >
           {t("agentSetup.resetToDefaults")}
         </button>
@@ -721,9 +912,63 @@ export function AgentSetupTab() {
         message={t("agentSetup.resetConfirm")}
         confirmLabel={t("agentSetup.reset")}
         destructive
-        onConfirm={() => {
-          resetProfile(selectedAgentId);
+        onConfirm={async () => {
           setShowResetConfirm(false);
+          // Cancel any in-flight debounced PUTs so they don't overwrite
+          // the clear with the pre-reset value.
+          const timers = debounceTimersRef.current;
+          timers.forEach((timer) => clearTimeout(timer));
+          timers.clear();
+          // Clear local state first so the UI updates immediately.
+          resetProfile(selectedAgentId);
+          if (!selectedAgentId) return;
+          // Push all wired fields as JSON-null → runtime maps null to
+          // `FieldPatch::Clear` for each, which drops the on-disk
+          // entry (`skip_serializing_if = Option::is_none`). Next
+          // boot falls through to the runtime defaults:
+          //   max_output_tokens → manifest / global default
+          //   max_iterations    → global default
+          //   max_sessions      → 1000
+          //   temperature       → 0.3
+          //   context_window    → 200K
+          //   shell_approval_threshold → manifest default
+          //   approval_timeout_secs     → 300
+          //   tool_compression_enabled  → true (agent_init.rs)
+          try {
+            setSavingFields((prev) => {
+              const next = new Set(prev);
+              next.add("__reset__");
+              return next;
+            });
+            const res = await fetch(
+              `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  max_output_tokens: null,
+                  max_iterations: null,
+                  max_sessions: null,
+                  temperature: null,
+                  context_window: null,
+                  shell_approval_threshold: null,
+                  approval_timeout_secs: null,
+                  tool_compression_enabled: null,
+                }),
+              },
+            );
+            if (!res.ok) {
+              log.warn("[AgentSetup] Reset PUT failed:", res.status);
+            }
+          } catch (err) {
+            log.warn("[AgentSetup] Reset PUT error:", err);
+          } finally {
+            setSavingFields((prev) => {
+              const next = new Set(prev);
+              next.delete("__reset__");
+              return next;
+            });
+          }
         }}
         onCancel={() => setShowResetConfirm(false)}
       />
