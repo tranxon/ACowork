@@ -38,20 +38,32 @@ pub struct ToolRegistry {
 }
 
 impl BuiltinToolEntry {
-    /// Decide the canonical `enabled` flag for a builtin tool from the
-    /// user's persisted preference. The persistence layer
-    /// ([`crate::agent_config::merge_tools_config`] and friends)
-    /// guarantees platform-protected tools are *never* present in
-    /// `enabled_entries`, so this is a straight passthrough —
-    /// platform-protection is enforced at the file boundary, not here.
+    /// Decide the canonical `enabled` flag for a builtin tool.
+    ///
+    /// **Platform-protected tools** (see [`PLATFORM_PROTECTED_TOOLS`]) are
+    /// unconditionally enabled here — even though the persistence
+    /// layer ([`crate::agent_config::merge_tools_config`] and friends)
+    /// strips them from `enabled_entries`, they ARE registered in the
+    /// in-memory registry (by [`crate::tools::builtin::all_builtin_tools`],
+    /// gated by the boot-only `tool_compression_enabled` flag) and
+    /// MUST reach the LLM when registered. Without this force-enable,
+    /// the registry layer's default `user_persisted_enabled = false`
+    /// would hide them from `tool_specs` (which filters on `enabled`),
+    /// defeating the whole point of `tool_compression_enabled`.
+    ///
+    /// **Non-platform tools** follow the user's persisted preference
+    /// verbatim — there's no second override at this layer.
+    ///
+    /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool
+    /// compression + the platform-protected tool set).
     pub(crate) fn with_resolved_enabled(
         user_persisted_enabled: bool,
         tool: Arc<dyn Tool>,
     ) -> Self {
-        Self {
-            enabled: user_persisted_enabled,
-            tool,
-        }
+        let name = tool.name();
+        let enabled = PLATFORM_PROTECTED_TOOLS.contains(&name.as_str())
+            || user_persisted_enabled;
+        Self { enabled, tool }
     }
 }
 
@@ -319,10 +331,13 @@ mod tests {
     // `tool_compression_enabled` flag) and reach the LLM through the
     // registry. The persistence-layer filter (`merge_tools_config`,
     // `init_tools_config_from_manifest`, `apply_builtin_tools_patch`,
-    // `all_enabled_tools_config`) guarantees `enabled_entries` never
-    // contains these names, so `with_resolved_enabled` is now a
-    // passthrough — the platform-protection logic moved upstream to
-    // the persistence boundary.
+    // `all_enabled_tools_config`) keeps them out of `enabled_entries`,
+    // but the registry still needs to surface them as `enabled=true`
+    // so the LLM-visible `tool_specs` list picks them up. That is what
+    // `with_resolved_enabled` does: for platform tools it ignores
+    // `user_persisted_enabled` and force-enables, so the absence of an
+    // entry in `enabled_entries` doesn't accidentally hide the tool
+    // from the LLM.
 
     use crate::agent_config::AgentToolEntry;
     use crate::agent::agent_core::BuiltinToolEntry;
@@ -332,31 +347,44 @@ mod tests {
     }
 
     #[test]
-    fn builtin_tool_entry_with_resolved_enabled_is_passthrough() {
-        // After ADR-052 the persistence layer (merge_tools_config &
-        // friends) guarantees platform tools are never present in
-        // `enabled_entries`. So `with_resolved_enabled` is a straight
-        // passthrough: the caller's `user_persisted_enabled` value
-        // wins verbatim, no platform-protection override needed.
-        let tool: Arc<dyn Tool> = platform_protected_entry("context_retrieve");
-        let entry = BuiltinToolEntry::with_resolved_enabled(true, tool.clone());
-        assert!(entry.enabled, "user-enabled → enabled");
+    fn builtin_tool_entry_force_enables_platform_tools() {
+        // `with_resolved_enabled` is the ONLY registry-level enforcement
+        // for platform-protection at activation time. Persistence-layer
+        // filtering strips these names from `enabled_entries`, so
+        // `user_persisted_enabled` will be `false` for them in practice
+        // — the force-enable here is what keeps them visible to the LLM.
+        let platform_tool: Arc<dyn Tool> = platform_protected_entry("context_retrieve");
+        let entry = BuiltinToolEntry::with_resolved_enabled(false, platform_tool);
+        assert!(entry.enabled, "platform tool must be force-enabled even when user said false");
 
-        let entry = BuiltinToolEntry::with_resolved_enabled(false, tool);
-        assert!(!entry.enabled, "user-disabled → disabled (persistence layer keeps platform tools out of enabled_entries)");
-
-        let normal: Arc<dyn Tool> = platform_protected_entry("shell");
-        let entry = BuiltinToolEntry::with_resolved_enabled(false, normal);
+        let normal_tool: Arc<dyn Tool> = platform_protected_entry("shell");
+        let entry = BuiltinToolEntry::with_resolved_enabled(false, normal_tool.clone());
         assert!(!entry.enabled, "non-platform tool respects user disable");
+        let entry = BuiltinToolEntry::with_resolved_enabled(true, normal_tool);
+        assert!(entry.enabled, "non-platform tool respects user enable");
     }
 
     #[test]
-    fn test_registry_activate_passes_through_user_enabled_flags() {
-        // End-to-end: build a registry, pass an enabled_entries list,
-        // verify activate() returns each tool with the user's chosen
-        // flag. Platform tools still reach the LLM (they are in
-        // `all_builtin_tools()`) — but their enabled flag is decided
-        // by `tool_compression_enabled` upstream, NOT by the user.
+    fn builtin_tool_entry_force_enables_all_listed_names() {
+        // Iterate over the full list so every platform-protected name
+        // is covered. Adding a new platform tool without updating this
+        // list will leave a hole — caught at code review.
+        for &name in PLATFORM_PROTECTED_TOOLS {
+            let tool: Arc<dyn Tool> = platform_protected_entry(name);
+            let entry = BuiltinToolEntry::with_resolved_enabled(false, tool);
+            assert!(entry.enabled, "PLATFORM_PROTECTED_TOOLS member '{}' must be force-enabled", name);
+        }
+    }
+
+    #[test]
+    fn test_registry_activate_force_enables_platform_tools_even_when_absent_from_enabled_entries() {
+        // Regression for the user report: after the persistence-layer
+        // filter was added, platform tools stopped reaching the LLM
+        // because `resolved_entries` no longer carries them and
+        // `with_resolved_enabled` defaulted to `false`. The
+        // force-enable here restores the contract: any tool whose
+        // name is in PLATFORM_PROTECTED_TOOLS must surface as
+        // `enabled=true` regardless of `enabled_entries`.
         let mut reg = ToolRegistry::new();
         reg.register(platform_protected_entry("context_retrieve"));
         reg.register(platform_protected_entry("context_abandon"));
@@ -366,35 +394,24 @@ mod tests {
         let resolver: SharedResolver =
             Arc::new(std::sync::RwLock::new(WorkspaceResolver::new("/tmp/test")));
 
-        // Persistence layer filter: enabled_entries never carries
-        // platform tools (this is the precondition the new contract
-        // relies on).
-        let enabled = vec![
-            AgentToolEntry::new("shell", true),
-        ];
+        // enabled_entries deliberately omits platform tools — this is
+        // exactly what merge_tools_config produces (commit 145b9104).
+        let enabled = vec![AgentToolEntry::new("shell", true)];
         let activated = reg.activate(&manifest, &resolver, 60, &enabled);
         let map: std::collections::HashMap<String, bool> =
             activated.iter().map(|e| (e.name().to_string(), e.enabled)).collect();
 
-        // Non-platform tool: follows user choice.
-        assert!(map["shell"], "non-platform tool enabled per user");
-        // Platform tools are NOT in enabled_entries, so they default
-        // to disabled by `with_resolved_enabled`. Activation callers
-        // (agent_core.rs) must independently gate platform tools on
-        // `tool_compression_enabled` — see the LLM-visible tool spec
-        // assembly in agent_init.rs.
-        assert!(
-            !map["context_retrieve"],
-            "platform tool is disabled at the activate() level (gated upstream by tool_compression_enabled)"
-        );
-        assert!(!map["context_abandon"]);
+        assert!(map["context_retrieve"], "platform tool must be force-enabled even when not in enabled_entries");
+        assert!(map["context_abandon"], "platform tool must be force-enabled even when not in enabled_entries");
+        assert!(map["shell"], "non-platform tool follows user enable");
     }
 
     #[test]
     fn plATFORM_PROTECTED_TOOLS_is_single_source_of_truth() {
         // Pin the contract: the constant list is what every filter
-        // callsite consults. Adding a new platform tool requires a
-        // single edit here, and merge / init / patch / activate all
+        // callsite (persistence layer + registry force-enable)
+        // consults. Adding a new platform tool requires a single edit
+        // here, and merge / init / patch / activate / force-enable all
         // pick it up.
         assert!(!PLATFORM_PROTECTED_TOOLS.is_empty(), "must list at least one name");
         for name in PLATFORM_PROTECTED_TOOLS {
