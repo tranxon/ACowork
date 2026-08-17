@@ -150,6 +150,7 @@
     "sendQueuedAndStop": "傳送佇列並停止",
     "stop": "停止",
     "copy": "複製",
+    "resend": "重新傳送",
     "close": "關閉",
     "imageUnsupportedTitle": "目前模型不支援圖片輸入",
     "imageUnsupportedDesc": "請切換至以下支援圖片輸入的模型：",
@@ -385,7 +386,9 @@
     "resetAgentSetup": "重設 Agent 設定",
     "reset": "重設",
     "toolCompressionEnabled": "工具壓縮",
-    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果"
+    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果",
+    "builtinToolPlatformProtectedHint": "由工具壓縮管理",
+    "builtinToolPlatformProtectedTooltip": "由「工具壓縮」全域開關管理，此處無法關閉"
   },
   "harness": {
     "tabProviders": "模型服務提供者",

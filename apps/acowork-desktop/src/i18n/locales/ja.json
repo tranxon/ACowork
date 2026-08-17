@@ -150,6 +150,7 @@
     "sendQueuedAndStop": "キューを送信して停止",
     "stop": "停止",
     "copy": "コピー",
+    "resend": "再送信",
     "close": "閉じる",
     "imageUnsupportedTitle": "現在のモデルは画像入力に対応していません",
     "imageUnsupportedDesc": "以下の画像対応モデルに切り替えてください：",
@@ -387,7 +388,9 @@
     "resetAgentSetup": "Agent設定をリセット",
     "reset": "リセット",
     "toolCompressionEnabled": "ツール圧縮",
-    "toolCompressionEnabledDesc": "有効にすると、LLMが自律的にツール結果を圧縮・取得できます"
+    "toolCompressionEnabledDesc": "有効にすると、LLMが自律的にツール結果を圧縮・取得できます",
+    "builtinToolPlatformProtectedHint": "ツール圧縮が管理",
+    "builtinToolPlatformProtectedTooltip": "「ツール圧縮」グローバル設定で管理されています — ここでは無効にできません"
   },
   "harness": {
     "tabProviders": "プロバイダー",

@@ -150,6 +150,7 @@
     "sendQueuedAndStop": "큐 전송 후 중지",
     "stop": "중지",
     "copy": "복사",
+    "resend": "다시 보내기",
     "close": "닫기",
     "imageUnsupportedTitle": "현재 모델이 이미지 입력을 지원하지 않습니다",
     "imageUnsupportedDesc": "이미지 지원 모델로 전환하세요：",
@@ -387,7 +388,9 @@
     "reset": "초기화",
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "toolCompressionEnabled": "도구 압축",
-    "toolCompressionEnabledDesc": "활성화하면 LLM이 자율적으로 도구 결과를 압축하고 검색할 수 있습니다"
+    "toolCompressionEnabledDesc": "활성화하면 LLM이 자율적으로 도구 결과를 압축하고 검색할 수 있습니다",
+    "builtinToolPlatformProtectedHint": "도구 압축에서 관리",
+    "builtinToolPlatformProtectedTooltip": "「도구 압축」전역 설정에서 관리됩니다 — 여기서 비활성화할 수 없습니다"
   },
   "harness": {
     "tabProviders": "제공자",

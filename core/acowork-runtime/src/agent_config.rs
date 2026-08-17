@@ -83,6 +83,28 @@ impl AgentMcpConfig {
             None => vec![],
         }
     }
+
+    /// Catalog ∪ local, filtered by `active_server_names()`.
+    ///
+    /// **This is the single source of truth for "which MCP servers should
+    /// be connected for this agent".** All MCP connection code paths
+    /// (startup auto-connect, MCP config change watcher, etc.) MUST
+    /// go through this method — never `merged()` directly — otherwise
+    /// the user's Tools-panel toggles are silently ignored.
+    ///
+    /// Tool names whose entry appears in `merged()` but not in
+    /// `active_server_names()` are filtered out. When
+    /// `active_server_names()` is empty (either `None` legacy state or
+    /// `Some(vec![])` user-unchecked-everything), the result is empty.
+    pub fn active_merged(&self) -> Vec<McpServerConfigDef> {
+        let active_names = self.active_server_names();
+        let active: std::collections::HashSet<&str> =
+            active_names.iter().map(String::as_str).collect();
+        self.merged()
+            .into_iter()
+            .filter(|s| active.contains(s.name.as_str()))
+            .collect()
+    }
 }
 
 /// Per-agent configuration persisted to workspace/config/agent_config.json.
@@ -289,7 +311,24 @@ pub struct AgentToolsConfig {
 }
 
 /// A single builtin tool entry in `agent_tools.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Wire/JSON shape:
+/// - **Persisted file** (`agent_tools.json`): `{ "name": "...", "enabled": bool }`
+///   — the platform-protection marker is intentionally NOT written to disk.
+///   Enforce lives in [`crate::tools::registry::BuiltinToolEntry::with_resolved_enabled`]
+///   (ADR-029 §"Initialization" + ADR-052).
+/// - **Runtime API response** (`GET /api/agents/{id}/tools`): the same
+///   `{name, enabled}` pair **plus** an optional `platform_protected: true`
+///   field when the entry's name is in
+///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]. The desktop UI
+///   reads this flag to render a non-interactive `Switch` with a
+///   "managed by the Tool Compression global toggle" tooltip, avoiding
+///   the previous UX where users could toggle force-enabled tools and
+///   see their write get silently ignored (and the file get polluted).
+///
+/// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression,
+/// which introduces the platform-protected tool set).
+#[derive(Debug, Clone, Deserialize)]
 pub struct AgentToolEntry {
     /// Tool name (matches `Tool::name()`).
     pub name: String,
@@ -300,8 +339,72 @@ pub struct AgentToolEntry {
     pub enabled: bool,
 }
 
+// Hand-rolled `Serialize` so we can emit the `platform_protected` flag
+// in API responses without writing it to the persisted file. The flag
+// is computed on the fly from `PLATFORM_PROTECTED_TOOLS` (single source
+// of truth in `tools/registry.rs`) so adding a new protected tool only
+// requires editing that one list — every caller picks it up.
+impl Serialize for AgentToolEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let platform_protected = crate::tools::registry::PLATFORM_PROTECTED_TOOLS
+            .contains(&self.name.as_str());
+        let n = if platform_protected { 3 } else { 2 };
+        let mut s = serializer.serialize_struct("AgentToolEntry", n)?;
+        s.serialize_field("name", &self.name)?;
+        s.serialize_field("enabled", &self.enabled)?;
+        if platform_protected {
+            s.serialize_field("platform_protected", &true)?;
+        }
+        s.end()
+    }
+}
+
 fn default_tool_entry_enabled() -> bool {
     true
+}
+
+/// On-disk representation of [`AgentToolsConfig`].
+///
+/// **Why this exists:** `AgentToolEntry`'s `Serialize` impl emits the
+/// `platform_protected: true` hint for tools in
+/// `PLATFORM_PROTECTED_TOOLS` so the desktop UI can render a
+/// non-interactive Switch (ADR-052). But that hint is a presentation
+/// concern only — it must NOT be persisted to `agent_tools.json`. This
+/// dedicated shape guarantees the on-disk format stays `{name, enabled}`
+/// (the format that [`load_agent_tools_config`] knows how to read), and
+/// that future API-only fields added to `AgentToolEntry` cannot leak
+/// into the persisted file by accident.
+///
+/// Use [`save_agent_tools_config`] (which converts via `From<&AgentToolsConfig>`)
+/// — never serialize [`AgentToolsConfig`] directly to disk.
+#[derive(Debug, Serialize)]
+struct PersistedToolsConfig<'a> {
+    tools: Vec<PersistedToolEntry<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct PersistedToolEntry<'a> {
+    name: &'a str,
+    enabled: bool,
+}
+
+impl<'a> From<&'a AgentToolsConfig> for PersistedToolsConfig<'a> {
+    fn from(cfg: &'a AgentToolsConfig) -> Self {
+        Self {
+            tools: cfg
+                .tools
+                .iter()
+                .map(|e| PersistedToolEntry {
+                    name: &e.name,
+                    enabled: e.enabled,
+                })
+                .collect(),
+        }
+    }
 }
 
 impl AgentToolEntry {
@@ -367,7 +470,16 @@ pub fn save_agent_tools_config(
     let path = tools_config_path(work_dir);
     let tmp_path = path.with_extension("tmp");
 
-    let json = serde_json::to_string_pretty(cfg)
+    // Persist via the dedicated on-disk shape (no `platform_protected`
+    // hint). The runtime `AgentToolEntry::serialize` injects
+    // `platform_protected: true` for tools in `PLATFORM_PROTECTED_TOOLS`
+    // so the desktop UI can render non-interactive Switches — but that
+    // flag is a presentation hint, never load-bearing. Writing it to
+    // disk would be wasted bytes at best, and a maintenance trap at
+    // worst (every persisted file would carry platform-internal state
+    // the user can never usefully edit). See ADR-029 + ADR-052.
+    let on_disk: PersistedToolsConfig<'_> = PersistedToolsConfig::from(cfg);
+    let json = serde_json::to_string_pretty(&on_disk)
         .map_err(|e| format!("Failed to serialize agent tools config: {}", e))?;
 
     std::fs::write(&tmp_path, &json)
@@ -502,6 +614,11 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 ///   enablement via manifest or frontend)
 /// - Tools only in persisted file (removed by Runtime upgrade) ->
 ///   silently dropped
+/// - Platform-protected tools (see
+///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are
+///   always enabled regardless of persisted state — enforced via
+///   [`crate::tools::registry::BuiltinToolEntry::with_resolved_enabled`]
+///   so this function and `apply_builtin_tools_patch` cannot disagree.
 pub fn merge_tools_config(
     code_tool_names: &[String],          // from `all_builtin_tools()` registry
     persisted: &[AgentToolEntry],        // from agent_tools.json
@@ -537,18 +654,16 @@ pub fn merge_tools_config(
     code_tool_names
         .iter()
         .map(|name| {
-            let enabled = persisted_map
+            let user_wants = persisted_map
                 .get(name.as_str())
                 .copied()
                 .unwrap_or(false); // new tool → disabled (opt-in)
-            AgentToolEntry::new(name, enabled)
+            // Resolve to the canonical enabled flag — platform-protected
+            // tools are force-enabled even if the persisted file says false.
+            resolve_enabled(name, user_wants)
         })
         .collect()
 }
-
-/// Tools that are part of the core platform protocol and must always be
-/// enabled. Users cannot disable these via frontend tool settings.
-const PLATFORM_TOOLS: &[&str] = &["context_retrieve", "context_abandon"];
 
 /// Apply a partial `RuntimeConfigUpdate.builtin_tools_enabled` payload
 /// (only listed tool names are touched) onto an existing
@@ -559,8 +674,8 @@ const PLATFORM_TOOLS: &[&str] = &["context_retrieve", "context_abandon"];
 /// silently ignored (defensive: future tools should arrive via
 /// `merge_tools_config` at startup, not via this incremental path).
 ///
-/// Platform tools (see `PLATFORM_TOOLS`) are force-enabled and ignore
-/// any user-provided patch value.
+/// Platform-protected tools are force-enabled regardless of the
+/// patch value — see [`resolve_enabled`].
 pub fn apply_builtin_tools_patch(
     current: &[AgentToolEntry],
     patch: &[AgentToolEntry],
@@ -573,17 +688,34 @@ pub fn apply_builtin_tools_patch(
     current
         .iter()
         .map(|e| {
-            // Platform tools are force-enabled — ignore user overrides.
-            if PLATFORM_TOOLS.contains(&e.name.as_str()) {
-                return AgentToolEntry::new(&e.name, true);
-            }
-            let enabled = patch_map
+            let patched = patch_map
                 .get(e.name.as_str())
                 .copied()
                 .unwrap_or(e.enabled);
-            AgentToolEntry::new(&e.name, enabled)
+            // Resolve to the canonical enabled flag — platform-protected
+            // tools are force-enabled even if the user tried to disable them.
+            resolve_enabled(&e.name, patched)
         })
         .collect()
+}
+
+/// Single source of truth for "should this builtin tool be enabled?".
+///
+/// Platform-protected tools (see
+/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are always
+/// enabled. All other tools use the user-supplied value unchanged.
+///
+/// Routes through the same [`BuiltinToolEntry`]-level helper that
+/// `ToolRegistry::activate` uses, so the cold-start path
+/// (`merge_tools_config`) and the hot-update path
+/// (`apply_builtin_tools_patch`) and the runtime registry
+/// initialization agree on every tool — no duplicated
+/// `PLATFORM_TOOLS.contains(...)` decision scattered across modules.
+fn resolve_enabled(name: &str, user_persisted_enabled: bool) -> AgentToolEntry {
+    let final_enabled = crate::tools::registry::PLATFORM_PROTECTED_TOOLS
+        .contains(&name)
+        || user_persisted_enabled;
+    AgentToolEntry::new(name, final_enabled)
 }
 
 /// Initialize an `AgentToolsConfig` from a `manifest.toml`
@@ -746,10 +878,37 @@ pub fn save_agent_mcp_config_catalog(
     save_agent_mcp_config(work_dir, &updated)
 }
 
+/// Load active MCP configs (catalog ∪ local, filtered by `active_names`)
+/// from workspace/config/agent_mcp.json.
+///
+/// **This is the single entry point for MCP connection code.** It honors
+/// the user's Tools-panel toggles via `active_server_names()`. Returns an
+/// empty vec if no servers are active (either no file, legacy state with
+/// `active_names = None`, or user explicitly unchecked everything).
+pub fn load_active_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
+    load_agent_mcp_config(work_dir)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to load agent_mcp.json for active-merge, using empty list");
+            None
+        })
+        .unwrap_or_default()
+        .active_merged()
+}
+
 /// Load merged MCP configs (catalog + local) from workspace/config/agent_mcp.json.
 ///
-/// Convenience function that loads `AgentMcpConfig` and returns the merged list.
-/// Returns an empty vec if the file does not exist.
+/// **Deprecated**: this returns the unconditional union of catalog + local
+/// and IGNORES `active_names`. New code MUST use [`load_active_mcp_configs`]
+/// so users' Tools-panel toggles are honored at MCP connection time.
+///
+/// Kept only for the persistence / introspection layer that legitimately
+/// needs to see the unconditional merged list (e.g. validating that a
+/// user-selected name is in fact present in catalog ∪ local). The deprecation
+/// lint will catch any new caller trying to use it for connection.
+#[deprecated(
+    since = "0.1.0",
+    note = "ignores active_names — use load_active_mcp_configs so user toggles are honored"
+)]
 pub fn load_merged_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
     load_agent_mcp_config(work_dir)
         .unwrap_or_else(|e| {
@@ -1304,10 +1463,218 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // exercising the deprecated loader explicitly
     fn load_merged_mcp_configs_returns_empty_when_no_file() {
         let dir = tempfile::tempdir().unwrap();
         let merged = load_merged_mcp_configs(dir.path());
         assert!(merged.is_empty());
+    }
+
+    // ── Bug 1 regression suite (MCP active_merged) ───────────────────
+    //
+    // These pin the semantics of `AgentMcpConfig::active_merged()` and
+    // `load_active_mcp_configs()` so the user-toggles-active-but-runtime-
+    // connects-all bug cannot recur. Any future change that breaks these
+    // is by definition a regression.
+
+    fn mcp_def(name: &str) -> McpServerConfigDef {
+        McpServerConfigDef {
+            name: name.to_string(),
+            transport: McpTransportDef::Stdio,
+            url: None,
+            command: "npx".to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            tool_timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn active_merged_returns_only_user_selected_entries() {
+        // User toggled context7 ON, playwright OFF in the Tools panel.
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("playwright"), mcp_def("context7")],
+            local: vec![],
+            active_names: Some(vec!["context7".into()]),
+        };
+        let active = cfg.active_merged();
+        assert_eq!(active.len(), 1, "only context7 should be active");
+        assert_eq!(active[0].name, "context7");
+    }
+
+    #[test]
+    fn active_merged_empty_when_user_unchecked_all() {
+        // User explicitly unchecked every catalog item — the "no MCP
+        // active" state surfaced in Bug 1. Result MUST be empty so the
+        // startup auto-connect path connects nothing.
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("playwright"), mcp_def("context7")],
+            local: vec![],
+            active_names: Some(vec![]),
+        };
+        assert!(cfg.active_merged().is_empty());
+    }
+
+    #[test]
+    fn active_merged_empty_when_active_names_field_missing() {
+        // Legacy file without `active_names` field (e.g. pre-ADR-? save).
+        // `active_server_names()` returns [] for None, so we must
+        // connect nothing — opt-in semantics for MCP.
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("playwright"), mcp_def("context7")],
+            local: vec![],
+            active_names: None,
+        };
+        assert!(
+            cfg.active_merged().is_empty(),
+            "legacy file (no active_names) must default to no servers active"
+        );
+    }
+
+    #[test]
+    fn active_merged_local_overrides_catalog_for_same_name() {
+        // Local entry shadows catalog entry with the same name and must
+        // remain active even if user listed only the catalog name.
+        // (active_names is a name set, not a {catalog,local} pair.)
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("context7")],
+            local: vec![{
+                let mut d = mcp_def("context7");
+                d.command = "local-context7".to_string();
+                d
+            }],
+            active_names: Some(vec!["context7".into()]),
+        };
+        let active = cfg.active_merged();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].command, "local-context7", "local must shadow catalog");
+    }
+
+    #[test]
+    fn active_merged_drops_unknown_active_names() {
+        // If a stale `active_names` references a catalog entry that no
+        // longer exists (e.g. catalog push removed it), active_merged
+        // must silently skip it — not panic, not include garbage.
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("context7")],
+            local: vec![],
+            active_names: Some(vec!["context7".into(), "ghost_mcp".into()]),
+        };
+        let active = cfg.active_merged();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "context7");
+    }
+
+    #[test]
+    fn load_active_mcp_configs_honors_active_names() {
+        // End-to-end: write a config file where the user has unchecked
+        // every catalog MCP, then verify the loader returns the empty
+        // list. This is the exact Bug 1 repro path.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let cfg = AgentMcpConfig {
+            catalog: vec![mcp_def("playwright"), mcp_def("context7")],
+            local: vec![],
+            active_names: Some(vec![]), // user unchecked all
+        };
+        save_agent_mcp_config(dir.path(), &cfg).unwrap();
+
+        let active = load_active_mcp_configs(dir.path());
+        assert!(
+            active.is_empty(),
+            "Bug 1 regression: load_active_mcp_configs returned {:?}",
+            active.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    // ── Bug 2 regression suite (PLATFORM_TOOLS force-enable) ─────────
+    //
+    // Pin the semantics that platform-protected tools
+    // (`context_retrieve`, `context_abandon`) are force-enabled through
+    // every write path: cold-start merge, hot-update patch, registry
+    // activate. Any change that breaks these is by definition a
+    // regression.
+
+    #[test]
+    fn merge_tools_config_force_enables_platform_tools() {
+        // Bug 2 scenario: persisted file says context_retrieve is
+        // disabled (legacy data, hand-edited file, or hostile client).
+        // Cold-start merge must NOT honor that — platform tools are
+        // force-enabled regardless of persisted state.
+        let code = vec![
+            "context_retrieve".to_string(),
+            "context_abandon".to_string(),
+            "shell".to_string(),
+        ];
+        let persisted = vec![
+            AgentToolEntry::new("context_retrieve", false), // user-disabled
+            AgentToolEntry::new("context_abandon", false),  // user-disabled
+            AgentToolEntry::new("shell", false),
+        ];
+        let merged = merge_tools_config(&code, &persisted);
+        let map: std::collections::HashMap<String, bool> =
+            merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert!(map["context_retrieve"], "PLATFORM tool must be force-enabled");
+        assert!(map["context_abandon"], "PLATFORM tool must be force-enabled");
+        assert!(!map["shell"], "non-platform tool follows user choice");
+    }
+
+    #[test]
+    fn merge_tools_config_force_enables_missing_platform_tools() {
+        // First start: persisted file absent → context_retrieve not in
+        // persisted at all. merge_tools_config must still emit it as
+        // enabled (platform protection applies even on cold start with
+        // no user history).
+        let code = vec![
+            "context_retrieve".to_string(),
+            "context_abandon".to_string(),
+        ];
+        let merged = merge_tools_config(&code, &[]);
+        assert!(merged.iter().all(|e| e.enabled), "platform tools default to enabled");
+    }
+
+    #[test]
+    fn apply_builtin_tools_patch_force_enables_platform_tools() {
+        // PUT /builtin-tools path: user explicitly disables
+        // context_retrieve via frontend. Patch must NOT honor that —
+        // platform tools are force-enabled regardless of patch value.
+        let current = vec![
+            AgentToolEntry::new("context_retrieve", true),
+            AgentToolEntry::new("context_abandon", true),
+            AgentToolEntry::new("shell", true),
+        ];
+        let patch = vec![
+            AgentToolEntry::new("context_retrieve", false),
+            AgentToolEntry::new("context_abandon", false),
+            AgentToolEntry::new("shell", false),
+        ];
+        let next = apply_builtin_tools_patch(&current, &patch);
+        let map: std::collections::HashMap<String, bool> =
+            next.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+        assert!(map["context_retrieve"]);
+        assert!(map["context_abandon"]);
+        assert!(!map["shell"]);
+    }
+
+    #[test]
+    fn merge_and_patch_agree_on_platform_tools() {
+        // The whole point of unification: cold-start (merge) and
+        // hot-update (patch) must agree on platform tools. If one
+        // returns `enabled=true` and the other returns `enabled=false`
+        // for the same persisted entry, the bug recurs.
+        let code = vec!["context_retrieve".to_string(), "shell".to_string()];
+        let persisted = vec![AgentToolEntry::new("context_retrieve", false)];
+
+        let merged = merge_tools_config(&code, &persisted);
+        let ctx_enabled = merged.iter().find(|e| e.name == "context_retrieve").unwrap().enabled;
+
+        let patch = vec![AgentToolEntry::new("context_retrieve", false)];
+        let patched = apply_builtin_tools_patch(&persisted, &patch);
+        let patch_enabled = patched.iter().find(|e| e.name == "context_retrieve").unwrap().enabled;
+
+        assert_eq!(ctx_enabled, patch_enabled, "cold-start and hot-update must agree");
+        assert!(ctx_enabled, "platform tool must be enabled in both paths");
     }
 
     // ── AgentConfig context_window serialization (ADR-026) ────────────
@@ -1541,5 +1908,91 @@ mod tests {
         assert!(map["memory_recall"]);
         assert!(!map["http_request"]);
         assert!(map["shell"]);
+    }
+
+    // ── platform_protected serialization hint (ADR-029 + ADR-052) ───
+
+    /// Non-protected tool: serialized JSON must be exactly `{name, enabled}`,
+    /// no `platform_protected` field at all (otherwise we'd bloat the
+    /// persisted file and force migrations on every release).
+    #[test]
+    fn agent_tool_entry_serialize_omits_platform_protected_for_unprotected() {
+        let entry = AgentToolEntry::new("memory_recall", true);
+        let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+        let obj = json.as_object().expect("must be a JSON object");
+        assert_eq!(obj.len(), 2, "must have exactly 2 keys, got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.get("name").unwrap(), "memory_recall");
+        assert_eq!(obj.get("enabled").unwrap(), true);
+        assert!(
+            !obj.contains_key("platform_protected"),
+            "platform_protected must be omitted for non-protected tools"
+        );
+    }
+
+    /// Protected tool (`context_retrieve`, `context_abandon` — see
+    /// `PLATFORM_PROTECTED_TOOLS`): serialized JSON must include
+    /// `"platform_protected": true` so the desktop can render a
+    /// non-interactive Switch + tooltip.
+    #[test]
+    fn agent_tool_entry_serialize_includes_platform_protected_for_protected() {
+        for protected_name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
+            let entry = AgentToolEntry::new(*protected_name, true);
+            let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
+            let obj = json.as_object().expect("must be a JSON object");
+            assert_eq!(
+                obj.get("platform_protected").and_then(|v| v.as_bool()),
+                Some(true),
+                "platform_protected must be emitted as `true` for {:?}",
+                protected_name
+            );
+            assert_eq!(obj.get("name").unwrap(), *protected_name);
+            assert_eq!(obj.get("enabled").unwrap(), true);
+        }
+    }
+
+    /// The persisted file format must remain `{name, enabled}` — even for
+    /// protected tools — so `save_agent_tools_config` never writes a
+    /// `platform_protected` key. This guards against accidentally
+    /// persisting the presentation hint.
+    #[test]
+    fn save_agent_tools_config_never_writes_platform_protected_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AgentToolsConfig {
+            tools: vec![
+                AgentToolEntry::new("context_retrieve", true),
+                AgentToolEntry::new("context_abandon", false),
+                AgentToolEntry::new("memory_recall", true),
+            ],
+        };
+        save_agent_tools_config(dir.path(), &cfg).unwrap();
+
+        let raw = std::fs::read_to_string(
+            dir.path().join("config").join(AGENT_TOOLS_CONFIG_FILE),
+        )
+        .unwrap();
+        assert!(
+            !raw.contains("platform_protected"),
+            "persisted file must not contain platform_protected; got:\n{}",
+            raw
+        );
+        // Sanity: shape is preserved.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let tools = parsed["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+    }
+
+    /// Forward compatibility: a hand-crafted JSON payload from a newer
+    /// client that *does* include `platform_protected` must still
+    /// deserialize cleanly — the field is a presentation hint, never
+    /// load-bearing.
+    #[test]
+    fn agent_tool_entry_deserialize_ignores_unexpected_platform_protected() {
+        let json = r#"{"name":"memory_recall","enabled":true,"platform_protected":true}"#;
+        let entry: AgentToolEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.name, "memory_recall");
+        assert!(entry.enabled);
+        // We don't surface a field; "platform_protected" must not be
+        // honored on the load path (the runtime enforcement is
+        // independent, in `with_resolved_enabled`).
     }
 }
