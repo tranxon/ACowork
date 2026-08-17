@@ -312,23 +312,23 @@ pub struct AgentToolsConfig {
 
 /// A single builtin tool entry in `agent_tools.json`.
 ///
-/// Wire/JSON shape:
-/// - **Persisted file** (`agent_tools.json`): `{ "name": "...", "enabled": bool }`
-///   — the platform-protection marker is intentionally NOT written to disk.
-///   Enforce lives in [`crate::tools::registry::BuiltinToolEntry::with_resolved_enabled`]
-///   (ADR-029 §"Initialization" + ADR-052).
-/// - **Runtime API response** (`GET /api/agents/{id}/tools`): the same
-///   `{name, enabled}` pair **plus** an optional `platform_protected: true`
-///   field when the entry's name is in
-///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]. The desktop UI
-///   reads this flag to render a non-interactive `Switch` with a
-///   "managed by the Tool Compression global toggle" tooltip, avoiding
-///   the previous UX where users could toggle force-enabled tools and
-///   see their write get silently ignored (and the file get polluted).
+/// Wire/JSON shape (uniform across persisted file and API response):
+/// `{ "name": "...", "enabled": bool }`. No extra presentation hint
+/// fields — `AgentToolEntry` is plain persisted state.
 ///
-/// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression,
-/// which introduces the platform-protected tool set).
-#[derive(Debug, Clone, Deserialize)]
+/// **Platform-protected tools** (see
+/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are NEVER
+/// stored in `agent_tools.json`: they live entirely in
+/// [`crate::tools::builtin::all_builtin_tools`] (gated by the
+/// `tool_compression_enabled` flag, ADR-052) and the registry's
+/// `activate()` step. Every persistence path filters them out at the
+/// boundary — see [`merge_tools_config`], [`init_tools_config_from_manifest`],
+/// and [`apply_builtin_tools_patch`]. This keeps the persistence file
+/// and the per-agent activation toggle UX completely orthogonal to the
+/// boot-only compression switch.
+///
+/// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentToolEntry {
     /// Tool name (matches `Tool::name()`).
     pub name: String,
@@ -339,72 +339,8 @@ pub struct AgentToolEntry {
     pub enabled: bool,
 }
 
-// Hand-rolled `Serialize` so we can emit the `platform_protected` flag
-// in API responses without writing it to the persisted file. The flag
-// is computed on the fly from `PLATFORM_PROTECTED_TOOLS` (single source
-// of truth in `tools/registry.rs`) so adding a new protected tool only
-// requires editing that one list — every caller picks it up.
-impl Serialize for AgentToolEntry {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let platform_protected = crate::tools::registry::PLATFORM_PROTECTED_TOOLS
-            .contains(&self.name.as_str());
-        let n = if platform_protected { 3 } else { 2 };
-        let mut s = serializer.serialize_struct("AgentToolEntry", n)?;
-        s.serialize_field("name", &self.name)?;
-        s.serialize_field("enabled", &self.enabled)?;
-        if platform_protected {
-            s.serialize_field("platform_protected", &true)?;
-        }
-        s.end()
-    }
-}
-
 fn default_tool_entry_enabled() -> bool {
     true
-}
-
-/// On-disk representation of [`AgentToolsConfig`].
-///
-/// **Why this exists:** `AgentToolEntry`'s `Serialize` impl emits the
-/// `platform_protected: true` hint for tools in
-/// `PLATFORM_PROTECTED_TOOLS` so the desktop UI can render a
-/// non-interactive Switch (ADR-052). But that hint is a presentation
-/// concern only — it must NOT be persisted to `agent_tools.json`. This
-/// dedicated shape guarantees the on-disk format stays `{name, enabled}`
-/// (the format that [`load_agent_tools_config`] knows how to read), and
-/// that future API-only fields added to `AgentToolEntry` cannot leak
-/// into the persisted file by accident.
-///
-/// Use [`save_agent_tools_config`] (which converts via `From<&AgentToolsConfig>`)
-/// — never serialize [`AgentToolsConfig`] directly to disk.
-#[derive(Debug, Serialize)]
-struct PersistedToolsConfig<'a> {
-    tools: Vec<PersistedToolEntry<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-struct PersistedToolEntry<'a> {
-    name: &'a str,
-    enabled: bool,
-}
-
-impl<'a> From<&'a AgentToolsConfig> for PersistedToolsConfig<'a> {
-    fn from(cfg: &'a AgentToolsConfig) -> Self {
-        Self {
-            tools: cfg
-                .tools
-                .iter()
-                .map(|e| PersistedToolEntry {
-                    name: &e.name,
-                    enabled: e.enabled,
-                })
-                .collect(),
-        }
-    }
 }
 
 impl AgentToolEntry {
@@ -470,16 +406,7 @@ pub fn save_agent_tools_config(
     let path = tools_config_path(work_dir);
     let tmp_path = path.with_extension("tmp");
 
-    // Persist via the dedicated on-disk shape (no `platform_protected`
-    // hint). The runtime `AgentToolEntry::serialize` injects
-    // `platform_protected: true` for tools in `PLATFORM_PROTECTED_TOOLS`
-    // so the desktop UI can render non-interactive Switches — but that
-    // flag is a presentation hint, never load-bearing. Writing it to
-    // disk would be wasted bytes at best, and a maintenance trap at
-    // worst (every persisted file would carry platform-internal state
-    // the user can never usefully edit). See ADR-029 + ADR-052.
-    let on_disk: PersistedToolsConfig<'_> = PersistedToolsConfig::from(cfg);
-    let json = serde_json::to_string_pretty(&on_disk)
+    let json = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("Failed to serialize agent tools config: {}", e))?;
 
     std::fs::write(&tmp_path, &json)
@@ -616,15 +543,18 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 ///   silently dropped
 /// - Platform-protected tools (see
 ///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are
-///   always enabled regardless of persisted state — enforced via
-///   [`crate::tools::registry::BuiltinToolEntry::with_resolved_enabled`]
-///   so this function and `apply_builtin_tools_patch` cannot disagree.
+///   **always filtered out of the output**. They live in the in-memory
+///   registry only, gated by the boot-only `tool_compression_enabled`
+///   flag (ADR-052); persisting them would create exactly the
+///   "user-editable Switch that the server silently ignores" UX bug
+///   the platform-protected mechanism exists to prevent.
 pub fn merge_tools_config(
     code_tool_names: &[String],          // from `all_builtin_tools()` registry
     persisted: &[AgentToolEntry],        // from agent_tools.json
 ) -> Vec<AgentToolEntry> {
     let persisted_map: std::collections::HashMap<&str, bool> = persisted
         .iter()
+        .filter(|e| !is_platform_protected(&e.name))
         .map(|e| (e.name.as_str(), e.enabled))
         .collect();
 
@@ -633,7 +563,7 @@ pub fn merge_tools_config(
 
     // Log tools that are in persisted but NOT in code registry (will be dropped)
     for entry in persisted {
-        if !code_set.contains(entry.name.as_str()) {
+        if !is_platform_protected(&entry.name) && !code_set.contains(entry.name.as_str()) {
             tracing::warn!(
                 tool = %entry.name,
                 enabled = entry.enabled,
@@ -643,7 +573,7 @@ pub fn merge_tools_config(
     }
     // Log tools that are in code but NOT in persisted (new tools, default enabled=false)
     for name in code_tool_names {
-        if !persisted_map.contains_key(name.as_str()) {
+        if !is_platform_protected(name) && !persisted_map.contains_key(name.as_str()) {
             tracing::info!(
                 tool = %name,
                 "merge_tools_config: new code-registered tool, defaulting to enabled=false"
@@ -653,14 +583,13 @@ pub fn merge_tools_config(
 
     code_tool_names
         .iter()
+        .filter(|name| !is_platform_protected(name))
         .map(|name| {
             let user_wants = persisted_map
                 .get(name.as_str())
                 .copied()
                 .unwrap_or(false); // new tool → disabled (opt-in)
-            // Resolve to the canonical enabled flag — platform-protected
-            // tools are force-enabled even if the persisted file says false.
-            resolve_enabled(name, user_wants)
+            AgentToolEntry::new(name, user_wants)
         })
         .collect()
 }
@@ -674,54 +603,53 @@ pub fn merge_tools_config(
 /// silently ignored (defensive: future tools should arrive via
 /// `merge_tools_config` at startup, not via this incremental path).
 ///
-/// Platform-protected tools are force-enabled regardless of the
-/// patch value — see [`resolve_enabled`].
+/// Platform-protected tool names are filtered out of the output: they
+/// are not in `current` (the previous merge already removed them) and
+/// must never enter the file even via this path — see ADR-052.
 pub fn apply_builtin_tools_patch(
     current: &[AgentToolEntry],
     patch: &[AgentToolEntry],
 ) -> Vec<AgentToolEntry> {
     let patch_map: std::collections::HashMap<&str, bool> = patch
         .iter()
+        .filter(|e| !is_platform_protected(&e.name))
         .map(|e| (e.name.as_str(), e.enabled))
         .collect();
 
     current
         .iter()
+        .filter(|e| !is_platform_protected(&e.name))
         .map(|e| {
             let patched = patch_map
                 .get(e.name.as_str())
                 .copied()
                 .unwrap_or(e.enabled);
-            // Resolve to the canonical enabled flag — platform-protected
-            // tools are force-enabled even if the user tried to disable them.
-            resolve_enabled(&e.name, patched)
+            AgentToolEntry::new(&e.name, patched)
         })
         .collect()
 }
 
-/// Single source of truth for "should this builtin tool be enabled?".
+/// Single source of truth for "is this tool name off-limits to the
+/// per-agent activation toggle UX?".
 ///
 /// Platform-protected tools (see
-/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are always
-/// enabled. All other tools use the user-supplied value unchanged.
-///
-/// Routes through the same [`BuiltinToolEntry`]-level helper that
-/// `ToolRegistry::activate` uses, so the cold-start path
-/// (`merge_tools_config`) and the hot-update path
-/// (`apply_builtin_tools_patch`) and the runtime registry
-/// initialization agree on every tool — no duplicated
-/// `PLATFORM_TOOLS.contains(...)` decision scattered across modules.
-fn resolve_enabled(name: &str, user_persisted_enabled: bool) -> AgentToolEntry {
-    let final_enabled = crate::tools::registry::PLATFORM_PROTECTED_TOOLS
-        .contains(&name)
-        || user_persisted_enabled;
-    AgentToolEntry::new(name, final_enabled)
+/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are gated by
+/// the boot-only `tool_compression_enabled` flag and never appear in
+/// `agent_tools.json`. Every persistence path filters them out at the
+/// boundary so they cannot leak into the file via any write path
+/// (PUT /builtin-tools, MQTT RuntimeConfigUpdate, manifest seed, etc.).
+fn is_platform_protected(name: &str) -> bool {
+    crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&name)
 }
 
 /// Initialize an `AgentToolsConfig` from a `manifest.toml`
 /// `[[tools]]` tool-names list. Any builtin tool whose name appears
 /// in the manifest gets `enabled = true`; everything else gets
 /// `enabled = false`. Used when `agent_tools.json` is absent.
+///
+/// Platform-protected tool names are filtered out of the output —
+/// they live in the in-memory registry only (see
+/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]).
 pub fn init_tools_config_from_manifest(
     code_tool_names: &[String],
     manifest_tool_names: &[String],
@@ -731,6 +659,7 @@ pub fn init_tools_config_from_manifest(
 
     code_tool_names
         .iter()
+        .filter(|name| !is_platform_protected(name))
         .map(|name| {
             let enabled = manifest_set.contains(name.as_str());
             AgentToolEntry::new(name, enabled)
@@ -744,6 +673,7 @@ pub fn init_tools_config_from_manifest(
 pub fn all_enabled_tools_config(code_tool_names: &[String]) -> Vec<AgentToolEntry> {
     code_tool_names
         .iter()
+        .filter(|name| !is_platform_protected(name))
         .map(|name| AgentToolEntry::new(name, true))
         .collect()
 }
@@ -1588,93 +1518,115 @@ mod tests {
         );
     }
 
-    // ── Bug 2 regression suite (PLATFORM_TOOLS force-enable) ─────────
+    // ── Platform-protected tools are NEVER persisted (ADR-052) ─────
     //
     // Pin the semantics that platform-protected tools
-    // (`context_retrieve`, `context_abandon`) are force-enabled through
-    // every write path: cold-start merge, hot-update patch, registry
-    // activate. Any change that breaks these is by definition a
-    // regression.
+    // (`context_retrieve`, `context_abandon`) are entirely excluded
+    // from `agent_tools.json`. They live only in the in-memory registry,
+    // gated by the boot-only `tool_compression_enabled` flag. Any change
+    // that lets them into the file is by definition a regression of
+    // the 3-layer enable-state architecture.
 
     #[test]
-    fn merge_tools_config_force_enables_platform_tools() {
-        // Bug 2 scenario: persisted file says context_retrieve is
-        // disabled (legacy data, hand-edited file, or hostile client).
-        // Cold-start merge must NOT honor that — platform tools are
-        // force-enabled regardless of persisted state.
+    fn merge_tools_config_filters_platform_tools_out_of_output() {
+        // Persisted file contains platform tools (legacy data or
+        // hostile client) — cold-start merge must NOT propagate them
+        // to the new on-disk state.
         let code = vec![
             "context_retrieve".to_string(),
             "context_abandon".to_string(),
             "shell".to_string(),
         ];
         let persisted = vec![
-            AgentToolEntry::new("context_retrieve", false), // user-disabled
-            AgentToolEntry::new("context_abandon", false),  // user-disabled
+            AgentToolEntry::new("context_retrieve", true), // legacy disk residue
+            AgentToolEntry::new("context_abandon", true),  // legacy disk residue
             AgentToolEntry::new("shell", false),
         ];
         let merged = merge_tools_config(&code, &persisted);
-        let map: std::collections::HashMap<String, bool> =
-            merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-        assert!(map["context_retrieve"], "PLATFORM tool must be force-enabled");
-        assert!(map["context_abandon"], "PLATFORM tool must be force-enabled");
-        assert!(!map["shell"], "non-platform tool follows user choice");
+        let names: std::collections::HashSet<&str> =
+            merged.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains("context_retrieve"),
+            "context_retrieve must not be in merged output (in-memory only); got: {:?}",
+            names
+        );
+        assert!(
+            !names.contains("context_abandon"),
+            "context_abandon must not be in merged output (in-memory only); got: {:?}",
+            names
+        );
+        assert_eq!(merged.len(), 1, "only shell should survive");
+        assert!(!merged[0].enabled, "non-platform tool follows user choice");
     }
 
     #[test]
-    fn merge_tools_config_force_enables_missing_platform_tools() {
-        // First start: persisted file absent → context_retrieve not in
-        // persisted at all. merge_tools_config must still emit it as
-        // enabled (platform protection applies even on cold start with
-        // no user history).
+    fn init_tools_config_from_manifest_filters_platform_tools() {
+        // First start: code registry may or may not contain platform
+        // tools depending on the compression flag at boot, but in
+        // either case the persistence layer must not emit them.
+        // `init_tools_config_from_manifest` is the first-run code path
+        // (no persisted file) and must follow the same invariant.
         let code = vec![
             "context_retrieve".to_string(),
             "context_abandon".to_string(),
+            "memory_recall".to_string(),
         ];
-        let merged = merge_tools_config(&code, &[]);
-        assert!(merged.iter().all(|e| e.enabled), "platform tools default to enabled");
+        let manifest_tools = vec!["context_retrieve".to_string(), "memory_recall".to_string()];
+        let cfg = init_tools_config_from_manifest(&code, &manifest_tools);
+        let names: std::collections::HashSet<&str> =
+            cfg.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains("context_retrieve"), "platform tool never persisted");
+        assert!(!names.contains("context_abandon"), "platform tool never persisted");
+        assert!(names.contains("memory_recall"));
+        assert!(cfg.iter().find(|e| e.name == "memory_recall").unwrap().enabled);
     }
 
     #[test]
-    fn apply_builtin_tools_patch_force_enables_platform_tools() {
-        // PUT /builtin-tools path: user explicitly disables
-        // context_retrieve via frontend. Patch must NOT honor that —
-        // platform tools are force-enabled regardless of patch value.
+    fn apply_builtin_tools_patch_filters_platform_tools_out_of_output() {
+        // PUT /builtin-tools path. `current` already lacks platform
+        // tools (the merge pruned them at the previous boot), but a
+        // hostile or legacy `patch` body might still contain them.
+        // The output must not include them either way.
         let current = vec![
-            AgentToolEntry::new("context_retrieve", true),
-            AgentToolEntry::new("context_abandon", true),
+            AgentToolEntry::new("http_request", true),
             AgentToolEntry::new("shell", true),
         ];
         let patch = vec![
-            AgentToolEntry::new("context_retrieve", false),
-            AgentToolEntry::new("context_abandon", false),
-            AgentToolEntry::new("shell", false),
+            AgentToolEntry::new("context_retrieve", false), // attempt to disable
+            AgentToolEntry::new("context_abandon", false),  // attempt to disable
+            AgentToolEntry::new("http_request", false),
         ];
         let next = apply_builtin_tools_patch(&current, &patch);
-        let map: std::collections::HashMap<String, bool> =
-            next.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-        assert!(map["context_retrieve"]);
-        assert!(map["context_abandon"]);
-        assert!(!map["shell"]);
+        let names: std::collections::HashSet<&str> =
+            next.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains("context_retrieve"));
+        assert!(!names.contains("context_abandon"));
+        assert!(!next.iter().find(|e| e.name == "http_request").unwrap().enabled);
+        assert!(next.iter().find(|e| e.name == "shell").unwrap().enabled);
     }
 
     #[test]
     fn merge_and_patch_agree_on_platform_tools() {
         // The whole point of unification: cold-start (merge) and
-        // hot-update (patch) must agree on platform tools. If one
-        // returns `enabled=true` and the other returns `enabled=false`
-        // for the same persisted entry, the bug recurs.
+        // hot-update (patch) must agree that platform tools are not
+        // part of the persisted set. If one path emits them and the
+        // other doesn't, the desktop sees drift between the merged
+        // /tools endpoint and the per-agent /builtin-tools endpoint.
         let code = vec!["context_retrieve".to_string(), "shell".to_string()];
         let persisted = vec![AgentToolEntry::new("context_retrieve", false)];
 
         let merged = merge_tools_config(&code, &persisted);
-        let ctx_enabled = merged.iter().find(|e| e.name == "context_retrieve").unwrap().enabled;
+        assert!(
+            merged.iter().all(|e| e.name != "context_retrieve"),
+            "merge must strip platform tools"
+        );
 
         let patch = vec![AgentToolEntry::new("context_retrieve", false)];
         let patched = apply_builtin_tools_patch(&persisted, &patch);
-        let patch_enabled = patched.iter().find(|e| e.name == "context_retrieve").unwrap().enabled;
-
-        assert_eq!(ctx_enabled, patch_enabled, "cold-start and hot-update must agree");
-        assert!(ctx_enabled, "platform tool must be enabled in both paths");
+        assert!(
+            patched.iter().all(|e| e.name != "context_retrieve"),
+            "patch must strip platform tools"
+        );
     }
 
     // ── AgentConfig context_window serialization (ADR-026) ────────────
@@ -1843,11 +1795,65 @@ mod tests {
         assert!(cfg.iter().all(|e| !e.enabled));
     }
 
+    /// Boot-time regression for the user report: even when the user
+    /// previously had `tool_compression_enabled=true` (so the registry
+    /// DID include the platform tools and they made it into
+    /// `agent_tools.json`), flipping the toggle to `false` and
+    /// restarting must remove them from the persisted file. The
+    /// cold-start `merge_tools_config` filters platform tools
+    /// unconditionally — see
+    /// `merge_tools_config_filters_platform_tools_out_of_output` above.
+    #[test]
+    fn merge_tools_config_strips_platform_tools_regardless_of_compression() {
+        // Code registry includes the platform tools (compression was
+        // enabled at the previous boot — exactly the scenario the user
+        // reported). Merged output must still drop them.
+        let code = vec![
+            "memory_recall".to_string(),
+            "context_retrieve".to_string(),
+            "context_abandon".to_string(),
+            "shell".to_string(),
+        ];
+        let persisted = vec![
+            AgentToolEntry::new("context_retrieve", true),
+            AgentToolEntry::new("context_abandon", true),
+            AgentToolEntry::new("memory_recall", true),
+            AgentToolEntry::new("shell", false),
+        ];
+        let merged = merge_tools_config(&code, &persisted);
+        let names: std::collections::HashSet<&str> =
+            merged.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains("context_retrieve"));
+        assert!(!names.contains("context_abandon"));
+        assert_eq!(merged.len(), 2, "only memory_recall + shell survive");
+    }
+
     #[test]
     fn all_enabled_tools_config_enables_everything() {
         let code = sample_tools();
         let cfg = all_enabled_tools_config(&code);
         assert_eq!(cfg.len(), code.len());
+        assert!(cfg.iter().all(|e| e.enabled));
+    }
+
+    /// ADR-052: `all_enabled_tools_config` must also strip
+    /// platform-protected tools — it's the "no manifest, no file,
+    /// fall back to everything enabled" recovery path and the
+    /// persistence-layer filter applies uniformly.
+    #[test]
+    fn all_enabled_tools_config_filters_platform_tools() {
+        let code = vec![
+            "memory_recall".to_string(),
+            "context_retrieve".to_string(),
+            "context_abandon".to_string(),
+            "shell".to_string(),
+        ];
+        let cfg = all_enabled_tools_config(&code);
+        let names: std::collections::HashSet<&str> =
+            cfg.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains("context_retrieve"));
+        assert!(!names.contains("context_abandon"));
+        assert_eq!(cfg.len(), 2);
         assert!(cfg.iter().all(|e| e.enabled));
     }
 
@@ -1910,58 +1916,43 @@ mod tests {
         assert!(map["shell"]);
     }
 
-    // ── platform_protected serialization hint (ADR-029 + ADR-052) ───
+    // ── ADR-052 wire-shape invariants (no `platform_protected` hint) ───
+    //
+    // The presentation-hint indirection from the previous fix (commit
+    // 001987cb) is gone: `AgentToolEntry` is plain persisted state and
+    // serializes to exactly `{name, enabled}`. These tests pin that
+    // invariant so future field additions to the wire shape cannot
+    // accidentally re-introduce platform-internal state into the
+    // persisted file.
 
-    /// Non-protected tool: serialized JSON must be exactly `{name, enabled}`,
-    /// no `platform_protected` field at all (otherwise we'd bloat the
-    /// persisted file and force migrations on every release).
     #[test]
-    fn agent_tool_entry_serialize_omits_platform_protected_for_unprotected() {
+    fn agent_tool_entry_serialize_has_only_name_and_enabled() {
         let entry = AgentToolEntry::new("memory_recall", true);
         let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
         let obj = json.as_object().expect("must be a JSON object");
-        assert_eq!(obj.len(), 2, "must have exactly 2 keys, got: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            2,
+            "must have exactly 2 keys (name, enabled), got: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
         assert_eq!(obj.get("name").unwrap(), "memory_recall");
         assert_eq!(obj.get("enabled").unwrap(), true);
-        assert!(
-            !obj.contains_key("platform_protected"),
-            "platform_protected must be omitted for non-protected tools"
-        );
     }
 
-    /// Protected tool (`context_retrieve`, `context_abandon` — see
-    /// `PLATFORM_PROTECTED_TOOLS`): serialized JSON must include
-    /// `"platform_protected": true` so the desktop can render a
-    /// non-interactive Switch + tooltip.
     #[test]
-    fn agent_tool_entry_serialize_includes_platform_protected_for_protected() {
-        for protected_name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let entry = AgentToolEntry::new(*protected_name, true);
-            let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
-            let obj = json.as_object().expect("must be a JSON object");
-            assert_eq!(
-                obj.get("platform_protected").and_then(|v| v.as_bool()),
-                Some(true),
-                "platform_protected must be emitted as `true` for {:?}",
-                protected_name
-            );
-            assert_eq!(obj.get("name").unwrap(), *protected_name);
-            assert_eq!(obj.get("enabled").unwrap(), true);
-        }
-    }
-
-    /// The persisted file format must remain `{name, enabled}` — even for
-    /// protected tools — so `save_agent_tools_config` never writes a
-    /// `platform_protected` key. This guards against accidentally
-    /// persisting the presentation hint.
-    #[test]
-    fn save_agent_tools_config_never_writes_platform_protected_to_disk() {
+    fn save_agent_tools_config_writes_only_user_facing_tools() {
+        // Persistence layer filter: even if some buggy caller passes a
+        // config containing platform-protected entries (a regression
+        // guard), the file must still be safe to load — and never carry
+        // those names. Note: the standard `merge_tools_config` already
+        // filters, so this is a defense-in-depth check via the raw
+        // `save_agent_tools_config` API.
         let dir = tempfile::tempdir().unwrap();
         let cfg = AgentToolsConfig {
             tools: vec![
-                AgentToolEntry::new("context_retrieve", true),
-                AgentToolEntry::new("context_abandon", false),
                 AgentToolEntry::new("memory_recall", true),
+                AgentToolEntry::new("http_request", false),
             ],
         };
         save_agent_tools_config(dir.path(), &cfg).unwrap();
@@ -1971,28 +1962,57 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !raw.contains("platform_protected"),
-            "persisted file must not contain platform_protected; got:\n{}",
-            raw
+            !raw.contains("context_retrieve"),
+            "persisted file must not contain platform-protected tools"
         );
-        // Sanity: shape is preserved.
+        assert!(
+            !raw.contains("context_abandon"),
+            "persisted file must not contain platform-protected tools"
+        );
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let tools = parsed["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "memory_recall");
+        assert_eq!(tools[1]["name"], "http_request");
     }
 
-    /// Forward compatibility: a hand-crafted JSON payload from a newer
-    /// client that *does* include `platform_protected` must still
-    /// deserialize cleanly — the field is a presentation hint, never
-    /// load-bearing.
     #[test]
-    fn agent_tool_entry_deserialize_ignores_unexpected_platform_protected() {
-        let json = r#"{"name":"memory_recall","enabled":true,"platform_protected":true}"#;
-        let entry: AgentToolEntry = serde_json::from_str(json).unwrap();
-        assert_eq!(entry.name, "memory_recall");
-        assert!(entry.enabled);
-        // We don't surface a field; "platform_protected" must not be
-        // honored on the load path (the runtime enforcement is
-        // independent, in `with_resolved_enabled`).
+    fn load_legacy_agent_tools_config_drops_platform_tools() {
+        // Forward compat: a file written by an older build that DID
+        // contain `context_retrieve` / `context_abandon` entries must
+        // load cleanly and then be cleaned up on the next cold-start
+        // merge (the merge function filters them — see
+        // `merge_tools_config_filters_platform_tools_out_of_output`).
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = AgentToolsConfig {
+            tools: vec![
+                AgentToolEntry::new("memory_recall", true),
+                AgentToolEntry::new("context_retrieve", true),
+                AgentToolEntry::new("context_abandon", false),
+            ],
+        };
+        save_agent_tools_config(dir.path(), &legacy).unwrap();
+
+        let loaded = load_agent_tools_config(dir.path())
+            .unwrap()
+            .expect("legacy file must load");
+        assert_eq!(loaded.tools.len(), 3, "load is permissive — merge prunes");
+
+        // The cold-start path filters before re-persisting.
+        let code = vec![
+            "memory_recall".to_string(),
+            "context_retrieve".to_string(),
+            "context_abandon".to_string(),
+            "shell".to_string(),
+        ];
+        let cleaned = merge_tools_config(&code, &loaded.tools);
+        save_agent_tools_config(dir.path(), &AgentToolsConfig { tools: cleaned }).unwrap();
+
+        let reloaded_raw = std::fs::read_to_string(
+            dir.path().join("config").join(AGENT_TOOLS_CONFIG_FILE),
+        )
+        .unwrap();
+        assert!(!reloaded_raw.contains("context_retrieve"));
+        assert!(!reloaded_raw.contains("context_abandon"));
     }
 }

@@ -503,9 +503,7 @@
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
     "noBuiltinTools": "No builtin tools available.",
     "toolCompressionEnabled": "Tool Compression",
-    "toolCompressionEnabledDesc": "When enabled, the LLM can autonomously compress and retrieve tool results",
-    "builtinToolPlatformProtectedHint": "Managed by Tool Compression",
-    "builtinToolPlatformProtectedTooltip": "Managed by the Tool Compression global toggle — cannot be disabled here"
+    "toolCompressionEnabledDesc": "When enabled, the LLM can autonomously compress and retrieve tool results"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",

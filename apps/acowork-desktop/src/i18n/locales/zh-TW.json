@@ -386,9 +386,7 @@
     "resetAgentSetup": "重設 Agent 設定",
     "reset": "重設",
     "toolCompressionEnabled": "工具壓縮",
-    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果",
-    "builtinToolPlatformProtectedHint": "由工具壓縮管理",
-    "builtinToolPlatformProtectedTooltip": "由「工具壓縮」全域開關管理，此處無法關閉"
+    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果"
   },
   "harness": {
     "tabProviders": "模型服務提供者",

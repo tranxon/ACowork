@@ -12,20 +12,6 @@ const EMPTY_ARRAY: string[] = [];
 interface BuiltinToolEntry {
   name: string;
   enabled: boolean;
-  /**
-   * ADR-029 + ADR-052: When `true`, the runtime force-enables this tool
-   * regardless of the persisted `enabled` flag (the backend routes every
-   * write path through `BuiltinToolEntry::with_resolved_enabled`, which
-   * consults `PLATFORM_PROTECTED_TOOLS` — see `core/acowork-runtime/src/
-   * tools/registry.rs`). The desktop must therefore render this row as
-   * non-interactive: a disabled Switch wrapped in a Tooltip pointing to
-   * the global Tool Compression toggle, and `toggleBuiltinTool` must
-   * short-circuit so the user cannot accidentally fire a PUT that
-   * pollutes `agent_tools.json` with a value the server will discard.
-   *
-   * Absent / `false` → standard interactive Switch.
-   */
-  platform_protected?: boolean;
 }
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -190,21 +176,9 @@ export function ToolsTab() {
 
   // ── ADR-029: Builtin tools helpers ─────────────────────────────────
 
-  /** Toggle a builtin tool enabled/disabled and PUT to Gateway.
-   *
-   * Platform-protected tools (see `BuiltinToolEntry.platform_protected`)
-   * short-circuit here: the user cannot toggle them in the UI, but if
-   * they somehow fire this function (keyboard, dev-tools paste, stale
-   * code path) we MUST NOT issue the PUT — the server would silently
-   * accept it and write `enabled=false` into `agent_tools.json`, which
-   * would then be silently overwritten by `with_resolved_enabled` on
-   * every cold start. Net effect: wasted disk write, no behavioural
-   * change, confusing diff in the persisted file.
-   */
+  /** Toggle a builtin tool enabled/disabled and PUT to Gateway */
   const toggleBuiltinTool = async (toolName: string) => {
     if (!selectedAgentId) return;
-    const target = builtinToolsAll.find((e) => e.name === toolName);
-    if (target?.platform_protected) return; // ADR-029 + ADR-052
     const next = builtinToolsAll.map((entry) =>
       entry.name === toolName ? { ...entry, enabled: !entry.enabled } : entry
     );
@@ -256,52 +230,23 @@ export function ToolsTab() {
         ) : (
           <div className="max-h-48 overflow-y-auto rounded-md border border-zinc-200 bg-modal-surface dark:border-zinc-700">
             <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-              {builtinToolsAll.map((entry) => {
-                // ADR-029 + ADR-052: platform-protected tools are force-
-                // enabled on the server regardless of the user's preference.
-                // Render them as a non-interactive Switch (greyed out) with
-                // a tooltip that points at the Tool Compression global
-                // toggle — the only knob that controls them.
-                const isProtected = entry.platform_protected === true;
-                const switchEl = (
+              {builtinToolsAll.map((entry) => (
+                <div
+                  key={entry.name}
+                  className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                >
+                  <span className="flex-1 min-w-0 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                    {entry.name}
+                  </span>
                   <Switch
                     checked={entry.enabled}
                     onChange={() => toggleBuiltinTool(entry.name)}
-                    disabled={isProtected || builtinSaving || !selectedAgentId}
+                    disabled={builtinSaving || !selectedAgentId}
                     size="sm"
                     aria-label={entry.name}
                   />
-                );
-                return (
-                  <div
-                    key={entry.name}
-                    className={`flex items-center gap-2 px-3 py-2 transition-colors ${
-                      isProtected
-                        ? "opacity-70"
-                        : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
-                    }`}
-                  >
-                    <span className="flex-1 min-w-0 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                      {entry.name}
-                    </span>
-                    {isProtected && (
-                      <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-700 dark:text-zinc-400">
-                        {t("agentSetup.builtinToolPlatformProtectedHint")}
-                      </span>
-                    )}
-                    {isProtected ? (
-                      <Tooltip
-                        content={t("agentSetup.builtinToolPlatformProtectedTooltip")}
-                        variant="plain"
-                      >
-                        {switchEl}
-                      </Tooltip>
-                    ) : (
-                      switchEl
-                    )}
-                  </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           </div>
         )}

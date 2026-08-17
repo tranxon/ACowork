@@ -2997,26 +2997,23 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// ADR-029 §7 wire-semantics regression test.
+    /// ADR-029 §7 + ADR-052 wire-semantics regression test.
     ///
-    /// `PUT /api/agents/{id}/config` with `builtin_tools` is the
-    /// **complete enabled set**: any tool currently in `agent_tools.json`
-    /// but absent from the request body MUST be flipped to
-    /// `enabled = false`. The previous implementation built the patch
-    /// directly from the request body (everything listed → enabled=true),
-    /// which made every unchecked checkbox silently re-enable on the
-    /// next PUT — the bug only became user-visible when
-    /// `chatStore::case "agent_config"` started emitting
-    /// `acowork:refresh-agent-config`, at which point the ToolsTab
-    /// listener overwrote the optimistic UI with the server's stale
-    /// `enabled=true` value.
+    /// `PUT /api/agents/{id}/builtin-tools` is the **complete enabled
+    /// set**: any tool currently in `agent_tools.json` but absent
+    /// from the request body MUST be flipped to `enabled = false`.
+    /// The previous implementation built the patch directly from the
+    /// request body (everything listed → enabled=true), which made
+    /// every unchecked checkbox silently re-enable on the next PUT.
     ///
     /// This test seeds `agent_tools.json` with three tools, sends a
     /// PUT listing only one of them as enabled, and asserts that:
     ///   - the listed tool stays `enabled=true`
-    ///   - the two **unlisted** tools flip to `enabled=false`
-    ///   - PLATFORM_TOOLS (e.g. `context_retrieve`) are still force-enabled
-    ///     even when omitted from the PUT body
+    ///   - the unlisted tool flips to `enabled=false`
+    ///   - PLATFORM_TOOLS (e.g. `context_retrieve`) are *never*
+    ///     persisted even if a hostile or legacy PUT body tries to
+    ///     toggle them — they live in the in-memory registry only
+    ///     (ADR-052)
     #[tokio::test]
     async fn test_put_agent_config_disables_unlisted_builtin_tools() {
         let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-put-config");
@@ -3082,9 +3079,12 @@ mod tests {
         // After the ADR-040 refactor, builtin-tools live on their own
         // endpoint (the field was removed from `PUT /config` because
         // it conflates "model knobs" with "tool state"). PUT only the
-        // one we want enabled; everything else (including the
-        // platform tool, which must stay enabled) must reflect the new
+        // one we want enabled; everything else must reflect the new
         // state on the next GET.
+        //
+        // We deliberately include `context_retrieve` in the request
+        // body — under ADR-052 it must NOT survive into the persisted
+        // file (or the GET response).
         let url = format!(
             "http://127.0.0.1:{}/agents/com.test.agent/builtin-tools",
             server.port
@@ -3092,7 +3092,7 @@ mod tests {
         let client = reqwest::Client::new();
         let response = client
             .put(&url)
-            .json(&serde_json::json!({"builtin_tools": ["http_request"]}))
+            .json(&serde_json::json!({"builtin_tools": ["http_request", "context_retrieve"]}))
             .send()
             .await
             .unwrap();
@@ -3119,13 +3119,14 @@ mod tests {
             "unlisted tool must be disabled — this is the bug regression"
         );
         assert!(
-            map["context_retrieve"],
-            "PLATFORM_TOOLS are force-enabled regardless of PUT body"
+            !map.contains_key("context_retrieve"),
+            "PLATFORM_TOOLS must NEVER appear in agent_tools.json (ADR-052)"
         );
 
         // Verify the GET /builtin-tools endpoint also returns the new
-        // state — this is what the ToolsTab listener reads, so the
-        // optimistic update overwrite would surface the bug here.
+        // state — this is what the ToolsTab listener reads. The
+        // platform tool is absent from the response, even though the
+        // PUT body tried to enable it.
         let tools_url = format!(
             "http://127.0.0.1:{}/agents/com.test.agent/builtin-tools",
             server.port
@@ -3144,7 +3145,10 @@ mod tests {
             .collect();
         assert!(tool_flags["http_request"]);
         assert!(!tool_flags["shell"]);
-        assert!(tool_flags["context_retrieve"]);
+        assert!(
+            !tool_flags.contains_key("context_retrieve"),
+            "PLATFORM_TOOLS must NEVER appear in the /builtin-tools response"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
