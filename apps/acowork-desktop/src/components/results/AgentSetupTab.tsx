@@ -66,7 +66,8 @@ type WiredField =
   | "contextWindow"
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
-  | "toolCompressionEnabled";
+  | "toolCompressionEnabled"
+  | "idleTimeoutSecs";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -77,6 +78,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   shellApprovalThreshold: "shell_approval_threshold",
   approvalTimeoutSecs: "approval_timeout_secs",
   toolCompressionEnabled: "tool_compression_enabled",
+  idleTimeoutSecs: "idle_timeout_secs",
 };
 
 const FIELD_DEBOUNCE_MS = 500;
@@ -87,6 +89,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   temperature: FIELD_DEBOUNCE_MS,
   contextWindow: FIELD_DEBOUNCE_MS,
   approvalTimeoutSecs: FIELD_DEBOUNCE_MS,
+  idleTimeoutSecs: FIELD_DEBOUNCE_MS,
   maxTokens: FIELD_DEBOUNCE_MS,
   maxIterations: FIELD_DEBOUNCE_MS,
   maxSessions: FIELD_DEBOUNCE_MS,
@@ -171,6 +174,7 @@ export function AgentSetupTab() {
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
           tool_compression_enabled?: boolean | null;
+          idle_timeout_secs?: number | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
         // local profile field when the server returned a concrete
@@ -216,6 +220,9 @@ export function AgentSetupTab() {
         if (typeof cfg.tool_compression_enabled === "boolean") {
           patch.toolCompressionEnabled = cfg.tool_compression_enabled;
         }
+        if (typeof cfg.idle_timeout_secs === "number") {
+          patch.idleTimeoutSecs = cfg.idle_timeout_secs;
+        }
         setProfile(selectedAgentId, patch);
       })
       .catch((err) => {
@@ -248,6 +255,7 @@ export function AgentSetupTab() {
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
               tool_compression_enabled?: boolean | null;
+              idle_timeout_secs?: number | null;
             };
             // Same race-safe merge as the mount effect above. The
             // retained-MQTT snapshot fires this refresh *after* every
@@ -286,6 +294,9 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.tool_compression_enabled === "boolean") {
               patch.toolCompressionEnabled = cfg.tool_compression_enabled;
+            }
+            if (typeof cfg.idle_timeout_secs === "number") {
+              patch.idleTimeoutSecs = cfg.idle_timeout_secs;
             }
             setProfile(selectedAgentId, patch);
           })
@@ -831,6 +842,54 @@ export function AgentSetupTab() {
         </p>
       </div>
 
+      {/* Idle (auto-sleep) Timeout */}
+      <div className="mb-3 space-y-1">
+        <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
+          {t("agentSetup.idleTimeout")}
+        </label>
+        <select
+          value={
+            profile.idleTimeoutSecs === 0
+              ? "0"
+              : profile.idleTimeoutSecs === 900
+                ? "900"
+                : profile.idleTimeoutSecs === 1800
+                  ? "1800"
+                  : profile.idleTimeoutSecs === 3600
+                    ? "3600"
+                    : profile.idleTimeoutSecs === 10800
+                      ? "10800"
+                      : "300"
+          }
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "") {
+              saveField("idleTimeoutSecs", undefined);
+              return;
+            }
+            const n = parseInt(v, 10);
+            saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
+          }}
+          className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
+          style={{
+            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width="1.5" d="M6 8l4 4 4-4"/%3e%3c/svg%3e")`,
+            backgroundPosition: 'right 0.5rem center',
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: '1.5em 1.5em',
+          }}
+        >
+          <option value="300">{t("agentSetup.idleTimeoutOption5Min")}</option>
+          <option value="900">{t("agentSetup.idleTimeoutOption15Min")}</option>
+          <option value="1800">{t("agentSetup.idleTimeoutOption30Min")}</option>
+          <option value="3600">{t("agentSetup.idleTimeoutOption1Hour")}</option>
+          <option value="10800">{t("agentSetup.idleTimeoutOption3Hour")}</option>
+          <option value="0">{t("agentSetup.idleTimeoutOptionNever")}</option>
+        </select>
+        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
+          {t("agentSetup.idleTimeoutDesc")}
+        </p>
+      </div>
+
       {/* Shell Command Approval Threshold */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -954,6 +1013,7 @@ export function AgentSetupTab() {
                   shell_approval_threshold: null,
                   approval_timeout_secs: null,
                   tool_compression_enabled: null,
+                  idle_timeout_secs: null,
                 }),
               },
             );

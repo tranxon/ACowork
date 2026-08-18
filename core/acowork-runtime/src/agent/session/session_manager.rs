@@ -2096,6 +2096,19 @@ After installation, ask the user to re-enable the MCP server.",
             .collect()
     }
 
+    /// Returns `true` when **any** session is currently in
+    /// [`SessionStatus::is_active()`] state (Working / Thinking /
+    /// Streaming / ToolExecuting / WaitingApproval / Paused).
+    ///
+    /// Used by the idle-watcher to suspend the auto-sleep deadline while
+    /// a session is busy. The check is cheap (`O(n)` over active sessions,
+    /// which is typically 1) and lock-free for the read path.
+    pub fn any_session_active(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|handle| handle.status().is_active())
+    }
+
     /// Access the shared core's manifest (ADR-012: for per-session model defaults).
     pub fn manifest(&self) -> &acowork_core::AgentManifest {
         self.core.manifest()

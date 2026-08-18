@@ -12,8 +12,6 @@ pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
 
 /// Lifecycle manager — controls Agent process lifecycle
 pub struct LifecycleManager {
-    /// Idle timeout in seconds (0 = no timeout)
-    idle_timeout_secs: u64,
     /// Log file max size in MB before auto-split
     log_file_size_mb: u64,
     /// Maximum number of log files to keep (0 = unlimited)
@@ -25,13 +23,16 @@ pub struct LifecycleManager {
 
 impl LifecycleManager {
     pub fn new(
-        idle_timeout_secs: u64,
         log_file_size_mb: u64,
         log_file_count: u64,
         mqtt_port: Option<u16>,
     ) -> Self {
+        // The previous `idle_timeout_secs` parameter was removed: the
+        // decision to auto-sleep an idle Runtime is now owned by the
+        // Runtime itself (see `acowork-runtime::agent::idle_watcher`).
+        // The Gateway only observes the `sleeping` retained status and
+        // surfaces it via `/api/agents` (see `AgentRegistry::sleeping_at`).
         Self {
-            idle_timeout_secs,
             log_file_size_mb,
             log_file_count,
             mqtt_port,
@@ -164,15 +165,11 @@ impl LifecycleManager {
         results
     }
 
-    /// Check for idle agents that should be stopped
-    pub fn check_idle_timeouts(&self, _state: &GatewayState) -> Vec<String> {
-        if self.idle_timeout_secs == 0 {
-            return Vec::new();
-        }
-        // Phase 1: return empty — idle tracking requires per-agent last-activity timestamps
-        // Phase 2: implement with actual idle tracking
-        Vec::new()
-    }
+    // `check_idle_timeouts` removed: the auto-sleep decision is owned by
+    // the Runtime (see `acowork-runtime::agent::idle_watcher`). The Gateway
+    // observes the resulting `sleeping` retained status via the
+    // `AgentRegistry` and surfaces `sleeping_at` to the Desktop through
+    // `/api/agents` — no idle-tracking state lives here.
 }
 
 #[cfg(test)]
@@ -188,22 +185,14 @@ mod tests {
 
     #[test]
     fn test_lifecycle_manager_new() {
-        let mgr = LifecycleManager::new(300, 10, 20, None);
-        assert_eq!(mgr.idle_timeout_secs, 300);
-    }
-
-    #[test]
-    fn test_lifecycle_manager_zero_timeout() {
-        let mgr = LifecycleManager::new(0, 10, 20, None);
-        let dir = temp_vault_dir("zero");
-        let state = GatewayState::new(&dir);
-        let result = mgr.check_idle_timeouts(&state);
-        assert!(result.is_empty());
+        let mgr = LifecycleManager::new(10, 20, None);
+        assert_eq!(mgr.log_file_size_mb, 10);
+        assert_eq!(mgr.log_file_count, 20);
     }
 
     #[tokio::test]
     async fn test_start_agent_not_installed() {
-        let mut mgr = LifecycleManager::new(300, 10, 20, None);
+        let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("start");
         let mut state = GatewayState::new(&dir);
         let result = mgr.start_agent("com.test.unknown", &mut state, false).await;
@@ -212,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_agent_not_running() {
-        let mut mgr = LifecycleManager::new(300, 10, 20, None);
+        let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("stop");
         let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent("com.test.unknown", &mut state).await;
@@ -226,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_system_agent_rejected() {
-        let mut mgr = LifecycleManager::new(300, 10, 20, None);
+        let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("sysstop");
         let mut state = GatewayState::new(&dir);
         let result = mgr.stop_agent(SYSTEM_AGENT_ID, &mut state).await;
@@ -237,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_start_system_agent_not_installed() {
-        let mut mgr = LifecycleManager::new(300, 10, 20, None);
+        let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("autostart");
         let mut state = GatewayState::new(&dir);
         // System Agent not installed — should succeed gracefully with warning

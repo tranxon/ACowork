@@ -30,8 +30,9 @@ pub(crate) async fn phase_d_run(
     let _span = tracing::info_span!("startup_phase_d").entered();
 
     let SessionBootContext {
-        mut session_manager,
+        session_manager,
         committed_lines: _committed_lines,
+        idle_watcher,
     } = session_ctx;
 
     let SubsystemHandles {
@@ -61,15 +62,25 @@ pub(crate) async fn phase_d_run(
     // SystemNotification { notification_type: ... }.
     let _mqtt_handle = ctx.control_rx.take().map(|ctrl_rx| {
         let tx = mqtt_dispatch_tx.clone();
+        // Phase B-3: idle watcher (if spawned) gets a `record_inbound()` on
+        // every user action so its deadline resets. Clone-able handle,
+        // so it's safe to share with this spawned task.
+        let idle_watcher = idle_watcher.clone();
         tokio::spawn(async move {
             let mut rx = ctrl_rx;
             while let Some((topic, payload)) = rx.recv().await {
                 match crate::mqtt::control_handler::parse_control_payload(&topic, &payload) {
                     Some(action) => {
-                        if let Some((session_id, msg)) = control_action_to_inbound(action)
-                            && tx.send((session_id, msg)).is_err()
-                        {
-                            tracing::warn!(topic, "MQTT dispatch channel closed");
+                        if let Some((session_id, msg)) = control_action_to_inbound(action) {
+                            // Reset the auto-sleep deadline on every parsed
+                            // user action. `None` means the user chose
+                            // "never sleep" — nothing to do.
+                            if let Some(watcher) = idle_watcher.as_ref() {
+                                watcher.record_inbound();
+                            }
+                            if tx.send((session_id, msg)).is_err() {
+                                tracing::warn!(topic, "MQTT dispatch channel closed");
+                            }
                         }
                     }
                     None => {
@@ -109,7 +120,7 @@ pub(crate) async fn phase_d_run(
     };
 
     let result = mqtt_only_loop(
-        &mut session_manager,
+        &session_manager,
         &lifecycle_publisher,
         mqtt_dispatch_rx,
         mcp_startup_rx,
@@ -327,7 +338,7 @@ fn control_action_to_inbound(
 /// chat loop runs in session tasks; this loop just routes messages.
 #[allow(clippy::too_many_arguments)]
 async fn mqtt_only_loop(
-    session_manager: &mut crate::agent::session::SessionManager,
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     mut mqtt_dispatch_rx: tokio::sync::mpsc::UnboundedReceiver<(
         String,
@@ -386,7 +397,7 @@ async fn mqtt_only_loop(
                 }
             } => {
                 if let Some((registry, wrappers, specs, failures)) = mcp_result {
-                    session_manager.apply_mcp_connection_result(
+                    session_manager.lock().await.apply_mcp_connection_result(
                         registry, wrappers, specs, failures,
                     );
                 }
@@ -396,7 +407,7 @@ async fn mqtt_only_loop(
             // Runtime MCP connect result
             mcp_runtime_result = mcp_runtime_rx.recv() => {
                 if let Some((registry, wrappers, specs, failures)) = mcp_runtime_result {
-                    session_manager.apply_mcp_connection_result(
+                    session_manager.lock().await.apply_mcp_connection_result(
                         registry, wrappers, specs, failures,
                     );
                 }
@@ -449,7 +460,7 @@ async fn mqtt_only_loop(
                         language = %profile.language,
                         "Applying acowork/global/user_profile update to SessionManager"
                     );
-                    session_manager.update_user_identity(Some(profile));
+                    session_manager.lock().await.update_user_identity(Some(profile));
                 }
             }
 
@@ -468,7 +479,7 @@ async fn mqtt_only_loop(
                         key_count = update.provider_key_vault.len(),
                         "Applying acowork/global/providers update to SessionManager"
                     );
-                    session_manager.update_global_provider_list(
+                    session_manager.lock().await.update_global_provider_list(
                         update.provider_list,
                         update.provider_list_version,
                         update.provider_key_vault,
@@ -490,7 +501,7 @@ async fn mqtt_only_loop(
                         key_count = update.search_key_vault.len(),
                         "Applying acowork/global/searches update to SessionManager"
                     );
-                    session_manager.update_search_config(
+                    session_manager.lock().await.update_search_config(
                         update.search_key_vault,
                         update.search_list,
                     );
@@ -523,7 +534,7 @@ async fn mqtt_only_loop(
 ///   tool-result compression is now LLM-initiated via `context_abandon`)
 /// - `SystemNotification` → legacy fallback (Phase 7: no longer produced by control path)
 async fn dispatch_inbound(
-    session_manager: &mut crate::agent::session::SessionManager,
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: String,
     msg: crate::agent::inbound::InboundMessage,
@@ -546,7 +557,7 @@ async fn dispatch_inbound(
                 // not just an in-memory spawn. Without this the Desktop never
                 // sees the new session via fetchSessions and the session has no
                 // persisted workspace context.
-                match session_manager.create_frontend_session(None, None, None).await {
+                match session_manager.lock().await.create_frontend_session(None, None, None).await {
                     Ok(sid) => {
                         tracing::info!(new_sid = %sid, "MQTT: session created via control command");
                         // Publish SessionCreated to the lifecycle topic so the
@@ -592,7 +603,7 @@ async fn dispatch_inbound(
                 ))
             }
             // ADR-038: explicit session activation. Routed through the
-            // system-level branch because `session_manager.open()` is a
+            // system-level branch because `session_manager.lock().await.open()` is a
             // manager-level operation, not a session-task-level one.
             InboundMessage::OpenSession { session_id } => {
                 if session_id.is_empty() {
@@ -618,7 +629,7 @@ async fn dispatch_inbound(
             InboundMessage::UserOperation(
                 crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides),
             ) => {
-                let failed = session_manager.apply_runtime_config_override(&overrides);
+                let failed = session_manager.lock().await.apply_runtime_config_override(&overrides);
                 if !failed.is_empty() {
                     tracing::warn!(
                         failed_sessions = failed.len(),
@@ -628,7 +639,7 @@ async fn dispatch_inbound(
                 Ok(())
             }
             InboundMessage::UpdateBuiltinTools { entries } => {
-                session_manager.apply_builtin_tools_enabled(&entries);
+                session_manager.lock().await.apply_builtin_tools_enabled(&entries);
                 Ok(())
             }
             other => Err(RuntimeError::Config(format!(
@@ -648,7 +659,7 @@ async fn dispatch_inbound(
             "user_message",
             work_dir,
             InboundMessage::UserMessage(text),
-        ),
+        ).await,
 
         // ② Stop signal → session task inbox
         InboundMessage::Stop { reason } => {
@@ -661,7 +672,7 @@ async fn dispatch_inbound(
             // `provider.chat_stream().await` while establishing a TCP/TLS
             // connection (the TTFT stop bug, ADR §1.3, §4.4).
             //
-            // `session_manager.cancel_handle(&session_id)` reads through the
+            // `session_manager.lock().await.cancel_handle(&session_id)` reads through the
             // `Arc<parking_lot::Mutex<CancelHandle>>` slot, so we always
             // target the *current* request's generation — never a stale
             // clone from session creation time (the §4.5 guarantee).
@@ -672,11 +683,11 @@ async fn dispatch_inbound(
             // closed, in which case the cancel is a no-op (no panic, just a
             // debug log) and the subsequent `forward_to_session_inbound`
             // call will surface the same eviction as a structured error.
-            match session_manager.cancel_handle(&session_id) {
+            match session_manager.lock().await.cancel_handle(&session_id) {
                 Some(handle) => {
                     handle.cancel(CancellationReason::UserStop {
                         source: StopSource::ChatPanel {
-                            agent_id: session_manager.agent_id().to_string(),
+                            agent_id: session_manager.lock().await.agent_id().to_string(),
                             session_id: session_id.clone(),
                         },
                         reason: reason.clone(),
@@ -701,7 +712,7 @@ async fn dispatch_inbound(
                 "stop",
                 work_dir,
                 InboundMessage::Stop { reason },
-            )
+            ).await
         }
 
         // ③ Continue execution → session task inbox
@@ -715,7 +726,7 @@ async fn dispatch_inbound(
                 session_id: session_id.clone(),
                 reason,
             },
-        ),
+        ).await,
 
         // ④ Approval decision → session task inbox
         InboundMessage::ApprovalDecision {
@@ -737,7 +748,7 @@ async fn dispatch_inbound(
                 allow_all_session,
                 reason,
             },
-        ),
+        ).await,
 
         // ⑤ Question answer → session task inbox
         InboundMessage::QuestionAnswer {
@@ -753,7 +764,7 @@ async fn dispatch_inbound(
                 request_id,
                 answer,
             },
-        ),
+        ).await,
 
         // ⑥ UserOperation (StopLoop, ContinueLoop, ApprovalDecision, QuestionAnswer)
         //
@@ -765,7 +776,7 @@ async fn dispatch_inbound(
         // because config mutations are agent-scoped).
         InboundMessage::UserOperation(op) => match op {
             crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides) => {
-                let failed = session_manager.apply_runtime_config_override(&overrides);
+                let failed = session_manager.lock().await.apply_runtime_config_override(&overrides);
                 if !failed.is_empty() {
                     tracing::warn!(
                         failed_sessions = failed.len(),
@@ -781,7 +792,7 @@ async fn dispatch_inbound(
                 "user_operation",
                 work_dir,
                 InboundMessage::UserOperation(op),
-            ),
+            ).await,
         },
 
         // ⑦ IntentMessage → session task inbox
@@ -796,7 +807,7 @@ async fn dispatch_inbound(
             "intent",
             work_dir,
             InboundMessage::IntentMessage { from, action, params },
-        ),
+        ).await,
 
         // ── ADR-034 §8 Phase 2: 8 new control commands ────────────────
 
@@ -808,7 +819,7 @@ async fn dispatch_inbound(
         // that physically removed the JSONL/meta files and made the closed
         // session disappear from fetchSessions. Bug 2/Bug 3 root cause.
         InboundMessage::CloseSession { session_id: sid } => {
-            let result = session_manager.close_session(&sid).await;
+            let result = session_manager.lock().await.close_session(&sid).await;
             // Publish SessionDeleted regardless of close result so the Desktop
             // prunes its UI list. close_session returns Err if the session was
             // already gone — that's still a "gone" signal for the Desktop.
@@ -846,7 +857,7 @@ async fn dispatch_inbound(
         // Replaces the gRPC-era SystemNotification detour (fixes §7.1 G1).
         // session_task.rs handles SessionMessage::UpdateSessionTitle at line ~1344.
         InboundMessage::UpdateSessionTitle { title, .. } => session_manager
-            .send_to_session(&session_id, SessionMessage::UpdateSessionTitle { title })
+            .lock().await.send_to_session(&session_id, SessionMessage::UpdateSessionTitle { title })
             .map_err(|e| RuntimeError::Config(format!("UpdateSessionTitle: {}", e))),
 
         // ADR-035 Phase 3: ⑩/⑪ EnableNotify/DisableNotify removed — push
@@ -870,7 +881,7 @@ async fn dispatch_inbound(
                 }
             };
             session_manager
-                .send_to_session(&session_id, SessionMessage::CompressAction(action))
+                .lock().await.send_to_session(&session_id, SessionMessage::CompressAction(action))
                 .map_err(|e| RuntimeError::Config(format!("CompressAction: {}", e)))
         }
 
@@ -883,13 +894,13 @@ async fn dispatch_inbound(
         // See the system-level arm above for the canonical routing;
         // this is defensive uniformity.
         InboundMessage::UpdateBuiltinTools { entries } => {
-            session_manager.apply_builtin_tools_enabled(&entries);
+            session_manager.lock().await.apply_builtin_tools_enabled(&entries);
             Ok(())
         }
 
         // ⑬ CreateSession (session-level DeleteSession)
         InboundMessage::DeleteSession { session_id: sid } => {
-            session_manager.delete_session(&sid).await;
+            session_manager.lock().await.delete_session(&sid).await;
             // Notify the Desktop so it can prune its session list immediately.
             let deleted = data_envelope::Payload::SessionDeleted(
                 acowork_core::mqtt_proto::SessionDeleted {
@@ -963,7 +974,7 @@ async fn dispatch_inbound(
             }
 
             session_manager
-                .send_to_session(
+                .lock().await.send_to_session(
                     &session_id,
                     SessionMessage::ChatMessage {
                         content,
@@ -993,7 +1004,7 @@ async fn dispatch_inbound(
                     .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction: {}", e)))
             } else {
                 session_manager
-                    .route_model_switch(&session_id, delta.model.unwrap_or_default(), delta.provider)
+                    .lock().await.route_model_switch(&session_id, delta.model.unwrap_or_default(), delta.provider)
                     .map_err(|e| RuntimeError::Config(format!("ModelSwitchAction (fallback): {}", e)))
             }
         }
@@ -1011,20 +1022,20 @@ async fn dispatch_inbound(
                     .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction: {}", e)))
             } else {
                 session_manager
-                    .route_reasoning_effort(&session_id, delta.reasoning_effort.unwrap_or_default())
+                    .lock().await.route_reasoning_effort(&session_id, delta.reasoning_effort.unwrap_or_default())
                     .map_err(|e| RuntimeError::Config(format!("ReasoningEffortAction (fallback): {}", e)))
             }
         }
 
         // ⑰ WorkspaceSwitchAction → SessionManager::route_workspace_switch
         InboundMessage::WorkspaceSwitchAction { workspace_id } => {
-            session_manager.route_workspace_switch(&session_id, &workspace_id);
+            session_manager.lock().await.route_workspace_switch(&session_id, &workspace_id);
             Ok(())
         }
 
         // ⑱ CompactContextAction → SessionMessage::CompactContext
         InboundMessage::CompactContextAction => session_manager
-            .send_to_session(&session_id, SessionMessage::CompactContext)
+            .lock().await.send_to_session(&session_id, SessionMessage::CompactContext)
             .map_err(|e| RuntimeError::Config(format!("CompactContextAction: {}", e))),
 
         // ── Legacy fallback (Phase 7: no longer produced by control path) ──
@@ -1068,14 +1079,14 @@ async fn dispatch_inbound(
 /// `SessionNotOpened` (instead of returning an error) so the frontend gets
 /// a structured event it can react to.
 async fn handle_open_session(
-    session_manager: &mut crate::agent::session::SessionManager,
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: &str,
     work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     use crate::agent::session::{SessionLifecycleState, SessionOpenOutcome};
 
-    let state = session_manager.get_lifecycle_state(session_id, work_dir);
+    let state = session_manager.lock().await.get_lifecycle_state(session_id, work_dir);
     let result = match state {
         SessionLifecycleState::NotFound => {
             // Surface as a structured event so the frontend can react.
@@ -1092,7 +1103,7 @@ async fn handle_open_session(
             // Already in memory; idempotent success.
             Ok(SessionOpenOutcome::AlreadyActive)
         }
-        SessionLifecycleState::Closed => session_manager.open(session_id, work_dir).await,
+        SessionLifecycleState::Closed => session_manager.lock().await.open(session_id, work_dir).await,
     };
 
     match result {
@@ -1102,7 +1113,7 @@ async fn handle_open_session(
                 SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
             };
             let (model, provider, last_active_at) =
-                session_manager.session_metadata_summary(session_id, work_dir);
+                session_manager.lock().await.session_metadata_summary(session_id, work_dir);
             if let Err(e) = lifecycle_publisher
                 .publish_session_opened(session_id, status, model, provider, last_active_at)
                 .await
@@ -1143,8 +1154,8 @@ async fn handle_open_session(
 /// affordance. Without this, a frontend that forgot to send
 /// `open_session` first would silently drop the message — the bug we
 /// are fixing here.
-fn forward_to_session_inbound(
-    session_manager: &mut crate::agent::session::SessionManager,
+async fn forward_to_session_inbound(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: &str,
     attempted_command: &str,
@@ -1152,12 +1163,17 @@ fn forward_to_session_inbound(
     msg: crate::agent::inbound::InboundMessage,
 ) -> crate::error::Result<()> {
     use crate::error::RuntimeError;
-    let handle = match session_manager.get_session(session_id) {
+    // Hold the SessionManager lock for the whole body: `SessionHandle`
+    // is borrowed from the manager (no Clone impl), and `send_inbound`
+    // only does `touch()` + `try_send()` — neither touches the manager,
+    // so keeping the lock here is safe and avoids a re-borrow.
+    let manager_guard = session_manager.lock().await;
+    let handle = match manager_guard.get_session(session_id) {
         Some(h) => h,
         None => {
             // Determine reason: Closed (file exists on disk) vs NotFound
             // (no file) — the Desktop uses this to render the right toast.
-            let reason = match session_manager.get_lifecycle_state(session_id, work_dir) {
+            let reason = match manager_guard.get_lifecycle_state(session_id, work_dir) {
                 crate::agent::session::SessionLifecycleState::Closed => "session_closed",
                 _ => "session_not_found",
             };

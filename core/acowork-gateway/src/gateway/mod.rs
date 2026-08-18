@@ -33,7 +33,6 @@ impl Gateway {
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         config.validate()?;
 
-        let idle_timeout = config.timeouts.idle_timeout_secs;
         let log_file_size_mb = config.log_file_size_mb;
         let log_file_count = config.log_file_count;
         let vault_dir = config.vault_dir.clone();
@@ -61,8 +60,11 @@ impl Gateway {
         let mut gateway = Self {
             config,
             state,
+            // idle_timeout removed: the decision is now owned by the Runtime
+            // (see `acowork-runtime::agent::idle_watcher`). The
+            // `Timeouts::idle_timeout_secs` TOML key is retained for backward
+            // compatibility but ignored at the Gateway.
             lifecycle: LifecycleManager::new(
-                idle_timeout,
                 log_file_size_mb,
                 log_file_count,
                 lifecycle_mqtt_port,
@@ -586,19 +588,11 @@ impl Gateway {
             gw.config = Some(self.config.clone());
         }
 
-        // Spawn the idle timeout checker in a background task
-        let idle_timeout = self.config.timeouts.idle_timeout_secs;
-        let _idle_handle = tokio::spawn(async move {
-            if idle_timeout > 0 {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(idle_timeout.min(60)));
-                loop {
-                    interval.tick().await;
-                    // Phase 2: check idle timeouts and stop idle agents
-                    tracing::trace!("Idle timeout check (configured: {}s)", idle_timeout);
-                }
-            }
-        });
+        // Idle-timeout decision is owned by the Runtime now (see
+        // `acowork-runtime::agent::idle_watcher`); the Gateway only
+        // observes the `sleeping` retained status that the Runtime
+        // publishes and stamps `AgentInfo.sleeping_at` for the
+        // /api/agents listing. No background checker is spawned here.
 
         tracing::info!("Gateway entering gRPC event loop (async multi-connection)");
 

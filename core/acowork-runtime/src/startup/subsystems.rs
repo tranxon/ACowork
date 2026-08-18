@@ -83,7 +83,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
             debug_port = debug_port,
             "DevMode enabled at startup — starting Debug Protocol server"
         );
-        session_ctx.session_manager.enable_debug_mode(debug_port).await;
+        session_ctx.session_manager.lock().await.enable_debug_mode(debug_port).await;
     }
 
     // ADR-040: gRPC hello_config MCP catalog sync removed.

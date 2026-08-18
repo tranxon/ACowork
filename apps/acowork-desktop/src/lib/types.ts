@@ -69,6 +69,15 @@ export interface AgentInfo {
    * for tooltips and future "last active" UI affordances.
    */
   last_interaction_at?: string | null;
+  /**
+   * RFC3339 timestamp the Runtime published the `sleeping` retained
+   * status — i.e. when the auto-sleep watcher exited the process.
+   * `null`/`undefined` for agents that are not currently sleeping.
+   * Lets the UI render an "auto-slept at HH:MM" badge distinct from
+   * "manually stopped" / "crashed" (both of which surface as
+   * running=false, connected=false).
+   */
+  sleeping_at?: string | null;
 }
 
 /** Agent detail response */

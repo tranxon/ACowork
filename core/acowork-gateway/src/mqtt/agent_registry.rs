@@ -11,15 +11,32 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
-/// Online status of an agent, derived from MQTT retained status messages.
+/// Lifecycle state of an agent, derived from MQTT retained status messages.
+///
+/// `online=true` covers both `online` and `sleeping` payloads — both mean
+/// the Runtime is reachable, but only `sleeping` records a timestamp the
+/// Desktop can use to render an "auto-slept at HH:MM" badge distinct from
+/// a manual stop (which leaves `online=false`).
 #[derive(Debug, Clone)]
 pub struct AgentOnlineState {
-    /// Whether the agent is currently online.
+    /// Whether the agent is currently reachable (online OR sleeping).
     pub online: bool,
-    /// When this status was last updated (local wall clock).
+    /// Whether the agent auto-slept (vs manually stopped / crashed).
+    /// Stamped from the moment the Runtime published the `sleeping`
+    /// retained message. `None` means "not sleeping" (either online,
+    /// offline, or never seen a sleeping message).
+    pub sleeping: bool,
+    /// Wall-clock instant when the registry last observed a status update.
     pub last_updated: Instant,
+    /// Wall-clock timestamp (UTC) the agent self-reported as going to
+    /// sleep. Captured from the local clock the moment the `sleeping`
+    /// payload was received. Persisted alongside `online`/`sleeping` so
+    /// the Desktop can show "Last active at HH:MM" without keeping its
+    /// own clock.
+    pub sleeping_at: Option<DateTime<Utc>>,
     /// The agent_id extracted from the topic.
     pub agent_id: String,
 }
@@ -43,7 +60,13 @@ impl AgentRegistry {
     /// Update an agent's status from an MQTT message.
     ///
     /// `topic` should match `acowork/agents/{agent_id}/status`.
-    /// `payload` should be "online" or "offline" (UTF-8 text).
+    /// `payload` should be one of "online", "sleeping", "offline" (UTF-8 text).
+    ///
+    /// `sleeping` is the Runtime's auto-sleep signal — see
+    /// `acowork-runtime::agent::idle_watcher`. We treat it as `online=true`
+    /// (the process is reachable; only the user-facing session has been
+    /// suspended) but also stamp `sleeping_at` so the Desktop can render
+    /// the auto-slept badge.
     pub fn update_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
         // Parse agent_id from topic: acowork/agents/{agent_id}/status
         let parts: Vec<&str> = topic.split('/').collect();
@@ -65,18 +88,40 @@ impl AgentRegistry {
                 ""
             }
         };
-        let online = payload_str.trim() == "online";
+        let state = payload_str.trim();
+        let online = matches!(state, "online" | "sleeping");
+        let now = Instant::now();
+        let sleeping_at_now = Utc::now();
+
+        // Preserve `sleeping_at` across the online→sleeping transition;
+        // clear it on any non-sleeping status so the badge resets.
+        let previous_sleeping_at = self
+            .agents
+            .get(&agent_id)
+            .and_then(|s| s.sleeping_at);
+        let sleeping_at = if state == "sleeping" {
+            Some(previous_sleeping_at.unwrap_or(sleeping_at_now))
+        } else {
+            None
+        };
 
         self.agents.insert(
             agent_id.clone(),
             AgentOnlineState {
                 online,
-                last_updated: Instant::now(),
+                sleeping: state == "sleeping",
+                last_updated: now,
+                sleeping_at,
                 agent_id,
             },
         );
 
-        tracing::debug!(agent_id = %parts[2], online, "Agent registry updated from MQTT");
+        tracing::debug!(
+            agent_id = %parts[2],
+            state = %state,
+            online,
+            "Agent registry updated from MQTT"
+        );
     }
 
     /// Check if an agent is online.
@@ -85,6 +130,16 @@ impl AgentRegistry {
             .get(agent_id)
             .map(|s| s.online)
             .unwrap_or(false)
+    }
+
+    /// Get the `sleeping_at` UTC timestamp for an agent, if it is currently
+    /// in the `sleeping` state. Used by `/api/agents` to surface the
+    /// auto-sleep timestamp on the Desktop side without round-tripping to
+    /// the Runtime.
+    pub fn sleeping_at(&self, agent_id: &str) -> Option<DateTime<Utc>> {
+        self.agents
+            .get(agent_id)
+            .and_then(|s| if s.sleeping { s.sleeping_at } else { None })
     }
 
     /// Get all online agent IDs.
@@ -163,5 +218,59 @@ mod tests {
         assert_eq!(online.len(), 2);
         assert!(online.contains(&"a".to_string()));
         assert!(online.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_sleeping_payload_is_online_and_stamps_timestamp() {
+        let mut registry = AgentRegistry::new();
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"online");
+        let before_sleep = Utc::now();
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"sleeping");
+        let state = registry
+            .agents
+            .get("com.example")
+            .expect("agent must be tracked");
+        assert!(state.online, "sleeping must keep online=true");
+        assert!(state.sleeping, "sleeping must set sleeping=true");
+        let ts = state
+            .sleeping_at
+            .expect("sleeping_at must be stamped");
+        assert!(ts >= before_sleep, "sleeping_at must be >= test start");
+        assert!(
+            ts <= Utc::now() + chrono::Duration::seconds(1),
+            "sleeping_at must be near now"
+        );
+    }
+
+    #[test]
+    fn test_online_after_sleep_clears_sleeping_at() {
+        // After the agent wakes up (online), sleeping_at must clear so the
+        // Desktop doesn't keep showing the old badge.
+        let mut registry = AgentRegistry::new();
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"sleeping");
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"online");
+        let state = registry
+            .agents
+            .get("com.example")
+            .expect("agent must be tracked");
+        assert!(state.online);
+        assert!(!state.sleeping);
+        assert!(
+            state.sleeping_at.is_none(),
+            "sleeping_at must clear after waking"
+        );
+    }
+
+    #[test]
+    fn test_offline_after_sleep_preserves_sleeping_at_until_resurrected() {
+        // LWT replaces sleeping with offline after the broker observes the
+        // disconnect. We clear sleeping_at on offline too — once the
+        // process is gone, the "slept at" badge no longer makes sense.
+        let mut registry = AgentRegistry::new();
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"sleeping");
+        registry.update_from_mqtt("acowork/agents/com.example/status", b"offline");
+        let state = registry.agents.get("com.example").unwrap();
+        assert!(!state.online);
+        assert!(state.sleeping_at.is_none());
     }
 }

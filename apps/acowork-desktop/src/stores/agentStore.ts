@@ -41,6 +41,9 @@ export interface AgentProfileSettings {
   /** ADR-052: Whether context_retrieve + context_abandon tools are registered.
    *  Undefined = use default (true). Boot-only: takes effect on next session restore. */
   toolCompressionEnabled?: boolean;
+  /** Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
+   *  0 = never sleep. Undefined = use manifest default or system default (300). */
+  idleTimeoutSecs?: number;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -55,6 +58,7 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
   toolCompressionEnabled: undefined,
+  idleTimeoutSecs: undefined,
 };
 
 const STORAGE_KEY = "acowork-agent-profiles";
@@ -119,6 +123,11 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     toolCompressionEnabled:
       typeof s.toolCompressionEnabled === "boolean"
         ? s.toolCompressionEnabled
+        : undefined,
+    // idleTimeoutSecs: number >= 0 (0 = never sleep). Undefined = use manifest default.
+    idleTimeoutSecs:
+      typeof s.idleTimeoutSecs === "number" && s.idleTimeoutSecs >= 0
+        ? s.idleTimeoutSecs
         : undefined,
   };
 }

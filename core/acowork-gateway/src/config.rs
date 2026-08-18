@@ -595,7 +595,6 @@ mod tests {
         assert!(!config.vault_dir.is_empty());
         assert!(!config.packages_dir.is_empty());
         assert_eq!(config.log_level, "info");
-        assert_eq!(config.timeouts.idle_timeout_secs, 300);
         assert_eq!(config.max_iterations, 20);
         assert_eq!(config.timeouts.iteration_timeout_ms, 900_000);
         assert!(config.http.enabled);

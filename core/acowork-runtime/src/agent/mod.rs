@@ -6,6 +6,7 @@ pub mod budget_guard;
 pub mod context;
 pub mod context_compression;
 pub mod history;
+pub mod idle_watcher;
 pub mod inbound;
 pub mod loop_;
 pub mod loop_approval;

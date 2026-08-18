@@ -138,6 +138,14 @@ pub struct AgentListResponse {
     /// MQTT broker hasn't detected TCP drop yet).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mqtt_online: Option<bool>,
+    /// Wall-clock timestamp (RFC3339) the Runtime published the `sleeping`
+    /// retained status — i.e. when the auto-sleep watcher exited the process.
+    /// `None` for agents that are not currently sleeping. Lets the Desktop
+    /// distinguish "auto-slept at HH:MM" from "manually stopped" /
+    /// "crashed" — both of which would otherwise look identical (running=false,
+    /// mqtt_online=false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleeping_at: Option<String>,
 }
 
 /// Agent detail response
@@ -225,6 +233,21 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             } else {
                 None
             };
+            // Read `sleeping_at` from the registry so each agent gets its own
+            // timestamp. Use `try_read()` to avoid stalling the request if
+            // another task is holding the write lock; fall back to None on
+            // contention — the Desktop just retries on the next poll.
+            let sleeping_at = state
+                .agent_registry
+                .as_ref()
+                .and_then(|reg| {
+                    match reg.try_read() {
+                        Ok(guard) => guard.sleeping_at(&info.agent_id).map(|t| {
+                            t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        }),
+                        Err(_) => None,
+                    }
+                });
             AgentListResponse {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
@@ -240,6 +263,7 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
                 mqtt_online,
+                sleeping_at,
             }
         })
         .collect();
@@ -1404,13 +1428,14 @@ pub async fn start_agent(
         )));
     }
 
-    // Use the lifecycle manager to start the agent
-    let idle_timeout = 300; // Default idle timeout
+    // Use the lifecycle manager to start the agent.
+    // idle_timeout is owned by the Runtime — see
+    // `acowork-runtime::agent::idle_watcher` — so the Gateway no longer
+    // passes one here.
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        idle_timeout,
         log_file_size_mb,
         log_file_count,
         mqtt_port,
@@ -1469,9 +1494,7 @@ pub async fn stop_agent(
         )));
     }
 
-    let idle_timeout = 300;
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        idle_timeout,
         10,
         20,
         None,
@@ -1518,12 +1541,10 @@ pub async fn restart_agent_in_debug(
 
     // ADR-033: gRPC removed. Restart-in-debug requires a full stop+start cycle.
     // Stop the agent first, then restart with dev_mode=true.
-    let idle_timeout = 300;
     let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
     let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
     let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        idle_timeout,
         log_file_size_mb,
         log_file_count,
         mqtt_port,
@@ -1825,6 +1846,7 @@ mod tests {
             debug_port: None,
             last_interaction_at: None,
             mqtt_online: None,
+            sleeping_at: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("com.example.weather"));
@@ -1832,6 +1854,8 @@ mod tests {
         assert!(json.contains("icon-05"));
         // last_interaction_at is None and skipped on serialization.
         assert!(!json.contains("last_interaction_at"));
+        // sleeping_at is None and skipped on serialization.
+        assert!(!json.contains("sleeping_at"));
     }
 
     #[test]
@@ -1879,6 +1903,7 @@ mod tests {
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
             mqtt_online: None,
+            sleeping_at: None,
         }
     }
 

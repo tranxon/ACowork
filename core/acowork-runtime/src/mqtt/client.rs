@@ -974,6 +974,28 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
+    /// Gracefully disconnect from the MQTT broker.
+    ///
+    /// Sends a DISCONNECT packet and tears down the client. The caller
+    /// does **not** need to wait for the broker to acknowledge — the
+    /// reconnect path (`pub async fn connect`) handles reconnect on the
+    /// next `connect()` call.
+    ///
+    /// Used by the idle-watcher's auto-sleep path: after publishing
+    /// `"sleeping"` to the agent status retained topic, the watcher
+    /// invokes `disconnect()` so the broker kicks the Last-Will ("offline")
+    /// cleanly off the wire instead of leaving the previous Retained
+    /// payload in place. The watchdog timeout (`POLL_WATCHDOG_TIMEOUT`)
+    /// and the re-`connect` path are unaffected by this call.
+    pub async fn disconnect(&self) -> Result<(), RuntimeMqttClientError> {
+        let client = self.client().await;
+        client
+            .disconnect()
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("disconnect: {}", e)))?;
+        Ok(())
+    }
+
     /// Publish a raw payload to a topic (non-protobuf).
     pub async fn publish_raw(
         &self,

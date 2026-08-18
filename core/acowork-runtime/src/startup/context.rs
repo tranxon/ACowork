@@ -235,12 +235,23 @@ pub(crate) struct AgentBootContext {
 /// Contains session-specific resources needed by Phase C and D.
 pub(crate) struct SessionBootContext {
     // ADR-034 §8 Phase 6 cleanup: legacy standalone-mode gRPC path removed.
-    pub session_manager: crate::agent::session::SessionManager,
+    //
+    // Wrapped in `Arc<tokio::sync::Mutex<>>` so the IdleWatcher (a
+    // detached background task that polls session activity on every
+    // tick) can read the live state without competing for `&mut
+    // session_manager` against the rest of the runtime. Locks are
+    // short-lived (held only for the duration of `any_session_active`).
+    pub session_manager: Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     /// ADR-022: Shared committed-lines counter for the initial session.
     /// The writer thread increments this after each disk write.
     /// `AgentCore` adopts this Arc so `read_messages_since` sees the
     /// true on-disk line count.
     pub committed_lines: Arc<std::sync::atomic::AtomicUsize>,
+    /// Auto-sleep idle watcher handle, if the user's effective timeout
+    /// is non-zero. `None` means "never sleep" (the watcher was not
+    /// spawned). Phase D's `control_action_to_inbound` calls
+    /// `record_inbound()` on every user action via this handle.
+    pub idle_watcher: Option<crate::agent::idle_watcher::IdleWatcherHandle>,
 }
 
 /// Build a `SessionManagerConfig` from the boot context.

@@ -1591,6 +1591,7 @@ async fn put_agent_config(
         req.shell_approval_threshold,
         req.approval_timeout_secs,
         req.tool_compression_enabled,
+        req.idle_timeout_secs,
     );
     let svc = state
         .agent_config
@@ -1743,6 +1744,11 @@ struct UpdateAgentConfigRequest {
     /// Boot-only: takes effect on next session restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_compression_enabled: Option<serde_json::Value>,
+    /// Idle (auto-sleep) timeout in seconds before the Runtime
+    /// self-terminates. `0` = never sleep. `None` outer = leave the
+    /// on-disk value alone (partial PUT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idle_timeout_secs: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {

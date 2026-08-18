@@ -34,7 +34,11 @@ pub struct ConfigResponse {
     pub log_file_size_mb: u64,
     /// Maximum number of log files to keep (0 = unlimited, default 20)
     pub log_file_count: u64,
-    pub idle_timeout_secs: u64,
+    // idle_timeout_secs was removed: the decision is now owned by the
+    // Runtime (see `acowork-runtime::agent::idle_watcher`). The field is
+    // still accepted in the Gateway TOML for backward compatibility but
+    // is no longer exposed over HTTP. Per-agent idle timeout is configured
+    // via the Runtime's `PUT /api/agents/{id}/config` endpoint.
     pub dev_mode: bool,
     pub http: HttpConfigResponse,
     /// Default LLM provider (if configured)
@@ -71,9 +75,10 @@ pub struct UpdateConfigRequest {
     /// Maximum number of log files to keep (0 = unlimited)
     #[serde(default)]
     pub log_file_count: Option<u64>,
-    /// Idle timeout in seconds
-    #[serde(default)]
-    pub idle_timeout_secs: Option<u64>,
+    // `idle_timeout_secs` removed from the Gateway update payload:
+    // the per-agent decision is owned by the Runtime now. The
+    // Gateway-level field is no longer accepted here (use the
+    // per-agent Runtime config endpoint instead).
     /// Default LLM provider for all agents
     #[serde(default)]
     pub default_provider: Option<String>,
@@ -113,7 +118,6 @@ pub async fn get_config(
         packages_dir: config.packages_dir.clone(),
         data_dir: config.data_dir.clone(),
         log_level: config.log_level.clone(),
-        idle_timeout_secs: config.timeouts.idle_timeout_secs,
         dev_mode: config.dev_mode,
         http: HttpConfigResponse {
             enabled: config.http.enabled,
@@ -149,12 +153,10 @@ pub async fn update_config(
         }
         updates.push(format!("log_level={}", level));
     }
-    if let Some(timeout) = body.idle_timeout_secs {
-        if timeout == 0 {
-            return Err(ApiError::bad_request("idle_timeout_secs must be > 0"));
-        }
-        updates.push(format!("idle_timeout_secs={}", timeout));
-    }
+    // `idle_timeout_secs` removed: per-agent decision is owned by the
+    // Runtime now. The struct field is kept on the wire (#[serde(default)])
+    // so legacy clients that still send it don't get a 400 — but the
+    // Gateway silently drops the value.
     if let Some(ref provider) = body.default_provider {
         updates.push(format!("default_provider={}", provider));
     }
@@ -189,9 +191,9 @@ pub async fn update_config(
         if let Some(level) = &body.log_level {
             config.log_level = level.clone();
         }
-        if let Some(timeout) = body.idle_timeout_secs {
-            config.timeouts.idle_timeout_secs = timeout;
-        }
+        // `body.idle_timeout_secs` removed — see struct definition. The
+        // Gateway no longer writes this field; the Runtime owns the
+        // per-agent value via its own config endpoint.
         // Update default_provider: Some("name") sets it, Some("") clears it
         if let Some(ref provider) = body.default_provider {
             if provider.is_empty() {
@@ -331,17 +333,20 @@ mod tests {
         let json = r#"{"log_level": "debug"}"#;
         let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.log_level, Some("debug".to_string()));
-        assert!(req.idle_timeout_secs.is_none());
         assert!(req.default_provider.is_none());
         assert!(req.default_model.is_none());
     }
 
     #[test]
-    fn test_update_config_request_both_fields() {
+    fn test_update_config_request_ignores_legacy_idle_timeout_secs() {
+        // Legacy clients still send `idle_timeout_secs` (it lived on the
+        // Gateway before the Runtime took ownership). The struct no longer
+        // has the field, so the deserializer must accept the key without
+        // failing — `#[serde(default)]` on every present field guarantees
+        // this; we only assert deserialization still works.
         let json = r#"{"log_level": "warn", "idle_timeout_secs": 600}"#;
         let req: UpdateConfigRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.log_level, Some("warn".to_string()));
-        assert_eq!(req.idle_timeout_secs, Some(600));
     }
 
     #[test]
@@ -358,7 +363,6 @@ mod tests {
             packages_dir: "/tmp/packages".to_string(),
             data_dir: "/tmp/data".to_string(),
             log_level: "info".to_string(),
-            idle_timeout_secs: 300,
             dev_mode: false,
             http: HttpConfigResponse {
                 enabled: true,
