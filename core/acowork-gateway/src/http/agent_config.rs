@@ -120,7 +120,11 @@ pub struct UpdateAgentConfigRequest {
     /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
     /// JSON `null` / field absent -> "don't change" (partial-PUT semantics).
     /// JSON `true` or `false` -> explicit value, persisted verbatim.
-    /// Boot-only: changes take effect at the next session restore.
+    /// Hot-reloadable: the Runtime pushes the change to the SessionManager
+    /// via `apply_runtime_config_override`, which updates the shared
+    /// `AgentCore` template (future sessions inherit it), the
+    /// `runtime_overrides` cache, and every active SessionTask's
+    /// `ContextBuilder.tool_definitions` in one shot (ADR-052 §3.5).
     #[serde(default)]
     pub tool_compression_enabled: Option<bool>,
 }

@@ -158,13 +158,16 @@ pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttC
 struct HttpState {
     work_dir: PathBuf,
     agent_id: String,
-    /// Shared map of per-session runtime snapshots, keyed by session_id.
-    /// Each value is the same `Arc<RwLock<SessionRuntimeSnapshot>>` held
-    /// by `SessionHandle`, so reads are always up-to-date.
-    ///
-    /// ADR-039: persisted fields (model, provider, workspace_id, etc.) are
-    /// not duplicated here — see `data/meta/{session_id}.json` and the
-    /// `session_meta` MQTT channel.
+    /// Retained on the state for parity with the startup wiring
+    /// (`SessionManager.config.session_snapshots`); the HTTP layer no
+    /// longer enumerates active sessions directly (the ADR-052 hot-reload
+    /// path pushes a single system-level message and lets
+    /// `dispatch_inbound` -> `SessionManager::{apply_runtime_config_override,
+    /// apply_builtin_tools_enabled}` walk `SessionManager.sessions`
+    /// itself). Suppresses `unused` because removing it would touch ~10
+    /// `RuntimeHttpServer::start` test call sites for no functional
+    /// gain.
+    #[allow(dead_code)]
     session_snapshots: SharedSessionSnapshots,
     /// Shared latest session info, updated by SessionManager on every
     /// session creation and startup scan.  Read by `get_latest_session`.
@@ -1611,12 +1614,18 @@ async fn put_agent_config(
     })?;
 
     // 2. Live-broadcast the live-editable subset (temperature,
-    //    context_window, max_iterations, …) to active sessions via
-    //    the existing dispatch channel. Best-effort: a missing
-    //    dispatch_tx (agent not yet ready) means "live-effective"
-    //    doesn't apply yet, but the on-disk file is still
-    //    authoritative. See the long-form comment block on the
-    //    pre-ADR-040 inline implementation for the full rationale.
+    //    context_window, max_iterations, tool_compression_enabled, …)
+    //    through `SessionManager::apply_runtime_config_override` via a
+    //    SINGLE system-level message. That pipeline applies the change
+    //    to (a) the shared AgentCore template so future sessions
+    //    inherit it, (b) the `runtime_overrides` cache, (c) every
+    //    active SessionTask's `ContextBuilder.tool_definitions` (so
+    //    the LLM sees the new set on the next `build_chat_request`),
+    //    and (d) mid-execution AgentLoops via the inbound fast
+    //    channel. The pre-ADR-052 implementation fanned out one
+    //    per-session message into the AgentLoop fast channel only,
+    //    which left the LLM-visible `ContextBuilder.tool_definitions`
+    //    stale - the "hot reload does nothing" symptom.
     broadcast_runtime_overrides(&state, &result.overrides).await;
 
     // 3. Re-PUBLISH retained config so any other Desktop subscriber
@@ -1781,117 +1790,107 @@ impl UpdateAgentConfigRequest {
 /// `drain_inbound_queue` → `apply_user_op` → `apply_runtime_config`,
 /// so the next LLM iteration picks up the new temperature /
 /// context_window / etc. without restarting the session.
-async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfigOverrides) {
-    if overrides.is_empty() {
-        // No live-editable fields were pushed. Skip the broadcast entirely
-        // so we don't broadcast a no-op UpdateRuntimeConfig that would
-        // still trigger `emit_session_state` on every active session.
-        return;
-    }
-
-    // Enumerate active session IDs. `session_snapshots` is the same
-    // authoritative map that `SessionManager` owns; cloning is cheap
-    // because each value is `Arc<RwLock<...>>`.
-    let session_ids: Vec<String> = state
-        .session_snapshots
-        .read()
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-
-    if session_ids.is_empty() {
-        // No live sessions to push to — the on-disk save above is still
-        // authoritative and will be re-loaded on the next session.
-        return;
-    }
-
-    // Snapshot dispatch_tx once. The slot itself is locked briefly to
-    // clone the inner sender; clones of `UnboundedSender` are cheap.
+/// Dispatch an agent-level config mutation through the Runtime's
+/// single application pipeline via ONE system-level message.
+///
+/// The message travels `dispatch_tx` → `mqtt_dispatch_rx` →
+/// `gateway_loop::dispatch_inbound`, which routes both agent-level
+/// config variants (`UserOp::UpdateRuntimeConfig`,
+/// `InboundMessage::UpdateBuiltinTools`) through the corresponding
+/// `SessionManager::{apply_runtime_config_override,
+/// apply_builtin_tools_enabled}` regardless of the routing key. Those
+/// two methods are the ONLY entry points that update, in one shot:
+///   1. the shared `AgentCore` **template** (so sessions opened LATER
+///      inherit the new value),
+///   2. the `runtime_overrides` / builtin-enable caches,
+///   3. every active SessionTask's `ContextBuilder.tool_definitions`
+///      (so the LLM sees the new set on the next
+///      `build_chat_request`), and
+///   4. mid-execution AgentLoops via the inbound fast channel
+///      (`apply_user_op` → `core.apply_runtime_config` →
+///      `sync_platform_tools_to_registry` for the compression case).
+///
+/// Pre-ADR-052 the HTTP layer sent one message **per session id** into
+/// the AgentLoop fast channel only. That mutated the live session's
+/// `all_tools` dispatch list but left every other layer (template,
+/// runtime_overrides cache, other sessions' `ContextBuilder`) stale -
+/// which is precisely the "hot reload does nothing" symptom this
+/// function is the fix for.
+///
+/// Routing key `""` marks the message system-level so dispatch_inbound
+/// applies it through the SessionManager pipeline above. Sending
+/// exactly ONE message (instead of fanning out per session) keeps the
+/// pipeline idempotent regardless of how many sessions happen to be
+/// alive at push time.
+///
+/// Best-effort on the dispatch channel itself: a missing `dispatch_tx`
+/// (agent not yet ready, Phase A pre-Phase D startup race) logs a
+/// warning and returns. The on-disk file written by the UseCase layer
+/// remains authoritative and is re-read at the next boot.
+async fn dispatch_agent_level_config(
+    state: &HttpState,
+    label: &str,
+    msg: InboundMessage,
+) {
     let tx_opt = state.dispatch_tx.lock().await.clone();
     let Some(tx) = tx_opt else {
-        // Agent not yet ready (Phase A pre-Phase D). Same fallback as
-        // empty session_ids above — file is authoritative.
+        tracing::warn!(
+            agent_id = %state.agent_id,
+            label,
+            "agent-level config dispatch skipped: dispatch channel not ready (on-disk file is authoritative)"
+        );
         return;
     };
-
-    let user_op = UserOp::UpdateRuntimeConfig(overrides.clone());
-    let mut sent = 0usize;
-    let mut skipped = 0usize;
-    for sid in session_ids {
-        let msg = InboundMessage::UserOperation(user_op.clone());
-        match tx.send((sid.clone(), msg)) {
-            Ok(()) => sent += 1,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %e,
-                    "broadcast_runtime_overrides: dispatch_tx send failed (session likely closed)"
-                );
-                skipped += 1;
-            }
-        }
+    match tx.send((String::new(), msg)) {
+        Ok(()) => tracing::info!(
+            agent_id = %state.agent_id,
+            label,
+            "agent-level config update dispatched to SessionManager pipeline (system-level)"
+        ),
+        Err(_) => tracing::warn!(
+            agent_id = %state.agent_id,
+            label,
+            "agent-level config dispatch failed: dispatch channel closed (on-disk file is authoritative)"
+        ),
     }
-    tracing::info!(
-        agent_id = %state.agent_id,
-        sent,
-        skipped,
-        "PUT /agents/{{id}}/config: live-broadcast RuntimeConfigOverrides dispatched"
-    );
 }
 
-/// Broadcast builtin-tool enabled flags to all active sessions after the
-/// `PUT /agents/{id}/builtin-tools` handler persists `agent_tools.json`.
+/// Push a runtime-config override into the SessionManager via
+/// [`dispatch_agent_level_config`].
 ///
-/// Without this, the `tool_definitions` in each session's `ContextBuilder`
-/// go stale — the LLM still sees tools that were disabled at runtime, and
-/// cannot see tools that were enabled.
+/// Early-exits when `overrides` is empty so we don't dispatch a no-op
+/// `UpdateRuntimeConfig` that would still trigger
+/// `emit_session_state` on every active session for nothing.
+async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfigOverrides) {
+    if overrides.is_empty() {
+        return;
+    }
+    dispatch_agent_level_config(
+        state,
+        "runtime_config",
+        InboundMessage::UserOperation(UserOp::UpdateRuntimeConfig(overrides.clone())),
+    )
+    .await;
+}
+
+/// Push a builtin-tools enabled update into the SessionManager via
+/// [`dispatch_agent_level_config`].
 ///
-/// Uses the same `dispatch_tx` → `mqtt_dispatch_rx` → `dispatch_inbound`
-/// path as `broadcast_runtime_overrides`.  `dispatch_inbound` converts
-/// `InboundMessage::UpdateBuiltinTools` into `SessionMessage::UpdateBuiltinTools`
-/// and sends it to the session's inbox channel.
+/// Always sends (even with zero active sessions) so the
+/// `AgentCore` template gets the new flags and sessions opened later
+/// inherit them.
 async fn broadcast_builtin_tools_update(
     state: &HttpState,
     entries: &[crate::agent_config::AgentToolEntry],
 ) {
-    let session_ids: Vec<String> = state
-        .session_snapshots
-        .read()
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-
-    if session_ids.is_empty() {
-        return;
-    }
-
-    let tx_opt = state.dispatch_tx.lock().await.clone();
-    let Some(tx) = tx_opt else {
-        return;
-    };
-
-    let msg = InboundMessage::UpdateBuiltinTools {
-        entries: entries.to_vec(),
-    };
-    let mut sent = 0usize;
-    let mut skipped = 0usize;
-    for sid in session_ids {
-        match tx.send((sid.clone(), msg.clone())) {
-            Ok(()) => sent += 1,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %sid,
-                    error = %e,
-                    "broadcast_builtin_tools_update: dispatch_tx send failed (session likely closed)"
-                );
-                skipped += 1;
-            }
-        }
-    }
-    tracing::info!(
-        agent_id = %state.agent_id,
-        sent,
-        skipped,
-        "PUT /agents/{{id}}/builtin-tools: live-broadcast UpdateBuiltinTools dispatched"
-    );
+    dispatch_agent_level_config(
+        state,
+        "builtin_tools",
+        InboundMessage::UpdateBuiltinTools {
+            entries: entries.to_vec(),
+        },
+    )
+    .await;
 }
 
 /// `GET /agents/{id}/tools` — Tools panel (merged: builtin + mcp + search).
@@ -2308,10 +2307,11 @@ async fn put_agent_builtin_tools(
     };
     match svc.put_builtin_tools(&id, body).await {
         Ok(resp) => {
-            // ADR-029 fix: broadcast the updated tool flags to all active
-            // sessions so the LLM's `tool_definitions` stay in sync.
-            // Without this, toggling a tool in the UI panel would persist
-            // to `agent_tools.json` but never reach the `ContextBuilder`.
+            // ADR-029/ADR-052: broadcast the new enabled flags to all
+            // sessions AND sync the shared AgentCore template so
+            // sessions created after this PUT inherit the new flags -
+            // see [`broadcast_builtin_tools_update`] doc and
+            // `SessionManager::apply_builtin_tools_enabled`.
             broadcast_builtin_tools_update(&state, &resp.tools).await;
             Ok(Json(serde_json::json!({
                 "agent_id": resp.agent_id,

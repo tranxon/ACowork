@@ -62,9 +62,22 @@ pub enum UserOp {
     /// (race vs. tool natural completion).
     CancelTool { tool_call_id: String },
     /// Apply runtime configuration changes immediately.
-    /// These are also persisted via the SessionTask channel
-    /// (`SessionMessage::UpdateRuntimeConfig`) for tool definitions
-    /// and other session-level updates.
+    ///
+    /// Agent-scoped (not session-scoped):
+    /// `gateway_loop::dispatch_inbound` routes this variant at BOTH
+    /// routing levels (system-level `""` and per-session) through
+    /// `SessionManager::apply_runtime_config_override`, which updates
+    /// (1) the shared `AgentCore` template - so sessions created LATER
+    /// inherit the new values, (2) the `runtime_overrides` cache - so
+    /// every newly spawned `SessionTask::new` re-applies them on its
+    /// per-session `core_mut`, (3) every active SessionTask's
+    /// `ContextBuilder` (via the `SessionMessage::UpdateRuntimeConfig`
+    /// broadcast - the LLM sees the new tool_definitions on the next
+    /// `build_chat_request`), and (4) mid-execution AgentLoops via the
+    /// inbound fast channel (`AgentLoop::apply_runtime_config` ->
+    /// `core.apply_runtime_config` ->
+    /// `sync_platform_tools_to_registry` for the
+    /// `tool_compression_enabled` flip). ADR-052 §3.5.
     UpdateRuntimeConfig(RuntimeConfigOverrides),
 }
 
@@ -185,12 +198,18 @@ pub enum InboundMessage {
     },
     /// ADR-034 Phase 7: Per-session compact context.
     CompactContextAction,
-    /// ADR-029 fix: broadcast builtin-tool enabled flags to all sessions.
-    /// The HTTP handler `put_agent_builtin_tools` persists to
-    /// `agent_tools.json` but must also push the update to active sessions
-    /// so the LLM's `tool_definitions` stay in sync.  `dispatch_inbound`
-    /// routes this to `SessionManager::send_to_session` as
-    /// `SessionMessage::UpdateBuiltinTools`.
+    /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
+    ///
+    /// `gateway_loop::dispatch_inbound` routes this variant at BOTH
+    /// routing levels (system-level `""` and per-session) through
+    /// `SessionManager::apply_builtin_tools_enabled`, which updates
+    /// (1) the shared `AgentCore` template - so sessions opened LATER
+    /// inherit the new enabled flags via the same shared policy helper
+    /// (`AgentCore::apply_builtin_enabled_entries`), (2) every active
+    /// session's `builtin_tools` enabled flags (via the
+    /// `SessionMessage::UpdateBuiltinTools` broadcast - which in turn
+    /// triggers the dispatch-list + LLM `tool_definitions` atomic
+    /// rebuild in `session_task::apply_builtin_tools_update`).
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },

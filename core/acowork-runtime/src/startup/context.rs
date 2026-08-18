@@ -80,8 +80,6 @@ pub(crate) struct AgentBootContext {
     /// [`crate::agent::AgentCore::builtin_tools`] via
     /// [`crate::agent::AgentCore::new`].
     pub active_tools: Vec<crate::agent::agent_core::BuiltinToolEntry>,
-    /// Flattened tool spec JSON objects for the LLM (enabled builtin only).
-    pub tool_definitions: Vec<serde_json::Value>,
     /// Full builtin specs including disabled ones (keyed by name),
     /// used by `/api/agents/{id}/builtin-tools` GET responses.
     pub full_tool_specs: Vec<(String, serde_json::Value)>,
@@ -225,11 +223,11 @@ pub(crate) struct AgentBootContext {
     /// ADR-052: Shared abandon queue for context_abandon tool.
     /// Created in Phase A, passed to the tool and injected into AgentCore
     /// in Phase B. The AgentLoop drains this queue each iteration.
-    pub abandon_queue: crate::tools::builtin::context_abandon::AbandonQueue,
+    pub abandon_queue: crate::agent::context_compression::AbandonQueue,
 
     /// ADR-052: Shared retrieve queue for context_retrieve tool.
     /// Same lifecycle as [`Self::abandon_queue`].
-    pub retrieve_queue: crate::tools::builtin::context_retrieve::RetrieveQueue,
+    pub retrieve_queue: crate::agent::context_compression::RetrieveQueue,
 }
 
 /// Context produced by Phase B (per-session initialization).
@@ -259,7 +257,6 @@ pub(crate) fn build_session_manager_config(
         per_session_budget: ctx.budget.clone(),
         history_max_tokens: config.history_max_tokens,
         chunk_tx: ctx.chunk_tx.clone(),
-        tool_definitions: ctx.tool_definitions.clone(),
         full_tool_specs: ctx.full_tool_specs.clone(),
         identity_context: ctx.identity_context.clone(),
         protocol_type: ctx.protocol_type.clone(),

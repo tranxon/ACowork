@@ -189,9 +189,15 @@ pub struct AgentConfig {
     /// LLM can autonomously compress and retrieve tool results. When `false`,
     /// neither tool is registered and the LLM cannot compress.
     ///
-    /// Boot-only: consumed at session creation time when building the
-    /// builtin tool list. Changes take effect on the next session restore
-    /// or process restart.
+    /// Hot-reloadable: a `RuntimeConfigUpdate.tool_compression_enabled`
+    /// push from Gateway flows through
+    /// `SessionManager::apply_runtime_config_override` -> the shared
+    /// `AgentCore` template (so future sessions inherit it) and every
+    /// active SessionTask's `ContextBuilder.tool_definitions` (so the LLM
+    /// sees the new set on the next `build_chat_request`). The boot-time
+    /// path remains as a fallback: `session_init.rs` re-reads this file
+    /// once on startup and seeds the SessionManager override cache before
+    /// the first session is created. ADR-052 §3.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_compression_enabled: Option<bool>,
 }
@@ -325,7 +331,7 @@ pub struct AgentToolsConfig {
 /// boundary — see [`merge_tools_config`], [`init_tools_config_from_manifest`],
 /// and [`apply_builtin_tools_patch`]. This keeps the persistence file
 /// and the per-agent activation toggle UX completely orthogonal to the
-/// boot-only compression switch.
+/// hot-reloadable compression switch (ADR-052 §3.5).
 ///
 /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,10 +550,11 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 /// - Platform-protected tools (see
 ///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are
 ///   **always filtered out of the output**. They live in the in-memory
-///   registry only, gated by the boot-only `tool_compression_enabled`
-///   flag (ADR-052); persisting them would create exactly the
-///   "user-editable Switch that the server silently ignores" UX bug
-///   the platform-protected mechanism exists to prevent.
+///   registry only, gated by the hot-reloadable
+///   `tool_compression_enabled` flag (ADR-052 §3.5); persisting them
+///   would create exactly the "user-editable Switch that the server
+///   silently ignores" UX bug the platform-protected mechanism exists
+///   to prevent.
 pub fn merge_tools_config(
     code_tool_names: &[String],          // from `all_builtin_tools()` registry
     persisted: &[AgentToolEntry],        // from agent_tools.json
@@ -634,10 +641,11 @@ pub fn apply_builtin_tools_patch(
 ///
 /// Platform-protected tools (see
 /// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are gated by
-/// the boot-only `tool_compression_enabled` flag and never appear in
-/// `agent_tools.json`. Every persistence path filters them out at the
-/// boundary so they cannot leak into the file via any write path
-/// (PUT /builtin-tools, MQTT RuntimeConfigUpdate, manifest seed, etc.).
+/// the hot-reloadable `tool_compression_enabled` flag (ADR-052 §3.5)
+/// and never appear in `agent_tools.json`. Every persistence path
+/// filters them out at the boundary so they cannot leak into the file
+/// via any write path (PUT /builtin-tools, MQTT RuntimeConfigUpdate,
+/// manifest seed, etc.).
 fn is_platform_protected(name: &str) -> bool {
     crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&name)
 }
@@ -1523,9 +1531,9 @@ mod tests {
     // Pin the semantics that platform-protected tools
     // (`context_retrieve`, `context_abandon`) are entirely excluded
     // from `agent_tools.json`. They live only in the in-memory registry,
-    // gated by the boot-only `tool_compression_enabled` flag. Any change
-    // that lets them into the file is by definition a regression of
-    // the 3-layer enable-state architecture.
+    // gated by the hot-reloadable `tool_compression_enabled` flag
+    // (ADR-052 §3.5). Any change that lets them into the file is by
+    // definition a regression of the 3-layer enable-state architecture.
 
     #[test]
     fn merge_tools_config_filters_platform_tools_out_of_output() {

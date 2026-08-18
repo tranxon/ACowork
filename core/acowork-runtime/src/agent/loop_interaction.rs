@@ -5,7 +5,8 @@
 //! dispatch flow and involve user interaction sub-protocols:
 //! - `handle_ask_user_question`: validates params, emits AskQuestion event,
 //!   transitions to WaitingApproval, blocks until user answers
-//! - `handle_todo_write`: updates session todo list and injects into context
+//! - `handle_todo_write`: updates the session todo list (the next
+//!   `build_chat_request` picks it up from SessionState)
 //!
 //! These methods are independent of the main loop orchestration — they are
 //! called from the tool dispatch step in execute_single_iteration when a
@@ -13,7 +14,6 @@
 
 use acowork_core::providers::traits::ToolCall;
 
-use crate::agent::context::ContextBuilder;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session_state::SessionStatus;
 use crate::tools::builtin::ask_user_question::AskUserQuestionTool;
@@ -107,15 +107,18 @@ impl AgentLoop {
         answer
     }
 
-    /// Handle a `todo_write` tool call by updating SessionState.todos and
-    /// injecting the updated list into the ContextBuilder for the next build().
+    /// Handle a `todo_write` tool call by updating SessionState.todos.
+    ///
+    /// The updated list reaches the system prompt through
+    /// `build_chat_request()`, which unconditionally injects
+    /// `session.format_todos()` into the ContextBuilder before every LLM
+    /// call - no eager write is needed here.
     ///
     /// This is synchronous (no I/O or user interaction) since todos are
     /// pure in-memory state on SessionState.
     pub(crate) fn handle_todo_write(
         &mut self,
         tc: &ToolCall,
-        context_builder: &mut ContextBuilder,
     ) -> String {
         use crate::agent::session_state::TodoItem;
 
@@ -171,9 +174,6 @@ impl AgentLoop {
 
         // Update the session todos
         self.session.update_todos(items, merge);
-
-        // Inject the updated list into context builder for the next build()
-        context_builder.set_todo_context(self.session.format_todos());
 
         // Emit TodoListUpdated event to frontend for UI rendering
         let _ = self.session_core.try_send_chunk(ChunkEvent::TodoListUpdated {

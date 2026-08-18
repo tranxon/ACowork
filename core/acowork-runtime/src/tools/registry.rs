@@ -17,8 +17,8 @@ use crate::tools::workspace_resolver::WorkspaceResolver;
 /// Names whose `enabled` flag is platform-managed — these tools
 /// never enter the per-agent activation toggle UX or the persisted
 /// `agent_tools.json` file. They live entirely in the in-memory
-/// `ToolRegistry` (gated by the boot-only `tool_compression_enabled`
-/// flag, ADR-052).
+/// `ToolRegistry` (gated by the hot-reloadable `tool_compression_enabled`
+/// flag, ADR-052 §3.5).
 ///
 /// **Single source of truth for the persistence-layer filter.** Every
 /// write path that touches `agent_tools.json` MUST consult this list
@@ -45,11 +45,12 @@ impl BuiltinToolEntry {
     /// layer ([`crate::agent_config::merge_tools_config`] and friends)
     /// strips them from `enabled_entries`, they ARE registered in the
     /// in-memory registry (by [`crate::tools::builtin::all_builtin_tools`],
-    /// gated by the boot-only `tool_compression_enabled` flag) and
-    /// MUST reach the LLM when registered. Without this force-enable,
-    /// the registry layer's default `user_persisted_enabled = false`
-    /// would hide them from `tool_specs` (which filters on `enabled`),
-    /// defeating the whole point of `tool_compression_enabled`.
+    /// gated by the hot-reloadable `tool_compression_enabled` flag,
+    /// ADR-052 §3.5) and MUST reach the LLM when registered. Without
+    /// this force-enable, the registry layer's default
+    /// `user_persisted_enabled = false` would hide them from
+    /// `tool_specs` (which filters on `enabled`), defeating the whole
+    /// point of `tool_compression_enabled`.
     ///
     /// **Non-platform tools** follow the user's persisted preference
     /// verbatim — there's no second override at this layer.
@@ -327,17 +328,17 @@ mod tests {
     //
     // Platform-protected tools (`context_retrieve`, `context_abandon`)
     // are never persisted to `agent_tools.json` — they are registered
-    // by `all_builtin_tools()` (gated by the boot-only
-    // `tool_compression_enabled` flag) and reach the LLM through the
-    // registry. The persistence-layer filter (`merge_tools_config`,
-    // `init_tools_config_from_manifest`, `apply_builtin_tools_patch`,
-    // `all_enabled_tools_config`) keeps them out of `enabled_entries`,
-    // but the registry still needs to surface them as `enabled=true`
-    // so the LLM-visible `tool_specs` list picks them up. That is what
-    // `with_resolved_enabled` does: for platform tools it ignores
-    // `user_persisted_enabled` and force-enables, so the absence of an
-    // entry in `enabled_entries` doesn't accidentally hide the tool
-    // from the LLM.
+    // by `all_builtin_tools()` (gated by the hot-reloadable
+    // `tool_compression_enabled` flag, ADR-052 §3.5) and reach the LLM
+    // through the registry. The persistence-layer filter
+    // (`merge_tools_config`, `init_tools_config_from_manifest`,
+    // `apply_builtin_tools_patch`, `all_enabled_tools_config`) keeps
+    // them out of `enabled_entries`, but the registry still needs to
+    // surface them as `enabled=true` so the LLM-visible `tool_specs`
+    // list picks them up. That is what `with_resolved_enabled` does:
+    // for platform tools it ignores `user_persisted_enabled` and
+    // force-enables, so the absence of an entry in `enabled_entries`
+    // doesn't accidentally hide the tool from the LLM.
 
     use crate::agent_config::AgentToolEntry;
     use crate::agent::agent_core::BuiltinToolEntry;

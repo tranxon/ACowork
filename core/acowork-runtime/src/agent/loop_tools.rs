@@ -20,7 +20,6 @@ use acowork_core::tools::traits::Tool;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
-use crate::agent::context::ContextBuilder;
 use crate::agent::loop_detector::{LoopDetectionResult, LoopPattern, ResponseLevel};
 use crate::agent::session_state::SessionStatus;
 use crate::error::{Result, RuntimeError};
@@ -978,7 +977,6 @@ impl AgentLoop {
         calls_to_execute: Vec<ToolCall>,
         deduped_calls: &[ToolCall],
         blocked_info: &[(usize, LoopPattern)],
-        context_builder: &mut ContextBuilder,
     ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
         // ADR-049: Transition from `LlmStreaming` to `ToolExecuting` at the
         // entry of tool dispatch. The frontend then shows the "running tool"
@@ -998,7 +996,7 @@ impl AgentLoop {
                 let result = self.handle_ask_user_question(&tc).await;
                 ask_question_results.push((idx, (result, false)));
             } else if tc.function.name == "todo_write" {
-                let result = self.handle_todo_write(&tc, context_builder);
+                let result = self.handle_todo_write(&tc);
                 todo_write_results.push((idx, (result, false)));
             } else {
                 parallel_calls.push((idx, tc));
@@ -1224,8 +1222,9 @@ fn looks_like_tool_error(result_content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::builtin::context_abandon::{AbandonQueue, ContextAbandonTool};
-    use crate::tools::builtin::context_retrieve::{ContextRetrieveTool, RetrieveQueue};
+    use crate::agent::context_compression::{AbandonQueue, RetrieveQueue};
+    use crate::tools::builtin::context_abandon::ContextAbandonTool;
+    use crate::tools::builtin::context_retrieve::ContextRetrieveTool;
     use acowork_core::providers::traits::{FunctionCall, ToolCall};
 
     fn make_tool_call(name: &str, arguments: &str, id: &str) -> ToolCall {
@@ -1313,3 +1312,4 @@ mod tests {
         );
     }
 }
+

@@ -526,14 +526,8 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // between the context_abandon/context_retrieve tools (write end) and
     // the AgentLoop (drain end). The queues are stored in AgentCore so
     // the AgentLoop can access them at drain time.
-    let abandon_queue: crate::tools::builtin::context_abandon::AbandonQueue =
-        std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::new(),
-        ));
-    let retrieve_queue: crate::tools::builtin::context_retrieve::RetrieveQueue =
-        std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::VecDeque::new(),
-        ));
+    let abandon_queue = crate::agent::context_compression::new_abandon_queue();
+    let retrieve_queue = crate::agent::context_compression::new_retrieve_queue();
 
     // ADR-052: Determine whether tool compression is enabled (default: true).
     // Boot-only: read from agent_config.json. When enabled, register
@@ -778,6 +772,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         full_specs = full_tool_specs.len(),
         "Tool specs: enabled vs full builtin registry"
     );
+    // Note: `tool_definitions` (flat JSON Vec for the LLM) is no longer
+    // propagated to `AgentBootContext`. New sessions now derive their
+    // initial `ContextBuilder.tool_definitions` live from
+    // `core.builtin_tools` inside `SessionTask::new`, so a pre-baked
+    // snapshot here would diverge from the hot-reloaded dispatch list
+    // whenever `RuntimeConfigUpdate` toggles
+    // `tool_compression_enabled`.
 
     // ── Step 6: Build context builder ───────────────────────────────
     // ADR-042: User identity is delivered via the `acowork/global/user_profile`
@@ -878,7 +879,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         compat_cache,
         emb_provider,
         active_tools,
-        tool_definitions,
         full_tool_specs,
         system_prompt,
         memory_session,

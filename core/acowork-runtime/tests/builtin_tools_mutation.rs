@@ -1,15 +1,17 @@
-//! Integration tests for the unified builtin-tools mutation pipeline.
+//! Integration tests for the unified builtin-tools mutation pipeline
+//! (ADR-052).
 //!
 //! These tests exercise the **end-to-end** read-modify-write cycle that
 //! connects:
-//!   1. `agent_config::apply_builtin_tools_patch` (persistence layer)
-//!   2. `tools::registry::BuiltinToolEntry::with_resolved_enabled` (platform
-//!      protection)
-//!   3. `session_task::apply_builtin_tools_update` (atomic in-memory rewrite
-//!      + dispatch list + LLM tool_definitions refresh)
+//!   1. `agent_config::apply_builtin_tools_patch` (persistence layer:
+//!      filters platform-protected tools out of the output)
+//!   2. `agent_config::merge_tools_config` (cold-start path: same filter)
+//!   3. `session_task::apply_builtin_tools_update` (atomic in-memory
+//!      rewrite + dispatch list + LLM tool_definitions refresh)
 //!
-//! They are the Bug 2 regression net at the integration level — when the
-//! persistence layer and the in-memory layer diverge, these tests fail.
+//! They are the ADR-052 regression net at the integration level — when
+//! the persistence layer and the in-memory layer diverge, these tests
+//! fail.
 
 use std::collections::HashMap;
 
@@ -27,7 +29,7 @@ fn put_builtin_tools(work_dir: &std::path::Path, patch: &[AgentToolEntry]) -> Ve
 
     // Mirror the RuntimeAgentToolsService::put_builtin_tools flow:
     //   1. read current
-    //   2. apply_builtin_tools_patch (force-enables platform tools)
+    //   2. apply_builtin_tools_patch (strips platform tools from output)
     //   3. save
     let updated = agent_config::apply_builtin_tools_patch(&current, patch);
     let cfg = AgentToolsConfig {
@@ -37,14 +39,20 @@ fn put_builtin_tools(work_dir: &std::path::Path, patch: &[AgentToolEntry]) -> Ve
     updated
 }
 
-/// Bug 2 regression: PUT /builtin-tools with user disabling a platform
-/// tool must NOT actually disable it on disk.
+/// ADR-052: PUT /builtin-tools must filter platform-protected tools
+/// out of both the returned list AND the on-disk file — they live
+/// exclusively in the in-memory registry, gated by
+/// `tool_compression_enabled` (ADR-052 §3.5). Persisting them would
+/// resurrect the "user-editable Switch the server silently ignores"
+/// UX bug that ADR-052 was created to eliminate.
 #[test]
-fn put_builtin_tools_cannot_disable_platform_tools() {
+fn put_builtin_tools_filters_platform_tools_out_of_disk() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path();
 
-    // Seed: all tools enabled.
+    // Seed: a mix of platform and non-platform tools, all enabled.
+    // The platform entries simulate legacy data or a hostile client
+    // that wrote them into the file — the PUT path must strip them.
     let initial = vec![
         AgentToolEntry::new("context_retrieve", true),
         AgentToolEntry::new("context_abandon", true),
@@ -57,30 +65,47 @@ fn put_builtin_tools_cannot_disable_platform_tools() {
     )
     .unwrap();
 
-    // User disables context_retrieve via frontend.
+    // User (or hostile client) attempts to disable context_retrieve.
     let patch = vec![AgentToolEntry::new("context_retrieve", false)];
     let updated = put_builtin_tools(work_dir, &patch);
 
-    let map: HashMap<String, bool> =
-        updated.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+    let names: std::collections::HashSet<&str> =
+        updated.iter().map(|e| e.name.as_str()).collect();
     assert!(
-        map["context_retrieve"],
-        "PUT patch cannot disable context_retrieve (Bug 2)"
+        !names.contains("context_retrieve"),
+        "PUT must filter context_retrieve out of returned list; got: {:?}",
+        names
     );
-    assert!(map["context_abandon"]);
-    assert!(map["shell"]);
-    assert!(map["memory_recall"]);
+    assert!(
+        !names.contains("context_abandon"),
+        "PUT must filter context_abandon out of returned list; got: {:?}",
+        names
+    );
+    assert!(names.contains("shell"));
+    assert!(names.contains("memory_recall"));
 
-    // The on-disk file must agree with the in-memory result.
+    // The on-disk file must agree with the returned list — both
+    // platform entries pruned, non-platform entries preserved with
+    // their persisted flag intact.
     let reloaded = agent_config::load_agent_tools_config(work_dir)
         .unwrap()
         .expect("file must exist");
-    let on_disk: HashMap<String, bool> =
-        reloaded.tools.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-    assert!(on_disk["context_retrieve"], "disk must mirror in-memory");
+    let on_disk: std::collections::HashSet<&str> =
+        reloaded.tools.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !on_disk.contains("context_retrieve"),
+        "disk must mirror in-memory filter; got: {:?}",
+        on_disk
+    );
+    assert!(
+        !on_disk.contains("context_abandon"),
+        "disk must mirror in-memory filter; got: {:?}",
+        on_disk
+    );
 
     // Round-trip the persistence again through merge_tools_config —
-    // cold-start path must agree with hot-update path.
+    // cold-start path must agree with hot-update path. Both must
+    // agree that platform tools never appear in the persisted set.
     let code = vec![
         "context_retrieve".to_string(),
         "context_abandon".to_string(),
@@ -88,20 +113,27 @@ fn put_builtin_tools_cannot_disable_platform_tools() {
         "memory_recall".to_string(),
     ];
     let merged = agent_config::merge_tools_config(&code, &reloaded.tools);
-    let merge_map: HashMap<String, bool> =
-        merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
+    let merge_names: std::collections::HashSet<&str> =
+        merged.iter().map(|e| e.name.as_str()).collect();
     assert!(
-        merge_map["context_retrieve"],
-        "cold-start merge must agree with hot-update patch (Bug 2 unification)"
+        !merge_names.contains("context_retrieve"),
+        "cold-start merge must agree with hot-update patch (ADR-052 unification)"
+    );
+    assert!(
+        !merge_names.contains("context_abandon"),
+        "cold-start merge must agree with hot-update patch (ADR-052 unification)"
     );
 }
 
-/// Bug 2 regression: when context_retrieve / context_abandon are MISSING
-/// from the persisted file (first start or hand-edited file), merge and
-/// patch both default them to enabled — the user cannot accidentally
-/// omit them.
+/// ADR-052: even when platform tools appear in the `code` registry
+/// (i.e. `tool_compression_enabled=true` at boot) but are absent from
+/// the persisted file (first start, hand-edited, or running with
+/// compression disabled), the cold-start `merge_tools_config` must
+/// STRIP them — they are in-memory only, never persisted. The user's
+/// per-agent tool toggle layer has no concept of "platform tools"
+/// because it cannot reach them.
 #[test]
-fn put_builtin_tools_seeds_platform_tools_when_missing() {
+fn merge_tools_config_filters_platform_tools_when_missing_from_persisted() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path();
 
@@ -116,9 +148,9 @@ fn put_builtin_tools_seeds_platform_tools_when_missing() {
     )
     .unwrap();
 
-    // Cold-start path: merge_tools_config emits entries for every code
-    // tool — including platform tools — with platform tools
-    // force-enabled.
+    // Cold-start path: code registry includes platform tools (this
+    // boot had tool_compression_enabled=true), but the persisted file
+    // does not. Merge must still exclude them from the output.
     let code = vec![
         "context_retrieve".to_string(),
         "context_abandon".to_string(),
@@ -127,19 +159,37 @@ fn put_builtin_tools_seeds_platform_tools_when_missing() {
     ];
     let loaded = agent_config::load_agent_tools_config(work_dir).unwrap().unwrap();
     let merged = agent_config::merge_tools_config(&code, &loaded.tools);
+    let names: std::collections::HashSet<&str> =
+        merged.iter().map(|e| e.name.as_str()).collect();
+
+    assert!(
+        !names.contains("context_retrieve"),
+        "platform tool must not appear in merged output even when code registry includes it; got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("context_abandon"),
+        "platform tool must not appear in merged output even when code registry includes it; got: {:?}",
+        names
+    );
+    // Non-platform tools are preserved with their persisted flags.
     let map: HashMap<String, bool> =
         merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-
-    assert!(map.contains_key("context_retrieve"));
-    assert!(map["context_retrieve"], "missing platform tool must default to enabled");
-    assert!(map["context_abandon"], "missing platform tool must default to enabled");
+    assert!(map["shell"], "non-platform tool keeps persisted enabled=true");
+    assert!(
+        !map["memory_recall"],
+        "non-platform tool keeps persisted enabled=false"
+    );
 }
 
-/// Bug 1 + Bug 2 unification: a single round-trip across both APIs
+/// ADR-052 + Bug 1 unification: a single round-trip across both APIs
 /// must leave the on-disk state in agreement with both filters
-/// (active_names for MCP, platform protection for builtin tools).
+/// (active_names for MCP, platform-tool strip for builtin tools).
+/// The two filters operate on disjoint sets — MCP active_names cannot
+/// leak into builtin output, and the builtin platform filter cannot
+/// leak into MCP output.
 #[test]
-fn mcp_active_filter_and_builtin_platform_protection_are_independent() {
+fn mcp_active_filter_and_builtin_platform_filter_are_independent() {
     let dir = tempfile::tempdir().unwrap();
     let work_dir = dir.path();
     std::fs::create_dir_all(work_dir.join("config")).unwrap();
@@ -177,8 +227,10 @@ fn mcp_active_filter_and_builtin_platform_protection_are_independent() {
     save_agent_mcp_config(work_dir, &cfg).unwrap();
     assert!(load_active_mcp_configs(work_dir).is_empty());
 
-    // ── Builtin layer: user has disabled context_retrieve in
-    // agent_tools.json — but merge/patch must override.
+    // ── Builtin layer: legacy data on disk has the platform tools
+    // written into agent_tools.json (e.g. user upgraded across the
+    // ADR-052 boundary). Both merge (cold-start) and patch (PUT path)
+    // must strip them.
     agent_config::save_agent_tools_config(
         work_dir,
         &AgentToolsConfig {
@@ -197,24 +249,48 @@ fn mcp_active_filter_and_builtin_platform_protection_are_independent() {
         "shell".to_string(),
     ];
     let loaded = agent_config::load_agent_tools_config(work_dir).unwrap().unwrap();
-    let merged = agent_config::merge_tools_config(&code, &loaded.tools);
-    let map: HashMap<String, bool> =
-        merged.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-    assert!(map["context_retrieve"]);
-    assert!(map["context_abandon"]);
 
-    // Cross-check the API used by the PUT path:
+    // Cold-start path: merge_tools_config strips platform tools.
+    let merged = agent_config::merge_tools_config(&code, &loaded.tools);
+    let merge_names: std::collections::HashSet<&str> =
+        merged.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !merge_names.contains("context_retrieve"),
+        "merge must filter context_retrieve; got: {:?}",
+        merge_names
+    );
+    assert!(
+        !merge_names.contains("context_abandon"),
+        "merge must filter context_abandon; got: {:?}",
+        merge_names
+    );
+    assert!(merge_names.contains("shell"));
+
+    // Hot-update path: apply_builtin_tools_patch strips platform
+    // tools from both the current list and the hostile patch entry.
     let patched = agent_config::apply_builtin_tools_patch(
         &loaded.tools,
         &[AgentToolEntry::new("context_retrieve", false)],
     );
-    let patch_map: HashMap<String, bool> =
-        patched.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-    assert!(patch_map["context_retrieve"]);
+    let patch_names: std::collections::HashSet<&str> =
+        patched.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !patch_names.contains("context_retrieve"),
+        "patch must filter context_retrieve; got: {:?}",
+        patch_names
+    );
+    assert!(
+        !patch_names.contains("context_abandon"),
+        "patch must filter context_abandon; got: {:?}",
+        patch_names
+    );
 
     // MCP loader still returns empty (proves the two filters are
     // orthogonal and not accidentally sharing state).
-    assert!(load_active_mcp_configs(work_dir).is_empty());
+    assert!(
+        load_active_mcp_configs(work_dir).is_empty(),
+        "MCP active_names filter must remain independent of builtin platform filter"
+    );
 }
 
 /// Drive `apply_builtin_tools_update` directly through its public
@@ -223,19 +299,40 @@ fn mcp_active_filter_and_builtin_platform_protection_are_independent() {
 /// proof that the `session_task::apply_builtin_tools_update` body, which
 /// calls `apply_builtin_tools_patch(&entries, &[])`, behaves correctly
 /// when handed an arbitrary enabled/disabled mix.
+///
+/// ADR-052: the legacy `force-enable platform tool` semantic is
+/// replaced by `filter platform tool out of output`. A hostile
+/// `current` that lists platform tools must not propagate them to the
+/// patch result regardless of `patch` contents.
 #[test]
-fn apply_builtin_tools_patch_is_idempotent_with_empty_patch() {
+fn apply_builtin_tools_patch_filters_platform_tools_with_empty_patch() {
     let entries = vec![
-        AgentToolEntry::new("context_retrieve", false), // hostile
-        AgentToolEntry::new("context_abandon", false),  // hostile
+        AgentToolEntry::new("context_retrieve", false), // hostile legacy data
+        AgentToolEntry::new("context_abandon", false),  // hostile legacy data
         AgentToolEntry::new("shell", true),
     ];
     let resolved = agent_config::apply_builtin_tools_patch(&entries, &[]);
-    let map: HashMap<String, bool> =
-        resolved.iter().map(|e| (e.name.clone(), e.enabled)).collect();
-    assert!(map["context_retrieve"], "platform tool force-enabled by empty-patch call");
-    assert!(map["context_abandon"], "platform tool force-enabled by empty-patch call");
-    assert!(map["shell"], "non-platform tool keeps its own enabled flag");
+    let names: std::collections::HashSet<&str> =
+        resolved.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !names.contains("context_retrieve"),
+        "patch must filter context_retrieve; got: {:?}",
+        names
+    );
+    assert!(
+        !names.contains("context_abandon"),
+        "patch must filter context_abandon; got: {:?}",
+        names
+    );
+    assert!(names.contains("shell"));
+
+    // Non-platform tool keeps its own enabled flag through the empty
+    // patch — the patch is a no-op for entries not mentioned in it.
+    let shell = resolved.iter().find(|e| e.name == "shell").unwrap();
+    assert!(
+        shell.enabled,
+        "non-platform tool keeps its own enabled flag (empty patch is no-op)"
+    );
 }
 
 /// Sanity-check that the legacy `load_merged_mcp_configs` still works

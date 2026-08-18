@@ -30,18 +30,12 @@
 //! the automatic compression trigger entirely - the LLM must explicitly call
 //! `context_abandon` to re-compress restored content.
 
+use crate::agent::context_compression::RetrieveQueue;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
 use tracing;
-
-/// ADR-052: Type alias for the retrieve queue shared between the tool and the
-/// agent loop. The tool writes `(tool_call_id, original_content)` pairs; the
-/// agent loop drains them and restores the original content in-place
-/// (replacing the placeholder).
-pub type RetrieveQueue = Arc<std::sync::Mutex<std::collections::VecDeque<(String, String)>>>;
 
 /// ADR-052 context_retrieve tool for retrieving compressed tool results.
 ///
@@ -343,7 +337,7 @@ mod tests {
 
     /// Helper: create a RetrieveQueue for testing.
     fn test_queue() -> RetrieveQueue {
-        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()))
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()))
     }
 
     #[test]

@@ -209,12 +209,12 @@ pub struct AgentCore {
     /// ADR-052: Shared queue for context_abandon tool. Created in agent_init,
     /// passed to the tool and stored here for the AgentLoop to drain.
     pub(crate) abandon_queue:
-        crate::tools::builtin::context_abandon::AbandonQueue,
+        crate::agent::context_compression::AbandonQueue,
 
     /// ADR-052: Shared queue for context_retrieve tool. Created in agent_init,
     /// passed to the tool and stored here for the AgentLoop to drain.
     pub(crate) retrieve_queue:
-        crate::tools::builtin::context_retrieve::RetrieveQueue,
+        crate::agent::context_compression::RetrieveQueue,
 }
 
 impl AgentCore {
@@ -417,6 +417,47 @@ impl AgentCore {
         // callable and newly-removed tools stop being dispatched.
         self.rebuild_all_tools();
         true
+    }
+
+    /// Rewrite `builtin_tools` enabled flags from a desired
+    /// `(name, enabled)` list - the **single policy** behind every
+    /// builtin-tools enabled write path (SessionTask hot-update via
+    /// `apply_builtin_tools_update`, SessionManager template sync via
+    /// `apply_builtin_tools_enabled`).
+    ///
+    /// Policy (all of it delegated to
+    /// [`crate::agent_config::apply_builtin_tools_patch`] with an empty
+    /// patch, so the persistence layer and the in-memory layer can
+    /// never diverge):
+    /// - Platform-protected names ([`PLATFORM_PROTECTED_TOOLS`]) are
+    ///   filtered out of the resolution - their enabled flag is
+    ///   platform-managed by [`Self::sync_platform_tools_to_registry`],
+    ///   never user-toggleable. Their registered slots keep the current
+    ///   flag.
+    /// - Names not currently registered are dropped (defensive against
+    ///   drift between the persisted file and the code registry).
+    /// - Only the `enabled` flag is rewritten; the wrapped `tool` impl
+    ///   (security decorators applied during `ToolRegistry::activate`)
+    ///   is preserved.
+    ///
+    /// Does NOT rebuild `all_tools` / `ContextBuilder.tool_definitions`;
+    /// dependent refreshes are owned by the caller (one refresh site
+    /// per layer - see `session_task::refresh_builtin_tools_dependents`).
+    pub(crate) fn apply_builtin_enabled_entries(
+        &mut self,
+        entries: &[crate::agent_config::AgentToolEntry],
+    ) {
+        let resolved = crate::agent_config::apply_builtin_tools_patch(entries, &[]);
+        let resolved_map: std::collections::HashMap<String, bool> = resolved
+            .iter()
+            .map(|e| (e.name.clone(), e.enabled))
+            .collect();
+        for entry in self.builtin_tools.iter_mut() {
+            let name = entry.name().to_string();
+            if let Some(&enabled) = resolved_map.get(&name) {
+                entry.enabled = enabled;
+            }
+        }
     }
 
     pub fn config(&self) -> &RuntimeConfig { &self.config }
@@ -1577,6 +1618,163 @@ mod tests {
         assert!(!has_platform_tool(&core, "context_retrieve"),
             "LLM dispatch list must drop context_retrieve after toggle false");
         assert!(!has_platform_tool(&core, "context_abandon"));
+    }
+
+
+    // ── apply_builtin_enabled_entries (ADR-052 §3.5 shared policy) ────
+    //
+    // The tests below pin the policy helper that BOTH the per-session
+    // hot-update path (`session_task::apply_builtin_tools_update`) and
+    // the SessionManager template-sync path
+    // (`SessionManager::apply_builtin_tools_enabled`) funnel through.
+    // Without these, the two paths could drift silently and reintroduce
+    // the "registry vs persistence" bug 2 regression.
+
+    use crate::agent_config::AgentToolEntry;
+
+    /// Pre-populate `builtin_tools` with a small mixed set so the
+    /// enabled-rewrite path has both platform and non-platform entries
+    /// to work with. Mirrors a real boot with compression enabled.
+    fn seed_with_mixed_builtins(core: &mut AgentCore) {
+        use crate::tools::builtin::build_platform_protected_tools;
+        // Add a non-platform tool for the rewrite to land on.
+        struct DummyTool;
+        #[async_trait::async_trait]
+        impl acowork_core::tools::traits::Tool for DummyTool {
+            fn name(&self) -> String {
+                "shell".to_string()
+            }
+            fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+                acowork_core::tools::traits::ToolSpec {
+                    name: "shell".to_string(),
+                    description: "test".to_string(),
+                    input_schema: serde_json::json!({}),
+                }
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _work_dir: Option<&str>,
+            ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+                Ok(acowork_core::tools::traits::ToolResult {
+                    ok: true,
+                    content: String::new(),
+                    error: None,
+                    token_usage: None,
+                })
+            }
+        }
+        core.builtin_tools.push(BuiltinToolEntry::with_resolved_enabled(
+            true,
+            Arc::new(DummyTool),
+        ));
+        for tool in build_platform_protected_tools(
+            &core.config.work_dir,
+            core.retrieve_queue.clone(),
+            core.abandon_queue.clone(),
+        ) {
+            core.builtin_tools
+                .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
+        }
+        core.rebuild_all_tools();
+    }
+
+    #[test]
+    fn apply_builtin_enabled_entries_filters_platform_tools_out_of_resolution() {
+        // The shared policy MUST delegate to
+        // `agent_config::apply_builtin_tools_patch` with an empty patch,
+        // so platform-protected names are stripped from the resolution
+        // map regardless of what the incoming `entries` say. If this
+        // ever changes, the platform-protected UX invariant is broken.
+        let mut core = make_core(Some(8192), None, None, 0);
+        seed_with_mixed_builtins(&mut core);
+
+        // Hostile patch tries to disable both platform tools.
+        core.apply_builtin_enabled_entries(&[
+            AgentToolEntry::new("shell", false),
+            AgentToolEntry::new("context_retrieve", false),
+            AgentToolEntry::new("context_abandon", false),
+        ]);
+
+        // Non-platform tool follows the patch verbatim.
+        let shell = core
+            .builtin_tools
+            .iter()
+            .find(|e| e.name() == "shell")
+            .expect("shell must still be registered");
+        assert!(
+            !shell.enabled,
+            "non-platform tool must follow the patch"
+        );
+
+        // Platform tools are filtered OUT of the resolution map, so
+        // their registered slots keep whatever enabled flag they had
+        // before the call (here, force-enabled by `with_resolved_enabled`
+        // -> true).
+        for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
+            let entry = core
+                .builtin_tools
+                .iter()
+                .find(|e| e.name() == *name)
+                .unwrap_or_else(|| panic!("{name} must still be registered"));
+            assert!(
+                entry.enabled,
+                "{name} must keep its prior enabled flag (platform tools are filter-out, not force-disable)"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_builtin_enabled_entries_drops_unknown_names() {
+        // Defensive: an `entries` payload that mentions a tool name not
+        // currently in `builtin_tools` must be silently dropped, not
+        // panic and not auto-register it (that would let a hostile
+        // `agent_tools.json` smuggle arbitrary tools into the registry).
+        let mut core = make_core(Some(8192), None, None, 0);
+        seed_with_mixed_builtins(&mut core);
+        let before = core.builtin_tools.len();
+
+        core.apply_builtin_enabled_entries(&[
+            AgentToolEntry::new("shell", false),
+            AgentToolEntry::new("totally_made_up_tool", true),
+        ]);
+
+        assert_eq!(
+            core.builtin_tools.len(),
+            before,
+            "unknown names must not introduce new registry entries"
+        );
+    }
+
+    #[test]
+    fn apply_builtin_enabled_entries_preserves_wrapped_tool_impl() {
+        // The shared policy only rewrites the `enabled` flag. The
+        // wrapped `tool` impl (security decorators applied during
+        // `ToolRegistry::activate`) must survive untouched.
+        let mut core = make_core(Some(8192), None, None, 0);
+        seed_with_mixed_builtins(&mut core);
+
+        let shell_before: Arc<dyn acowork_core::tools::traits::Tool> = core
+            .builtin_tools
+            .iter()
+            .find(|e| e.name() == "shell")
+            .unwrap()
+            .tool
+            .clone();
+
+        core.apply_builtin_enabled_entries(&[AgentToolEntry::new("shell", false)]);
+
+        let shell_after: Arc<dyn acowork_core::tools::traits::Tool> = core
+            .builtin_tools
+            .iter()
+            .find(|e| e.name() == "shell")
+            .unwrap()
+            .tool
+            .clone();
+        assert!(
+            Arc::ptr_eq(&shell_before, &shell_after),
+            "the wrapped tool impl must be the same Arc (security decorators preserved)"
+        );
     }
 
 

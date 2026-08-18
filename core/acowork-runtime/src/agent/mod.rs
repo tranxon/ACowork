@@ -4,6 +4,7 @@ pub mod agent_core;
 pub mod attachment_to_image;
 pub mod budget_guard;
 pub mod context;
+pub mod context_compression;
 pub mod history;
 pub mod inbound;
 pub mod loop_;

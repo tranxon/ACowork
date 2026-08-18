@@ -382,7 +382,7 @@ pub struct AgentLoop {
     /// them before the next `build_chat_request` via
     /// `drain_abandon_queue()`.
     pub(crate) abandon_queue:
-        crate::tools::builtin::context_abandon::AbandonQueue,
+        crate::agent::context_compression::AbandonQueue,
 
     /// ADR-052: Shared queue for `context_retrieve` tool requests.
     ///
@@ -390,7 +390,7 @@ pub struct AgentLoop {
     /// agent loop drains them before the next `build_chat_request` via
     /// `drain_retrieve_queue()`, restoring the original content in-place.
     pub(crate) retrieve_queue:
-        crate::tools::builtin::context_retrieve::RetrieveQueue,
+        crate::agent::context_compression::RetrieveQueue,
 
     /// ADR-032 C4b: Compression action receiver.
     ///
@@ -1539,7 +1539,6 @@ impl AgentLoop {
                 calls_to_execute,
                 &deduped_calls,
                 &blocked_info,
-                context_builder,
             )
             .await;
 

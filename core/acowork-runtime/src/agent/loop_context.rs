@@ -668,6 +668,34 @@ impl AgentLoop {
             }
         }
 
+        // LLM-perspective tool dump: AFTER builtin + MCP merge.
+        // This is the most authoritative view of what the LLM actually sees
+        // in the next provider call. tool_names is the literal contents of
+        // the tools array sent on the wire -- filter it for any platform
+        // tool like context_abandon / context_retrieve to verify hot reload
+        // of the compression switch (ADR-052).
+        if let Some(ref tools) = chat_request.tools {
+            let tool_names: Vec<String> = tools
+                .iter()
+                .filter_map(|t| {
+                    t.get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            t.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                })
+                .collect();
+            tracing::info!(
+                request_tools_count = tool_names.len(),
+                request_tool_names = ?tool_names,
+                "LLM tools schema (after builtin + MCP merge) -- exact wire payload"
+            );
+        }
+
         // Compute total input chars for next round's token ratio calibration.
         self.last_input_chars = count_chat_request_chars(&chat_request);
 

@@ -602,6 +602,35 @@ async fn dispatch_inbound(
                 }
                 handle_open_session(session_manager, lifecycle_publisher, &session_id, work_dir).await
             }
+            // ── ADR-052 §3.5: agent-level config mutations are
+            //    GLOBAL, not per-session. Route through SessionManager
+            //    so the shared template, the runtime_overrides cache,
+            //    every active SessionTask's ContextBuilder, and every
+            //    mid-execution AgentLoop all see the change in one
+            //    shot. The session-level arm below mirrors this for
+            //    defensive uniformity (any per-session producer gets
+            //    the same global policy).
+            //
+            //    The HTTP layer (`http::server::dispatch_agent_level_config`)
+            //    produces system-level messages; MQTT producers should
+            //    too. Either way, the policy at this table is
+            //    "config mutations are agent-scoped".
+            InboundMessage::UserOperation(
+                crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides),
+            ) => {
+                let failed = session_manager.apply_runtime_config_override(&overrides);
+                if !failed.is_empty() {
+                    tracing::warn!(
+                        failed_sessions = failed.len(),
+                        "system-level UpdateRuntimeConfig: some sessions missed the broadcast (likely closed)"
+                    );
+                }
+                Ok(())
+            }
+            InboundMessage::UpdateBuiltinTools { entries } => {
+                session_manager.apply_builtin_tools_enabled(&entries);
+                Ok(())
+            }
             other => Err(RuntimeError::Config(format!(
                 "system-level dispatch: unsupported variant {:?}",
                 std::mem::discriminant(&other)
@@ -726,15 +755,34 @@ async fn dispatch_inbound(
             },
         ),
 
-        // ⑥ UserOperation (StopLoop, ContinueLoop, ApprovalDecision, QuestionAnswer, UpdateRuntimeConfig)
-        InboundMessage::UserOperation(op) => forward_to_session_inbound(
-            session_manager,
-            lifecycle_publisher,
-            &session_id,
-            "user_operation",
-            work_dir,
-            InboundMessage::UserOperation(op),
-        ),
+        // ⑥ UserOperation (StopLoop, ContinueLoop, ApprovalDecision, QuestionAnswer)
+        //
+        // `UpdateRuntimeConfig` is an agent-level config mutation and is
+        // routed globally through `SessionManager::apply_runtime_config_override`
+        // (see the system-level arm above for the canonical path; this
+        // arm is defensive uniformity - any per-session producer
+        // targeting a single session_id gets the same global policy
+        // because config mutations are agent-scoped).
+        InboundMessage::UserOperation(op) => match op {
+            crate::agent::inbound::UserOp::UpdateRuntimeConfig(overrides) => {
+                let failed = session_manager.apply_runtime_config_override(&overrides);
+                if !failed.is_empty() {
+                    tracing::warn!(
+                        failed_sessions = failed.len(),
+                        "per-session UpdateRuntimeConfig: some sessions missed the broadcast (likely closed)"
+                    );
+                }
+                Ok(())
+            }
+            _ => forward_to_session_inbound(
+                session_manager,
+                lifecycle_publisher,
+                &session_id,
+                "user_operation",
+                work_dir,
+                InboundMessage::UserOperation(op),
+            ),
+        },
 
         // ⑦ IntentMessage → session task inbox
         InboundMessage::IntentMessage {
@@ -826,15 +874,18 @@ async fn dispatch_inbound(
                 .map_err(|e| RuntimeError::Config(format!("CompressAction: {}", e)))
         }
 
-        // ⑫b UpdateBuiltinTools — ADR-029 fix: broadcast builtin-tool
-        // enabled flags from the HTTP `put_agent_builtin_tools` handler to
-        // the active session so the LLM's `tool_definitions` stay in sync.
-        // `session_task.rs` handles `SessionMessage::UpdateBuiltinTools` by
-        // updating `agent_loop.core.builtin_tools` and calling
-        // `rebuild_context_tool_definitions()` to refresh the `ContextBuilder`.
-        InboundMessage::UpdateBuiltinTools { entries } => session_manager
-            .send_to_session(&session_id, SessionMessage::UpdateBuiltinTools { entries })
-            .map_err(|e| RuntimeError::Config(format!("UpdateBuiltinTools: {}", e))),
+        // ⑫b UpdateBuiltinTools - ADR-029/ADR-052: agent-level builtin tool
+        // enabled mutation. Routed globally through
+        // `SessionManager::apply_builtin_tools_enabled` so sessions
+        // created AFTER this PUT inherit the new enabled flags (the
+        // template is CoW-synced) and every active session's
+        // dispatch list + LLM tool_definitions are rebuilt atomically.
+        // See the system-level arm above for the canonical routing;
+        // this is defensive uniformity.
+        InboundMessage::UpdateBuiltinTools { entries } => {
+            session_manager.apply_builtin_tools_enabled(&entries);
+            Ok(())
+        }
 
         // ⑬ CreateSession (session-level DeleteSession)
         InboundMessage::DeleteSession { session_id: sid } => {

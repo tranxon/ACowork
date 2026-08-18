@@ -20,16 +20,11 @@
 //!   result to abandon. This is the same id that appears in tool results
 //!   and in compressed placeholders.
 
+use crate::agent::context_compression::AbandonQueue;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::sync::Arc;
 use tracing;
-
-/// ADR-052: Type alias for the abandon queue shared between the tool and the
-/// agent loop. The tool writes `tool_call_id` strings here; the agent loop
-/// drains them and calls `HistoryManager::abandon_tool_result()`.
-pub type AbandonQueue = Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
 
 /// ADR-052 context_abandon tool for replacing tool results with placeholders.
 ///
@@ -134,6 +129,7 @@ impl Tool for ContextAbandonTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// Helper: create an AbandonQueue for testing.
     fn test_queue() -> AbandonQueue {

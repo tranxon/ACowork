@@ -51,6 +51,7 @@ use acowork_core::tools::traits::Tool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::agent::context_compression::{AbandonQueue, RetrieveQueue};
 use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
@@ -106,8 +107,8 @@ use search_backends::WebSearchEngine;
 /// regardless of how many times the registry rebuilds.
 pub fn build_platform_protected_tools(
     agent_home: &str,
-    retrieve_queue: context_retrieve::RetrieveQueue,
-    abandon_queue: context_abandon::AbandonQueue,
+    retrieve_queue: RetrieveQueue,
+    abandon_queue: AbandonQueue,
 ) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(context_retrieve::ContextRetrieveTool::new(
@@ -129,8 +130,8 @@ pub fn all_builtin_tools(
     agent_home: String,
     lsp_relay_endpoint: Option<String>,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
-    abandon_queue: context_abandon::AbandonQueue,
-    retrieve_queue: context_retrieve::RetrieveQueue,
+    abandon_queue: AbandonQueue,
+    retrieve_queue: RetrieveQueue,
     tool_compression_enabled: bool,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
@@ -247,8 +248,8 @@ mod tests {
         String,                                          // agent_home
         Option<String>,                                  // lsp_relay_endpoint
         crate::http::server::SharedMqttClientSlot,
-        context_abandon::AbandonQueue,
-        context_retrieve::RetrieveQueue,
+        AbandonQueue,
+        RetrieveQueue,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
@@ -262,9 +263,9 @@ mod tests {
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
         let mqtt_slot: crate::http::server::SharedMqttClientSlot =
             Arc::new(tokio::sync::Mutex::new(None));
-        let abandon_queue: context_abandon::AbandonQueue =
+        let abandon_queue: AbandonQueue =
             Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let retrieve_queue: context_retrieve::RetrieveQueue =
+        let retrieve_queue: RetrieveQueue =
             Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
         (

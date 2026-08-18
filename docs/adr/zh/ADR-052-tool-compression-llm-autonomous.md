@@ -451,6 +451,31 @@ let transient = false;
 
 **生效方式**：**Hot-reload via `RuntimeConfigUpdate`**（2026-08-17 修订：原 "Boot-only" 论断被实施漏洞反证——`apply_runtime_config` 收到 toggle 时只写 `tool_compression_enabled_override` 字段而不调 rebuild 路径，导致前端 Switch 可见但 LLM 工具列表不变）。Gateway 通过 `RuntimeConfigUpdate.tool_compression_enabled` 推送 toggle → `AgentCore::apply_runtime_config` 检测值变化 → `AgentCore::sync_platform_tools_to_registry(enabled)` 增减 `builtin_tools` Vec 成员并调 `rebuild_all_tools`（刷新 dispatch list）→ SessionTask handler 调 `rebuild_context_tool_definitions` 刷新 `ContextBuilder.tool_definitions`（LLM 视角)。下一次 `build_chat_request` 自动使用新工具列表。**与 `UpdateBuiltinTools` 共享相同的"atomic 双侧 rebuild"不变量**。
 
+**完整 dispatch 链路**（2026-08-18 修订：HTTP 路径与 MQTT 路径必须统一走 `SessionManager` 全局管道，否则只更新 dispatch list 不更新 LLM-visible `ContextBuilder` —— 这是用户实测"hot reload 无效"的根因）：
+
+```mermaid
+flowchart LR
+    subgraph Producer["Gateway"]
+        G1["HTTP PUT /agents/{id}/config"]
+        G2["MQTT RuntimeConfigUpdate"]
+    end
+    G1 -->|"http::server::dispatch_agent_level_config<br/>(单条 system-level 消息)"| DTX["dispatch_tx (String, InboundMessage)"]
+    G2 -->|"control_action_to_inbound<br/>(session_id=\"\")"| DTX
+    DTX -->|"gateway_loop::dispatch_inbound"| DI["system-level arm<br/>(session_id empty)"]
+    DI -->|"SessionManager::<br/>apply_runtime_config_override"| SM
+    subgraph SM["SessionManager pipeline"]
+        S0["0. 模板 CoW 同步<br/>Arc::make_mut(core).apply_runtime_config<br/>↳ tool_compression_enabled 时:<br/>&nbsp;&nbsp;sync_platform_tools_to_registry + rebuild_all_tools"]
+        S1["1. runtime_overrides 缓存合并"]
+        S2["2. broadcast SessionMessage::<br/>UpdateRuntimeConfig"]
+        S3["3. send_inbound fast channel<br/>AgentLoop::apply_user_op"]
+    end
+    S2 --> ST["SessionTask handler<br/>(per-session)"]
+    ST -->|"sync_platform_tools_to_registry<br/>rebuild_context_tool_definitions"| CB["ContextBuilder.tool_definitions<br/>(LLM 视角)"]
+    S3 --> AL["AgentLoop (mid-execution)<br/>core.apply_runtime_config<br/>sync_platform_tools_to_registry"]
+```
+
+旧 "Boot-only" 行为（仅 session_init 读取 → 新会话才生效）作为 fallback 保留：若 MQTT push 路径还没触发（例如 Snapshot 没到），新会话仍按 `agent_config.json` 上的 `tool_compression_enabled` 启动。两条路径的本质是"cache 写入时机不同"，最终值一致。
+
 旧 "Boot-only" 行为（仅 session_init 读取 → 新会话才生效）作为 fallback 保留：若 MQTT push 路径还没触发（例如 Snapshot 没到），新会话仍按 `agent_config.json` 上的 `tool_compression_enabled` 启动。两条路径的本质是"cache 写入时机不同"，最终值一致。
 
 **不变量（与本 hot-reload 修改正交）**：

@@ -271,8 +271,6 @@ pub(crate) struct SessionTask {
     chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
     /// Unique session identifier (used for logging and chunk tagging)
     session_id: String,
-    /// Complete tool definitions (with input_schema) for ContextBuilder
-    tool_definitions: Vec<serde_json::Value>,
     /// Identity context string injected by Gateway
     identity_context: Option<String>,
     /// LLM protocol type (for image token estimation)
@@ -304,7 +302,6 @@ impl SessionTask {
         system_prompt: String,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         session_id: String,
-        tool_definitions: Vec<serde_json::Value>,
         identity_context: Option<String>,
         protocol_type: acowork_core::protocol::ProtocolType,
         mcp_tools: Option<Vec<Arc<dyn Tool>>>,
@@ -421,7 +418,6 @@ impl SessionTask {
             system_prompt,
             chunk_tx,
             session_id,
-            tool_definitions,
             identity_context,
             protocol_type,
         };
@@ -473,16 +469,21 @@ impl SessionTask {
             chunk_tx,
             mut inbound_rx,
             system_prompt,
-            tool_definitions,
             identity_context,
             protocol_type,
         } = self;
 
-        // Build ContextBuilder with complete tool definitions and identity
-        // from SessionManagerConfig, instead of building simplified ones from manifest.
-        let mut context_builder = ContextBuilder::new(system_prompt.clone())
-            .with_identity(identity_context.clone())
-            .with_tools(tool_definitions.clone());
+        // Build ContextBuilder with identity. Tool definitions are NOT
+        // seeded from a pre-baked snapshot — we derive them live from
+        // `core.builtin_tools` so hot-reloads (e.g.
+        // `tool_compression_enabled` toggles) propagate to NEW sessions
+        // the same way they propagate to live sessions. Pre-baked
+        // snapshots were the root cause of the bug where the LLM still
+        // saw `context_retrieve` / `context_abandon` after the
+        // compression switch was turned off (see commit history and
+        // `rebuild_context_tool_definitions`).
+        let mut context_builder =
+            ContextBuilder::new(system_prompt.clone()).with_identity(identity_context.clone());
 
         // Mirror the identity onto SessionState so compaction paths
         // (loop_context / loop_session) can inject the user's preferred
@@ -501,6 +502,16 @@ impl SessionTask {
             .session
             .history_mut()
             .set_protocol_type(protocol_type.clone());
+
+        // Seed ContextBuilder.tool_definitions from the freshly built
+        // per-session `core.builtin_tools`. Done here so the very first
+        // `build_chat_request` reflects the current
+        // `tool_compression_enabled` value (already applied during
+        // `SessionTask::new` via `core_mut.apply_runtime_config`).
+        // Mirror of the hot-reload path inside the
+        // `UpdateRuntimeConfig` handler — single derivation logic,
+        // single source of truth (`core.builtin_tools`).
+        rebuild_context_tool_definitions(&agent_loop.core.builtin_tools, &mut context_builder);
 
         // Emit initial session state so the snapshot is populated
         // before the frontend's first fetchSessionState pull request.
@@ -1449,52 +1460,35 @@ fn rebuild_context_tool_definitions(
     context_builder.set_tool_definitions(new_tool_definitions);
 }
 
-/// Atomic builtin-tools mutation — the **only** entry point for rewriting
-/// the `enabled` flags of `AgentCore.builtin_tools`.
+/// Atomic builtin-tools enabled mutation - one of the two call sites
+/// for [`AgentCore::apply_builtin_enabled_entries`] (the other being
+/// the `SessionManager` template sync).
 ///
-/// Routes every write path (startup merge, hot-update patch, dynamic
-/// sidecar add/remove) through one function so:
-/// 1. The dispatch list (`all_tools`) is always rebuilt immediately after
-///    the builtin list changes (no stale enables).
-/// 2. The LLM's `tool_definitions` (`ContextBuilder`) is rebuilt in lock-step
-///    so the LLM sees the same set the runtime can dispatch (no
-///    "Unknown tool" errors after a hot toggle).
-/// 3. Platform-protected tools (`context_retrieve`, `context_abandon`) are
-///    always resolved to `enabled = true` via
-///    [`crate::agent_config::apply_builtin_tools_patch`], the same helper
-///    the persistence layer uses — no caller can introduce a divergent
-///    policy.
+/// Routes the per-session write through the shared policy so the
+/// platform-protected filter is never re-implemented here. After the
+/// flag rewrite, refreshes both dependents in lock-step so the
+/// dispatch list (`all_tools`) and the LLM's `tool_definitions`
+/// (`ContextBuilder`) cannot diverge - the invariant the original
+/// `UpdateBuiltinTools` hot path broke.
 ///
 /// `entries` carries the *desired* (name, enabled) state for every
 /// registered builtin tool. The wrapped `tool` impl behind each
-/// registered slot is preserved — only the `enabled` flag is rewritten,
-/// so security decorators set during `ToolRegistry::activate` survive.
+/// registered slot is preserved by the shared policy; only the
+/// `enabled` flag is rewritten, so security decorators set during
+/// `ToolRegistry::activate` survive.
 fn apply_builtin_tools_update(
     core: &mut AgentCore,
     context_builder: &mut ContextBuilder,
     entries: Vec<crate::agent_config::AgentToolEntry>,
 ) {
-    // Re-resolve through `apply_builtin_tools_patch` with an empty patch.
-    // This guarantees platform-protected tools are force-enabled even if
-    // the incoming `entries` came from a write path that didn't itself
-    // consult PLATFORM_PROTECTED_TOOLS. The empty patch also drops any
-    // names not currently registered (defensive against drift).
-    let resolved = crate::agent_config::apply_builtin_tools_patch(&entries, &[]);
-    let resolved_map: std::collections::HashMap<String, bool> = resolved
-        .iter()
-        .map(|e| (e.name.clone(), e.enabled))
-        .collect();
+    // Re-resolve through the shared policy (the empty patch is what
+    // strips platform-protected names and unregistered slots, so this
+    // stays correct even if the incoming `entries` came from a write
+    // path that didn't itself consult `PLATFORM_PROTECTED_TOOLS`).
+    core.apply_builtin_enabled_entries(&entries);
 
-    // Apply only the `enabled` flag to the registered slots — preserve
-    // the wrapped `tool` impl (security decorators, etc.).
-    for entry in core.builtin_tools.iter_mut() {
-        let name = entry.name().to_string();
-        if let Some(&enabled) = resolved_map.get(&name) {
-            entry.enabled = enabled;
-        }
-    }
-
-    // Refresh the dispatch list and the LLM tool_definitions.
+    // Refresh both dependents in lock-step - the dispatch list for
+    // the runtime, and the LLM-visible spec list for the LLM.
     refresh_builtin_tools_dependents(core, context_builder);
 }
 
