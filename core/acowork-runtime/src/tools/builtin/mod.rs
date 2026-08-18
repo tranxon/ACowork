@@ -82,6 +82,42 @@ use search_backends::WebSearchEngine;
 /// * `tool_compression_enabled` - ADR-052: when true (default), register context_retrieve +
 ///   context_abandon tools. When false, neither tool is registered.
 #[allow(clippy::too_many_arguments)]
+/// Construct the two platform-protected tools gated by
+/// `tool_compression_enabled` (ADR-052): `context_retrieve` +
+/// `context_abandon`.
+///
+/// Centralizing the construction here means there is exactly one place
+/// to extend when a new platform tool is added (a single
+/// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`] match-arm
+/// edit, plus one push below — same pattern as `all_builtin_tools`).
+///
+/// Reused by:
+/// - [`crate::tools::builtin::all_builtin_tools`] at startup (always
+///   gated by the boot-time `tool_compression_enabled` config)
+/// - [`crate::agent::agent_core::AgentCore::sync_platform_tools_to_registry`]
+///   at runtime, when Gateway pushes
+///   `RuntimeConfigUpdate.tool_compression_enabled` and we need to add
+///   or remove these tools from the live `builtin_tools` Vec.
+///
+/// The tools' internal queues (`retrieve_queue`, `abandon_queue`) are
+/// `Arc<Mutex<...>>` clones of the per-`AgentCore` shared queues; the
+/// hot-reload path passes the same `Arc` clones so any agent-loop side
+/// that drains the queues keeps seeing the same backing storage
+/// regardless of how many times the registry rebuilds.
+pub fn build_platform_protected_tools(
+    agent_home: &str,
+    retrieve_queue: context_retrieve::RetrieveQueue,
+    abandon_queue: context_abandon::AbandonQueue,
+) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(context_retrieve::ContextRetrieveTool::new(
+            agent_home,
+            retrieve_queue,
+        )),
+        Arc::new(context_abandon::ContextAbandonTool::new(abandon_queue)),
+    ]
+}
+
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
@@ -146,14 +182,17 @@ pub fn all_builtin_tools(
 
     // ADR-052: context_retrieve + context_abandon are conditionally registered
     // based on tool_compression_enabled config (default: true).
+    //
+    // The platform tools are constructed by [`build_platform_protected_tools`]
+    // so the same factory is reusable from the hot-reload path
+    // (`AgentCore::sync_platform_tools_to_registry`) when Gateway pushes
+    // a `RuntimeConfigUpdate.tool_compression_enabled` toggle.
     if tool_compression_enabled {
-        tools.push(Arc::new(context_retrieve::ContextRetrieveTool::new(
+        tools.extend(build_platform_protected_tools(
             &agent_home,
             retrieve_queue,
-        )));
-        tools.push(Arc::new(context_abandon::ContextAbandonTool::new(
             abandon_queue,
-        )));
+        ));
     }
 
     // Only register web_search when at least one search provider is configured

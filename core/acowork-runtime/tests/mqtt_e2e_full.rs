@@ -578,11 +578,17 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
             raw_json,
         );
 
-        // ── 5. After sync, `merged()` resolves the catalog names ────
-        // This is what `put_mcp_servers` consults. Before the fix,
-        // this returned `vec![]` and PUT /mcp-servers 400'd with
-        // UnknownServers. After: the names resolve and the user's
-        // active_names write succeeds.
+        // ── 5. After sync, the merged catalog ∪ local resolves the
+        // catalog names. This is what `put_mcp_servers` consults.
+        // Before the fix, this returned `vec![]` and PUT /mcp-servers
+        // 400'd with UnknownServers. After: the names resolve and the
+        // user's active_names write succeeds.
+        //
+        // We use `active_merged()` (not the deprecated
+        // `load_merged_mcp_configs`) but for this assertion that doesn't
+        // matter — the persisted file has no active_names yet so both
+        // return the same set.
+        #[allow(deprecated)]
         let merged = acowork_runtime::agent_config::load_merged_mcp_configs(&work_dir);
         let merged_names: Vec<&str> = merged.iter().map(|s| s.name.as_str()).collect();
         assert!(

@@ -449,14 +449,24 @@ let transient = false;
 | 配置层级 | `RuntimeConfigOverrides` → `AgentConfig` → 代码默认 `true` |
 | 语义 | `true` = 注册 `context_retrieve` + `context_abandon` 工具；`false` = 不注册 |
 
-**生效方式**：Boot-only（与原 `tool_result_compression_mode` 一致）。写入 `agent_config.json`，在下次 session restore / 进程重启时生效。不支持运行时热更新（工具列表在 session 创建时确定）。
+**生效方式**：**Hot-reload via `RuntimeConfigUpdate`**（2026-08-17 修订：原 "Boot-only" 论断被实施漏洞反证——`apply_runtime_config` 收到 toggle 时只写 `tool_compression_enabled_override` 字段而不调 rebuild 路径，导致前端 Switch 可见但 LLM 工具列表不变）。Gateway 通过 `RuntimeConfigUpdate.tool_compression_enabled` 推送 toggle → `AgentCore::apply_runtime_config` 检测值变化 → `AgentCore::sync_platform_tools_to_registry(enabled)` 增减 `builtin_tools` Vec 成员并调 `rebuild_all_tools`（刷新 dispatch list）→ SessionTask handler 调 `rebuild_context_tool_definitions` 刷新 `ContextBuilder.tool_definitions`（LLM 视角)。下一次 `build_chat_request` 自动使用新工具列表。**与 `UpdateBuiltinTools` 共享相同的"atomic 双侧 rebuild"不变量**。
+
+旧 "Boot-only" 行为（仅 session_init 读取 → 新会话才生效）作为 fallback 保留：若 MQTT push 路径还没触发（例如 Snapshot 没到），新会话仍按 `agent_config.json` 上的 `tool_compression_enabled` 启动。两条路径的本质是"cache 写入时机不同"，最终值一致。
+
+**不变量（与本 hot-reload 修改正交）**：
+- `PLATFORM_PROTECTED_TOOLS`(`context_retrieve`, `context_abandon`) 仍不进 `agent_tools.json`。这是磁盘层不变量，由 `merge_tools_config` / `apply_builtin_tools_patch` / `init_tools_config_from_manifest` / `get_merged_tools` 共同执行（见同文档 §6.4）。任何写路径都过 `is_platform_protected` 过滤。
+- `BuiltinToolEntry::with_resolved_enabled` 强制启用 platform 工具（不走用户 `--builtin-tools` 切换），hook 与 boot-time 注册、hot-reload 添加时一致。
+- `retrieve_queue` / `abandon_queue` 是 `Arc<Mutex<...>>` 共享队列，`sync_platform_tools_to_registry` 推入新 `BuiltinToolEntry` 时 clone 同一个 `Arc`——agent_loop 端 drain 队列与 registry 多次 rebuild 解耦。
 
 **AgentCore 新增字段**：
 
 ```rust
 /// ADR-052: Whether context_retrieve and context_abandon tools are registered.
 /// `None` falls through to `true` (default enabled).
-/// Boot-only: consumed at session creation time when building the builtin tool list.
+/// Hot-reload: when this changes, `sync_platform_tools_to_registry`
+/// mutates `builtin_tools` and triggers the dispatch-list + LLM
+/// tool_definitions rebuild via `apply_runtime_config` and the
+/// `SessionTask` handler.
 pub(crate) tool_compression_enabled_override: Option<bool>,
 ```
 
@@ -465,10 +475,38 @@ pub(crate) tool_compression_enabled_override: Option<bool>,
 ```rust
 // ADR-052: context_retrieve + context_abandon are conditionally registered
 // based on tool_compression_enabled config (default: true).
+//
+// The platform tools are constructed by `build_platform_protected_tools`
+// so the same factory is reusable from the hot-reload path
+// (`AgentCore::sync_platform_tools_to_registry`) when Gateway pushes
+// a `RuntimeConfigUpdate.tool_compression_enabled` toggle.
 let compression_enabled = tool_compression_enabled.unwrap_or(true);
 if compression_enabled {
-    tools.push(Arc::new(context_retrieve::ContextRetrieveTool::new(&agent_home)));
-    tools.push(Arc::new(context_abandon::ContextAbandonTool::new(abandon_queue)));
+    tools.extend(build_platform_protected_tools(
+        &agent_home,
+        retrieve_queue,
+        abandon_queue,
+    ));
+}
+```
+
+**Hot-reload 路径**（`agent_core.rs::sync_platform_tools_to_registry`）：
+
+```rust
+// Idempotent: 第二/三次调用 enabled 值相同 → before/after 一致 → 直接返回 false
+pub(crate) fn sync_platform_tools_to_registry(&mut self, enabled: bool) -> bool {
+    if enabled {
+        // 缺哪个 build_platform_protected_tools 哪个
+        for tool in build_platform_protected_tools(...) {
+            if !existing.contains(&tool.name()) {
+                self.builtin_tools.push(BuiltinToolEntry::with_resolved_enabled(false, tool));
+            }
+        }
+    } else {
+        self.builtin_tools.retain(|e| !PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name()));
+    }
+    self.rebuild_all_tools();  // 刷新 dispatch list
+    true
 }
 ```
 

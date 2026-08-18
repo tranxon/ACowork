@@ -93,7 +93,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
     let mcp_startup_rx: Option<
         tokio::sync::mpsc::Receiver<crate::tools::mcp_manager::McpConnectResult>,
     > = {
-        let mcp_configs = crate::agent_config::load_merged_mcp_configs(work_dir_path);
+        let mcp_configs = crate::agent_config::load_active_mcp_configs(work_dir_path);
         if !mcp_configs.is_empty() {
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);

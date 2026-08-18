@@ -222,7 +222,7 @@ pub trait AgentToolsService: Send + Sync {
     ///   - silently ignores names not present in the current config
     ///     (defensive: future tools arrive via `merge_tools_config` at
     ///     startup, not via this incremental path),
-    ///   - force-enables [`crate::agent_config::PLATFORM_TOOLS`]
+    ///   - force-enables [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]
     ///     regardless of the patch.
     ///
     /// No `UnknownTools` error variant — unlike MCP, unknown names are

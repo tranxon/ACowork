@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, Children, isValidElement } from "react";
-import { Copy, ChevronDown, ChevronRight, Wrench, AlertTriangle } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Copy, ChevronDown, ChevronRight, Wrench, AlertTriangle, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../../lib/types";
@@ -20,6 +21,24 @@ import { pickOpenActionForPath } from "../editor/markdownLinkResolver";
 import type { AttachedItem } from "../../lib/types";
 
 // ── Utilities ─────────────────────────────────────────────────────────
+
+/** Shape of a single item rendered inside the bubble context menu.  Kept
+ *  intentionally small so callers can compose their own item lists without
+ *  having to know about the wrapper's internal state (selection, copy). */
+export interface BubbleMenuItem {
+  /** Stable key for React reconciliation. */
+  key: string;
+  /** Lucide icon shown on the left of the label. */
+  icon: React.ReactNode;
+  /** Visible label — usually a `t("...")` translation. */
+  label: string;
+  /** Click handler.  The wrapper closes the menu after invoking it. */
+  onClick: () => void;
+  /** Disabled state — rendered with reduced opacity and `not-allowed`. */
+  disabled?: boolean;
+  /** Optional colour variant — reuses the global context-menu classes. */
+  variant?: "default" | "danger" | "warning";
+}
 
 /**
  * Strip common leading whitespace from multi-line strings.
@@ -134,7 +153,30 @@ const markdownComponents = {
 // ── Message Wrapper ───────────────────────────────────────────────────
 
 /** Wrapper that provides right-click context menu for copying text */
-function MessageContentWrapper({ children }: { children: React.ReactNode }) {
+interface MessageContentWrapperProps {
+  children: React.ReactNode;
+  /** Extra menu items appended below the default Copy action.  Use for
+   *  message-type-specific affordances (e.g. "Resend" on user bubbles).
+   *  Items are rendered in the order provided. */
+  extraMenuItems?: BubbleMenuItem[];
+}
+
+/**
+ * Wraps a message bubble's visual content and attaches a right-click context
+ * menu anchored at the cursor.
+ *
+ * The menu is rendered through `createPortal` to `document.body` so that
+ * `position: fixed` is anchored to the **viewport** rather than the nearest
+ * transformed ancestor.  `VirtualMessageList` translates each row with
+ * `transform: translateY(...)`, which under CSS Containing Block rules
+ * makes `position: fixed` resolve against the row container instead of the
+ * viewport — the symptom users reported was the menu "floating far from
+ * the bubble".  Same trick used in `FileTreeNode.tsx:417`.
+ */
+function MessageContentWrapper({
+  children,
+  extraMenuItems,
+}: MessageContentWrapperProps) {
   const { t } = useTranslation();
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -143,16 +185,20 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
     pointer: contextMenu,
   });
 
+  // Track whether the last right-click hit text that produced a selection
+  // — used to enable/disable the Copy item without re-reading the
+  // selection on every render.
+  const [hasSelection, setHasSelection] = useState(false);
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // Always show the menu on right-click; some items (e.g. "Resend") do
+    // not require a text selection.  Copy stays disabled when nothing is
+    // selected — see `BubbleMenuItem.disabled` below.
     const selection = window.getSelection();
-    const selectedText = selection?.toString().trim();
-
-    // Only show context menu if there's selected text
-    if (selectedText) {
-      setContextMenu({ x: e.clientX, y: e.clientY });
-    }
+    setHasSelection(!!selection?.toString().trim());
+    setContextMenu({ x: e.clientX, y: e.clientY });
   }, []);
 
   const handleCopy = useCallback(async () => {
@@ -174,6 +220,17 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
       }
     }
     setContextMenu(null);
+  }, []);
+
+  // Wrap any extra item click so the menu always closes — the wrapper
+  // owns the close-on-action contract so callers can stay focused on
+  // *what* happens, not *when* the menu disappears.
+  const invokeAndClose = useCallback((item: BubbleMenuItem) => {
+    return () => {
+      if (item.disabled) return;
+      item.onClick();
+      setContextMenu(null);
+    };
   }, []);
 
   // Close context menu on outside click (but not on right-click)
@@ -202,25 +259,56 @@ function MessageContentWrapper({ children }: { children: React.ReactNode }) {
     };
   }, [contextMenu]);
 
+  // Stable key for the Copy action — keeps React happy across re-renders.
+  const copyKey = "copy";
+
+  // Default items: Copy (always first).  Extra items appended below.
+  const copyItem: BubbleMenuItem = {
+    key: copyKey,
+    icon: <Copy size={14} />,
+    label: t("chatPanel.copy"),
+    onClick: handleCopy,
+    disabled: !hasSelection,
+  };
+
+  const allItems: BubbleMenuItem[] = [copyItem, ...(extraMenuItems ?? [])];
+
+  // Portal target must exist in the DOM — guard for SSR / very-early mount.
+  const portalTarget = typeof document !== "undefined" ? document.body : null;
+
   return (
     <>
       <div ref={wrapperRef} onContextMenu={handleContextMenu}>{children}</div>
-      {contextMenu && (
+      {contextMenu && portalTarget && createPortal(
         <div
           ref={menuRef}
           className="context-menu context-menu--compact"
           style={contextMenuStyle}
           onContextMenu={(e) => e.stopPropagation()}
         >
-          <button
-            type="button"
-            className="context-menu-item"
-            onClick={handleCopy}
-          >
-            <Copy size={14} />
-            <span>{t("chatPanel.copy")}</span>
-          </button>
-        </div>
+          {allItems.map((item) => {
+            const variantClass =
+              item.variant === "danger"
+                ? "context-menu-item--danger"
+                : item.variant === "warning"
+                  ? "context-menu-item--warning"
+                  : undefined;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                className={`context-menu-item${variantClass ? ` ${variantClass}` : ""}`}
+                onClick={invokeAndClose(item)}
+                disabled={item.disabled}
+                aria-disabled={item.disabled ? "true" : undefined}
+              >
+                <span className="context-menu-item__icon">{item.icon}</span>
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>,
+        portalTarget,
       )}
     </>
   );
@@ -244,6 +332,7 @@ const MessageBubble = React.memo(function MessageBubble({
 }) {
   // Convergent model: content always comes from the frozen message.
   const displayContent = message.content;
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
@@ -269,9 +358,36 @@ const MessageBubble = React.memo(function MessageBubble({
     useChatStore.getState().removeMessageAttachment(agentId, currentSessionId, message.id);
   }, [currentSessionId, message.id]);
 
+  // ── Resend handler (user bubbles only) ─────────────────────────────
+  // Reuses `sendMessage` which already handles message-id allocation,
+  // optimistic insert, attached-item clearing and MQTT publish.  Reading
+  // agentId via `getState()` keeps this callback's deps narrow and
+  // stable — same pattern used by the chip handlers above.
+  const handleResend = useCallback(() => {
+    const agentId = useAgentStore.getState().selectedAgentId;
+    if (!agentId) return;
+    // Resend only carries the text body.  Any original attachments are
+    // intentionally dropped — they were tied to a previous send and would
+    // double-charge the upload pipeline on a fresh re-send.
+    if (!message.content) return;
+    void useChatStore.getState().sendMessage(message.content, agentId);
+  }, [message.content]);
+
+  // Stable items array — rebuilt only when content (or language) changes.
+  // Wrapped in useMemo so React.memo peer bubbles don't see prop churn.
+  const userExtraMenuItems = React.useMemo<BubbleMenuItem[]>(() => {
+    if (!message.content) return [];
+    return [{
+      key: "resend",
+      icon: <RotateCcw size={14} />,
+      label: t("chatPanel.resend"),
+      onClick: handleResend,
+    }];
+  }, [message.content, handleResend, t]);
+
   if (message.type === "user") {
     return (
-      <MessageContentWrapper>
+      <MessageContentWrapper extraMenuItems={userExtraMenuItems}>
         <div className="flex items-start justify-end gap-2">
           <div className="min-w-0 flex-1 flex flex-col items-end">
             {liveUserName && (

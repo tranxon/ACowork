@@ -220,11 +220,13 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
       "assistant",
     ]);
 
-    // The avatar must appear above the explore_group (index 1) AND above
-    // the assistant (index 2) — both are agent replies anchored to the
-    // user_with_attachments block at index 0.
+    // The avatar appears exactly once per agent turn: above the FIRST
+    // agent block after the user — in this sequence the explore_group
+    // (index 1).  The assistant (index 2) is a continuation of the same
+    // turn, so it must NOT show a second avatar (regression guard for
+    // the duplicate-avatar bug).
     expect(shouldShowAgentAvatar(blocks, 1)).toBe(true);
-    expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
+    expect(shouldShowAgentAvatar(blocks, 2)).toBe(false);
   });
 
   it("shows the avatar even when a late attachment system entry sits between the user block and the agent reply", () => {
@@ -244,8 +246,11 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
       "assistant",
     ]);
 
+    // Same rule: the late `system` block IS a skip type (transparent),
+    // so the avatar still anchors above the explore_group.  But the
+    // assistant following the explore_group must NOT show a second avatar.
     expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
-    expect(shouldShowAgentAvatar(blocks, 3)).toBe(true);
+    expect(shouldShowAgentAvatar(blocks, 3)).toBe(false);
   });
 
   it("shows the avatar after a plain user block (legacy behaviour preserved)", () => {
@@ -331,6 +336,131 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
     ]);
     // The assistant at index 2 should anchor to the second user_with_attachments.
     expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
+  });
+});
+
+// ── shouldShowAgentAvatar: explore_group / no-duplicate-avatar regression ──
+//
+// Reported symptom: "用户消息后面如果跟着一个 agent 的 think 消息，agent
+// 头像会显示两次。先显示用户头像和消息，然后显示 agent 头像和深度思考块，
+// 然后又显示 agent 头像，然后再显示 agent 工具调用或者其他消息".
+//
+// Root cause: avatarAnchor previously listed `explore_group` in SKIP_TYPES,
+// so the backward scan passed THROUGH it on its way to the user block,
+// re-triggering the avatar on every subsequent agent block in the turn.
+//
+// These tests pin the corrected rule: avatar anchors to the FIRST agent
+// block after the user — once shown, never again until the next user
+// message.  `explore_group` is itself an agent block and acts as a HARD
+// stop, the same way a second `assistant` block would.
+
+describe("shouldShowAgentAvatar — explore_group must not duplicate the avatar", () => {
+  it("user → thought → assistant: avatar only on the explore_group, not on the assistant", () => {
+    // The minimal reproduction of the reported bug.  A user message,
+    // followed by a single thought (folding into an explore_group of
+    // length 1), followed by the assistant reply.  The avatar must show
+    // exactly once — above the explore_group — and NOT above the
+    // assistant that continues the same turn.
+    const messages: ChatMessage[] = [
+      userMsg(1000, "hi"),
+      thoughtMsg(2000, "let me think..."),
+      assistantMsg(3000, "here you go"),
+    ];
+    const blocks = foldMessages(messages);
+    expect(blocks.map((b) => b.type)).toEqual([
+      "user",
+      "explore_group",
+      "assistant",
+    ]);
+
+    expect(shouldShowAgentAvatar(blocks, 1)).toBe(true);
+    expect(shouldShowAgentAvatar(blocks, 2)).toBe(false);
+  });
+
+  it("user → thought → tool_call → tool_call → assistant: avatar only on the explore_group", () => {
+    // A more realistic agent turn: thinking then multiple tool calls
+    // then the final reply.  All of thought/tool_call/tool_result fold
+    // into a single explore_group.  The assistant must NOT duplicate the
+    // avatar.
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      thoughtMsg(1100, "I should check the file"),
+      toolCallMsg(1200),
+      toolCallMsg(1250),
+      assistantMsg(2000, "the file says ..."),
+    ];
+    const blocks = foldMessages(messages);
+    expect(blocks.map((b) => b.type)).toEqual([
+      "user",
+      "explore_group",
+      "assistant",
+    ]);
+    expect(blocks[1].rawCount).toBe(3);
+
+    expect(shouldShowAgentAvatar(blocks, 1)).toBe(true);
+    expect(shouldShowAgentAvatar(blocks, 2)).toBe(false);
+  });
+
+  it("user → explore_group → system → explore_group → assistant: avatar only on the FIRST explore_group", () => {
+    // Streaming can emit multiple distinct explore phases (thought → tool →
+    // new thought → tool → …) that fold into multiple explore_group blocks
+    // because each phase is separated by something non-explore.  Here we
+    // simulate that by inserting a system marker between two explore
+    // phases.
+    //
+    // The system marker IS a skip type (transparent), so the second
+    // explore_group's backward scan passes through it — but it then hits
+    // the FIRST explore_group, which is a HARD stop.  Once the avatar has
+    // been shown above the first explore_group of a turn, no later agent
+    // block in that turn re-triggers it, regardless of what non-agent
+    // markers sit between them.
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      thoughtMsg(1100),
+      toolCallMsg(1200),
+      // A non-attachment system entry splits the explore group.
+      systemMsg(1300, "phase boundary"),
+      thoughtMsg(1400, "next phase"),
+      toolCallMsg(1500),
+      assistantMsg(2000),
+    ];
+    const blocks = foldMessages(messages);
+    expect(blocks.map((b) => b.type)).toEqual([
+      "user",
+      "explore_group",
+      "system",
+      "explore_group",
+      "assistant",
+    ]);
+
+    // First explore_group: avatar shown (anchored to user).
+    expect(shouldShowAgentAvatar(blocks, 1)).toBe(true);
+    // Second explore_group: prev=system (skip), then prev=explore_group
+    // (hard stop) → NO avatar.  The avatar already belongs to this turn.
+    expect(shouldShowAgentAvatar(blocks, 3)).toBe(false);
+    // Assistant: prev=explore_group (hard stop) → NO avatar.
+    expect(shouldShowAgentAvatar(blocks, 4)).toBe(false);
+  });
+
+  it("compaction between user and explore_group: avatar still shown on explore_group", () => {
+    // Guard the legitimate skip behaviour: compaction IS a skip type and
+    // must NOT prevent the avatar from anchoring to the next agent block.
+    const messages: ChatMessage[] = [
+      userMsg(1000),
+      compactionMsg(1500),
+      thoughtMsg(2000),
+      assistantMsg(3000),
+    ];
+    const blocks = foldMessages(messages);
+    expect(blocks.map((b) => b.type)).toEqual([
+      "user",
+      "compaction",
+      "explore_group",
+      "assistant",
+    ]);
+
+    expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
+    expect(shouldShowAgentAvatar(blocks, 3)).toBe(false);
   });
 });
 

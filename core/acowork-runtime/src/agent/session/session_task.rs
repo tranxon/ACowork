@@ -1009,9 +1009,37 @@ impl SessionTask {
                         max_iterations = ?overrides.max_iterations,
                         temperature = ?overrides.temperature,
                         context_window = ?overrides.context_window,
+                        tool_compression_enabled = ?overrides.tool_compression_enabled,
                         "SessionTask: applying runtime config overrides"
                     );
+                    // Capture before the move; `apply_runtime_config`
+                    // does not take ownership of the overrides.
+                    let tool_compression_toggled = overrides.tool_compression_enabled.is_some();
+                    let tool_compression_new = overrides.tool_compression_enabled;
+
                     agent_loop.apply_runtime_config(&overrides);
+
+                    // ADR-052 hot-reload: when `tool_compression_enabled`
+                    // flipped, `AgentCore.apply_runtime_config` already
+                    // mutated `builtin_tools` and rebuilt `all_tools`
+                    // (the dispatch list). Here we additionally rebuild
+                    // `ContextBuilder.tool_definitions` so the LLM sees
+                    // the new set on the next `build_chat_request` —
+                    // mirroring the `apply_builtin_tools_update` path
+                    // below, which rebuilds both sides atomically.
+                    if tool_compression_toggled {
+                        rebuild_context_tool_definitions(
+                            &agent_loop.core.builtin_tools,
+                            &mut context_builder,
+                        );
+                        tracing::info!(
+                            session_id = %session_id,
+                            new_enabled = ?tool_compression_new,
+                            active_specs = agent_loop.core.builtin_tools.len(),
+                            "SessionTask: platform tools synced to ContextBuilder"
+                        );
+                    }
+
                     // Push updated state to frontend immediately so the
                     // ResultsPanel temperature display reflects the new value
                     // without waiting for the next LLM iteration.
@@ -1042,32 +1070,15 @@ impl SessionTask {
                         enabled_count,
                         "SessionTask: updating builtin tools on AgentCore"
                     );
-                    let patch_map: std::collections::HashMap<&str, bool> =
-                        entries.iter().map(|e| (e.name.as_str(), e.enabled)).collect();
-                    /// Platform-protected tools — always enabled, user cannot disable.
-                    const PLATFORM_TOOLS: &[&str] = &["context_retrieve", "context_abandon"];
-
-                    for entry in agent_loop.core.builtin_tools.iter_mut() {
-                        let name = entry.name();
-                        // Platform tools are force-enabled, ignore user override.
-                        if PLATFORM_TOOLS.contains(&name.as_str()) {
-                            if !entry.enabled {
-                                entry.enabled = true;
-                            }
-                            continue;
-                        }
-                        if let Some(&new_enabled) = patch_map.get(name.as_str()) {
-                            entry.enabled = new_enabled;
-                        }
-                    }
-                    agent_loop.core.rebuild_all_tools();
-                    // ADR-029 fix: rebuild tool_definitions for the LLM's
-                    // context builder so the LLM sees the updated tool list.
-                    // Without this, the LLM's tool_definitions go stale when
-                    // tools are enabled/disabled at runtime.
-                    rebuild_context_tool_definitions(
-                        &agent_loop.core.builtin_tools,
+                    // Atomic mutation: rebuild agent_tools dispatch list + LLM
+                    // tool_definitions in one shot. Platform-protected tools
+                    // (`context_retrieve`, `context_abandon`) are force-enabled
+                    // by `apply_builtin_tools_update` itself — no manual
+                    // override needed here.
+                    apply_builtin_tools_update(
+                        &mut agent_loop.core,
                         &mut context_builder,
+                        entries,
                     );
                 }
                 // ── ADR-030 C3: dynamic builtin tool add/remove ──────
@@ -1092,9 +1103,10 @@ impl SessionTask {
                         agent_loop.core.builtin_tools.push(entry);
                         false
                     };
-                    agent_loop.core.rebuild_all_tools();
-                    rebuild_context_tool_definitions(
-                        &agent_loop.core.builtin_tools,
+                    // Rebuild dispatch list + LLM tool_definitions in one
+                    // place (single source of truth for the reroute).
+                    refresh_builtin_tools_dependents(
+                        &mut agent_loop.core,
                         &mut context_builder,
                     );
                     tracing::info!(
@@ -1109,9 +1121,8 @@ impl SessionTask {
                     agent_loop.core.builtin_tools.retain(|e| e.name() != name);
                     let removed = agent_loop.core.builtin_tools.len() < before;
                     if removed {
-                        agent_loop.core.rebuild_all_tools();
-                        rebuild_context_tool_definitions(
-                            &agent_loop.core.builtin_tools,
+                        refresh_builtin_tools_dependents(
+                            &mut agent_loop.core,
                             &mut context_builder,
                         );
                     }
@@ -1436,6 +1447,71 @@ fn rebuild_context_tool_definitions(
         "Rebuilding context builder tool definitions from builtin_tools"
     );
     context_builder.set_tool_definitions(new_tool_definitions);
+}
+
+/// Atomic builtin-tools mutation — the **only** entry point for rewriting
+/// the `enabled` flags of `AgentCore.builtin_tools`.
+///
+/// Routes every write path (startup merge, hot-update patch, dynamic
+/// sidecar add/remove) through one function so:
+/// 1. The dispatch list (`all_tools`) is always rebuilt immediately after
+///    the builtin list changes (no stale enables).
+/// 2. The LLM's `tool_definitions` (`ContextBuilder`) is rebuilt in lock-step
+///    so the LLM sees the same set the runtime can dispatch (no
+///    "Unknown tool" errors after a hot toggle).
+/// 3. Platform-protected tools (`context_retrieve`, `context_abandon`) are
+///    always resolved to `enabled = true` via
+///    [`crate::agent_config::apply_builtin_tools_patch`], the same helper
+///    the persistence layer uses — no caller can introduce a divergent
+///    policy.
+///
+/// `entries` carries the *desired* (name, enabled) state for every
+/// registered builtin tool. The wrapped `tool` impl behind each
+/// registered slot is preserved — only the `enabled` flag is rewritten,
+/// so security decorators set during `ToolRegistry::activate` survive.
+fn apply_builtin_tools_update(
+    core: &mut AgentCore,
+    context_builder: &mut ContextBuilder,
+    entries: Vec<crate::agent_config::AgentToolEntry>,
+) {
+    // Re-resolve through `apply_builtin_tools_patch` with an empty patch.
+    // This guarantees platform-protected tools are force-enabled even if
+    // the incoming `entries` came from a write path that didn't itself
+    // consult PLATFORM_PROTECTED_TOOLS. The empty patch also drops any
+    // names not currently registered (defensive against drift).
+    let resolved = crate::agent_config::apply_builtin_tools_patch(&entries, &[]);
+    let resolved_map: std::collections::HashMap<String, bool> = resolved
+        .iter()
+        .map(|e| (e.name.clone(), e.enabled))
+        .collect();
+
+    // Apply only the `enabled` flag to the registered slots — preserve
+    // the wrapped `tool` impl (security decorators, etc.).
+    for entry in core.builtin_tools.iter_mut() {
+        let name = entry.name().to_string();
+        if let Some(&enabled) = resolved_map.get(&name) {
+            entry.enabled = enabled;
+        }
+    }
+
+    // Refresh the dispatch list and the LLM tool_definitions.
+    refresh_builtin_tools_dependents(core, context_builder);
+}
+
+/// Rebuild `all_tools` (dispatch list) and `ContextBuilder` tool_definitions
+/// (LLM-visible spec list) from the current `core.builtin_tools`.
+///
+/// Used by callers that mutate `builtin_tools` directly (e.g. dynamic
+/// sidecar add/remove) and by [`apply_builtin_tools_update`]. Callers
+/// MUST NOT call `rebuild_all_tools` / `rebuild_context_tool_definitions`
+/// separately — that would re-introduce the duplicated flow that this
+/// function deprecates.
+fn refresh_builtin_tools_dependents(
+    core: &mut AgentCore,
+    context_builder: &mut ContextBuilder,
+) {
+    core.rebuild_all_tools();
+    rebuild_context_tool_definitions(&core.builtin_tools, context_builder);
 }
 
 // ---------------------------------------------------------------------------

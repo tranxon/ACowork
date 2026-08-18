@@ -19,11 +19,23 @@ const USER_ANCHOR_TYPES: ReadonlySet<MessageBlock["type"]> = new Set([
   "user_with_attachments",
 ]);
 
-/** Block types that are skipped (no avatar here, but keep looking back). */
+/**
+ * Block types that are skipped during the backward scan: they are
+ * "transparent" markers that don't carry an avatar themselves but also
+ * don't terminate the search.  The avatar must still appear above the
+ * FIRST agent block after the user, even when compaction or a pure
+ * system entry sits in between.
+ *
+ * `explore_group` is deliberately NOT a skip type — it is itself an
+ * agent block (see isAgentBlock) and already shows the avatar header
+ * above it.  Treating it as a skip would let the backward scan pass
+ * through it and re-trigger the avatar on the next agent block
+ * (e.g. the trailing `assistant` message after `thought + tool_call +
+ * tool_result`), producing a duplicate avatar in the chat UI.
+ */
 const SKIP_TYPES: ReadonlySet<MessageBlock["type"]> = new Set([
   "compaction",
   "system",
-  "explore_group",
 ]);
 
 /**
@@ -54,6 +66,16 @@ export function isAgentBlock(block: MessageBlock): boolean {
  * Skip blocks are compaction and pure system markers; user-anchored
  * blocks are user messages, including those folded with attachment system
  * entries into a `user_with_attachments` block.
+ *
+ * The avatar anchors to the FIRST agent reply after the user — never to
+ * subsequent agent blocks.  Once the avatar has been shown above the
+ * first agent block in a turn (which may be an `explore_group` if the
+ * agent thinks / calls tools first), every later agent block in the same
+ * turn must terminate the scan.  Because `explore_group` is itself an
+ * agent block, encountering it during the backward scan must break the
+ * search and return false.  Treating it as a skip — as the previous
+ * version of this file did — would produce a duplicate avatar on the
+ * `assistant` message that follows `thought + tool_call + tool_result`.
  */
 export function shouldShowAgentAvatar(
   blocks: readonly MessageBlock[],

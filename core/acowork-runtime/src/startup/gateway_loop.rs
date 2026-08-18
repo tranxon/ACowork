@@ -405,7 +405,7 @@ async fn mqtt_only_loop(
             // MCP config change notification
             _ = mcp_config_rx.changed() => {
                 tracing::info!("MCP config change — reconnecting MCP servers (background)");
-                let merged = crate::agent_config::load_merged_mcp_configs(
+                let merged = crate::agent_config::load_active_mcp_configs(
                     std::path::Path::new(&work_dir),
                 );
                 let tx = mcp_runtime_tx.clone();
