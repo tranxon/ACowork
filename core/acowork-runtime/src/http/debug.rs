@@ -78,7 +78,7 @@ impl DebugRpcBody {
     fn require_session(&self) -> Result<&str, DebugHttpError> {
         if self.session_id.is_empty() {
             Err(DebugHttpError::invalid_params(
-                -326,
+                -32602,
                 "session_id is required",
             ))
         } else {
@@ -268,7 +268,7 @@ async fn get_state(
 ) -> Result<Json<DebugHttpResponse<DebugStateSnapshot>>, DebugHttpError> {
     if query.session_id.is_empty() {
         return Err(DebugHttpError::invalid_params(
-            -326,
+            -32602,
             "session_id query parameter is required",
         ));
     }
@@ -297,7 +297,7 @@ async fn get_context_snapshot(
 ) -> Result<Json<DebugHttpResponse<GetContextSnapshotResult>>, DebugHttpError> {
     if query.session_id.is_empty() {
         return Err(DebugHttpError::invalid_params(
-            -326,
+            -32602,
             "session_id query parameter is required",
         ));
     }
@@ -316,7 +316,7 @@ async fn get_section(
 ) -> Result<Json<DebugHttpResponse<GetSectionResult>>, DebugHttpError> {
     if query.session_id.is_empty() {
         return Err(DebugHttpError::invalid_params(
-            -326,
+            -32602,
             "session_id query parameter is required",
         ));
     }
@@ -335,7 +335,7 @@ async fn post_rewind(
     let sid = body.require_session()?;
     let target = body
         .to_iteration
-        .ok_or_else(|| DebugHttpError::invalid_params(-326, "to_iteration is required"))?;
+        .ok_or_else(|| DebugHttpError::invalid_params(-32602, "to_iteration is required"))?;
     let svc = resolve_service(&state).await?;
     svc.rewind(
         sid,
@@ -357,7 +357,7 @@ async fn post_patch_context(
     let patches = body
         .patches
         .clone()
-        .ok_or_else(|| DebugHttpError::invalid_params(-326, "patches is required"))?;
+        .ok_or_else(|| DebugHttpError::invalid_params(-32602, "patches is required"))?;
     let svc = resolve_service(&state).await?;
     svc.patch_context(sid, patches)
         .await

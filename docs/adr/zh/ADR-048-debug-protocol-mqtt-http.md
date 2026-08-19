@@ -129,11 +129,11 @@ acowork/agents/{agent_id}/debug/events/{event_type}
 
 | 子主题 | payload protobuf | 数据量 | QoS |
 |--------|----------------|--------|-----|
-| `onStep` | `DebugStepEvent { iteration, phase, input?, output?, usage? }` | ~200B-2KB | 0 |
-| `onBreakpoint` | `DebugBreakpointEvent { breakpoint_id, iteration, phase }` | ~50B | 0 |
-| `onRecordStep` | `DebugRecordStepEvent { step_index, phase, step_data? }` | ~100B-1KB | 0 |
-| `onStateChange` | `DebugStateChangeEvent { old_phase, new_phase, iteration }` | ~30B | 0 |
-| `onContextBuilt` | `DebugContextBuiltEvent { iteration, sections{...}, total_token_estimate }` | <500B | 0 |
+| `onStep` | `DebugStepEvent { session_id, iteration, phase, input?, output?, prompt_tokens, completion_tokens, total_tokens }` | ~200B-2KB | 0 |
+| `onBreakpoint` | `DebugBreakpointEvent { session_id, breakpoint_id, iteration, phase }` | ~50B | 0 |
+| `onRecordStep` | `DebugRecordStepEvent { session_id, step_index, phase, step_data? }` | ~100B-1KB | 0 |
+| `onStateChange` | `DebugStateChangeEvent { session_id, new_state, iteration }`（`new_state` 为 DebugState 名 `Running/Paused/Stepping/Stopped` 或 DebugPhase 名；Runtime 把 `ExecutionStateChanged` 与旧的 `StateChanged` 事件统一映射到本主题） | ~30B | 0 |
+| `onContextBuilt` | `DebugContextBuiltEvent { session_id, iteration, sections{...}, total_token_estimate }` | <500B | 0 |
 
 **对齐 `docs/zh/protocols/mqtt.md` §3.5 设计原则**：
 - ① **按数据源分类**：主题表达"agent {id} 的 debug 事件流"，不是"做什么动作"
@@ -147,14 +147,17 @@ acowork/agents/{agent_id}/debug/events/{event_type}
 
 **Gateway HTTP 反向代理**：在 `http/proxy.rs` 中新增 `/api/debug/*` 反代规则，复用现有 Runtime HTTP 注册表
 
-**错误码映射**（JSON-RPC → HTTP）：
+**错误码映射**（DebugError → HTTP status / JSON-RPC code）：
 
 | 场景 | HTTP status | JSON-RPC error code |
 |------|------------|-------------------|
 | 成功 | 200 | — |
-| 方法不存在 | 404 | -32601 |
-| JSON-RPC 内部错误 | 422 | -32603 |
-| Runtime 未运行 DevMode | 403 | -32000 |
+| Session 未找到（DevMode 内 `session_id` 不存在） | 404 | -32000 |
+| 参数无效（missing/invalid body 字段） | 400 | -32602 |
+| 快照 / section 未找到 | 404 | -32002 |
+| 控制器状态不允许该操作（如未暂停时 `step`） | 409 | -32003 |
+| 未指定内部失败 | 422 | -32603 |
+| Runtime 未运行 DevMode（slot 仍空） | 503 | -32000 |
 | Runtime 宕机 | 502 | (Gateway 反代错误) |
 
 **响应体格式**：
@@ -464,7 +467,7 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 
 | 风险 | 严重度 | 缓解 |
 |------|--------|------|
-| **现有 handler 业务逻辑提取时丢细节** | 中 | 提取是"cut & paste",调用语义不变；已迁 10 个 handler 全部经 `cargo test` 验证（events ×3 + mqtt encode ×4 + gateway proxy ×3）；旧 WebSocket 测试矩阵中未迁 12 个 endpoint 本就不在旧 server 内 |
+| **现有 handler 业务逻辑提取时丢细节** | 中 | 提取是"cut & paste",调用语义不变；已迁 10 个 handler 全部经 `cargo test` 直接验证（handlers ×18 — 每个 handler 至少覆盖正常路径 + 关键分支如 rewind 的 Stopped→Paused、step 的 Ignored）+ 传输层验证（events ×3 + mqtt encode ×3 + gateway proxy ×3）；旧 WebSocket 测试矩阵中未迁 12 个 endpoint 本就不在旧 server 内 |
 | **Runtime localhost HTTP 与 debug router 端口冲突** | 低 | debug 路由挂在 `/api/debug/*` 路径前缀，与 chat 路由无冲突；复用 Runtime 现有 localhost HTTP server |
 | **Desktop MQTT 订阅 chat + debug 两族，event callback 复杂度上升** | 低 | `on_message` 里按 topic 前缀分发（`agents/{id}/debug/events/#` vs `agents/{id}/sessions/{sid}/messages/#`），逻辑清晰 |
 | **`getState` 返回 messages 完整列表可能数十 KB** | 低 | 复用 Gateway 现有反代路径（已为类似大小 payload 设计） |

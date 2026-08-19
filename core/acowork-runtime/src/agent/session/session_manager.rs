@@ -2708,16 +2708,31 @@ After installation, ask the user to re-enable the MCP server.",
 
         let debug_event_tx = event_bus.sender_template();
 
-        // Create debug controllers for ALL existing sessions and register
-        // them in the shared debug_controllers map. New sessions created
-        // while debug mode is active register their own controllers at
-        // creation time via pending_debug_handles.
+        // Create debug controllers AND event senders for ALL existing
+        // sessions and register them in the shared maps. New sessions
+        // created while debug mode is active register their own pair at
+        // creation time via `create_session_with_id_and_conversation`.
+        //
+        // Both halves are required by `RuntimeDebugService::get_session_state`
+        // (`usecases/debug_service_impl.rs:61-78`): a missing controller
+        // or a missing sender both surface as `SessionNotFound` → 404 on
+        // every debug RPC. Without the sender registration below, the
+        // initial session (created in Phase B before `enable_debug_mode`
+        // runs) — the most common debug target — would fail every F5/F10
+        // /getState/step with the exact 404 the user is seeing.
         {
             let session_ids: Vec<String> = self.sessions.keys().cloned().collect();
             let mut controllers = self.debug_controllers.write().await;
+            let mut senders = self.debug_event_senders.write().await;
             for sid in session_ids {
                 let debug_ctrl = Arc::new(tokio::sync::Mutex::new(DebugController::new()));
-                controllers.insert(sid, debug_ctrl);
+                controllers.insert(sid.clone(), debug_ctrl);
+                // Per-session sender shares the broadcast channel with
+                // `runtime_debug_handles.debug_event_tx` (cheap clone)
+                // but is tagged with this session_id so events emitted
+                // by the AgentLoop land on the right receiver.
+                let per_session_sender = debug_event_tx.for_session(sid);
+                senders.insert(per_session_sender.session_id().to_string(), per_session_sender);
             }
         }
 
@@ -3630,5 +3645,139 @@ mod tests {
         let r = read_messages_since_cursor(&path, cursor, 50, &map, sid, store.committed_lines_for(sid)).unwrap();
         assert_eq!(r.messages.len(), 0);
         assert!(!r.has_more);
+    }
+
+    // ── ADR-048: enable_debug_mode must populate BOTH halves ──────────
+    //
+    // Bug history: pre-fix, `enable_debug_mode` only iterated
+    // `self.sessions` to insert per-session `DebugController`s into the
+    // shared `debug_controllers` map. It did NOT touch
+    // `debug_event_senders`. New sessions created after
+    // `enable_debug_mode` ran (via `create_session_with_id_and_conversation`)
+    // registered both halves, so they worked. But the initial session
+    // — created in Phase B before `enable_debug_mode` runs in Phase C,
+    // and the most common debug target — was left with a controller
+    // but no sender. `RuntimeDebugService::get_session_state` requires
+    // BOTH, so any debug RPC against the initial session (resume / step
+    // / getState / ...) returned `SessionNotFound` → 404:
+    //
+    //   Unhandled Promise Rejection: Debug 404 Not Found:
+    //     No debug session found for session_id: 20260819_231156_74e55e
+    //
+    // This test pins the fix: every existing session at the moment
+    // `enable_debug_mode` runs must show up in BOTH maps, so the
+    // paired lookup in `get_session_state` succeeds.
+    //
+    // Note: we don't run `create_session` here — it spawns a tokio
+    // task and requires a fully-wired AgentCore / WorkDir. The bug is
+    // purely about the map-population inside `enable_debug_mode`, which
+    // only reads `self.sessions.keys()`. We hand-inject a dummy
+    // SessionHandle keyed by the session_id we want to test, then
+    // exercise `enable_debug_mode` and assert both maps agree.
+    #[tokio::test]
+    async fn enable_debug_mode_populates_event_senders_for_existing_sessions() {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session::session_task::SessionMessage;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+
+        // 1. Build a bare SessionManager (no MQTT, no AgentCore details
+        //    needed — `enable_debug_mode` is what we're testing).
+        let config = crate::config::RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.debug_existing"
+            version = "1.0.0"
+            name = "Test debug-existing"
+            description = "Pin enable_debug_mode dual-map population"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+
+        // 2. Hand-inject a dummy session_handle into `self.sessions`
+        //    to mimic the Phase B initial session. The fields are
+        //    dummy because `enable_debug_mode` only reads
+        //    `self.sessions.keys()` — it never touches the handle.
+        let initial_session_id = "20260819_231156_74e55e".to_string();
+        let (inbound_tx, _inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(1);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            initial_session_id.clone(),
+            SessionHandle {
+                session_id: initial_session_id.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: initial_session_id.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: None,
+            },
+        );
+
+        // 3. Pre-condition: both maps are empty before enable_debug_mode.
+        assert!(
+            manager.debug_controllers.read().await.is_empty(),
+            "precondition: debug_controllers empty"
+        );
+        assert!(
+            manager.debug_event_senders.read().await.is_empty(),
+            "precondition: debug_event_senders empty"
+        );
+
+        // 4. Run enable_debug_mode (Phase C, no MQTT client — exercising
+        //    the no-publisher branch is fine; the bug is in the
+        //    map-population loop, independent of the publisher).
+        manager.enable_debug_mode(19878, None).await;
+
+        // 5. The fix: BOTH maps must contain the pre-existing session.
+        let ctrl_map = manager.debug_controllers.read().await;
+        let sender_map = manager.debug_event_senders.read().await;
+        assert!(
+            ctrl_map.contains_key(&initial_session_id),
+            "controller must be registered for the initial session (was: {:?})",
+            ctrl_map.keys().collect::<Vec<_>>()
+        );
+        let sender = sender_map
+            .get(&initial_session_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "BUG: event sender missing for initial session (was: {:?}) — would 404 on every F5/F10",
+                    sender_map.keys().collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            sender.session_id(),
+            initial_session_id,
+            "per-session sender must be tagged with the originating session_id (not the template's empty id)"
+        );
     }
 }
