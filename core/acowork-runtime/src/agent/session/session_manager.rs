@@ -304,11 +304,23 @@ pub struct SessionManager {
     /// and notify handles. Existing sessions restart via urgent_interrupt
     /// and pick up these handles on their next agent_loop.run().
     pub(crate) runtime_debug_handles: Option<DebugHandles>,
-    /// Per-session debug controllers, shared with DebugProtocolServer for
+    /// Per-session debug controllers, shared with DebugEventBus consumers
     /// request routing. Each session adds its controller when created with
     /// debug mode active.
     pub(crate) debug_controllers:
         Arc<tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<DebugController>>>>>,
+    /// ADR-048: per-session event senders, populated when DevMode is
+    /// enabled. `RuntimeDebugService` reads from this map to route
+    /// handler-emitted events through the correct per-session sender
+    /// (so each event is tagged with the originating session_id).
+    pub(crate) debug_event_senders:
+        Arc<tokio::sync::RwLock<HashMap<String, crate::debug::DebugEventSender>>>,
+    /// ADR-048: the late-bind Debug service that HTTP routes consult
+    /// via `debug_service_slot` in `AgentBootContext`. Built by
+    /// `enable_debug_mode` once per-session controllers and senders
+    /// are populated. `None` outside DevMode; HTTP routes return 503
+    /// in that case.
+    debug_service: Option<Arc<crate::usecases::RuntimeDebugService>>,
     /// Per-session urgent_stop Notify handles.
     /// Keyed by session_id; fire_urgent_stop() looks up the target session's
     /// Notify and wakes only that session's tokio::select! branches.
@@ -388,6 +400,8 @@ impl SessionManager {
             resolver: None,
             runtime_debug_handles: None,
             debug_controllers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            debug_event_senders: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            debug_service: None,
             urgent_stops: HashMap::new(),
             cancel_handles: HashMap::new(),
             session_committed_lines: HashMap::new(),
@@ -468,7 +482,7 @@ impl SessionManager {
             Arc::new(tokio::sync::Mutex::new(None));
 
         // If debug mode is active, create a per-session DebugController and
-        // register it in self.debug_controllers so the DebugProtocolServer can
+        // register it in self.debug_controllers so the debug service can
         // read this session's state via getState. The global runtime_debug_handles
         // carries a shared controller — we must NOT reuse it because each session
         // needs its own independent iteration/phase.
@@ -488,6 +502,17 @@ impl SessionManager {
                 .write()
                 .await
                 .insert(session_id.clone(), ctrl.clone());
+            // ADR-048: also register the per-session event sender in the
+            // shared map so `RuntimeDebugService` (built by
+            // `enable_debug_mode`) can find it. The template sender from
+            // `runtime_debug_handles` is per-session-tagged, so we share
+            // the channel handle but bind it to the new session_id.
+            let per_session_sender =
+                handles.debug_event_tx.for_session(session_id.clone());
+            self.debug_event_senders
+                .write()
+                .await
+                .insert(session_id.clone(), per_session_sender.clone());
             Some(DebugHandles {
                 debug_ctrl: ctrl,
                 debug_event_tx: handles.debug_event_tx.for_session(session_id.clone()),
@@ -2628,11 +2653,25 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Initialize debug mode at runtime (called when Gateway pushes EnableDebugMode).
     ///
-    /// Starts a DebugProtocolServer on `debug_port` and stores the resulting
-    /// controller, event sender, and notify handles. Then pushes the handles
-    /// to all existing sessions via `SessionMessage::EnableDebugMode` so they
-    /// can start emitting debug events immediately, without a restart.
-    pub async fn enable_debug_mode(&mut self, debug_port: u32) {
+    /// ADR-048: no TCP listener is started anymore. This wires up:
+    /// 1. A [`crate::debug::DebugEventBus`] + per-session senders
+    ///    (event path - consumed by the MQTT publisher).
+    /// 2. The MQTT publisher itself, if an MQTT client is available.
+    /// 3. The late-bind `RuntimeDebugService` for HTTP `/api/debug/*`.
+    ///
+    /// Then pushes the handles to all existing sessions via
+    /// `SessionMessage::EnableDebugMode` so they can start emitting
+    /// debug events immediately, without a restart.
+    ///
+    /// `debug_port` is retained for API stability but unused at runtime
+    /// (ADR-048 removed the WS listener); it's still plumbed through the
+    /// CLI / config / Gateway → Runtime handshake so existing operator
+    /// scripts and dashboards keep working.
+    pub async fn enable_debug_mode(
+        &mut self,
+        debug_port: u32,
+        mqtt_client: Option<Arc<crate::mqtt::RuntimeMqttClient>>,
+    ) {
         // Avoid double-init: if debug handles are already set, skip.
         if self.runtime_debug_handles.is_some() {
             tracing::warn!(
@@ -2642,10 +2681,32 @@ After installation, ask the user to re-enable the MCP server.",
             return;
         }
 
-        let port = debug_port as u16;
-        let debug_server =
-            crate::debug::server::DebugProtocolServer::new(port, self.debug_controllers.clone());
-        let debug_event_tx = debug_server.start().await;
+        let event_bus = crate::debug::DebugEventBus::new();
+
+        // ADR-048: if an MQTT client is available, subscribe a
+        // publisher that forwards every TaggedEvent to the broker on
+        // acowork/agents/<id>/debug/events/<event_type>.
+        if let Some(mqtt_client) = mqtt_client {
+            let event_rx = event_bus.subscribe();
+            let agent_id = self.core.config.agent_id.clone();
+            let publisher = crate::mqtt::DebugEventMqttPublisher::new(
+                agent_id,
+                mqtt_client,
+                event_rx,
+            );
+            tokio::spawn(async move {
+                publisher.run().await;
+            });
+            tracing::info!(
+                "DebugEventMqttPublisher subscribed — debug events will be published to MQTT"
+            );
+        } else {
+            tracing::warn!(
+                "DevMode started without MQTT client — debug events have no consumer"
+            );
+        }
+
+        let debug_event_tx = event_bus.sender_template();
 
         // Create debug controllers for ALL existing sessions and register
         // them in the shared debug_controllers map. New sessions created
@@ -2702,16 +2763,36 @@ After installation, ask the user to re-enable the MCP server.",
         };
         self.runtime_debug_handles = Some(template_handles);
 
+        // ADR-048: build the late-bind `RuntimeDebugService` now that
+        // per-session controllers and event senders are populated. The
+        // service reads from `debug_controllers` and `debug_event_senders`
+        // on every call, so future session registrations still work —
+        // we don't snapshot the maps.
+        let debug_svc = Arc::new(crate::usecases::RuntimeDebugService::new(
+            self.debug_controllers.clone(),
+            self.debug_event_senders.clone(),
+        ));
+        self.debug_service = Some(debug_svc);
+
         tracing::info!(
-            port = port,
-            "enable_debug_mode: debug server started, handles stored for future sessions"
+            "enable_debug_mode: event bus + MQTT publisher wired, handles stored for future sessions"
         );
 
         // Push debug handles to all existing sessions so their AgentCore
         // gets debug_ctrl/debug_event_tx injected. Without this, existing
         // sessions would continue without debug instrumentation while the
-        // DebugProtocolServer would show iteration:0 forever.
+        // debug panel would show iteration:0 forever.
         self.push_debug_mode_to_existing_sessions().await;
+    }
+
+    /// Get the late-bind Debug service (built by `enable_debug_mode`).
+    ///
+    /// Returns `None` outside DevMode — the caller (typically the
+    /// startup code that fills `debug_service_slot`) skips the slot
+    /// fill in that case and the HTTP `/api/debug/*` routes return
+    /// 503 with "Debug service not ready".
+    pub fn debug_service(&self) -> Option<Arc<crate::usecases::RuntimeDebugService>> {
+        self.debug_service.clone()
     }
 
     /// Push EnableDebugMode to every existing session so they inject the
@@ -2719,7 +2800,7 @@ After installation, ask the user to re-enable the MCP server.",
     ///
     /// Each session receives its own per-session `DebugController` (stored
     /// in `self.debug_controllers`) so that the AgentLoop's state updates
-    /// are visible to the `DebugProtocolServer` via `getState`. The notify
+    /// are visible to the HTTP debug routes via `getState`. The notify
     /// handles (rewind/resume) also come from the per-session controller so
     /// that the debug server's `notify_one()` calls reach the correct waiter.
     async fn push_debug_mode_to_existing_sessions(&self) {
@@ -2729,7 +2810,7 @@ After installation, ask the user to re-enable the MCP server.",
         let controllers = self.debug_controllers.read().await;
         for (sid, session_handle) in &self.sessions {
             // Use the per-session controller registered in debug_controllers,
-            // NOT the global handles.debug_ctrl. The DebugProtocolServer reads
+            // NOT the global handles.debug_ctrl. The debug service reads
             // from debug_controllers for getState, so the AgentLoop must write
             // to the same instance.
             let per_session_ctrl = controllers

@@ -1238,12 +1238,14 @@ pub enum GatewayResponse {
     ///
     /// Gateway pushes this when the user clicks "Restart in Debug" on a
     /// running agent. The Runtime fires urgent_interrupt to cancel any
-    /// in-flight tools/LLM, starts the Debug WebSocket server on
-    /// `debug_port`, and injects DebugController + notify handles into
-    /// the shared AgentCore. If the agent loop is idle, the interrupt
-    /// step is skipped and debug mode is initialized directly.
+    /// in-flight tools and LLM calls, registers the Debug HTTP routes and
+    /// spawns the MQTT debug events publisher (ADR-048), and injects the
+    /// DebugController and notify handles into the shared AgentCore. If
+    /// the agent loop is idle, the interrupt step is skipped and debug
+    /// mode is initialized directly.
     EnableDebugMode {
-        /// Debug WebSocket port (allocated by Gateway)
+        /// Debug Protocol port hint (allocated by Gateway; no longer bound
+        /// as a listener after ADR-048, kept for API stability).
         debug_port: u32,
     },
     /// Start embedding dimension migration (Gateway → Runtime).

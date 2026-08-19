@@ -381,7 +381,7 @@ cargo test                  # 全测通过（已知失败除外）
 - [ ] 修改 MCP 配置 → 热推送 → Runtime 日志显示 SearchConfigDelivery
 - [ ] 切模型 → 重启 Runtime → AgentHello 握手成功
 - [ ] 手动 tool_approval_needed → 桌面弹窗 → 批准 → Runtime 收到
-- [ ] DevMode debug panel（ws://127.0.0.1:19878）正常工作
+- [ ] DevMode debug panel（HTTP RPC + MQTT events，ADR-048）正常工作
 - [ ] 检查 Gateway 日志：无 ERROR"missing session" / "unauthenticated session" 类异常
 
 ---

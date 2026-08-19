@@ -100,7 +100,7 @@ Agent Runtime 二进制
 │   └── RagClient (opt)    # RAG 检索客户端
 ├── Grafeo (嵌入式)     # 私有 Memory 存储引擎
 ├── Skill Loader        # 加载 Skills（SKILL.md + Grafeo 经验层）
-├── Debug/DevMode       # 调试协议（WebSocket JSON-RPC，可选）
+├── Debug/DevMode       # 调试协议（HTTP RPC + MQTT events，ADR-048；可选）
 ├── MCP Manager         # MCP 服务器连接管理（按需激活）
 ├── Search Config       # Web 搜索提供商配置（从 Gateway 同步）
 └── Budget Manager      # 本地预算预检 + 用量上报

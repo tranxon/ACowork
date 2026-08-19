@@ -1,28 +1,39 @@
 //! Debug protocol module for Agent Runtime DevMode.
 //!
-//! Provides:
-//! - [`protocol`]: JSON-RPC 2.0 message types (request, response, notification)
-//! - [`controller`]: DebugController — shared state (execution control, snapshots)
-//! - [`server`]: WebSocket server (ws://127.0.0.1:19878) for Desktop App communication
-//! - [`observer`]: [`DebugObserver`] trait + [`DebugObserverSlot`] enum dispatch
-//! - [`observer_impl`]: [`DebugObserverImpl`] — concrete DevMode implementation
+//! ADR-048: the Debug Protocol runs on the same transports as the
+//! production IPC channels - HTTP REST for RPC, MQTT pub/sub for
+//! events:
 //!
-//! The debug protocol follows Chrome DevTools Protocol (CDP) conventions
-//! with JSON-RPC 2.0 over WebSocket. See `docs/design/10-debug-protocol.md`.
+//! - [`protocol`]: shared data types (DebugPhase, ContextSections, ...)
+//! - [`controller`]: DebugController - shared state (execution control, snapshots)
+//! - [`events`]: [`DebugEventBus`] + [`DebugEventSender`] - broadcast
+//!   event channel consumed by the MQTT publisher
+//! - [`handlers`]: Debug RPC business logic (thin, transport-free)
+//! - [`observer`]: [`DebugObserver`] trait + [`DebugObserverSlot`] enum dispatch
+//! - [`observer_impl`]: [`DebugObserverImpl`] - concrete DevMode implementation
+//!
+//! RPC flow: `http/debug.rs` (axum routes) -> `usecases::DebugService`
+//! -> `handlers` (this module). Event flow: AgentLoop ->
+//! `DebugEventSender` -> `DebugEventBus` -> MQTT publisher ->
+//! `acowork/agents/{id}/debug/events/{event_type}`.
+//!
+//! The legacy WebSocket + JSON-RPC server was removed by ADR-048 D4;
+//! see `docs/adr/zh/ADR-048-debug-protocol-mqtt-http.md`.
 
 use std::sync::Arc;
 use tokio::sync::Notify;
 
 use crate::debug::controller::DebugController;
-use crate::debug::server::DebugEventSender;
 
 pub mod controller;
+pub mod events;
+pub mod handlers;
 pub mod observer;
 pub mod observer_impl;
 pub mod protocol;
-pub mod server;
 
 // Re-export the primary types for convenience.
+pub use events::{DebugEvent, DebugEventBus, DebugEventSender, TaggedEvent};
 pub use observer::{ContextSnapshotRequest, DebugObserverSlot};
 pub use observer_impl::DebugObserverImpl;
 

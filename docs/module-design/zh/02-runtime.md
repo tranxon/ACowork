@@ -151,11 +151,13 @@ crates/acowork-runtime/
     │   ├── transport.rs           # 传输层抽象（Unix Socket / Named Pipe / Local TCP）
     │   └── client.rs              # Gateway Service API 客户端
     ├── debug/
-    │   ├── mod.rs                 # DevMode 控制器
-    │   ├── protocol.rs            # Debug Protocol Server（JSON-RPC over WebSocket）
-    │   ├── snapshot.rs            # 对话快照管理
-    │   ├── recording.rs           # 录制引擎（JSONL）
-    │   └── replay.rs              # 回放引擎
+    │   ├── mod.rs                 # DevMode 控制器（ADR-048：仅导出 DebugEventBus + DebugEventSender）
+    │   ├── handlers.rs            # Debug Protocol 业务逻辑（10 个 pub async fn，从原 server.rs 提取；其余 12 个 endpoint 预留）
+    │   ├── events.rs              # DebugEventBus（broadcast channel，连接 handlers ↔ MQTT publisher）
+    │   ├── controller.rs          # DebugController 共享状态
+    │   ├── observer.rs            # 主循环观察者（pause/step 等控制信号）
+    │   ├── observer_impl.rs       # observer 默认实现
+    │   └── protocol.rs            # Debug Protocol DTO（ADR-048 后仅保留数据，移除 JSON-RPC 帧）
     ├── config.rs                  # Agent Runtime 配置
     └── cli.rs                     # CLI 子命令定义
 ```

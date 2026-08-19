@@ -10,6 +10,8 @@
 pub mod available_cache;
 pub mod client;
 pub mod control_handler;
+pub mod debug_events;
 
 pub use available_cache::{AvailableResourceCache, SharedAvailableCache, new_shared_cache};
 pub use client::{MqttChunkPublisher, MqttConnectConfig, RuntimeMqttClient, RuntimeMqttClientError, ToolApprovalNeededEvent};
+pub use debug_events::DebugEventMqttPublisher;

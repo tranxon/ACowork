@@ -86,7 +86,9 @@ pub async fn spawn_agent_process(
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
 
-    // Developer mode: pass --dev-mode flag to enable Debug Protocol WebSocket
+    // Developer mode: pass --dev-mode so Runtime starts Debug Protocol
+    // (HTTP RPC + MQTT events per ADR-048; the legacy WebSocket server
+    // was removed in D4).
     if dev_mode {
         cmd.arg("--dev-mode");
         if let Some(port) = debug_port {

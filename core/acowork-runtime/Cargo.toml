@@ -79,9 +79,6 @@ ignore.workspace = true
 # Glob pattern matching (used by glob_search tool, transitive via ignore)
 globset.workspace = true
 
-# Debug protocol WebSocket server
-tokio-tungstenite.workspace = true
-
 # Interactive CLI (feature-gated)
 dialoguer = { workspace = true, optional = true }
 
@@ -107,7 +104,6 @@ serde_json = { workspace = true }
 mockito = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart"] }
-tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 
 # ── ADR-033: Standalone MQTT integration test binary ─────────────────

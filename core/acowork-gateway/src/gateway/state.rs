@@ -44,7 +44,10 @@ pub struct RunningAgentInfo {
     pub ready: bool,
     /// Whether the agent was started in developer mode (Debug Protocol enabled)
     pub dev_mode: bool,
-    /// Debug WebSocket port (set when dev_mode is true)
+    /// Debug Protocol port hint (set when dev_mode is true).
+    ///
+    /// ADR-048: kept for API stability; Runtime no longer binds it as a
+    /// WebSocket listener. See `dev_mode` doc above.
     pub debug_port: Option<u16>,
     /// In-memory cache of the agent's workspace config JSON (ADR-009: pass-through).
     /// Populated by Runtime via UpdateWorkspaceConfig gRPC after AgentHello.

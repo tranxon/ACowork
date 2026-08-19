@@ -155,7 +155,7 @@ pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttC
 
 /// State shared with HTTP handlers.
 #[derive(Clone)]
-struct HttpState {
+pub(crate) struct HttpState {
     work_dir: PathBuf,
     agent_id: String,
     /// Retained on the state for parity with the startup wiring
@@ -220,6 +220,12 @@ struct HttpState {
     /// RAG provider (late-bind from AgentCore Phase B).
     /// Used by `GET /agents/{id}/rag/status` and `POST /agents/{id}/rag/query`.
     rag_provider: SharedRagProvider,
+    /// ADR-048: late-bind slot for the Debug service. Populated by Phase
+    /// B after SessionManager wires up per-session debug controllers.
+    /// `None` until then; HTTP handlers return 503 with a descriptive
+    /// message when this slot is still empty (same pattern as every
+    /// other ADR-040 use-case slot).
+    pub(crate) debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
 }
 
 /// Handle to the running HTTP server.
@@ -262,6 +268,7 @@ impl RuntimeHttpServer {
         session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
         consolidation_timer: SharedConsolidationTimer,
         rag_provider: SharedRagProvider,
+        debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
         let state = HttpState {
             work_dir,
@@ -282,6 +289,7 @@ impl RuntimeHttpServer {
             session_config,
             consolidation_timer,
             rag_provider,
+            debug_service,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -433,6 +441,11 @@ impl RuntimeHttpServer {
             .route("/memory/consolidation/status", get(get_consolidation_status))
             .route("/agents/{id}/rag/status", get(get_rag_status))
             .route("/agents/{id}/rag/query", post(post_rag_query))
+            // ADR-048: debug protocol HTTP routes — thin wrappers
+            // around DebugService. Mounted under /api/debug/*. Phase A
+            // starts the HTTP server before DebugService is wired up,
+            // so handlers return 503 until Phase B populates the slot.
+            .merge(crate::http::debug::debug_routes())
             .with_state(state);
 
         // Bind to 127.0.0.1:0 for a random port
@@ -2624,6 +2637,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2725,6 +2739,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .unwrap();
@@ -2879,6 +2894,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -2939,6 +2955,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3078,6 +3095,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3242,6 +3260,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3444,6 +3463,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3649,6 +3669,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -3794,6 +3815,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4266,6 +4288,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4388,6 +4411,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4574,6 +4598,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             consolidation_timer_slot,
             Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4627,7 +4652,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-        )
+            Arc::new(tokio::sync::Mutex::new(None)),        )
         .await
         .expect("server should start");
 
@@ -4695,6 +4720,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4750,7 +4776,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-        )
+            Arc::new(tokio::sync::Mutex::new(None)),        )
         .await
         .expect("server should start");
 
@@ -4836,6 +4862,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -4910,7 +4937,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-        )
+            Arc::new(tokio::sync::Mutex::new(None)),        )
         .await
         .expect("server should start");
 
@@ -4982,6 +5009,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -5144,6 +5172,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -5258,6 +5287,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -5339,6 +5369,7 @@ mod tests {
             session_config_slot,
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");
@@ -5434,6 +5465,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
+                    std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         )
         .await
         .expect("server should start");

@@ -1,9 +1,20 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useChatStore } from "./chatStore";
 import { useAgentStore } from "./agentStore";
 import { log } from "../lib/logger";
 
 // ── Debug Protocol types ──────────────────────────────────────────────
+//
+// ADR-048 D6: transport switched from a direct WebSocket JSON-RPC
+// connection (ws://127.0.0.1:19878) to the standard IPC pair:
+//   - RPC  -> Tauri command `debug_rpc` (Gateway HTTP reverse proxy
+//             `/api/agents/{agent_id}/debug/{path}` -> Runtime
+//             `/api/debug/{path}`)
+//   - push -> Tauri event `debug-event` (MQTT
+//             `acowork/agents/{agent_id}/debug/events/{type}`, decoded
+//             by the Rust MQTT client in `commands/chat_mqtt.rs`)
 
 type Phase =
   | "BudgetCheck"
@@ -14,8 +25,10 @@ type Phase =
   | "AppendHistory"
   | "Idle";
 
-/** Mirrors backend DebugState — the single source of truth for execution state. */
+/** Mirrors backend DebugState - the single source of truth for execution state. */
 type DebugState = "Running" | "Paused" | "Stepping" | "Stopped";
+
+const DEBUG_STATES: ReadonlySet<string> = new Set(["Running", "Paused", "Stepping", "Stopped"]);
 
 interface SectionMeta {
   size_bytes: number;
@@ -26,15 +39,13 @@ interface SectionMeta {
 interface ContextSnapshotMeta {
   iteration: number;
   built_at: string;
-  sections: {
-    system_prompt: SectionMeta;
-    workspace_context: SectionMeta;
-    environment: SectionMeta;
-    tool_definitions: SectionMeta;
-    skill_instructions: SectionMeta;
-    retrieved_memory: SectionMeta;
-    identity_context: SectionMeta;
-  };
+  /**
+   * Section metadata keyed by section name (system_prompt, ...).
+   * Both sources use this shape: the `onContextBuilt` MQTT event
+   * (proto map) and the `GET /api/debug/context/{iter}` RPC result
+   * (ContextSections struct - same seven keys).
+   */
+  sections: Record<string, SectionMeta>;
   total_token_estimate: number;
   phase: Phase;
 }
@@ -76,33 +87,6 @@ function freshPerSessionState(): PerSessionDebugState {
   };
 }
 
-// ── JSON-RPC types ─────────────────────────────────────────────────────
-
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params: Record<string, unknown>;
-}
-
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id: number;
-  result?: unknown;
-  error?: { code: number; message: string };
-}
-
-interface JsonRpcEvent {
-  jsonrpc: "2.0";
-  method: string;
-  params: Record<string, unknown>;
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────
-
-const DEFAULT_DEBUG_PORT = 19878;
-let connectRetryTimer: ReturnType<typeof setTimeout> | null = null;
-
 /** Get or create the per-session state entry for a session ID. */
 function ensureSessionState(
   states: Record<string, PerSessionDebugState>,
@@ -114,26 +98,84 @@ function ensureSessionState(
   return states[sid];
 }
 
+// ── Debug event payloads (Rust MQTT client -> `debug-event`) ──────────
+//
+// Emitted by `commands/chat_mqtt.rs` after decoding the
+// `DataEnvelope::Debug*Event` protobuf on
+// `acowork/agents/{agent_id}/debug/events/{type}`. `type` mirrors the
+// MQTT topic suffix.
+
+interface DebugEventPayload {
+  type: "onStep" | "onContextBuilt" | "onStateChange";
+  agent_id: string;
+  session_id: string;
+  // onStep
+  iteration?: number;
+  phase?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  // onContextBuilt
+  sections?: Record<string, SectionMeta>;
+  total_token_estimate?: number;
+  // onStateChange
+  new_state?: string;
+}
+
+// ── Global `debug-event` listener ─────────────────────────────────────
+//
+// Registered lazily by `connect()` (DevMode only) and kept for the app
+// lifetime. Events arriving before registration are dropped - same QoS 0
+// semantics as the MQTT publisher (ADR-048 §2.4): after a (re)connect
+// the panel re-syncs via `GET /api/debug/state`.
+
+let _debugEventUnlisten: (() => void) | null = null;
+let _debugEventInitPromise: Promise<void> | null = null;
+
+async function ensureDebugEventListener(): Promise<void> {
+  if (_debugEventUnlisten) return;
+  if (_debugEventInitPromise) {
+    await _debugEventInitPromise;
+    return;
+  }
+  _debugEventInitPromise = (async () => {
+    const unlisten = await listen<DebugEventPayload>("debug-event", (event) => {
+      useDebugStore.getState()._handleDebugEvent(event.payload);
+    });
+    if (_debugEventUnlisten) {
+      // A concurrent init won the race - drop this registration.
+      unlisten();
+      return;
+    }
+    _debugEventUnlisten = unlisten;
+  })();
+  await _debugEventInitPromise;
+}
+
 // ── Store interface ────────────────────────────────────────────────────
 
 interface DebugStore {
-  // Connection (shared — one WebSocket per agent)
-  socket: WebSocket | null;
+  // Connection (shared - one debug session per agent)
+  /**
+   * Whether a debug session is attached (`debugAgentId` set). There is
+   * no persistent connection any more: RPC is per-call HTTP through the
+   * Gateway and events ride the shared MQTT subscription, so this flag
+   * simply gates the DevMode UI.
+   */
   connected: boolean;
-  connecting: boolean;
   debugAgentId: string | null;
 
-  /** Per-session debug state map — preserved across session switches. */
+  /** Per-session debug state map - preserved across session switches. */
   sessionStates: Record<string, PerSessionDebugState>;
 
-  // Pending RPC (shared)
-  nextRequestId: number;
-  pendingRequests: Map<number, { resolve: (r: unknown) => void; reject: (e: Error) => void }>;
-
   // Actions
-  connect: (agentId: string, debugPort?: number) => void;
+  connect: (agentId: string) => void;
   disconnect: () => void;
-  sendRequest: (sessionId: string | null, method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  rpc: (
+    method: "GET" | "POST",
+    path: string,
+    opts?: { query?: Record<string, string>; body?: Record<string, unknown> },
+  ) => Promise<unknown>;
 
   // Debug commands
   resume: (sessionId: string | null) => Promise<void>;
@@ -148,156 +190,80 @@ interface DebugStore {
   getSection: (sessionId: string | null, iteration: number, section: string) => Promise<SectionContent | null>;
 
   // Context editing commands (S2.8)
-  rewind: (sessionId: string | null, toIteration: number) => Promise<{ rewound_to_iteration: number; messages_trimmed_to: number }>;
-  reExecute: (sessionId: string | null) => Promise<{ has_patches: boolean }>;
+  rewind: (sessionId: string | null, toIteration: number) => Promise<{ rewound_to_iteration: number; messages_trimmed_to: number } | undefined>;
+  reExecute: (sessionId: string | null) => Promise<{ has_patches: boolean } | undefined>;
   patchContext: (sessionId: string | null, patches: Record<string, unknown>) => Promise<void>;
+
+  // Internal
+  _handleDebugEvent: (event: DebugEventPayload) => void;
 }
 
 export const useDebugStore = create<DebugStore>((set, get) => ({
   // Connection
-  socket: null,
   connected: false,
-  connecting: false,
   debugAgentId: null,
   sessionStates: {},
 
-  // Pending RPC
-  nextRequestId: 1,
-  pendingRequests: new Map(),
-
   // ── Connection ─────────────────────────────────────────────────────
 
-  connect: (agentId: string, debugPort?: number) => {
+  connect: (agentId: string) => {
     const state = get();
-    if (state.connected && state.debugAgentId === agentId && state.socket?.readyState === WebSocket.OPEN) return;
-    if (state.socket) {
-      state.socket.close();
-    }
-    if (connectRetryTimer) {
-      clearTimeout(connectRetryTimer);
-      connectRetryTimer = null;
-    }
+    if (state.connected && state.debugAgentId === agentId) return;
 
-    const port = debugPort ?? DEFAULT_DEBUG_PORT;
-    let retries = 0;
-    const maxRetries = 10;
-    const retryDelayMs = 1000;
+    // Events arrive on the global `debug-event` Tauri channel (MQTT
+    // subscription owned by the Rust client); make sure it is listened
+    // on. RPC needs no handshake - it is per-call HTTP via the Gateway.
+    void ensureDebugEventListener();
 
-    const tryConnect = () => {
-      if (get().connected && get().debugAgentId === agentId) return;
-      set({ connecting: true, debugAgentId: agentId });
+    set({ connected: true, debugAgentId: agentId });
 
-      const url = `ws://127.0.0.1:${port}`;
-      const socket = new WebSocket(url);
-
-      socket.onopen = () => {
-        if (get().socket !== socket) {
-          log.debug("[debugStore] onopen: socket is not current, ignoring");
-          return;
-        }
-        set({ connected: true, connecting: false });
-        setTimeout(() => {
-          const sessionId = useChatStore.getState().getActiveSessionId(agentId);
-          get().getState(sessionId).catch(() => { });
-        }, 0);
-      };
-
-      socket.onmessage = (event: MessageEvent) => {
-        if (get().socket !== socket) return;
-        try {
-          const msg = JSON.parse(event.data) as JsonRpcResponse | JsonRpcEvent;
-          const store = get();
-
-          if ("id" in msg && msg.id !== undefined) {
-            const pending = store.pendingRequests.get(msg.id);
-            if (pending) {
-              const nextPending = new Map(store.pendingRequests);
-              nextPending.delete(msg.id);
-              set({ pendingRequests: nextPending });
-              if (msg.error) {
-                pending.reject(new Error(msg.error.message));
-              } else {
-                pending.resolve(msg.result);
-              }
-            }
-          } else if ("method" in msg) {
-            log.debug("[debugStore] received event:", msg.method, msg.params);
-            store._handleEvent(msg as JsonRpcEvent);
-          } else {
-            log.warn("[debugStore] unexpected message format:", msg);
-          }
-        } catch (e) {
-          log.warn("[debugStore] failed to parse message:", e);
-        }
-      };
-
-      socket.onclose = () => {
-        const isCurrent = get().socket === socket;
-        const willRetry = isCurrent && retries < maxRetries;
-        if (isCurrent) {
-          set({ connected: false, connecting: willRetry, socket: null });
-        }
-        if (willRetry && !get().connected) {
-          retries++;
-          connectRetryTimer = setTimeout(tryConnect, retryDelayMs);
-        }
-      };
-
-      socket.onerror = () => { /* onclose handles retry */ };
-      set({ socket });
-    };
-
-    tryConnect();
+    // Re-sync the active session, mirroring the legacy WS `onopen`
+    // behaviour.
+    setTimeout(() => {
+      const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+      get().getState(sessionId).catch(() => { });
+    }, 0);
   },
 
   disconnect: () => {
-    if (connectRetryTimer) {
-      clearTimeout(connectRetryTimer);
-      connectRetryTimer = null;
-    }
-    const { socket } = get();
-    if (socket) socket.close();
-    set({ socket: null, connected: false, connecting: false, debugAgentId: null });
+    // No socket to close: just detach from the agent. The
+    // `debug-event` listener stays registered for the app lifetime -
+    // events are filtered by `debugAgentId` in `_handleDebugEvent`.
+    set({ connected: false, debugAgentId: null });
   },
 
   // ── RPC ────────────────────────────────────────────────────────────
 
-  sendRequest: (sessionId: string | null, method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
-    return new Promise((resolve, reject) => {
-      set((state) => {
-        if (!state.socket || !state.connected) {
-          reject(new Error("Not connected to debug WebSocket"));
-          return {};
-        }
-        // Auto-inject current session_id so the backend knows which
-        // DebugController to query.  Callers can override by passing
-        // session_id explicitly — their value wins because ...params
-        // comes after the default.
-        const finalParams: Record<string, unknown> = {
-          session_id: sessionId,
-          ...params,
-        };
-        const id = state.nextRequestId;
-        const newPending = new Map(state.pendingRequests);
-        newPending.set(id, { resolve, reject });
-        const request: JsonRpcRequest = { jsonrpc: "2.0", id, method, params: finalParams };
-        try {
-          state.socket.send(JSON.stringify(request));
-        } catch (sendErr) {
-          reject(new Error(`WebSocket send failed: ${sendErr}`));
-          return {};
-        }
-        return { nextRequestId: id + 1, pendingRequests: newPending };
-      });
+  rpc: async (
+    method: "GET" | "POST",
+    path: string,
+    opts?: { query?: Record<string, string>; body?: Record<string, unknown> },
+  ): Promise<unknown> => {
+    const agentId = get().debugAgentId;
+    if (!agentId) {
+      throw new Error("No debug session attached (agent not in DevMode?)");
+    }
+    return invoke<unknown>("debug_rpc", {
+      agentId,
+      method,
+      path,
+      query: opts?.query ?? null,
+      body: opts?.body ?? null,
     });
   },
 
   // ── Event handler ──────────────────────────────────────────────────
 
-  _handleEvent: function (event: JsonRpcEvent) {
+  _handleDebugEvent: function (event: DebugEventPayload) {
+    // Only track the agent currently attached via connect(). Debug
+    // events flow for every dev-mode agent on the shared MQTT
+    // subscription; sessions of other agents are irrelevant here.
+    const store = get();
+    if (!event.agent_id || event.agent_id !== store.debugAgentId) return;
+
     // Route events by session_id so background sessions' state is
     // updated correctly even when not currently displayed.
-    const targetSid = event.params.session_id as string | undefined;
+    const targetSid = event.session_id;
     if (!targetSid) return;
 
     const patchSession = (patch: Partial<PerSessionDebugState>) => {
@@ -318,33 +284,21 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       });
     };
 
-    switch (event.method) {
-      case "debugger.onStep": {
-        const usage = (event.params as Record<string, unknown>).usage as
-          | { prompt_tokens: number; completion_tokens: number }
-          | undefined;
+    switch (event.type) {
+      case "onStep": {
         patchSession({
-          iteration: (event.params.iteration as number) ?? 0,
-          phase: (event.params.phase as Phase) ?? "Idle",
-          promptTokens: usage?.prompt_tokens ?? 0,
-          completionTokens: usage?.completion_tokens ?? 0,
+          iteration: event.iteration ?? 0,
+          phase: (event.phase as Phase) ?? "Idle",
+          promptTokens: event.prompt_tokens ?? 0,
+          completionTokens: event.completion_tokens ?? 0,
         });
         break;
       }
 
-      case "debugger.onPaused":
-        patchSession({ debugState: "Paused", paused: true });
-        break;
-
-      case "debugger.onResumed":
-        patchSession({ debugState: "Running", paused: false });
-        break;
-
-      case "debugger.onContextBuilt": {
-        const params = event.params as Record<string, unknown>;
-        const iteration = (params.iteration as number) ?? 0;
-        const sections = params.sections as ContextSnapshotMeta["sections"] | undefined;
-        const total_token_estimate = (params.total_token_estimate as number) ?? 0;
+      case "onContextBuilt": {
+        const iteration = event.iteration ?? 0;
+        const sections = event.sections;
+        const total_token_estimate = event.total_token_estimate ?? 0;
         log.debug("[debugStore] onContextBuilt: sid=", targetSid, "iteration=", iteration, "sections=", !!sections);
         if (sections) {
           setSession((current) => {
@@ -372,10 +326,19 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         break;
       }
 
-      case "debugger.onExecutionStateChange": {
-        const newState = event.params.new_state as DebugState;
-        if (newState) {
-          patchSession({ debugState: newState, paused: newState === "Paused" });
+      case "onStateChange": {
+        const newState = event.new_state;
+        if (!newState) break;
+        if (DEBUG_STATES.has(newState)) {
+          // DebugState transition (Running/Paused/Stepping/Stopped) -
+          // covers the legacy onExecutionStateChange /
+          // onPaused / onResumed notifications.
+          patchSession({ debugState: newState as DebugState, paused: newState === "Paused" });
+        } else {
+          // The Runtime maps DebugPhase changes onto the same topic
+          // (mqtt/debug_events.rs encode_event) - phase names arrive
+          // here as `new_state`.
+          patchSession({ phase: newState as Phase });
         }
         break;
       }
@@ -385,19 +348,23 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   // ── Control commands ────────────────────────────────────────────────
 
   resume: async (sessionId: string | null) => {
-    await get().sendRequest(sessionId, "debugger.resume");
+    if (!sessionId) return;
+    await get().rpc("POST", "resume", { body: { session_id: sessionId } });
   },
 
   pause: async (sessionId: string | null) => {
-    await get().sendRequest(sessionId, "debugger.pause");
+    if (!sessionId) return;
+    await get().rpc("POST", "pause", { body: { session_id: sessionId } });
   },
 
   step: async (sessionId: string | null, granularity = "iteration") => {
-    await get().sendRequest(sessionId, "debugger.step", { granularity });
+    if (!sessionId) return;
+    await get().rpc("POST", "step", { body: { session_id: sessionId, granularity } });
   },
 
   stop: async (sessionId: string | null) => {
-    await get().sendRequest(sessionId, "debugger.stop");
+    if (!sessionId) return;
+    await get().rpc("POST", "stop", { body: { session_id: sessionId } });
   },
 
   restart: async (sessionId: string | null) => {
@@ -406,7 +373,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       log.warn("[debugStore] restart: no debugAgentId, skipping");
       return;
     }
-    // Route through Gateway gRPC EnableDebugMode (the debugger.restart RPC
+    // Route through Gateway HTTP restart-debug (the debugger.restart RPC
     // was removed when restart-to-debug was refactored to be processless).
     try {
       await useAgentStore.getState().restartAgentInDebug(agentId);
@@ -420,7 +387,8 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   // ── State query ─────────────────────────────────────────────────────
 
   getState: async (sessionId: string | null) => {
-    const result = (await get().sendRequest(sessionId, "debugger.getState")) as {
+    if (!sessionId) return;
+    const result = (await get().rpc("GET", "state", { query: { session_id: sessionId } })) as {
       iteration: number;
       phase: Phase;
       state: DebugState;
@@ -443,8 +411,11 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   // ── Context commands ────────────────────────────────────────────────
 
   getContextSnapshot: async (sessionId: string | null, iteration: number) => {
-    const result = (await get().sendRequest(sessionId, "debugger.getContextSnapshot", { iteration })) as
-      | ContextSnapshotMeta
+    if (!sessionId) return;
+    const result = (await get().rpc("GET", `context/${iteration}`, {
+      query: { session_id: sessionId },
+    })) as
+      | (ContextSnapshotMeta & { sections: Record<string, SectionMeta> })
       | undefined;
     if (result) {
       applySessionDebug(sessionId, (s) => {
@@ -460,12 +431,15 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   },
 
   getSection: async (sessionId: string | null, iteration: number, section: string): Promise<SectionContent | null> => {
+    if (!sessionId) return null;
     const cacheKey = `${iteration}:${section}`;
-    const current = sessionId ? get().sessionStates[sessionId]?.sectionCache : undefined;
+    const current = get().sessionStates[sessionId]?.sectionCache;
     const cached = current?.get(cacheKey);
     if (cached) return cached;
     try {
-      const result = (await get().sendRequest(sessionId, "debugger.getSection", { iteration, section })) as
+      const result = (await get().rpc("GET", `context/${iteration}/sections/${section}`, {
+        query: { session_id: sessionId },
+      })) as
         | SectionContent
         | undefined;
       if (result) {
@@ -484,12 +458,21 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   // ── Context editing commands (S2.8) ────────────────────────────────
 
   patchContext: async (sessionId: string | null, patches: Record<string, unknown>) => {
-    await get().sendRequest(sessionId, "debugger.patchContext", { patches });
+    if (!sessionId) return;
+    // Body shape matches Runtime `DebugRpcBody` (http/debug.rs):
+    // `patches` is a `PatchContextParams { patches: PatchSet }`, i.e.
+    // the patch set is nested one level under a `patches` key.
+    await get().rpc("POST", "context/patch", {
+      body: { session_id: sessionId, patches: { patches } },
+    });
     patchSessionDebug(sessionId, { hasPendingPatches: true });
   },
 
   rewind: async (sessionId: string | null, toIteration: number) => {
-    const result = (await get().sendRequest(sessionId, "debugger.rewind", { to_iteration: toIteration })) as {
+    if (!sessionId) return undefined;
+    const result = (await get().rpc("POST", "context/rewind", {
+      body: { session_id: sessionId, to_iteration: toIteration },
+    })) as {
       rewound_to_iteration: number;
       messages_trimmed_to: number;
     };
@@ -516,7 +499,10 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
   },
 
   reExecute: async (sessionId: string | null) => {
-    const result = (await get().sendRequest(sessionId, "debugger.reExecute", {})) as { has_patches: boolean };
+    if (!sessionId) return undefined;
+    const result = (await get().rpc("POST", "context/re-execute", {
+      body: { session_id: sessionId },
+    })) as { has_patches: boolean };
     patchSessionDebug(sessionId, { hasPendingPatches: false });
     return result;
   },
@@ -542,13 +528,4 @@ function applySessionDebug(sessionId: string | null, fn: (current: PerSessionDeb
       sessionStates: { ...s.sessionStates, [sessionId]: updated },
     };
   });
-}
-
-// Augment the interface for the internal _handleEvent
-declare module "zustand" {
-  interface StoreMutators<S, A> { }
-}
-
-interface DebugStore {
-  _handleEvent: (event: JsonRpcEvent) => void;
 }

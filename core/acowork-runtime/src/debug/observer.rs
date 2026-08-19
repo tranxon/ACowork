@@ -28,7 +28,7 @@ use tokio::sync::Notify;
 use super::DebugHandles;
 use super::controller::DebugController;
 use super::protocol::DebugPhase;
-use super::server::DebugEventSender;
+use super::events::DebugEventSender;
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;

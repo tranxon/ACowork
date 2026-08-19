@@ -49,7 +49,7 @@
 | **HTTP API** | Desktop App / CLI / Gateway → Runtime 反代 | REST (`http://127.0.0.1:19876`) | Agent 管理、对话触发、Vault、配置、大数据查询反代 |
 | **MQTT** | Agent Runtime ↔ Gateway ↔ Desktop App | MQTT 3.1.1 over TCP (`127.0.0.1:19875`, rumqttd broker) | 实时事件推送（chat chunk / tool_call / done）、状态同步、设备生命周期（Will+Retained）、Intent 主题路由 |
 | **HTTP 反向代理** | Gateway → Agent Runtime | HTTP（Runtime 自身监听 localhost 随机端口）| 会话历史拉取、消息分页查询、配置回写、AgentHello 等需要"等回复"的场景 |
-| **Debug Protocol** | Desktop App (DevMode) | JSON-RPC 2.0 over WebSocket（直接连 Agent Runtime）| 步进调试、录制回放、Skill 热加载（DevMode 仍走 WebSocket，与 IPC 主通道无关）|
+| **Debug Protocol** | Desktop App (DevMode) | HTTP RPC（Gateway 反代 → Runtime `/api/debug/*`）+ MQTT 调试事件（`acowork/agents/{id}/debug/events/{type}`） | 步进调试、录制回放、Skill 热加载（ADR-048 后与生产 IPC 完全同构）|
 
 **权威参考：**
 - MQTT 主题树与 payload protobuf：[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)

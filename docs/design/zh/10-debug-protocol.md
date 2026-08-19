@@ -4,7 +4,7 @@
 
 ---
 
-Agent Runtime 的 DevMode 通过 Debug Protocol 与 Desktop App 通信。协议设计参考 Chrome DevTools Protocol（CDP），基于 JSON-RPC 2.0。
+Agent Runtime 的 DevMode 通过 Debug Protocol 与 Desktop App 通信。Debug Protocol 在 ADR-048 之后与生产 IPC 通道完全对齐：RPC 走 HTTP REST、事件走 MQTT pub/sub（与 ADR-033 的生产通道复用同一组传输），不再使用 JSON-RPC over WebSocket。
 
 Desktop App 的开发者模式完全依赖本协议，UI 层设计见 [14-desktop-app.md](./14-desktop-app.md)。
 
@@ -13,10 +13,15 @@ Desktop App 的开发者模式完全依赖本协议，UI 层设计见 [14-deskto
 ```
 Desktop App (Tauri)              Agent Runtime (DevMode)
        │                                │
-       │   Debug Protocol               │
-       │   WebSocket                    │
-       │   ws://127.0.0.1:19877         │
+       │  Debug RPC  (HTTP REST)        │
+       │  POST/GET .../api/debug/{path} │
+       │  Gateway 反代 → Runtime        │
        ├───────────────────────────────>│
+       │                                │
+       │  Debug Events (MQTT, QoS 0)    │
+       │  acowork/agents/{id}/debug/    │
+       │    events/{type}               │
+       │<───────────────────────────────│
        │                                │
        │  同时，Agent Runtime 仍通过       │
        │  Gateway Service API 获取       │
@@ -30,34 +35,85 @@ Desktop App (Tauri)              Agent Runtime (DevMode)
 ```
 
 Desktop App 与 Agent Runtime 之间有两条独立通道：
-- **Debug Protocol**（WebSocket `ws://127.0.0.1:19877`）：开发模式专用，控制执行流、编辑状态、热加载
+- **Debug Protocol**（HTTP RPC + MQTT events，与生产 IPC 同构）：开发模式专用，控制执行流、编辑状态、热加载。RPC 走 Gateway `/api/agents/{id}/debug/{*rest}` 反代到 Runtime `/api/debug/{path}`；事件走 MQTT topic `acowork/agents/{id}/debug/events/{type}`
 - **Gateway Service API**：生产通道，Agent 仍通过 Gateway 获取 Key、收发 Intent 等
 
 ## 2. 传输层
 
-| 平台 | 传输方式 | 说明 |
-|------|---------|------|
-| Linux | WebSocket (`ws://127.0.0.1:19877`) | 通用性最好 |
-| macOS | WebSocket | 同上 |
-| Windows | WebSocket | 同上 |
-| 备选 | Named Pipe | 更安全，但 Tauri WebView 侧接入稍复杂 |
+| 平台 | RPC | 事件 | 说明 |
+|------|-----|------|------|
+| Linux | HTTP REST（Gateway 反代 → Runtime `/api/debug/*`） | MQTT（`localhost:19875` 共享 broker） | 跨平台一致 |
+| macOS | 同上 | 同上 | 同上 |
+| Windows | 同上 | 同上 | 同上 |
 
-端口可配置，默认 `19877`。Agent Runtime 以 DevMode 启动时，额外监听 Debug 端口。Desktop App 连接后获得完全的调试控制权。
+HTTP RPC 与 MQTT 共享 Gateway 现有端口（HTTP `:19876`、MQTT `:19875`）——Debug Protocol **不再占用独立端口**。Agent Runtime 以 DevMode 启动时，在 localhost HTTP server 上注册 `/api/debug/*` 路由并 spawn MQTT 调试事件 publisher。Desktop App 通过 Gateway 反代访问时，自动获得 `localhost-only` 网关 + ACL 的多用户隔离（详见 ADR-040 / ADR-048）。
 
 ## 3. 协议定义
 
-基于 JSON-RPC 2.0 消息格式：
+Debug Protocol 由两类消息构成，分别走两条独立通道（ADR-048）：
 
-```json
-// 请求
-{ "jsonrpc": "2.0", "id": 1, "method": "debugger.resume", "params": {} }
+### 3.0 通道与载荷
 
-// 响应
-{ "jsonrpc": "2.0", "id": 1, "result": { ... } }
+| 方向 | 通道 | 载荷格式 |
+|------|------|----------|
+| Desktop → Runtime（RPC） | HTTP REST（Gateway 反代 → Runtime `/api/debug/*`） | JSON request/response |
+| Runtime → Desktop（事件） | MQTT `acowork/agents/{id}/debug/events/{type}`（QoS 0） | Protobuf（`DebugStepEvent` / `DebugContextBuiltEvent` / `DebugStateChangeEvent`，定义见 `acowork-core/src/protocol.rs`） |
 
-// 事件（Runtime → Desktop App，无 id）
-{ "jsonrpc": "2.0", "method": "debugger.onStep", "params": { ... } }
+RPC 请求是普通的 HTTP 调用（`method` / `path` / `query` / `body`），由 Gateway 透明转发到 Runtime 的 axum handler；Runtime 解开 Gateway 的 `{ok, data?, error?}` 信封后返回业务结果。事件侧 Runtime 直接 publish 到 MQTT broker，Desktop 通过已建立的 MQTT 订阅收到，由 `chat_mqtt.rs` 解码后 re-emit 到 Tauri `debug-event` 通道。
+
+```text
+RPC 请求（Desktop → Gateway → Runtime）：
+POST /api/agents/{agent_id}/debug/{path}
+Content-Type: application/json
+
+{ "agent_id": "...", "session_id": "...", ... }
+
+→ 200 { "ok": true,  "data": { ... } }
+→ 4xx { "ok": false, "error": { "code": "...", "message": "..." } }
+
+事件（Runtime → MQTT → Desktop）：
+acowork/agents/{agent_id}/debug/events/onStep            (DebugStepEvent)
+acowork/agents/{agent_id}/debug/events/onContextBuilt    (DebugContextBuiltEvent)
+acowork/agents/{agent_id}/debug/events/onStateChange    (DebugStateChangeEvent)
 ```
+
+### 3.0.1 端点映射（方法名 → HTTP / MQTT 主题）
+
+§3.1–§3.9 用业务方法名（`debugger.resume` 等）描述语义。运行时所有 RPC 走 HTTP，所有事件走 MQTT。下表给出方法名到传输端点的一一对应（由 ADR-048 D2 定义、`http/debug.rs` 实现）：
+
+> **实现状态**：✅ = 已迁移（D1-D4）；⏳ = 文档预留、未实现（旧 WebSocket server 同样未实现，见 ADR-048 范围声明，未来走 ADR-053）。
+
+| 业务方法 | 方向 | 端点 / 主题 | 状态 |
+|----------|------|-------------|------|
+| `debugger.resume` | RPC | `POST /api/debug/resume` | ✅ |
+| `debugger.pause` | RPC | `POST /api/debug/pause` | ✅ |
+| `debugger.step` | RPC | `POST /api/debug/step` | ✅ |
+| `debugger.stop` | RPC | `POST /api/debug/stop` | ✅ |
+| `debugger.restart` | RPC | `POST /api/debug/restart` | ⏳（Desktop 走 `restartAgentInDebug` 进程级重启） |
+| `debugger.getState` | RPC | `GET /api/debug/state?session_id=…` | ✅ |
+| `debugger.setBreakpoint` | RPC | `POST /api/debug/breakpoints` | ⏳ |
+| `debugger.removeBreakpoint` | RPC | `DELETE /api/debug/breakpoints/{bp_id}` | ⏳ |
+| `debugger.listBreakpoints` | RPC | `GET /api/debug/breakpoints` | ⏳ |
+| `debugger.getContextSnapshot` | RPC | `GET /api/debug/context/{iteration}?session_id=…` | ✅ |
+| `debugger.getSection` | RPC | `GET /api/debug/context/{iteration}/sections/{section}?session_id=…` | ✅ |
+| `debugger.rewind` | RPC | `POST /api/debug/context/rewind` | ✅ |
+| `debugger.patchContext` | RPC | `POST /api/debug/context/patch` | ✅ |
+| `debugger.reExecute` | RPC | `POST /api/debug/context/re-execute` | ✅ |
+| `debugger.editMessage` | RPC | `PATCH /api/debug/messages/{index}` | ⏳ |
+| `debugger.rollback` | RPC | `POST /api/debug/messages/rollback` | ⏳ |
+| `debugger.reloadSkills` | RPC | `POST /api/debug/skills/reload` | ⏳ |
+| `debugger.switchProvider` | RPC | `POST /api/debug/provider/switch` | ⏳ |
+| `debugger.startRecording` | RPC | `POST /api/debug/recording/start` | ⏳ |
+| `debugger.stopRecording` | RPC | `POST /api/debug/recording/stop` | ⏳ |
+| `debugger.loadRecording` | RPC | `POST /api/debug/recording/load` | ⏳ |
+| `debugger.stopReplay` | RPC | `POST /api/debug/recording/replay/stop` | ⏳ |
+| `debugger.onStep` | 事件 | MQTT `acowork/agents/{id}/debug/events/onStep` | ✅ |
+| `debugger.onBreakpoint` | 事件 | MQTT `acowork/agents/{id}/debug/events/onBreakpoint` | ⏳ |
+| `debugger.onRecordStep` | 事件 | MQTT `acowork/agents/{id}/debug/events/onRecordStep` | ⏳ |
+| `debugger.onStateChange` | 事件 | MQTT `acowork/agents/{id}/debug/events/onStateChange` | ✅ |
+| `debugger.onContextBuilt` | 事件 | MQTT `acowork/agents/{id}/debug/events/onContextBuilt` | ✅ |
+
+> **路径前缀**：Desktop 调 Gateway 时挂 `/api/agents/{agent_id}/debug/{rest}`，由 Gateway 透明转发到 Runtime `/api/debug/{rest}`（详见 `acowork-gateway/src/http/proxy.rs` 中的 Debug 通配反代规则，ADR-048 D5）。
 
 ### 3.1 执行控制
 
@@ -329,48 +385,53 @@ method: "debugger.stopReplay"
 params: {}
 ```
 
-### 3.9 事件通知（Runtime → Desktop App）
+### 3.9 事件通知（Runtime → Desktop App，MQTT 通道）
 
-```rust
-/// 每步执行完推送
-event: "debugger.onStep"
-params: {
+事件走 MQTT 主题 `acowork/agents/{agent_id}/debug/events/{type}`，载荷用 Protobuf（见 `acowork-core/src/protocol.rs` 的 `DebugStepEvent` / `DebugContextBuiltEvent` / `DebugStateChangeEvent`）。下表以 JSON 形态给出 payload 字段含义，便于阅读；线缆格式以 Protobuf 为准。
+
+```text
+topic: acowork/agents/{agent_id}/debug/events/onStep
+payload (DebugStepEvent):
+{
+    "session_id": "…",        // 事件来源会话
     "iteration": 3,
     "phase": "ToolExecution",
     "input": { ... },         // 本步输入（如有）
     "output": { ... },        // 本步输出（如有）
-    "usage": { ... }          // LLM 用量（如有）
+    "usage": { ... }          // LLM 用量（如有，prompt/completion/total_tokens）
 }
 
-/// 断点命中通知
-event: "debugger.onBreakpoint"
-params: {
+topic: acowork/agents/{agent_id}/debug/events/onBreakpoint  （⏳ 未发射，见 ADR-048 范围声明）
+payload (DebugBreakpointEvent):
+{
+    "session_id": "…",
     "breakpoint_id": "bp-001",
     "iteration": 3,
     "phase": "ToolExecution"
 }
 
-/// 录制步骤通知
-event: "debugger.onRecordStep"
-params: {
+topic: acowork/agents/{agent_id}/debug/events/onRecordStep  （⏳ 未发射）
+payload (DebugRecordStepEvent):
+{
+    "session_id": "…",
     "step_index": 5,
     "phase": "LlmCall",
     "step_data": { ... }      // 序列化的步骤数据
 }
 
-/// 状态变更通知（通用）
-event: "debugger.onStateChange"
-params: {
-    "old_phase": "BuildContext",
-    "new_phase": "LlmCall",
+topic: acowork/agents/{agent_id}/debug/events/onStateChange
+payload (DebugStateChangeEvent):
+{
+    "session_id": "…",
+    "new_state": "Paused"     // DebugState（Running/Paused/Stepping/Stopped）
+                              // 或 DebugPhase 名（LlmCall/…，Runtime 复用同一 topic）
     "iteration": 4
 }
 
-/// 上下文构建完成通知
-/// 在每轮 BuildContext 阶段完成后推送，携带 5 个控制面 section 的元数据摘要。
-/// Desktop App 收到后将其追加到调试面板的上下文树中。
-event: "debugger.onContextBuilt"
-params: {
+topic: acowork/agents/{agent_id}/debug/events/onContextBuilt
+payload (DebugContextBuiltEvent):
+{
+    "session_id": "…",
     "iteration": 3,
     "sections": {
         "system_prompt":      { "size_bytes": 2048, "token_estimate": 512,  "hash": "a1b2..." },
@@ -382,6 +443,8 @@ params: {
     "total_token_estimate": 2816
 }
 ```
+
+> **实现侧**：`mqtt/debug_events.rs::DebugEventMqttPublisher` 把 `DebugEventBus` 收到的 `TaggedEvent` 编码为对应 Protobuf 后 PUBLISH 到上述主题。Desktop 侧 `commands/chat_mqtt.rs` 三个 proto 解码 arm 解码后 emit Tauri `debug-event` 事件，由 `stores/debugStore.ts` 接收。
 
 ## 4. 消息快照机制
 
@@ -461,7 +524,7 @@ Agent Runtime 的 DevMode 是生产模式的**超集**：
 
 | 维度 | DevMode | 生产模式 |
 |------|---------|---------|
-| Debug Protocol | 监听 `ws://127.0.0.1:19877` | 不监听 |
+| Debug Protocol | HTTP RPC `/api/debug/*`（localhost Runtime HTTP）+ MQTT 调试事件 publisher（共享 `:19875`） | 不注册 routes、不 spawn publisher |
 | 主循环 | 受调试器控制（Pause/Step/Resume） | 自动连续执行 |
 | 上下文快照 | 每轮自动创建上下文快照（5 section） | 不创建 |
 | 上下文编辑 | 支持迭代级回退与修补（`rewind`/`patchContext`/`reExecute`） | 不支持 |
@@ -593,7 +656,7 @@ body: { "package_path": "...", "export_to": "/user/choosen/path" }
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 协议格式 | JSON-RPC 2.0 over WebSocket | CDP 验证的标准模式；双向通信天然支持；工具链成熟 |
+| 协议格式（ADR-048） | HTTP REST（RPC）+ MQTT pub/sub（事件） | 与生产 IPC 完全同构（ADR-033 / ADR-034），无需引入第三种协议栈；ACL / 多用户隔离天然继承 |
 | 调试面板范围 | 仅 5 个控制面 section，排除 conversation_history | conversation_history 已在左侧聊天面板完整展示；调试面板聚焦于可编辑的"控制面"上下文 |
 | 上下文快照 | 元数据摘要 + 懒加载 | 每轮 <500 字节元数据（size/token/hash），section 内容按需拉取；配合虚拟滚动保证百轮对话的流畅性 |
 | 上下文编辑模型 | rewind + patchContext + reExecute 分离 | rewind 不自动触发执行，编辑后需显式 reExecute；补丁临时生效，执行后自动清除 |
@@ -601,7 +664,7 @@ body: { "package_path": "...", "export_to": "/user/choosen/path" }
 | 录制格式 | JSONL | 逐行追加写入，无需完整序列化；崩溃不丢失已录制内容；易于调试和人工审阅 |
 | DevMode 启动参数 | `--dev-mode` CLI flag | Gateway 通过启动参数控制，Runtime 侧零配置变更 |
 | DevMode 是超集 | 不改变生产逻辑 | 生产模式下代码路径完全不变；DevMode 仅在检测到 flag 后初始化调试组件 |
-| 端口默认值 | 19877 | 可配置，但默认值应避免与常见服务冲突 |
+| 端口默认值 | 19877（ADR-048 后不再占用） | 可配置，但默认值应避免与常见服务冲突；ADR-048 后 Debug RPC 走 Runtime localhost HTTP 随机端口 + Gateway 反代，MQTT 事件复用 `:19875`，不再监听独立 Debug 端口 |
 | Agent 克隆走 Gateway API | 不走 Debug Protocol | 克隆是 Gateway 侧的文件操作，与 Agent Runtime 无关 |
 | 调试中会话的 DevMode 入口 | Agent 克隆 + 克隆体 `--dev-mode` 启动 | 不采用运行时动态切换 DevMode；克隆体隔离数据，原 Agent 不受影响 |
 | 克隆体 conversations 目录 | full 模式复制当前 session JSONL | 支持"聊天到一半开启调试"场景，克隆体恢复对话状态 |

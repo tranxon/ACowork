@@ -40,10 +40,13 @@ pub struct Cli {
     #[arg(long, default_value = "false")]
     pub dev_mode: bool,
 
-    /// Debug WebSocket server port (used with --dev-mode).
-    /// Gateway assigns a unique port per agent to avoid conflicts.
-
-    /// Defaults to 19878 when not specified.
+    /// Debug Protocol port hint (used with --dev-mode).
+    ///
+    /// ADR-048: the legacy WebSocket listener was removed; the port is
+    /// no longer bound by Runtime. The flag is kept for API stability
+    /// (Gateway still assigns a per-agent port to avoid clashes with
+    /// the LSP Relay default range starting at 19878) and historical
+    /// compatibility with pre-ADR-048 Desktop configs.
     #[arg(long, default_value = "19878")]
     pub debug_port: u16,
 

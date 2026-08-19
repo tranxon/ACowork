@@ -7,6 +7,7 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §7.5.
 
+pub mod debug;
 pub mod memory_query;
 pub mod server;
 

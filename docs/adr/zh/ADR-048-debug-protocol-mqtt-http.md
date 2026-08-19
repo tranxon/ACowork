@@ -16,7 +16,9 @@
 
 **Debug Protocol 从 JSON-RPC 2.0 over WebSocket 迁至 MQTT pub/sub（事件）+ HTTP REST（RPC）。与生产 IPC 完全对齐。**
 
-现有 `core/acowork-runtime/src/debug/server.rs` 中的 **22 个 RPC handler 业务逻辑 0 改动**——只把它们从内部闭包提到 `debug/handlers.rs` 作为 `pub async fn`，再用 ADR-040 的 UseCase 模式包装成 `DebugService` trait。MQTT events / HTTP routes 都是 thin wrappers，调用 service。
+现有 `core/acowork-runtime/src/debug/server.rs` 中的 RPC handler **业务逻辑 0 改动**——只把它们从内部闭包提到 `debug/handlers.rs` 作为 `pub async fn`，再用 ADR-040 的 UseCase 模式包装成 `DebugService` trait。MQTT events / HTTP routes 都是 thin wrappers，调用 service。
+
+> **⚠️ 范围声明（D7 修订）**：原规划迁移全部 **22 个 RPC**，实际本 ADR 迁移 **10 个**（resume / pause / step / stop / getState / getContextSnapshot / getSection / rewind / patchContext / reExecute）。其余 12 个（restart / breakpoints ×3 / editMessage / rollback / reloadSkills / switchProvider / recording ×4）**不在本次范围内**——它们从未在旧 WebSocket server 中实现（旧 server 同样只有 10 个 handler 的业务逻辑，其余是文档预留），因此"业务逻辑 0 改动"承诺依然成立。未来补齐时走 ADR-053，传输接线（Gateway 反代 + Desktop `debug_rpc` 通用命令）**零改动**。
 
 ```mermaid
 graph LR
@@ -30,7 +32,7 @@ graph LR
         H1 -->|调用| SVC["DebugService trait"]
         EVT["mqtt/debug_events.rs"] -->|调用| SVC
         SVC -.实现.-> IMPL["RuntimeDebugService"]
-        IMPL -->|调用业务逻辑| H2["debug/handlers.rs<br/>(22 pub async fn,<br/>业务逻辑原样不动)"]
+        IMPL -->|调用业务逻辑| H2["debug/handlers.rs<br/>(10 pub async fn,<br/>业务逻辑原样不动)"]
     end
 
     style Before fill:#fee,stroke:#a66
@@ -39,7 +41,7 @@ graph LR
 
 | 维度 | 现状 | 目标 |
 |------|------|------|
-| Debug 业务逻辑位置 | `debug/server.rs` 内部闭包（1011 行混着 WS 帧解析） | `debug/handlers.rs` 独立 `pub async fn`（业务逻辑原样不动） |
+| Debug 业务逻辑位置 | `debug/server.rs` 内部闭包（1011 行混着 WS 帧解析） | `debug/handlers.rs` 独立 `pub async fn`（已迁 10 个，业务逻辑原样不动） |
 | Debug 内部架构 | handler 直调 `DebugController` state（绕过 ADR-040） | **`DebugService` trait**（ADR-040 UseCase 模式） |
 | Debug 外部接口 | 1（WebSocket） | 2（MQTT + HTTP） |
 | Debug 多用户支持 | 单客户端硬编码 | 自动继承 ACL |
@@ -71,13 +73,13 @@ Runtime*Service struct (持有 work_dir / sessions 等内部状态)
 
 ### 本 ADR 的关键洞察：业务逻辑 0 改动
 
-`debug/server.rs` 现有的 22 个 handler 函数（`resume`/`pause`/`step`/`getState`/...）**业务逻辑本身是正确的、经过测试的**——问题只是它们被埋在 WebSocket 帧解析的回调里。
+`debug/server.rs` 现有的 handler 函数（`resume`/`pause`/`step`/`getState`/...）**业务逻辑本身是正确的、经过测试的**——问题只是它们被埋在 WebSocket 帧解析的回调里。
 
 **正确的重构不是"重写"而是"提取"**：
-1. 把 22 个 handler 的业务代码从闭包提到独立 `pub async fn`（放 `debug/handlers.rs`）
+1. 把 10 个 handler（resume/pause/step/stop/getState/getContextSnapshot/getSection/rewind/patchContext/reExecute）的业务代码从闭包提到独立 `pub async fn`（放 `debug/handlers.rs`）
 2. 用 ADR-040 UseCase 模式包装：`usecases/debug_service.rs` 定义 trait + `usecases/debug_service_impl.rs` 实现（实现里调 `handlers::*`）
 3. HTTP routes (`http/debug.rs`) 和 MQTT events publisher (`mqtt/debug_events.rs`) 都是 thin wrappers
-4. 删除 `debug/server.rs` 仅 WebSocket 部分，保留 `DebugEventSender`（events 走 mpsc → MQTT publisher）
+4. 删除 `debug/server.rs` 仅 WebSocket 部分，保留 `DebugEventSender`（events 走 broadcast event bus → MQTT publisher）
 
 **这样 Debug Protocol 切换到 MQTT+HTTP 几乎等同于"结构调整"，业务逻辑零回归风险。**
 
@@ -87,35 +89,37 @@ Runtime*Service struct (持有 work_dir / sessions 等内部状态)
 
 ### 1. 协议映射（对外契约）
 
-| JSON-RPC 方法 | 通道 | 主题 / HTTP 端点 |
-|--------------|------|----------------|
-| `onStep`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onStep` |
-| `onBreakpoint`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onBreakpoint` |
-| `onRecordStep`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onRecordStep` |
-| `onStateChange`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onStateChange` |
-| `onContextBuilt`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onContextBuilt` |
-| `debugger.resume`（RPC） | **HTTP** | `POST /api/debug/resume` |
-| `debugger.pause` | **HTTP** | `POST /api/debug/pause` |
-| `debugger.step` | **HTTP** | `POST /api/debug/step` |
-| `debugger.stop` | **HTTP** | `POST /api/debug/stop` |
-| `debugger.restart` | **HTTP** | `POST /api/debug/restart` |
-| `debugger.getState` | **HTTP** | `GET /api/debug/state` |
-| `debugger.setBreakpoint` | **HTTP** | `POST /api/debug/breakpoints` |
-| `debugger.removeBreakpoint` | **HTTP** | `DELETE /api/debug/breakpoints/{bp_id}` |
-| `debugger.listBreakpoints` | **HTTP** | `GET /api/debug/breakpoints` |
-| `debugger.getContextSnapshot` | **HTTP** | `GET /api/debug/context/{iteration}` |
-| `debugger.getSection` | **HTTP** | `GET /api/debug/context/{iteration}/sections/{name}` |
-| `debugger.rewind` | **HTTP** | `POST /api/debug/context/rewind` |
-| `debugger.patchContext` | **HTTP** | `POST /api/debug/context/patch` |
-| `debugger.reExecute` | **HTTP** | `POST /api/debug/context/re-execute` |
-| `debugger.editMessage` | **HTTP** | `PATCH /api/debug/messages/{index}` |
-| `debugger.rollback` | **HTTP** | `POST /api/debug/messages/rollback` |
-| `debugger.reloadSkills` | **HTTP** | `POST /api/debug/skills/reload` |
-| `debugger.switchProvider` | **HTTP** | `POST /api/debug/provider/switch` |
-| `debugger.startRecording` | **HTTP** | `POST /api/debug/recording/start` |
-| `debugger.stopRecording` | **HTTP** | `POST /api/debug/recording/stop` |
-| `debugger.loadRecording` | **HTTP** | `POST /api/debug/recording/load` |
-| `debugger.stopReplay` | **HTTP** | `POST /api/debug/recording/replay/stop` |
+| JSON-RPC 方法 | 通道 | 主题 / HTTP 端点 | 状态 |
+|--------------|------|----------------|------|
+| `onStep`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onStep` | ✅ |
+| `onBreakpoint`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onBreakpoint` | ⏳ |
+| `onRecordStep`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onRecordStep` | ⏳ |
+| `onStateChange`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onStateChange` | ✅ |
+| `onContextBuilt`（事件） | **MQTT** | `acowork/agents/{agent_id}/debug/events/onContextBuilt` | ✅ |
+| `debugger.resume`（RPC） | **HTTP** | `POST /api/debug/resume` | ✅ |
+| `debugger.pause` | **HTTP** | `POST /api/debug/pause` | ✅ |
+| `debugger.step` | **HTTP** | `POST /api/debug/step` | ✅ |
+| `debugger.stop` | **HTTP** | `POST /api/debug/stop` | ✅ |
+| `debugger.restart` | **HTTP** | `POST /api/debug/restart` | ⏳（Desktop 走 `restartAgentInDebug` 进程级重启） |
+| `debugger.getState` | **HTTP** | `GET /api/debug/state` | ✅ |
+| `debugger.setBreakpoint` | **HTTP** | `POST /api/debug/breakpoints` | ⏳ |
+| `debugger.removeBreakpoint` | **HTTP** | `DELETE /api/debug/breakpoints/{bp_id}` | ⏳ |
+| `debugger.listBreakpoints` | **HTTP** | `GET /api/debug/breakpoints` | ⏳ |
+| `debugger.getContextSnapshot` | **HTTP** | `GET /api/debug/context/{iteration}` | ✅ |
+| `debugger.getSection` | **HTTP** | `GET /api/debug/context/{iteration}/sections/{name}` | ✅ |
+| `debugger.rewind` | **HTTP** | `POST /api/debug/context/rewind` | ✅ |
+| `debugger.patchContext` | **HTTP** | `POST /api/debug/context/patch` | ✅ |
+| `debugger.reExecute` | **HTTP** | `POST /api/debug/context/re-execute` | ✅ |
+| `debugger.editMessage` | **HTTP** | `PATCH /api/debug/messages/{index}` | ⏳ |
+| `debugger.rollback` | **HTTP** | `POST /api/debug/messages/rollback` | ⏳ |
+| `debugger.reloadSkills` | **HTTP** | `POST /api/debug/skills/reload` | ⏳ |
+| `debugger.switchProvider` | **HTTP** | `POST /api/debug/provider/switch` | ⏳ |
+| `debugger.startRecording` | **HTTP** | `POST /api/debug/recording/start` | ⏳ |
+| `debugger.stopRecording` | **HTTP** | `POST /api/debug/recording/stop` | ⏳ |
+| `debugger.loadRecording` | **HTTP** | `POST /api/debug/recording/load` | ⏳ |
+| `debugger.stopReplay` | **HTTP** | `POST /api/debug/recording/replay/stop` | ⏳ |
+
+> **✅ = D1-D4 已迁移**；**⏳ = 不在本次范围**（旧 WebSocket server 同样未实现，仅文档预留；见上方"范围声明"）。
 
 ### 2. MQTT 事件主题设计
 
@@ -169,19 +173,21 @@ acowork/agents/{agent_id}/debug/events/{event_type}
 
 | 类型 | 文件 | 角色 |
 |------|------|------|
-| **业务逻辑**（保留） | `core/acowork-runtime/src/debug/handlers.rs`（**新增**） | 22 个 `pub async fn handler_*(...)`：现有闭包里的业务代码原样提取到这里 |
+| **业务逻辑**（保留） | `core/acowork-runtime/src/debug/handlers.rs`（**新增**） | 10 个 `pub async fn handler_*(...)`：现有闭包里的业务代码原样提取到这里（其余 12 个 endpoint 旧 server 本就未实现，见顶部范围声明） |
 | **业务逻辑**（保留） | `core/acowork-runtime/src/debug/controller.rs` | 现有 `DebugController` 状态机，不动 |
 | **业务逻辑**（保留） | `core/acowork-runtime/src/debug/protocol.rs` | 现有 JSON-RPC 类型，**仅保留 DTO 部分**，删除 WS 帧相关辅助 |
-| **事件通道**（保留+适配） | `core/acowork-runtime/src/debug/mod.rs` 中的 `DebugEventSender` | mpsc 发送端不变；接收端从 WebSocket 换成 MQTT publisher |
-| **UseCase trait**（新增） | `core/acowork-runtime/src/usecases/debug_service.rs` | 定义 `DebugService` trait + 22 个 async 方法 + DTO |
+| **事件通道**（保留+适配） | `core/acowork-runtime/src/debug/events.rs`（**新增**，替代原 `mod.rs` 中的 `DebugEventSender`） | broadcast event bus：`DebugEventBus` + 每 session `DebugEventSender`；接收端从 WebSocket 换成 MQTT publisher（D3 起） |
+| **UseCase trait**（新增） | `core/acowork-runtime/src/usecases/debug_service.rs` | 定义 `DebugService` trait + 10 个 async 方法 + DTO |
 | **UseCase 实现**（新增） | `core/acowork-runtime/src/usecases/debug_service_impl.rs` | `RuntimeDebugService` 实现 trait，每个方法内部调用 `handlers::*` |
-| **外部接口**（新增） | `core/acowork-runtime/src/http/debug.rs` | 22 条 axum HTTP route，每个 handler 是一个 thin wrapper（`state.debug_service.lock().await...method().await`）|
-| **外部接口**（新增） | `core/acowork-runtime/src/mqtt/debug_events.rs` | `DebugEventMqttPublisher`：消费 `event_rx` mpsc → PUBLISH 到 MQTT broker |
+| **外部接口**（新增） | `core/acowork-runtime/src/http/debug.rs` | 10 条 axum HTTP route，每个 handler 是一个 thin wrapper（`state.debug_service.lock().await...method().await`）|
+| **外部接口**（新增） | `core/acowork-runtime/src/mqtt/debug_events.rs` | `DebugEventMqttPublisher`：消费 `event_rx` broadcast → PUBLISH 到 MQTT broker |
 | **启动方式**（修改） | `core/acowork-runtime/src/startup/subsystems.rs` 中的 `enable_debug_mode` | 不再 listen TCP；改为注册 HTTP routes + 启动 events publisher |
-| **late-bind slot**（新增） | `HttpState` + `AgentBootContext` + `startup/session_init.rs` Phase B | 仿 ADR-040：Phase A slot 是 `None`，Phase B 填充 `RuntimeDebugService::new(sessions)` |
-| **删除**（仅 WS 部分） | `core/acowork-runtime/src/debug/server.rs` | **整个文件 ~900 行删除**，仅保留 `DebugEventSender`（mpsc 发送端部分）；`accept_async` / `WebSocket` / `TcpListener` 全部消失 |
+| **late-bind slot**（新增） | `HttpState` + `AgentBootContext` + `startup/subsystems.rs` Phase C | 仿 ADR-040：Phase A slot 是 `None`，Phase C（`enable_debug_mode` 之后）填充 `RuntimeDebugService::new(sessions)` |
+| **删除**（仅 WS 部分） | `core/acowork-runtime/src/debug/server.rs` | **整个文件 ~1011 行删除**，仅保留 `DebugEventSender` 部分（迁到 `debug/events.rs`）；`accept_async` / `WebSocket` / `TcpListener` 全部消失 |
 
 #### 4.2 trait 定义骨架
+
+> **实现注（D7）**：下图为完整蓝图（22 方法）；**当前实现只落地前 10 个**（resume/pause/step/stop/get_state/get_context_snapshot/get_section/rewind/patch_context/re_execute）。未落地方法保持"文档预留"状态，补全时按 ADR-053 走，无需改传输接线。
 
 ```rust
 // core/acowork-runtime/src/usecases/debug_service.rs
@@ -243,7 +249,7 @@ pub trait DebugService: Send + Sync {
 
 ```rust
 // core/acowork-runtime/src/debug/handlers.rs（新增）
-// 把现有 debug/server.rs 的 22 个 handler 函数从闭包里"原样提取"出来
+// 把现有 debug/server.rs 的 10 个 handler 函数从闭包里"原样提取"出来
 
 use super::controller::DebugController;
 
@@ -300,7 +306,7 @@ pub fn debug_routes() -> Router<HttpState> {
     Router::new()
         .route("/api/debug/resume",     post(resume))
         .route("/api/debug/pause",      post(pause))
-        // ... 22 条
+        // ... 10 条（见 http/debug.rs 实际 route 表）
 }
 
 async fn resume(
@@ -314,39 +320,41 @@ async fn resume(
         .map(DebugHttpResponse::ok)
         .map_err(DebugHttpError::from)
 }
-// ... 21 个完全同样的 thin wrapper
+// ... 9 个完全同样的 thin wrapper
 ```
 
-#### 4.5 MQTT events — 解耦的 mpsc 桥
+#### 4.5 MQTT events — 解耦的事件总线（实现注：broadcast 而非 mpsc）
 
-**关键设计**：`DebugEventSender` (mpsc 发送端) 完全不动,接收端从 WebSocket 换成 MQTT publisher。
+**关键设计**：`DebugEventSender` 发送端由 AgentLoop 持有、完全不动，接收端从 WebSocket 换成 MQTT publisher。
+
+> **⚠️ 实现偏差说明（D3/D7）**：ADR 草案设想用 `mpsc::UnboundedReceiver`（单消费者）；实现改用 `tokio::sync::broadcast`（`debug/events.rs`）。理由：事件总线是**广播语义**，未来可能有多个消费者（如进程内 recorder 录制 `onRecordStep`），broadcast 天然支持多订阅者且每个订阅者独立滞后跟踪；慢消费者（MQTT publisher）不会阻塞 AgentLoop。`DebugEventSender` 仍按 session 打 tag（`TaggedEvent`），但底层从 mpsc 换成了 broadcast Sender。D3 起 `DebugEventMqttPublisher` 通过 `DebugEventBus::subscribe()` 获取 `broadcast::Receiver`。
 
 ```rust
-// core/acowork-runtime/src/mqtt/debug_events.rs（新增）
+// core/acowork-runtime/src/debug/events.rs（新增，替代原 server.rs 中的 DebugEventSender）
 
-pub struct DebugEventMqttPublisher {
-    agent_id: String,
-    mqtt_client: Arc<MqttClient>,
-    event_rx: mpsc::UnboundedReceiver<TaggedDebugEvent>,
+pub struct DebugEventBus {
+    tx: broadcast::Sender<TaggedEvent>,
 }
 
-impl DebugEventMqttPublisher {
-    pub async fn run(mut self) {
-        while let Some(tagged) = self.event_rx.recv().await {
-            // DebugEvent → protobuf → PUBLISH 到 acowork/agents/{id}/debug/events/{type}
-            self.publish_event(&tagged.session_id, tagged.event).await;
-        }
+pub struct DebugEventSender {
+    tx: broadcast::Sender<TaggedEvent>,  // 每 session 一个，send 时自动打 tag
+    session_id: String,
+}
+
+impl DebugEventSender {
+    pub fn send(&self, event: DebugEvent) -> bool {
+        self.tx.send(TaggedEvent { session_id: self.session_id.clone(), event }).is_ok()
     }
 }
 ```
 
-启动方式(`subsystems.rs`):
+启动方式（`startup/subsystems.rs` Phase C）:
 ```rust
 if config.dev_mode {
-    let (event_tx, event_rx) = mpsc::unbounded_channel();  // 单事件总线
-    // 1. event_tx 发给 SessionManager.for_new_debug_session() (现有逻辑不变)
-    // 2. event_rx 给 DebugEventMqttPublisher
-    let publisher = DebugEventMqttPublisher::new(ctx.agent_id.clone(), ctx.mqtt_client.clone(), event_rx);
+    let event_bus = crate::debug::DebugEventBus::new();
+    // 1. event_bus.sender_template().for_session(sid) 给每个新 session（SessionManager）
+    // 2. event_bus.subscribe() 给 DebugEventMqttPublisher
+    let publisher = DebugEventMqttPublisher::new(agent_id, mqtt_client, event_bus.subscribe());
     tokio::spawn(publisher.run());
 }
 ```
@@ -370,11 +378,13 @@ pub async fn start(
     debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn DebugService>>>>,
 ) -> Self { /* ... */ }
 
-// Phase A: AgentBootContext 创建空 slot
-// Phase B: session_init.rs 里
+// Phase A: AgentBootContext 创建空 slot（startup/agent_init.rs）
+// Phase C: subsystems.rs 里 enable_debug_mode() 之后填充
 let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn DebugService>;
-*ctx.boot.debug_service_slot.lock().await = Some(service);
+*ctx.debug_service_slot.lock().await = Some(service);
 ```
+
+> **⚠️ 实现偏差说明（D2）**：ADR 草案写"Phase B: `session_init.rs` 里填充"；实现实际在 **Phase C（`startup/subsystems.rs`）** 填充——因为 `RuntimeDebugService` 依赖 `SessionManager::enable_debug_mode()` 先建好 per-session controllers + event senders，而这些在 Phase C 才发生。与 ADR-040 其他 slot（workspace_mutation / memory_query）的填充时机保持一致。
 
 完全对齐 ADR-040 中 `workspace_mutation` / `memory_query` 模式。
 
@@ -398,17 +408,17 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 
 | 文件 | 估计 | 说明 |
 |------|------|------|
-| `core/acowork-runtime/src/debug/handlers.rs` | **+450** | 从 server.rs 提取 22 个 `pub async fn` 业务逻辑（几乎全部来自复制粘贴，0 改动） |
+| `core/acowork-runtime/src/debug/handlers.rs` | **+450** | 从 server.rs 提取 10 个 `pub async fn` 业务逻辑（几乎全部来自复制粘贴，0 改动） |
 | `core/acowork-runtime/src/usecases/debug_service.rs` | **+180** | `DebugService` trait + DTO + `DebugError` |
 | `core/acowork-runtime/src/usecases/debug_service_impl.rs` | **+220** | `RuntimeDebugService` 实现，每个方法 ~10 行 |
 | `core/acowork-runtime/src/usecases/mod.rs` | **+3** | 注册 `debug_service` 和 `debug_service_impl` 模块 + re-export |
-| `core/acowork-runtime/src/http/debug.rs` | **+200** | 22 条 axum 路由 + thin wrapper |
+| `core/acowork-runtime/src/http/debug.rs` | **+200** | 10 条 axum 路由 + thin wrapper |
 | `core/acowork-runtime/src/mqtt/debug_events.rs` | **+150** | `DebugEventMqttPublisher::run` |
 | `core/acowork-core/proto/mqtt_payload.proto` | **+50** | 5 个 `Debug*Event` message |
-| `core/acowork-runtime/src/startup/subsystems.rs` | **+20 / -30** | `enable_debug_mode` 改为"注册 routes + spawn publisher" |
-| `core/acowork-runtime/src/http/server.rs` | **+30** | `HttpState.debug_service` 字段 + `start()` slot 参数 + `mount("/api/debug", debug::debug_routes())` |
+| `core/acowork-runtime/src/startup/subsystems.rs` | **+20 / -30** | `enable_debug_mode` 改为"注册 routes + spawn publisher + 填 slot" |
+| `core/acowork-runtime/src/http/server.rs` | **+30** | `HttpState.debug_service` 字段 + `start()` slot 参数 + `merge("/api/debug", debug::debug_routes())` |
 | `core/acowork-runtime/src/startup/context.rs` | **+8** | `AgentBootContext.debug_service_slot` 字段 |
-| `core/acowork-runtime/src/startup/session_init.rs` | **+25** | Phase B: `RuntimeDebugService::new(sessions)` 填充 slot |
+| `core/acowork-runtime/src/startup/subsystems.rs` | **+20** | Phase C: `enable_debug_mode` 后填充 slot（ADR 草案原写 session_init.rs Phase B，见 §4.6 偏差说明） |
 | `core/acowork-runtime/src/startup/agent_init.rs` | **+15** | Phase A: 创建空 slot |
 | `core/acowork-gateway/src/http/proxy.rs` | **+5** | `/api/debug/*` 反代规则 |
 | `apps/acowork-desktop/src-tauri/src/commands/debug.rs`（重写） | **+200 / -250** | 从 WebSocket client 改为 HTTP + MQTT |
@@ -454,13 +464,13 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 
 | 风险 | 严重度 | 缓解 |
 |------|--------|------|
-| **现有 handler 业务逻辑提取时丢细节** | 中 | 提取是"cut & paste",调用语义不变；新地址栏测试（22 个调用场景）覆盖旧 WebSocket 测试矩阵 |
+| **现有 handler 业务逻辑提取时丢细节** | 中 | 提取是"cut & paste",调用语义不变；已迁 10 个 handler 全部经 `cargo test` 验证（events ×3 + mqtt encode ×4 + gateway proxy ×3）；旧 WebSocket 测试矩阵中未迁 12 个 endpoint 本就不在旧 server 内 |
 | **Runtime localhost HTTP 与 debug router 端口冲突** | 低 | debug 路由挂在 `/api/debug/*` 路径前缀，与 chat 路由无冲突；复用 Runtime 现有 localhost HTTP server |
 | **Desktop MQTT 订阅 chat + debug 两族，event callback 复杂度上升** | 低 | `on_message` 里按 topic 前缀分发（`agents/{id}/debug/events/#` vs `agents/{id}/sessions/{sid}/messages/#`），逻辑清晰 |
 | **`getState` 返回 messages 完整列表可能数十 KB** | 低 | 复用 Gateway 现有反代路径（已为类似大小 payload 设计） |
 | **事件流断线重连期间事件丢失（QoS 0）** | 中 | DevMode 是开发工具,断线丢失 1~2 个 onStep 可接受；未来需要严格不丢可改 QoS 1 |
-| **late-bind slot 时序**：Phase A 注册 routes（service = None）vs Phase B 填充（service = Some）之间请求会失败 | 低 | 与 ADR-040 workspace_mutation 同样的解决方案：HTTP handler `service.lock().await.as_ref().ok_or(503)`,在 Phase B 之前所有 debug 请求返回 503 |
-| **22 个 handler 中的 session_id 路径参数** | 低 | 现有 handler 都已经在内部从 `JsonRpcRequest.params` 取 session_id；迁移到 HTTP route 后，路径或 body 中显式传 `agent_id` + `session_id`，handler 内部统一从 `self.sessions[session_id]` 取 controller |
+| **late-bind slot 时序**：Phase A 注册 routes（service = None）vs Phase C 填充（service = Some）之间请求会失败 | 低 | 与 ADR-040 workspace_mutation 同样的解决方案：HTTP handler `service.lock().await.as_ref().ok_or(503)`,在 Phase C 之前所有 debug 请求返回 503 |
+| **10 个 handler 中的 session_id 路径参数** | 低 | 现有 handler 都已经在内部从 `JsonRpcRequest.params` 取 session_id；迁移到 HTTP route 后，路径或 body 中显式传 `agent_id` + `session_id`，handler 内部统一从 `self.sessions[session_id]` 取 controller |
 
 **对比原方案的额外收益**：因为 RPC 现在走 UseCase service，**多用户隔离在 HTTP/MQTT 路径天然成立**（`localhost-only` 网关 + ACL），无需额外认证层。
 
@@ -483,14 +493,15 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 
 | Commit | 范围 | 主要内容 | 估计 |
 |--------|------|---------|------|
-| **D0**（已合 ✅） | Gateway `Cargo.toml` | 删除孤儿依赖 `tokio-tungstenite` (dev-dep) | -1 行 |
-| **D1** | Runtime: handler 提取 + UseCase trait | `debug/handlers.rs`（从 server.rs 提取 22 个 `pub async fn`，业务逻辑原样不动）+ `usecases/debug_service.rs`（trait 定义）+ `usecases/debug_service_impl.rs`（实现，调用 handlers）+ `usecases/mod.rs` 注册 | +850 行,**WebSocket server 保留运行** |
-| **D2** | Runtime: HTTP routes + late-bind slot | `http/debug.rs`（22 条 axum route + thin wrapper）+ `http/server.rs` 增加 `debug_service` slot + `mount("/api/debug", ...)` + `startup/{context,agent_init,session_init}.rs` 三件套 slot 接线 | +300 行,**WebSocket server 保留运行** |
-| **D3** | Runtime: MQTT events publisher + 启动切换 | `mqtt/debug_events.rs`（`DebugEventMqttPublisher`）+ proto 5 个 messages + `subsystems.rs` 的 `enable_debug_mode` 改为"注册 routes + spawn publisher"，**删除 TCP listener 启动** | +250 行,**WebSocket server 删除** |
-| **D4** | Runtime: 删除 server.rs WebSocket 部分 + Cargo.toml | `debug/server.rs` 整个 WebSocket 文件删除（保留 `DebugEventSender` 部分，移到 `debug/mod.rs`）+ Runtime `Cargo.toml` 删除 2 处 `tokio-tungstenite` | -850 / -1 行 |
-| **D5** | Gateway: HTTP 反代规则 | `http/proxy.rs` 新增 `/api/debug/*` 反代规则 | +5 行 |
-| **D6** | Desktop: DebugClient 重写 | `commands/debug.rs` 重写为 HTTP + MQTT + 删除 `debugStore.ts` WebSocket 逻辑 + `ResultsPanel.tsx` Debug 部分删除 + 同步 stale 注释 | ~+200/-250 行 |
-| **D7** | 文档 + 注释 + workspace 依赖清理 | `10-debug-protocol.md` §1§2§3§9 大改 + 其他 5 个文档同步 + ~25 处 Rust 注释同步 + `core/Cargo.toml` L117 删除 `tokio-tungstenite` workspace 依赖 | ~150 行文档 / -1 行 |
+| **D0** ✅ | Gateway `Cargo.toml` | 删除孤儿依赖 `tokio-tungstenite` (dev-dep) | -1 行 |
+| **D1** ✅ | Runtime: handler 提取 + UseCase trait | `debug/handlers.rs`（从 server.rs 提取 10 个 `pub async fn`，业务逻辑原样不动）+ `usecases/debug_service.rs`（trait 定义）+ `usecases/debug_service_impl.rs`（实现，调用 handlers）+ `usecases/mod.rs` 注册 | +850 行,**WebSocket server 保留运行** |
+| **D2** ✅ | Runtime: HTTP routes + late-bind slot | `http/debug.rs`（10 条 axum route + thin wrapper）+ `http/server.rs` 增加 `debug_service` slot + `merge("/api/debug", ...)` + `startup/{context,agent_init,subsystems}.rs` 三件套 slot 接线（slot 填充在 Phase C） | +300 行,**WebSocket server 保留运行** |
+| **D3** ✅ | Runtime: MQTT events publisher + 启动切换 | `mqtt/debug_events.rs`（`DebugEventMqttPublisher`）+ proto 5 个 messages + `subsystems.rs` 的 `enable_debug_mode` 改为"注册 routes + spawn publisher"，**删除 TCP listener 启动** | +250 行,**WebSocket server 删除** |
+| **D4** ✅ | Runtime: 删除 server.rs WebSocket 部分 + Cargo.toml | `debug/server.rs` 整个 WebSocket 文件删除（保留 `DebugEventSender` 部分，移到 `debug/events.rs`）+ Runtime `Cargo.toml` 删除 2 处 `tokio-tungstenite` | -1011 / -1 行 |
+| **D5** ✅ | Gateway: HTTP 反代规则 | `http/proxy.rs` 新增 `/api/debug/*` 反代规则 | +5 行 |
+| **D6** ✅ | Desktop: DebugClient 重写 | `commands/debug.rs` 重写为 HTTP + MQTT + 删除 `debugStore.ts` WebSocket 逻辑 + `ResultsPanel.tsx` Debug 部分删除 + 同步 stale 注释 | 实测 +91 / -216 行（净 **-125 行**），含 264 行 `<DebugPanel/>` 死组件清除 |
+| **D7** ✅ | 文档 + 注释同步 | `10-debug-protocol.md` §1§2§3§9 大改 + `06-communication.md` §0 表格 + `14-desktop-app.md` §2.2§7.1 + `03-agent-runtime.md` CLI flag + 模块结构 + `module-design/02-runtime.md` debug/ 结构 + `ADR-031` L384 + `AGENTS.md` 协议分工行 + ~11 处 Rust 注释（`acowork-runtime/src/{cli,startup/subsystems,agent/session/session_manager,usecases/debug_service_impl}.rs` + `acowork-gateway/src/{lifecycle/process,http/agents,gateway/state}.rs` + `acowork-core/src/protocol.rs`） | 文档 ~150 行 / Rust 注释 ~30 行；workspace `tokio-tungstenite = "0.29"` **未删**（`acowork-lsp-relay` 仍用，见 §C 修正） |
+| **D8** ⏳ | **（可选，ADR-053）** 补齐剩余 12 个 RPC | breakpoints ×3 / editMessage / rollback / reloadSkills / switchProvider / recording ×4 / restart —— 全部通过既有传输接线（Gateway 反代 + Desktop `debug_rpc` 通用命令）新增，传输层 0 改动 | +200~300 行 |
 
 **关键节点**：
 - D1 完成后：所有现有测试应通过（handlers 是从 server.rs 提取的，行为不变；新的 trait + impl 还没被任何 route 调用）

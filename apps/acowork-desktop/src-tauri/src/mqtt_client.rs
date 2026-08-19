@@ -209,6 +209,14 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // record_complete at QoS 1; subscribing at QoS 0 would force the
     // broker to downgrade delivery, losing end-to-end ordering.
     ("acowork/agents/+/sessions/+/messages/#", MqttQoS::AtLeastOnce),
+    // ── Debug protocol events (ADR-048 D6) ──
+    // Runtime publishes DevMode debug events (onStep / onContextBuilt /
+    // onStateChange) on `acowork/agents/glm-5.3_common/debug/events/{type}`.
+    // Zero traffic outside DevMode, so subscribing unconditionally is
+    // free. QoS 0 matches the publisher: events are fire-and-forget and
+    // the DevMode panel re-syncs via `GET /api/debug/state` after a
+    // reconnect.
+    ("acowork/agents/+/debug/events/#", MqttQoS::AtMostOnce),
 ];
 
 /// Re-subscribe to ALL topics after a (re)connect.

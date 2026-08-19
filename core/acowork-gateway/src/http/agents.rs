@@ -122,7 +122,10 @@ pub struct AgentListResponse {
     pub ready: bool,
     /// Whether the agent is running in developer mode (Debug Protocol enabled)
     pub dev_mode: bool,
-    /// Debug WebSocket port (set when dev_mode is true and agent is running)
+    /// Debug Protocol port hint (set when dev_mode is true and agent is running).
+    ///
+    /// ADR-048: no longer bound by Runtime as a WebSocket listener; kept
+    /// for API stability and operator dashboards that surface this field.
     pub debug_port: Option<u16>,
     /// RFC3339 timestamp of the last user-driven interaction with this agent
     /// (chat_message / approval / question_answer / compact_context).
@@ -1402,7 +1405,7 @@ pub async fn uninstall_agent(
 #[serde(default)]
 #[derive(Default)]
 pub struct StartAgentRequest {
-    /// Start in developer mode (enables Debug Protocol WebSocket)
+    /// Start in developer mode (enables Debug Protocol: HTTP RPC + MQTT events per ADR-048)
     pub dev_mode: bool,
 }
 

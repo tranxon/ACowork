@@ -1,9 +1,10 @@
 //! Gateway HTTP client
 //!
 //! Encapsulates all Gateway HTTP API calls. The Desktop App communicates
-//! with the platform primarily through Gateway HTTP API and Debug Protocol
-//! WebSocket. It references acowork_core::defaults for shared constants
-//! (host, port, URL) to avoid hardcoded duplication.
+//! with the platform primarily through Gateway HTTP API and the Debug
+//! Protocol (HTTP RPC via the same Gateway + MQTT push). It references
+//! `acowork_core::defaults` for shared constants (host, port, URL) to
+//! avoid hardcoded duplication.
 
 use acowork_core::defaults;
 use anyhow::Result;
@@ -276,6 +277,81 @@ impl GatewayClient {
             .send()
             .await?;
         parse_gateway_response(resp).await
+    }
+
+    // ── Debug Protocol RPC (ADR-048 D6) ────────────────────────────────────
+
+    /// ADR-048: generic Debug Protocol RPC relay.
+    ///
+    /// Sends `METHOD {base}/api/agents/{agent_id}/debug/{path}` to the
+    /// Gateway, which reverse-proxies to the Runtime's `/api/debug/{path}`
+    /// (Gateway `http/proxy.rs`, one wildcard route for every endpoint).
+    /// Keeping the client generic mirrors that design: debug endpoints
+    /// added on the Runtime need no Desktop Rust change, only a call
+    /// site in `debugStore.ts`.
+    ///
+    /// The Runtime answers with the `{ ok, data?, error? }` envelope
+    /// (`acowork-runtime/src/http/debug.rs`); this method unwraps it:
+    /// `ok: true` -> `Ok(data)`, `ok: false` -> `Err(message)`. Errors
+    /// from the Gateway itself (e.g. 502 when the Runtime is down) use
+    /// its own `ApiError` shape and surface via the text fallback.
+    pub async fn debug_rpc(
+        &self,
+        agent_id: &str,
+        method: &str,
+        path: &str,
+        query: Option<&std::collections::HashMap<String, String>>,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let mut url = format!("{}/api/agents/{}/debug/{}", self.base_url, agent_id, path);
+        if let Some(params) = query {
+            let qs = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoded(k), urlencoded(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+            if !qs.is_empty() {
+                url.push('?');
+                url.push_str(&qs);
+            }
+        }
+
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| anyhow::anyhow!("invalid HTTP method '{}': {}", method, e))?;
+        let mut req = self.client.request(method, &url);
+        if let Some(json) = body {
+            req = req.json(json);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+
+        // Runtime debug envelope: `{ ok, data?, error? { code, message } }`
+        #[derive(Deserialize)]
+        struct DebugErrorBody {
+            #[allow(dead_code)]
+            code: i32,
+            message: String,
+        }
+        #[derive(Deserialize)]
+        struct DebugEnvelope {
+            ok: bool,
+            data: Option<serde_json::Value>,
+            error: Option<DebugErrorBody>,
+        }
+        match serde_json::from_str::<DebugEnvelope>(&text) {
+            Ok(env) if env.ok => Ok(env.data.unwrap_or(serde_json::Value::Null)),
+            Ok(env) => {
+                let message = env
+                    .error
+                    .map(|e| e.message)
+                    .unwrap_or_else(|| "debug RPC failed".to_string());
+                anyhow::bail!("Debug {}: {}", status, message)
+            }
+            // Not the debug envelope - Gateway-level error (ApiError or
+            // raw body). Surface status + body verbatim.
+            Err(_) => anyhow::bail!("Gateway {}: {}", status, text),
+        }
     }
 
     // ── Clone ──────────────────────────────────────────────────────────

@@ -1,56 +1,18 @@
-//! JSON-RPC 2.0 protocol types for the Debug Protocol.
+//! Shared data types for the Debug Protocol.
 //!
-//! Based on the debug protocol design in `docs/design/10-debug-protocol.md`.
-//! All messages follow JSON-RPC 2.0 format over WebSocket.
+//! ADR-048: the JSON-RPC 2.0 framing (over WebSocket) was removed.
+//! These types are the transport-neutral DTOs shared by:
+//! - debug/handlers.rs (business logic)
+//! - http/debug.rs (HTTP REST routes serialize them as JSON)
+//! - debug/events.rs (DebugEvent payloads)
+//! - mqtt/debug_events.rs (protobuf encoding)
 //!
-//! ## Message flow
-//! - **Request**: Client → Server (`{ jsonrpc, id, method, params }`)
-//! - **Response**: Server → Client (`{ jsonrpc, id, result/error }`)
-//! - **Event (Notification)**: Server → Client (`{ jsonrpc, method, params }`, no `id`)
+//! See docs/design/10-debug-protocol.md and
+//! docs/adr/zh/ADR-048-debug-protocol-mqtt-http.md.
 
 use serde::{Deserialize, Serialize};
 
-// ── JSON-RPC 2.0 Core Types ──────────────────────────────────────────
-
-/// A JSON-RPC 2.0 request from the debug client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: String,
-    pub id: serde_json::Value,
-    pub method: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
-}
-
-/// A JSON-RPC 2.0 response to the debug client.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcResponse {
-    pub jsonrpc: String,
-    pub id: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcError>,
-}
-
-/// A JSON-RPC 2.0 error object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcError {
-    pub code: i32,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-/// A JSON-RPC 2.0 notification (server-pushed event, no `id`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonRpcNotification {
-    pub jsonrpc: String,
-    pub method: String,
-    #[serde(default)]
-    pub params: serde_json::Value,
-}
-
+// ── Execution Control ─────────────────────────────────────────────────
 // ── Execution Control Methods ─────────────────────────────────────────
 
 /// Parameters for `debugger.step`.
@@ -280,53 +242,3 @@ pub struct OnContextBuiltParams {
     pub total_token_estimate: usize,
 }
 
-// ── JSON-RPC Error Codes ──────────────────────────────────────────────
-
-pub const PARSE_ERROR: i32 = -32700;
-pub const INVALID_REQUEST: i32 = -32600;
-pub const METHOD_NOT_FOUND: i32 = -32601;
-pub const INVALID_PARAMS: i32 = -32602;
-pub const INTERNAL_ERROR: i32 = -32603;
-pub const SERVER_NOT_STARTED: i32 = -32000;
-pub const NOT_IN_DEV_MODE: i32 = -32001;
-
-impl JsonRpcResponse {
-    /// Build a success response.
-    pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    /// Build an error response.
-    pub fn error(
-        id: serde_json::Value,
-        code: i32,
-        message: impl Into<String>,
-        data: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-                data,
-            }),
-        }
-    }
-}
-
-impl JsonRpcNotification {
-    pub fn new(method: impl Into<String>, params: serde_json::Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            method: method.into(),
-            params,
-        }
-    }
-}

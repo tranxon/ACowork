@@ -852,7 +852,7 @@ impl SessionTask {
                                     agent_loop.core.debug_observer.debug_event_tx()
                                 {
                                     let _ = event_tx.send(
-                                        crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                        crate::debug::DebugEvent::ExecutionStateChanged {
                                             new_state:
                                                 crate::debug::controller::DebugState::Running,
                                             iteration,

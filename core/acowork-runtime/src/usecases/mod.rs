@@ -7,6 +7,7 @@ pub mod agent_config;
 pub mod agent_token;
 pub mod agent_tools;
 pub mod attachment;
+pub mod debug_service;
 pub mod memory_query;
 pub mod session_config;
 pub mod session_control;
@@ -27,6 +28,7 @@ pub use agent_tools::{
 pub use attachment::{
     AttachmentError, AttachmentService, UploadFileParams, UploadedFileResponse, MAX_UPLOAD_BYTES,
 };
+pub use debug_service::DebugService;
 pub use memory_query::MemoryQueryService;
 pub use session_config::SessionConfigService;
 pub use session_control::SessionControlService;
@@ -39,6 +41,7 @@ pub mod agent_config_impl;
 pub mod agent_token_impl;
 pub mod agent_tools_impl;
 pub mod attachment_impl;
+pub mod debug_service_impl;
 pub mod memory_query_impl;
 pub mod session_config_impl;
 pub mod session_metadata_impl;
@@ -49,6 +52,7 @@ pub use agent_config_impl::RuntimeAgentConfigService;
 pub use agent_token_impl::RuntimeAgentTokenService;
 pub use agent_tools_impl::RuntimeAgentToolsService;
 pub use attachment_impl::RuntimeAttachmentService;
+pub use debug_service_impl::RuntimeDebugService;
 pub use memory_query_impl::GrafeoMemoryAdapter;
 pub use session_config_impl::{RuntimeSessionConfigService, SharedSessionConfigs};
 pub use session_metadata_impl::RuntimeSessionMetadataService;

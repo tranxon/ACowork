@@ -1274,7 +1274,7 @@ impl AgentLoop {
                         drop(ctrl_guard);
                         if let Some(event_tx) = self.core.debug_observer.debug_event_tx() {
                             let _ = event_tx.send(
-                                crate::debug::server::DebugEvent::ExecutionStateChanged {
+                                crate::debug::DebugEvent::ExecutionStateChanged {
                                     new_state: crate::debug::controller::DebugState::Stopped,
                                     iteration,
                                 },

@@ -7,6 +7,8 @@
 //!   - Spawn MCP auto-connect background task
 //!   - Send workspace config snapshot to Gateway
 
+use std::sync::Arc;
+
 use crate::config::RuntimeConfig;
 use crate::conversation::{ConfigChange, ConversationSession, StateChange};
 use crate::error::Result;
@@ -76,14 +78,44 @@ pub(crate) async fn phase_c_spawn_subsystems(
         None
     };
 
-    // ── DevMode: start Debug Protocol server ─────────────────────────
+    // ── DevMode: register Debug HTTP routes + spawn events publisher ──
     if config.dev_mode {
         let debug_port = config.debug_port as u32;
         tracing::info!(
             debug_port = debug_port,
-            "DevMode enabled at startup — starting Debug Protocol server"
+            "DevMode enabled at startup — registering Debug Protocol routes and MQTT events publisher"
         );
-        session_ctx.session_manager.lock().await.enable_debug_mode(debug_port).await;
+        // ADR-048: pass the MQTT client so the debug events publisher
+        // forwards every TaggedEvent to the broker on
+        // `acowork/agents/{id}/debug/events/{type}`. The publisher
+        // needs `Arc<RuntimeMqttClient>`; clone the cheap (internally
+        // Arc-wrapped) client and re-wrap it.
+        let mqtt_client = ctx.mqtt_client.clone().map(|c| std::sync::Arc::new(c));
+        session_ctx
+            .session_manager
+            .lock()
+            .await
+            .enable_debug_mode(debug_port, mqtt_client)
+            .await;
+
+        // ADR-048: populate the HTTP server's late-bind Debug service
+        // slot. Without this, /api/debug/* routes return 503 forever.
+        // The service was built inside `enable_debug_mode` after
+        // per-session controllers and senders were registered.
+        if let Some(svc) = session_ctx
+            .session_manager
+            .lock()
+            .await
+            .debug_service()
+        {
+            let svc_dyn: Arc<dyn crate::usecases::DebugService> = svc;
+            *ctx.debug_service_slot.lock().await = Some(svc_dyn);
+            tracing::info!("Debug service slot populated (DevMode active)");
+        } else {
+            tracing::warn!(
+                "DevMode enabled but debug_service is None — /api/debug/* will return 503"
+            );
+        }
     }
 
     // ADR-040: gRPC hello_config MCP catalog sync removed.

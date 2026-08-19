@@ -153,7 +153,7 @@ impl From<&ContextSnapshotSections> for ContextSections {
 
 // ── DebugController ───────────────────────────────────────────────────
 
-/// Shared debug controller, owned by DebugProtocolServer and accessed by AgentLoop.
+/// Shared debug controller, accessed by HTTP debug routes and AgentLoop.
 pub struct DebugController {
     /// Current execution state
     pub state: DebugState,

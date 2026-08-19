@@ -63,6 +63,17 @@ message DataEnvelope {
     // ── Memory (Runtime → subscribers) ──
     MemoryNodeUpdate         memory_node_update        = 50;
 
+    // ADR-048: Debug protocol events (Runtime → Desktop DevMode, QoS 0).
+    // Topics: `acowork/agents/{agent_id}/debug/events/{event_type}`.
+    // The Desktop App subscribes to `agents/{id}/debug/events/#` and
+    // routes each event by tag. Events are best-effort — DevMode may
+    // drop 1-2 events on reconnect without functional impact.
+    DebugStepEvent           debug_step_event          = 70;
+    DebugBreakpointEvent     debug_breakpoint_event    = 71;
+    DebugRecordStepEvent     debug_record_step_event   = 72;
+    DebugStateChangeEvent    debug_state_change_event  = 73;
+    DebugContextBuiltEvent   debug_context_built_event = 74;
+
     // ── Sidecar (Sidecar → subscribers, Retained) ──
     SidecarStatus            sidecar_status            = 60;
   }
@@ -868,4 +879,91 @@ message SessionNotOpened {
   string attempted_command = 2;
   /// "session_not_found" | "session_closed"
   string reason = 3;
+}
+
+// ── Debug protocol events (ADR-048) ───────────────────────────────────
+
+/// `debugger.onStep` — a conversation step completed during agent loop.
+///
+/// Topic: acowork/agents/{agent_id}/debug/events/onStep (QoS 0).
+/// The Desktop DevMode panel uses this to update the iteration timeline.
+///
+/// `input` / `output` are JSON values so the frontend can render any
+/// payload shape without prior schema knowledge. `usage` follows the
+/// same DebugUsage shape used by the agent loop (prompt/completion/total).
+message DebugStepEvent {
+  string session_id = 1;
+  uint32 iteration = 2;
+  /// DebugPhase (string): BudgetCheck | BuildContext | LlmCall | ParseResponse
+  /// | ToolExecution | AppendHistory | Idle
+  string phase = 3;
+  /// LLM input context (optional, can be large).
+  string input = 4;
+  /// LLM output (optional, can be large).
+  string output = 5;
+  /// Token usage for this step (optional).
+  uint64 prompt_tokens = 6;
+  uint64 completion_tokens = 7;
+  uint64 total_tokens = 8;
+}
+
+/// `debugger.onBreakpoint` — a breakpoint was hit.
+///
+/// Topic: acowork/agents/{agent_id}/debug/events/onBreakpoint (QoS 0).
+/// Fired when the agent loop reaches a phase marked with a breakpoint
+/// condition.
+message DebugBreakpointEvent {
+  string session_id = 1;
+  string breakpoint_id = 2;
+  uint32 iteration = 3;
+  string phase = 4;
+}
+
+/// `debugger.onRecordStep` — a recorded replay step event.
+///
+/// Topic: acowork/agents/{agent_id}/debug/events/onRecordStep (QoS 0).
+/// Fired during recording and replay to surface individual steps to the
+/// DevMode timeline.
+message DebugRecordStepEvent {
+  string session_id = 1;
+  uint32 step_index = 2;
+  string phase = 3;
+  /// Opaque step data (JSON string).
+  string step_data = 4;
+}
+
+/// `debugger.onStateChange` — DebugState transitioned (Running/Paused/etc).
+///
+/// Topic: acowork/agents/{agent_id}/debug/events/onStateChange (QoS 0).
+/// Subscribers use this to update their "Paused / Running / Stepping"
+/// badge in the DevMode UI.
+message DebugStateChangeEvent {
+  string session_id = 1;
+  /// DebugState: Running | Paused | Stepping | Stopped
+  string new_state = 2;
+  uint32 iteration = 3;
+}
+
+/// `debugger.onContextBuilt` — context snapshot was built for an iteration.
+///
+/// Topic: acowork/agents/{agent_id}/debug/events/onContextBuilt (QoS 0).
+/// The Desktop uses this to refresh the context-tree view in the DevMode
+/// panel. Sections carry metadata only (size/token/hash); full section
+/// content is fetched lazily via `GET /api/debug/context/{iter}/sections/{name}`.
+message DebugContextBuiltEvent {
+  string session_id = 1;
+  uint32 iteration = 2;
+  uint64 total_token_estimate = 3;
+  /// Section metadata: size_bytes, token_estimate, hash. Same fields as
+  /// `DebugUsage`-style meta records in the existing protocol.
+  map<string, SectionMeta> sections = 4;
+}
+
+/// Lightweight section metadata (size / tokens / hash).
+///
+/// Reuses the wire shape of [`SectionMeta`] defined for context snapshots.
+message SectionMeta {
+  uint64 size_bytes = 1;
+  uint64 token_estimate = 2;
+  string hash = 3;
 }

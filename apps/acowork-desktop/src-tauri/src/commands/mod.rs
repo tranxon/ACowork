@@ -4,6 +4,7 @@ pub mod agent;
 pub mod chat;
 pub mod chat_mqtt;
 pub mod create;
+pub mod debug;
 pub mod effects;
 pub mod gateway;
 pub mod publish;

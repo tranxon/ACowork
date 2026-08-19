@@ -21,7 +21,7 @@ use super::controller::{
 };
 use super::observer::ContextSnapshotRequest;
 use super::protocol::DebugPhase;
-use super::server::{DebugEvent, DebugEventSender};
+use super::events::{DebugEvent, DebugEventSender};
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;

@@ -209,6 +209,14 @@ pub(crate) struct AgentBootContext {
     /// and `POST /agents/{id}/rag/query`.
     pub rag_provider_slot: crate::http::server::SharedRagProvider,
 
+    /// ADR-048: Late-bind slot for the Debug service. Populated in
+    /// Phase B after SessionManager has wired up per-session debug
+    /// controllers (DevMode must be active for this to be set; outside
+    /// DevMode the slot stays empty and the `/api/debug/*` routes
+    /// return 503 with "Debug service not ready").
+    pub debug_service_slot:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+
     /// Shared search key vault (provider_id -> decrypted API key).
     /// Created in Phase A, passed to `WebSearchEngine` (via
     /// `all_builtin_tools`) and injected into `AgentCore` in Phase B.

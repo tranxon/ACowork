@@ -21,7 +21,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put, delete},
+    routing::{any, get, post, put, delete},
 };
 use axum::body::Bytes;
 use tokio::sync::RwLock;
@@ -288,6 +288,17 @@ pub fn proxy_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/providers",
             get(proxy_get_providers),
+        )
+        // ADR-048: Debug Protocol HTTP RPC reverse proxy. One wildcard
+        // route forwards every method on `/debug/*` to the Runtime's
+        // `/api/debug/*` (path suffix, querystring, body and headers
+        // all pass through verbatim - see `proxy_debug_rpc`). New
+        // debug endpoints on the Runtime need no Gateway change.
+        // Debug *events* do NOT flow through here: they are MQTT
+        // pub/sub on `acowork/agents/{id}/debug/events/{event_type}`.
+        .route(
+            "/api/agents/{id}/debug/{*rest}",
+            any(proxy_debug_rpc),
         )
 }
 
@@ -1096,6 +1107,45 @@ async fn proxy_put_search_config(
     .await
 }
 
+/// ADR-048: Reverse-proxy ANY method on
+/// `/api/agents/glm-5.3_common/debug/{*rest}` to the Runtime's
+/// `/api/debug/{rest}`.
+///
+/// The Runtime owns the debug RPC surface when DevMode is active
+/// (`http/debug.rs`, mounted by D2); the Gateway is a transparent
+/// reverse-proxy exactly like the workspace/session routes above:
+/// method, path suffix, querystring (e.g. `?session_id=...`), body
+/// (e.g. `{"session_id": "...", "granularity": "..."}`) and headers
+/// are forwarded verbatim. Unknown debug paths surface the Runtime's
+/// own 404/405 responses - the Gateway does not second-guess the
+/// surface.
+async fn proxy_debug_rpc(
+    State(state): State<AppState>,
+    Path((id, rest)): Path<(String, String)>,
+    method: axum::http::Method,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/api/debug/{}", rest);
+    let query = build_query_string(&params);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        &query,
+        method,
+        payload,
+        &headers,
+    )
+    .await
+}
+
 /// Build a query string from a HashMap of params.
 fn build_query_string(params: &HashMap<String, String>) -> String {
     if params.is_empty() {
@@ -1434,6 +1484,129 @@ mod tests {
         registry.unregister("com.test.agent");
         assert!(registry.is_empty());
         assert_eq!(registry.get_port("com.test.agent"), None);
+    }
+
+    /// ADR-048 D5: the debug wildcard route must forward method, path
+    /// suffix, querystring and body verbatim to the Runtime's
+    /// `/api/debug/*`.
+    ///
+    /// Spawns a mock "Runtime" HTTP server that echoes the received
+    /// request as JSON, registers its port in the
+    /// RuntimeHttpRegistry, then drives the proxy router with real
+    /// HTTP requests.
+    #[tokio::test]
+    async fn test_debug_rpc_proxy_forwards_verbatim() {
+        use tower::util::ServiceExt;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // ── Mock Runtime: echoes method/path/query/body back as JSON ──
+        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let received_for_server = received.clone();
+        let runtime_app = axum::Router::new().fallback(
+            axum::routing::any(move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                received_for_server
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {} body={}", method, uri, String::from_utf8_lossy(&body)));
+                axum::Json(serde_json::json!({"ok": true}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+
+        // ── Gateway state with the mock Runtime registered ──
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-debug-proxy-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry.write().await.register("glm-5.3_common", port);
+        state.runtime_http_registry = Some(registry);
+
+        let app = super::proxy_routes().with_state(state);
+
+        // ── GET /debug/state?session_id=… → Runtime GET /api/debug/state ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/glm-5.3_common/debug/state?session_id=s1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── POST /debug/step {session_id, granularity} ──
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/agents/glm-5.3_common/debug/step")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"session_id":"s1","granularity":"iteration"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // ── Deep path: context/{iteration}/sections/{section} ──
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/agents/glm-5.3_common/debug/context/3/sections/system_prompt?session_id=s1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got.len(), 3, "all three requests forwarded: {:?}", got);
+        assert!(
+            got[0].starts_with("GET /api/debug/state?session_id=s1 body="),
+            "state request forwarded verbatim: {}",
+            got[0]
+        );
+        assert!(
+            got[1].starts_with("POST /api/debug/step body="),
+            "step request forwarded verbatim: {}",
+            got[1]
+        );
+        assert!(
+            got[1].contains(r#""session_id":"s1""#),
+            "step body forwarded verbatim: {}",
+            got[1]
+        );
+        assert!(
+            got[2].starts_with("GET /api/debug/context/3/sections/system_prompt?session_id=s1 body="),
+            "deep path forwarded verbatim: {}",
+            got[2]
+        );
     }
 
     #[test]

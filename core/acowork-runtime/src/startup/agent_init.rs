@@ -158,6 +158,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(std::sync::RwLock::new(None));
     let rag_provider_slot: crate::http::server::SharedRagProvider =
         Arc::new(std::sync::RwLock::new(None));
+    // ADR-048: late-bind slot for the Debug service. Empty in Phase A;
+    // populated in Phase B once SessionManager has built per-session
+    // debug controllers (only when DevMode is active — outside DevMode
+    // the slot stays None and `/api/debug/*` returns 503).
+    let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
@@ -187,6 +193,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             session_config_slot.clone(),
             consolidation_timer_slot.clone(),
             rag_provider_slot.clone(),
+            debug_service_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -912,6 +919,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         session_config_slot,
         consolidation_timer_slot,
         rag_provider_slot,
+        debug_service_slot,
         search_key_vault,
         search_provider_list,
         session_configs,

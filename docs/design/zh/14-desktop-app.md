@@ -49,13 +49,14 @@ Desktop App 是 ACowork 平台的**用户界面层**，不承载任何平台核�
 │  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │  │
 │  │  │ Gateway      │  │ Debug        │  │ Tray          │  │  │
 │  │  │ Client       │  │ Protocol     │  │ Manager       │  │  │
-│  │  │ (HTTP/Socket)│  │ Client (WS)  │  │               │  │  │
+│  │  │ (HTTP/MQTT)  │  │ Client       │  │               │  │  │
+│  │  │              │  │ (HTTP+MQTT)  │  │               │  │  │
 │  │  └──────────────┘  └──────────────┘  └───────────────┘  │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
-         │                                    │
-         │ Gateway Service API                │ Debug Protocol
-         │ (HTTP or Socket)                   │ (WebSocket)
+          │                                    │
+          │ Gateway Service API                │ Debug Protocol
+          │ (HTTP REST + MQTT)                  │ (HTTP RPC + MQTT events)
          ▼                                    ▼
 ┌─────────────────────┐           ┌─────────────────────────┐
 │  Gateway (独立进程)  │           │  Agent Runtime          │
@@ -430,7 +431,7 @@ Desktop App 后台定期（每 5s）调用 Gateway `/health` 端点：
 | **构建工具** | Vite | 快速 HMR、Tauri 官方推荐 |
 | **UI 组件库** | shadcn/ui + Tailwind CSS | 可定制性强、无运行时依赖、tree-shakable |
 | **状态管理** | Zustand | 轻量、TypeScript 友好、适合中等复杂度应用 |
-| **WebSocket** | 原生 WebSocket API | 流式消息、Debug Protocol 通信 |
+| **HTTP + MQTT** | `fetch` + `mqtt.js`（或 Tauri Command `debug_rpc`） | 流式消息（MQTT 订阅 `acowork/agents/{id}/sessions/{sid}/messages/#`）、Debug Protocol（`debug_rpc` + `debug-event` 事件） |
 
 ### 7.2 Tauri Plugins
 

@@ -7,7 +7,6 @@ import { getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import {
   WifiOff,
-  Loader,
   Play,
   Pause,
   StepForward,
@@ -117,7 +116,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   // ── Debug store (always called, conditionally used) ──────────────
   const {
     connected,
-    connecting,
     debugAgentId,
     sessionStates,
     connect,
@@ -164,16 +162,18 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   useEffect(() => {
     if (!isDebugMode || !selectedAgentId) return;
 
-    // Debug WebSocket is a direct Desktop ↔ Runtime connection (127.0.0.1:19878).
-    // In remote mode (Desktop on a different machine than Gateway/Runtime),
-    // this connection cannot be established. Skip silently.
+    // ADR-048 D6: debug RPC goes through the Gateway HTTP reverse proxy
+    // and events ride the shared MQTT subscription, but the Desktop MQTT
+    // client still connects to the broker on 127.0.0.1 - in remote mode
+    // (Desktop on a different machine than Gateway/Runtime) debug events
+    // would not flow. Skip silently.
     if (!isGatewayLocal()) return;
 
     const agentChanged = selectedAgentId !== prevAgentId.current;
 
     if (selectedAgent?.dev_mode && selectedAgent.running) {
       if (agentChanged || !connected || debugAgentId !== selectedAgentId) {
-        connect(selectedAgentId, selectedAgent?.debug_port);
+        connect(selectedAgentId);
       }
       autoConnectAttempted.current = true;
     }
@@ -277,23 +277,14 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
             </div>
           ) : !connected ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
-              {connecting ? (
-                <>
-                  <Loader className="h-5 w-5 animate-spin" />
-                  <span>{t("resultsPanel.connectingDebug")}</span>
-                </>
-              ) : (
-                <>
-                  <WifiOff className="h-5 w-5" />
-                  <span className="text-center">
-                    {selectedAgent?.running && selectedAgent?.dev_mode
-                      ? t("resultsPanel.debugConnectionLost")
-                      : selectedAgent?.running
-                        ? t("resultsPanel.agentNotDebugMode")
-                        : t("resultsPanel.noAgentDebug")}
-                  </span>
-                </>
-              )}
+              <WifiOff className="h-5 w-5" />
+              <span className="text-center">
+                {selectedAgent?.running && selectedAgent?.dev_mode
+                  ? t("resultsPanel.debugConnectionLost")
+                  : selectedAgent?.running
+                    ? t("resultsPanel.agentNotDebugMode")
+                    : t("resultsPanel.noAgentDebug")}
+              </span>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto p-3 space-y-3">

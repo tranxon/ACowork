@@ -80,14 +80,14 @@ Agent Runtime (universal binary — Rust)
 ├── MQTT client (rumqttc) + localhost HTTP server (random port)
 ├── System Agent (com.acowork.system) — identity, preferences
 ├── User Agents — each has private Grafeo + LLM direct connection
-└── DevMode — Debug Protocol (WebSocket, for developers — separate from IPC main channel)
+└── DevMode — Debug Protocol (HTTP RPC + MQTT events, ADR-048; mirrors production IPC stack)
 ```
 
 **协议分工**（自 [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 HTTP + MQTT）：
 
 - **HTTP REST**（`http://127.0.0.1:19876`）— Desktop / CLI 触发 + 配置写回 + 大数据查询；Gateway 内部转为对 Runtime localhost HTTP 的反向代理
 - **MQTT**（`localhost:19875`）— 实时事件（chat chunk / tool_call / done）、状态同步（Will + Retained）、设备生命周期
-- **Debug Protocol WebSocket**（DevMode 专用，不参与生产 IPC）— 步进调试、Skill 热加载、录制回放
+- **Debug Protocol**（DevMode 专用，复用生产 IPC 通道，ADR-048）— HTTP RPC `/api/agents/{id}/debug/{*rest}`（Gateway 反代 → Runtime）+ MQTT 调试事件 `acowork/agents/{id}/debug/events/{type}`：步进调试、Skill 热加载、录制回放
 - 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/zh/protocols/README.md`
 
 ## Conventions

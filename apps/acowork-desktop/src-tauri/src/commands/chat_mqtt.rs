@@ -4,6 +4,11 @@
 //! - `connect_mqtt` — connect to the MQTT broker
 //! - `disconnect_mqtt` — disconnect and clean up
 //! - `mqtt_publish_control` — publish a control command (protobuf-encoded)
+//!
+//! The `connect_mqtt` message callback also decodes DevMode debug events
+//! (ADR-048 D6) published on `acowork/agents/glm-5.3_common/debug/events/#`
+//! and re-emits them on the `debug-event` Tauri channel for the frontend
+//! `debugStore`.
 
 use std::sync::Arc;
 
@@ -243,7 +248,84 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("agent-event", event);
             }
 
+            // ── Debug protocol events (ADR-048 D6) ──
+            //
+            // Runtime DevMode events arrive on
+            // `acowork/agents/glm-5.3_common/debug/events/{event_type}`.
+            // The protobuf payloads carry `session_id` but NOT `agent_id`
+            // (it lives in the topic path), so we re-attach it here the
+            // same way the SessionOpened / SessionNotOpened arms do.
+            //
+            // These are emitted on a dedicated `debug-event` Tauri channel
+            // (not `agent-event`): the debugStore owns their state and the
+            // chatStore's `handleMessageEvent` must not need to know about
+            // debug types. Payload `type` mirrors the MQTT topic suffix so
+            // the frontend dispatch table stays 1:1 with the wire topics.
+            data_envelope::Payload::DebugStepEvent(ev) => {
+                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                let event = serde_json::json!({
+                    "type": "onStep",
+                    "agent_id": agent_id,
+                    "session_id": ev.session_id,
+                    "iteration": ev.iteration,
+                    "phase": ev.phase,
+                    "prompt_tokens": ev.prompt_tokens,
+                    "completion_tokens": ev.completion_tokens,
+                    "total_tokens": ev.total_tokens,
+                });
+                let _ = app_handle.emit("debug-event", event);
+            }
+            data_envelope::Payload::DebugContextBuiltEvent(ev) => {
+                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                // sections: proto map<string, SectionMeta> -> flat JSON
+                // object keyed by section name (system_prompt, ...). The
+                // frontend ContextSnapshotMeta consumes it as a plain
+                // Record and iterates the fixed SECTION_ORDER list.
+                let sections: serde_json::Map<String, serde_json::Value> = ev
+                    .sections
+                    .iter()
+                    .map(|(name, meta)| {
+                        (
+                            name.clone(),
+                            serde_json::json!({
+                                "size_bytes": meta.size_bytes,
+                                "token_estimate": meta.token_estimate,
+                                "hash": meta.hash,
+                            }),
+                        )
+                    })
+                    .collect();
+                let event = serde_json::json!({
+                    "type": "onContextBuilt",
+                    "agent_id": agent_id,
+                    "session_id": ev.session_id,
+                    "iteration": ev.iteration,
+                    "total_token_estimate": ev.total_token_estimate,
+                    "sections": serde_json::Value::Object(sections),
+                });
+                let _ = app_handle.emit("debug-event", event);
+            }
+            data_envelope::Payload::DebugStateChangeEvent(ev) => {
+                let agent_id = extract_agent_id_from_topic(&msg.topic).unwrap_or_default();
+                // `new_state` carries either a DebugState ("Running" /
+                // "Paused" / "Stepping" / "Stopped") or a DebugPhase name
+                // ("LlmCall", ...) - the Runtime maps both legacy event
+                // kinds onto this topic. The frontend discriminates by
+                // value (see debugStore `_handleDebugEvent`).
+                let event = serde_json::json!({
+                    "type": "onStateChange",
+                    "agent_id": agent_id,
+                    "session_id": ev.session_id,
+                    "new_state": ev.new_state,
+                    "iteration": ev.iteration,
+                });
+                let _ = app_handle.emit("debug-event", event);
+            }
+
             // ── Global resources & control commands: ignore (Gateway handles these) ──
+            // DebugBreakpointEvent / DebugRecordStepEvent are likewise
+            // reserved-but-unemitted (see Runtime mqtt/debug_events.rs);
+            // they fall through here until handlers exist.
             _ => {}
         }
     };
