@@ -683,11 +683,21 @@ async fn dispatch_inbound(
             // closed, in which case the cancel is a no-op (no panic, just a
             // debug log) and the subsequent `forward_to_session_inbound`
             // call will surface the same eviction as a structured error.
-            match session_manager.lock().await.cancel_handle(&session_id) {
+            // NOTE(deadlock): the cancel handle and the agent_id MUST be
+            // hoisted out of the `match` scrutinee. The scrutinee temporary
+            // (`MutexGuard`) lives until the end of the whole `match`
+            // expression, so re-locking `session_manager` inside a match
+            // arm self-deadlocks on the non-reentrant `tokio::sync::Mutex`.
+            // This exact bug froze the entire MQTT control plane (Stop /
+            // CreateSession / ChatMessage all silently queued) while the
+            // session kept running - see the 2026-08-20 incident.
+            let agent_id = session_manager.lock().await.agent_id().to_string();
+            let cancel_handle = session_manager.lock().await.cancel_handle(&session_id);
+            match cancel_handle {
                 Some(handle) => {
                     handle.cancel(CancellationReason::UserStop {
                         source: StopSource::ChatPanel {
-                            agent_id: session_manager.lock().await.agent_id().to_string(),
+                            agent_id,
                             session_id: session_id.clone(),
                         },
                         reason: reason.clone(),

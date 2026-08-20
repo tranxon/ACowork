@@ -54,3 +54,7 @@ ref-repo/
 /cargo-check-output.txtnul
 .playwright-mcp/
 *.tsbuildinfo
+
+# Rust test build artifacts
+target-test/
+core/target-test/
