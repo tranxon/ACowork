@@ -29,6 +29,10 @@ const EXT_LANGUAGE_MAP: Record<string, string> = {
     js: "javascript",
     jsx: "javascript",
     json: "json",
+    // Monaco ships no built-in TOML grammar; TOML syntax is close enough to
+    // INI (comments, [sections], key = value) that we reuse "ini" for
+    // highlighting. Must stay in lockstep with AgentSetupTab's
+    // "TOML is mapped to ini language" when it opens shell_risk_rules.toml.
     toml: "ini",
     yaml: "yaml",
     yml: "yaml",
