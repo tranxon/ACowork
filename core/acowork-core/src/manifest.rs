@@ -528,7 +528,7 @@ mod tests {
 
             [resources]
             max_memory_mb = 512
-            idle_timeout_secs = 300
+            idle_timeout_secs = 1800
 
             [sandbox]
             enabled = true

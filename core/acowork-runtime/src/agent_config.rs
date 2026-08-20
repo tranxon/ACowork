@@ -188,7 +188,7 @@ pub struct AgentConfig {
     /// 1. **this field** — user's agent-level setting (set via Agent Setup panel)
     /// 2. `manifest.resources.idle_timeout_secs` — package author default
     /// 3. `crate::agent::idle_watcher::DEFAULT_IDLE_TIMEOUT_SECS` — hardcoded
-    ///    final fallback (300 s)
+    ///    final fallback (1800 s)
     ///
     /// `None` means "I don't have an opinion" — fall through to the next level.
     /// `Some(0)` means "never sleep" — the Runtime runs forever until manually

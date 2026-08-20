@@ -510,7 +510,7 @@ pub(crate) async fn phase_b_init_session(
 
             // ── idle_timeout_secs: resolve + writeback ──────
             // Phase B: resolve the effective idle timeout from the three-layer
-            // chain (user override -> manifest default -> 300s) and write it back
+            // chain (user override -> manifest default -> 1800s) and write it back
             // to agent_config.json so subsequent boots get the same value
             // (and the UI dropdown in the Setup panel is restored from disk).
             // The watcher itself is spawned at the end of session_init; the

@@ -42,7 +42,7 @@ export interface AgentProfileSettings {
    *  Undefined = use default (true). Boot-only: takes effect on next session restore. */
   toolCompressionEnabled?: boolean;
   /** Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
-   *  0 = never sleep. Undefined = use manifest default or system default (300). */
+   *  0 = never sleep. Undefined = use manifest default or system default (1800). */
   idleTimeoutSecs?: number;
 }
 

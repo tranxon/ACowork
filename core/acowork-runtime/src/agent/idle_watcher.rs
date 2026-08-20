@@ -49,9 +49,9 @@ use crate::mqtt::RuntimeMqttClient;
 
 /// Default idle timeout in seconds when neither the user override nor the
 /// manifest supplies one. Matches the legacy `GatewayConfig::timeouts::
-/// idle_timeout_secs` default (300 s = 5 min) so behaviour is unchanged for
+/// idle_timeout_secs` default (1800 s = 30 min) so behaviour is unchanged for
 /// operators who never set the new field.
-pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1800;
 
 /// Sentinel for "never sleep" — stored in `AgentConfig::idle_timeout_secs`
 /// (and exposed to the UI as the "Never" dropdown option). When the

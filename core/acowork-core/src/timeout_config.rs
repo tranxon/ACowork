@@ -201,7 +201,7 @@ fn default_session_idle_timeout_secs() -> u64 {
     300 // 5 min
 }
 fn default_idle_timeout_secs() -> u64 {
-    300 // 5 min
+    1800 // 30 min
 }
 fn default_retry_max_attempts() -> u32 {
     3
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(t.tool_http(), Duration::from_millis(30_000));
         assert_eq!(t.tool_exec(), Duration::from_millis(600_000));
         assert_eq!(t.session_idle(), Duration::from_secs(300));
-        assert_eq!(t.idle_agent(), Duration::from_secs(300));
+        assert_eq!(t.idle_agent(), Duration::from_secs(1800));
         assert_eq!(t.retry.backoff_base(), Duration::from_millis(1_000));
         assert_eq!(t.retry.backoff_cap(), Duration::from_millis(10_000));
     }

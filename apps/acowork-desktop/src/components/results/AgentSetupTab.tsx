@@ -859,7 +859,7 @@ export function AgentSetupTab() {
                     ? "3600"
                     : profile.idleTimeoutSecs === 10800
                       ? "10800"
-                      : "300"
+                      : "1800"
           }
           onChange={(e) => {
             const v = e.target.value;
