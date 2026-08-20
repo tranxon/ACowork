@@ -29,13 +29,23 @@ use acowork_mqtt_session::{
 /// breaks to the soft-restart path, which drops the old EventLoop and
 /// creates a fresh TCP connection.
 ///
-/// 20 s = 4 × keepalive interval. Normal connections produce at least
+/// 5 s = 1 × keepalive interval. Normal connections produce at least
 /// one PINGRESP within every keepalive interval (now 5 s — see
-/// `set_keep_alive` below), so 20 s without any event strongly
-/// indicates a stuck socket. Previously 90 s but the long delay caused
-/// a poor UX after OS wake-from-sleep (users waited up to 90 s for
-/// the reconnection to kick in).
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
+/// `set_keep_alive` below; rumqttc paces PINGREQ at keepalive/2 so a
+/// healthy connection actually emits a PINGRESP every ~2.5 s), so 5 s
+/// without any event strongly indicates a stuck socket.
+///
+/// History:
+/// - Originally 90 s — left users staring at "Reconnecting..." for up
+///   to 90 s after OS wake-from-sleep.
+/// - Lowered to 20 s (4 × keepalive) for better wake-recovery UX.
+/// - Lowered to 5 s (1 × keepalive) to further cut wake-recovery
+///   latency. The cost is a higher chance of spurious soft-restarts on
+///   genuinely busy event loops — acceptable because soft-restart on a
+///   healthy connection only causes a ~100 ms input-disabled flash
+///   (replacing one EventLoop with another on localhost is sub-10 ms;
+///   the 14 SUBSCRIBE frames add another ~50 ms).
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// MQTT QoS level (mirrors the Gateway's).
 #[derive(Debug, Clone, Copy)]
