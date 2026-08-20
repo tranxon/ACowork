@@ -1167,7 +1167,7 @@ pub enum GatewayResponse {
         system_prompt_override: Option<String>,
         /// Shell command approval threshold.
         /// Controls which risk levels require user confirmation before execution.
-        /// "low" | "medium" (default) | "high" | "never"
+        /// "low" | "medium" (default) | "high" | "auto_approve" (legacy "never" accepted)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell_approval_threshold: Option<String>,
         /// MCP server configurations.

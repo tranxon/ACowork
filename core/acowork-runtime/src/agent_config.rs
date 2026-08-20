@@ -157,7 +157,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt_override: Option<String>,
 
-    /// Shell command approval threshold ("low" | "medium" | "high" | "never").
+    /// Shell command approval threshold ("low" | "medium" | "high" | "auto_approve"; legacy "never" accepted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell_approval_threshold: Option<String>,
 

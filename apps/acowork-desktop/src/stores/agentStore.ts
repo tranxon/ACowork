@@ -104,7 +104,9 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
           : 0,
     maxSessions: typeof s.maxSessions === "number" && s.maxSessions > 0 ? s.maxSessions : 0,
     systemPrompt: s.systemPrompt,
-    shellApprovalThreshold: s.shellApprovalThreshold,
+    // Normalize the legacy "never" spelling (pre-rename) to "auto_approve".
+    shellApprovalThreshold:
+      s.shellApprovalThreshold === "never" ? "auto_approve" : s.shellApprovalThreshold,
     temperature:
       typeof s.temperature === "number" && s.temperature >= 0 && s.temperature <= 2
         ? s.temperature

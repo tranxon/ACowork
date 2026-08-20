@@ -589,11 +589,6 @@ async fn check_shell_approval(
     tool_call_id: &str,
     rules: &crate::security::shell_risk::ShellRiskRules,
 ) -> Option<String> {
-    // "Never" threshold: skip approval entirely
-    if *threshold == ShellApprovalThreshold::Never {
-        return None;
-    }
-
     // Parse the command from shell tool params
     let params: serde_json::Value = match serde_json::from_str(params_json) {
         Ok(p) => p,
@@ -611,25 +606,31 @@ async fn check_shell_approval(
     // Assess risk (with no provenance lookup in the spawned task context)
     let assessment = shell_risk::assess_shell_risk(command, |_path| None, rules);
 
-    // Convert ShellApprovalThreshold to ShellRisk for comparison
-    let threshold_risk = match threshold {
-        ShellApprovalThreshold::Low => ShellRisk::Low,
-        ShellApprovalThreshold::Medium => ShellRisk::Medium,
-        ShellApprovalThreshold::High => ShellRisk::High,
-        ShellApprovalThreshold::Never => unreachable!(), // handled above
-    };
-
-    // Check if risk meets/exceeds threshold
-    if !risk_meets_threshold(assessment.risk, threshold_risk) {
-        return None; // Risk below threshold, proceed normally
-    }
-
-    // Blocked commands: always reject without asking
+    // Blocked commands are rejected unconditionally — this is a hard safety
+    // floor that even "Auto-approve" cannot bypass (e.g. `rm -rf /`).
     if assessment.risk == ShellRisk::Blocked {
         return Some(format!(
             "Error: Shell command was blocked for safety reasons. Command: {}\nReason: {}",
             command, assessment.reason
         ));
+    }
+
+    // "Auto-approve" threshold: skip approval entirely (Blocked handled above).
+    if *threshold == ShellApprovalThreshold::AutoApprove {
+        return None;
+    }
+
+    // Convert ShellApprovalThreshold to ShellRisk for comparison
+    let threshold_risk = match threshold {
+        ShellApprovalThreshold::Low => ShellRisk::Low,
+        ShellApprovalThreshold::Medium => ShellRisk::Medium,
+        ShellApprovalThreshold::High => ShellRisk::High,
+        ShellApprovalThreshold::AutoApprove => unreachable!(), // handled above
+    };
+
+    // Check if risk meets/exceeds threshold
+    if !risk_meets_threshold(assessment.risk, threshold_risk) {
+        return None; // Risk below threshold, proceed normally
     }
 
     // Build approval request
@@ -703,11 +704,6 @@ async fn check_shell_approval_handle(
     tool_call_id: &str,
     rules: &crate::security::shell_risk::ShellRiskRules,
 ) -> Option<String> {
-    // "Never" threshold: skip approval entirely
-    if *threshold == ShellApprovalThreshold::Never {
-        return None;
-    }
-
     // Parse the command from shell tool params
     let params: serde_json::Value = match serde_json::from_str(params_json) {
         Ok(p) => p,
@@ -728,25 +724,31 @@ async fn check_shell_approval_handle(
     // Assess risk (with no provenance lookup in the spawned task context)
     let assessment = shell_risk::assess_shell_risk(command, |_path| None, rules);
 
-    // Convert ShellApprovalThreshold to ShellRisk for comparison
-    let threshold_risk = match threshold {
-        ShellApprovalThreshold::Low => ShellRisk::Low,
-        ShellApprovalThreshold::Medium => ShellRisk::Medium,
-        ShellApprovalThreshold::High => ShellRisk::High,
-        ShellApprovalThreshold::Never => unreachable!(),
-    };
-
-    // Check if risk meets/exceeds threshold
-    if !risk_meets_threshold(assessment.risk, threshold_risk) {
-        return None;
-    }
-
-    // Blocked commands: always reject without asking
+    // Blocked commands are rejected unconditionally — this is a hard safety
+    // floor that even "Auto-approve" cannot bypass (e.g. `rm -rf /`).
     if assessment.risk == ShellRisk::Blocked {
         return Some(format!(
             "Error: Shell command was blocked for safety reasons. Command: {}\nReason: {}",
             command, assessment.reason
         ));
+    }
+
+    // "Auto-approve" threshold: skip approval entirely (Blocked handled above).
+    if *threshold == ShellApprovalThreshold::AutoApprove {
+        return None;
+    }
+
+    // Convert ShellApprovalThreshold to ShellRisk for comparison
+    let threshold_risk = match threshold {
+        ShellApprovalThreshold::Low => ShellRisk::Low,
+        ShellApprovalThreshold::Medium => ShellRisk::Medium,
+        ShellApprovalThreshold::High => ShellRisk::High,
+        ShellApprovalThreshold::AutoApprove => unreachable!(),
+    };
+
+    // Check if risk meets/exceeds threshold
+    if !risk_meets_threshold(assessment.risk, threshold_risk) {
+        return None;
     }
 
     // Build approval request
@@ -1315,6 +1317,78 @@ mod tests {
         assert!(
             !is_transient,
             "Unknown tool must also return is_transient=false; got: {content:?}"
+        );
+    }
+
+    // ── Shell approval threshold semantics ──────────────────────────────
+
+    /// Blocked commands are a hard safety floor: rejected even under the
+    /// AutoApprove threshold. "Auto-approve" skips the *prompt*, it must
+    /// never bypass the blocklist (e.g. `rm -rf /`).
+    #[tokio::test]
+    async fn test_auto_approve_still_blocks_blocked_commands() {
+        let gate = crate::security::approval_gate::AutoApproveGate;
+        let rules = crate::security::shell_risk::ShellRiskRules::default();
+        let result = check_shell_approval(
+            &gate,
+            "shell",
+            r#"{"command": "rm -rf /"}"#,
+            &ShellApprovalThreshold::AutoApprove,
+            "tc-blocked",
+            &rules,
+        )
+        .await;
+        assert!(
+            result.is_some(),
+            "Blocked command must be rejected even under AutoApprove"
+        );
+        let err = result.unwrap();
+        assert!(
+            err.contains("blocked"),
+            "error should mention blocking; got: {err}"
+        );
+    }
+
+    /// Safe commands pass through untouched under AutoApprove.
+    #[tokio::test]
+    async fn test_auto_approve_allows_safe_commands() {
+        let gate = crate::security::approval_gate::AutoApproveGate;
+        let rules = crate::security::shell_risk::ShellRiskRules::default();
+        let result = check_shell_approval(
+            &gate,
+            "shell",
+            r#"{"command": "echo hello"}"#,
+            &ShellApprovalThreshold::AutoApprove,
+            "tc-safe",
+            &rules,
+        )
+        .await;
+        assert!(result.is_none(), "safe command must pass under AutoApprove");
+    }
+
+    /// Low threshold prompts for Low-risk commands as well; a rejecting
+    /// gate surfaces the rejection as an error.
+    #[tokio::test]
+    async fn test_low_threshold_prompts_for_low_risk() {
+        let gate = crate::security::approval_gate::AutoRejectGate;
+        let rules = crate::security::shell_risk::ShellRiskRules::default();
+        let result = check_shell_approval(
+            &gate,
+            "shell",
+            r#"{"command": "echo hello"}"#,
+            &ShellApprovalThreshold::Low,
+            "tc-low",
+            &rules,
+        )
+        .await;
+        assert!(
+            result.is_some(),
+            "Low threshold must ask before Low-risk commands"
+        );
+        let err = result.unwrap();
+        assert!(
+            err.contains("rejected"),
+            "expected rejection message; got: {err}"
         );
     }
 }

@@ -518,7 +518,11 @@ pub enum ShellApprovalThreshold {
     /// Prompt for High risk only.
     High,
     /// Never prompt — auto-approve all shell commands.
-    Never,
+    ///
+    /// Serialized as "auto_approve"; accepts the legacy "never" spelling
+    /// when reading existing agent_config.json / API payloads.
+    #[serde(rename = "auto_approve", alias = "never")]
+    AutoApprove,
 }
 
 impl ShellApprovalThreshold {
@@ -528,7 +532,7 @@ impl ShellApprovalThreshold {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
-            "never" => Some(Self::Never),
+            "auto_approve" | "never" => Some(Self::AutoApprove),
             _ => None,
         }
     }
@@ -539,7 +543,7 @@ impl ShellApprovalThreshold {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::Never => "never",
+            Self::AutoApprove => "auto_approve",
         }
     }
 }
@@ -757,5 +761,34 @@ mod tests {
         let display = format!("{}", err);
         assert!(display.contains("foobar:baz"));
         assert!(display.contains("unknown category"));
+    }
+
+    #[test]
+    fn test_shell_approval_threshold_parse() {
+        use ShellApprovalThreshold as T;
+        assert_eq!(T::from_str_loose("low"), Some(T::Low));
+        assert_eq!(T::from_str_loose("medium"), Some(T::Medium));
+        assert_eq!(T::from_str_loose("high"), Some(T::High));
+        // New canonical spelling.
+        assert_eq!(T::from_str_loose("auto_approve"), Some(T::AutoApprove));
+        // Legacy spelling still accepted.
+        assert_eq!(T::from_str_loose("never"), Some(T::AutoApprove));
+        assert_eq!(T::from_str_loose("bogus"), None);
+    }
+
+    #[test]
+    fn test_shell_approval_threshold_serde_roundtrip() {
+        use ShellApprovalThreshold as T;
+        // Canonical serialization.
+        assert_eq!(
+            serde_json::to_string(&T::AutoApprove).unwrap(),
+            "\"auto_approve\""
+        );
+        // Legacy "never" still deserializes (serde alias).
+        let parsed: T = serde_json::from_str("\"never\"").unwrap();
+        assert_eq!(parsed, T::AutoApprove);
+        // Canonical value round-trips.
+        let parsed: T = serde_json::from_str("\"auto_approve\"").unwrap();
+        assert_eq!(parsed, T::AutoApprove);
     }
 }

@@ -897,7 +897,13 @@ export function AgentSetupTab() {
           {t("agentSetup.shellCommandApproval")}
         </label>
         <select
-          value={profile.shellApprovalThreshold ?? "medium"}
+          value={
+            // Legacy "never" (pre-rename) is normalized to "auto_approve" so
+            // profiles saved before the rename still show the right option.
+            profile.shellApprovalThreshold === "never"
+              ? "auto_approve"
+              : (profile.shellApprovalThreshold ?? "medium")
+          }
           onChange={(e) => {
             const v = e.target.value;
             saveField("shellApprovalThreshold", v);
@@ -913,7 +919,7 @@ export function AgentSetupTab() {
           <option value="medium">{t("agentSetup.approvalMedium")}</option>
           <option value="low">{t("agentSetup.approvalLow")}</option>
           <option value="high">{t("agentSetup.approvalHigh")}</option>
-          <option value="never">{t("agentSetup.approvalNever")}</option>
+          <option value="auto_approve">{t("agentSetup.approvalAutoApprove")}</option>
         </select>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalDesc")}

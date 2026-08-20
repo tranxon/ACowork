@@ -105,7 +105,7 @@ pub enum ConfigField {
     /// `AgentConfig::context_window` — `Option<u64>`.
     ContextWindow,
     /// `AgentConfig::shell_approval_threshold` — `Option<String>`
-    /// (`"low" | "medium" | "high" | "never"`).
+    /// (`"low" | "medium" | "high" | "auto_approve"`; legacy `"never"` accepted).
     ShellApprovalThreshold,
     /// `AgentConfig::approval_timeout_secs` — `Option<u64>`.
     ApprovalTimeoutSecs,

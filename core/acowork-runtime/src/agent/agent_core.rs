@@ -168,7 +168,7 @@ pub struct AgentCore {
     pub(crate) attachment_service: Option<Arc<dyn crate::usecases::AttachmentService>>,
     /// Approval gate for shell command risk confirmation.
     pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
-    /// Shell approval threshold: Low / Medium / High / Never.
+    /// Shell approval threshold: Low / Medium / High / Auto-approve.
     pub(crate) shell_approval_threshold: ShellApprovalThreshold,
     /// Shell risk rules (loaded from config dir on startup).
     pub(crate) shell_risk_rules: crate::security::shell_risk::ShellRiskRules,
