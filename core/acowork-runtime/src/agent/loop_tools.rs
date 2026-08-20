@@ -96,6 +96,7 @@ impl AgentLoop {
                 let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
                 let session_id = session_id.clone();
                 let chunk_tx = chunk_tx.clone();
+                let shell_risk_rules = self.core.shell_risk_rules.clone();
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`
                 // so the sender is registered into `pending_tool_cancels`
@@ -115,6 +116,7 @@ impl AgentLoop {
                         "bash" | "powershell" | "pwsh" | "shell"
                     );
                     if is_shell_tool {
+                        let rules_snapshot = shell_risk_rules.clone();
                         // Gateway mode: use ApprovalHandle → main loop handles pause/resume
                         if use_gateway_approval {
                             if let Some(rejection) = check_shell_approval_handle(
@@ -122,21 +124,23 @@ impl AgentLoop {
                                 &tc.function.name,
                                 &tc.function.arguments,
                                 &shell_threshold,
-                                &tc.id,
-                            )
-                            .await
-                            {
-                                let _ = tx.send((idx, (rejection, false))).await;
-                                return;
-                            }
-                        } else if let Some(ref gate) = approval_gate {
-                            // CLI / test mode: use ApprovalGate trait directly
-                            if let Some(rejection) = check_shell_approval(
-                                gate.as_ref(),
-                                &tc.function.name,
-                                &tc.function.arguments,
-                                &shell_threshold,
-                                &tc.id,
+                                 &tc.id,
+                                 &rules_snapshot,
+                             )
+                             .await
+                             {
+                                 let _ = tx.send((idx, (rejection, false))).await;
+                                 return;
+                             }
+                         } else if let Some(ref gate) = approval_gate {
+                             // CLI / test mode: use ApprovalGate trait directly
+                             if let Some(rejection) = check_shell_approval(
+                                 gate.as_ref(),
+                                 &tc.function.name,
+                                 &tc.function.arguments,
+                                 &shell_threshold,
+                                 &tc.id,
+                                 &rules_snapshot,
                             )
                             .await
                             {
@@ -583,6 +587,7 @@ async fn check_shell_approval(
     params_json: &str,
     threshold: &ShellApprovalThreshold,
     tool_call_id: &str,
+    rules: &crate::security::shell_risk::ShellRiskRules,
 ) -> Option<String> {
     // "Never" threshold: skip approval entirely
     if *threshold == ShellApprovalThreshold::Never {
@@ -604,7 +609,7 @@ async fn check_shell_approval(
     }
 
     // Assess risk (with no provenance lookup in the spawned task context)
-    let assessment = shell_risk::assess_shell_risk(command, |_path| None);
+    let assessment = shell_risk::assess_shell_risk(command, |_path| None, rules);
 
     // Convert ShellApprovalThreshold to ShellRisk for comparison
     let threshold_risk = match threshold {
@@ -696,6 +701,7 @@ async fn check_shell_approval_handle(
     params_json: &str,
     threshold: &ShellApprovalThreshold,
     tool_call_id: &str,
+    rules: &crate::security::shell_risk::ShellRiskRules,
 ) -> Option<String> {
     // "Never" threshold: skip approval entirely
     if *threshold == ShellApprovalThreshold::Never {
@@ -720,7 +726,7 @@ async fn check_shell_approval_handle(
     }
 
     // Assess risk (with no provenance lookup in the spawned task context)
-    let assessment = shell_risk::assess_shell_risk(command, |_path| None);
+    let assessment = shell_risk::assess_shell_risk(command, |_path| None, rules);
 
     // Convert ShellApprovalThreshold to ShellRisk for comparison
     let threshold_risk = match threshold {

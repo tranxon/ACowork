@@ -170,6 +170,8 @@ pub struct AgentCore {
     pub(crate) approval_gate: Option<Arc<dyn ApprovalGate>>,
     /// Shell approval threshold: Low / Medium / High / Never.
     pub(crate) shell_approval_threshold: ShellApprovalThreshold,
+    /// Shell risk rules (loaded from config dir on startup).
+    pub(crate) shell_risk_rules: crate::security::shell_risk::ShellRiskRules,
     /// Memory session handle — shared between agent loop and memory tools.
     pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     /// Embedding provider for vector-based memory retrieval.
@@ -248,7 +250,7 @@ impl AgentCore {
             .collect();
 
         Self {
-            config,
+            config: config.clone(),
             manifest,
             provider,
             builtin_tools,
@@ -274,6 +276,10 @@ impl AgentCore {
             debug_observer: observer,
             approval_gate: None,
             shell_approval_threshold,
+            shell_risk_rules: crate::security::shell_risk::ShellRiskRules::load(
+                std::path::Path::new(&config.work_dir),
+            )
+            .unwrap_or_default(),
             embedding_provider: None,
             metrics_aggregator: Arc::new(std::sync::Mutex::new(
                 crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
@@ -1066,6 +1072,7 @@ impl Clone for AgentCore {
             debug_observer: self.debug_observer.clone_production(),
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
+            shell_risk_rules: self.shell_risk_rules.clone(),
             embedding_provider: self.embedding_provider.clone(),
             metrics_aggregator: self.metrics_aggregator.clone(),
             consolidation_bg_task: None, // sessions don't own bg task

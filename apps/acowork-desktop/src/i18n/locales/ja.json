@@ -376,6 +376,7 @@
     "approvalHigh": "高 — 例：sudo、eval、source",
     "approvalNever": "なし — すべてのシェルコマンドを自動承認",
     "approvalDesc": "ユーザー確認が必要なシェルコマンドを制御します。デフォルト：中。",
+    "editRiskRules": "リスクルールファイルを編集",
     "approvalTimeout": "承認タイムアウト（秒）",
     "approvalTimeoutDesc": "空欄の場合はデフォルト値（300秒 = 5分）を使用。ツール承認はタイムアウト後に自動拒否されます。",
     "webSearchProviders": "ウェブ検索プロバイダー",

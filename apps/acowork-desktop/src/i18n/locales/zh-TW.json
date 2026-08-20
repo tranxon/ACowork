@@ -375,6 +375,7 @@
     "approvalHigh": "高 — 例如 sudo、eval、source",
     "approvalNever": "從不 — 自動核准所有 Shell 命令",
     "approvalDesc": "控制哪些 Shell 命令需要使用者確認。預設：中。",
+    "editRiskRules": "編輯風險規則檔案",
     "approvalTimeout": "審批逾時時間（秒）",
     "approvalTimeoutDesc": "留空使用預設值（300 秒 = 5 分鐘）。工具審批將在逾時後自動拒絕。",
     "webSearchProviders": "網頁搜尋服務提供者",

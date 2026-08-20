@@ -101,7 +101,7 @@ Agent Runtime (universal binary — Rust)
 
 - Do NOT edit `ref-repo/` — it is a separate reference project, not source of truth
 - Do NOT commit in Chinese
-- Do NOT act before the user confirms your plan.
+- Do NOT act before the user confirms your plan
 
 ## Key Documentation
 

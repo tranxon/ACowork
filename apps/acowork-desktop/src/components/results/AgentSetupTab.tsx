@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useAgentStore, type AgentProfileSettings } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { getGatewayUrl } from "../../lib/config";
@@ -917,6 +918,32 @@ export function AgentSetupTab() {
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalDesc")}
         </p>
+        <button
+          onClick={async () => {
+            if (!selectedAgentId) return;
+            const url = `${getGatewayUrl()}/api/agents/${selectedAgentId}/shell-risk-rules`;
+            try {
+              const resp = await fetch(url);
+              if (!resp.ok) {
+                log.error("[AgentSetupTab] Failed to fetch shell risk rules:", resp.status);
+                return;
+              }
+              const data = (await resp.json()) as { content: string; has_user_override: boolean };
+              useFileEditorStore.getState().openFileWithContent(
+                selectedAgentId,
+                "__agent_home__",
+                "config/shell_risk_rules.toml",
+                data.content,
+                "ini", // TOML is mapped to "ini" language in the editor
+              );
+            } catch (e) {
+              log.error("[AgentSetupTab] Error opening shell risk rules:", e);
+            }
+          }}
+          className="mt-1 text-[9px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
+        >
+          {t("agentSetup.editRiskRules")}
+        </button>
       </div>
 
       {/* Temperature slider */}

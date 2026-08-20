@@ -158,6 +158,11 @@ pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttC
 pub(crate) struct HttpState {
     work_dir: PathBuf,
     agent_id: String,
+    /// Shell risk rules — loaded at startup; updated in-place by PUT
+    /// `/agents/{id}/shell-risk-rules` so live sessions pick up new rules
+    /// without a restart. Write via `Arc<RwLock>` because the state is
+    /// cloned into each axum handler (axum's `State<T>` requires `Clone`).
+    shell_risk_rules: Arc<std::sync::RwLock<crate::security::shell_risk::ShellRiskRules>>,
     /// Retained on the state for parity with the startup wiring
     /// (`SessionManager.config.session_snapshots`); the HTTP layer no
     /// longer enumerates active sessions directly (the ADR-052 hot-reload
@@ -270,9 +275,12 @@ impl RuntimeHttpServer {
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
     ) -> Result<Self, RuntimeHttpServerError> {
+        let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
+            .unwrap_or_default();
         let state = HttpState {
             work_dir,
             agent_id,
+            shell_risk_rules: Arc::new(std::sync::RwLock::new(shell_risk_rules)),
             session_snapshots,
             latest_session,
             dispatch_tx,
@@ -441,6 +449,11 @@ impl RuntimeHttpServer {
             .route("/memory/consolidation/status", get(get_consolidation_status))
             .route("/agents/{id}/rag/status", get(get_rag_status))
             .route("/agents/{id}/rag/query", post(post_rag_query))
+            // Shell risk rules — read effective content or write user override.
+            .route(
+                "/agents/{id}/shell-risk-rules",
+                get(get_shell_risk_rules).put(put_shell_risk_rules),
+            )
             // ADR-048: debug protocol HTTP routes — thin wrappers
             // around DebugService. Mounted under /api/debug/*. Phase A
             // starts the HTTP server before DebugService is wired up,
@@ -2408,6 +2421,118 @@ async fn get_agent_status(
         "latest_session": latest_session,
         "embed_dim": embed_dim.clone(),
     }))
+}
+
+// ── Shell Risk Rules (ADR-055) ────────────────────────────────────────
+
+/// `GET /agents/{id}/shell-risk-rules` — read the effective shell risk rules.
+///
+/// Returns `{agent_id, matches, content, has_user_override}`. Content precedence:
+/// 1. User override file on disk (raw text, including comments)
+/// 2. Embedded defaults source (raw text, including comments)
+///
+/// We deliberately return the raw TOML text rather than re-rendering
+/// from the parsed in-memory rules — comments and formatting from the
+/// source are preserved so the editor shows the file as authored.
+async fn get_shell_risk_rules(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "agent_id mismatch"})),
+        ));
+    }
+    let path = state.work_dir.join("config").join("shell_risk_rules.toml");
+    tracing::info!(agent_id = %id, path = %path.display(), "GET /agents/{id}/shell-risk-rules");
+    let (content, has_user_override) = if path.exists() {
+        match std::fs::read_to_string(&path) {
+            Ok(c) => (c, true),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "Failed to read shell risk rules");
+                (
+                    crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string(),
+                    false,
+                )
+            }
+        }
+    } else {
+        (
+            crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string(),
+            false,
+        )
+    };
+    Ok(Json(serde_json::json!({
+        "agent_id": state.agent_id,
+        "matches": true,
+        "content": content,
+        "has_user_override": has_user_override,
+    })))
+}
+
+/// `PUT /agents/{id}/shell-risk-rules` — write user override for shell risk rules.
+///
+/// Validates TOML syntax before writing; on success both disk and the
+/// in-memory rule cache are updated so live sessions pick up the new rules
+/// without a restart.
+async fn put_shell_risk_rules(
+    State(state): State<HttpState>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if id != state.agent_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "agent_id mismatch"})),
+        ));
+    }
+    tracing::info!(
+        agent_id = %id,
+        content_bytes = req.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0),
+        "PUT /agents/{id}/shell-risk-rules"
+    );
+    let content = req
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing or invalid 'content' field"})),
+        ))?;
+    // Validate TOML syntax before writing — fail fast if the editor
+    // contains a parse error so the user can fix it without restarting.
+    //
+    // The on-disk format (see `security/shell_risk_rules.toml`) is a
+    // table-of-rules: `{ rules: [ {...}, {...} ] }`. That schema matches
+    // `ShellRiskRules`, NOT a bare `Vec<ShellRiskRule>` — deserializing
+    // into the Vec used to fail with "invalid type: map, expected a
+    // sequence" because the top-level value is a map, not an array.
+    let parsed = toml::from_str::<crate::security::shell_risk::ShellRiskRules>(content)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("TOML parse error: {}", e)
+                })),
+            )
+        })?;
+    // Write to disk first, then update in-memory state so GET returns
+    // consistent data even if the write fails midway.
+    let config_dir = state.work_dir.join("config");
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to create config dir: {}", e)}))))?;
+    let path = config_dir.join("shell_risk_rules.toml");
+    std::fs::write(&path, content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to write rules: {}", e)}))))?;
+    // Update in-memory cache atomically.
+    let rule_count = parsed.rules.len();
+    let mut guard = state
+        .shell_risk_rules
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = parsed;
+    tracing::info!(path = %path.display(), rule_count, "Wrote shell risk rules user override");
+    Ok(Json(serde_json::json!({"written": true})))
 }
 
 // ── N1: Consolidation status endpoint ──────────────────────────

@@ -92,6 +92,8 @@ export interface OpenFile {
     language: string;
     /** Whether the file has unsaved changes */
     dirty: boolean;
+    /** Set when the last save attempt failed. Cleared on next successful save or on content edit. */
+    saveError?: string;
     /** If set, editor should reveal this line (1-based) after mount */
     cursorLine?: number;
     /** "edit" = Monaco editor; "preview" = read-only Markdown render. */
@@ -156,6 +158,23 @@ function buildFileUrl(agentId: string, workspaceId: string, relPath: string): st
     }
     params.set("path", relPath);
     return `${baseUrl}/api/agents/${agentId}/workspaces/file?${params.toString()}`;
+}
+
+/**
+ * The shell risk rules file lives at `<work_dir>/config/shell_risk_rules.toml`,
+ * which is NOT inside any workspace — so the generic workspace file API
+ * (`/workspaces/file`) cannot write to it. The Runtime exposes a dedicated
+ * endpoint `/agents/{id}/shell-risk-rules` that handles persistence and
+ * live-reload of the in-memory rule cache.
+ *
+ * Detect this special file by its path so saveFile routes to the right URL.
+ */
+const SHELL_RISK_RULES_PATH = "config/shell_risk_rules.toml";
+function isShellRiskRulesFile(workspaceId: string, relPath: string): boolean {
+    return workspaceId === "__agent_home__" && relPath === SHELL_RISK_RULES_PATH;
+}
+function buildShellRiskRulesUrl(agentId: string): string {
+    return `${getGatewayUrl()}/api/agents/${agentId}/shell-risk-rules`;
 }
 
 function detectLanguage(fileName: string): string {
@@ -396,7 +415,13 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         set((state) => ({
             openFiles: state.openFiles.map((f) =>
                 f.id === fileId
-                    ? { ...f, content, dirty: content !== f.originalContent }
+                    ? {
+                        ...f,
+                        content,
+                        dirty: content !== f.originalContent,
+                        // Clear stale save error — user is editing to recover.
+                        saveError: undefined,
+                    }
                     : f,
             ),
         }));
@@ -408,25 +433,39 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
 
         set((state) => ({
             openFiles: state.openFiles.map((f) =>
-                f.id === fileId ? { ...f, saving: true } : f,
+                f.id === fileId ? { ...f, saving: true, saveError: undefined } : f,
             ),
         }));
 
         try {
-            const url = buildFileUrl(file.agentId, file.workspaceId, file.relPath);
+            // Route shell-risk-rules to the dedicated endpoint (the file
+            // is not under any workspace, so /workspaces/file can't write it).
+            const isRiskRules = isShellRiskRulesFile(file.workspaceId, file.relPath);
+            const url = isRiskRules
+                ? buildShellRiskRulesUrl(file.agentId)
+                : buildFileUrl(file.agentId, file.workspaceId, file.relPath);
             const resp = await fetch(url, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ content: file.content }),
             });
             if (!resp.ok) {
-                log.error("[FileEditorStore] saveFile failed:", resp.status);
+                // Surface the error body so the editor toast can show a
+                // useful message (e.g. TOML parse error from Runtime).
+                const errText = await resp.text().catch(() => "");
+                const saveError = errText || `HTTP ${resp.status}`;
+                log.error("[FileEditorStore] saveFile failed:", resp.status, errText);
+                set((state) => ({
+                    openFiles: state.openFiles.map((f) =>
+                        f.id === fileId ? { ...f, saving: false, saveError } : f,
+                    ),
+                }));
                 return;
             }
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, saving: false, originalContent: f.content, dirty: false }
+                        ? { ...f, saving: false, originalContent: f.content, dirty: false, saveError: undefined }
                         : f,
                 ),
             }));
@@ -434,7 +473,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             log.error("[FileEditorStore] saveFile error:", e);
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
-                    f.id === fileId ? { ...f, saving: false } : f,
+                    f.id === fileId ? { ...f, saving: false, saveError: String(e) } : f,
                 ),
             }));
         }

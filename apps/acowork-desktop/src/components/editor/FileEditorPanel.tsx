@@ -12,7 +12,7 @@ import { useLspClientPool } from "../../hooks/useLspClientPool";
 import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Locate, RefreshCw, XSquare, Files } from "lucide-react";
+import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -1151,19 +1151,35 @@ export function FileEditorPanel({ width }: { width: number }) {
 
                     {/* Save button — only for editable files in edit mode */}
                     {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
-                        <Tooltip content={t("fileEditor.save")} variant="plain">
+                        <Tooltip
+                                content={
+                                    activeFile.saveError
+                                        ? activeFile.saveError
+                                        : t("fileEditor.save")
+                                }
+                                variant="plain"
+                            >
                             <button
                                 onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
                                 disabled={!activeFile.dirty || activeFile.saving}
+                                aria-label={
+                                    activeFile.saveError
+                                        ? `Save failed: ${activeFile.saveError}`
+                                        : t("fileEditor.save")
+                                }
                                 className={cn(
                                     "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
-                                    activeFile.dirty
-                                        ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                        : "text-zinc-300 dark:text-zinc-600 cursor-default",
+                                    activeFile.saveError
+                                        ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
+                                        : activeFile.dirty
+                                          ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                          : "text-zinc-300 dark:text-zinc-600 cursor-default",
                                 )}
                             >
                                 {activeFile.saving ? (
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : activeFile.saveError ? (
+                                    <AlertCircle className="h-3.5 w-3.5" />
                                 ) : (
                                     <Save className="h-3.5 w-3.5" />
                                 )}

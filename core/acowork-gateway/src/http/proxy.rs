@@ -169,6 +169,12 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/rag/query",
             post(proxy_rag_query),
         )
+        // Shell risk rules — GET returns effective content (user override or defaults),
+        // PUT writes a user override to {work_dir}/config/shell_risk_rules.toml.
+        .route(
+            "/api/agents/{id}/shell-risk-rules",
+            get(proxy_get_shell_risk_rules).put(proxy_put_shell_risk_rules),
+        )
         // Route 1: Get single session
         .route(
             "/api/agents/{id}/sessions/{sid}",
@@ -446,6 +452,28 @@ async fn proxy_rag_query(
     let path = format!("/agents/{}/rag/query", id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/shell-risk-rules` to Runtime.
+async fn proxy_get_shell_risk_rules(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/agents/{}/shell-risk-rules", id);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/shell-risk-rules` to Runtime.
+async fn proxy_put_shell_risk_rules(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/shell-risk-rules", id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/memory/nodes` to Runtime's `GET /memory/nodes`.

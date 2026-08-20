@@ -377,6 +377,7 @@
     "approvalHigh": "高 — 例如 sudo、eval、source",
     "approvalNever": "从不 — 自动批准所有 Shell 命令",
     "approvalDesc": "控制哪些 Shell 命令需要用户确认。默认：中。",
+    "editRiskRules": "编辑风险规则文件",
     "approvalTimeout": "审批超时时间（秒）",
     "approvalTimeoutDesc": "留空使用默认值（300秒 = 5分钟）。工具审批将在超时后自动拒绝。",
     "webSearchProviders": "网页搜索服务商",

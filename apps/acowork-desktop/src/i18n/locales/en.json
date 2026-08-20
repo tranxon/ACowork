@@ -480,6 +480,7 @@
     "approvalHigh": "High — e.g. sudo, eval, source",
     "approvalNever": "Never — auto-approve all shell commands",
     "approvalDesc": "Controls which shell commands require user confirmation. Default: Medium.",
+    "editRiskRules": "Edit risk rules file",
     "approvalTimeout": "Approval Timeout (seconds)",
     "approvalTimeoutDesc": "Leave empty to use default (300s = 5 min). Tool approval will auto-deny after timeout.",
     "webSearchProviders": "Web Search Providers",
