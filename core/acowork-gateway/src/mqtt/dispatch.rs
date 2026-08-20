@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use acowork_core::mqtt_proto::{data_envelope, AgentStatus as AgentStatusProto, DataEnvelope};
 
+use crate::handlers::server::SharedState;
 use crate::http::proxy::SharedRuntimeHttpRegistry;
 use crate::mqtt::agent_registry::SharedAgentRegistry;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
@@ -33,8 +34,9 @@ pub fn handle_message(
     runtime_http_registry: &SharedRuntimeHttpRegistry,
     agent_registry: &SharedAgentRegistry,
     mqtt_client: Option<&Arc<GatewayMqttClient>>,
+    state: &SharedState,
 ) {
-    handle_plaintext_message(topic, payload, runtime_http_registry, agent_registry, mqtt_client);
+    handle_plaintext_message(topic, payload, runtime_http_registry, agent_registry, mqtt_client, state);
 }
 
 /// Topic pattern matcher.
@@ -77,6 +79,7 @@ pub fn handle_plaintext_message(
     runtime_http_registry: &SharedRuntimeHttpRegistry,
     agent_registry: &SharedAgentRegistry,
     mqtt_client: Option<&Arc<GatewayMqttClient>>,
+    state: &SharedState,
 ) {
     if topic_matches("acowork/agents/+/http_port", topic) {
         let agent_id = topic
@@ -190,6 +193,65 @@ pub fn handle_plaintext_message(
                     "failed to re-publish agent status as protobuf"
                 );
             }
+        });
+    } else if topic_matches("acowork/agents/+/ready", topic) {
+        // Plain-text retained payload ("true" / "false") published by the
+        // Runtime after Phase A–C have all populated the HTTP server's
+        // late-bind slots and the runtime is ready to serve any
+        // `/agents/{id}/*` request. The Gateway pins
+        // `running_agents[id].ready` to this value so `/api/agents`
+        // reports it; the Desktop fast-path keeps its `running && ready`
+        // gate closed until the Gateway mirrors `ready=true`.
+        //
+        // The plain-text shape is intentional: it parallels
+        // `acowork/agents/+/status` so the dispatch surface is uniform
+        // and the broker's retained message gives a fresh Gateway
+        // startup the same answer without polling the Runtime.
+        let agent_id = match topic
+            .strip_prefix("acowork/agents/")
+            .and_then(|s| s.strip_suffix("/ready"))
+        {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                tracing::warn!(topic, "ready topic matched but agent_id extraction failed");
+                return;
+            }
+        };
+        let payload_str = match std::str::from_utf8(payload) {
+            Ok(s) => s.trim(),
+            Err(e) => {
+                tracing::warn!(
+                    topic,
+                    agent_id = %agent_id,
+                    error = %e,
+                    "ready payload is not valid UTF-8 — ignoring"
+                );
+                return;
+            }
+        };
+        let ready = match payload_str {
+            "true" => true,
+            "false" => false,
+            other => {
+                tracing::warn!(
+                    topic,
+                    agent_id = %agent_id,
+                    payload = %other,
+                    "ready payload is not 'true'/'false' — ignoring"
+                );
+                return;
+            }
+        };
+        let state_for_ready = state.clone();
+        let agent_id_for_log = agent_id.clone();
+        tokio::spawn(async move {
+            let mut gw = state_for_ready.write().await;
+            gw.set_agent_ready(&agent_id_for_log, ready);
+            tracing::info!(
+                agent_id = %agent_id_for_log,
+                ready,
+                "Runtime ready signal received via MQTT"
+            );
         });
     }
 }

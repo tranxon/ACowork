@@ -156,6 +156,7 @@
     "selectReasoningEffort": "思考深度",
     "selectModel": "Select model",
     "startAgent": "Start Agent",
+    "startingAgent": "{{name}} を起動しています…",
     "llmNotConfigured": "LLM プロバイダーが設定されていません。Harness → Providers で API キーを追加してください。",
     "thinking": "思考中...",
     "replying": "返信中...",

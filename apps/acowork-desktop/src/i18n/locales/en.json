@@ -69,6 +69,7 @@
     "selectModel": "Select model",
     "selectReasoningEffort": "Reasoning effort",
     "startAgent": "Start Agent",
+    "startingAgent": "Starting {{name}}…",
     "llmNotConfigured": "No LLM provider configured. Please add an API key in Harness → Providers.",
     "thinking": "Thinking...",
     "replying": "Replying...",

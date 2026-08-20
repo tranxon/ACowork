@@ -106,9 +106,21 @@ pub(crate) async fn phase_d_run(
     let lifecycle_publisher: crate::mqtt::MqttChunkPublisher = if let Some(ref mqtt) =
         ctx.mqtt_client
     {
+        // Status first — `online` is the "TCP connection + AgentRegistry sees
+        // us" signal that the Gateway uses for `online` / `sleeping` tracking.
         let _ = mqtt.publish_status(true).await;
+        // Then ready — `ready=true` is the "HTTP server slot populated, can
+        // serve /agents/{id}/*" signal. The Gateway gates `/api/agents` →
+        // `ready=true` on this topic, so the Desktop only issues HTTP
+        // requests after Phase B has finished wiring `session_metadata_slot`,
+        // `session_config_slot`, `memory_query_slot`, etc. Without this
+        // ordering, the Gateway reports `ready=true` ~17ms after spawn
+        // (when the Gateway just inserts the entry into `running_agents`)
+        // and the Desktop hits 503 on every `/sessions/{sid}/messages` call
+        // for the next ~3s while Phase B/C are still running.
+        let _ = mqtt.publish_ready(true).await;
         tracing::info!(
-            "Agent status published via MQTT for agent={}",
+            "Agent status+ready published via MQTT for agent={}",
             ctx.agent_id
         );
         crate::mqtt::MqttChunkPublisher::from_runtime_client(mqtt)

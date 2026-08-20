@@ -122,10 +122,27 @@ impl LifecycleManager {
             pid,
             started_at: chrono::Utc::now(),
             workspace: workspace.to_string_lossy().to_string(),
-            connected: true,
-            // ADR-033: MQTT-only agents are ready immediately
-            // (status "online" = gRPC AgentReady equivalent).
-            ready: self.mqtt_port.is_some(),
+            // `connected` flips to `true` when the Runtime completes the MQTT
+            // handshake and the Gateway's `handle_agent_hello` callback fires
+            // (`handlers/server.rs:324`). It is NOT tied to the spawn returning
+            // — writing `true` here would let `/api/agents` report a connected
+            // agent before the Runtime's MQTT client has actually talked to
+            // the broker, which is the same class of race as the (formerly
+            // broken) `ready: true` below.
+            connected: false,
+            // `ready` flips to `true` only when the Runtime publishes
+            // `acowork/agents/{id}/ready = "true"` after Phase B has fully
+            // populated `session_metadata_slot` / `session_config_slot` /
+            // `memory_query_slot` / `workspace_query_slot` and Phase C has
+            // spawned the chunk-relay / DevMode / MCP subsystems. Until then,
+            // the HTTP server boots with all of those slots `None` and every
+            // handler returns 503 (see `http/server.rs:533, 595, 620, 648`).
+            // Reporting `ready=true` at spawn time made the Desktop dispatch
+            // HTTP requests into that 503 window and surfaced them as
+            // "Session 加载失败" right after Stop → Start. The dispatch path
+            // (`mqtt/dispatch.rs` plaintext `acowork/agents/+/ready`) catches
+            // the published retained message and calls `set_agent_ready`.
+            ready: false,
             dev_mode,
             debug_port,
             workspace_config_json: None,

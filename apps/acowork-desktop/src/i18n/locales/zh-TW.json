@@ -154,6 +154,8 @@
     "inputParams": "輸入參數...（Enter 傳送，Shift+Enter 換行）",
     "inputParamsConnecting": "輸入參數...（正在連線至 Agent...）",
     "selectReasoningEffort": "思考深度",
+    "startAgent": "啟動 Agent",
+    "startingAgent": "正在啟動 {{name}}…",
     "llmNotConfigured": "未設定 LLM 服務商。請在 Harness → 模型服務商 中新增 API 金鑰。",
     "thinking": "正在思考...",
     "replying": "正在回覆...",

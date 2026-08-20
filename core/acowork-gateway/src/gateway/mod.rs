@@ -877,13 +877,15 @@ impl Gateway {
                 tokio::sync::Mutex<Option<Arc<crate::mqtt::GatewayMqttClient>>>,
             > = std::sync::Arc::new(tokio::sync::Mutex::new(dispatch_client));
             let slot_for_cb = dispatch_client_slot.clone();
+            let state_for_dispatch = shared_state.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
-                // Plain-text dispatch (http_port, status, …)
+                // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
                 let topic = topic.clone();
                 let payload = payload.clone();
                 let reg_for_dispatch = reg_for_dispatch.clone();
                 let agent_reg_for_dispatch = agent_reg_for_dispatch.clone();
+                let state_for_dispatch = state_for_dispatch.clone();
                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     crate::mqtt::dispatch::handle_message(
@@ -891,6 +893,7 @@ impl Gateway {
                         &reg_for_dispatch,
                         &agent_reg_for_dispatch,
                         client.as_ref(),
+                        &state_for_dispatch,
                     );
                 });
             });

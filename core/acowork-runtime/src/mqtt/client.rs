@@ -974,6 +974,29 @@ impl RuntimeMqttClient {
         Ok(())
     }
 
+    /// Publish the agent's HTTP-ready signal as a plain text Retained message.
+    ///
+    /// Tells the Gateway that the Runtime has finished Phase A through Phase C
+    /// (HTTP server bound, session metadata slot populated, subsystems spawned)
+    /// and is ready to serve `/agents/{id}/*` requests. The Gateway pins
+    /// `running_agents[id].ready` to this value and only flips it back to
+    /// `false` on `status="offline"` or a crash — `subsystems.rs:47` is the
+    /// historical note that originally motivated this signal under gRPC
+    /// (ADR-033 §3 carried it over to MQTT but the publish was dropped).
+    ///
+    /// Like [`publish_status`], the payload is Retained so a Gateway that
+    /// restarts after the Runtime is already up will see the latest ready
+    /// state on its first subscribe.
+    pub async fn publish_ready(&self, ready: bool) -> Result<(), RuntimeMqttClientError> {
+        let topic = format!("acowork/agents/{}/ready", self.agent_id);
+        let payload = if ready { "true" } else { "false" };
+        self.client().await
+            .publish(topic, QoS::AtLeastOnce, true, payload)
+            .await
+            .map_err(|e| RuntimeMqttClientError::Publish(format!("ready: {}", e)))?;
+        Ok(())
+    }
+
     /// Gracefully disconnect from the MQTT broker.
     ///
     /// Sends a DISCONNECT packet and tears down the client. The caller

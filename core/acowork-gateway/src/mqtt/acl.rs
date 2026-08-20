@@ -61,6 +61,7 @@ impl AclConfig {
                 client_id_pattern: "user:*:desktop:*".to_string(),
                 topics: vec![
                     ("acowork/agents/+/status".to_string(), AclPermission::Subscribe),
+                    ("acowork/agents/+/ready".to_string(), AclPermission::Subscribe),
                     ("acowork/agents/+/meta".to_string(), AclPermission::Subscribe),
                     ("acowork/agents/+/config".to_string(), AclPermission::Subscribe),
                     ("acowork/global/#".to_string(), AclPermission::Subscribe),
@@ -78,6 +79,7 @@ impl AclConfig {
                 client_id_pattern: "agent:*".to_string(),
                 topics: vec![
                     ("acowork/agents/+/status".to_string(), AclPermission::PublishSubscribe),
+                    ("acowork/agents/+/ready".to_string(), AclPermission::Publish),
                     ("acowork/agents/+/meta".to_string(), AclPermission::Publish),
                     ("acowork/agents/+/config".to_string(), AclPermission::Publish),
                     ("acowork/agents/+/sessions/created".to_string(), AclPermission::Publish),

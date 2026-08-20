@@ -223,7 +223,15 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
             let actually_running = running_info
                 .map(|r| is_process_alive(r.pid))
                 .unwrap_or(false);
-            let connected = running_info.map(|r| r.connected).unwrap_or(false);
+            // `connected` is the broker-level "Runtime's MQTT client is
+            // reachable" signal. Pull it from the AgentRegistry (which
+            // observes `acowork/agents/{id}/status` retained messages)
+            // rather than the per-PID `running_agents[id].connected` field
+            // — the latter is leftover from the gRPC `handle_agent_hello`
+            // path that ADR-040 removed, and is never updated. Fall back to
+            // the legacy field when the registry is unavailable (tests).
+            let connected = running_info.map(|r| r.connected).unwrap_or(false)
+                || mqtt_online_set.contains(&info.agent_id);
             let ready = running_info.map(|r| r.ready).unwrap_or(false);
             let last_interaction_at = gw
                 .get_interaction(&info.agent_id)

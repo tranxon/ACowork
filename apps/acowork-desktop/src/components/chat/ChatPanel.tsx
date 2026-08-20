@@ -1243,6 +1243,30 @@ export function ChatPanel() {
     );
   }
 
+  // ── Agent not yet ready ──
+  // The Gateway only flips `ready=true` after the Runtime publishes
+  // `acowork/agents/{id}/ready = "true"` (see `mqtt/dispatch.rs`). Until
+  // then, every HTTP call to `/sessions/{sid}/messages` and friends 503s
+  // because the Runtime's HTTP server slots (session_metadata /
+  // session_config / memory_query / workspace_query) are still `None`.
+  // We render a spinner here so the user sees a clear "starting agent…
+  // please wait" instead of a confusing "Session 加载失败" flash that
+  // races the eventual retry. The wait is typically ~2–3s on first
+  // launch (Phase A→B→C) and is the cost of *not* sending requests
+  // before the runtime is ready.
+  if (selectedAgent.running && !selectedAgent.ready) {
+    return (
+      <div className="flex flex-1 items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">
+            {t("chatPanel.startingAgent", { name: agentDisplayName })}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // ── Initializing session ──
   // The window between MQTT pushing `running` → true and `startAgentAndSyncUI`
   // finishing its atomic initSessionForAgent chain (fetchLatestSession +

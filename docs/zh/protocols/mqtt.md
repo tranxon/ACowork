@@ -222,6 +222,17 @@ acowork/agents/{agent_id}/
 ├── status                            # [Retained + LWT] "online" | "offline"
 │                                     #   LWT payload: "offline"（异常断开时 Broker 自动发布）
 │                                     #   正常上线时 PUBLISH "online" (retained)
+├── ready                             # [Retained] "true" | "false"
+│                                     #   Runtime 启动完成 Phase A–C 后 PUBLISH "true"：
+│                                     #     Phase A: HTTP server bind + listen
+│                                     #     Phase B: session_metadata / session_config / memory_query / workspace_query slot 填充
+│                                     #     Phase C: chunk_relay / DevMode / MCP subsystem spawn
+│                                     #   Gateway 据此翻转 `running_agents[id].ready`，
+│                                     #   `/api/agents` 立刻可见；Desktop 由此知道
+│                                     #   `/sessions/{sid}/messages` 等请求可发，不再 503。
+│                                     #   Runtime 在 idle auto-sleep / 退出前 PUBLISH "false"。
+│                                     #   与 `status` 不同：`status` 只表示 MQTT broker 上
+│                                     #   进程可达；`ready` 才表示 HTTP 服务可响应业务请求。
 ├── meta                              # [Retained] agent 元数据：ID、地址、status 状态信息
 │                                     #   （payload 始终是最新完整 AgentMeta，包含 status 变化）
 ├── config                            # [Retained] Runtime 当前生效的完整 agent_config.json
@@ -481,10 +492,26 @@ sequenceDiagram
     RT->>B: PUBLISH acowork/agents/{id}/config (Retained, QoS 1)
     RT->>B: SUBSCRIBE acowork/global/# (QoS 1)
     RT->>B: SUBSCRIBE acowork/agents/{id}/sessions/control/# (QoS 1)
+    Note over RT: Phase A-C 完成 (HTTP bind + slot 填充 + 子系统就绪)
+    RT->>B: PUBLISH acowork/agents/{id}/ready = true (Retained, QoS 1)
+    B-->>GW: (Gateway 已 SUB agents/+/ready,翻 running_agents[id].ready = true)
+    GW-->>DA: (Desktop 订阅 retained,GET /api/agents 可见 ready=true,可发业务请求)
     Note over RT: 业务 publish / receive 恢复
 ```
 
 ⚠️ **常见误区**：只判断客户端"是否连接"是不够的——重连后必须**重做 Bootstrap**（§5.1.1）才能恢复 retained 状态和持久订阅。漏做时客户端对外表现为"在线"但收不到任何业务消息，且日志看不到错误（broker 不会替你找出"我应该重订哪些 topic"）。本工作发生在 `core/acowork-runtime/src/mqtt/client.rs::Self::run_bootstrap`，由事件循环匹配 `Incoming::ConnAck(_)` 自动触发。
+
+#### 5.1.3 `status` vs `ready`：两个信号不要混用
+
+| 主题 | 信号源 | 语义 | 翻转时机 |
+|------|--------|------|----------|
+| `agents/{id}/status` | Runtime（Broker 据 LWT 翻转） | **进程可达性**："MQTT 客户端已 CONNACK" | Bootstrap 完成 `PUBLISH online`；TCP 异常断开时 Broker 据 LWT `PUBLISH offline` |
+| `agents/{id}/ready` | Runtime | **业务可达性**："HTTP server 已 bind、Phase A–C 已完成、可响应业务请求" | Bootstrap + Phase A（HTTP bind）+ Phase B（slot 填充）+ Phase C（子系统就绪）完成后 `PUBLISH true`；idle auto-sleep / 退出前 `PUBLISH false` |
+
+**为什么需要拆成两个**：
+- `status` 只回答"Runtime 进程在不在"。但 Runtime 在 `status=online` 到 HTTP server 可用之间存在窗口期（Phase A 期间）；如果 Gateway 在 `status=online` 那一刻就把 `running_agents[id].ready=true` 写入注册表，Desktop `GET /api/agents` 立即可见 → Desktop 立刻发起 `/api/agents/{id}/sessions/...` HTTP 请求 → Gateway 反代到未就绪 Runtime → **503 Service Unavailable**。
+- `ready` 由 Runtime **主动**在 Phase A–C 完成后发布，Gateway 据此翻转 `running_agents[id].ready`，从而保证 Desktop 看到的 `ready=true` 与 Runtime 实际可响应业务请求之间不存在窗口期。
+- Desktop ChatPanel 在 `running=true && ready=false` 期间显示转圈占位（"startingAgent"），不发任何 `/api/agents/{id}/sessions/...` 业务请求，避免误中 503。
 
 ### 5.2 正常通信：用户发消息（直连，无 gateway 转发）
 
@@ -636,8 +663,9 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | 客户端 | client_id 模式 | SUBSCRIBE |
 |--------|---------------|-----------|
 | **Gateway Publisher** | `gateway:publisher` | （仅 PUBLISH `acowork/global/#` Retained，不 SUBSCRIBE 业务主题） |
+| **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
 | **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#` |
-| **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用） |
+| **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用） |
 | **Desktop (Tauri Rust) — 进入具体 session 时动态订阅** | 同上 | `acowork/agents/{id}/sessions/{sid}/meta`<br/>`acowork/agents/{id}/sessions/{sid}/config`<br/>`acowork/agents/{id}/sessions/{sid}/messages/#` |
 | **Desktop (Tauri Rust) — PUBLISH（控制指令）** | 同上 | `acowork/agents/{id}/sessions/control/#`（payload 带 sid） |
 
@@ -728,6 +756,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | Agent Search 选择（`agent_search.json`） | Runtime（本地） | B-KB | 含在 `agents/{id}/config` retained 内（`search_config`） | —（同上） |
 | Session provider/model 选择（`session_meta`） | Runtime（本地） | B | `agents/{id}/sessions/{sid}/meta` (R) | —（Desktop 进入 session 时 SUB retained） |
 | Agent status (在线) | Runtime | B | `agents/{id}/status` (LWT+Retained) | `GET /api/agents/{id}/status` |
+| Agent ready（HTTP server 已 bind、Phase A–C 完成） | Runtime | B | `agents/{id}/ready` (R, QoS 1) | `GET /api/agents/{id}/ready` |
 | Agent meta | Runtime | KB | `agents/{id}/meta` (R, 单主题) | `GET /api/agents/{id}` |
 | Agent config（Runtime 工作区 agent_config.json 合并默认值，含 MCP + Search） | Runtime（本地） | KB | `agents/{id}/config` (R, 单主题，Runtime 自己 PUBLISH) | —（Desktop SUB retained；写入走 `PUT /api/agents/{id}/config` → Gateway MQTT control） |
 | Session list | Runtime | 任意 | ❌ 仅 `created` / `deleted` 增量通知 | ✅ `GET /api/agents/{id}/sessions`（Gateway 反向代理到 Runtime HTTP） |
@@ -1104,10 +1133,11 @@ graph TB
 6. **消息丢失检测**：QoS 0 的流式事件丢一帧由下一帧覆盖；QoS 1 的状态变更由 retained message + HTTP `GET` 拉取快照修正。
 7. **LWT 与 retained status 共用同一 topic**：`agents/{id}/status` 既作为 retained message 传递当前状态，也作为 Will Message 的目标 topic。Broker 在 TCP 断开后用 retained flag 重新发布 LWT payload。
 8. **envelope 模式扩展**：新增数据资源时，扩展 `DataEnvelope.payload` oneof 即可，不破坏已有消息。主题路径与 oneof 字段一一对应。
-9. **session list 不放 retained**：避免每次 list 变化都更新 retained（性能差、并发写），改为 `created` / `deleted` 增量事件 + HTTP 全量兜底。
-10. **session 进入时动态订阅**：Desktop 不要一次性 SUBSCRIBE 所有 session 的所有主题（主题数量爆炸）。仅在用户进入具体 session 时动态 SUBSCRIBE 该 sid 的 `meta/...` / `config/...` / `messages/...` / `control/...`，离开时 UNSUBSCRIBE。
-11. **max_packet_size 必须对齐**：rumqttc 客户端的 `MqttOptions::max_outgoing_packet_size` 默认是 `10 * 1024 = 10 KB`。Runtime 发 stream_delta 或大型 meta/config 时（含 LLM 长 thought 内容，protobuf 编码后常 ≥ 21 KB），**必须**显式调用 `options.set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, GATEWAY_MQTT_MAX_PACKET_SIZE)`（10 MB，对齐 broker 端 `max_payload_size`），否则 broker 会主动 close 并触发 `OutgoingPacketTooLarge` 错误。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §6。
-12. **重连后必须重做 Bootstrap**：Runtime 在 keep-alive 超时或 broker 重启后，**不能**只判断"已 connected"就认为业务可用。每次到达 `ConnAck` 必须按 §5.1.1 重做 status + meta + config + global/# + control/# 五步；漏做会让"在线但永远收不到消息"的故障静默出现。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §4 与 §5.1.2。
+9. **`status` vs `ready` 双信号**：`status` 只回答"进程可达"，`ready` 回答"业务可达"（Phase A–C 完成）。Runtime 必须**主动**在 Phase A–C 完成后发布 `ready=true`；Gateway 不再做"status 翻转即 ready 翻转"的乐观写入，避免 Desktop 在 Runtime HTTP server 尚未 bind 的窗口期内发起业务请求产生 503。详见 §5.1.3。
+10. **session list 不放 retained**：避免每次 list 变化都更新 retained（性能差、并发写），改为 `created` / `deleted` 增量事件 + HTTP 全量兜底。
+11. **session 进入时动态订阅**：Desktop 不要一次性 SUBSCRIBE 所有 session 的所有主题（主题数量爆炸）。仅在用户进入具体 session 时动态 SUBSCRIBE 该 sid 的 `meta/...` / `config/...` / `messages/...` / `control/...`，离开时 UNSUBSCRIBE。
+12. **max_packet_size 必须对齐**：rumqttc 客户端的 `MqttOptions::max_outgoing_packet_size` 默认是 `10 * 1024 = 10 KB`。Runtime 发 stream_delta 或大型 meta/config 时（含 LLM 长 thought 内容，protobuf 编码后常 ≥ 21 KB），**必须**显式调用 `options.set_max_packet_size(GATEWAY_MQTT_MAX_PACKET_SIZE, GATEWAY_MQTT_MAX_PACKET_SIZE)`（10 MB，对齐 broker 端 `max_payload_size`），否则 broker 会主动 close 并触发 `OutgoingPacketTooLarge` 错误。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §6。
+13. **重连后必须重做 Bootstrap**：Runtime 在 keep-alive 超时或 broker 重启后，**不能**只判断"已 connected"就认为业务可用。每次到达 `ConnAck` 必须按 §5.1.1 重做 status + meta + config + global/# + control/# 五步；漏做会让"在线但永远收不到消息"的故障静默出现。详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §4 与 §5.1.2。
 
 ---
 

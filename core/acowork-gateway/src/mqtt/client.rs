@@ -79,11 +79,19 @@ fn error_descriptor_from_rumqttc_025(err: &ConnectionError) -> ErrorDescriptor {
 ///
 /// With `clean_session = true` the broker drops all subscriptions on
 /// disconnect, so **every** active subscription must be listed here.
-/// Without re-subscribing, the Gateway silently loses agent http_port
-/// and status updates after any MQTT reconnect.
+/// Without re-subscribing, the Gateway silently loses agent http_port,
+/// status, and ready updates after any MQTT reconnect.
 const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     ("acowork/agents/+/http_port", QoS::AtLeastOnce),
     ("acowork/agents/+/status", QoS::AtLeastOnce),
+    // Runtime publishes "true" only after Phase A–C have all populated
+    // the HTTP server's late-bind slots; the Gateway pins
+    // `running_agents[id].ready` to this value so `/api/agents` reports
+    // it. Without this subscription the Desktop's `running && ready`
+    // gate stays open on stale spawn-time defaults, and every
+    // `/sessions/{sid}/messages` HTTP call from the ChatPanel races with
+    // Phase B and hits 503.
+    ("acowork/agents/+/ready", QoS::AtLeastOnce),
 ];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).
