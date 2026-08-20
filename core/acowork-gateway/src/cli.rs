@@ -164,15 +164,27 @@ impl Cli {
 
         match self.command {
             Some(Commands::Install { package }) => {
-                let msg = gateway.install_package(&package)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(GatewayError::Io)?;
+                let msg = rt.block_on(gateway.install_package(&package))?;
                 println!("{}", msg);
             }
             Some(Commands::Uninstall { agent_id }) => {
-                let msg = gateway.uninstall_package(&agent_id)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(GatewayError::Io)?;
+                let msg = rt.block_on(gateway.uninstall_package(&agent_id))?;
                 println!("{}", msg);
             }
             Some(Commands::Upgrade { agent_id, package }) => {
-                let msg = gateway.upgrade_package(&agent_id, &package)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(GatewayError::Io)?;
+                let msg = rt.block_on(gateway.upgrade_package(&agent_id, &package))?;
                 println!("{}", msg);
             }
             Some(Commands::Start { agent_id }) => {
@@ -193,7 +205,11 @@ impl Cli {
                 println!("{}", msg);
             }
             Some(Commands::List) => {
-                let entries = gateway.list_agents();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(GatewayError::Io)?;
+                let entries = rt.block_on(gateway.list_agents());
                 if entries.is_empty() {
                     println!("No agents installed.");
                 } else {
@@ -203,7 +219,11 @@ impl Cli {
                 }
             }
             Some(Commands::Package { agent_id, output, sign, key_dir }) => {
-                let msg = gateway.package_agent(&agent_id, output.as_deref(), sign, key_dir.as_deref())?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(GatewayError::Io)?;
+                let msg = rt.block_on(gateway.package_agent(&agent_id, output.as_deref(), sign, key_dir.as_deref()))?;
                 println!("{}", msg);
             }
             None => {

@@ -309,6 +309,13 @@ message EmbeddingModelRef {
 message AgentStatus {
   string agent_id = 1;
   bool online = 2;
+  // True when the Runtime self-published `"sleeping"` just before
+  // `process::exit(0)` (idle auto-sleep, see
+  // `acowork-runtime::agent::idle_watcher`). Lets the Desktop render an
+  // "auto-slept at HH:MM" badge distinct from a manual stop. Mutually
+  // informative with `online` — `online=true, sleeping=true` means
+  // "process just exited via idle, retained message still cached".
+  bool sleeping = 3;
 }
 
 /// Agent metadata.

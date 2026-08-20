@@ -955,11 +955,14 @@ export function ChatPanel() {
   // File upload handler: opens the dialog and dispatches to the shared
   // upload pipeline. The pipeline handles both documents and images and
   // emits a single `pendingAttachedItems` entry.
+  // ADR-046: single upload entry-point for documents AND images. The
+  // runtime decodes the format string and persists the blob; the desktop
+  // wraps the response into a `FileUploadItem` / `ImageUploadItem`
+  // metadata envelope to attach to the next user message. For images we
+  // gate the upload on the current model supporting image input — if not,
+  // we surface the "switch to a vision-capable model" dialog before
+  // committing to a useless upload.
   const handleFileUpload = async () => {
-    // ADR-046: single upload entry-point for documents AND images. The
-    // runtime decodes the format string and persists the blob; the desktop
-    // wraps the response into a `FileUploadItem` / `ImageUploadItem`
-    // metadata envelope to attach to the next user message.
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       title: "Select a document or image",
@@ -973,12 +976,38 @@ export function ChatPanel() {
     if (!selected) return;
     const filePath = selected as string;
     if (!filePath) return;
+
+    // Image-only: gate on multimodal capability. Documents are unaffected —
+    // they are surfaced as references regardless of model vision support.
+    const filename = filePath.replace(/^.*[\\/]/, "");
+    const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+    if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) {
+      const currentEntry = availableModels.find(
+        (m) => m.name === currentModel && m.provider === currentProvider,
+      );
+      const supportsImage = currentEntry?.input_modalities?.includes("image");
+      if (!supportsImage) {
+        const imageModels = availableModels.filter((m) =>
+          m.input_modalities?.includes("image"),
+        );
+        if (imageModels.length === 0) {
+          log.warn(
+            "[ChatPanel] No image-capable models available — skipping upload",
+          );
+          return;
+        }
+        session.setImageCapableModels(imageModels);
+        session.setShowImageUnsupportedDialog(true);
+        return;
+      }
+    }
+
     await uploadFileAtPath(filePath);
   };
 
-  // Shared upload pipeline used by handleFileUpload (document-or-image dialog)
-  // and handleImageSelect (image-only dialog). The runtime accepts both via
-  // the same `upload_file` command.
+  // Shared upload pipeline. The runtime accepts both documents and images
+  // via the same `upload_file` command; this wrapper only adds a single
+  // `pendingAttachedItems` entry and dispatches based on file extension.
   const uploadFileAtPath = async (filePath: string) => {
     const filename = filePath.replace(/^.*[\\/]/, "");
     const ext = filename.split(".").pop()?.toLowerCase() ?? "";
@@ -1076,60 +1105,6 @@ export function ChatPanel() {
   // Remove a pending attachment chip
   const handleRemovePending = (tempId: string) => {
     session.setPendingAttachedItems(prev => prev.filter((p) => p.tempId !== tempId));
-  };
-
-  // Select image file via Tauri dialog, read as base64, and get dimensions
-  const handleImageSelect = async () => {
-    if (!currentSessionId || !selectedAgentId) return;
-
-    // ADR-046: gate image selection on multimodal-supporting model — the
-    // runtime still accepts the upload, but the LLM prompt layer only
-    // consumes the dimensions; a non-vision model would treat the image as
-    // a placeholder reference. We surface the warning here before the user
-    // commits to a useless upload.
-    const currentEntry = availableModels.find(
-      (m) => m.name === currentModel && m.provider === currentProvider,
-    );
-    const supportsImage = currentEntry?.input_modalities?.includes("image");
-    if (!supportsImage) {
-      const imageModels = availableModels.filter((m) =>
-        m.input_modalities?.includes("image"),
-      );
-      if (imageModels.length === 0) {
-        log.warn(
-          "[ChatPanel] No image-capable models available — skipping dialog",
-        );
-        return;
-      }
-      session.setImageCapableModels(imageModels);
-      session.setShowImageUnsupportedDialog(true);
-      return;
-    }
-
-    // ADR-046: image and document upload share the same code path. We just
-    // narrow the dialog filter to image extensions — the runtime handler
-    // already accepts both, and the resulting `image_upload` envelope
-    // (carrying `width`/`height` for the thumbnail) lands in the same
-    // `pendingAttachedItems` queue as document uploads.
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({
-        title: t("chatPanel.selectImageTitle"),
-        filters: [
-          {
-            name: "Images",
-            extensions: ["png", "jpg", "jpeg", "gif", "webp"],
-          },
-        ],
-        multiple: false,
-      });
-      if (!selected) return;
-      const filePath = selected as string;
-      if (!filePath) return;
-      await uploadFileAtPath(filePath);
-    } catch (err) {
-      log.error("[ChatPanel] Image selection failed:", err);
-    }
   };
 
   // ADR-045: cancel an in-flight tool execution by tool_call_id.
@@ -1920,7 +1895,17 @@ export function ChatPanel() {
               <div ref={skBtnRef} className="min-w-0">
                 <SkillsPanel textHidden={textHidden.sk} />
               </div>
-              {/* File upload button */}
+            </div>
+
+            {/* Right: send/stop button + context usage icon */}
+
+            <div className="flex shrink-0 items-center gap-1">
+              {/* Context usage icon — shown when session is active */}
+              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
+
+              {/* File upload button — single entry point for documents and images.
+                  Placed adjacent to send so attachments sit with the action that
+                  consumes them. */}
               <Tooltip content={t("chatPanel.uploadHint")}>
                 <button
                   className={toolbarButton}
@@ -1931,24 +1916,6 @@ export function ChatPanel() {
                   <Paperclip size={14} />
                 </button>
               </Tooltip>
-              {/* Image upload button */}
-              <Tooltip content={t("chatPanel.uploadImageHint")}>
-                <button
-                  className={toolbarButton}
-                  onClick={handleImageSelect}
-                  disabled={!currentSessionId || !selectedAgentId}
-                  aria-label={t("chatPanel.selectImage")}
-                >
-                  <Image size={14} />
-                </button>
-              </Tooltip>
-            </div>
-
-            {/* Right: send/stop button + context usage icon */}
-
-            <div className="flex shrink-0 items-center gap-1">
-              {/* Context usage icon — shown when session is active */}
-              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
 
               {/* Send/Stop button with tooltip above */}
               <Tooltip content={sending

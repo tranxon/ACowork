@@ -2,10 +2,15 @@
 
 use crate::error::GatewayError;
 use crate::gateway::state::{GatewayState, RunningAgentInfo};
+use crate::handlers::server::SharedState;
 use crate::lifecycle::process::{
     check_health, find_available_debug_port, kill_agent_process, spawn_agent_process,
 };
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::RwLock;
 
 /// System Agent ID — always auto-started with Gateway
 pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
@@ -40,23 +45,44 @@ impl LifecycleManager {
     }
 
     /// Start an agent process
+    ///
+    /// `state` is a `SharedState` (`Arc<RwLock<GatewayState>>`) — the
+    /// reaper task needs its own handle to remove the agent when the
+    /// child exits, so we cannot take `&mut GatewayState` here.
+    /// Callers that hold `&mut GatewayState` wrap it with
+    /// `Arc::new(tokio::sync::RwLock::new(state))` or pass an existing
+    /// `SharedState` clone.
+    ///
+    /// `wire_reaper` controls whether the spawned child's exit-handler
+    /// removes the agent from `state.running_agents`. Pass `true` for
+    /// production HTTP handlers (long-lived daemon) where the gateway
+    /// outlives the agent process. Pass `false` for short-lived CLI
+    /// commands (`gateway start`/`stop`) where the reaper is irrelevant
+    /// and avoiding the wrapper clone lets us `try_unwrap` the state on
+    /// return.
     pub async fn start_agent(
         &mut self,
         agent_id: &str,
-        state: &mut GatewayState,
+        state: &SharedState,
         dev_mode: bool,
+        wire_reaper: bool,
     ) -> Result<(), GatewayError> {
         // Check if already running
-        if state.is_running(agent_id) {
-            return Err(GatewayError::AgentAlreadyRunning(agent_id.to_string()));
+        {
+            let gw = state.read().await;
+            if gw.is_running(agent_id) {
+                return Err(GatewayError::AgentAlreadyRunning(agent_id.to_string()));
+            }
         }
 
         // Check if installed
-        let info = state
-            .installed_agents
-            .get(agent_id)
-            .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
-            .clone();
+        let info = {
+            let gw = state.read().await;
+            gw.installed_agents
+                .get(agent_id)
+                .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
+                .clone()
+        };
 
         // Determine workspace directory
         let workspace = PathBuf::from(&info.install_path).join("workspace");
@@ -68,7 +94,14 @@ impl LifecycleManager {
             None
         };
 
-        // Spawn the agent process
+        // Spawn the agent process. Pass a `SharedState` clone to the
+        // reaper so it can clean up `running_agents` when the child
+        // exits — fixes the bug where an auto-sleep Runtime left a
+        // dead PID behind and `POST /api/agents/{id}/stop` returned 500.
+        //
+        // `wire_reaper = false` is for short-lived CLI invocations where
+        // the reaper would outlive the caller's ownership of `state`.
+        let reaper_state = if wire_reaper { Some(state.clone()) } else { None };
         let child = spawn_agent_process(
             agent_id,
             &info.install_path,
@@ -78,12 +111,13 @@ impl LifecycleManager {
             self.log_file_size_mb,
             self.log_file_count,
             self.mqtt_port,
+            reaper_state,
         )
         .await?;
 
         let pid = child.id();
 
-        state.add_running(RunningAgentInfo {
+        state.write().await.add_running(RunningAgentInfo {
             agent_id: agent_id.to_string(),
             pid,
             started_at: chrono::Utc::now(),
@@ -110,9 +144,14 @@ impl LifecycleManager {
     /// It cannot be stopped by normal `stop_agent` calls.
     pub async fn auto_start_system_agent(
         &mut self,
-        state: &mut GatewayState,
+        state: &SharedState,
     ) -> Result<(), GatewayError> {
-        if !state.is_installed(SYSTEM_AGENT_ID) {
+        let (installed, running) = {
+            let gw = state.read().await;
+            (gw.is_installed(SYSTEM_AGENT_ID), gw.is_running(SYSTEM_AGENT_ID))
+        };
+
+        if !installed {
             tracing::warn!(
                 "System Agent ({}) not installed — skipping auto-start",
                 SYSTEM_AGENT_ID
@@ -120,20 +159,24 @@ impl LifecycleManager {
             return Ok(());
         }
 
-        if state.is_running(SYSTEM_AGENT_ID) {
+        if running {
             tracing::debug!("System Agent already running");
             return Ok(());
         }
 
         tracing::info!("Auto-starting System Agent ({})", SYSTEM_AGENT_ID);
-        self.start_agent(SYSTEM_AGENT_ID, state, false).await
+        self.start_agent(SYSTEM_AGENT_ID, state, false, true).await
     }
 
     /// Stop a running agent process
+    ///
+    /// Takes `SharedState` so the reaper can also see the cleanup if the
+    /// manual kill races with the Runtime's own exit (idempotent: both
+    /// paths call `remove_running`, and the second call is a no-op).
     pub async fn stop_agent(
         &mut self,
         agent_id: &str,
-        state: &mut GatewayState,
+        state: &SharedState,
     ) -> Result<(), GatewayError> {
         // System Agent cannot be stopped
         if agent_id == SYSTEM_AGENT_ID {
@@ -142,14 +185,31 @@ impl LifecycleManager {
             ));
         }
 
-        let running = state
-            .running_agents
-            .get(agent_id)
-            .ok_or_else(|| GatewayError::AgentNotRunning(agent_id.to_string()))?
-            .clone();
+        let running = {
+            let gw = state.read().await;
+            gw.running_agents
+                .get(agent_id)
+                .ok_or_else(|| GatewayError::AgentNotRunning(agent_id.to_string()))?
+                .clone()
+        };
 
-        kill_agent_process(running.pid).await?;
-        state.remove_running(agent_id);
+        // Pre-emptively remove the entry so a subsequent `kill_agent_process`
+        // failure (e.g. PID already gone because the Runtime exited via
+        // idle auto-sleep) does NOT leave a stale record. The reaper will
+        // find nothing and quietly exit.
+        state.write().await.remove_running(agent_id);
+
+        // Then try to deliver SIGTERM/taskkill. If the process is already
+        // gone this returns Err — that's fine, the state is already clean.
+        if let Err(e) = kill_agent_process(running.pid).await {
+            tracing::warn!(
+                agent_id,
+                pid = running.pid,
+                error = %e,
+                "kill_agent_process failed during stop_agent; \
+                 process likely already exited (state already cleaned)"
+            );
+        }
 
         tracing::info!("Stopped agent: {} (was PID: {})", agent_id, running.pid);
         Ok(())
@@ -194,8 +254,8 @@ mod tests {
     async fn test_start_agent_not_installed() {
         let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("start");
-        let mut state = GatewayState::new(&dir);
-        let result = mgr.start_agent("com.test.unknown", &mut state, false).await;
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let result = mgr.start_agent("com.test.unknown", &state, false, false).await;
         assert!(result.is_err());
     }
 
@@ -203,8 +263,8 @@ mod tests {
     async fn test_stop_agent_not_running() {
         let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("stop");
-        let mut state = GatewayState::new(&dir);
-        let result = mgr.stop_agent("com.test.unknown", &mut state).await;
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let result = mgr.stop_agent("com.test.unknown", &state).await;
         assert!(result.is_err());
     }
 
@@ -217,8 +277,8 @@ mod tests {
     async fn test_stop_system_agent_rejected() {
         let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("sysstop");
-        let mut state = GatewayState::new(&dir);
-        let result = mgr.stop_agent(SYSTEM_AGENT_ID, &mut state).await;
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
+        let result = mgr.stop_agent(SYSTEM_AGENT_ID, &state).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("System Agent") || err_msg.contains("com.acowork.system"));
@@ -228,9 +288,9 @@ mod tests {
     async fn test_auto_start_system_agent_not_installed() {
         let mut mgr = LifecycleManager::new(10, 20, None);
         let dir = temp_vault_dir("autostart");
-        let mut state = GatewayState::new(&dir);
+        let state: SharedState = Arc::new(RwLock::new(GatewayState::new(&dir)));
         // System Agent not installed — should succeed gracefully with warning
-        let result = mgr.auto_start_system_agent(&mut state).await;
+        let result = mgr.auto_start_system_agent(&state).await;
         assert!(result.is_ok());
     }
 }

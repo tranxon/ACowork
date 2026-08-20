@@ -402,18 +402,27 @@ pub async fn run_cron_scheduler(
 
             if !is_running {
                 tracing::info!("Cron: agent {} not running, attempting to start", agent_id);
-                let mut gw = gateway_state.write().await;
-                if gw.is_installed(&agent_id) {
-                    // Start the agent process
-                    let log_file_size_mb =
-                        gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
-                    let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
+                let is_installed = {
+                    let gw = gateway_state.read().await;
+                    gw.is_installed(&agent_id)
+                };
+                if is_installed {
+                    // Start the agent process. Wire the reaper — if the
+                    // cron-spawned agent later exits (auto-sleep, crash)
+                    // we still want running_agents to be cleaned up.
+                    let (log_file_size_mb, log_file_count) = {
+                        let gw = gateway_state.read().await;
+                        (
+                            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
+                            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
+                        )
+                    };
                     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
                         log_file_size_mb,
                         log_file_count,
                         None,
                     );
-                    match lifecycle.start_agent(&agent_id, &mut gw, false).await {
+                    match lifecycle.start_agent(&agent_id, &gateway_state, false, true).await {
                         Ok(()) => {
                             tracing::info!(
                                 "Cron: started agent {} for scheduled trigger",

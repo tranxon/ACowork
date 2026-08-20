@@ -369,10 +369,15 @@ export function AgentList({ width }: AgentListProps) {
                       * least one session in a non-idle status (streaming /
                       * waiting_approval / paused), per ADR-014. Disappears
                       * once every session returns to idle. Offline agents
-                      * (online === false) show no dot. */}
+                      * (online === false) AND auto-slept agents
+                      * (sleeping === true) show no dot — the latter is
+                      * about to flip to offline via the Runtime's Will
+                      * "offline" message; we suppress the dot to avoid
+                      * one final "active" flash on its way out. */}
                   {agent.running &&
                     activeAgentIds.has(agent.agent_id) &&
-                    agentsMap[agent.agent_id]?.online !== false && (
+                    agentsMap[agent.agent_id]?.online !== false &&
+                    agentsMap[agent.agent_id]?.sleeping !== true && (
                       <span
                         className={cn(
                           "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)]"

@@ -53,10 +53,35 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         });
         let _ = app_handle.emit("mqtt-event", raw_payload);
 
+        // ── Plain-text topic: `acowork/agents/+/status` ──
+        //
+        // The Runtime publishes its lifecycle status as a plain text
+        // retained message ("online" / "sleeping" / "offline") — see
+        // `acowork-runtime::agent::idle_watcher` (sleeping) and
+        // `acowork-runtime::mqtt::client::publish_status` (online/offline).
+        // Without this branch the Desktop would silently lose the auto-sleep
+        // signal and keep showing the agent as alive long after the
+        // Runtime exited.
+        if msg.topic.starts_with("acowork/agents/") && msg.topic.ends_with("/status") {
+            // Status topic — never fall through to protobuf decode,
+            // even if the payload is an unknown status string
+            // (parse_plaintext_agent_status already logged the warning).
+            if let Some(parsed) = parse_plaintext_agent_status(&msg.topic, &msg.payload) {
+                let event = serde_json::json!({
+                    "type": "agent_status",
+                    "agent_id": parsed.agent_id,
+                    "online": parsed.online,
+                    "sleeping": parsed.sleeping,
+                });
+                let _ = app_handle.emit("agent-event", event);
+            }
+            return;
+        }
+
         // Try to decode as DataEnvelope protobuf
         let envelope = match DataEnvelope::decode(&msg.payload[..]) {
             Ok(e) => e,
-            Err(_) => return, // Not protobuf — ignore (plain text topics handled elsewhere)
+            Err(_) => return, // Not protobuf — ignore
         };
 
         let Some(payload) = &envelope.payload else { return };
@@ -199,10 +224,15 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
             // ── Agent lifecycle ──
             data_envelope::Payload::AgentStatus(status) => {
+                // Same shape as the plain-text branch above — schema
+                // must be identical so the React `chatStore.case
+                // "agent_status"` reducer can handle either path with
+                // one code path.
                 let event = serde_json::json!({
                     "type": "agent_status",
                     "agent_id": status.agent_id,
                     "online": status.online,
+                    "sleeping": status.sleeping,
                 });
                 let _ = app_handle.emit("agent-event", event);
             }
@@ -1088,6 +1118,46 @@ fn extract_agent_id_from_topic(topic: &str) -> Option<String> {
     None
 }
 
+/// Parse the plain-text agent status payload published by the Runtime
+/// on `acowork/agents/{id}/status` (retained message).
+///
+/// Returns:
+/// - `Some(...)` when the topic matches the status shape and the
+///   payload is one of the known status values.
+/// - `None` when the topic is not a status topic (caller should fall
+///   through to the protobuf decoder). When the topic *is* a status
+///   topic but the payload is unknown, this function logs a warning and
+///   still returns `None` — callers should drop the message to avoid
+///   spurious protobuf decode attempts.
+fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAgentStatus> {
+    if !topic.starts_with("acowork/agents/") || !topic.ends_with("/status") {
+        return None;
+    }
+    let agent_id = extract_agent_id_from_topic(topic)?;
+    let payload_str = String::from_utf8_lossy(payload);
+    let parsed = match payload_str.trim() {
+        "online" => ParsedAgentStatus { agent_id, online: true, sleeping: false },
+        "sleeping" => ParsedAgentStatus { agent_id, online: true, sleeping: true },
+        "offline" => ParsedAgentStatus { agent_id, online: false, sleeping: false },
+        unknown => {
+            tracing::warn!(
+                topic = %topic,
+                payload = %unknown,
+                "unknown agent status payload — ignoring"
+            );
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedAgentStatus {
+    agent_id: String,
+    online: bool,
+    sleeping: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1183,69 @@ mod tests {
         assert_eq!(extract_agent_id_from_topic(""), None);
         assert_eq!(extract_agent_id_from_topic("not/the/expected/topic"), None);
         assert_eq!(extract_agent_id_from_topic("acowork/agents//sessions/x/opened"), None);
+    }
+
+    /// Regression test: plain-text "sleeping" payload must surface as
+    /// `online=true, sleeping=true` so the React reducer can show the
+    /// sleeping UI even before the Gateway republishes the status as a
+    /// protobuf DataEnvelope. Before this fix the Desktop would decode
+    /// the message as protobuf, fail (not a valid DataEnvelope), and
+    /// `return` — the frontend never learned about the sleep.
+    #[test]
+    fn parse_plaintext_sleeping_payload() {
+        let p = parse_plaintext_agent_status(
+            "acowork/agents/com.acowork.senior-engineer/status",
+            b"sleeping",
+        )
+        .expect("known status payload must parse");
+        assert_eq!(p.agent_id, "com.acowork.senior-engineer");
+        assert!(p.online);
+        assert!(p.sleeping);
+    }
+
+    #[test]
+    fn parse_plaintext_online_payload() {
+        let p = parse_plaintext_agent_status(
+            "acowork/agents/com.example.weather/status",
+            b"online",
+        )
+        .unwrap();
+        assert_eq!(p.agent_id, "com.example.weather");
+        assert!(p.online);
+        assert!(!p.sleeping);
+    }
+
+    #[test]
+    fn parse_plaintext_offline_payload() {
+        let p = parse_plaintext_agent_status(
+            "acowork/agents/com.example.weather/status",
+            b"offline",
+        )
+        .unwrap();
+        assert_eq!(p.agent_id, "com.example.weather");
+        assert!(!p.online);
+        assert!(!p.sleeping);
+    }
+
+    #[test]
+    fn parse_plaintext_unknown_status_returns_none() {
+        // Topic is a status topic, payload is garbage → None (caller
+        // drops, warning already logged).
+        assert!(parse_plaintext_agent_status(
+            "acowork/agents/com.x/status",
+            b"what is this",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_plaintext_non_status_topic_returns_none() {
+        // Not a status topic → fall through to protobuf decoder.
+        assert!(parse_plaintext_agent_status(
+            "acowork/agents/com.x/sessions/s-1/meta",
+            b"online",
+        )
+        .is_none());
     }
 }
 

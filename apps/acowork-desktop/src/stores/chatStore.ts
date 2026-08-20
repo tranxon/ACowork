@@ -2968,7 +2968,12 @@ export function handleMessageEvent(
       const aid = data.agent_id as string | undefined;
       const online = data.online as boolean | undefined;
       if (aid && online !== undefined) {
-        useAgentStore.getState().updateAgentOnlineStatus(aid, online);
+        // `sleeping` is included by the plain-text branch (Desktop
+        // `parse_plaintext_agent_status`) and by the protobuf branch
+        // (newer Runtimes / Gateway republish). Older agents may omit
+        // it; `updateAgentOnlineStatus` defaults `sleeping` to false.
+        const sleeping = (data as { sleeping?: boolean }).sleeping ?? false;
+        useAgentStore.getState().updateAgentOnlineStatus(aid, online, sleeping);
       }
       break;
     }

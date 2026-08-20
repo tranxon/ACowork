@@ -22,14 +22,29 @@ use crate::package_manager::upgrade;
 /// Gateway — the top-level orchestrator
 ///
 /// Owns all sub-systems and drives the event loop.
+///
+/// `state` is a [`SharedState`] (`Arc<RwLock<GatewayState>>`) from the
+/// very first moment after construction. Wrapping the state in a shared
+/// handle at construction time (rather than after a `std::mem::take` in
+/// `run()`) eliminates the entire family of "self.state is a stand-in,
+/// writes go nowhere" bugs that arise when an owned field is converted
+/// to a shared handle partway through initialisation.
 pub struct Gateway {
     config: GatewayConfig,
-    state: GatewayState,
+    state: SharedState,
     lifecycle: LifecycleManager,
 }
 
 impl Gateway {
     /// Create a new Gateway instance with the given configuration
+    ///
+    /// Construction runs entirely on a single thread before any async
+    /// runtime exists, so we first build an owned `GatewayState` and run
+    /// all synchronous initialisation (`interaction_store` setup,
+    /// `restore_installed_agents`) directly against it. We then wrap the
+    /// fully-initialised state in a `SharedState`. From this point on,
+    /// every code path sees the same shared handle — there is no
+    /// `std::mem::take`/`mem::swap` dance and no "two views of the state".
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         config.validate()?;
 
@@ -37,6 +52,7 @@ impl Gateway {
         let log_file_count = config.log_file_count;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
+        let packages_dir = config.packages_dir.clone();
 
         // Ensure data directory exists before opening the database
         std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -57,9 +73,19 @@ impl Gateway {
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
-        let mut gateway = Self {
+        // Restore installed agents from disk *before* wrapping into
+        // SharedState. This is the only time we can operate on the owned
+        // `GatewayState` directly; all later mutations go through the
+        // shared lock. See [`Self::restore_installed_agents_static`].
+        Self::restore_installed_agents_static(
+            &mut state,
+            std::path::Path::new(&packages_dir),
+            std::path::Path::new(&data_dir),
+        );
+
+        let gateway = Self {
             config,
-            state,
+            state: Arc::new(RwLock::new(state)),
             // idle_timeout removed: the decision is now owned by the Runtime
             // (see `acowork-runtime::agent::idle_watcher`). The
             // `Timeouts::idle_timeout_secs` TOML key is retained for backward
@@ -70,10 +96,6 @@ impl Gateway {
                 lifecycle_mqtt_port,
             ),
         };
-
-        // Restore installed agents from disk so CLI commands (list, start, etc.)
-        // can see agents without the daemon running.
-        gateway.restore_installed_agents();
 
         Ok(gateway)
     }
@@ -93,7 +115,12 @@ impl Gateway {
         }
 
         // Check if System Agent is already installed
-        if self.state.is_installed(crate::lifecycle::SYSTEM_AGENT_ID) {
+        if self
+            .state
+            .read()
+            .await
+            .is_installed(crate::lifecycle::SYSTEM_AGENT_ID)
+        {
             tracing::debug!("System Agent already installed, skipping bundled install");
             return;
         }
@@ -127,7 +154,7 @@ impl Gateway {
             Ok(agent_id) => {
                 tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
                 // Refresh installed agents state
-                self.restore_installed_agents();
+                self.restore_installed_agents().await;
             }
             Err(e) => {
                 tracing::warn!("Failed to auto-install bundled System Agent: {}", e);
@@ -199,7 +226,7 @@ impl Gateway {
             manifest,
         };
 
-        self.state.add_installed(info);
+        self.state.write().await.add_installed(info);
         Ok(agent_id)
     }
 
@@ -227,8 +254,32 @@ impl Gateway {
     /// On startup, the Gateway needs to rebuild its in-memory `installed_agents`
     /// map by reading `manifest.toml` from each subdirectory under `packages_dir`.
     /// Without this, agents installed in a previous session are invisible.
-    fn restore_installed_agents(&mut self) {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
+    ///
+    /// **Async** wrapper that locks `self.state` and delegates to the
+    /// [`Self::restore_installed_agents_static`] helper. The split exists so
+    /// `Gateway::new` can run the same initialisation against an owned
+    /// `GatewayState` (no async runtime exists yet) before wrapping it in a
+    /// `SharedState`. After construction, all restore paths go through this
+    /// async method.
+    async fn restore_installed_agents(&mut self) {
+        let packages_dir = std::path::PathBuf::from(&self.config.packages_dir);
+        let data_dir = std::path::PathBuf::from(&self.config.data_dir);
+        let mut state = self.state.write().await;
+        Self::restore_installed_agents_static(&mut state, &packages_dir, &data_dir);
+    }
+
+    /// Synchronous restore helper that operates on an owned `&mut GatewayState`.
+    ///
+    /// Called from both [`Gateway::new`] (against a freshly constructed
+    /// owned state) and [`Gateway::restore_installed_agents`] (under the
+    /// `SharedState` write lock). Keeping the IO and field-mutation logic
+    /// here avoids duplicating it across two callers and prevents drift
+    /// between the construction-time and post-construction restore paths.
+    fn restore_installed_agents_static(
+        state: &mut GatewayState,
+        packages_dir: &std::path::Path,
+        data_dir: &std::path::Path,
+    ) {
         if !packages_dir.exists() {
             return;
         }
@@ -259,11 +310,11 @@ impl Gateway {
                             manifest,
                         };
                         let agent_id = info.agent_id.clone();
-                        self.state.add_installed(info);
+                        state.add_installed(info);
                         tracing::info!(
                             "Restored installed agent: {} v{}",
                             agent_id,
-                            self.state
+                            state
                                 .installed_agents
                                 .get(&agent_id)
                                 .map(|i| i.version.as_str())
@@ -288,18 +339,17 @@ impl Gateway {
             }
         }
 
-        let count = self.state.installed_agents.len();
+        let count = state.installed_agents.len();
         if count > 0 {
             tracing::info!("Restored {} installed agent(s) from disk", count);
         }
 
         // ADR-017: Load avatar cache and apply to in-memory manifest so
         // list_agents returns the correct avatar even for stopped agents.
-        let data_dir = std::path::Path::new(&self.config.data_dir);
         let avatar_cache = crate::http::agent_config::load_avatar_cache(data_dir);
         if !avatar_cache.is_empty() {
             for (agent_id, entry) in &avatar_cache {
-                if let Some(info) = self.state.installed_agents.get_mut(agent_id) {
+                if let Some(info) = state.installed_agents.get_mut(agent_id) {
                     info.manifest.avatar = entry.avatar.clone();
                     info.manifest.builtin_avatar = entry.builtin_avatar.clone();
                 }
@@ -386,10 +436,13 @@ impl Gateway {
 
     /// Run the Gateway daemon (async, multi-connection)
     ///
-    /// This starts the gRPC server and enters the main event loop.
-    /// Blocks until shutdown signal is received.
-    /// The GatewayState is wrapped in Arc<RwLock> for concurrent access
-    /// by multiple gRPC connection handlers.
+    /// This starts the HTTP server, MQTT broker, embed/LSP supervisors and
+    /// the main event loop. Blocks until shutdown signal is received.
+    ///
+    /// `self.state` is already a [`SharedState`] at construction time, so
+    /// there is no `std::mem::take`/`mem::swap` dance here — every
+    /// mutation goes through the shared lock and every reader sees the
+    /// same data.
     pub async fn run(
         &mut self,
         log_reload_handle: Option<crate::LogReloadHandle>,
@@ -405,15 +458,14 @@ impl Gateway {
         // so that API keys can be stored/retrieved without manual unlock.
         // This is intentionally insecure — dev_mode is for local development only.
         if self.config.dev_mode {
-            if let Err(e) = self.state.vault.unlock("dev-mode-unlock") {
-                tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e);
-            } else {
-                tracing::info!("Vault auto-unlocked (dev_mode)");
+            match self.state.write().await.vault.unlock("dev-mode-unlock") {
+                Ok(()) => tracing::info!("Vault auto-unlocked (dev_mode)"),
+                Err(e) => tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e),
             }
         }
 
-        // Scan packages directory and restore installed agents from disk
-        self.restore_installed_agents();
+        // Scan packages directory and restore installed agents from disk.
+        self.restore_installed_agents().await;
 
         // Clean up orphaned runtime processes from a previous Gateway run.
         // When Gateway restarts, previously running agents become orphaned
@@ -427,10 +479,19 @@ impl Gateway {
         // Auto-install bundled agents (System Agent, etc.) if not installed
         self.auto_install_bundled_agents().await;
 
-        // Auto-start the System Agent if installed
+        // `self.state` is already a SharedState. Clone the handle so the
+        // rest of `run()` can move it into long-lived tasks (reapers,
+        // supervisors, HTTP server) while `&mut self` continues to be
+        // available for the occasional self-state mutation.
+        let shared_state: SharedState = self.state.clone();
+
+        // Auto-start the System Agent if installed.
+        // Pass the shared handle so the reaper can clean up the
+        // running-agent entry if the System Agent ever exits (e.g. a
+        // future idle-sleep policy that covers privileged agents).
         if let Err(e) = self
             .lifecycle
-            .auto_start_system_agent(&mut self.state)
+            .auto_start_system_agent(&shared_state)
             .await
         {
             tracing::warn!("Failed to auto-start System Agent: {}", e);
@@ -463,7 +524,7 @@ impl Gateway {
                     ready = embed_state.ready,
                     "Reusing existing embedding service"
                 );
-                self.state.embed_process = Some(embed_state);
+                self.state.write().await.embed_process = Some(embed_state);
                 embed_supervisor_cfg =
                     Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                         data_dir,
@@ -490,7 +551,7 @@ impl Gateway {
                             port = embed_state.port,
                             "Embedding service process spawned"
                         );
-                        self.state.embed_process = Some(embed_state);
+                        self.state.write().await.embed_process = Some(embed_state);
                         embed_child = Some(child);
                         embed_supervisor_cfg =
                             Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
@@ -514,13 +575,16 @@ impl Gateway {
 
         // Load resource cache (provider_list.json + mcp_list.json) into memory.
         // These files are rebuilt by HTTP handlers when resources change.
+        // Writes go through the SharedState write lock so the very next
+        // HTTP/MQTT request sees the loaded data — no more "loaded but
+        // invisible" race where `self.state` is a stand-in.
         let cache_dir = std::path::PathBuf::from(&self.config.data_dir);
-        self.state.resource_cache = crate::resource_cache::load_resource_cache(&cache_dir);
+        let loaded_cache = crate::resource_cache::load_resource_cache(&cache_dir);
+        shared_state.write().await.resource_cache = loaded_cache;
 
-        // Wrap state in Arc<RwLock> for concurrent access in multi-connection mode.
-        // std::mem::take replaces self.state with Default so the Arc takes ownership.
-        // This is safe because run() is the terminal daemon method that blocks forever.
-        let shared_state: SharedState = Arc::new(RwLock::new(std::mem::take(&mut self.state)));
+        // `shared_state` was constructed *earlier* in this function
+        // (see `let shared_state: SharedState = self.state.clone();`)
+        // so the System Agent's reaper can be wired up.
 
         // Spawn embed process reaper — clears state when the child exits.
         // This is the single source of truth for embed process lifecycle:
@@ -796,19 +860,52 @@ impl Gateway {
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
+            // Pass the client into dispatch so the status re-publish
+            // path (plain text → protobuf DataEnvelope) has a way to
+            // call `publish_envelope`. Note: the client is created
+            // AFTER this callback registration, so we capture an
+            // `Option<Arc<…>>` that the callback re-borrows each time
+            // via the closure below. Easier: re-use the *same* client
+            // — we already have `mqtt_gw_client` in scope, but the
+            // callback needs to own its clone. Build the callback with
+            // a one-shot placeholder, then wire it after `client`
+            // exists via the message_callback's set-after-connect
+            // pattern. For now, capture the *eventual* client via
+            // `Option<Arc<…>>` by deferring construction:
+            let dispatch_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = None;
+            let dispatch_client_slot: std::sync::Arc<
+                tokio::sync::Mutex<Option<Arc<crate::mqtt::GatewayMqttClient>>>,
+            > = std::sync::Arc::new(tokio::sync::Mutex::new(dispatch_client));
+            let slot_for_cb = dispatch_client_slot.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, …)
-                crate::mqtt::dispatch::handle_message(
-                    &topic, &payload,
-                    &reg_for_dispatch,
-                    &agent_reg_for_dispatch,
-                );
+                let slot = slot_for_cb.clone();
+                let topic = topic.clone();
+                let payload = payload.clone();
+                let reg_for_dispatch = reg_for_dispatch.clone();
+                let agent_reg_for_dispatch = agent_reg_for_dispatch.clone();
+                tokio::spawn(async move {
+                    let client = slot.lock().await.clone();
+                    crate::mqtt::dispatch::handle_message(
+                        &topic, &payload,
+                        &reg_for_dispatch,
+                        &agent_reg_for_dispatch,
+                        client.as_ref(),
+                    );
+                });
             });
 
             match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
+                    // Backfill the dispatch slot so the status re-publish
+                    // path can call `publish_envelope`. Until now the
+                    // slot was `None` and dispatch silently dropped
+                    // re-publishes (still updating the in-process
+                    // AgentRegistry, which is what the Gateway itself
+                    // needs).
+                    *dispatch_client_slot.lock().await = Some(client.clone());
                     Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
@@ -937,71 +1034,102 @@ impl Gateway {
         Ok(())
     }
 
-    /// Install a .agent package
-    pub fn install_package(&mut self, package_path: &str) -> Result<String, GatewayError> {
+    /// Install a .agent package.
+    ///
+    /// Async because `self.state` is a tokio [`SharedState`] — the write
+    /// lock is held only across the `install_package` call (which itself
+    /// does IO, but that's pre-existing behaviour and not made worse by
+    /// this change). The daemon-side HTTP install path uses
+    /// `state.blocking_write()` directly and is unaffected.
+    pub async fn install_package(&mut self, package_path: &str) -> Result<String, GatewayError> {
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
+        let mut state = self.state.write().await;
         install::install_package(
             std::path::Path::new(package_path),
             packages_dir,
-            &mut self.state,
+            &mut state,
             self.config.dev_mode,
         )?;
         Ok(format!("Package installed: {}", package_path))
     }
 
-    /// Uninstall an agent
-    pub fn uninstall_package(&mut self, agent_id: &str) -> Result<String, GatewayError> {
+    /// Uninstall an agent. See [`Self::install_package`] for the async rationale.
+    pub async fn uninstall_package(&mut self, agent_id: &str) -> Result<String, GatewayError> {
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        uninstall::uninstall_package(agent_id, packages_dir, &mut self.state)?;
+        let mut state = self.state.write().await;
+        uninstall::uninstall_package(agent_id, packages_dir, &mut state)?;
         Ok(format!("Agent uninstalled: {}", agent_id))
     }
 
-    /// Upgrade an agent
-    pub fn upgrade_package(
+    /// Upgrade an agent. See [`Self::install_package`] for the async rationale.
+    pub async fn upgrade_package(
         &mut self,
         agent_id: &str,
         package_path: &str,
     ) -> Result<String, GatewayError> {
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
+        let mut state = self.state.write().await;
         upgrade::upgrade_package(
             agent_id,
             std::path::Path::new(package_path),
             packages_dir,
-            &mut self.state,
+            &mut state,
         )?;
         Ok(format!("Agent upgraded: {}", agent_id))
     }
 
-    /// Start an agent
+    /// Start an agent.
+    ///
+    /// `self.state` is already a [`SharedState`], so the CLI path is just
+    /// "clone the handle, hand it to `lifecycle`, done" — no
+    /// `take`/`swap` translation layer. The daemon (`run()`) and CLI
+    /// paths now share the same lifecycle signature.
+    ///
+    /// `wire_reaper = false` because in the CLI path the Gateway process
+    /// is about to exit; the reaper would outlive the call and have no
+    /// effect.
     pub async fn start_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
+        let state = self.state.clone();
         self.lifecycle
-            .start_agent(agent_id, &mut self.state, false)
+            .start_agent(agent_id, &state, false, false)
             .await?;
         Ok(format!("Agent started: {}", agent_id))
     }
 
-    /// Stop a running agent
+    /// Stop a running agent. See [`Self::start_agent`] for the
+    /// SharedState rationale.
     pub async fn stop_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        self.lifecycle.stop_agent(agent_id, &mut self.state).await?;
+        let state = self.state.clone();
+        self.lifecycle.stop_agent(agent_id, &state).await?;
         Ok(format!("Agent stopped: {}", agent_id))
     }
 
-    /// List installed agents
-    pub fn list_agents(&self) -> Vec<AgentListEntry> {
-        self.state
+    /// List installed agents.
+    ///
+    /// Returns a snapshot of installed agents and their current running
+    /// state. Marked `async` because `self.state` is a tokio
+    /// [`SharedState`] (the daemon-side handlers already use it under
+    /// `read().await`).
+    pub async fn list_agents(&self) -> Vec<AgentListEntry> {
+        let state = self.state.read().await;
+        state
             .installed_agents
             .values()
             .map(|info| AgentListEntry {
                 agent_id: info.agent_id.clone(),
                 name: info.name.clone(),
                 version: info.version.clone(),
-                running: self.state.is_running(&info.agent_id),
+                running: state.is_running(&info.agent_id),
             })
             .collect()
     }
 
-    /// Package an installed agent into .agent file (CLI command)
-    pub fn package_agent(
+    /// Package an installed agent into .agent file (CLI command).
+    ///
+    /// Async for SharedState symmetry with the rest of the CLI surface.
+    /// `build_package` only reads state, so we hold a `read().await` lock
+    /// for the duration.
+    pub async fn package_agent(
         &self,
         agent_id: &str,
         output_dir: Option<&str>,
@@ -1013,12 +1141,13 @@ impl Gateway {
             .unwrap_or_else(|| std::path::PathBuf::from("./build"));
         let key = key_dir.map(std::path::PathBuf::from);
 
+        let state = self.state.read().await;
         let result = crate::package_manager::publish::build_package(
             agent_id,
             &output,
             sign,
             key.as_deref(),
-            &self.state,
+            &state,
         )?;
 
         Ok(format!(
@@ -1099,11 +1228,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_gateway_new() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_gateway_new() {
         let config = test_config();
         let gateway = Gateway::new(config).unwrap();
-        assert!(gateway.list_agents().is_empty());
+        assert!(gateway.list_agents().await.is_empty());
     }
 
     #[test]
@@ -1113,11 +1242,11 @@ mod tests {
         assert!(gateway.ensure_dirs().is_ok());
     }
 
-    #[test]
-    fn test_list_agents_empty() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_list_agents_empty() {
         let config = test_config();
         let gateway = Gateway::new(config).unwrap();
-        let list = gateway.list_agents();
+        let list = gateway.list_agents().await;
         assert!(list.is_empty());
     }
 

@@ -168,8 +168,18 @@ export interface AgentStorage {
    *  not yet active). Refreshed on every successful session-list fetch.
    *  `null` = not yet fetched / older Runtime without ADR-028. */
   agentTokenTotals: { input: number; output: number } | null;
-  /** Agent online/offline status — updated by agent_status MQTT event */
+  /** Agent online/offline status — updated by agent_status MQTT event.
+   *  Defaults to `true` so the first paint shows a "running" agent
+   *  rather than a blank/inactive state — the Gateway's `/api/agents`
+   *  and the Runtime's first `"online"` retained message will overwrite
+   *  this within the first 1-2 s. */
   online: boolean;
+  /** Runtime self-reported auto-sleep (idle_watcher fired). True after
+   *  the Runtime published `"sleeping"` to the status retained topic
+   *  but before the process actually exits (the retained message stays
+   *  cached until the Will "offline" overwrites it). Lets the UI render
+   *  the sleeping empty state without waiting for a full polling cycle. */
+  sleeping: boolean;
 }
 
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
@@ -184,6 +194,7 @@ function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentSto
     isLoading: false,
     agentTokenTotals: null,
     online: true,
+    sleeping: false,
   };
 }
 
@@ -269,8 +280,13 @@ interface AgentStoreState {
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  /** Update agent's online/offline status (from MQTT agent_status event). */
-  updateAgentOnlineStatus: (agentId: string, online: boolean) => void;
+  /** Update agent's online/offline status (from MQTT agent_status event).
+   *  `sleeping` is optional for backward compatibility with older callers. */
+  updateAgentOnlineStatus: (
+    agentId: string,
+    online: boolean,
+    sleeping?: boolean,
+  ) => void;
   /** Patch specific meta fields without a full state reload. */
   patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "display_name" | "role">>) => void;
 
@@ -319,14 +335,30 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         );
       }
 
-      // Merge with existing agents map
+// Merge with existing agents map
       const storedProfiles = loadAllProfiles();
       set((state) => {
         const next: Record<string, AgentStorage> = {};
         for (const meta of list) {
           const existing = state.agents[meta.agent_id];
           if (existing) {
-            next[meta.agent_id] = { ...existing, meta }; // preserve sessions/profile/etc.
+            // Fold in `running` from the latest snapshot — if the
+            // Runtime auto-slept (or crashed) between MQTT events, the
+            // Gateway's `/api/agents` is the only source of truth for
+            // `running=false` + `sleeping_at`. We also normalise
+            // `online`/`sleeping` here: if the Gateway says
+            // `running=false`, force `online=false, sleeping=false`
+            // even if the in-memory MQTT event hasn't propagated yet.
+            // This prevents the stale "online=true" window where the
+            // ChatPanel keeps showing the session input after the
+            // Runtime is gone.
+            const gateway_says_alive = !!meta.running;
+            next[meta.agent_id] = {
+              ...existing,
+              meta,
+              online: gateway_says_alive ? existing.online : false,
+              sleeping: gateway_says_alive ? existing.sleeping : false,
+            };
           } else {
             const profile = storedProfiles[meta.agent_id] ?? { ...DEFAULT_PROFILE };
             next[meta.agent_id] = createStorage(meta, profile);
@@ -845,8 +877,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   // ── Agent lifecycle (MQTT-driven) ──
 
-  updateAgentOnlineStatus: (agentId: string, online: boolean) => {
-    set((state) => patchAgent(state, agentId, { online }));
+  updateAgentOnlineStatus: (
+    agentId: string,
+    online: boolean,
+    sleeping = false,
+  ) => {
+    // `sleeping` is optional for backward compatibility with callers
+    // that only have `online`. The plain-text MQTT status branch
+    // (acowork/agents/+/status "online"/"sleeping"/"offline") always
+    // passes it; the protobuf branch may omit it in older Runtimes.
+    set((state) => patchAgent(state, agentId, { online, sleeping }));
   },
 
   patchAgentMeta: (agentId: string, meta) => {

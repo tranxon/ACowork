@@ -1416,38 +1416,45 @@ pub async fn start_agent(
     Path(agent_id): Path<String>,
     Json(req): Json<StartAgentRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    let mut gw = state.gateway_state.write().await;
-
-    if !gw.is_installed(&agent_id) {
-        return Err(ApiError::not_found(&format!(
-            "Agent not found: {}",
-            agent_id
-        )));
+    // Pre-flight checks — released before we touch the lifecycle so the
+    // reaper task isn't starved while we read config.
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_installed(&agent_id) {
+            return Err(ApiError::not_found(&format!(
+                "Agent not found: {}",
+                agent_id
+            )));
+        }
+        if gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is already running",
+                agent_id
+            )));
+        }
     }
-    if gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!(
-            "Agent {} is already running",
-            agent_id
-        )));
-    }
 
-    // Use the lifecycle manager to start the agent.
-    // idle_timeout is owned by the Runtime — see
-    // `acowork-runtime::agent::idle_watcher` — so the Gateway no longer
-    // passes one here.
-    let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
-    let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
-    let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
+    // Build lifecycle from current config.
+    let (log_file_size_mb, log_file_count, mqtt_port) = {
+        let gw = state.gateway_state.read().await;
+        (
+            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
+            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
+            gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None }),
+        )
+    };
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         log_file_size_mb,
         log_file_count,
         mqtt_port,
     );
+    // `wire_reaper = true`: this is the long-lived daemon path — the
+    // reaper must clean up `running_agents` if the Runtime exits
+    // (auto-sleep, crash, manual stop).
     lifecycle
-        .start_agent(&agent_id, &mut gw, req.dev_mode)
+        .start_agent(&agent_id, &state.gateway_state, req.dev_mode, true)
         .await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
-    drop(gw);
 
     // When starting in debug mode, bump Gateway's log level to DEBUG
     // so the Settings UI reflects the effective log level.
@@ -1488,13 +1495,14 @@ pub async fn stop_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    let mut gw = state.gateway_state.write().await;
-
-    if !gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!(
-            "Agent {} is not running",
-            agent_id
-        )));
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
     }
 
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
@@ -1503,7 +1511,7 @@ pub async fn stop_agent(
         None,
     );
     lifecycle
-        .stop_agent(&agent_id, &mut gw)
+        .stop_agent(&agent_id, &state.gateway_state)
         .await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
 
@@ -1521,32 +1529,50 @@ pub async fn restart_agent_in_debug(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    let mut gw = state.gateway_state.write().await;
-
-    if !gw.is_running(&agent_id) {
-        return Err(ApiError::bad_request(&format!(
-            "Agent {} is not running",
-            agent_id
-        )));
+    {
+        let gw = state.gateway_state.read().await;
+        if !gw.is_running(&agent_id) {
+            return Err(ApiError::bad_request(&format!(
+                "Agent {} is not running",
+                agent_id
+            )));
+        }
     }
 
     // Already in debug mode — no-op
-    if let Some(info) = gw.running_agents.get(&agent_id)
-        && info.dev_mode && info.debug_port.is_some() {
-            return Ok(Json(MessageResponse {
-                message: format!(
-                    "Agent {} is already in debug mode (port {})",
-                    agent_id,
-                    info.debug_port.unwrap_or(0)
-                ),
-            }));
-        }
+    let already_in_debug = {
+        let gw = state.gateway_state.read().await;
+        gw.running_agents
+            .get(&agent_id)
+            .map(|info| info.dev_mode && info.debug_port.is_some())
+            .unwrap_or(false)
+    };
+    if already_in_debug {
+        let port = {
+            let gw = state.gateway_state.read().await;
+            gw.running_agents
+                .get(&agent_id)
+                .and_then(|info| info.debug_port)
+                .unwrap_or(0)
+        };
+        return Ok(Json(MessageResponse {
+            message: format!(
+                "Agent {} is already in debug mode (port {})",
+                agent_id, port
+            ),
+        }));
+    }
 
     // ADR-033: gRPC removed. Restart-in-debug requires a full stop+start cycle.
     // Stop the agent first, then restart with dev_mode=true.
-    let log_file_size_mb = gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10);
-    let log_file_count = gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20);
-    let mqtt_port = gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None });
+    let (log_file_size_mb, log_file_count, mqtt_port) = {
+        let gw = state.gateway_state.read().await;
+        (
+            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
+            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
+            gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None }),
+        )
+    };
     let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
         log_file_size_mb,
         log_file_count,
@@ -1555,17 +1581,15 @@ pub async fn restart_agent_in_debug(
 
     // Stop current process
     lifecycle
-        .stop_agent(&agent_id, &mut gw)
+        .stop_agent(&agent_id, &state.gateway_state)
         .await
         .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
 
-    // Start with dev_mode=true
+    // Start with dev_mode=true (wire reaper: long-lived daemon path)
     lifecycle
-        .start_agent(&agent_id, &mut gw, true)
+        .start_agent(&agent_id, &state.gateway_state, true, true)
         .await
         .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
-
-    drop(gw);
 
     // Bump Gateway's log level to DEBUG so the Settings UI reflects it.
     {
