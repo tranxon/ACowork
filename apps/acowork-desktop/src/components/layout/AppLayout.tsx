@@ -216,6 +216,7 @@ export function AppLayout() {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
+  const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.sleeping ?? false) : false;
   const isDebugMode = selectedAgent?.dev_mode && selectedAgent?.running;
   const agentDisplayName = selectedAgent
     ? (agents[selectedAgent.agent_id]?.profile?.displayName ??
@@ -505,6 +506,13 @@ export function AppLayout() {
   // the first mqtt-status event reaching the frontend).
   useEffect(() => {
     if (gatewayStatus !== "connected") return;
+    // When the agent is sleeping (auto-slept, process exited), MQTT disconnect
+    // is expected — do not show a warning. Only surface disconnects for
+    // actively-running agents.
+    if (isSleeping) {
+      clearStatus("mqtt");
+      return;
+    }
     if (!mqttConnected && lastMqttError !== null) {
       const reason = lastMqttError ? `: ${lastMqttError}` : "";
       setStatus(t("statusBar.mqttDisconnected", { reason }), "warning", "mqtt");
@@ -514,7 +522,7 @@ export function AppLayout() {
       // displayed string (which would break if translations change).
       clearStatus("mqtt");
     }
-  }, [mqttConnected, lastMqttError, gatewayStatus, setStatus, clearStatus, t]);
+  }, [mqttConnected, lastMqttError, gatewayStatus, isSleeping, setStatus, clearStatus, t]);
 
   // Detect wake from sleep via visibility change and reconnect.
   //
