@@ -21,8 +21,12 @@
 //!    - If `effective_timeout == 0` ("never sleep") the task is never started.
 //!    - If any session is in `is_active()` state (Working / Thinking /
 //!      Streaming / ToolExecuting / WaitingApproval / Paused — see
-//!      `SessionStatus::is_active`), the deadline is suspended until the
-//!      session becomes Idle again.
+//!      `SessionStatus::is_active`), the deadline is **renewed** via
+//!      `record_inbound()` so the wall-clock time spent actively working is
+//!      NOT counted against the idle budget. Without this renewal the
+//!      deadline would expire mid-conversation and the process would sleep
+//!      immediately after the session returns to Idle — the "slept 2 minutes
+//!      after a long chat ended" bug.
 //!    - Otherwise (`all sessions Idle`), the time since the last recorded
 //!      inbound is checked against the effective timeout.
 //!    - On expiry: publish `"sleeping"` to the agent status retained topic,
@@ -240,6 +244,24 @@ fn tick_interval(effective_timeout_secs: u64) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Renew the idle deadline when any session is active.
+///
+/// Returns `true` when the caller should skip the expiry check this tick
+/// (i.e. `active` was true). When active, the last-inbound timestamp is
+/// advanced to now so the elapsed-time computation only ever measures
+/// **contiguous idle time** — active work does not consume the idle budget.
+///
+/// Extracted from `run_watcher` so the "active ⇒ deadline renewal"
+/// behaviour is unit-testable without driving the infinite loop.
+fn suspend_deadline(handle: &IdleWatcherHandle, active: bool) -> bool {
+    if active {
+        handle.record_inbound();
+        true
+    } else {
+        false
+    }
+}
+
 /// Main watcher loop. Runs until the timeout fires, at which point it
 /// exits the process.
 ///
@@ -258,13 +280,17 @@ pub(crate) async fn run_watcher(
     loop {
         interval.tick().await;
 
-        // Suspend the deadline while any session is in-flight. The user
-        // may have walked away, but the agent is actively working — we
-        // must not yank the process out from under it.
-        if config.session_activity.any_active().await {
+        // Suspend (renew) the deadline while any session is in-flight.
+        // The user may have walked away, but the agent is actively
+        // working — the wall-clock time spent working must NOT count
+        // against the idle budget, otherwise a long conversation would
+        // exhaust the timeout and the process would sleep right after
+        // the session returns to Idle ("idle for under 2 minutes, but the
+        // agent had been working for 30+ minutes").
+        if suspend_deadline(&handle, config.session_activity.any_active().await) {
             tracing::trace!(
                 agent_id = %config.agent_id,
-                "Idle watcher: session active, deadline suspended",
+                "Idle watcher: session active, deadline renewed",
             );
             continue;
         }
@@ -429,6 +455,30 @@ mod tests {
 
         let after = handle.last_inbound_at_ms().unwrap();
         assert!(after > initial, "record_inbound must advance the timestamp");
+    }
+
+    #[test]
+    fn suspend_deadline_renews_timestamp_when_active() {
+        let handle = IdleWatcherHandle {
+            last_inbound_at_ms: Arc::new(AtomicI64::new(1)),
+        };
+        // Active session ⇒ deadline renewed (timestamp advanced to now).
+        assert!(suspend_deadline(&handle, true));
+        assert!(
+            handle.last_inbound_at_ms().unwrap() > 1,
+            "active session must renew the deadline (advance last_inbound)"
+        );
+    }
+
+    #[test]
+    fn suspend_deadline_preserves_timestamp_when_idle() {
+        let handle = IdleWatcherHandle {
+            last_inbound_at_ms: Arc::new(AtomicI64::new(12345)),
+        };
+        // All sessions idle ⇒ no renewal; the expiry check proceeds
+        // untouched.
+        assert!(!suspend_deadline(&handle, false));
+        assert_eq!(handle.last_inbound_at_ms(), Some(12345));
     }
 
     #[test]
