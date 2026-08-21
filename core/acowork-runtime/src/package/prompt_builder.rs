@@ -26,10 +26,6 @@ use crate::skills::parser::SkillRegistry;
 /// skips it when assembling the main system prompt.
 pub const COMPACTION_PROMPT_FILE: &str = "summary.md";
 
-/// File stem (without extension) of [`COMPACTION_PROMPT_FILE`], used to
-/// recognize the file after `file_stem()` normalization.
-pub const COMPACTION_PROMPT_STEM: &str = "summary";
-
 /// Load the agent-specific compaction prompt from `prompts/summary.md`.
 ///
 /// Returns `None` when the file is missing or contains only whitespace —
@@ -37,9 +33,34 @@ pub const COMPACTION_PROMPT_STEM: &str = "summary";
 /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`]. Surrounding whitespace is
 /// stripped so a file consisting only of blank lines behaves like an
 /// absent file.
+///
+/// An existing-but-unreadable file (permissions, invalid UTF-8) also
+/// yields `None` but is logged as a warning — a broken package must not
+/// be silently masked by the fallback.
+///
+/// The filename is matched **exactly** (`summary.md`) — the same criterion
+/// [`build_system_prompt_with_mode`] uses to exclude it from the main
+/// dialog system prompt — so "excluded from main prompt" and "loaded as
+/// compaction prompt" always refer to the same file. Any other name
+/// (`SUMMARY.md`, `summary.txt`) is an ordinary prompt section.
 pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
     let path = package_dir.join("prompts").join(COMPACTION_PROMPT_FILE);
-    let content = fs::read_to_string(path).ok()?;
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        // File (or the prompts/ dir) absent → normal fallback, no log spam.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        // File exists but is unreadable (permissions) or not valid UTF-8 —
+        // surface it so a broken package is not silently masked by the
+        // built-in default.
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to read compaction prompt; falling back to built-in default"
+            );
+            return None;
+        }
+    };
     let trimmed = content.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
@@ -86,7 +107,12 @@ pub fn build_system_prompt_with_mode(
             // for context compaction / episode distillation, not a section
             // of the main dialog system prompt. Including it here would
             // leak summarization meta-instructions into every LLM call.
-            if name == COMPACTION_PROMPT_STEM {
+            //
+            // Exact filename match keeps the exclusion symmetric with
+            // `load_compaction_prompt`: only `summary.md` has special
+            // semantics; any other name (SUMMARY.md, summary.txt) is an
+            // ordinary prompt section.
+            if path.file_name().is_some_and(|n| n == COMPACTION_PROMPT_FILE) {
                 continue;
             }
 
@@ -326,5 +352,49 @@ Be friendly and welcoming.
         assert!(prompt.contains("test agent"));
         assert!(prompt.contains("Always be polite."));
         assert!(!prompt.contains("summarizer directive"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_does_not_exclude_summary_case_variant() {
+        // Symmetry with load_compaction_prompt: only the exact filename
+        // `summary.md` has special semantics. A case variant like
+        // `SUMMARY.md` is an ordinary prompt section — it must NOT be
+        // silently dropped (on case-insensitive filesystems it would still
+        // be read as the compaction prompt, so excluding it here would make
+        // it invisible in BOTH places).
+        let dir = std::env::temp_dir().join("acowork-test-compaction-case-variant");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("SUMMARY.md"),
+            "Case variant summary directive.",
+        )
+        .unwrap();
+        let prompt = build_system_prompt(&dir).unwrap();
+        assert!(prompt.contains("test agent"));
+        assert!(prompt.contains("Case variant summary directive."));
+        assert!(prompt.contains("## SUMMARY"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_does_not_exclude_summary_txt() {
+        // Symmetry with load_compaction_prompt: only `summary.md` is
+        // excluded. `summary.txt` (collected by collect_markdown_files but
+        // never loaded as the compaction prompt) must surface as an
+        // ordinary section rather than being silently dropped.
+        let dir = std::env::temp_dir().join("acowork-test-compaction-txt-variant");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(
+            dir.join("prompts").join("summary.txt"),
+            "Txt summary directive.",
+        )
+        .unwrap();
+        let prompt = build_system_prompt(&dir).unwrap();
+        assert!(prompt.contains("test agent"));
+        assert!(prompt.contains("Txt summary directive."));
+        assert!(prompt.contains("## summary"));
     }
 }

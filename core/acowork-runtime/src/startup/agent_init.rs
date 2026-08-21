@@ -292,6 +292,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let system_prompt = build_system_prompt_with_mode(&loaded.package_dir, skill_mode)?;
     tracing::debug!(prompt_len = system_prompt.len(), "System prompt built");
 
+    // ADR-053: agent-specific compaction prompt (prompts/summary.md, optional).
+    // Loaded once here (Phase A) so BOTH Gateway mode (phase_b_init_session)
+    // and Standalone mode (cli.rs AgentLoop construction) resolve the same
+    // value — the file is a package-level declaration, so the package load
+    // point is its single source of truth. `None` (no file) means the
+    // built-in COMPACTION_SYSTEM_PROMPT fallback is used at compaction time.
+    let compaction_prompt =
+        crate::package::prompt_builder::load_compaction_prompt(&loaded.package_dir);
+    if let Some(ref p) = compaction_prompt {
+        tracing::debug!(
+            prompt_len = p.len(),
+            "Loaded agent-specific compaction prompt from prompts/summary.md"
+        );
+    }
+
     // ── Step 3.5: Load skill registry ───────────────────────────────
     let skills_dir = loaded.package_dir.join("skills");
     let _skill_registry = crate::skills::parser::SkillRegistry::load_from_dir(&skills_dir)
@@ -888,6 +903,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         active_tools,
         full_tool_specs,
         system_prompt,
+        compaction_prompt,
         memory_session,
         mcp_notifier,
         workspace_resolver,

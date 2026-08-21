@@ -87,6 +87,14 @@ pub(crate) struct AgentBootContext {
     // ADR-034 §8 Phase 6 cleanup: legacy standalone-mode gRPC path removed.
     pub system_prompt: String,
 
+    /// ADR-053: agent-specific compaction prompt loaded from
+    /// `prompts/summary.md` (package-level declaration). `None` → the
+    /// built-in `COMPACTION_SYSTEM_PROMPT` fallback is used at compaction
+    /// time. Loaded once in Phase A so Gateway and Standalone modes behave
+    /// identically; each `AgentCore` constructor injects it into
+    /// [`crate::agent::AgentCore::compaction_prompt`].
+    pub compaction_prompt: Option<String>,
+
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,
     pub mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier>,

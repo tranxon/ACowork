@@ -245,17 +245,11 @@ pub(crate) async fn phase_b_init_session(
         c.compat_cache = ctx.compat_cache.take();
 
         // Agent-specific compaction prompt (prompts/summary.md, optional).
-        // Loaded here because the package_dir is only known after package
-        // loading; `None` (no file) means the built-in
-        // COMPACTION_SYSTEM_PROMPT fallback is used at compaction time.
-        c.compaction_prompt =
-            crate::package::prompt_builder::load_compaction_prompt(&ctx.loaded.package_dir);
-        if let Some(ref p) = c.compaction_prompt {
-            tracing::debug!(
-                prompt_len = p.len(),
-                "Loaded agent-specific compaction prompt from prompts/summary.md"
-            );
-        }
+        // Loaded once in Phase A (see `AgentBootContext::compaction_prompt`)
+        // so Gateway and Standalone modes share the same resolution; `None`
+        // (no file) means the built-in COMPACTION_SYSTEM_PROMPT fallback is
+        // used at compaction time.
+        c.compaction_prompt = ctx.compaction_prompt.clone();
 
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).

@@ -258,6 +258,13 @@ async fn async_main(
 
         agent_loop.core.embedding_provider = agent_ctx.emb_provider.clone();
         agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
+        // ADR-053: this branch bypasses `phase_b_init_session`, so the
+        // agent-specific compaction prompt (prompts/summary.md) must be
+        // injected here — mirroring the Phase B injection for Gateway mode.
+        // The value was already loaded once in Phase A (see
+        // `AgentBootContext::compaction_prompt`), so both modes resolve the
+        // same package declaration.
+        agent_loop.core.compaction_prompt = agent_ctx.compaction_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
         agent_loop.init_memory_store(work_dir_path);
 

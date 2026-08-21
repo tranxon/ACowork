@@ -24,7 +24,7 @@
    ```
 3. **消除语义混用**：compaction 路径**不再借用** `system_prompt_override`（agent_config.json 中用于覆盖主对话 system prompt 的字段）。压缩是独立的摘要任务，其指令属于包声明，不属于运行时配置。
 4. **主 prompt 排除**：`prompt_builder` 组装主 system prompt 时**跳过 `summary.md`**，防止摘要元指令泄漏进每一轮 LLM 调用。
-5. **全路径统一**：压缩主路径（`loop_context.rs`）与三条蒸馏路径（`episode_distill.rs` 的 `compact_full_context` / `compact_messages` / `distill_on_session_end`）均使用同一解析结果。
+5. **全路径统一**：压缩主路径（`loop_context.rs`）与蒸馏路径（`episode_distill.rs` 的 `compact_messages`，以及预留的 `distill_on_session_end`）均使用同一解析结果；加载点收敛到 Phase A，Gateway 与 Standalone 两种模式行为一致。
 
 ---
 
@@ -88,7 +88,7 @@ pub fn load_compaction_prompt(package_dir: &Path) -> Option<String>;
 ```
 
 - `AgentCore` 新增 `compaction_prompt: Option<String>` 字段（与 `system_prompt_override` 并列但语义独立）。
-- `session_init.rs` Phase B 注入：`load_compaction_prompt(&ctx.loaded.package_dir)`。
+- **加载收敛到 Phase A**（`agent_init.rs` Step 3，system prompt 构建之后）：`load_compaction_prompt(&loaded.package_dir)` 只执行一次，结果存入 `AgentBootContext.compaction_prompt`。两种 AgentCore 构造入口都从该字段注入——Gateway 模式（`session_init.rs` Phase B 的 `Arc::get_mut`）与 Standalone 模式（`cli.rs` 直接构造 `AgentLoop` 后赋值）——保证同一 `.agent` 包在两种模式下解析出相同的压缩指令，不存在模式分裂。
 - `loop_context.rs` 解析链：
 
 ```rust
@@ -101,13 +101,20 @@ self.core.compaction_prompt
 
 ### 3.3 主 prompt 排除
 
-`build_system_prompt_with_mode` 在遍历 `prompts/*.md` 时按文件名（stem）跳过 `summary.md`。这是 `prompts/` "全量拼接"规则的唯一例外，理由：压缩指令是给摘要 LLM 的元指令，进入主对话 system prompt 会污染每一轮 LLM 调用。
+`build_system_prompt_with_mode` 在遍历 `prompts/*.md` 时按**精确文件名**（`summary.md`）跳过该文件。这是 `prompts/` "全量拼接"规则的唯一例外，理由：压缩指令是给摘要 LLM 的元指令，进入主对话 system prompt 会污染每一轮 LLM 调用。
+
+排除与加载使用**同一匹配判据**（精确文件名 `summary.md`），保证"被排除出主 prompt"与"被加载为压缩指令"始终指向同一个文件；任何其他命名（`SUMMARY.md`、`summary.txt`）一律按普通 prompt 段处理，不静默丢失。
 
 ### 3.4 保留不变的
 
 - 内置 `COMPACTION_SYSTEM_PROMPT` 作为兜底（无 `summary.md` 的包行为不变）。
 - `build_compaction_system_prompt(base, identity_context)` 仍将用户身份（语言）指令追加到 base 之后——`summary.md` 作为 base 同样受益于语言规则。
 - `COMPACT_PROMPT`（携带 `<conversation>` 正文的 user 消息模板）不变。
+
+### 3.5 限制与预留
+
+- **启动时静态加载**：`compaction_prompt` 在 Phase A 读取一次，之后不随包升级 / 热更新重载（与 system prompt 的启动时编译行为一致）。包作者更新 `summary.md` 后需重启 Runtime 生效。
+- **`distill_on_session_end` 为预留路径**：该入口（session 关闭时的全量蒸馏）当前**无调用方**，签名已接入 `compaction_prompt` 参数但未激活；实际生效的蒸馏路径为 `loop_session.rs` 的 tail 蒸馏（`compact_messages`）与 `loop_context.rs` 的压缩主路径（`compact_via_llm`）。后续激活 session-close 蒸馏时需从 `AgentCore` 传入同一字段。
 
 ---
 
@@ -117,9 +124,12 @@ self.core.compaction_prompt
 
 | 文件 | 改动 |
 |---|---|
-| `core/acowork-runtime/src/package/prompt_builder.rs` | `load_compaction_prompt` + 主 prompt 排除 `summary.md` + 5 个单元测试 |
+| `core/acowork-runtime/src/package/prompt_builder.rs` | `load_compaction_prompt`（区分缺失/读取失败）+ 主 prompt 按精确文件名排除 `summary.md` + 7 个单元测试 |
 | `core/acowork-runtime/src/agent/agent_core.rs` | 新增 `compaction_prompt` 字段 + new 初始化 + Clone impl |
-| `core/acowork-runtime/src/startup/session_init.rs` | Phase B 注入 |
+| `core/acowork-runtime/src/startup/agent_init.rs` | Phase A 加载 `compaction_prompt` 并存入 `AgentBootContext` |
+| `core/acowork-runtime/src/startup/context.rs` | `AgentBootContext` 新增 `compaction_prompt: Option<String>` 字段 |
+| `core/acowork-runtime/src/startup/session_init.rs` | Phase B 从 ctx 注入（不再直接读文件） |
+| `core/acowork-runtime/src/cli.rs` | Standalone 分支从 ctx 注入（消除模式分裂） |
 | `core/acowork-runtime/src/agent/loop_context.rs` | 压缩解析链改用 `compaction_prompt`，移除 `system_prompt_override` 借用 |
 | `core/acowork-runtime/src/episode_distill.rs` | 三个入口新增 `compaction_prompt: Option<&str>` 参数 |
 | `core/acowork-runtime/src/agent/loop_session.rs` | tail 蒸馏传 `core.compaction_prompt` |
@@ -136,9 +146,9 @@ self.core.compaction_prompt
 ### 4.3 验证
 
 - `cargo build -p acowork-runtime`：通过。
-- `cargo test -p acowork-runtime --lib`：886 passed（含 5 个新测试）。
+- `cargo test -p acowork-runtime --lib`：888 passed（含 7 个 prompt_builder 新测试；`test_run_falls_back_to_user_message_when_raw_is_none` 为 pre-existing 时序性 flaky，与本次改动无关）。
+- `cargo clippy -p acowork-runtime --all-targets -- -D warnings`：通过，零警告。
 - 集成测试：`mqtt_e2e_full` / `mqtt_e2e` / `conversation_session_tokens` / `builtin_tools_mutation` 全绿；`shell_risk_e2e` 失败为 pre-existing（与本次改动无关，见会话记录）。
-- `cargo clippy --all-targets -- -D warnings`：见最终验证记录。
 
 ---
 
@@ -150,7 +160,7 @@ self.core.compaction_prompt
 
 ### 5.2 summary.md 放包根目录（否决）
 
-避免 `prompt_builder` 排除逻辑，但破坏"所有 prompt 文件集中在 `prompts/`"的组织原则，且与 `system.md` 不对称。一行排除逻辑（`name == "summary"`）换来组织一致性，值得。
+避免 `prompt_builder` 排除逻辑，但破坏"所有 prompt 文件集中在 `prompts/`"的组织原则，且与 `system.md` 不对称。一行排除逻辑（精确文件名匹配）换来组织一致性，值得。
 
 ### 5.3 压缩指令也用 frontmatter 元数据（否决）
 
