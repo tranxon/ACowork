@@ -19,7 +19,7 @@ use globset::Glob;
 const DEFAULT_SHELL_RISK_RULES: &str = include_str!("shell_risk_rules.toml");
 
 /// Risk level for a shell command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum ShellRisk {
     /// Low risk: basic file operations (ls, cat, grep, etc.)
     Low,
@@ -29,6 +29,20 @@ pub enum ShellRisk {
     High,
     /// Blocked: clearly destructive operations (rm -rf /, mkfs, etc.)
     Blocked,
+}
+
+// ShellRisk needs Serialize so generate_user_rules_toml can render a
+// user-facing TOML file with embedded rules shown as commented examples.
+// Using serde(rename_all = "PascalCase") is unnecessary because we
+// already capitalize the variants; explicit serde rename keeps it
+// matching the canonical strings ("Low", "Medium", "High", "Blocked").
+impl serde::Serialize for ShellRisk {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.label())
+    }
 }
 
 impl ShellRisk {
@@ -82,6 +96,136 @@ pub struct ShellRiskRules {
     pub rules: Vec<ShellRiskRule>,
 }
 
+/// Read and parse the user's `{work_dir}/config/shell_risk_rules.toml`
+/// if it exists and is valid. Returns `None` when the file is missing,
+/// unreadable, or unparseable — all three are logged as warnings so the
+/// caller can use embedded defaults without losing context.
+///
+/// Splitting this out keeps `ShellRiskRules::load` readable and gives
+/// the merge-load tests a single seam to exercise.
+fn read_user_rules(work_dir: &Path) -> Option<ShellRiskRules> {
+    let user_path = work_dir.join("config").join("shell_risk_rules.toml");
+    if !user_path.exists() {
+        return None;
+    }
+    let content = match std::fs::read_to_string(&user_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                path = %user_path.display(),
+                error = %e,
+                "Failed to read user shell risk rules; using embedded defaults only"
+            );
+            return None;
+        }
+    };
+    match toml::from_str::<ShellRiskRules>(&content) {
+        Ok(rules) => Some(rules),
+        Err(e) => {
+            tracing::warn!(
+                path = %user_path.display(),
+                error = %e,
+                "Failed to parse user shell risk rules; using embedded defaults only"
+            );
+            None
+        }
+    }
+}
+
+/// Generate a fresh user `shell_risk_rules.toml` whose body is empty
+/// but whose header carries the embedded binary rules as **comments**.
+///
+/// Why this shape:
+/// - The user opens the file in an editor and sees, at a glance, which
+///   commands the binary already gates. They do not waste effort adding
+///   duplicate rules, and they see the canonical `risk` / `reason`
+///   strings so they can mirror the same style.
+/// - The TOML parser ignores `#` comments, so the file parses cleanly
+///   to `ShellRiskRules { rules: vec![] }` and the merged
+///   `ShellRiskRules::load` falls back to the embedded rules verbatim.
+/// - The user's actual rules live in the bottom block. They are loaded
+///   first by `load` and therefore shadow the embedded copies — the
+///   documented way to relax a binary default.
+///
+/// Caller is responsible for the file write; this function is pure so
+/// the test suite can inspect the string without touching the disk.
+///
+/// `build_rev` is a short string that uniquely identifies the binary's
+/// embedded rule set (e.g. `git rev-parse --short HEAD` + build date).
+/// It is informational — the user can compare two files and see whether
+/// the embedded snapshot is stale.
+pub fn generate_user_rules_toml(build_rev: &str) -> Result<String, String> {
+    let embedded = ShellRiskRules::embedded_parsed()?;
+    let embedded_toml = toml::to_string_pretty(&embedded)
+        .map_err(|e| format!("Failed to re-serialize embedded rules: {}", e))?;
+
+    // Comment out every line of the embedded TOML so it parses as
+    // `rules = []` while still being visible to humans. Preserve
+    // original line breaks.
+    let commented = embedded_toml
+        .lines()
+        .map(|line| if line.is_empty() { String::new() } else { format!("# {}", line) })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let header = format!(
+        "# ─── DO NOT EDIT THIS SECTION ────────────────────────────────────────\n\
+         # The block below is the embedded shell_risk_rules.toml that ships\n\
+         # inside the acowork-runtime binary. It is included here purely as\n\
+         # a reference so you can see what is already covered before you\n\
+         # add new rules.\n\
+         #\n\
+         # • Edits to this commented block are IGNORED — the binary always\n\
+         #   loads its own copy at startup.\n\
+         # • To OVERRIDE a rule, copy the line you want to change into the\n\
+         #   \"YOUR RULES\" section at the bottom of this file. Your copy\n\
+         #   loads first, so it wins on the same (command, subcommand,\n\
+         #   args_pattern) key.\n\
+         # • To ADD a brand-new rule, write it in the \"YOUR RULES\" section.\n\
+         #\n\
+         # Build identifier: {build_rev}\n\
+         # Rule count:       {count}\n\
+         # ────────────────────────────────────────────────────────\n",
+        build_rev = build_rev,
+        count = embedded.rules.len(),
+    );
+
+    let footer = "\n\
+        \n# ─── YOUR RULES (edit below) ─────────────────────────────────────────\n\
+         # Rules here are MERGED with the binary defaults at load time.\n\
+         # Evaluation order: your rules load first, then the embedded\n\
+         # rules; the first match wins.\n\
+         #\n\
+         # Add a rule like this:\n\
+         #\n\
+         #   [[rules]]\n\
+         #   command = \"my-tool\"\n\
+         #   subcommand = \"dangerous\"\n\
+         #   args_pattern = \"--force\"\n\
+         #   risk = \"Blocked\"\n\
+         #   reason = \"Custom: this tool can corrupt the workspace\"\n\
+         #\n\
+         # Fields:\n\
+         #   command      (required) primary command name, case-insensitive\n\
+         #   subcommand   (optional) subcommand, case-insensitive\n\
+         #   args_pattern (optional) glob (\"-f*\") or regex (\"regex:^--force\");\n\
+         #                           matched against the joined remaining\n\
+         #                           tokens (see ShellRiskRules::match_rule)\n\
+         #   risk         (required) \"Low\" | \"Medium\" | \"High\" | \"Blocked\"\n\
+         #   reason       (optional) human-readable explanation\n\
+         #\n\
+         # The body below MUST start with `rules = []` (or a populated\n\
+         # `[[rules]]` table-of-rules). Without it, the TOML parser fails\n\
+         # with `missing field 'rules'`. The empty list signals \"no user\n\
+         # overrides\", which ShellRiskRules::load merges cleanly with the\n\
+         # embedded defaults — the binary's safety rules take effect\n\
+         # verbatim.\n\
+         \n\
+         rules = []\n";
+
+    Ok(format!("{}{}\n{}", header, commented, footer))
+}
+
 impl ShellRiskRules {
     /// Returns the embedded default rules TOML content (the same source
     /// used as fallback when no user override exists on disk).
@@ -96,57 +240,101 @@ impl ShellRiskRules {
         Self::load(work_dir)
     }
 
-    /// Load shell risk rules with the following precedence:
-    /// 1. User override at `{work_dir}/config/shell_risk_rules.toml`
-    /// 2. Built-in defaults embedded in the binary
+    /// Load shell risk rules by **merging** user override with built-in
+    /// defaults, not by substituting one for the other.
     ///
-    /// A missing or unparseable user override falls back to the embedded
-    /// defaults (with a warning), so the assessment engine is never left
-    /// with an empty rule set. An error is returned only if the embedded
-    /// defaults themselves fail to parse (cannot happen in practice).
+    /// Merged rule set (in evaluation order, first match wins via
+    /// `match_rule`):
+    ///
+    /// 1. **User rules** — read from `{work_dir}/config/shell_risk_rules.toml`,
+    ///    in the order they appear in that file. These shadow any
+    ///    binary-built-in rule with the same `(command, subcommand,
+    ///    args_pattern)` key.
+    /// 2. **Embedded defaults** — compiled into the binary via
+    ///    `include_str!`. Ship upgrades bring new rules here automatically;
+    ///    existing user rules are not disturbed.
+    ///
+    /// Why merge instead of "user wins if present":
+    ///
+    /// - **No version drift.** A user file created against acowork v1
+    ///   silently shadows v2's new safety rules (`rm -rf`, `git restore`,
+    ///   ...) for as long as it exists. Merging keeps binary upgrades
+    ///   live without forcing the user to re-edit their file.
+    /// - **Intentional overrides still work.** A user who wants to relax a
+    ///   binary default adds their own rule at the top of their file —
+    ///   user rules load first, so they win on the same key.
+    /// - **A stale "I just opened this once" user file** no longer
+    ///   permanently shadows future binary improvements.
+    ///
+    /// Error & fallback policy:
+    /// - Missing user file → use embedded only.
+    /// - User file present but unparseable → warn, ignore the file, use
+    ///   embedded only. (The previous "exclusive user file" semantics
+    ///   would have produced an empty rule set, which is worse than a
+    ///   parse failure — silent reduction of safety.)
+    /// - Embedded defaults fail to parse → return error (cannot happen
+    ///   in practice; the embedded TOML is compile-time-checked).
     pub fn load(work_dir: &Path) -> Result<Self, String> {
-        let user_path = work_dir.join("config").join("shell_risk_rules.toml");
-        if user_path.exists() {
-            match std::fs::read_to_string(&user_path) {
-                Ok(content) => {
-                    // The on-disk format is a table-of-rules: `{ rules: [ ... ] }`
-                    // (see `shell_risk_rules.toml`), which maps to `ShellRiskRules`,
-                    // NOT a bare `Vec<ShellRiskRule>`.
-                    match toml::from_str::<ShellRiskRules>(&content) {
-                        Ok(rules) => {
-                            tracing::info!(
-                                rules_count = rules.rules.len(),
-                                path = %user_path.display(),
-                                "Loaded shell risk rules (user override)"
-                            );
-                            return Ok(rules);
-                        }
-                        Err(e) => tracing::warn!(
-                            path = %user_path.display(),
-                            error = %e,
-                            "Failed to parse user shell risk rules; falling back to embedded defaults"
-                        ),
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    path = %user_path.display(),
-                    error = %e,
-                    "Failed to read user shell risk rules; falling back to embedded defaults"
-                ),
-            }
-        }
-        // Fall back to embedded defaults.
-        let rules: ShellRiskRules = toml::from_str(DEFAULT_SHELL_RISK_RULES)
+        let user_rules = read_user_rules(work_dir);
+
+        // Parse embedded defaults. This is a `&'static str` from
+        // `include_str!` and is exercised by every test in this module,
+        // so a parse error here is genuinely a build-time bug.
+        let embedded: ShellRiskRules = toml::from_str(DEFAULT_SHELL_RISK_RULES)
             .map_err(|e| format!("Failed to parse embedded shell risk rules: {}", e))?;
-        tracing::info!(
-            rules_count = rules.rules.len(),
-            source = "embedded",
-            "Loaded shell risk rules (built-in defaults)"
-        );
-        Ok(rules)
+
+        let merged = match user_rules {
+            Some(rules) => {
+                tracing::info!(
+                    user_count = rules.rules.len(),
+                    embedded_count = embedded.rules.len(),
+                    merged_count = rules.rules.len() + embedded.rules.len(),
+                    path = %work_dir.join("config").join("shell_risk_rules.toml").display(),
+                    "Loaded shell risk rules (user + embedded merged; user rules take precedence)"
+                );
+                let mut all = rules.rules;
+                all.extend(embedded.rules);
+                ShellRiskRules { rules: all }
+            }
+            None => {
+                tracing::info!(
+                    rules_count = embedded.rules.len(),
+                    source = "embedded",
+                    "Loaded shell risk rules (built-in defaults; no user override)"
+                );
+                embedded
+            }
+        };
+        Ok(merged)
+    }
+
+    /// Returns the parsed embedded default rule set (the rules that ship
+    /// inside the binary at compile time). Useful for the
+    /// "generate-user-toml-with-embedded-as-comment" UX flow.
+    pub fn embedded_parsed() -> Result<Self, String> {
+        toml::from_str(DEFAULT_SHELL_RISK_RULES)
+            .map_err(|e| format!("Failed to parse embedded shell risk rules: {}", e))
+    }
+
+    /// Returns the raw TOML text of the embedded defaults, for writing
+    /// it as a comment header into a freshly generated user file.
+    pub fn embedded_toml() -> &'static str {
+        DEFAULT_SHELL_RISK_RULES
     }
 
     /// Match a command against rules. Returns the first matching rule.
+    ///
+    /// Token layout for `parts`:
+    ///   parts[0]            = primary command name
+    ///   parts[1]            = subcommand slot (or first token if no subcommand)
+    ///   parts[2..]          = remaining args
+    ///
+    /// Why `args_pattern` scans `parts[1..]` (when no `subcommand` is set):
+    /// a command like `rm -rf ./foo` has no subcommand — `-rf` is a flag
+    /// sitting in `parts[1]`. Scanning only `parts[2..]` would miss the flag
+    /// and silently drop the rule. The explicit `subcommand` field still
+    /// hard-anchors `parts[1]` and shifts the args window to `parts[2..]`
+    /// (e.g. `docker rm -f xxx`).
     pub fn match_rule(&self, command: &str) -> Option<&ShellRiskRule> {
         let parts: Vec<&str> = command.split_whitespace().collect();
         if parts.is_empty() {
@@ -160,15 +348,20 @@ impl ShellRiskRules {
             }
 
             // Match subcommand if specified
-            if let Some(ref sub) = rule.subcommand
-                && (parts.len() < 2 || parts[1].to_lowercase() != sub.to_lowercase())
-            {
-                continue;
-            }
+            let args_start = if let Some(ref sub) = rule.subcommand {
+                if parts.len() < 2 || parts[1].to_lowercase() != sub.to_lowercase() {
+                    continue;
+                }
+                2
+            } else {
+                // No subcommand: include parts[1..] in args scan so flags
+                // like `-rf` on a bare command are seen by the pattern.
+                1
+            };
 
             // Match args pattern if specified
             if let Some(ref pattern) = rule.args_pattern {
-                let args = &parts[2..].join(" ");
+                let args = &parts[args_start..].join(" ");
                 if !self.pattern_matches(pattern, args) {
                     continue;
                 }
@@ -180,12 +373,21 @@ impl ShellRiskRules {
         None
     }
 
-    /// Check if a pattern matches the given text.
+    /// Check if a pattern matches the given `args` string.
     ///
-    /// Supports:
-    /// - Exact match
-    /// - Glob patterns (e.g., "-f*", "--force*")
-    /// - Regex patterns (prefix with "regex:")
+    /// Three tiers:
+    /// - `regex:` prefix: full-string regex match. Authors control anchoring
+    ///   with `^` / `$` as needed.
+    /// - Glob / exact pattern: matches if the pattern matches the entire
+    ///   `args` string **or** any whitespace-separated token. This is the
+    ///   semantics authors actually want for shell args: `args_pattern =
+    ///   "HEAD"` should fire on `git checkout HEAD` and also on `git checkout
+    ///   HEAD 2>&1`, `args_pattern = "-f"` should fire on `rm -rf -f`, etc.
+    ///   Without token fallback, a stray `2>&1` or pipe target silently
+    ///   masks the rule.
+    ///
+    /// Glob semantics (`*`, `?`, `[...]`) come from `globset`; an exact
+    /// pattern is just the degenerate glob case.
     fn pattern_matches(&self, pattern: &str, text: &str) -> bool {
         if let Some(regex_pattern) = pattern.strip_prefix("regex:") {
             return regex::Regex::new(regex_pattern)
@@ -193,9 +395,16 @@ impl ShellRiskRules {
                 .unwrap_or(false);
         }
 
-        // Use globset for correct glob semantics (multi-*, ?, [...])
+        // Use globset for correct glob semantics (multi-*, ?, [...]).
         match Glob::new(pattern) {
-            Ok(glob) => glob.compile_matcher().is_match(text),
+            Ok(glob) => {
+                let matcher = glob.compile_matcher();
+                if matcher.is_match(text) {
+                    return true;
+                }
+                text.split_whitespace()
+                    .any(|token| matcher.is_match(token))
+            }
             Err(_) => false,
         }
     }
@@ -531,24 +740,17 @@ const BLOCKED_PATTERNS: &[&str] = &[
 /// This prevents evasion via `cd /safe/path && rm -rf .` where the safe first
 /// command would otherwise mask the destructive second one.
 ///
-/// User-defined rules are checked first (Phase 0), allowing parameter-aware
-/// risk classification (e.g., `git checkout HEAD` → High).
+/// User-defined rules participate inside the per-sub-command loop (Phase 3)
+/// as the first tier of assessment — they can capture parameter-aware
+/// patterns (e.g. `git checkout HEAD` → High) that the built-in classify
+/// table cannot. Earlier revisions short-circuited on a single user-rule
+/// match of the full command, which let `cd /tmp && git checkout HEAD`
+/// bypass the rule (the leading `cd` made `parts[0]` not match `git`).
+/// Running user rules per-sub-command keeps all three phases aligned on
+/// the same chain-aware invariant.
 pub fn assess_base_risk(command: &str, rules: &ShellRiskRules) -> ShellRiskAssessment {
     let trimmed = command.trim();
     let trimmed_lower = trimmed.to_lowercase();
-
-    // ── Phase 0: Check user-defined rules first ──
-    if let Some(rule) = rules.match_rule(trimmed) {
-        return ShellRiskAssessment {
-            risk: rule.risk,
-            base_risk: rule.risk,
-            reason: rule.reason.clone(),
-            executable_paths: extract_executable_paths(trimmed),
-            provenance_elevated: false,
-        };
-    }
-
-    // Split into individual sub-commands by chain separators (&&, ;)
     let sub_commands = split_command_chain(trimmed);
 
     // ── Phase 1: Check blocked patterns on the FULL command AND each sub-command ──
@@ -604,6 +806,10 @@ pub fn assess_base_risk(command: &str, rules: &ShellRiskRules) -> ShellRiskAsses
     }
 
     // ── Phase 3: Analyze EACH sub-command and take the highest risk ──
+    //
+    // User-defined rules and built-in classify now share this loop. Per
+    // sub-command we take `max(user_rule_risk, classify_risk)` so neither
+    // tier can mask the other across chain separators.
     let mut max_risk = ShellRisk::Low;
     let mut max_reason = String::new();
 
@@ -613,30 +819,10 @@ pub fn assess_base_risk(command: &str, rules: &ShellRiskRules) -> ShellRiskAsses
             continue;
         }
 
-        let (primary_cmd, is_sudo) = extract_primary_command(sub_trimmed);
-
-        let sub_risk = if is_sudo {
-            let r = ShellRisk::High;
-            max_reason = "Command uses sudo (privilege escalation)".to_string();
-            r
-        } else {
-            let r = classify_command(&primary_cmd);
-            if risk_ordinal(r) > risk_ordinal(max_risk) {
-                max_reason = match r {
-                    ShellRisk::Low => format!("Low-risk sub-command: {}", primary_cmd),
-                    ShellRisk::Medium => format!(
-                        "Medium-risk sub-command: {} (can delete/modify files)",
-                        primary_cmd
-                    ),
-                    ShellRisk::High => format!("High-risk sub-command: {}", primary_cmd),
-                    ShellRisk::Blocked => format!("Blocked sub-command: {}", primary_cmd),
-                };
-            }
-            r
-        };
-
+        let (sub_risk, sub_reason) = assess_sub_command(sub_trimmed, rules);
         if risk_ordinal(sub_risk) > risk_ordinal(max_risk) {
             max_risk = sub_risk;
+            max_reason = sub_reason;
         }
     }
 
@@ -662,6 +848,43 @@ pub fn assess_base_risk(command: &str, rules: &ShellRiskRules) -> ShellRiskAsses
         executable_paths: extract_executable_paths(trimmed),
         provenance_elevated: false,
     }
+}
+
+/// Assess a single sub-command's risk.
+///
+/// User-defined rules take precedence over the built-in `classify_command`
+/// table, since they can capture parameter-aware patterns that classify
+/// cannot (e.g. `git checkout HEAD` is High while plain `git` is Low).
+/// Called from `assess_base_risk`'s per-sub-command loop, so user rules
+/// now share the same chain-aware invariant as Phase 1 (Blocked patterns)
+/// and the built-in classify tier.
+fn assess_sub_command(sub: &str, rules: &ShellRiskRules) -> (ShellRisk, String) {
+    // User-defined rule — parameter-aware, takes precedence.
+    if let Some(rule) = rules.match_rule(sub) {
+        return (rule.risk, rule.reason.clone());
+    }
+
+    // Built-in classify by primary command name.
+    let (primary_cmd, is_sudo) = extract_primary_command(sub);
+    let r = if is_sudo {
+        ShellRisk::High
+    } else {
+        classify_command(&primary_cmd)
+    };
+    let reason = if is_sudo {
+        "Command uses sudo (privilege escalation)".to_string()
+    } else {
+        match r {
+            ShellRisk::Low => format!("Low-risk sub-command: {}", primary_cmd),
+            ShellRisk::Medium => format!(
+                "Medium-risk sub-command: {} (can delete/modify files)",
+                primary_cmd
+            ),
+            ShellRisk::High => format!("High-risk sub-command: {}", primary_cmd),
+            ShellRisk::Blocked => format!("Blocked sub-command: {}", primary_cmd),
+        }
+    };
+    (r, reason)
 }
 
 /// Ordinal for ShellRisk comparison.
@@ -1414,6 +1637,97 @@ mod tests {
         assert_eq!(assessment.risk, ShellRisk::Low);
     }
 
+    // ── User rules across `&&` / `;` chains ────────────────────────────
+    //
+    // Regression: the original Phase 0 short-circuit ran match_rule on the
+    // full command and only matched `parts[0]`. A command prefixed with a
+    // benign sub-command (the common `cd <work_dir> && ...` pattern) would
+    // therefore bypass every `command = "git"` rule. These tests pin the
+    // invariant that user rules apply per-sub-command, sharing the same
+    // chain-awareness as Phase 1 (Blocked) and the built-in classify tier.
+
+    /// `cd /tmp && git checkout HEAD` — the leading `cd` must not mask the
+    /// `git checkout HEAD → High` rule on the second sub-command.
+    #[test]
+    fn test_user_rule_matches_sub_command_in_chain_with_cd_prefix() {
+        let rules = git_checkout_head_high_rule();
+        let assessment = assess_base_risk(
+            "cd /d/projects/tranxon/ACoworkDev && git checkout HEAD 2>&1",
+            &rules,
+        );
+        assert_eq!(assessment.risk, ShellRisk::High);
+        assert!(assessment.reason.contains("Destructive"));
+    }
+
+    /// `echo hi && git checkout HEAD` — rule must still fire when the
+    /// matched sub-command is at the tail of the chain.
+    #[test]
+    fn test_user_rule_matches_sub_command_at_chain_tail() {
+        let rules = git_checkout_head_high_rule();
+        let assessment =
+            assess_base_risk(r#"echo "preamble" && git checkout HEAD"#, &rules);
+        assert_eq!(assessment.risk, ShellRisk::High);
+    }
+
+    /// `cd /tmp && git checkout HEAD && echo done` — rule must fire even
+    /// when followed by additional sub-commands.
+    #[test]
+    fn test_user_rule_matches_sub_command_between_safe_commands() {
+        let rules = git_checkout_head_high_rule();
+        let assessment = assess_base_risk(
+            r#"cd /tmp && git checkout HEAD && echo "done""#,
+            &rules,
+        );
+        assert_eq!(assessment.risk, ShellRisk::High);
+    }
+
+    /// Phase 1 (Blocked patterns) on the full command string still wins
+    /// over per-sub-command user rules — defense in depth must not regress.
+    #[test]
+    fn test_blocked_pattern_wins_over_user_rule_in_chain() {
+        let rules = git_checkout_head_high_rule();
+        // `git status` matches no rule (no "HEAD"); `rm -rf /` matches Blocked.
+        let assessment =
+            assess_base_risk("cd /tmp && git status && rm -rf /", &rules);
+        assert_eq!(assessment.risk, ShellRisk::Blocked);
+        assert!(assessment.reason.contains("Blocked"));
+    }
+
+    /// No rule matches → fall through to classify per sub-command.
+    /// `cd /tmp && git status` is Low because `git` is in LOW_RISK_COMMANDS.
+    #[test]
+    fn test_user_rule_no_match_falls_through_to_classify_in_chain() {
+        let rules = git_checkout_head_high_rule();
+        let assessment =
+            assess_base_risk("cd /tmp && git status", &rules);
+        assert_eq!(assessment.risk, ShellRisk::Low);
+    }
+
+    /// `sudo` in a chain sub-command must still escalate to High via the
+    /// built-in tier (no user rule required).
+    #[test]
+    fn test_sudo_in_chain_sub_command_is_high() {
+        let rules = ShellRiskRules::default();
+        let assessment =
+            assess_base_risk("cd /tmp && sudo apt install foo", &rules);
+        assert_eq!(assessment.risk, ShellRisk::High);
+        assert!(assessment.reason.contains("sudo"));
+    }
+
+    /// Helper: the `git checkout HEAD → High` rule used by chain tests.
+    fn git_checkout_head_high_rule() -> ShellRiskRules {
+        ShellRiskRules {
+            rules: vec![ShellRiskRule {
+                command: "git".to_string(),
+                subcommand: Some("checkout".to_string()),
+                args_pattern: Some("HEAD".to_string()),
+                risk: ShellRisk::High,
+                reason: "Destructive: discards all local uncommitted changes"
+                    .to_string(),
+            }],
+        }
+    }
+
     #[test]
     fn test_rule_glob_pattern_matches() {
         let rules = ShellRiskRules {
@@ -1465,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_user_override_takes_precedence() {
+     fn test_load_user_override_takes_precedence() {
         let dir = temp_work_dir("user-override");
         std::fs::create_dir_all(dir.join("config")).unwrap();
         std::fs::write(
@@ -1474,10 +1788,24 @@ mod tests {
         )
         .unwrap();
         let rules = ShellRiskRules::load(&dir).expect("load should succeed");
-        assert_eq!(rules.rules.len(), 1);
-        assert_eq!(rules.rules[0].command, "my-tool");
-        // The user override replaces (not merges with) the embedded defaults.
-        assert_eq!(rules.rules[0].risk, ShellRisk::Blocked);
+        // The user's `my-tool` rule must be present AND it must load
+        // BEFORE the embedded defaults (so it shadows them on the same
+        // key).
+        let my_tool_idx = rules
+            .rules
+            .iter()
+            .position(|r| r.command == "my-tool")
+            .expect("user rule must be present after merge");
+        assert_eq!(rules.rules[my_tool_idx].risk, ShellRisk::Blocked);
+        // Some embedded rule must exist beyond the user rule (i.e. the
+        // merge happened — the user file did NOT shadow the binary
+        // defaults wholesale).
+        let embedded_count = rules.rules.len() - 1;
+        assert!(
+            embedded_count > 0,
+            "expected embedded rules to remain in the merged set, got total {}",
+            rules.rules.len()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1498,5 +1826,351 @@ mod tests {
             "invalid user override must fall back to embedded defaults"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── REPRODUCER ───────────────────────────��────────────────────────────
+    // User report: with threshold=High, the command
+    //   rm -rf ./shell-approval-test-dir
+    // does not trigger the approval dialog. Expected: High (because the
+    // -rf flag pattern is destructive). Actual (current default rules): Medium.
+    //
+    // Until the default rule file ships a rule for `command = "rm",
+    // args_pattern = "-rf*"` (or equivalent), High threshold lets bare
+    // `rm -rf` slip through silently.
+    //
+    // ── rm -rf default rules regression (user-reported bug) ────────────────
+    //
+    // With approval threshold = High, the command
+    //   rm -rf ./shell-approval-test-dir
+    // did not trigger the approval dialog because the default rules classified
+    // bare `rm` as Medium (via classify_command -> MEDIUM_RISK_COMMANDS) and
+    // no user rule covered the `-rf` flag pattern. These tests lock in the
+    // new default rules so the regression cannot return.
+    //
+    // The rules file (shell_risk_rules.toml) adds:
+    //   command = "rm", args_pattern = "-rf*"  -> High
+    //   command = "rm", args_pattern = "-fr*"  -> High
+    //   command = "rm", args_pattern = regex:-(r|R){1,}|--(recursive|force) -> High
+    //
+    // Pattern matching is token-or-full-string (see pattern_matches), so
+    // `rm -rf -f ./x` and `rm -r ./x` both fire.
+
+    fn default_rules() -> ShellRiskRules {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let work_dir = manifest_dir.parent().unwrap().to_path_buf();
+        ShellRiskRules::load(&work_dir).expect("load defaults")
+    }
+
+    /// Helper: assert a command is at least `at_least` (i.e. ordinal >=).
+    fn assert_min_risk(cmd: &str, at_least: ShellRisk, note: &str) {
+        let rules = default_rules();
+        let a = assess_base_risk(cmd, &rules);
+        assert!(
+            risk_ordinal(a.risk) >= risk_ordinal(at_least),
+            "expected {:?} or higher for `{}` ({}), got {:?}: {}",
+            at_least,
+            cmd,
+            note,
+            a.risk,
+            a.reason,
+        );
+    }
+
+    #[test]
+    fn rm_rf_default_rules_block_user_reported_case() {
+        // The exact command from the bug report.
+        let rules = default_rules();
+        let a = assess_base_risk("rm -rf ./shell-approval-test-dir", &rules);
+        assert!(
+            risk_ordinal(a.risk) >= risk_ordinal(ShellRisk::High),
+            "rm -rf ./shell-approval-test-dir must be High or Blocked under default rules, got {:?}: {}",
+            a.risk,
+            a.reason,
+        );
+    }
+
+    #[test]
+    fn rm_rf_default_rules_cover_common_destructive_flags() {
+        // All of these are at least High. Note: `rm -rf /tmp/foo` is Blocked
+        // (Phase 1 substring hits "rm -rf /"); the rest fall through to High.
+        let cases: &[&str] = &[
+            "rm -rf ./shell-approval-test-dir",
+            "rm -rfv ./build",
+            "rm -fr ./shell-approval-test-dir",
+            "rm -rf -f ./x",
+            "rm -r ./dir",
+            "rm -R ./dir",
+            "rm --recursive ./dir",
+            "rm --force ./dir",
+            "rm -r --force ./dir",
+            "rm -rf -v -f ./dir",
+            "rm -rf ./shell-approval-test-dir && echo done",
+            "echo pre && rm -rf ./shell-approval-test-dir",
+            "cd /tmp && rm -rf ./shell-approval-test-dir",
+        ];
+        for cmd in cases {
+            assert_min_risk(cmd, ShellRisk::High, "destructive rm variant");
+        }
+    }
+
+    #[test]
+    fn rm_plain_stays_at_or_above_medium() {
+        // Bare `rm <file>` (no flags) is still in MEDIUM_RISK_COMMANDS.
+        // The new rules must not silently downgrade it to Low.
+        let rules = default_rules();
+        let a = assess_base_risk("rm somefile.txt", &rules);
+        assert!(
+            risk_ordinal(a.risk) >= risk_ordinal(ShellRisk::Medium),
+            "bare `rm` must stay Medium or higher, got {:?}: {}",
+            a.risk,
+            a.reason,
+        );
+    }
+
+    #[test]
+    fn rm_rf_default_rules_do_not_over_match_safe_commands() {
+        // Negative cases: non-`rm` commands must not be hijacked by the new
+        // rm-* rules. `rf` is sometimes used as a tool name.
+        let rules = default_rules();
+        for cmd in [
+            "ls -rf ./dir", // `ls` has no `-rf` flag, but the glob shouldn't elevate it
+            "echo rm -rf", // echo doesn't run rm; should stay Low
+        ] {
+            let a = assess_base_risk(cmd, &rules);
+            assert!(
+                risk_ordinal(a.risk) < risk_ordinal(ShellRisk::High),
+                "safe command `{}` incorrectly elevated to {:?}: {}",
+                cmd,
+                a.risk,
+                a.reason,
+            );
+        }
+    }
+
+    // ── ShellRiskRules::load merge semantics ─────────────────────────────────
+    //
+    // load() merges the user file with embedded defaults instead of
+    // substituting one for the other. These tests pin the four states
+    // the merge can be in.
+
+    /// Helper: write a user shell_risk_rules.toml to the given work_dir
+    /// under `config/shell_risk_rules.toml` (the real path load() reads).
+    fn write_user_rules(work_dir: &Path, body: &str) {
+        let cfg = work_dir.join("config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("shell_risk_rules.toml"), body).unwrap();
+    }
+
+    #[test]
+    fn load_merges_user_rules_with_embedded() {
+        // User adds ONE rule for `my-tool`. After load(), the merged
+        // set must contain BOTH that rule and every embedded rule
+        // (including the rm -rf* rules added to fix the user-reported
+        // bug).
+        let dir = temp_work_dir("merge-with-user");
+        write_user_rules(
+            &dir,
+            r#"
+[[rules]]
+command = "my-tool"
+risk = "Blocked"
+reason = "Custom rule"
+"#,
+        );
+        let merged = ShellRiskRules::load(&dir).expect("load");
+        // The user rule must be present.
+        assert!(
+            merged.rules.iter().any(|r| r.command == "my-tool"
+                && r.risk == ShellRisk::Blocked),
+            "user rule must survive the merge"
+        );
+        // The embedded rm -rf rule must ALSO be present — that is the
+        // whole point of merging instead of substituting.
+        assert!(
+            merged.rules.iter().any(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*")),
+            "embedded rm -rf* rule must survive even when a user file is present"
+        );
+        // User rule must load FIRST so it shadows any binary default
+        // with the same key.
+        let user_idx = merged
+            .rules
+            .iter()
+            .position(|r| r.command == "my-tool")
+            .unwrap();
+        let rm_idx = merged
+            .rules
+            .iter()
+            .position(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*"))
+            .unwrap();
+        assert!(
+            user_idx < rm_idx,
+            "user rule must load before embedded rules (user_idx={}, rm_idx={})",
+            user_idx,
+            rm_idx
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_user_rule_overrides_embedded_rule_with_same_key() {
+        // User writes a `rm` rule that DOWNGRADES `rm -rf*` to Medium.
+        // The user version must win because it loads first.
+        let dir = temp_work_dir("merge-shadow");
+        write_user_rules(
+            &dir,
+            r#"
+[[rules]]
+command = "rm"
+args_pattern = "-rf*"
+risk = "Medium"
+reason = "User override: relax rm -rf to Medium"
+"#,
+        );
+        let merged = ShellRiskRules::load(&dir).expect("load");
+
+        // The user rule is present.
+        assert!(
+            merged.rules.iter().any(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*")
+                && r.risk == ShellRisk::Medium),
+            "user override of rm -rf* must be in the merged set"
+        );
+
+        // Assessment uses the FIRST matching rule. With user rules
+        // first, the user's Medium wins over the embedded High.
+        let a = assess_base_risk("rm -rf ./foo", &merged);
+        assert_eq!(
+            a.risk,
+            ShellRisk::Medium,
+            "user rule must shadow embedded default for the same key"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_uses_embedded_only_when_user_file_missing() {
+        // No user file. load() returns the embedded set verbatim.
+        let dir = temp_work_dir("merge-no-user");
+        let merged = ShellRiskRules::load(&dir).expect("load");
+        let embedded = ShellRiskRules::embedded_parsed().unwrap();
+        assert_eq!(
+            merged.rules.len(),
+            embedded.rules.len(),
+            "merged rule count must equal embedded rule count when no user file is present"
+        );
+
+        // The new rm -rf* rule must still be present.
+        assert!(
+            merged.rules.iter().any(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*")),
+            "embedded rm -rf* rule must be present even with no user file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_falls_back_to_embedded_when_user_file_is_invalid() {
+        // The user file is garbage. load() must NOT return an empty
+        // rule set — it must log a warning and use embedded defaults.
+        // (Returning empty would silently disable every safety rule,
+        // which is the catastrophic outcome the old exclusive-user-file
+        // behavior would have produced.)
+        let dir = temp_work_dir("merge-bad-user");
+        write_user_rules(&dir, "this is = not toml = at all\n");
+        let merged = ShellRiskRules::load(&dir).expect("load must not fail on bad user file");
+
+        let embedded = ShellRiskRules::embedded_parsed().unwrap();
+        assert_eq!(
+            merged.rules.len(),
+            embedded.rules.len(),
+            "on bad user file, merged set must equal embedded set (user dropped, not embedded)"
+        );
+        assert!(
+            merged.rules.iter().any(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*")),
+            "embedded rm -rf* rule must survive a bad user file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_user_empty_rules_array_uses_embedded_only() {
+        // User file is valid TOML but has zero rules (e.g. they cleared
+        // it intending to start over). load() must use embedded
+        // defaults verbatim.
+        let dir = temp_work_dir("merge-empty-user");
+        write_user_rules(&dir, "rules = []\n");
+        let merged = ShellRiskRules::load(&dir).expect("load");
+
+        let embedded = ShellRiskRules::embedded_parsed().unwrap();
+        assert_eq!(merged.rules.len(), embedded.rules.len());
+        assert!(
+            merged.rules.iter().any(|r| r.command == "rm"
+                && r.args_pattern.as_deref() == Some("-rf*")),
+            "embedded rm -rf* rule must be present when user file is empty"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── generate_user_rules_toml ─────────────────────────────────────────────
+    //
+    // The "edit user rules" button generates a fresh file whose body is
+    // empty but whose header carries the embedded binary rules as
+    // comments. The generated file must:
+    //   1. parse cleanly to `rules = []` (so merged load() falls back
+    //      to embedded verbatim),
+    //   2. contain a comment header for every embedded rule (so the
+    //      user can see what is already covered),
+    //   3. contain a "YOUR RULES" footer so the user knows where to
+    //      add their overrides.
+
+    #[test]
+    fn generate_user_rules_toml_parses_to_empty_rules() {
+        let body = generate_user_rules_toml("test-rev-123").expect("generate");
+        let parsed = toml::from_str::<ShellRiskRules>(&body)
+            .expect("generated toml must parse cleanly as a ShellRiskRules");
+        assert!(
+            parsed.rules.is_empty(),
+            "generated file must parse to empty rules, got {} rules",
+            parsed.rules.len()
+        );
+    }
+
+    #[test]
+    fn generate_user_rules_toml_lists_every_embedded_rule() {
+        let body = generate_user_rules_toml("test-rev-123").expect("generate");
+        let embedded = ShellRiskRules::embedded_parsed().unwrap();
+        for rule in &embedded.rules {
+            // Each embedded rule's `command = "..."` must appear in the
+            // generated body as a commented line. We don't require an
+            // exact string match — just that the rule is visible to the
+            // user as reference material.
+            let needle = format!(r#"command = "{}""#, rule.command);
+            assert!(
+                body.contains(&needle),
+                "generated file must reference embedded rule `{}` somewhere in the comment header",
+                needle
+            );
+        }
+    }
+
+    #[test]
+    fn generate_user_rules_toml_has_your_rules_section() {
+        let body = generate_user_rules_toml("test-rev-123").expect("generate");
+        assert!(
+            body.contains("YOUR RULES"),
+            "generated file must have a 'YOUR RULES' section"
+        );
+        assert!(
+            body.contains("test-rev-123"),
+            "generated file must include the build identifier so users can spot stale snapshots"
+        );
     }
 }

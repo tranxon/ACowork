@@ -114,6 +114,39 @@ args_pattern = "-D"
 risk = "High"
 reason = "Destructive: force deletes branch"
 
+# ── rm destructive operations ──────────────────────────────────────────────────
+# `rm -rf` / `rm -fr` are the canonical destructive delete patterns. They
+# must be classified at least High so that the High approval threshold can
+# gate them. The hard-coded Blocked pattern list still catches the most
+# catastrophic cases (rm -rf /, rm -rf ~) before these rules run, but in
+# general `rm -rf <path>` is just High: user-confirmed, not opaque-rejected.
+#
+# Pattern strategy:
+#   - "-rf*" / "-fr*" cover both token orderings (`-rf`, `-rfv`, `-Rfv`, ...).
+#   - glob matches per-token, so `rm -rf -f ./x` and `rm -r -f ./x` both fire.
+#   - The separate "single recursive" rule promotes `rm -r` / `rm -R` /
+#     `rm --recursive` to High even without -f (a bare `rm -r ./dir` is
+#     still a recursive delete and should not be auto-confirmed at the
+#     Medium threshold).
+
+[[rules]]
+command = "rm"
+args_pattern = "-rf*"
+risk = "High"
+reason = "Destructive: recursive force delete (rm -rf)"
+
+[[rules]]
+command = "rm"
+args_pattern = "-fr*"
+risk = "High"
+reason = "Destructive: recursive force delete (rm -fr)"
+
+[[rules]]
+command = "rm"
+args_pattern = "regex:-(r|R){1,}|--(recursive|force)"
+risk = "High"
+reason = "Destructive: recursive or force delete flag"
+
 # ── Docker destructive operations ─────────────────────────────────────────────
 
 [[rules]]

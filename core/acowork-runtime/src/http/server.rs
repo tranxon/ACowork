@@ -2444,24 +2444,72 @@ async fn get_shell_risk_rules(
             Json(serde_json::json!({"error": "agent_id mismatch"})),
         ));
     }
-    let path = state.work_dir.join("config").join("shell_risk_rules.toml");
+    let config_dir = state.work_dir.join("config");
+    let path = config_dir.join("shell_risk_rules.toml");
     tracing::info!(agent_id = %id, path = %path.display(), "GET /agents/{id}/shell-risk-rules");
+
+    // Build revision identifier embedded in the generated template. It is
+    // informational only — lets the user see at a glance which binary
+    // snapshot the template was generated from, so they can spot stale
+    // copies across machines.
+    let build_rev = format!(
+        "runtime-{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        chrono::Utc::now().format("%Y%m%d"),
+    );
+
+    // UX contract: clicking the "Edit" button creates the user file on
+    // disk if it does not already exist. The created file is a template:
+    //   • the binary's embedded rules as `# ...` comments (so the user
+    //     can see what is already covered before adding their own), and
+    //   • an empty `rules = []` body (so saving it back is a no-op and
+    //     the merge-load semantics in `ShellRiskRules::load` keep the
+    //     embedded rules live).
+    //
+    // Why create on GET rather than wait for the user to press Save:
+    //   1. `has_user_override` flips to `true` immediately, which the
+    //      frontend uses to render the "this is your local copy" hint
+    //      and to make the file appear in the agent's file tree.
+    //   2. Avoids the failure mode where the user opens the editor,
+    //      walks away, and a later binary upgrade silently changes what
+    //      the editor would have shown them — the file is now pinned
+    //      to the binary snapshot they actually saw.
+    //   3. A user who closes the editor without saving still has a
+    //      file that is semantically empty (`rules = []`), which is
+    //      the same observable behavior as "no file" under merge
+    //      load.
     let (content, has_user_override) = if path.exists() {
         match std::fs::read_to_string(&path) {
             Ok(c) => (c, true),
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "Failed to read shell risk rules");
-                (
-                    crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string(),
-                    false,
-                )
+                let template = crate::security::shell_risk::generate_user_rules_toml(&build_rev)
+                    .unwrap_or_else(|err| {
+                        tracing::error!(error = %err, "generate_user_rules_toml failed; falling back to embedded raw");
+                        crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string()
+                    });
+                (template, false)
             }
         }
     } else {
-        (
-            crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string(),
-            false,
-        )
+        let template = match crate::security::shell_risk::generate_user_rules_toml(&build_rev) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::error!(error = %err, "generate_user_rules_toml failed; falling back to embedded raw");
+                crate::security::shell_risk::ShellRiskRules::embedded_defaults().to_string()
+            }
+        };
+        // Create the user file on first GET. A write failure is logged
+        // but does not block the editor from opening — the template is
+        // still served in-memory and PUT can materialize it later.
+        if let Err(e) = std::fs::create_dir_all(&config_dir) {
+            tracing::warn!(path = %config_dir.display(), error = %e, "Failed to create config dir; serving template without persisting");
+        } else if let Err(e) = std::fs::write(&path, &template) {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to materialize user rules template; will retry on PUT");
+        } else {
+            tracing::info!(path = %path.display(), bytes = template.len(), "Materialized shell risk rules user template on first GET");
+        }
+        (template, true)
     };
     Ok(Json(serde_json::json!({
         "agent_id": state.agent_id,
