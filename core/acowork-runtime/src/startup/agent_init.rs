@@ -951,9 +951,9 @@ mod tests {
     use crate::tools::registry::ToolRegistry;
 
     /// G2: Verify that when a manifest declares a RAG tool, the
-    /// `rag_config()` extraction + `RagClientConfig::from_manifest`
-    /// + `HttpRagProvider::new` + `RagQueryTool::new` + registry
-    /// registration chain works end-to-end.
+    /// `rag_config()` extraction, `RagClientConfig::from_manifest`,
+    /// `HttpRagProvider::new`, `RagQueryTool::new`, and the registry
+    /// registration chain work end-to-end.
     ///
     /// This tests the exact code path in `build_builtin_registry`
     /// (lines 535-612) without needing the full agent_init

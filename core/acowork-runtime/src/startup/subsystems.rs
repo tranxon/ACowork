@@ -90,7 +90,7 @@ pub(crate) async fn phase_c_spawn_subsystems(
         // `acowork/agents/{id}/debug/events/{type}`. The publisher
         // needs `Arc<RuntimeMqttClient>`; clone the cheap (internally
         // Arc-wrapped) client and re-wrap it.
-        let mqtt_client = ctx.mqtt_client.clone().map(|c| std::sync::Arc::new(c));
+        let mqtt_client = ctx.mqtt_client.clone().map(std::sync::Arc::new);
         session_ctx
             .session_manager
             .lock()

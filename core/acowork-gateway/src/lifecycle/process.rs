@@ -391,6 +391,9 @@ mod tests {
                 ready: false,
                 dev_mode: false,
                 debug_port: None,
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
             });
         }
         assert!(state.read().await.is_running("com.test.reaper"));

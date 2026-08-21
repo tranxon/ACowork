@@ -465,8 +465,10 @@ mod tests {
 
     #[test]
     fn test_high_abstention_rate_alert() {
-        let mut thresholds = AlertThresholds::default();
-        thresholds.abstention_rate_high = 0.3; // 30%
+        let thresholds = AlertThresholds {
+            abstention_rate_high: 0.3, // 30%
+            ..Default::default()
+        };
         let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
 
         // 4 retrievals, 2 abstentions -> rate = 50% > 30%
@@ -495,9 +497,11 @@ mod tests {
 
     #[test]
     fn test_low_nrr_consecutive_alert() {
-        let mut thresholds = AlertThresholds::default();
-        thresholds.nrr_warning = 0.5;
-        thresholds.nrr_consecutive_limit = 3;
+        let thresholds = AlertThresholds {
+            nrr_warning: 0.5,
+            nrr_consecutive_limit: 3,
+            ..Default::default()
+        };
         let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
 
         // 3 consecutive low-NRR retrievals (score=0.3, max=1.0 -> NRR=0.3 < 0.5)
@@ -532,8 +536,10 @@ mod tests {
 
     #[test]
     fn test_low_conflict_accuracy_alert() {
-        let mut thresholds = AlertThresholds::default();
-        thresholds.conflict_accuracy_min = 0.8;
+        let thresholds = AlertThresholds {
+            conflict_accuracy_min: 0.8,
+            ..Default::default()
+        };
         let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
 
         // 5 records: 2 correct, 3 incorrect -> accuracy = 40% < 80%
@@ -581,8 +587,10 @@ mod tests {
 
     #[test]
     fn test_nrr_sliding_window_eviction() {
-        let mut thresholds = AlertThresholds::default();
-        thresholds.nrr_consecutive_limit = 100; // prevent alert noise
+        let thresholds = AlertThresholds {
+            nrr_consecutive_limit: 100, // prevent alert noise
+            ..Default::default()
+        };
         let mut agg = RetrievalMetricsAggregator::new(1.0, thresholds);
         agg.window_size = 3; // small window for testing
 

@@ -934,15 +934,6 @@ mod tests {
         }
     }
 
-    /// Helper: make an Assistant-role message (no tool_calls, plain text content).
-    fn make_assistant_message(content: &str) -> ChatMessage {
-        ChatMessage {
-            role: MessageRole::Assistant,
-            content: content.to_string(),
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn test_append_and_count() {
         let mut hm = HistoryManager::new(1000);

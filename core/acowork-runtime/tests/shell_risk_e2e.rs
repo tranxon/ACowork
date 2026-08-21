@@ -59,7 +59,12 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     let base = format!("http://127.0.0.1:{}", server.port);
     let client = reqwest::Client::new();
 
-    // Step 1: GET — should return embedded defaults (no user override yet)
+    // Step 1: GET — first access MATERIALIZES the user template on disk
+    // (UX contract, see get_shell_risk_rules: "clicking the Edit button
+    // creates the user file on disk if it does not already exist" so the
+    // file appears in the agent file tree and the frontend can show the
+    // "local copy" hint). has_user_override is therefore `true` even on
+    // first GET; the content is the generated template, not a user edit.
     let resp = client
         .get(format!("{}/agents/com.test.agent/shell-risk-rules", base))
         .send()
@@ -67,9 +72,18 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         .expect("GET should not error");
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["has_user_override"], false);
+    assert_eq!(body["has_user_override"], true, "first GET must materialize the user template");
     let content = body["content"].as_str().expect("content should be a string");
     assert!(!content.is_empty(), "default content should not be empty");
+    // The materialized template must parse as valid TOML and contain no
+    // active user rules (the embedded defaults are comments).
+    let parsed: serde_json::Value =
+        toml::from_str(content).expect("materialized template must parse as TOML");
+    assert_eq!(
+        parsed["rules"].as_array().map(|a| a.len()).unwrap_or(0),
+        0,
+        "materialized template must have zero active user rules"
+    );
     println!("[e2e] default content len = {}", content.len());
 
     // Step 2: PUT a valid override

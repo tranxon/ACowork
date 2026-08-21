@@ -651,7 +651,7 @@ mod tests {
         let script = r#"
             for /L %i in (1,1,1000) do @echo line %i
         "#;
-        let mut cmd = bash_cmd(&script);
+        let mut cmd = bash_cmd(script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await
             .expect("should complete normally");

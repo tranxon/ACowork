@@ -428,7 +428,7 @@ impl MemoryProvider for GrafeoStore {
         // Apply weights and min_score filter
         Ok(results
             .into_iter()
-            .filter(|(_, score)| min_score.map_or(true, |ms| *score as f32 >= ms))
+            .filter(|(_, score)| min_score.is_none_or(|ms| *score as f32 >= ms))
             .map(|(id, score)| {
                 let weighted = score * text_weight.max(vector_weight);
                 (id.0, weighted)

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::{
     labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
-use crate::consolidation::GeneralizationConfig;
+use crate::consolidation::{EmbeddingFn, GeneralizationConfig};
 use chrono::{DateTime, Utc};
 
 use acowork_core::EmbeddingProvider;
@@ -932,7 +932,7 @@ impl MemoryManager {
     pub async fn run_post_compaction_tasks(
         &self,
         provider: &dyn MemoryProvider,
-        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
+        embedding_fn: Option<EmbeddingFn>,
     ) {
         // Step 1: Experience generalization (Path C).
         self.run_generalization_step(provider, embedding_fn).await;
@@ -980,7 +980,7 @@ impl MemoryManager {
     async fn run_generalization_step(
         &self,
         provider: &dyn MemoryProvider,
-        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
+        embedding_fn: Option<EmbeddingFn>,
     ) {
         let config = GeneralizationConfig {
             min_observations: 3,
@@ -991,8 +991,7 @@ impl MemoryManager {
         };
 
         // Use provided embedding function, or fallback to zero vector.
-        let zero_fn: Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync> =
-            Arc::new(|_| vec![0.0f32; 128]);
+        let zero_fn: EmbeddingFn = Arc::new(|_| vec![0.0f32; 128]);
         let emb_fn = embedding_fn.unwrap_or(zero_fn);
 
         match provider.run_generalization(None, &emb_fn, &config).await {

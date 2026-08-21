@@ -3196,7 +3196,7 @@ mod tests {
             .builtin_tools
             .iter()
             .filter(|e| e.enabled)
-            .map(|e| serde_json::to_value(&e.tool.spec()).unwrap_or_default())
+            .map(|e| serde_json::to_value(e.tool.spec()).unwrap_or_default())
             .collect();
         context_builder.set_tool_definitions(llm_visible);
 
@@ -3224,7 +3224,9 @@ mod tests {
         // Make sure SessionTask::new signature no longer requires a
         // tool_definitions argument (compile-time check). The
         // `_task_builder` closure below only references the type —
-        // we don't actually run it.
+        // we don't actually run it. The fn-pointer type is intentionally
+        // spelled out as a signature contract; allow the complexity lint.
+        #[allow(clippy::type_complexity)]
         let _check_signature: fn(
             Arc<AgentCore>,
             crate::agent::session_state::SessionState,

@@ -14,14 +14,13 @@
 //!
 //! Design ref: ADR-051
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use acowork_core::error::Result;
 use async_trait::async_trait;
 
 use crate::consolidation::{
-    GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
+    EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
 use crate::types::{
@@ -124,6 +123,12 @@ pub trait MemoryProvider: Send + Sync {
     // ── Phase 1: Hybrid retrieval (extended) ────────────────────────────
 
     /// Run hybrid retrieval (vector + full-text), returning (node_id, score) pairs.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: this is a thin trait-method
+    /// signature whose parameters (query, embedding, weights, filter) are
+    /// semantically independent retrieval inputs; bundling them into a
+    /// struct would obscure the call sites without reducing real complexity.
+    #[allow(clippy::too_many_arguments)]
     fn hybrid_search_full(
         &self,
         label: &str,
@@ -168,7 +173,7 @@ pub trait MemoryProvider: Send + Sync {
     async fn run_generalization(
         &self,
         session_id: Option<&str>,
-        embedding_fn: &Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>,
+        embedding_fn: &EmbeddingFn,
         config: &GeneralizationConfig,
     ) -> Result<GeneralizationResult>;
 
@@ -285,7 +290,7 @@ pub trait MemoryProvider: Send + Sync {
         &self,
         offline_config: &OfflineConsolidationConfig,
         llm: Option<&dyn TripleExtractorLlm>,
-        embedding_fn: Option<Arc<dyn for<'a> Fn(&'a str) -> Vec<f32> + Send + Sync>>,
+        embedding_fn: Option<EmbeddingFn>,
         gen_config: Option<&GeneralizationConfig>,
     ) -> Result<OfflineConsolidationResult>;
 }

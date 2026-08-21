@@ -642,6 +642,12 @@ impl AgentLoop {
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].
+    ///
+    /// `#[allow(clippy::too_many_arguments)]` follows the project convention
+    /// for thin pass-through facades (cf. `AgentCore::new_with_observer`):
+    /// `run` / `replay` / debug-resume call sites pass orthogonal per-request
+    /// inputs; bundling them would obscure the call sites.
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &mut self,
         user_message: &str,

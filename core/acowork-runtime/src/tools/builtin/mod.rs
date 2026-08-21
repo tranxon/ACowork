@@ -56,33 +56,6 @@ use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
 
-/// Create the standard built-in tools (without RAG).
-///
-/// Shell tools are registered dynamically based on platform detection:
-/// - Windows: Git Bash (bash) + PowerShell, or just PowerShell if Git not found
-/// - Linux/macOS: Single "shell" tool using system shell
-///
-/// # Arguments
-/// * `resolver` - Workspace directory resolver (single source of truth)
-/// * `agent_id` - Agent ID for memory isolation and identity management
-/// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
-/// * `search_key_vault` - Shared search API key vault. The `web_search`
-///   tool is registered when the provider list is non-empty at call time.
-///   The engine reads from this vault (and `search_provider_list`) at
-///   call time, so MQTT-driven key updates take effect immediately.
-/// * `search_provider_list` - Shared list of configured search providers.
-/// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
-/// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
-/// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
-///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
-///   not per-project. No fallback: must always be set explicitly.
-/// * `abandon_queue` - Shared queue for context_abandon tool (ADR-052). When `tool_compression_enabled`
-///   is true, this queue is injected into the tool and the agent loop.
-/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). When `tool_compression_enabled`
-///   is true, this queue is injected into the tool and the agent loop.
-/// * `tool_compression_enabled` - ADR-052: when true (default), register context_retrieve +
-///   context_abandon tools. When false, neither tool is registered.
-#[allow(clippy::too_many_arguments)]
 /// Construct the two platform-protected tools gated by
 /// `tool_compression_enabled` (ADR-052): `context_retrieve` +
 /// `context_abandon`.
@@ -119,6 +92,37 @@ pub fn build_platform_protected_tools(
     ]
 }
 
+/// Create the standard built-in tools (without RAG).
+///
+/// Shell tools are registered dynamically based on platform detection:
+/// - Windows: Git Bash (bash) + PowerShell, or just PowerShell if Git not found
+/// - Linux/macOS: Single "shell" tool using system shell
+///
+/// # Arguments
+/// * `resolver` - Workspace directory resolver (single source of truth)
+/// * `agent_id` - Agent ID for memory isolation and identity management
+/// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
+/// * `search_key_vault` - Shared search API key vault. The `web_search`
+///   tool is registered when the provider list is non-empty at call time.
+///   The engine reads from this vault (and `search_provider_list`) at
+///   call time, so MQTT-driven key updates take effect immediately.
+/// * `search_provider_list` - Shared list of configured search providers.
+/// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
+/// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
+/// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
+///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
+///   not per-project. No fallback: must always be set explicitly.
+/// * `abandon_queue` - Shared queue for context_abandon tool (ADR-052). When `tool_compression_enabled`
+///   is true, this queue is injected into the tool and the agent loop.
+/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). When `tool_compression_enabled`
+///   is true, this queue is injected into the tool and the agent loop.
+/// * `tool_compression_enabled` - ADR-052: when true (default), register context_retrieve +
+///   context_abandon tools. When false, neither tool is registered.
+///
+/// `#[allow(clippy::too_many_arguments)]` follows the project convention
+/// for thin pass-through facades (cf. `AgentCore::new_with_observer`): the
+/// arguments are independent assembly dependencies for the tool registry.
+#[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
     agent_id: &str,
@@ -237,6 +241,11 @@ mod tests {
     /// Build a minimal set of dependencies for `all_builtin_tools` testing.
     /// Most dependencies are empty/default so the test focuses on the
     /// compression-enabled switch.
+    ///
+    /// `#[allow(clippy::type_complexity)]`: the returned tuple mirrors
+    /// `all_builtin_tools`'s assembly dependencies one-to-one; naming a
+    /// struct for a single test helper would add indirection without value.
+    #[allow(clippy::type_complexity)]
     fn make_test_deps() -> (
         SharedResolver,
         String,                                          // agent_id

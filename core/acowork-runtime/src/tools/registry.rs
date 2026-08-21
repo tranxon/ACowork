@@ -408,6 +408,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(non_snake_case)]
+    // Deliberately uppercase to pin the contract to the
+    // PLATFORM_PROTECTED_TOOLS constant name.
     fn plATFORM_PROTECTED_TOOLS_is_single_source_of_truth() {
         // Pin the contract: the constant list is what every filter
         // callsite (persistence layer + registry force-enable)
