@@ -211,24 +211,26 @@ export function FileTree({
         [onSelectPath],
     );
 
-    // Virtual scrolling setup — row height scales with global font size.
+    // Virtual scrolling setup.
     //
-    // The multiplier 1.9 is derived from the actual rendered row geometry,
-    // not a guessed value:
-    //   - font-size:        fontSize rem × 16 px/rem
-    //   - text line-height: 1.5 (Tailwind preflight default, inherited from html)
-    //   - py-[0.2em] top+bottom: 0.4 × fontSize px  (0.2em × 2)
-    //   → total height = fontSize × 16 × (1.5 + 0.4) = fontSize × 16 × 1.9
+    // Row height is derived from CSS geometry (`line-height × font-size +
+    // vertical padding` = fontSize × 16 × 1.9) and NOT rounded — see the
+    // e29e5196 commit for the multiplier's derivation.
     //
-    // Underestimating this is a classic virtualizer bug: the slot
-    // height comes from the estimate, but the actual `.file-tree-row`
-    // div overflows the slot by ~4-5px. `elementFromPoint` in that
-    // overflow band returns the NEXT row, so :hover paints on the row
-    // below the cursor and any `closest('[data-rel-path]')` (used by
-    // the DnD logic) resolves to the wrong path.
+    // Two constraints that fall out of the row geometry:
+    //
+    // 1. The row div IS the virtualizer slot (merged, no wrapper layer).
+    //    Otherwise `elementFromPoint` lands on a wrapper without
+    //    `data-rel-path`, and `closest('[data-rel-path]')` returns null
+    //    in WorkspaceExplorer's DnD handler.
+    //
+    // 2. `rowHeight` must equal the row's natural CSS height exactly.
+    //    With `Math.round(26.6) = 27` the slot extends 0.4px past the
+    //    rendered row, leaving a sliver where `elementFromPoint` lands
+    //    on the slot's outer edge — same null-`closest` failure mode.
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const fontSize = useSettingsStore((s) => s.fontSize);
-    const rowHeight = useMemo(() => Math.round(fontSize * 16 * 1.9), [fontSize]);
+    const rowHeight = useMemo(() => fontSize * 16 * 1.9, [fontSize]);
     const virtualizer = useVirtualizer({
         count: flatNodes.length,
         getScrollElement: () => scrollRef.current,
@@ -289,48 +291,42 @@ export function FileTree({
                     const node = flatNodes[virtualRow.index];
                     const isLoading = treeLoadingPaths.has(`${treeCachePrefix}:${node.relPath}`);
 
+                    // FileTreeNode IS the virtualizer slot (one div owns
+                    // both the slot geometry and the row semantics —
+                    // see the comment above the virtualizer setup).
                     return (
-                        <div
+                        <FileTreeNode
                             key={node.relPath}
-                            style={{
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                minWidth: "100%",
-                                width: "fit-content",
-                                height: `${virtualRow.size}px`,
-                                transform: `translateY(${virtualRow.start}px)`,
-                            }}
-                        >
-                            <FileTreeNode
-                                entry={node.entry}
-                                depth={node.depth}
-                                agentId={agentId}
-                                sessionId={sessionId}
-                                relPath={node.relPath}
-                                absPath={workspaceRoot ? `${workspaceRoot}/${node.relPath}` : node.relPath}
-                                isExpanded={expandedPaths.has(node.relPath)}
-                                isLoading={isLoading}
-                                isSelected={selectedPath === node.relPath}
-                                hasOpenDescendant={openFileDirSet.has(node.relPath)}
-                                onToggle={handleToggle}
-                                onSelect={handleSelect}
-                                onDoubleClick={onFileDoubleClick}
-                                onContextNewItem={onContextNewItem}
-                                onDelete={onDelete}
-                                onCopy={onCopy}
-                                onPaste={onPaste}
-                                onRename={onRename}
-                                onReveal={onReveal}
-                                renameTarget={renameTarget}
-                                renameInitialValue={renameInitialValue}
-                                onCancelRename={onCancelRename}
-                                onRequestRename={onRequestRename}
-                                draggingRelPath={draggingRelPath}
-                                dropTarget={dropTarget}
-                                onPointerDownTreeEntry={onPointerDownTreeEntry}
-                            />
-                        </div>
+                            entry={node.entry}
+                            depth={node.depth}
+                            agentId={agentId}
+                            sessionId={sessionId}
+                            relPath={node.relPath}
+                            absPath={workspaceRoot ? `${workspaceRoot}/${node.relPath}` : node.relPath}
+                            isExpanded={expandedPaths.has(node.relPath)}
+                            isLoading={isLoading}
+                            isSelected={selectedPath === node.relPath}
+                            hasOpenDescendant={openFileDirSet.has(node.relPath)}
+                            onToggle={handleToggle}
+                            onSelect={handleSelect}
+                            onDoubleClick={onFileDoubleClick}
+                            onContextNewItem={onContextNewItem}
+                            onDelete={onDelete}
+                            onCopy={onCopy}
+                            onPaste={onPaste}
+                            onRename={onRename}
+                            onReveal={onReveal}
+                            renameTarget={renameTarget}
+                            renameInitialValue={renameInitialValue}
+                            onCancelRename={onCancelRename}
+                            onRequestRename={onRequestRename}
+                            draggingRelPath={draggingRelPath}
+                            dropTarget={dropTarget}
+                            onPointerDownTreeEntry={onPointerDownTreeEntry}
+                            slotSize={virtualRow.size}
+                            slotStart={virtualRow.start}
+                            slotIndex={virtualRow.index}
+                        />
                     );
                 })}
             </div>

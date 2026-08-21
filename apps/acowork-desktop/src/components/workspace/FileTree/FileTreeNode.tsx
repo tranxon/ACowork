@@ -85,6 +85,12 @@ interface FileTreeNodeProps {
   /** pointerdown on a row - records the drag candidate. The parent's
    * global pointermove/pointerup listeners handle the actual drag. */
   onPointerDownTreeEntry?: (relPath: string, isDir: boolean, e: React.PointerEvent) => void;
+  /** Virtualizer slot geometry for THIS row — the row div doubles as
+   * the slot (see FileTree.tsx). `slotSize` is the exact float
+   * (`fontSize × 16 × 1.9`), not a rounded integer. */
+  slotSize: number;
+  slotStart: number;
+  slotIndex: number;
 }
 
 export const FileTreeNode = memo(function FileTreeNode({
@@ -114,6 +120,9 @@ export const FileTreeNode = memo(function FileTreeNode({
   draggingRelPath = null,
   dropTarget = null,
   onPointerDownTreeEntry,
+  slotSize,
+  slotStart,
+  slotIndex,
 }: FileTreeNodeProps) {
   const isDir = entry.type === "directory";
   const fileIcon = isDir ? null : getFileIcon(entry.name);
@@ -366,18 +375,34 @@ export const FileTreeNode = memo(function FileTreeNode({
       <div
         className={cn(
           "file-tree-row flex cursor-pointer items-center gap-1 py-[0.2em] pr-3 hover:bg-zinc-100 dark:hover:bg-zinc-800 select-none",
-          isSelected && "bg-[var(--color-accent)]/10",
+          // Selected highlight lives in globals.css (`.file-tree-row-selected`)
+          // — see comment in styles/globals.css for why it can't be a Tailwind
+          // utility on this row.
+          isSelected && "file-tree-row-selected",
           isDragSource && "file-tree-row-drag-source",
           isDropTarget && "file-tree-row-drop-target",
         )}
-        style={{ paddingLeft: `${depth * 16 + 8}px`, fontSize: "var(--ui-font-size, 0.875rem)" }}
-        /* DnD: data attributes identify this row to the parent's global
-         * pointermove/pointerup handlers via `elementFromPoint`.
+        /* Row div doubles as the virtualizer slot (see FileTree.tsx for
+         * why this is one div, not a wrapper + inner row). */
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          minWidth: "100%",
+          width: "fit-content",
+          height: `${slotSize}px`,
+          transform: `translateY(${slotStart}px)`,
+          paddingLeft: `${depth * 16 + 8}px`,
+          fontSize: "var(--ui-font-size, 0.875rem)",
+        }}
+        /* DnD identity: `data-rel-path` is how the parent's global
+         * pointermove/pointerup handlers find this row via
+         * `elementFromPoint(...).closest('[data-rel-path]')`.
          * `onPointerDown` records the drag candidate; the parent
-         * decides when to actually start dragging (after a 5px
-         * threshold). No HTML5 DnD events are used. */
+         * starts dragging after a 5px threshold. No HTML5 DnD. */
         data-rel-path={relPath}
         data-is-dir={String(isDir)}
+        data-index={slotIndex}
         onPointerDown={(e) => {
           if (!onPointerDownTreeEntry) return;
           onPointerDownTreeEntry(relPath, isDir, e);

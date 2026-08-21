@@ -1544,3 +1544,30 @@ input[type="radio"]:checked {
 .file-tree-row-drop-target {
   background-color: color-mix(in srgb, var(--color-accent) 22%, transparent);
 }
+
+/* Selected row state.
+ *
+ * Lives here (not as a Tailwind utility) because the row also uses
+ * `hover:bg-zinc-100`, and Tailwind emits hover variants AFTER the
+ * matching non-hover utility — so an in-class `bg-[var(--color-accent)]/10`
+ * gets visually overridden by `hover:bg-zinc-100` whenever the cursor is
+ * over the row (i.e. exactly when you click it). Placing the rule
+ * unlayered at the end of the bundle gives it higher precedence than any
+ * Tailwind utility, so selected rows stay highlighted on hover as well.
+ *
+ * The `:hover` override is intentionally the SAME accent colour — we
+ * don't want the row to "go neutral" while the user is interacting with
+ * it (e.g. drag-and-drop onto a selected row, or holding click).
+ */
+.file-tree-row-selected,
+.file-tree-row-selected:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.dark .file-tree-row-selected,
+.dark .file-tree-row-selected:hover {
+  /* Slightly stronger wash in dark mode — 10% accent over `zinc-900`
+   * reads almost invisible, so bump to ~15% to match the drop-target
+   * contrast. Keep the same hue so the two states stay related. */
+  background-color: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
