@@ -1888,7 +1888,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_mqtt_client_connects_and_publishes() {
-        // Start a broker (using the Gateway's broker module)
+        // Start a broker (using the Gateway's broker module). Threaded
+        // mode: `start_broker` blocks forever on rumqttd's
+        // `Broker::start()` (it joins the server threads), so the
+        // Gateway exposes only `start_broker`.
         let port = 18980;
         let broker = acowork_gateway::mqtt::start_broker("127.0.0.1", port)
             .expect("broker should start");

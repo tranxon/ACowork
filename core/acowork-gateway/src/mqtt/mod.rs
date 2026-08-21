@@ -28,6 +28,6 @@ pub mod sidecar;
 
 // Re-export key types
 pub use acl::{AclConfig, AclConfigError, AclPermission, AclRule};
-pub use broker::{start_broker, start_broker_in_thread, start_default_broker, MqttBrokerError, MqttBrokerHandle};
+pub use broker::{start_broker, MqttBrokerError, MqttBrokerHandle};
 pub use client::{GatewayMqttClient, GatewayMqttClientError, MqttMessageCallback, MqttQoS};
 pub use global_resources_publisher::{MqttGlobalResourcesPublisher, MqttPublisherHandle, MqttPublisherTrigger};

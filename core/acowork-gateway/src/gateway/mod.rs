@@ -825,9 +825,9 @@ impl Gateway {
         // so it's available for chat handlers to publish control commands.
         let mqtt_config = self.config.mqtt.clone();
         let mut mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
-            // ADR-033: start_broker_in_thread runs in a separate OS thread
+            // ADR-033: start_broker runs in a separate OS thread
             // because rumqttd creates its own tokio runtime internally.
-            match crate::mqtt::start_broker_in_thread(&mqtt_config.host, mqtt_config.port) {
+            match crate::mqtt::start_broker(&mqtt_config.host, mqtt_config.port) {
                 Ok(h) => { tracing::info!(addr = %h.listen_addr, "MQTT broker started"); Some(h) }
                 Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
             }

@@ -555,6 +555,9 @@ mod tests {
         use tokio::sync::RwLock;
 
         let port = 18978;
+        // Threaded mode: `start_broker` blocks forever on rumqttd's
+        // `Broker::start()` (it joins the server threads), so calling it
+        // from the test thread would hang whenever the port is free.
         let broker = crate::mqtt::broker::start_broker("127.0.0.1", port)
             .expect("broker should start");
 

@@ -7,7 +7,7 @@
 //! 4. GatewayMqttClient control publish (requires broker)
 //!
 //! Note: rumqttd 0.14's Broker::start() panics inside tokio runtime.
-//! Broker startup tests run in a separate OS thread via start_broker_in_thread.
+//! Broker startup tests run in a separate OS thread via start_broker.
 
 use acowork_core::mqtt_proto::{
     self, control_command::Command,

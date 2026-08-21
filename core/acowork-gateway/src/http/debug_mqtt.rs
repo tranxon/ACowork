@@ -157,7 +157,7 @@ async fn start_mqtt_broker(State(state): State<AppState>) -> impl IntoResponse {
     // listener closed; a short sleep + retry is enough to absorb it.
     let mut last_err: Option<String> = None;
     for attempt in 0..START_RETRIES {
-        match crate::mqtt::start_broker_in_thread(&host, port) {
+        match crate::mqtt::start_broker(&host, port) {
             Ok(handle) => {
                 let gw = state.gateway_state.read().await;
                 {

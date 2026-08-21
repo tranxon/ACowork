@@ -14,14 +14,14 @@ use acowork_core::mqtt_proto::{
     AvailableProviders, AvailableSearches, ChatMessage, ControlCommand, DataEnvelope,
     LlmProtocol, McpRef, McpTransport as ProtoMcpTransport, ProviderRef, SearchRef,
 };
-use acowork_gateway::mqtt::{start_broker_in_thread, GatewayMqttClient};
+use acowork_gateway::mqtt::{start_broker, GatewayMqttClient};
 use acowork_runtime::mqtt::{new_shared_cache, MqttConnectConfig, RuntimeMqttClient};
 use prost::Message as _;
 
 /// Reserve a unique broker port for the current test.
 ///
 /// **Why per-test ports?** Each test below starts its own embedded
-/// `rumqttd` broker via [`start_broker_in_thread`]. `cargo test` runs
+/// `rumqttd` broker via [`start_broker`]. `cargo test` runs
 /// `#[test]` functions in parallel by default — if every test bound the
 /// same hard-coded port (the previous `BROKER_PORT = 19975`), only the
 /// first broker to acquire the port would actually be listening while the
@@ -49,7 +49,7 @@ fn fresh_broker_port() -> u16 {
 #[test]
 fn integration_broker_starts() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port)
+    let broker = start_broker("127.0.0.1", port)
         .expect("broker should start in separate thread");
     assert_eq!(broker.listen_addr.to_string(), format!("127.0.0.1:{}", port));
     drop(broker);
@@ -62,7 +62,7 @@ fn integration_broker_starts() {
 #[test]
 fn integration_gateway_and_runtime_connect() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -113,7 +113,7 @@ fn integration_gateway_and_runtime_connect() {
 #[test]
 fn integration_control_message_flow() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -201,7 +201,7 @@ fn integration_control_message_flow() {
 #[test]
 fn integration_control_stop_flow() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -298,7 +298,7 @@ fn integration_control_stop_flow() {
 #[test]
 fn integration_multiple_messages() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -369,7 +369,7 @@ fn integration_multiple_messages() {
 #[test]
 fn integration_lwt_offline_on_disconnect() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -452,7 +452,7 @@ fn integration_lwt_offline_on_disconnect() {
 #[test]
 fn integration_catalog_retained_persists_to_agent_mcp_json() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -620,7 +620,7 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
 #[test]
 fn integration_providers_retained_persists_to_agent_provider_json() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -771,7 +771,7 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
 #[test]
 fn integration_searches_retained_persists_to_agent_search_json() {
     let port = fresh_broker_port();
-    let broker = start_broker_in_thread("127.0.0.1", port).unwrap();
+    let broker = start_broker("127.0.0.1", port).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
