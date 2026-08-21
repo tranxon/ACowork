@@ -2368,22 +2368,47 @@ async fn put_agent_builtin_tools(
     }
 }
 
-/// Wire-shape DTOs for the two new endpoints. Kept local to `server.rs`
-/// because they only travel between the Gateway proxy and the Runtime HTTP
-/// server (the Desktop uses its own narrower types in `apps/acowork-desktop/src/lib/types.ts`).
+/// Wire-shape DTOs for the Tools-panel PUT endpoints. Kept local to
+/// `server.rs` because they only travel between the Gateway proxy and the
+/// Runtime HTTP server (the Desktop uses its own narrower types in
+/// `apps/acowork-desktop/src/lib/types.ts`).
+///
+/// **Wire semantics (pattern B — "complete enabled set")**: the body's
+/// list is the *full* desired state, not a patch. Anything currently on
+/// disk but absent from the list is flipped to inactive / removed.
+///
+/// `#[serde(default)]` is required on every list field so that the
+/// deserialization layer accepts bare `{}` (no keys) as well as explicit
+/// `{"servers": []}` / `{"providers": []}`. Both shapes mean "explicitly
+/// empty selection" and must reach the usecase layer (where the impl
+/// already handles them as `Some(vec![])` — see
+/// `usecases::agent_tools_impl::put_mcp_servers` line 97-98 for the MCP
+/// contract). Without `#[serde(default)]`, missing-field deserialization
+/// fails at the `Json<...>` extractor before the handler runs, returning
+/// 400 to clients that legitimately send `{}` (e.g. a CLI clearing the
+/// selection without restating the empty array).
 #[derive(serde::Deserialize)]
 struct UpdateMcpServersRequest {
+    /// Names of MCP servers to activate (complete enabled set).
+    /// Empty/absent means "no servers active".
+    #[serde(default)]
     servers: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
 struct UpdateAgentSearchConfigRequest {
+    /// Ordered list of active search providers (complete enabled set).
+    /// Empty/absent means "no providers selected" — distinct from
+    /// "config file missing" (a 500). See `SearchConfigResponse.providers`.
+    #[serde(default)]
     providers: Vec<acowork_core::protocol::AgentSearchProvider>,
 }
 
 #[derive(serde::Deserialize)]
 struct UpdateAgentBuiltinToolsRequest {
     /// Names of builtin tools to enable (complete enabled set).
+    /// Empty/absent means "no builtin tools enabled" (platform tools
+    /// are still force-enabled by the patcher — see ADR-029 §7).
     #[serde(default)]
     builtin_tools: Vec<String>,
 }
@@ -3754,6 +3779,157 @@ mod tests {
         assert!(
             active.is_empty(),
             "empty active_servers must round-trip as empty (not auto-merged), got: {active:?}"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Regression: bare `{}` (no keys) must be accepted for both
+    /// `PUT /agents/{id}/mcp-servers` and `PUT /agents/{id}/search-config`,
+    /// deserializing to the same empty list as `{"servers": []}` /
+    /// `{"providers": []}`. Both shapes reach the usecase layer (which
+    /// treats them as `Some(vec![])` — explicit "no servers/providers
+    /// active"), distinct from "never set anything".
+    ///
+    /// **Bug shape** (pre-fix): `UpdateMcpServersRequest.servers` and
+    /// `UpdateAgentSearchConfigRequest.providers` lacked `#[serde(default)]`,
+    /// so axum's `Json<...>` extractor returned 400 before reaching the
+    /// handler when the request body was bare `{}`. The existing
+    /// `test_mcp_and_search_persistence_roundtrip` only tested
+    /// `{"servers": []}` (explicit empty list), which deserializes
+    /// successfully whether or not `#[serde(default)]` is present —
+    /// so the bug was silent.
+    ///
+    /// Companion to `test_mcp_and_search_persistence_roundtrip`; uses
+    /// a stripped-down harness because empty bodies bypass the catalog
+    /// validation in `put_mcp_servers` (impl.rs:99) so we don't need
+    /// to seed `agent_mcp.json::catalog` here.
+    #[tokio::test]
+    async fn test_put_mcp_and_search_accepts_empty_body() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-empty-body");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        // Only the agent_tools slot needs to be populated for these two
+        // endpoints; everything else can stay None.
+        let agent_tools_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+            temp_dir.clone(),
+        ))));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            agent_tools_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+        let mcp_url = format!("{}/agents/com.test.agent/mcp-servers", base);
+        let search_url = format!("{}/agents/com.test.agent/search-config", base);
+
+        // 1) Bare `{}` to mcp-servers must succeed (was 400 pre-fix).
+        let resp = client
+            .put(&mcp_url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "PUT mcp-servers with bare {{}} must succeed, got {}",
+            resp.status()
+        );
+
+        // 2) Bare `{}` to search-config must succeed (was 400 pre-fix).
+        let resp = client
+            .put(&search_url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "PUT search-config with bare {{}} must succeed, got {}",
+            resp.status()
+        );
+
+        // 3) Round-trip: GET sees the empty active set on both endpoints —
+        //    confirms the empty body reached the usecase (which wrote
+        //    `active_names = Some(vec![])` / `providers: vec![]`) rather
+        //    than being silently no-op'd at the deserialization layer.
+        let resp = client.get(&mcp_url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let active = body["active_servers"].as_array().unwrap();
+        assert!(
+            active.is_empty(),
+            "GET mcp-servers after empty-body PUT must report empty active set, got: {active:?}"
+        );
+
+        let resp = client.get(&search_url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        let providers = body["providers"].as_array().unwrap();
+        assert!(
+            providers.is_empty(),
+            "GET search-config after empty-body PUT must report empty providers, got: {providers:?}"
+        );
+
+        // 4) Parity check: explicit `{"servers": []}` / `{"providers": []}`
+        //    also succeed (this was already working pre-fix; included here
+        //    so the test pins both wire shapes as equivalent).
+        let resp = client
+            .put(&mcp_url)
+            .json(&serde_json::json!({"servers": []}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "explicit empty list must succeed (parity with bare {{}}), got {}",
+            resp.status()
+        );
+
+        let resp = client
+            .put(&search_url)
+            .json(&serde_json::json!({"providers": []}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "explicit empty providers must succeed (parity with bare {{}}), got {}",
+            resp.status()
         );
 
         std::fs::remove_dir_all(&temp_dir).ok();
