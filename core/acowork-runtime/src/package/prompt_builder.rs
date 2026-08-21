@@ -5,12 +5,44 @@
 //! 2. prompts/constraints.md — Behavioral constraints
 //! 3. prompts/*.md — Additional prompt sections
 //! 4. skills/*/SKILL.md — Skill instructions
+//!
+//! [`COMPACTION_PROMPT_FILE`] (`prompts/summary.md`) is the one exception to
+//! the "everything in prompts/ goes into the system prompt" rule: it is the
+//! agent-specific context-compaction directive and is deliberately excluded
+//! from the main system prompt (see [`load_compaction_prompt`]).
 
 use std::fs;
 use std::path::Path;
 
 use crate::error::{Result, RuntimeError};
 use crate::skills::parser::SkillRegistry;
+
+/// Filename of the agent-specific compaction prompt inside `prompts/`.
+///
+/// When present, this file replaces the built-in
+/// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] as the system prompt for
+/// context compaction and episode distillation. It is a summarization
+/// directive, not a dialog identity section, so [`build_system_prompt_with_mode`]
+/// skips it when assembling the main system prompt.
+pub const COMPACTION_PROMPT_FILE: &str = "summary.md";
+
+/// File stem (without extension) of [`COMPACTION_PROMPT_FILE`], used to
+/// recognize the file after `file_stem()` normalization.
+pub const COMPACTION_PROMPT_STEM: &str = "summary";
+
+/// Load the agent-specific compaction prompt from `prompts/summary.md`.
+///
+/// Returns `None` when the file is missing or contains only whitespace —
+/// the caller then falls back to the built-in default
+/// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`]. Surrounding whitespace is
+/// stripped so a file consisting only of blank lines behaves like an
+/// absent file.
+pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
+    let path = package_dir.join("prompts").join(COMPACTION_PROMPT_FILE);
+    let content = fs::read_to_string(path).ok()?;
+    let trimmed = content.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
 
 /// Build system prompt from package files (default: Manual skill mode).
 ///
@@ -28,6 +60,9 @@ pub fn build_system_prompt(package_dir: &Path) -> Result<String> {
 /// - `Manual`: no skill content is injected.
 /// - `Progressive`: a compact summary (name + description) of available skills
 ///   is appended after prompt sections.
+///
+/// [`COMPACTION_PROMPT_FILE`] is excluded — it is the compaction directive,
+/// not a dialog section.
 pub fn build_system_prompt_with_mode(
     package_dir: &Path,
     skill_mode: acowork_core::SkillMode,
@@ -41,18 +76,26 @@ pub fn build_system_prompt_with_mode(
         prompt_files.sort();
 
         for path in &prompt_files {
+            // Use filename (without extension) as section header
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+
+            // Skip the compaction prompt — it is a summarization directive
+            // for context compaction / episode distillation, not a section
+            // of the main dialog system prompt. Including it here would
+            // leak summarization meta-instructions into every LLM call.
+            if name == COMPACTION_PROMPT_STEM {
+                continue;
+            }
+
             let content = fs::read_to_string(path).map_err(|e| {
                 RuntimeError::Package(format!(
                     "Failed to read prompt file {}: {e}",
                     path.display()
                 ))
             })?;
-
-            // Use filename (without extension) as section header
-            let name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
 
             sections.push(format!("## {name}\n\n{content}"));
         }
@@ -217,5 +260,71 @@ Be friendly and welcoming.
 
         let prompt = build_system_prompt(&dir).unwrap();
         assert_eq!(prompt, "You are a helpful AI assistant.");
+    }
+
+    // ----- load_compaction_prompt -----
+
+    /// Unique temp dir per test — the fixed-name helper below caused
+    /// parallel test flakiness (two tests deleting each other's files).
+    fn create_package_with_summary(name: &str, summary: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("acowork-test-compaction-prompt-{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+        fs::write(dir.join("prompts").join(COMPACTION_PROMPT_FILE), summary).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_load_compaction_prompt_missing_file_returns_none() {
+        let dir = std::env::temp_dir().join("acowork-test-compaction-missing");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("system.md"), "You are a test agent.").unwrap();
+
+        assert_eq!(load_compaction_prompt(&dir), None);
+    }
+
+    #[test]
+    fn test_load_compaction_prompt_reads_file() {
+        let dir = create_package_with_summary("reads-file", "Summarize with code details.\n");
+        let loaded = load_compaction_prompt(&dir);
+        assert_eq!(loaded.as_deref(), Some("Summarize with code details."));
+    }
+
+    #[test]
+    fn test_load_compaction_prompt_whitespace_only_is_none() {
+        // A file containing only blank lines behaves like an absent file —
+        // the caller falls back to the built-in default prompt.
+        let dir = create_package_with_summary("whitespace", "   \n\t\n  ");
+        assert_eq!(load_compaction_prompt(&dir), None);
+    }
+
+    #[test]
+    fn test_build_system_prompt_excludes_summary_md() {
+        // summary.md must NOT leak into the main dialog system prompt.
+        let dir = create_package_with_summary(
+            "excludes",
+            "You are a summarizer. Do NOT appear in the main system prompt.",
+        );
+        let prompt = build_system_prompt(&dir).unwrap();
+        assert!(prompt.contains("test agent"));
+        assert!(!prompt.contains("summarizer"));
+        assert!(!prompt.contains("## summary"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_still_includes_other_sections() {
+        // Only summary.md is excluded; sibling prompt files keep working.
+        let dir = create_package_with_summary("includes", "summarizer directive");
+        fs::write(
+            dir.join("prompts").join("constraints.md"),
+            "Always be polite.",
+        )
+        .unwrap();
+        let prompt = build_system_prompt(&dir).unwrap();
+        assert!(prompt.contains("test agent"));
+        assert!(prompt.contains("Always be polite."));
+        assert!(!prompt.contains("summarizer directive"));
     }
 }

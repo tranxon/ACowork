@@ -147,6 +147,16 @@ pub struct AgentCore {
     /// ADR-032: number of recent tool results preserved raw at every trigger
     /// System prompt override (from Gateway config).
     pub(crate) system_prompt_override: Option<String>,
+    /// Agent-specific compaction prompt (from `prompts/summary.md` in the
+    /// .agent package). `None` = use the built-in
+    /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] fallback.
+    ///
+    /// This is the package-declared summarization directive for context
+    /// compaction and episode distillation. It is deliberately independent
+    /// of `system_prompt_override` (which covers the MAIN dialog prompt
+    /// only) — compaction is a summarization task with its own directive,
+    /// and per-agent rules belong to the package, not the runtime config.
+    pub(crate) compaction_prompt: Option<String>,
     /// Grafeo memory store (shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
@@ -269,6 +279,9 @@ impl AgentCore {
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
+            // Populated in Phase B of session_init from prompts/summary.md
+            // (see `load_compaction_prompt`); None until then.
+            compaction_prompt: None,
             memory_provider: None,
             memory_admin: None,
             rag_provider: None,
@@ -1065,6 +1078,7 @@ impl Clone for AgentCore {
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
+            compaction_prompt: self.compaction_prompt.clone(),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             rag_provider: self.rag_provider.clone(),

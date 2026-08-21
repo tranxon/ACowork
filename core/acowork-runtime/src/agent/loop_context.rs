@@ -309,9 +309,17 @@ impl AgentLoop {
                         acc
                     });
             let compact_model = self.resolve_distill_model(&combined_text);
+            // Compaction prompt resolution chain:
+            //   1. AgentCore.compaction_prompt — package-declared
+            //      `prompts/summary.md` (per-agent summarization rules).
+            //   2. Built-in COMPACTION_SYSTEM_PROMPT — universal fallback.
+            // The main-dialog `system_prompt_override` is deliberately NOT
+            // consulted: it overrides the dialog identity, while compaction
+            // is a summarization task with its own directive (see
+            // `AgentCore.compaction_prompt` doc).
             let system_prompt = self
                 .core
-                .system_prompt_override
+                .compaction_prompt
                 .as_deref()
                 .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
             let provider = self.core.provider.clone();

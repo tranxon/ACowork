@@ -244,6 +244,19 @@ pub(crate) async fn phase_b_init_session(
         // can wire it into rebuilt providers (429-retry / session-resume).
         c.compat_cache = ctx.compat_cache.take();
 
+        // Agent-specific compaction prompt (prompts/summary.md, optional).
+        // Loaded here because the package_dir is only known after package
+        // loading; `None` (no file) means the built-in
+        // COMPACTION_SYSTEM_PROMPT fallback is used at compaction time.
+        c.compaction_prompt =
+            crate::package::prompt_builder::load_compaction_prompt(&ctx.loaded.package_dir);
+        if let Some(ref p) = c.compaction_prompt {
+            tracing::debug!(
+                prompt_len = p.len(),
+                "Loaded agent-specific compaction prompt from prompts/summary.md"
+            );
+        }
+
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).
         let providers_for_init = ctx.provider_config.as_ref().map(|c| &c.providers);
@@ -636,18 +649,18 @@ pub(crate) async fn phase_b_init_session(
             // core_clone was moved into RuntimeAgentTokenService above; use
             // agent_core_shared (which holds a clone) to access the fields.
             let shared = ctx.agent_core_shared.read();
-            if let Ok(ref guard) = shared {
-                if let Some(core) = guard.as_ref() {
-                    if let Some(ref timer) = core.consolidation_timer {
-                        if let Ok(mut slot) = ctx.consolidation_timer_slot.write() {
-                            *slot = Some(timer.clone());
-                        }
-                    }
-                    if let Some(ref rag) = core.rag_provider {
-                        if let Ok(mut slot) = ctx.rag_provider_slot.write() {
-                            *slot = Some(rag.clone());
-                        }
-                    }
+            if let Ok(ref guard) = shared
+                && let Some(core) = guard.as_ref()
+            {
+                if let Some(ref timer) = core.consolidation_timer
+                    && let Ok(mut slot) = ctx.consolidation_timer_slot.write()
+                {
+                    *slot = Some(timer.clone());
+                }
+                if let Some(ref rag) = core.rag_provider
+                    && let Ok(mut slot) = ctx.rag_provider_slot.write()
+                {
+                    *slot = Some(rag.clone());
                 }
             }
         }

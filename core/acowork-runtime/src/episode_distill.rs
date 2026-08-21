@@ -151,6 +151,10 @@ impl EpisodeDistiller {
     /// [`crate::prompt::build_compaction_system_prompt`]). Pass `None` when
     /// the session has no user profile yet (default → English summary).
     ///
+    /// `compaction_prompt` is the agent-specific summarization directive from
+    /// `prompts/summary.md` (see [`crate::package::prompt_builder::load_compaction_prompt`]).
+    /// `None` falls back to the built-in [`crate::prompt::COMPACTION_SYSTEM_PROMPT`].
+    ///
     /// Returns `(summary, usage)` per ADR-027 so callers can record raw
     /// Provider usage in [`crate::conversation::SessionTokens`].
     pub async fn compact_full_context(
@@ -159,6 +163,7 @@ impl EpisodeDistiller {
         model_name: &str,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
+        compaction_prompt: Option<&str>,
     ) -> Result<(String, UsageInfo)> {
         let messages_text = format_messages(messages);
         if messages_text.is_empty() {
@@ -167,7 +172,15 @@ impl EpisodeDistiller {
             ));
         }
         let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-        compact_with_llm(&prompt, provider, model_name, distill_max_tokens, identity_context, crate::prompt::COMPACTION_SYSTEM_PROMPT).await
+        compact_with_llm(
+            &prompt,
+            provider,
+            model_name,
+            distill_max_tokens,
+            identity_context,
+            compaction_prompt.unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT),
+        )
+        .await
     }
 
     /// Compact a specific slice of in-memory messages (e.g. tail after last compaction).
@@ -175,7 +188,8 @@ impl EpisodeDistiller {
     /// Same as `compact_full_context` but takes a slice reference for convenience
     /// when the caller already has the exact message range. `identity_context` is
     /// threaded through for the same language-aware reason as in
-    /// [`Self::compact_full_context`].
+    /// [`Self::compact_full_context`], and `compaction_prompt` for the same
+    /// per-agent summarization rules.
     ///
     /// Returns `(summary, usage)` per ADR-027 so callers can record raw
     /// Provider usage in [`crate::conversation::SessionTokens`].
@@ -185,6 +199,7 @@ impl EpisodeDistiller {
         model_name: &str,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
+        compaction_prompt: Option<&str>,
     ) -> Result<(String, UsageInfo)> {
         Self::compact_full_context(
             messages,
@@ -192,6 +207,7 @@ impl EpisodeDistiller {
             model_name,
             distill_max_tokens,
             identity_context,
+            compaction_prompt,
         )
         .await
     }
@@ -208,8 +224,19 @@ impl EpisodeDistiller {
     /// raw-text fallback path is taken, no LLM is invoked and identity is not
     /// consulted (the raw conversation text is used as-is).
     ///
+    /// `compaction_prompt` is the agent-specific summarization directive from
+    /// `prompts/summary.md`; `None` falls back to the built-in
+    /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`].
+    ///
     /// Returns `(episode, usage)` per ADR-027 so callers can record raw
     /// Provider usage in [`crate::conversation::SessionTokens`].
+    ///
+    /// `#[allow(clippy::too_many_arguments)]` follows the project convention
+    /// for thin pass-through facades (cf. `AgentCore::new_with_observer`,
+    /// `SessionCore::new`): every argument is semantically independent and
+    /// arrives from a different call-site context, so bundling them into a
+    /// config struct would hurt readability without reducing surface area.
+    #[allow(clippy::too_many_arguments)]
     pub async fn distill_on_session_end(
         session_path: &Path,
         session_id: &str,
@@ -218,6 +245,7 @@ impl EpisodeDistiller {
         min_distill_chars: usize,
         distill_max_tokens: u32,
         identity_context: Option<&str>,
+        compaction_prompt: Option<&str>,
     ) -> Result<(DistilledEpisode, UsageInfo)> {
         let messages_text = read_jsonl_content(session_path)?;
         if messages_text.is_empty() {
@@ -241,7 +269,7 @@ impl EpisodeDistiller {
                 model_name,
                 distill_max_tokens,
                 identity_context,
-                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                compaction_prompt.unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT),
             )
             .await?
         };

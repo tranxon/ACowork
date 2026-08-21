@@ -293,6 +293,7 @@ impl super::loop_::AgentLoop {
                         &model_name,
                         distill_max_tokens,
                         identity_context.as_deref(),
+                        core_clone.compaction_prompt.as_deref(),
                     )
                     .await
                     {
