@@ -26,7 +26,7 @@ import { HarnessPage } from "../harness/HarnessPage";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
-import { useLayoutStore, type PanelTab } from "../../stores/layoutStore";
+import { useLayoutStore } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Bot, Check, Cpu } from "lucide-react";
@@ -212,12 +212,15 @@ export function AppLayout() {
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
   }, []);
-  // Determine if selected agent is in debug mode
+  // Determine if selected agent is in debug mode.
+  // ADR-048 follow-up: key off `debug_state` (current capability), not
+  // `dev_mode` (startup intent) — DevMode can be flipped on at runtime
+  // via POST /api/agents/{id}/debug/enable without restarting the agent.
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isSleeping = selectedAgentId ? (agents[selectedAgentId]?.sleeping ?? false) : false;
-  const isDebugMode = selectedAgent?.dev_mode && selectedAgent?.running;
+  const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.running;
   const agentDisplayName = selectedAgent
     ? (agents[selectedAgent.agent_id]?.profile?.displayName ??
       selectedAgent.display_name ??
@@ -406,25 +409,6 @@ export function AppLayout() {
     }
     prevIsDebugMode.current = isDebugMode;
   }, [isDebugMode]);
-
-  // ── Track last non-debug tab so we can restore it when leaving debug ─
-  const lastNonDebugTab = useRef<PanelTab>(activeTab);
-  useEffect(() => {
-    if (activeTab !== "debug") {
-      lastNonDebugTab.current = activeTab;
-    }
-  }, [activeTab]);
-
-  // ── When agent switches, restore last non-debug tab if new agent has no debug ─
-  const prevSelectedAgentId = useRef(selectedAgentId);
-  useEffect(() => {
-    if (prevSelectedAgentId.current !== selectedAgentId) {
-      prevSelectedAgentId.current = selectedAgentId;
-      if (activeTab === "debug" && !isDebugMode) {
-        setActiveTab(lastNonDebugTab.current);
-      }
-    }
-  }, [selectedAgentId, isDebugMode, activeTab]);
 
   // ── Switch to status tab when agent stops ────────────────────────
   const prevRunning = useRef(selectedAgent?.running);
@@ -858,10 +842,8 @@ export function AppLayout() {
                 setActiveTab(tab);
               }
             }}
-            isDebugMode={!!isDebugMode}
             agentRunning={selectedAgent?.running ?? false}
-            collapsed={resultsCollapsed}
-          />
+            collapsed={resultsCollapsed}          />
         )}
 
         {currentView === "settings" && (

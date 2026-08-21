@@ -120,8 +120,26 @@ pub struct AgentListResponse {
     pub connected: bool,
     /// Whether the agent's SessionTask is initialized and ready to receive messages
     pub ready: bool,
-    /// Whether the agent is running in developer mode (Debug Protocol enabled)
+    /// Whether the agent was started with the `--dev-mode` flag (Debug
+    /// Protocol enabled at boot).
+    ///
+    /// ADR-048 follow-up: this is now **startup intent**, not current
+    /// capability. To check whether DevMode is actually live for a
+    /// running agent, read [`Self::debug_state`] instead. The Desktop
+    /// uses `debug_state` to drive the Debug Panel + the "Enable Debug"
+    /// button; `dev_mode` is preserved for backwards-compatible
+    /// dashboards and operator scripts.
     pub dev_mode: bool,
+    /// Whether DevMode is actually live for the running agent right now.
+    ///
+    /// ADR-048 follow-up: distinct from `dev_mode` so the Desktop can
+    /// tell apart "agent was started in dev mode" from "DevMode was
+    /// just enabled at runtime" (`POST /api/agents/{id}/debug/enable`).
+    /// Serialised as the literal string `"enabled"` or `"disabled"` —
+    /// matches the lower-case enum naming the TypeScript side uses for
+    /// `AgentStore.dev_mode_state`.
+    #[serde(rename = "debug_state")]
+    pub debug_state: crate::gateway::state::DebugState,
     /// Debug Protocol port hint (set when dev_mode is true and agent is running).
     ///
     /// ADR-048: no longer bound by Runtime as a WebSocket listener; kept
@@ -171,6 +189,15 @@ pub struct AgentDetailResponse {
     pub ready: bool,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
+    /// Whether the agent was started with the `--dev-mode` flag.
+    ///
+    /// ADR-048 follow-up: startup intent only. For current DevMode
+    /// capability, see [`Self::debug_state`].
+    pub dev_mode: bool,
+    /// Whether DevMode is live right now (decoupled from `dev_mode` —
+    /// can be enabled at runtime via `POST /api/agents/{id}/debug/enable`).
+    #[serde(rename = "debug_state")]
+    pub debug_state: crate::gateway::state::DebugState,
     /// Debug WebSocket port (set when dev_mode is true and agent is running)
     pub debug_port: Option<u16>,
 }
@@ -271,6 +298,9 @@ pub async fn list_agents(State(state): State<AppState>) -> Json<Vec<AgentListRes
                 connected,
                 ready,
                 dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
+                debug_state: running_info
+                    .map(|r| r.debug_state)
+                    .unwrap_or(crate::gateway::state::DebugState::Disabled),
                 debug_port: running_info.and_then(|r| r.debug_port),
                 last_interaction_at,
                 mqtt_online,
@@ -362,6 +392,10 @@ pub async fn get_agent_detail(
         ready,
         pid: running_info.map(|r| r.pid),
         started_at: running_info.map(|r| r.started_at.to_rfc3339()),
+        dev_mode: running_info.map(|r| r.dev_mode).unwrap_or(false),
+        debug_state: running_info
+            .map(|r| r.debug_state)
+            .unwrap_or(crate::gateway::state::DebugState::Disabled),
         debug_port: running_info.and_then(|r| r.debug_port),
     };
     Ok(Json(resp))
@@ -1533,6 +1567,17 @@ pub async fn stop_agent(
 /// ADR-033: gRPC removed. Debug mode is now configured at agent start time
 /// (via `POST /api/agents/{id}/start` with `dev_mode: true`). Restart-in-debug
 /// requires a full process restart in MQTT mode.
+///
+/// **ADR-048 follow-up — DEPRECATED.** The Desktop right-click "Restart
+/// in Debug" context menu no longer calls this endpoint (removed from
+/// `AgentList.tsx`); users flip DevMode on via
+/// `POST /api/agents/{id}/debug/enable` instead, which proxies to the
+/// Runtime's `/api/debug/enable` without an agent restart. This
+/// handler remains operational so any external script or older Desktop
+/// build still works, and so the operator escape hatch (full process
+/// restart to genuinely reset session state) is still available.
+/// Plan to remove in a follow-up release once the Desktop has shipped
+/// without the menu for one full minor version.
 pub async fn restart_agent_in_debug(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
@@ -1878,6 +1923,7 @@ mod tests {
             connected: false,
             ready: false,
             dev_mode: false,
+            debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: None,
             mqtt_online: None,
@@ -1891,6 +1937,28 @@ mod tests {
         assert!(!json.contains("last_interaction_at"));
         // sleeping_at is None and skipped on serialization.
         assert!(!json.contains("sleeping_at"));
+        // ADR-048 follow-up: debug_state serialises as lowercase string.
+        assert!(
+            json.contains("\"debug_state\":\"disabled\""),
+            "debug_state should serialise to lowercase \"disabled\"; got: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn test_debug_state_serialises_lowercase() {
+        // Pin the exact wire shape the TypeScript `AgentStore.dev_mode_state`
+        // mapping relies on. If we ever flip to SCREAMING_SNAKE_CASE the
+        // frontend mapping breaks silently — this test makes the breakage
+        // visible at PR time.
+        assert_eq!(
+            serde_json::to_string(&crate::gateway::state::DebugState::Disabled).unwrap(),
+            "\"disabled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::gateway::state::DebugState::Enabled).unwrap(),
+            "\"enabled\""
+        );
     }
 
     #[test]
@@ -1935,6 +2003,7 @@ mod tests {
             connected: false,
             ready: false,
             dev_mode: false,
+            debug_state: crate::gateway::state::DebugState::Disabled,
             debug_port: None,
             last_interaction_at: ts.map(|s| s.to_string()),
             mqtt_online: None,

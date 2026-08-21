@@ -755,6 +755,16 @@ pub(crate) async fn phase_b_init_session(
     let session_manager_arc: Arc<tokio::sync::Mutex<SessionManager>> =
         Arc::new(tokio::sync::Mutex::new(session_manager));
 
+    // Late-bind the SessionManager into the slot the HTTP server is
+    // already holding (it was given a clone of `ctx.session_manager_slot`
+    // in Phase A). The runtime `POST /api/debug/enable` route reads
+    // this slot to call `enable_debug_mode` without a restart; the
+    // Phase C `debug_mode` startup wiring also goes through the same
+    // slot via `enable_debug_mode_and_fill_slot`. Filling it here
+    // (rather than later in Phase C) means both consumers can rely on
+    // the slot being populated as soon as Phase B returns.
+    *ctx.session_manager_slot.write().await = Some(session_manager_arc.clone());
+
     // -- Phase B epilogue: auto-sleep idle watcher ----
     //
     // Spawn the IdleWatcher after SessionManager is fully constructed

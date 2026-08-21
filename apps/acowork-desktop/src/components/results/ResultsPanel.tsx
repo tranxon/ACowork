@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { useTranslation } from "../../i18n/useTranslation";
+import { invoke } from "@tauri-apps/api/core";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useDebugStore } from "../../stores/debugStore";
 import type { ChatMessage, SessionStatus } from "../../lib/types";
 import { getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { log } from "../../lib/logger";
 import {
   WifiOff,
   Play,
@@ -13,6 +16,7 @@ import {
   Square,
   RefreshCw,
   RotateCcw,
+  Bug,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
@@ -20,8 +24,6 @@ import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
-import { useTranslation } from "../../i18n/useTranslation";
-import { log } from "../../lib/logger";
 
 interface ResultsPanelProps {
   onCollapse: () => void;
@@ -146,6 +148,11 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   // Debug section expansion / editing state
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [loadedSections, setLoadedSections] = useState<Set<string>>(new Set());
+  // ADR-048 follow-up: in-flight flag for the runtime DevMode enable
+  // button. Disables the button + changes its label while the
+  // `enable_agent_debug` Tauri command is awaiting a response, so the
+  // user can't double-click and double-fire the wiring.
+  const [enablingDebug, setEnablingDebug] = useState(false);
   const [editingSection, setEditingSection] = useState<{
     iteration: number;
     section: string;
@@ -171,7 +178,10 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
 
     const agentChanged = selectedAgentId !== prevAgentId.current;
 
-    if (selectedAgent?.dev_mode && selectedAgent.running) {
+    // ADR-048 follow-up: `debug_state === "enabled"` covers both
+    // startup `--dev-mode` and runtime enable (dev_mode stays false
+    // after POST /api/agents/{id}/debug/enable).
+    if (selectedAgent?.debug_state === "enabled" && selectedAgent.running) {
       if (agentChanged || !connected || debugAgentId !== selectedAgentId) {
         connect(selectedAgentId);
       }
@@ -181,15 +191,15 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     if (agentChanged) {
       prevAgentId.current = selectedAgentId;
     }
-  }, [isDebugMode, selectedAgentId, selectedAgent?.dev_mode, selectedAgent?.running, connected, debugAgentId, connect]);
+  }, [isDebugMode, selectedAgentId, selectedAgent?.debug_state, selectedAgent?.running, connected, debugAgentId, connect]);
 
   // ── Debug disconnect effect ──────────────────────────────────────
   useEffect(() => {
     if (!isDebugMode) return;
-    if (connected && selectedAgent && (!selectedAgent.dev_mode || !selectedAgent.running)) {
+    if (connected && selectedAgent && (selectedAgent.debug_state !== "enabled" || !selectedAgent.running)) {
       disconnect();
     }
-  }, [isDebugMode, selectedAgent?.dev_mode, selectedAgent?.running, connected, disconnect]);
+  }, [isDebugMode, selectedAgent?.debug_state, selectedAgent?.running, connected, disconnect]);
 
   // ── Debug toggle section callback ────────────────────────────────
   const toggleSection = useCallback(
@@ -263,9 +273,78 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
       </div>
 
       {/* ── Debug tab content ─────────────────────────────────────── */}
-      {activeTab === "debug" && isDebugMode && (
+      {/* ADR-048 follow-up: the debug tab renders in every state, not
+          just when DevMode is active — otherwise the "Enable Debug"
+          button (shown when debug_state === "disabled") would be
+          unreachable. Branching:
+            1. agent not running            → "no agent in debug mode"
+            2. running, DevMode off         → "Enable Debug" button
+            3. running, DevMode on, remote  → remote-unavailable
+            4. running, DevMode on, local,
+               not connected                → "debug connection lost"
+            5. running, DevMode on, local,
+               connected                    → DebugPanel */}
+      {activeTab === "debug" && (
         <>
-          {!isGatewayLocal() ? (
+          {!selectedAgent?.running ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+              <Bug className="h-5 w-5" />
+              <span className="text-center">
+                {t("resultsPanel.noAgentDebug")}
+              </span>
+            </div>
+          ) : selectedAgent?.debug_state !== "enabled" ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
+              <Bug className="h-5 w-5" />
+              <span className="text-center">
+                {t("resultsPanel.agentNotDebugMode")}
+              </span>
+              {/* ADR-048 follow-up: runtime DevMode activation. Renders only
+                  when the agent is running but not yet in DevMode. Clicking
+                  flips DevMode on at the Runtime via
+                  POST /api/agents/{id}/debug/enable without restarting the agent. */}
+              <button
+                type="button"
+                className={cn(
+                  "mt-1 inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-modal-surface px-3 py-1.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800",
+                  enablingDebug && "opacity-50 cursor-wait",
+                )}
+                disabled={enablingDebug}
+                onClick={async () => {
+                  if (!selectedAgentId) return;
+                  setEnablingDebug(true);
+                  try {
+                    log.debug("[ResultsPanel] enable_agent_debug: invoking", { agentId: selectedAgentId });
+                    await invoke<{ enabled: boolean; already_enabled: boolean; debug_port: number }>(
+                      "enable_agent_debug",
+                      { agentId: selectedAgentId, debugPort: 0 },
+                    );
+                    log.debug("[ResultsPanel] enable_agent_debug: invoke ok, refreshing agents");
+                    await useAgentStore.getState().fetchAgents();
+                    // ADR-048 follow-up: don't wait for the auto-connect
+                    // useEffect to fire — its run is deferred to after
+                    // commit, which races with the tab switch below and
+                    // leaves `connected` momentarily false (case 4 "调试
+                    // 连接已断开" flashes for a frame). Attach the
+                    // debug session synchronously so the very first
+                    // render after fetchAgents already shows the panel.
+                    log.debug("[ResultsPanel] enable_agent_debug: calling connect() directly");
+                    useDebugStore.getState().connect(selectedAgentId);
+                    onTabChange("debug");
+                  } catch (err) {
+                    log.error("[ResultsPanel] enable_agent_debug failed:", err);
+                  } finally {
+                    setEnablingDebug(false);
+                  }
+                }}
+              >
+                <Bug className="h-3.5 w-3.5" />
+                {enablingDebug
+                  ? t("resultsPanel.enablingDebug")
+                  : t("resultsPanel.enableDebug")}
+              </button>
+            </div>
+          ) : !isGatewayLocal() ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               <WifiOff className="h-5 w-5" />
               <span className="text-center text-xs">
@@ -279,11 +358,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-zinc-500 dark:text-zinc-400">
               <WifiOff className="h-5 w-5" />
               <span className="text-center">
-                {selectedAgent?.running && selectedAgent?.dev_mode
-                  ? t("resultsPanel.debugConnectionLost")
-                  : selectedAgent?.running
-                    ? t("resultsPanel.agentNotDebugMode")
-                    : t("resultsPanel.noAgentDebug")}
+                {t("resultsPanel.debugConnectionLost")}
               </span>
             </div>
           ) : (

@@ -144,6 +144,19 @@ impl LifecycleManager {
             // the published retained message and calls `set_agent_ready`.
             ready: false,
             dev_mode,
+            // ADR-048 follow-up: track DevMode activation independent of
+            // the startup `--dev-mode` flag. When the agent was started
+            // with `--dev-mode=true`, DevMode is already live on the
+            // Runtime side (Phase C ran `enable_debug_mode_and_fill_slot`),
+            // so the initial state is `Enabled`. Otherwise the runtime
+            // enable path (`POST /api/agents/{id}/debug/enable` →
+            // `proxy_debug_rpc`) is the only thing that can transition
+            // it to `Enabled`.
+            debug_state: if dev_mode {
+                crate::gateway::state::DebugState::Enabled
+            } else {
+                crate::gateway::state::DebugState::Disabled
+            },
             debug_port,
             workspace_config_json: None,
             current_embed_dim: None,

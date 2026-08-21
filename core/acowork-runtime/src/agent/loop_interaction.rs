@@ -52,12 +52,9 @@ impl AgentLoop {
             .map(|t| t as u32)
             .unwrap_or(acowork_core::timeout_config::constants::APPROVAL.as_secs() as u32);
 
-        // Generate unique request ID
-        let request_id = format!(
-            "q-{}",
-            self.approval_next_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
+        // Generate unique request ID (UUID v4; global uniqueness means
+        // question ids and approval ids can never collide)
+        let request_id = format!("q-{}", uuid::Uuid::new_v4());
 
         tracing::info!(
             request_id = %request_id,

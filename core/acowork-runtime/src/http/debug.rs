@@ -11,6 +11,7 @@
 //!
 //! | Method | Path                            | DebugService call         |
 //! |--------|---------------------------------|---------------------------|
+//! | POST   | `/api/debug/enable`             | (no service call — flips DevMode on at runtime) |
 //! | POST   | `/api/debug/resume`             | `resume(session_id)`      |
 //! | POST   | `/api/debug/pause`              | `pause(session_id)`       |
 //! | POST   | `/api/debug/step`               | `step(session_id, …)`     |
@@ -378,6 +379,100 @@ async fn post_re_execute(
         .map_err(DebugHttpError::from)
 }
 
+// ── Runtime DevMode activation ───────────────────────────────────────
+
+/// JSON body for `POST /api/debug/enable`.
+///
+/// `session_id` is intentionally absent — DevMode is per-agent, not
+/// per-session. `debug_port` is accepted for API parity with the
+/// original `--debug-port` config knob (the legacy WS listener was
+/// removed in ADR-048; the value is plumbed through but unused at
+/// runtime). `None` defaults to 0, which is the same default as
+/// `RuntimeConfig::debug_port` fallback.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct EnableDebugBody {
+    #[serde(default)]
+    pub debug_port: Option<u32>,
+}
+
+/// Response payload for `POST /api/debug/enable`.
+///
+/// `already_enabled` distinguishes a fresh activation from a no-op
+/// confirmation so the Desktop can skip the "DevMode just turned on"
+/// toast on the second click and refresh the Debug Panel state
+/// instead.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnableDebugResult {
+    pub enabled: bool,
+    /// `true` when the slot was already populated before this call —
+    /// no wiring happened, just a status confirmation.
+    pub already_enabled: bool,
+    pub debug_port: u32,
+}
+
+/// `POST /api/debug/enable` — flip DevMode on at runtime.
+///
+/// Idempotent: if DevMode is already active (debug service slot is
+/// populated) the handler returns `already_enabled: true` and skips
+/// the wiring. Otherwise it routes through
+/// [`crate::startup::debug_enable::enable_debug_mode_and_fill_slot`]
+/// to install the per-session debug controllers, MQTT event
+/// publisher, and HTTP debug service in one shot — without restarting
+/// the agent or restarting the HTTP server.
+///
+/// `debug_port` is preserved for API stability but unused at runtime
+/// (ADR-048 removed the legacy WebSocket listener). The Desktop
+/// always sends the value it has in `agentStore.dev_mode` /
+/// `agentStore.debug_port`, so the field still serves as a "the user
+/// confirmed the port" sanity check.
+async fn post_enable(
+    State(state): State<super::server::HttpState>,
+    Json(body): Json<EnableDebugBody>,
+) -> Result<Json<DebugHttpResponse<EnableDebugResult>>, DebugHttpError> {
+    let debug_port = body.debug_port.unwrap_or(0);
+
+    let outcome = crate::startup::debug_enable::enable_debug_mode_and_fill_slot(
+        &state.debug_service,
+        &state.mqtt_client,
+        &state.session_manager_slot,
+        debug_port,
+    )
+    .await;
+
+    match outcome {
+        crate::startup::debug_enable::DebugEnableOutcome::AlreadyEnabled => Ok(Json(
+            DebugHttpResponse::ok(EnableDebugResult {
+                enabled: true,
+                already_enabled: true,
+                debug_port,
+            }),
+        )),
+        crate::startup::debug_enable::DebugEnableOutcome::NewlyEnabled => {
+            tracing::info!(
+                debug_port,
+                "DevMode enabled at runtime via HTTP — /api/debug/* routes are now live"
+            );
+            Ok(Json(DebugHttpResponse::ok(EnableDebugResult {
+                enabled: true,
+                already_enabled: false,
+                debug_port,
+            })))
+        }
+        crate::startup::debug_enable::DebugEnableOutcome::SessionManagerUnavailable => {
+            // Phase B hasn't finished wiring SessionManager into the
+            // slot yet. Same shape as the other "slot not ready" 503s
+            // in this file (`resolve_service` returns 503 when the
+            // DebugService slot is empty) so the Desktop can handle
+            // both with a single retry path.
+            Err(DebugHttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                -32000,
+                "SessionManager not ready (Phase B still running) — retry shortly",
+            ))
+        }
+    }
+}
+
 // ── Router ────────────────────────────────────────────────────────────
 
 use axum::extract::Query;
@@ -388,6 +483,7 @@ use axum::extract::Query;
 /// `.merge(debug::debug_routes())` after the main routes.
 pub(crate) fn debug_routes() -> Router<super::server::HttpState> {
     Router::new()
+        .route("/api/debug/enable", post(post_enable))
         .route("/api/debug/resume", post(post_resume))
         .route("/api/debug/pause", post(post_pause))
         .route("/api/debug/step", post(post_step))

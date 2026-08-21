@@ -2832,13 +2832,20 @@ After installation, ask the user to re-enable the MCP server.",
                 .get(sid)
                 .cloned()
                 .unwrap_or_else(|| handles.debug_ctrl.clone());
-            let ctrl_ptr = Arc::as_ptr(&per_session_ctrl) as *const ();
-            tracing::debug!(
-                session_id = %sid,
-                ctrl_ptr = ?ctrl_ptr,
-                found_in_map = controllers.contains_key(sid),
-                "push_debug_mode: per-session controller resolved"
-            );
+            {
+                // Trace immediately (the pointer is only valid before the
+                // first await on the controller lock — capture it now so
+                // it doesn't have to be carried across the lock().await
+                // below, which would force the future to be !Send because
+                // raw `*const ()` is not Send).
+                let ctrl_ptr = Arc::as_ptr(&per_session_ctrl) as *const ();
+                tracing::debug!(
+                    session_id = %sid,
+                    ctrl_ptr = ?ctrl_ptr,
+                    found_in_map = controllers.contains_key(sid),
+                    "push_debug_mode: per-session controller resolved"
+                );
+            }
             // Extract notify handles from the per-session controller.
             // The debug server calls ctrl.resume_notify.notify_one() on this
             // same controller instance, so SessionTask must wait on the same
@@ -2869,7 +2876,6 @@ After installation, ask the user to re-enable the MCP server.",
                 *pending = Some(per_session_handles.clone());
                 tracing::debug!(
                     session_id = %sid,
-                    ctrl_ptr = ?ctrl_ptr,
                     "push_debug_mode: handles written to pending_debug_handles (bypass)"
                 );
             }

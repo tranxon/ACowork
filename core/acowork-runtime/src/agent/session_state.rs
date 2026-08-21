@@ -148,6 +148,13 @@ pub enum SessionStatus {
     /// running" indicator instead of generic "replying".
     ToolExecuting,
     /// A tool requires user approval before execution.
+    ///
+    /// **Concurrent semantics**: when multiple tools await approval
+    /// simultaneously (fan-out), `request_id` reflects the most recent
+    /// transition only. The frontend must NOT use this field to
+    /// locate/dismiss dialogs - it should key off
+    /// `ChunkEvent::ToolApprovalNeeded.request_id`, which is unique per
+    /// approval request.
     WaitingApproval { request_id: String },
     /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision.
     Paused {

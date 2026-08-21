@@ -16,12 +16,70 @@
 //! added on the Runtime (D2 route table in
 //! `acowork-runtime/src/http/debug.rs`) need no Desktop Rust change -
 //! only a new call site in the frontend store.
+//!
+//! ADR-048 follow-up: a dedicated `enable_agent_debug` command exists
+//! alongside the generic `debug_rpc` for the runtime DevMode flip path
+//! (see `ResultsPanel.tsx` "Enable Debug" button). It exists separately
+//! because the generic `debug_rpc` is gated on `debugStore.debugAgentId`
+//! (set by `connect()`) — but at the moment the user clicks "Enable
+//! Debug", that field is necessarily `null` because the agent isn't in
+//! DevMode yet. Routing through a dedicated command avoids the
+//! chicken-and-egg.
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::state::AppState;
+
+/// Response shape for `enable_agent_debug` — mirrors the Runtime's
+/// `EnableDebugResult` (see `acowork-runtime/src/http/debug.rs`).
+///
+/// `already_enabled: true` means the runtime reported a no-op
+/// confirmation (DevMode was already active); the Desktop still needs
+/// to refresh the agent list to pick up the Gateway-side state
+/// transition, but the user-facing copy can be "DevMode is on" rather
+/// than "DevMode just turned on".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnableDebugResult {
+    pub enabled: bool,
+    pub already_enabled: bool,
+    pub debug_port: u32,
+}
+
+/// Flip DevMode on at runtime for `agent_id`. Idempotent — calling
+/// twice is safe; the second call returns `already_enabled: true`.
+///
+/// Routes through the same Gateway wildcard proxy as [`debug_rpc`]:
+/// `POST /api/agents/{agent_id}/debug/enable` -> Runtime
+/// `/api/debug/enable`. The Gateway's `proxy_debug_rpc` hook updates
+/// `running_agents[id].debug_state = Enabled` on a 2xx response, so
+/// after this command returns the Desktop's next `fetchAgents` call
+/// will report `debug_state = "enabled"` and the Debug Panel +
+/// step/pause/resume controls become active.
+#[tauri::command]
+pub async fn enable_agent_debug(
+    state: State<'_, AppState>,
+    agent_id: String,
+    debug_port: Option<u32>,
+) -> Result<EnableDebugResult, String> {
+    // Wrap the Runtime's `{ ok, data, error }` envelope — `debug_rpc`
+    // already unwraps `data`, so we receive either the
+    // `EnableDebugResult` payload directly or a transport-level error.
+    let body = serde_json::json!({
+        "debug_port": debug_port.unwrap_or(0),
+    });
+    let data = {
+        let client = state.gateway.read().await;
+        client
+            .debug_rpc(&agent_id, "POST", "enable", None, Some(&body))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    serde_json::from_value::<EnableDebugResult>(data)
+        .map_err(|e| format!("malformed /api/debug/enable response: {}", e))
+}
 
 /// Relay a Debug Protocol HTTP RPC to the Runtime via the Gateway.
 ///

@@ -165,6 +165,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let debug_service_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // Late-bind slot for `SessionManager`. Empty in Phase A; populated
+    // by Phase B once SessionManager is constructed. Cloned into the
+    // Runtime HTTP server so the runtime `POST /api/debug/enable`
+    // route can flip DevMode on for an agent that started without it.
+    let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // ADR-038-style late-bind slot for the MQTT client. The Runtime HTTP
     // server starts here in Phase A before `mqtt_client` is connected, so
     // we hand the server an `Arc<Mutex<Option<_>>>` slot and populate it
@@ -206,6 +213,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             rag_provider_slot.clone(),
             debug_service_slot.clone(),
             workspace_resolver.clone(),
+            session_manager_slot.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -932,6 +940,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         memory_store_shared,
         embed_dim_shared,
         degraded_reasons,
+        // Same Arc as the local `mqtt_client_slot` above — both Phase C
+        // (subsystems) and the runtime `/api/debug/enable` route read
+        // through `ctx.mqtt_client_slot`.
+        mqtt_client_slot: mqtt_client_slot.clone(),
         agent_core_shared,
         session_metadata_slot,
         memory_query_slot,
@@ -944,6 +956,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         consolidation_timer_slot,
         rag_provider_slot,
         debug_service_slot,
+        session_manager_slot,
         search_key_vault,
         search_provider_list,
         session_configs,

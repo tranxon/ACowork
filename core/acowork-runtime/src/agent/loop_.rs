@@ -9,7 +9,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
@@ -319,12 +318,19 @@ pub struct AgentLoop {
     /// Inbound message receiver for external message injection
     pub(crate) inbound_rx: tokio::sync::mpsc::Receiver<InboundMessage>,
     /// Approval request receiver: spawned tool tasks send requests here,
-    /// the main loop receives them and handles the pause/resume cycle.
+    /// the main loop receives them and routes decisions via `route_inbound`.
     pub(crate) approval_rx: mpsc::Receiver<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>,
-    /// Approval handle (sender side) — cloned into spawned tool tasks.
+    /// Approval handle (sender side) - cloned into spawned tool tasks.
     pub(crate) approval_handle: ApprovalHandle,
-    /// Counter for generating unique approval request IDs.
-    pub(crate) approval_next_id: AtomicU64,
+    /// In-flight approval requests keyed by request_id (UUID v4).
+    /// Inserted by `execute_tools_parallel`'s `approval_rx` branch, removed
+    /// by `route_inbound` when the matching `ApprovalDecision` arrives on
+    /// `inbound_rx`. Replaces the old recursive `await_approval_decision`
+    /// design which deadlocked when multiple concurrent approvals raced on
+    /// the shared `inbound_rx` (buffered into `deferred_inbound` but never
+    /// drained within the approval wait).
+    pub(crate) pending_approvals:
+        std::collections::HashMap<String, oneshot::Sender<ApprovalDecision>>,
     /// Total input chars of the most recent ChatRequest, used for token
     /// ratio calibration together with the API-reported prompt_tokens.
     pub(crate) last_input_chars: usize,
@@ -457,7 +463,7 @@ impl AgentLoop {
             inbound_rx,
             approval_rx,
             approval_handle: approval_handle.clone(),
-            approval_next_id: AtomicU64::new(0),
+            pending_approvals: std::collections::HashMap::new(),
             last_input_chars: 0,
             last_reasoning_effort: None,
             last_thinking_mode: None,
@@ -528,7 +534,7 @@ impl AgentLoop {
             inbound_rx,
             approval_rx,
             approval_handle: approval_handle.clone(),
-            approval_next_id: AtomicU64::new(0),
+            pending_approvals: std::collections::HashMap::new(),
             last_input_chars: 0,
             last_reasoning_effort: None,
             last_thinking_mode: None,

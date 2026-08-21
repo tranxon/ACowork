@@ -23,9 +23,11 @@ import { bannerSlot } from "../../lib/ui-styles";
 export function DebugPausedBanner() {
   const { t } = useTranslation();
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+  // ADR-048 follow-up: key off `debug_state` (current capability), not
+  // `dev_mode` (startup intent) — DevMode can be flipped on at runtime.
   const devMode = useAgentStore((s) => {
     if (!s.selectedAgentId) return false;
-    return s.agents[s.selectedAgentId]?.meta?.dev_mode ?? false;
+    return s.agents[s.selectedAgentId]?.meta?.debug_state === "enabled";
   });
   const currentSessionId = useChatStore((s) =>
     selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null,

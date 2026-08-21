@@ -153,6 +153,24 @@ pub type SharedDegradation = Arc<std::sync::RwLock<Vec<String>>>;
 /// still authoritative for the next GET.
 pub type SharedMqttClientSlot = Arc<tokio::sync::Mutex<Option<SharedRuntimeMqttClient>>>;
 
+/// Late-bind slot for the Runtime's `SessionManager`.
+///
+/// The HTTP server starts in Phase A before `SessionManager` is
+/// constructed in Phase B, so we hand the server an
+/// `Option`-wrapped `Arc<Mutex<SessionManager>>` and populate it once
+/// Phase B finishes. The only handler that reads this slot today is
+/// `POST /api/debug/enable` (`http/debug.rs`), which uses it to call
+/// `SessionManager::enable_debug_mode` for runtime DevMode activation.
+/// `None` is reported back to the caller as 503 — same ADR-040 pattern
+/// as every other late-bind slot.
+///
+/// Type is `Arc<...>` (not `Mutex`) because the server only ever reads
+/// the slot to clone the inner `Arc<Mutex<SessionManager>>`; the
+/// exclusive write happens once at Phase B and never changes again.
+/// An `RwLock` keeps the read path lock-free.
+pub type SharedSessionManagerSlot =
+    Arc<tokio::sync::RwLock<Option<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>>>>;
+
 /// State shared with HTTP handlers.
 #[derive(Clone)]
 pub(crate) struct HttpState {
@@ -190,7 +208,9 @@ pub(crate) struct HttpState {
     /// the broker connection is established. The `PUT /agents/{id}/config`
     /// handler uses this to re-PUBLISH the retained config snapshot so
     /// other Desktop subscribers see the new values without a restart.
-    mqtt_client: SharedMqttClientSlot,
+    /// Also consumed by `POST /api/debug/enable` to wire the
+    /// DebugEventMqttPublisher when DevMode is flipped on at runtime.
+    pub(crate) mqtt_client: SharedMqttClientSlot,
     /// ADR-040: late-bind usecase services. Populated by Phase B.
     /// All handlers depend solely on these traits; no direct access
     /// to memory_store or agent_core is required.
@@ -241,6 +261,13 @@ pub(crate) struct HttpState {
     /// persisted to disk and listed by the desktop but never selected —
     /// the switch would fall back to `__agent_home__`.
     workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
+    /// Late-bind slot for `SessionManager`. Populated by Phase B once
+    /// the session manager is constructed. The only consumer is
+    /// `POST /api/debug/enable` (`http/debug::post_enable`), which
+    /// uses it to flip DevMode on at runtime without restarting the
+    /// agent. `None` outside Phase B (e.g. early boot, tests that
+    /// never build a SessionManager).
+    pub(crate) session_manager_slot: crate::http::server::SharedSessionManagerSlot,
 }
 
 /// Handle to the running HTTP server.
@@ -285,6 +312,7 @@ impl RuntimeHttpServer {
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
+        session_manager_slot: SharedSessionManagerSlot,
     ) -> Result<Self, RuntimeHttpServerError> {
         let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
             .unwrap_or_default();
@@ -310,6 +338,7 @@ impl RuntimeHttpServer {
             rag_provider,
             debug_service,
             workspace_resolver,
+            session_manager_slot,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -2882,6 +2911,8 @@ mod tests {
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -2903,6 +2934,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -2985,6 +3017,8 @@ mod tests {
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3006,6 +3040,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .unwrap();
@@ -3141,6 +3176,8 @@ mod tests {
             ));
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3162,6 +3199,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -3203,6 +3241,8 @@ mod tests {
         let degraded_reasons: SharedDegradation = std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3224,6 +3264,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -3344,6 +3385,8 @@ mod tests {
         let agent_tools_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(agent_tools_svc)));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3365,6 +3408,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -3510,6 +3554,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3531,6 +3577,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -3714,6 +3761,8 @@ mod tests {
         let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -3735,6 +3784,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -3894,6 +3944,9 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot =
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         // Only the agent_tools slot needs to be populated for these two
         // endpoints; everything else can stay None.
         let agent_tools_slot: Arc<
@@ -3923,6 +3976,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -4072,6 +4126,8 @@ mod tests {
         let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -4093,6 +4149,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -4163,6 +4220,9 @@ mod tests {
         std::fs::create_dir_all(&ws_path).unwrap();
 
         let workspace_resolver = new_test_workspace_resolver();
+
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
         let workspace_mutation_slot: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
         > = Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
@@ -4190,6 +4250,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_resolver.clone(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -4310,6 +4371,8 @@ mod tests {
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
         let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -4331,6 +4394,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -4784,6 +4848,8 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -4805,6 +4871,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -4908,6 +4975,8 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -4929,6 +4998,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5096,6 +5166,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5117,6 +5189,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5151,6 +5224,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5172,6 +5247,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5221,6 +5297,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5242,6 +5320,7 @@ mod tests {
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5278,6 +5357,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5299,6 +5380,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5366,6 +5448,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5387,6 +5471,7 @@ mod tests {
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5442,6 +5527,8 @@ mod tests {
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5463,6 +5550,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
+            session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5516,6 +5604,8 @@ mod tests {
         let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5537,6 +5627,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5680,6 +5771,8 @@ mod tests {
         let session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>> =
             Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5701,6 +5794,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5796,6 +5890,8 @@ mod tests {
         let session_config_slot =
             Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5817,6 +5913,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5879,6 +5976,8 @@ mod tests {
         let session_config_slot =
             Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5900,6 +5999,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -5976,6 +6076,8 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None));
         let session_metadata = new_test_session_metadata(&temp_dir, snapshots, latest);
 
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             "com.test.agent".to_string(),
@@ -5997,6 +6099,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                     new_test_workspace_resolver(),
+                    session_manager_slot,
         )
         .await
         .expect("server should start");
@@ -6021,6 +6124,243 @@ mod tests {
             "GET /sessions/{{sid}} meta must NOT contain temperature");
         assert!(meta_obj.get("workspace_id").is_none() || meta_obj["workspace_id"].is_null(),
             "GET /sessions/{{sid}} meta must NOT contain workspace_id");
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-048 follow-up: `POST /api/debug/enable` flips DevMode on at
+    /// runtime without restarting the agent. The test:
+    /// 1. Before: any `/api/debug/*` route returns 503 (slot empty).
+    /// 2. POST `/api/debug/enable` with empty body → 200, `already_enabled=false`.
+    /// 3. After: `/api/debug/state` returns 404 (SessionNotFound) — the
+    ///    slot is populated, the service is wired.
+    /// 4. POST again → 200, `already_enabled=true` (idempotent).
+    #[tokio::test]
+    async fn test_http_server_debug_enable_runtime() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-debug-enable");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Minimal SessionManager for the enable path. enable_debug_mode
+        // does not need any active sessions — it works on zero-session
+        // managers too (creates a fallback controller).
+        let config = crate::config::RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.debug_enable"
+            version = "1.0.0"
+            name = "Test debug-enable runtime"
+            description = "Pin /api/debug/enable HTTP wiring"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = std::sync::Arc::new(
+            acowork_core::providers::mock::MockProvider::single_text("test"),
+        );
+        let core = std::sync::Arc::new(crate::agent::agent_core::AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let session_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::agent::session::SessionManager::new(
+                core,
+                crate::agent::session::session_manager::SessionManagerConfig::default(),
+            ),
+        ));
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+
+        // SessionManager slot populated; the real handle is the one we
+        // built above (cloned — the HTTP server holds a reference, the
+        // closure below keeps the original alive for the test scope).
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Some(session_manager.clone())));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.debug_enable".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot.clone(),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+
+        // 1. Before enable: /api/debug/state returns 503 (slot empty).
+        let resp = reqwest::Client::new()
+            .get(format!("{}/api/debug/state?session_id=foo", base))
+            .send()
+            .await
+            .expect("GET state should not error");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "before enable: /api/debug/state must be 503"
+        );
+
+        // 2. POST /api/debug/enable with empty body → 200, already_enabled=false.
+        let resp = reqwest::Client::new()
+            .post(format!("{}/api/debug/enable", base))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("POST enable should not error");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "POST /api/debug/enable must be 200"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["enabled"], true);
+        assert_eq!(body["data"]["already_enabled"], false);
+
+        // 3. After enable: /api/debug/state returns 404 (SessionNotFound),
+        //    not 503. The slot is now populated.
+        let resp = reqwest::Client::new()
+            .get(format!("{}/api/debug/state?session_id=foo", base))
+            .send()
+            .await
+            .expect("GET state should not error");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "after enable: /api/debug/state must be 404 (SessionNotFound)"
+        );
+
+        // 4. POST again → 200, already_enabled=true (idempotent).
+        let resp = reqwest::Client::new()
+            .post(format!("{}/api/debug/enable", base))
+            .json(&serde_json::json!({"debug_port": 0}))
+            .send()
+            .await
+            .expect("POST enable should not error");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["enabled"], true);
+        assert_eq!(
+            body["data"]["already_enabled"], true,
+            "second call should be idempotent"
+        );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-048 follow-up: `POST /api/debug/enable` returns 503 when
+    /// the SessionManager slot is empty (e.g. Phase B hasn't finished
+    /// yet). The HTTP route should surface this as a clean service-
+    /// unavailable, not a panic or wrong-status success.
+    #[tokio::test]
+    async fn test_http_server_debug_enable_without_session_manager() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-debug-enable-no-sm");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let embed_dim: SharedEmbedDimension = std::sync::Arc::new(std::sync::RwLock::new(0));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata = new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let memory_store: SharedMemoryStore =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+
+        // SessionManager slot is empty — mimics Phase B not yet finished.
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.no_sm".to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            embed_dim.clone(),
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(memory_store, embed_dim.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(temp_dir.clone())))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let resp = reqwest::Client::new()
+            .post(format!("{}/api/debug/enable", base))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("POST enable should not error");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "missing SessionManager should yield 503"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("SessionManager"),
+            "error message should mention SessionManager; got {:?}",
+            body
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

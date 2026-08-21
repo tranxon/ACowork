@@ -25,7 +25,7 @@ interface AgentListProps {
 export function AgentList({ width }: AgentListProps) {
   const { t } = useTranslation();
   const isCollapsed = width !== undefined && width <= 80;
-  const { selectedAgentId, loading, fetchAgents, selectAgent, stopAgent, uninstallAgent, restartAgentInDebug, fetchLatestSession } =
+  const { selectedAgentId, loading, fetchAgents, selectAgent, stopAgent, uninstallAgent, fetchLatestSession } =
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
 
@@ -217,15 +217,6 @@ export function AgentList({ width }: AgentListProps) {
         next.delete(agentId);
         return next;
       });
-    }
-    setContextMenu(null);
-  };
-
-  const handleRestartDebug = async (agentId: string) => {
-    try {
-      await restartAgentInDebug(agentId);
-    } catch (e) {
-      addToast({ type: "error", message: t("agentList.errorFailedToRestartInDebug", { error: String(e) }) });
     }
     setContextMenu(null);
   };
@@ -544,13 +535,6 @@ export function AgentList({ width }: AgentListProps) {
                 onClick={() => handleStop(contextMenu.agentId)}
               >
                 <Square className="context-menu-item__icon" /> {t("agentList.contextStop")}
-              </button>
-              <button
-                type="button"
-                className="context-menu-item context-menu-item--warning"
-                onClick={() => handleRestartDebug(contextMenu.agentId)}
-              >
-                <Bug className="context-menu-item__icon" /> {t("agentList.contextRestartInDebug")}
               </button>
             </>
           )}

@@ -363,7 +363,10 @@ function RuntimeRow({ agent }: { agent: AgentListResponse }) {
       <div className="flex items-center gap-2 min-w-0">
         <Monitor className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
         <span className="text-xs font-medium truncate">{agent.name}</span>
-        {agent.dev_mode && (
+        {/* ADR-048 follow-up: badge reflects current DevMode capability
+            (debug_state), not startup intent (dev_mode) — an agent can be
+            flipped into DevMode at runtime without restart. */}
+        {agent.debug_state === "enabled" && (
           <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
             <Bug className="h-3 w-3" />
             {t("settings.debug")}
