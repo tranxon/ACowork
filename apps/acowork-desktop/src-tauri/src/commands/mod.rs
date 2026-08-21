@@ -8,5 +8,6 @@ pub mod debug;
 pub mod effects;
 pub mod gateway;
 pub mod publish;
+pub mod reveal;
 pub mod settings;
 pub mod vault;

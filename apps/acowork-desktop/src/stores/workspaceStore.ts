@@ -1,7 +1,8 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "./settingsStore";
 import { useChatStore } from "./chatStore";
-import { DEFAULT_GATEWAY_URL } from "../lib/config";
+import { DEFAULT_GATEWAY_URL, isGatewayLocal } from "../lib/config";
 import { log } from "../lib/logger";
 
 /** Single workspace directory entry — matches Gateway API response */
@@ -163,6 +164,21 @@ interface WorkspaceState {
 
   // Set/unset prompt file for workspace (e.g. CLAUDE.md, AGENTS.md)
   setPromptFile: (agentId: string, workspaceId: string, promptFile: string | null) => Promise<boolean>;
+
+  /**
+   * Open the OS file manager with the given file/folder revealed.
+   *
+   * **Local-mode only.** Returns `false` (and logs) when the Gateway
+   * is remote — the file manager would otherwise open on the Gateway
+   * host, not the user's machine. The caller should hide or disable
+   * the corresponding menu item in remote mode (see
+   * `FileTreeNode.handleReveal` for the UI rule).
+   *
+   * Returns `true` on success, `false` on any error (path not cached,
+   * the file no longer exists, the OS refused to spawn the file
+   * manager, …). Errors are logged; the caller surfaces them as a toast.
+   */
+  revealItem: (agentId: string, workspaceId: string, relPath: string) => Promise<boolean>;
 
   // Clear state on agent switch
   reset: () => void;
@@ -575,6 +591,52 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return true;
     } catch (e) {
       log.error("[WorkspaceStore] setPromptFile error:", e);
+      return false;
+    }
+  },
+
+  revealItem: async (agentId: string, workspaceId: string, relPath: string) => {
+    // Defence in depth: even though FileTreeNode hides this menu
+    // item in remote mode, we re-check here. A manipulated frontend
+    // (or stale menu) must not be able to open the Gateway host's
+    // file manager.
+    if (!isGatewayLocal()) {
+      log.warn(
+        "[WorkspaceStore] revealItem refused: gateway is in remote mode (agentId=%s, workspaceId=%s, path=%s)",
+        agentId,
+        workspaceId,
+        relPath,
+      );
+      return false;
+    }
+
+    const rootKey = `${agentId}:${workspaceId}`;
+    const root = get().treeRoots[rootKey];
+    if (!root) {
+      log.warn(
+        "[WorkspaceStore] revealItem failed: no cached workspace root for %s — fetch the tree first",
+        rootKey,
+      );
+      return false;
+    }
+
+    // TreeResponse.root is documented as forward-slash normalised,
+    // even on Windows. `explorer.exe` accepts forward slashes, so we
+    // keep the separator uniform instead of swapping to Path.join
+    // (which would introduce backslashes on Windows and break the
+    // /select,` argument boundary).
+    const trimmedRel = relPath.replace(/^\/+/, "").replace(/\/+$/, "");
+    const absolute = trimmedRel === "" ? root : `${root}/${trimmedRel}`;
+
+    try {
+      await invoke("reveal_in_file_explorer", { path: absolute });
+      return true;
+    } catch (e) {
+      log.error(
+        "[WorkspaceStore] revealItem failed (path=%s):",
+        absolute,
+        e,
+      );
       return false;
     }
   },

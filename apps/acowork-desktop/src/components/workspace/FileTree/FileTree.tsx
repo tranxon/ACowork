@@ -29,6 +29,15 @@ interface FileTreeProps {
     onCopy?: (relPath: string, isDir: boolean) => void;
     onPaste?: (parentPath: string) => void;
     onRename?: (relPath: string, newName: string, isDir: boolean) => Promise<boolean>;
+    /**
+     * Right-click "Reveal in File Explorer" — opens the OS file manager
+     * with the entry selected. Local-mode only; the parent supplies a
+     * handler that surfaces a toast on failure. The corresponding menu
+     * item is hidden entirely when `isGatewayLocal()` is false (matches
+     * VSCode's behaviour for remote workspaces — see
+     * `FileTreeNode.handleReveal`).
+     */
+    onReveal?: (relPath: string) => void | Promise<void>;
     /** When this matches a node's `relPath`, that node renders an inline
      * rename input seeded with `renameInitialValue`. Owned by the parent
      * so the same machinery drives right-click "New File / New Folder /
@@ -71,6 +80,7 @@ export function FileTree({
     onCopy,
     onPaste,
     onRename,
+    onReveal,
     renameTarget = null,
     renameInitialValue = "",
     onCancelRename,
@@ -297,6 +307,7 @@ export function FileTree({
                                 onCopy={onCopy}
                                 onPaste={onPaste}
                                 onRename={onRename}
+                                onReveal={onReveal}
                                 renameTarget={renameTarget}
                                 renameInitialValue={renameInitialValue}
                                 onCancelRename={onCancelRename}

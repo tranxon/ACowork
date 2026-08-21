@@ -629,7 +629,9 @@
       "copy": "複製",
       "paste": "貼上",
       "rename": "重新命名…",
-      "delete": "刪除"
+      "delete": "刪除",
+      "reveal": "在檔案管理員中顯示",
+      "revealDisabled": "遠端模式下無法使用（閘道不在本機）"
     },
     "ariaLabelClearSearch": "清除搜尋",
     "removeWorkspaceTitle": "移除工作區",

@@ -597,6 +597,11 @@ pub fn run() {
             // ADR-XXX: MQTT broker debug controls (status bar test buttons)
             commands::gateway::debug_mqtt_shutdown,
             commands::gateway::debug_mqtt_start,
+            // Local-mode "Reveal in File Explorer" — opens the OS file
+            // manager with the entry selected. Only meaningful when the
+            // Desktop App and Gateway share a machine (local mode); the
+            // frontend hides the corresponding menu item in remote mode.
+            commands::reveal::reveal_in_file_explorer,
         ])
         .setup(|app| {
             tray::setup(app)?;

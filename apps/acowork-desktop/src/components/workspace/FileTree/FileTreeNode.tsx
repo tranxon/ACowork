@@ -1,6 +1,6 @@
 import { memo, useCallback, useState, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil } from "lucide-react";
+import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil, ExternalLink } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { getFileIcon } from "./fileIcons";
 import { SetiIcon } from "../../common/SetiIcon";
@@ -9,6 +9,7 @@ import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenuPosition } from "../../../hooks/useContextMenuPosition";
+import { isGatewayLocal } from "../../../lib/config";
 import type { TreeEntry } from "../../../stores/workspaceStore";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
@@ -45,6 +46,16 @@ interface FileTreeNodeProps {
    * success, `false` on failure (caller surfaces an error toast).
    */
   onRename?: (relPath: string, newName: string, isDir: boolean) => Promise<boolean>;
+  /**
+   * Right-click "Reveal in File Explorer" — opens the OS file manager
+   * (Finder / Explorer / xdg-open) with the entry selected. Only
+   * rendered when `isGatewayLocal()` is true; in remote mode the
+   * corresponding menu item is hidden because revealing a file on
+   * the Gateway host has no value to the user. The store still
+   * re-checks `isGatewayLocal()` as defence in depth, so a stale or
+   * manipulated menu cannot trigger a cross-host spawn.
+   */
+  onReveal?: (relPath: string) => void | Promise<void>;
   /** When this matches the node's `relPath`, the node swaps its name
    * span for an inline rename input. Owned by the parent so the same
    * machinery drives right-click "New File / Folder / Paste" (which
@@ -95,6 +106,7 @@ export const FileTreeNode = memo(function FileTreeNode({
   onCopy,
   onPaste,
   onRename,
+  onReveal,
   renameTarget = null,
   renameInitialValue = "",
   onCancelRename,
@@ -313,6 +325,16 @@ export const FileTreeNode = memo(function FileTreeNode({
     setContextMenu(null);
   }, [agentId, sessionId, relPath, openPreview]);
 
+  /** Right-click "Reveal in File Explorer" — local-mode only.
+   * The corresponding menu item is hidden in remote mode (see the
+   * menu JSX), so this handler should never fire then. We still
+   * forward through `onReveal` rather than calling the store directly
+   * so the parent's error-toast contract is preserved end-to-end. */
+  const handleReveal = useCallback(() => {
+    onReveal?.(relPath);
+    setContextMenu(null);
+  }, [relPath, onReveal]);
+
   const handleTogglePromptFile = useCallback(() => {
     const state = useWorkspaceStore.getState();
     const workspaceId = state.sessionWorkspaceMap[sessionId] ?? "__agent_home__";
@@ -495,6 +517,25 @@ export const FileTreeNode = memo(function FileTreeNode({
             >
               <Pencil className="context-menu-item__icon" />
               {t("workspace.contextMenu.rename")}
+            </button>
+          )}
+          {/* "Reveal in File Explorer" — local-mode only.
+           *
+           * In remote mode (Gateway on a different machine) opening
+           * the file manager would reveal a folder the user can't see,
+           * so we hide the menu item entirely. Matches VSCode's
+           * behaviour for remote workspaces and keeps the menu clean.
+           * `isGatewayLocal()` is checked again inside `revealItem`
+           * as defence in depth — see workspaceStore.ts. */}
+          {onReveal && isGatewayLocal() && (
+            <button
+              type="button"
+              onClick={handleReveal}
+              className="context-menu-item"
+              title={t("workspace.contextMenu.reveal")}
+            >
+              <ExternalLink className="context-menu-item__icon" />
+              {t("workspace.contextMenu.reveal")}
             </button>
           )}
           <button

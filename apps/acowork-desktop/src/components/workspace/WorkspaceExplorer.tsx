@@ -43,6 +43,7 @@ export function WorkspaceExplorer() {
     const deleteDir = useWorkspaceStore((s) => s.deleteDir);
     const copyItem = useWorkspaceStore((s) => s.copyItem);
     const renameItem = useWorkspaceStore((s) => s.renameItem);
+    const revealItem = useWorkspaceStore((s) => s.revealItem);
     const setCopiedEntry = useWorkspaceStore((s) => s.setCopiedEntry);
     const openFile = useFileEditorStore((s) => s.openFile);
     const openPreview = useFileEditorStore((s) => s.openPreview);
@@ -335,6 +336,35 @@ export function WorkspaceExplorer() {
             requestRenameFor(relPath, initialName);
         },
         [requestRenameFor],
+    );
+
+    /* ── Reveal in File Explorer ──────────────────────────────────────
+     *
+     * Opens the OS file manager (Finder / Explorer / xdg-open) with the
+     * given entry selected. The actual spawn happens in the desktop
+     * Rust process via the `reveal_in_file_explorer` Tauri command; the
+     * store handles gateway-mode guarding + path resolution.
+     *
+     * Local-mode only by design. The `revealItem` action refuses remote
+     * gateways and returns false; we surface the result as a toast so
+     * the user knows why nothing happened. The menu item itself is also
+     * disabled with an explanatory tooltip when `isGatewayLocal()` is
+     * false — this handler is the second line of defence. */
+    const handleReveal = useCallback(
+        async (relPath: string): Promise<void> => {
+            if (!selectedAgentId) return;
+            const ok = await revealItem(selectedAgentId, currentWorkspaceId, relPath);
+            if (!ok) {
+                // The store already logged the underlying cause (remote
+                // mode, no cached root, spawn failure, …). Surface a
+                // user-facing hint here so the action is not silent.
+                addToast({
+                    type: "error",
+                    message: t("workspace.contextMenu.revealDisabled"),
+                });
+            }
+        },
+        [selectedAgentId, currentWorkspaceId, revealItem, addToast, t],
     );
 
     /* ── Search box state (Ctrl+P-style file search above the file tree) ── */
@@ -788,6 +818,7 @@ export function WorkspaceExplorer() {
                     onCopy={handleCopy}
                     onPaste={handlePaste}
                     onRename={handleRename}
+                    onReveal={handleReveal}
                     renameTarget={renameTarget}
                     renameInitialValue={renameInitialValue}
                     onCancelRename={cancelExternalRename}

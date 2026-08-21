@@ -325,7 +325,9 @@
       "copy": "Copy",
       "paste": "Paste",
       "rename": "Rename…",
-      "delete": "Delete"
+      "delete": "Delete",
+      "reveal": "Reveal in File Explorer",
+      "revealDisabled": "Unavailable in remote mode (Gateway is on a different machine)"
     },
     "defaultWorkingDirectory": "Default working directory",
     "noMatchingWorkspaces": "No matching workspaces",
