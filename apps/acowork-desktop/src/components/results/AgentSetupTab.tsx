@@ -21,6 +21,11 @@ import {
 } from "../../lib/avatar";
 import type { AvatarAssetEntry, AvatarConfigResponse } from "../../lib/types";
 import { log } from "../../lib/logger";
+import {
+  IDLE_TIMEOUT_OPTIONS,
+  idleTimeoutDisplayValue,
+} from "../../lib/idleTimeoutOptions";
+import { useToast } from "../common/ToastProvider";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -100,6 +105,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
 
 export function AgentSetupTab() {
   const { t } = useTranslation();
+  const { addToast } = useToast();
   const { agents, selectedAgentId, fetchAgents } = useAgentStore();
   const { getProfile, setProfile, resetProfile } = useAgentStore();
 
@@ -352,9 +358,26 @@ export function AgentSetupTab() {
         );
         if (!res.ok) {
           log.warn("[AgentSetup] Field save failed:", field, res.status);
+          // Surface the failure instead of silently accepting the
+          // optimistic local update — otherwise the panel lies about the
+          // persisted value (the "shows 30 min but actually 5 min" trap).
+          addToast({
+            type: "error",
+            message: t("agentSetup.saveFailed", {
+              field: WIRE_FIELD[field],
+              status: res.status,
+            }),
+          });
         }
       } catch (err) {
         log.warn("[AgentSetup] Field save error:", field, err);
+        addToast({
+          type: "error",
+          message: t("agentSetup.saveFailed", {
+            field: WIRE_FIELD[field],
+            status: "network",
+          }),
+        });
       } finally {
         setSavingFields((prev) => {
           if (!prev.has(field)) return prev;
@@ -364,7 +387,7 @@ export function AgentSetupTab() {
         });
       }
     },
-    [selectedAgentId],
+    [selectedAgentId, t, addToast],
   );
 
   const saveField = useCallback(
@@ -849,19 +872,7 @@ export function AgentSetupTab() {
           {t("agentSetup.idleTimeout")}
         </label>
         <select
-          value={
-            profile.idleTimeoutSecs === 0
-              ? "0"
-              : profile.idleTimeoutSecs === 900
-                ? "900"
-                : profile.idleTimeoutSecs === 1800
-                  ? "1800"
-                  : profile.idleTimeoutSecs === 3600
-                    ? "3600"
-                    : profile.idleTimeoutSecs === 10800
-                      ? "10800"
-                      : "1800"
-          }
+          value={idleTimeoutDisplayValue(profile.idleTimeoutSecs)}
           onChange={(e) => {
             const v = e.target.value;
             if (v === "") {
@@ -879,12 +890,17 @@ export function AgentSetupTab() {
             backgroundSize: '1.5em 1.5em',
           }}
         >
-          <option value="300">{t("agentSetup.idleTimeoutOption5Min")}</option>
-          <option value="900">{t("agentSetup.idleTimeoutOption15Min")}</option>
-          <option value="1800">{t("agentSetup.idleTimeoutOption30Min")}</option>
-          <option value="3600">{t("agentSetup.idleTimeoutOption1Hour")}</option>
-          <option value="10800">{t("agentSetup.idleTimeoutOption3Hour")}</option>
-          <option value="0">{t("agentSetup.idleTimeoutOptionNever")}</option>
+          {/* Placeholder shown when the stored value is undefined or no
+              longer a preset (e.g. legacy 300/900). Never silently
+              relabel a non-preset value as "30 minutes". */}
+          <option value="" disabled hidden>
+            {t("agentSetup.idleTimeoutPlaceholder")}
+          </option>
+          {IDLE_TIMEOUT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {t(opt.labelKey)}
+            </option>
+          ))}
         </select>
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.idleTimeoutDesc")}
