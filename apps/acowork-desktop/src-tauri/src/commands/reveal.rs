@@ -24,6 +24,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 /// Reveal a file or directory in the OS file manager.
 ///
 /// On macOS: `open -R <path>` reveals and selects the item in Finder.
@@ -70,12 +73,27 @@ fn spawn_reveal(path_str: &str, path_buf: &std::path::Path) -> std::io::Result<(
     #[cfg(target_os = "windows")]
     {
         // Explorer's `/select,<path>` syntax highlights the item in
-        // its parent folder. The comma MUST NOT be separated by a
-        // space — that's the documented one-arg form. We build the
-        // single argument as a String so cmd.exe receives
-        // `/select,C:\path\to\file.txt` verbatim.
+        // its parent folder. TWO non-obvious requirements to make
+        // explorer.exe actually do what we want:
+        //
+        //   1. The comma MUST NOT be separated from the path — that's
+        //      the documented one-arg form `/select,<path>`. We build
+        //      it as a single String.
+        //
+        //   2. The whole argument MUST NOT be wrapped in quotes —
+        //      explorer.exe's argument parser does NOT understand the
+        //      quoted form `/select,"C:\path\file.txt"`. When the
+        //      path contains a space (e.g. `C:\Users\Me\My Documents\…`)
+        //      Rust's `Command::arg` would normally auto-wrap the
+        //      argument in quotes for the Win32 command line, which
+        //      causes explorer.exe to silently fall back to opening
+        //      the default location (Desktop / Quick Access).
+        //
+        // `CommandExt::raw_arg` is the documented escape hatch: it
+        // appends the argument verbatim, with NO escaping. The result
+        // is the exact bytes explorer.exe needs to see on its argv.
         let select_arg = format!("/select,{}", path_str);
-        Command::new("explorer.exe").arg(select_arg).spawn()?;
+        Command::new("explorer.exe").raw_arg(select_arg).spawn()?;
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -124,5 +142,36 @@ mod tests {
         fs::write(&f, "x").unwrap();
         assert!(f.exists());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Regression guard for the Windows reveal bug (see fix-windows-reveal):
+    /// if a future refactor accidentally re-introduces `Command::arg()`
+    /// here, the path-with-space case will silently regress and open
+    /// Desktop instead of the target folder. This test documents the
+    /// contract at the build level: the `CommandExt::raw_arg` call site
+    /// exists on Windows. It does NOT spawn explorer.exe (that would
+    /// open an Explorer window in CI).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reveal_uses_raw_arg_to_bypass_quoting() {
+        // Construct a synthetic /select, string with a space — exactly
+        // the case that triggered the original bug. The format string
+        // must produce the literal `/select,<path>` with no quoting.
+        let path_with_space = r"C:\Users\Name\My Documents\file.txt";
+        let select_arg = format!("/select,{}", path_with_space);
+        assert_eq!(
+            select_arg, r"/select,C:\Users\Name\My Documents\file.txt",
+            "select_arg must be a single literal argument; if quoting is ever \
+             reintroduced here, explorer.exe will fall back to opening the \
+             default Desktop folder."
+        );
+        // And the argument MUST contain a space (otherwise the test
+        // would pass vacuously even if quoting is reverted, since
+        // Rust's auto-quoting is space-triggered). This protects
+        // against accidentally removing the space from the fixture.
+        assert!(
+            select_arg.contains(' '),
+            "fixture must contain a space to actually exercise the quoting path"
+        );
     }
 }

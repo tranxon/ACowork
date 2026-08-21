@@ -211,10 +211,24 @@ export function FileTree({
         [onSelectPath],
     );
 
-    // Virtual scrolling setup — row height scales with global font size
+    // Virtual scrolling setup — row height scales with global font size.
+    //
+    // The multiplier 1.9 is derived from the actual rendered row geometry,
+    // not a guessed value:
+    //   - font-size:        fontSize rem × 16 px/rem
+    //   - text line-height: 1.5 (Tailwind preflight default, inherited from html)
+    //   - py-[0.2em] top+bottom: 0.4 × fontSize px  (0.2em × 2)
+    //   → total height = fontSize × 16 × (1.5 + 0.4) = fontSize × 16 × 1.9
+    //
+    // Underestimating this is a classic virtualizer bug: the slot
+    // height comes from the estimate, but the actual `.file-tree-row`
+    // div overflows the slot by ~4-5px. `elementFromPoint` in that
+    // overflow band returns the NEXT row, so :hover paints on the row
+    // below the cursor and any `closest('[data-rel-path]')` (used by
+    // the DnD logic) resolves to the wrong path.
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const fontSize = useSettingsStore((s) => s.fontSize);
-    const rowHeight = useMemo(() => Math.round(fontSize * 16 * 1.55), [fontSize]);
+    const rowHeight = useMemo(() => Math.round(fontSize * 16 * 1.9), [fontSize]);
     const virtualizer = useVirtualizer({
         count: flatNodes.length,
         getScrollElement: () => scrollRef.current,
