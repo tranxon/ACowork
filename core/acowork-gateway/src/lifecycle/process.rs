@@ -390,6 +390,7 @@ mod tests {
                 connected: false,
                 ready: false,
                 dev_mode: false,
+                debug_state: crate::gateway::state::DebugState::Disabled,
                 debug_port: None,
                 workspace_config_json: None,
                 current_embed_dim: None,

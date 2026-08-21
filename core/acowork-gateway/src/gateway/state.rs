@@ -1,5 +1,7 @@
 //! Gateway global state
 
+use serde::Serialize;
+
 use crate::budget::tracker::BudgetTracker;
 use crate::capability::registry::CapabilityRegistry;
 use crate::cron::CronScheduler;
@@ -31,6 +33,50 @@ pub struct AgentInfo {
     pub manifest: acowork_core::AgentManifest,
 }
 
+/// Runtime DevMode activation state.
+///
+/// ADR-048 follow-up: Decoupled from the startup `--dev-mode` flag.
+/// DevMode can now be flipped on at runtime via
+/// `POST /api/agents/{id}/debug/enable` (Gateway) →
+/// `POST /api/debug/enable` (Runtime), without restarting the agent.
+/// The Gateway tracks the activation in
+/// [`RunningAgentInfo::debug_state`] so the Desktop can render the
+/// Debug Panel + the "Enable Debug" button correctly even when the
+/// agent was started without `--dev-mode`.
+///
+/// State transitions:
+///
+/// ```text
+///        ┌──── CLI flag --dev-mode ────┐
+///        │                            ▼
+///   Disabled ────────── runtime enable ─────► Enabled
+///        ▲                                     │
+///        └────────── (no disable path) ────────┘
+/// ```
+///
+/// We do NOT expose a "disable debug" path today; once DevMode is live
+/// the only way to turn it off is to restart the agent. This matches
+/// the Runtime's own contract (see `enable_debug_mode` early-return
+/// when `runtime_debug_handles` is already set) and avoids forcing
+/// teardown logic onto the SessionTask mid-iteration.
+///
+/// Serialised as the lowercase string `"disabled"` / `"enabled"` so
+/// the TypeScript `AgentStore.dev_mode_state` mapping is direct (no
+/// SCREAMING_SNAKE_CASE noise on the wire). The TypeScript side
+/// already uses these literal strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DebugState {
+    /// DevMode is not active. Either the agent was started without
+    /// `--dev-mode` and no runtime `POST /api/debug/enable` has been
+    /// observed, or the runtime enable call failed.
+    Disabled,
+    /// DevMode is live. Either the agent was started with
+    /// `--dev-mode`, or the Gateway has successfully proxied a
+    /// `POST /api/agents/{id}/debug/enable` call that returned 200.
+    Enabled,
+}
+
 /// Information about a running agent
 #[derive(Debug, Clone)]
 pub struct RunningAgentInfo {
@@ -42,8 +88,24 @@ pub struct RunningAgentInfo {
     pub connected: bool,
     /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
     pub ready: bool,
-    /// Whether the agent was started in developer mode (Debug Protocol enabled)
+    /// Whether the agent was started in developer mode (Debug Protocol enabled at boot).
+    ///
+    /// ADR-048 follow-up: this is now **startup intent**, not current
+    /// capability. To check whether DevMode is actually live for a
+    /// running agent, read [`Self::debug_state`] instead. `dev_mode=true`
+    /// at spawn time implies `debug_state=Enabled`; `dev_mode=false`
+    /// does NOT imply `debug_state=Disabled` — the runtime enable path
+    /// can flip DevMode on after the fact.
     pub dev_mode: bool,
+    /// Whether DevMode is actually live for the running agent right now.
+    ///
+    /// ADR-048 follow-up: distinct from `dev_mode` so the Desktop can
+    /// tell apart "agent was started in dev mode" from "DevMode was
+    /// just enabled at runtime". Updated:
+    ///   - At spawn: `Enabled` if `dev_mode=true`, else `Disabled`.
+    ///   - After a successful `POST /api/agents/{id}/debug/enable`
+    ///     proxy call (`proxy_debug_rpc` in `http/proxy.rs`): `Enabled`.
+    pub debug_state: DebugState,
     /// Debug Protocol port hint (set when dev_mode is true).
     ///
     /// ADR-048: kept for API stability; Runtime no longer binds it as a
@@ -326,6 +388,7 @@ mod tests {
             connected: false,
             ready: false,
             dev_mode: false,
+            debug_state: DebugState::Disabled,
             debug_port: None,
             workspace_config_json: None,
             current_embed_dim: None,

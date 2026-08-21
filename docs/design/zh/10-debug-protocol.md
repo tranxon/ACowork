@@ -38,6 +38,25 @@ Desktop App 与 Agent Runtime 之间有两条独立通道：
 - **Debug Protocol**（HTTP RPC + MQTT events，与生产 IPC 同构）：开发模式专用，控制执行流、编辑状态、热加载。RPC 走 Gateway `/api/agents/{id}/debug/{*rest}` 反代到 Runtime `/api/debug/{path}`；事件走 MQTT topic `acowork/agents/{id}/debug/events/{type}`
 - **Gateway Service API**：生产通道，Agent 仍通过 Gateway 获取 Key、收发 Intent 等
 
+### 1.1 DevMode 启动方式（v3.1 起新增运行时启用）
+
+DevMode 现在支持**两种**激活方式：
+
+1. **启动时激活**（`--dev-mode` 启动参数）
+   - Gateway 在 spawn Agent 时传入 `--dev-mode` 标志，Runtime 在 Phase C 通过共享 helper `enable_debug_mode_and_fill_slot` 完成 per-session controller + MQTT event publisher + Debug service slot 的填充。
+   - 启动后第一次 `/api/debug/*` 请求即有 service 响应。
+   - 适用于：已知要调试的开发场景，签名/元数据 `dev_mode: true`、`debug_state: enabled`。
+
+2. **运行时激活**（`POST /api/agents/{id}/debug/enable`，v3.1 新增）
+   - 桌面侧：Desktop App 在 Debug 面板里检测到「Agent 不在调试模式」时显示 **「启用调试」按钮**（`ResultsPanel.tsx`，见 ADR-048 follow-up）。
+   - 调用链：`enable_agent_debug`（Tauri command）→ Gateway `POST /api/agents/{id}/debug/enable`（透传）→ Runtime `POST /api/debug/enable` → `enable_debug_mode_and_fill_slot`。
+   - 调用是**幂等**的：DevMode 已开启时第二次调用返回 `already_enabled: true`。
+   - Gateway `proxy_debug_rpc` 钩子在 2xx 响应时同步把 `running_agents[id].debug_state` 翻为 `Enabled`，下次 `GET /api/agents` 即返回 `debug_state: "enabled"`，Desktop 的 `agentStore` 触发 React 重渲染并自动连接到 debug tab。
+   - **不需要重启 Agent，不需要重启 Gateway**，不需要重启 Runtime HTTP server——同一进程的 SessionManager、HTTP server、MQTT client slot 全部沿用。
+   - 适用于：Agent 已启动后才意识到需要调试，或用户希望零停机开启调试。
+
+**已废弃**：`POST /api/agents/{id}/restart-debug`（完整进程重启进入调试模式）已被运行时启用替代。Gateway 端点仍保留可用以作操作逃生口，Desktop 端右键菜单「Restart in Debug」已移除（`AgentList.tsx`）。计划在下一个 minor 版本后完全下线——见 ADR-048 follow-up。
+
 ## 2. 传输层
 
 | 平台 | RPC | 事件 | 说明 |
@@ -85,6 +104,7 @@ acowork/agents/{agent_id}/debug/events/onStateChange    (DebugStateChangeEvent)
 
 | 业务方法 | 方向 | 端点 / 主题 | 状态 |
 |----------|------|-------------|------|
+| `debugger.enable` | RPC | `POST /api/debug/enable` | ✅（v3.1 运行时启用，见 §1.1） |
 | `debugger.resume` | RPC | `POST /api/debug/resume` | ✅ |
 | `debugger.pause` | RPC | `POST /api/debug/pause` | ✅ |
 | `debugger.step` | RPC | `POST /api/debug/step` | ✅ |
@@ -537,12 +557,14 @@ Agent Runtime 的 DevMode 是生产模式的**超集**：
 
 生产模式下 Agent Runtime 与 03-agent-runtime.md 设计完全一致。DevMode 的复杂度全部封装在 Agent Runtime 和 Desktop App 内部，Gateway 不需要任何修改。
 
-DevMode 启动方式（Gateway 侧）：
+DevMode 启动方式（Gateway 侧，v3.1 起推荐运行时启用）：
 
 ```toml
 # Gateway 启动 Agent 时，如果 Agent 标记为 dev: true，则追加 --dev-mode 参数
 agent-runtime /path/to/agent --endpoint pipe://agent-gateway --agent-id com.example.weather-dev --dev-mode
 ```
+
+或者在 Agent 已启动后由 Desktop App 通过 `POST /api/agents/{id}/debug/enable` 运行时启用——见 §1.1。**推荐**第二种方式，因为不需要重启 Agent、不打断 session 状态；第一种方式仅保留用于 CLI / CI 场景下的「以调试模式启动」测试。
 
 ## 7. Agent 克隆协议
 

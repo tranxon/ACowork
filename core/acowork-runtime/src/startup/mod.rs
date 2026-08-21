@@ -15,6 +15,7 @@
 
 pub(crate) mod agent_init;
 pub(crate) mod context;
+pub(crate) mod debug_enable;
 pub(crate) mod gateway_loop;
 pub(crate) mod session_init;
 pub(crate) mod subsystems;

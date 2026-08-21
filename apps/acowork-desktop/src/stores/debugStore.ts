@@ -208,7 +208,15 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   connect: (agentId: string) => {
     const state = get();
-    if (state.connected && state.debugAgentId === agentId) return;
+    log.debug("[debugStore] connect() called", {
+      agentId,
+      wasConnected: state.connected,
+      wasDebugAgentId: state.debugAgentId,
+    });
+    if (state.connected && state.debugAgentId === agentId) {
+      log.debug("[debugStore] connect() no-op: already attached to this agent");
+      return;
+    }
 
     // Events arrive on the global `debug-event` Tauri channel (MQTT
     // subscription owned by the Rust client); make sure it is listened
@@ -216,12 +224,16 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     void ensureDebugEventListener();
 
     set({ connected: true, debugAgentId: agentId });
+    log.debug("[debugStore] connect() set connected=true, debugAgentId=", agentId);
 
     // Re-sync the active session, mirroring the legacy WS `onopen`
     // behaviour.
     setTimeout(() => {
       const sessionId = useChatStore.getState().getActiveSessionId(agentId);
-      get().getState(sessionId).catch(() => { });
+      log.debug("[debugStore] connect() deferred getState for session", sessionId);
+      get().getState(sessionId).catch((e) => {
+        log.warn("[debugStore] connect() deferred getState failed:", e);
+      });
     }, 0);
   },
 

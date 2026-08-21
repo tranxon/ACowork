@@ -13,7 +13,6 @@ type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 interface RightNavBarProps {
   activeTab: PanelTab;
   onTabChange: (tab: PanelTab) => void;
-  isDebugMode: boolean;
   agentRunning: boolean;
   collapsed: boolean;
 }
@@ -26,7 +25,7 @@ interface NavItem {
   show: boolean;
 }
 
-export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning, collapsed }: RightNavBarProps) {
+export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }: RightNavBarProps) {
   const { t } = useTranslation();
 
   const items: NavItem[] = [
@@ -36,12 +35,6 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
     // path collapses both lids into one solid blob, losing the "open"
     // visual). `icon` is intentionally omitted.
     { tab: "workspace", i18nKey: "resultsPanel.workspace", show: true },
-    // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
-    // state preserves the central spine line via SVG mask. Without the
-    // mask, the spine (M12 20v-9, fully inside the body) would be
-    // drowned by `fill="currentColor"` and the bug would lose its
-    // segmented look. `icon` is intentionally omitted.
-    { tab: "debug", i18nKey: "resultsPanel.debug", show: isDebugMode },
     // status uses the shared FilledGaugeIcon/OutlineGaugeIcon so the
     // filled state preserves the needle via SVG mask. Lucide's Activity
     // (heartbeat zigzag) had almost no body to fill — it just turned
@@ -57,6 +50,16 @@ export function RightNavBar({ activeTab, onTabChange, isDebugMode, agentRunning,
     // center hole is preserved on selection; `icon` is intentionally omitted.
     { tab: "setup", i18nKey: "resultsPanel.setup", show: agentRunning },
     { tab: "tools", icon: Wrench, i18nKey: "resultsPanel.tools", show: agentRunning },
+    // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
+    // state preserves the central spine line via SVG mask. Without the
+    // mask, the spine (M12 20v-9, fully inside the body) would be
+    // drowned by `fill="currentColor"` and the bug would lose its
+    // segmented look. `icon` is intentionally omitted.
+    // ADR-048 follow-up: the debug tab is a regular panel — always
+    // visible so the "Enable Debug" button is reachable even when the
+    // agent is not yet in DevMode. Placed last so it sits at the bottom
+    // of the nav rail, visually separated from the content tabs.
+    { tab: "debug", i18nKey: "resultsPanel.debug", show: true },
   ];
 
   return (

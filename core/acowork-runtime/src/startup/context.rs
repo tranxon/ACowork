@@ -168,6 +168,15 @@ pub(crate) struct AgentBootContext {
     #[allow(dead_code)]
     pub embed_dim_shared: crate::http::SharedEmbedDimension,
 
+    /// Late-bind slot for the Runtime's MQTT client. Same lifecycle as
+    /// `mqtt_client: Option<RuntimeMqttClient>` above, but the slot is
+    /// the handle the HTTP server holds and that Phase C's DevMode
+    /// wiring reads via `enable_debug_mode_and_fill_slot`. Phase A
+    /// creates the slot and passes a clone to the HTTP server; Phase
+    /// A also fills the slot once the MQTT connect succeeds. Phase C
+    /// reads from it via `ctx.mqtt_client_slot`.
+    pub mqtt_client_slot: crate::http::server::SharedMqttClientSlot,
+
     /// Startup-phase degradation reasons — non-fatal errors that
     /// degrade runtime capabilities (e.g. session persistence
     /// unavailable due to filesystem sandbox). Read by `/health`.
@@ -224,6 +233,15 @@ pub(crate) struct AgentBootContext {
     /// return 503 with "Debug service not ready").
     pub debug_service_slot:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+
+    /// Late-bind slot for `SessionManager`. Populated by Phase B once
+    /// the session manager is constructed; cloned into the HTTP server
+    /// via `RuntimeHttpServer::start` in Phase A so the runtime
+    /// `POST /api/debug/enable` route can call
+    /// `SessionManager::enable_debug_mode` without a restart. Same
+    /// ADR-040 late-bind pattern as `debug_service_slot` and the other
+    /// use-case slots.
+    pub session_manager_slot: crate::http::server::SharedSessionManagerSlot,
 
     /// Shared search key vault (provider_id -> decrypted API key).
     /// Created in Phase A, passed to `WebSearchEngine` (via

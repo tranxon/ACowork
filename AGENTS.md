@@ -13,6 +13,14 @@ cd core && cargo test
 ./dev/ci.sh all
 ```
 
+## Debug & Log 
+
+When debugging, consult the latest log file to rapidly identify the root cause
+
+* gateway Log: {HOME_DIR}\.acowork\acowork-gateway\data\logs
+* desktop Log: {HOME_DIR}\.acowork\desktop-app\logs
+* runtime Log: {HOME_DIR}\.acowork\acowork-gateway\config\packages\com.acowork.senior-engineer\workspace\logs
+
 ## Project Structure
 
 ```

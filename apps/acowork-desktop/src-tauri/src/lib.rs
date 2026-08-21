@@ -588,6 +588,8 @@ pub fn run() {
             commands::effects::set_window_effect,
             // ADR-048 D6: Debug Protocol RPC relay (HTTP via Gateway)
             commands::debug::debug_rpc,
+            // ADR-048 follow-up: runtime DevMode activation (no agent restart).
+            commands::debug::enable_agent_debug,
             // ADR-033 Phase 3: MQTT real-time event commands
             commands::chat_mqtt::connect_mqtt,
             commands::chat_mqtt::disconnect_mqtt,

@@ -23,6 +23,8 @@ export interface AgentListResponse {
   running: boolean;
   connected: boolean;
   dev_mode: boolean;
+  /** Whether DevMode is live right now (ADR-048 follow-up; can be enabled at runtime). */
+  debug_state?: "enabled" | "disabled";
   debug_port: number | null;
 }
 
@@ -60,6 +62,16 @@ export interface AgentInfo {
   connected: boolean;
   ready: boolean;
   dev_mode: boolean;
+  /**
+   * Whether DevMode is actually live for the running agent right now
+   * (ADR-048 follow-up). Distinct from `dev_mode` (startup intent):
+   * DevMode can be flipped on at runtime via
+   * `POST /api/agents/{id}/debug/enable` without restarting the agent,
+   * which flips this to `"enabled"` while `dev_mode` stays `false`.
+   * Absent/undefined means the Gateway predates the field — treat as
+   * `"disabled"`.
+   */
+  debug_state?: "enabled" | "disabled";
   debug_port?: number;
   /**
    * RFC3339 timestamp of the last user-driven interaction with this agent
@@ -101,6 +113,10 @@ export interface AgentDetail {
   ready: boolean;
   pid: number | null;
   started_at: string | null;
+  /** Whether the agent was started with the `--dev-mode` flag (startup intent). */
+  dev_mode?: boolean;
+  /** Whether DevMode is live right now (can be enabled at runtime without restart). */
+  debug_state?: "enabled" | "disabled";
 }
 
 /** Cost information for a model (per million tokens) */

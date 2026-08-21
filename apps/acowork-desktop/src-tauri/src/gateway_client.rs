@@ -737,6 +737,12 @@ pub struct AgentListEntry {
     pub connected: bool,
     pub ready: bool,
     pub dev_mode: bool,
+    /// Whether DevMode is live right now (ADR-048 follow-up; can be enabled
+    /// at runtime via POST /api/agents/{id}/debug/enable without restarting
+    /// the agent). The Gateway always sends it ("enabled"/"disabled");
+    /// `None` only if an older Gateway omits the field — the frontend treats
+    /// that exactly like "disabled".
+    pub debug_state: Option<String>,
     pub debug_port: Option<u16>,
     /// Last user interaction time (RFC 3339).  Drives the frontend auto-select
     /// logic: on webview reload the agent with the largest value is selected.
@@ -762,6 +768,11 @@ pub struct AgentDetailResponse {
     pub ready: bool,
     pub pid: Option<u32>,
     pub started_at: Option<String>,
+    /// Whether DevMode is live right now (ADR-048 follow-up; can be enabled
+    /// at runtime via POST /api/agents/{id}/debug/enable without restarting
+    /// the agent). `None` only if an older Gateway omits the field — the
+    /// frontend treats that exactly like "disabled".
+    pub debug_state: Option<String>,
     pub debug_port: Option<u16>,
 }
 

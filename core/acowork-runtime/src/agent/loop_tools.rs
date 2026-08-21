@@ -28,7 +28,8 @@ use crate::security::shell_risk::{self, ShellRisk};
 use acowork_core::ShellApprovalThreshold;
 
 use super::loop_::{AgentLoop, ControlDecision};
-use super::loop_approval::ApprovalHandle;
+use crate::agent::inbound::InboundMessage;
+use super::loop_approval::{ApprovalDecision, ApprovalHandle, APPROVAL_TIMEOUT, APPROVAL_TIMEOUT_SECS};
 
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
@@ -117,30 +118,33 @@ impl AgentLoop {
                     );
                     if is_shell_tool {
                         let rules_snapshot = shell_risk_rules.clone();
-                        // Gateway mode: use ApprovalHandle → main loop handles pause/resume
+                        // Gateway mode: use ApprovalHandle -> main loop routes
+                        // the ApprovalDecision via route_inbound.
                         if use_gateway_approval {
                             if let Some(rejection) = check_shell_approval_handle(
                                 &approval_handle,
+                                &mut cancel_rx,
                                 &tc.function.name,
                                 &tc.function.arguments,
                                 &shell_threshold,
-                                 &tc.id,
-                                 &rules_snapshot,
-                             )
-                             .await
-                             {
-                                 let _ = tx.send((idx, (rejection, false))).await;
-                                 return;
-                             }
-                         } else if let Some(ref gate) = approval_gate {
-                             // CLI / test mode: use ApprovalGate trait directly
-                             if let Some(rejection) = check_shell_approval(
-                                 gate.as_ref(),
-                                 &tc.function.name,
-                                 &tc.function.arguments,
-                                 &shell_threshold,
-                                 &tc.id,
-                                 &rules_snapshot,
+                                &tc.id,
+                                &rules_snapshot,
+                            )
+                            .await
+                            {
+                                let _ = tx.send((idx, (rejection, false))).await;
+                                return;
+                            }
+                        } else if let Some(ref gate) = approval_gate {
+                            // CLI / test mode: use ApprovalGate trait directly
+                            if let Some(rejection) = check_shell_approval(
+                                gate.as_ref(),
+                                &mut cancel_rx,
+                                &tc.function.name,
+                                &tc.function.arguments,
+                                &shell_threshold,
+                                &tc.id,
+                                &rules_snapshot,
                             )
                             .await
                             {
@@ -284,14 +288,42 @@ impl AgentLoop {
         let mut interrupt: Option<ControlDecision> = None;
 
         if use_gateway_approval {
-            // ── Gateway mode: 4-way select (results / timeout / approval / interrupt) ──
+            // ── Gateway mode: 5-way select ──
+            // (results / timeout / approval-request / inbound-decision / cancel)
+            //
+            // Opening drain: if a prior phase (e.g. `await_question_answer`)
+            // buffered any ApprovalDecision into `deferred_inbound`, route
+            // them now so in-flight approvals registered before this call
+            // are not stranded for the full APPROVAL_TIMEOUT.
+            if !self.pending_approvals.is_empty() {
+                let deferred: Vec<InboundMessage> = std::mem::take(
+                    &mut self.session.deferred_inbound,
+                );
+                let (decisions, others): (Vec<_>, Vec<_>) = deferred
+                    .into_iter()
+                    .partition(|m| {
+                        matches!(m, InboundMessage::ApprovalDecision { .. })
+                    });
+                self.session.deferred_inbound = others;
+                for msg in decisions {
+                    self.route_inbound(msg).await;
+                }
+            }
+            // Approval requests are registered into `self.pending_approvals`
+            // and announced to the Desktop via `send_tool_approval_needed`.
+            // User decisions arriving on `inbound_rx` are routed by
+            // `route_inbound`, which resolves the matching oneshot directly.
+            // This is a flat loop - no recursion, no deferred_inbound
+            // re-buffering for ApprovalDecision messages.
+            let mut approval_deadline: Option<Instant> = None;
+
             while collected.len() < total {
                 // ADR-044 §4.5: bind the *current request's* handle to a
                 // local so the Arc inside it outlives the `cancelled()`
                 // future. Re-read on every iteration so we observe any
                 // slot swap that happened mid-tool-execution (none is
-                // expected within one request — `begin_new_request` is
-                // only called from `run_inner` entry — but defensive).
+                // expected within one request - `begin_new_request` is
+                // only called from `run_inner` entry - but defensive).
                 let cancel_handle = self.session_core.cancel_handle();
                 tokio::select! {
                     entry = rx.recv() => {
@@ -311,19 +343,79 @@ impl AgentLoop {
                         }
                         break;
                     }
+                    // New approval request from a spawned tool task.
+                    // Register it in `pending_approvals` and announce it;
+                    // do NOT block waiting for the decision here - the
+                    // inbound_rx branch below resolves it whenever the
+                    // user responds.
                     approval_req = self.approval_rx.recv() => {
                         match approval_req {
                             Some((req, decision_tx)) => {
-                                // Pause iteration timeout during approval wait.
-                                // handle_approval_request() blocks on user decision,
-                                // which can take minutes — that time should not count
-                                // against the iteration deadline.
-                                let remaining = deadline.saturating_duration_since(Instant::now());
-                                self.handle_approval_request(req, decision_tx).await;
-                                // After approval handling, check for control signals
-                                // that arrived during the wait (Stop/Pause).
-                                // poll_control() checks pending_interrupt set by
-                                // await_approval_decision when it consumed a Stop/Pause.
+                                let request_id = uuid::Uuid::new_v4().to_string();
+                                self.pending_approvals.insert(
+                                    request_id.clone(),
+                                    decision_tx,
+                                );
+                                self.send_tool_approval_needed(&request_id, &req);
+                                self.transition_status(
+                                    crate::agent::session_state::SessionStatus::WaitingApproval {
+                                        request_id: request_id.clone(),
+                                    },
+                                );
+                                // First in-flight approval starts the
+                                // 5-minute approval deadline; subsequent
+                                // concurrent approvals share it.
+                                if approval_deadline.is_none() {
+                                    approval_deadline = Some(
+                                        Instant::now() + APPROVAL_TIMEOUT,
+                                    );
+                                }
+                                tracing::info!(
+                                    request_id = %request_id,
+                                    in_flight = self.pending_approvals.len(),
+                                    "Approval request registered"
+                                );
+                                // Re-anchor the iteration deadline on each
+                                // approval registration: a user decision can
+                                // take minutes and must not count against the
+                                // iteration deadline. Unlike the old recursive
+                                // handle_approval_request (which preserved the
+                                // *remaining* time across the blocking wait),
+                                // this grants a fresh full iteration_timeout
+                                // from the moment the approval is registered —
+                                // deliberately more lenient, and simpler now
+                                // that the wait is non-blocking (the deadline
+                                // keeps ticking while the decision is pending).
+                                deadline = Instant::now() + iteration_timeout;
+                            }
+                            None => {
+                                tracing::warn!("Approval channel closed unexpectedly");
+                            }
+                        }
+                    }
+                    // User decision (ApprovalDecision / Stop / other inbound)
+                    // arriving from Gateway. `route_inbound` resolves the
+                    // matching oneshot, or cancels all pending on Stop.
+                    //
+                    // Only polled while approvals are in flight: a closed
+                    // inbound channel (common in unit tests where the
+                    // inbound_tx sender is dropped) must NOT terminate the
+                    // tool-result collection loop early.
+                    inbound = async {
+                        if self.pending_approvals.is_empty() {
+                            std::future::pending::<
+                                Option<crate::agent::inbound::InboundMessage>,
+                            >()
+                            .await
+                        } else {
+                            self.inbound_rx.recv().await
+                        }
+                    } => {
+                        match inbound {
+                            Some(msg) => {
+                                self.route_inbound(msg).await;
+                                // Control signals may have arrived during the
+                                // decision wait (Stop / Pause via InboundMessage).
                                 match self.poll_control() {
                                     c @ (ControlDecision::Stop | ControlDecision::Pause) => {
                                         for handle in &handles {
@@ -334,14 +426,58 @@ impl AgentLoop {
                                     }
                                     ControlDecision::Continue => {}
                                 }
-                                deadline = Instant::now() + remaining;
                             }
                             None => {
-                                tracing::warn!("Approval channel closed unexpectedly");
+                                // Channel closed while approvals are pending:
+                                // they will never be answered - reject now
+                                // instead of waiting for the timeout.
+                                let count = self.pending_approvals.len();
+                                let reason =
+                                    "Inbound channel closed; approval can never be answered"
+                                        .to_string();
+                                for (_, tx) in self.pending_approvals.drain() {
+                                    let _ = tx.send(ApprovalDecision {
+                                        approved: false,
+                                        allow_all_session: false,
+                                        reason: Some(reason.clone()),
+                                    });
+                                }
+                                tracing::warn!(
+                                    count = count,
+                                    "Inbound channel closed; auto-rejected pending approvals"
+                                );
                             }
                         }
                     }
-                    // Cancellation handle — fires when external sources
+                    // Approval timeout: auto-reject all still-pending
+                    // approvals so the loop cannot hang forever when the
+                    // user walks away without answering.
+                    _ = async {
+                        match approval_deadline {
+                            Some(d) => tokio::time::sleep_until(d).await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        let count = self.pending_approvals.len();
+                        let reason = format!(
+                            "tool approval timed out after {}s",
+                            APPROVAL_TIMEOUT_SECS
+                        );
+                        for (_, tx) in self.pending_approvals.drain() {
+                            let _ = tx.send(ApprovalDecision {
+                                approved: false,
+                                allow_all_session: false,
+                                reason: Some(reason.clone()),
+                            });
+                        }
+                        tracing::warn!(
+                            count = count,
+                            timeout_secs = APPROVAL_TIMEOUT_SECS,
+                            "Pending approvals timed out, auto-rejecting"
+                        );
+                        approval_deadline = None;
+                    }
+                    // Cancellation handle - fires when external sources
                     // (MQTT `StopGeneration` dispatcher in
                     // `startup/gateway_loop.rs`, debug server Stop, CLI
                     // cancel, test harness) call `cancel()` on this
@@ -353,17 +489,17 @@ impl AgentLoop {
                     // MQTT stop flow (the root cause of the TTFT stop bug).
                     // The handle's level-triggered `Notify` + persistent
                     // `AtomicU8` state means this branch wakes within
-                    // microseconds of `cancel()` — long before the 500ms
+                    // microseconds of `cancel()` - long before the 500ms
                     // idle-poll fallback would observe the inbound Stop
                     // message.
                     //
                     // ADR-044 §4.5: this is the *current request's* handle
-                    // — see `SessionCore::begin_new_request` for how the
+                    // - see `SessionCore::begin_new_request` for how the
                     // slot is swapped at every `run_inner` entry.
                     _ = cancel_handle.cancelled() => {
                         match self.poll_control() {
                             c @ (ControlDecision::Stop | ControlDecision::Pause) => {
-                                tracing::info!(signal = ?c, "Control signal via cancellation handle — aborting tools");
+                                tracing::info!(signal = ?c, "Control signal via cancellation handle - aborting tools");
                                 for handle in &handles {
                                     handle.abort();
                                 }
@@ -380,7 +516,7 @@ impl AgentLoop {
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
                         match self.poll_control() {
                             c @ (ControlDecision::Stop | ControlDecision::Pause) => {
-                                tracing::info!(signal = ?c, "Control signal detected during tool execution — aborting");
+                                tracing::info!(signal = ?c, "Control signal detected during tool execution - aborting");
                                 for handle in &handles {
                                     handle.abort();
                                 }
@@ -391,6 +527,36 @@ impl AgentLoop {
                         }
                     }
                 }
+            }
+
+            // Iteration cleanup: any approvals still in flight (loop exited
+            // via timeout / interrupt / all tools completed while a dialog
+            // was unanswered) are auto-rejected so the spawned tasks do
+            // not stay parked on their oneshots forever.
+            if !self.pending_approvals.is_empty() {
+                tracing::warn!(
+                    count = self.pending_approvals.len(),
+                    "Auto-rejecting pending approvals at iteration end"
+                );
+                let reason = "Iteration aborted before user response".to_string();
+                for (request_id, tx) in self.pending_approvals.drain() {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        reason = %reason,
+                        "Auto-rejecting pending approval at iteration end"
+                    );
+                    let _ = tx.send(ApprovalDecision {
+                        approved: false,
+                        allow_all_session: false,
+                        reason: Some(reason.clone()),
+                    });
+                }
+                // Let a reconnecting Desktop know no stale dialogs remain.
+                let _ = self.session_core.try_send_chunk(
+                    crate::agent::loop_::ChunkEvent::ClearRetainedEvent {
+                        event_type: "tool_approval_needed".to_string(),
+                    },
+                );
             }
         } else {
             // ── CLI / test mode: 4-way select (results / timeout / stop / notify) ──
@@ -445,6 +611,18 @@ impl AgentLoop {
                     }
                 }
             }
+        }
+
+        // ADR-045: drop this iteration's per-tool cancel tokens now that the
+        // collection loop has exited (normal completion, timeout, or
+        // interrupt). Without this the map would accumulate one entry per
+        // tool_call_id across iterations. `cancel_tool_by_id` treats a
+        // missing key as a no-op, so removing here is safe even if a tool
+        // task is still winding down — its `cancel_rx` receiver is dropped
+        // when the task ends, making any later `send(true)` a silent no-op
+        // regardless.
+        for tc in tool_calls {
+            self.pending_tool_cancels.remove(&tc.id);
         }
 
         // Build final results in original order
@@ -583,6 +761,7 @@ pub(crate) async fn execute_single_tool(
 /// or `None` if the command can proceed (approved or below threshold).
 async fn check_shell_approval(
     gate: &dyn ApprovalGate,
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     tool_name: &str,
     params_json: &str,
     threshold: &ShellApprovalThreshold,
@@ -651,8 +830,22 @@ async fn check_shell_approval(
         "Requesting user approval for shell command"
     );
 
-    // Request approval
-    let response = gate.request_approval(&approval_req).await;
+    // Request approval. ADR-045: also listen on cancel_rx so a CancelTool
+    // signal interrupts the approval wait.
+    let response = tokio::select! {
+        r = gate.request_approval(&approval_req) => r,
+        _ = cancel_rx.wait_for(|cancelled| *cancelled) => {
+            tracing::info!(
+                tool_call_id = %tool_call_id,
+                command = %command,
+                "Tool cancelled while waiting for approval (CLI mode)"
+            );
+            return Some(format!(
+                "Error: Cancelled by user while waiting for approval of '{}'",
+                command
+            ));
+        }
+    };
 
     match response {
         crate::security::approval_gate::ApprovalResponse::Approved => {
@@ -698,6 +891,7 @@ fn risk_meets_threshold(risk: ShellRisk, threshold: ShellRisk) -> bool {
 /// until the user's ApprovalDecision arrives (no timeout).
 async fn check_shell_approval_handle(
     handle: &ApprovalHandle,
+    cancel_rx: &mut tokio::sync::watch::Receiver<bool>,
     tool_name: &str,
     params_json: &str,
     threshold: &ShellApprovalThreshold,
@@ -769,8 +963,24 @@ async fn check_shell_approval_handle(
         "Requesting user approval for shell command (Gateway mode)"
     );
 
-    // Request approval via ApprovalHandle (no timeout — main loop blocks on inbound_rx)
-    let decision = handle.request_approval(approval_req).await;
+    // Request approval via ApprovalHandle. ADR-045: also listen on cancel_rx
+    // so a CancelTool signal interrupts the approval wait - without this,
+    // a cancelled tool would still execute if the user later approved the
+    // stale dialog.
+    let decision = tokio::select! {
+        d = handle.request_approval(approval_req) => d,
+        _ = cancel_rx.wait_for(|cancelled| *cancelled) => {
+            tracing::info!(
+                tool_call_id = %tool_call_id,
+                command = %command,
+                "Tool cancelled while waiting for approval"
+            );
+            return Some(format!(
+                "Error: Cancelled by user while waiting for approval of '{}'",
+                command
+            ));
+        }
+    };
 
     if decision.approved {
         tracing::info!(command = %command, "Shell command approved by user");
@@ -1331,6 +1541,7 @@ mod tests {
         let rules = crate::security::shell_risk::ShellRiskRules::default();
         let result = check_shell_approval(
             &gate,
+            &mut tokio::sync::watch::channel(false).1,
             "shell",
             r#"{"command": "rm -rf /"}"#,
             &ShellApprovalThreshold::AutoApprove,
@@ -1356,6 +1567,7 @@ mod tests {
         let rules = crate::security::shell_risk::ShellRiskRules::default();
         let result = check_shell_approval(
             &gate,
+            &mut tokio::sync::watch::channel(false).1,
             "shell",
             r#"{"command": "echo hello"}"#,
             &ShellApprovalThreshold::AutoApprove,
@@ -1374,6 +1586,7 @@ mod tests {
         let rules = crate::security::shell_risk::ShellRiskRules::default();
         let result = check_shell_approval(
             &gate,
+            &mut tokio::sync::watch::channel(false).1,
             "shell",
             r#"{"command": "echo hello"}"#,
             &ShellApprovalThreshold::Low,

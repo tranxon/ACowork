@@ -341,7 +341,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       const storedProfiles = loadAllProfiles();
       set((state) => {
         const next: Record<string, AgentStorage> = {};
-        for (const meta of list) {
+        for (const raw of list) {
+          // ADR-048 follow-up: normalise `debug_state` — a Gateway that
+          // predates the field omits it, and `undefined` must behave
+          // exactly like `"disabled"` for every consumer (Debug Panel
+          // gate, "Enable Debug" button, paused banner, settings badge).
+          const meta: AgentInfo = {
+            ...raw,
+            debug_state: raw.debug_state ?? "disabled",
+          };
           const existing = state.agents[meta.agent_id];
           if (existing) {
             // Fold in `running` from the latest snapshot — if the
