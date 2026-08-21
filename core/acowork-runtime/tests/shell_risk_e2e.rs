@@ -31,6 +31,10 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
     let rag_provider: Arc<std::sync::RwLock<Option<Arc<dyn acowork_core::rag::RagProvider>>>> =
         Arc::new(std::sync::RwLock::new(None));
     let debug_service = Arc::new(tokio::sync::Mutex::new(None));
+    let workspace_resolver: Arc<std::sync::RwLock<acowork_runtime::tools::workspace_resolver::WorkspaceResolver>> =
+        Arc::new(std::sync::RwLock::new(
+            acowork_runtime::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
+        ));
 
     let server = acowork_runtime::http::RuntimeHttpServer::start(
         temp_dir.clone(),
@@ -52,6 +56,7 @@ async fn test_shell_risk_rules_get_put_roundtrip() {
         consolidation_timer,
         rag_provider,
         debug_service,
+        workspace_resolver,
     )
     .await
     .expect("server should start");

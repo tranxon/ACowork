@@ -20,11 +20,34 @@ use crate::usecases::workspace_query::WorkspaceError;
 /// `access` is `"read-only"` / `"read-write"` (matches the gateway's
 /// `AccessLevel` kebab-case serialisation); unknown variants surface as
 /// `WorkspaceError::InvalidPath`.
+///
+/// `id` is **optional** — the runtime is the authoritative source of
+/// workspace IDs and generates a fresh `ws-` + 12 hex chars when the
+/// desktop omits it (e.g. on `POST /workspaces` for a brand-new entry).
+/// This restores the pre-ADR-040 Gateway-direct contract where the
+/// server was the sole owner of `id` / `added_at`.
+///
+/// `path` and `access` are **optional** at the wire level so the same
+/// DTO can serve both `POST /workspaces` (both required — enforced by
+/// the impl) and `PUT /workspaces/{ws_id}` (partial update — desktop
+/// sends only the fields it wants to change, e.g. `{access}` for an
+/// access-level toggle).
+///
+/// `alias` is the optional human-friendly label shown in the desktop
+/// selector / file tree; persisted as-is so round trips preserve it.
+/// `None` on create / unset-on-update — the impl only writes the field
+/// when `Some` is supplied, matching the existing `prompt_file` /
+/// `last_active` semantics.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkspaceEntryInput {
-    pub id: String,
-    pub path: String,
-    pub access: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub access: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
     #[serde(default)]
     pub prompt_file: Option<String>,
     #[serde(default)]

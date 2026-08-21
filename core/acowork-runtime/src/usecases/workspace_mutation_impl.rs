@@ -28,6 +28,24 @@ impl RuntimeWorkspaceMutationService {
         Self { work_dir }
     }
 
+    /// Generate a fresh workspace id (`ws-` + 12 lowercase hex chars).
+    ///
+    /// Mirrors the pre-ADR-040 Gateway-direct format so newly-created
+    /// entries are indistinguishable from existing ones on disk.
+    /// 12 hex chars = 48 bits of entropy — sufficient collision
+    /// resistance for the per-agent config (the file holds a handful of
+    /// entries at most, never thousands).
+    fn generate_workspace_id() -> String {
+        let uuid = uuid::Uuid::new_v4().simple().to_string();
+        format!("ws-{}", &uuid[..12])
+    }
+
+    /// Now as an RFC 3339 string. Wrapped so tests can swap it out if
+    /// they ever need a deterministic clock.
+    fn now_rfc3339() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
     /// Resolve path + workspace_id preferring querystring over body.
     /// Returns `(workspace_id, path)` with empty `path` if neither side
     /// supplied one. The caller is responsible for the "missing path"
@@ -126,12 +144,23 @@ impl RuntimeWorkspaceMutationService {
         self.work_dir.join("config").join("agent_workspaces.json")
     }
 
-    fn load_config(&self) -> WorkspacesConfig {
+    /// Load the on-disk workspace config.
+    ///
+    /// Returns `Ok(Default)` when the file does not exist (first run).
+    /// Any read/parse failure is surfaced as an error — **never** a
+    /// silent empty fallback: a corrupt or schema-mismatched file must
+    /// fail the mutation (500) rather than let `save_config` overwrite
+    /// the user's workspace list with an empty one.
+    fn load_config(&self) -> Result<WorkspacesConfig, WorkspaceError> {
         let path = self.workspaces_config_path();
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<WorkspacesConfig>(&s).ok())
-            .unwrap_or_default()
+        if !path.exists() {
+            return Ok(WorkspacesConfig::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| WorkspaceError::Persist(format!("read {}: {}", path.display(), e)))?;
+        let cfg: WorkspacesConfig = serde_json::from_str(&content)
+            .map_err(|e| WorkspaceError::Persist(format!("parse {}: {}", path.display(), e)))?;
+        Ok(cfg)
     }
 
     fn save_config(&self, cfg: &WorkspacesConfig) -> Result<(), WorkspaceError> {
@@ -152,25 +181,17 @@ impl RuntimeWorkspaceMutationService {
 
 // ── Workspace config on-disk schema ───────────────────────────────────────
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// On-disk schema for `agent_workspaces.json`.
+///
+/// Deliberately minimal: the old `version` field carried no logic
+/// anywhere in the codebase (both readers ignored it), so it has been
+/// removed. Unknown keys in existing files are ignored by serde during
+/// deserialization, and `save_config` writes the normalized shape
+/// without it.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 struct WorkspacesConfig {
-    #[serde(default = "default_workspaces_version")]
-    version: u32,
     #[serde(default)]
     additional_dirs: Vec<serde_json::Value>,
-}
-
-fn default_workspaces_version() -> u32 {
-    1
-}
-
-impl Default for WorkspacesConfig {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            additional_dirs: Vec::new(),
-        }
-    }
 }
 
 // ── Standalone path-traversal guard (mirrors query impl) ──────────────────
@@ -256,22 +277,94 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         &self,
         entry: WorkspaceEntryInput,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
-        let mut cfg = self.load_config();
+        // ── Required-field validation ──────────────────────────────────
+        //
+        // `WorkspaceEntryInput` is shared with the partial-update route
+        // (`PUT /workspaces/{ws_id}`), so the wire-level DTO keeps every
+        // body field optional. For create, however, the desktop always
+        // supplies `path` + `access`; anything else is a malformed
+        // request and surfaces here as 400 before we touch the config.
+        let path = entry.path.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+            WorkspaceError::BadRequest {
+                status: 400,
+                message: "missing required field 'path'".to_string(),
+            }
+        })?;
+        let access = entry.access.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+            WorkspaceError::BadRequest {
+                status: 400,
+                message: "missing required field 'access'".to_string(),
+            }
+        })?;
+
+        // ── Path sanity guard ──────────────────────────────────────────
+        //
+        // Restores the pre-ADR-040 Gateway-direct behaviour: refuse to
+        // register a path that doesn't exist or isn't a directory. This
+        // is both a UX hint (the desktop dialog should never silently
+        // accept a typo) and a defensive measure — workspaces that
+        // resolve to files or missing paths break `resolve_within` later
+        // with cryptic canonicalize errors.
+        let path_buf = PathBuf::from(path);
+        let path_meta = std::fs::metadata(&path_buf).map_err(|e| {
+            WorkspaceError::BadRequest {
+                status: 400,
+                message: format!("path not accessible: {} ({})", path, e),
+            }
+        })?;
+        if !path_meta.is_dir() {
+            return Err(WorkspaceError::BadRequest {
+                status: 400,
+                message: format!("path is not a directory: {}", path),
+            });
+        }
+
+        // ── Id resolution ──────────────────────────────────────────────
+        //
+        // The runtime is the authoritative source of workspace IDs. If
+        // the desktop omitted `id` (the normal case — restored from the
+        // pre-ADR-040 contract), mint a fresh one. If the desktop did
+        // supply one, enforce it and 409 on collision.
+        let id = match entry.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(client_id) => client_id.to_string(),
+            None => Self::generate_workspace_id(),
+        };
+
+        let mut cfg = self.load_config()?;
         if cfg.additional_dirs.iter().any(|d| {
-            d.get("id").and_then(|v| v.as_str()) == Some(&entry.id)
+            d.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
         }) {
             return Err(WorkspaceError::BadRequest {
                 status: 409,
-                message: format!("workspace id already exists: {}", entry.id),
+                message: format!("workspace id already exists: {}", id),
             });
         }
-        let new_entry = serde_json::json!({
-            "id": entry.id,
-            "path": entry.path,
-            "access": entry.access,
-            "prompt_file": entry.prompt_file,
+
+        // ── Persist the on-disk schema ─────────────────────────────────
+        //
+        // The fields written here match the pre-ADR-040 Gateway-direct
+        // output so existing desktop selectors / file-tree components
+        // (which already rely on `alias`, `added_at`, `select_count`,
+        // `last_selected_at`) keep rendering new entries correctly.
+        let mut new_entry = serde_json::json!({
+            "id": id,
+            "path": path,
+            "access": access,
+            "added_at": Self::now_rfc3339(),
             "last_active": entry.last_active.unwrap_or(false),
+            "select_count": 0,
+            "last_selected_at": serde_json::Value::Null,
         });
+        // Optional fields — only write the key when the desktop
+        // actually supplied it, so the on-disk file stays minimal for
+        // users who don't use aliases / prompt-files.
+        if let Some(alias) = entry.alias.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            new_entry["alias"] = serde_json::json!(alias);
+        }
+        if let Some(pf) = entry.prompt_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            new_entry["prompt_file"] = serde_json::json!(pf);
+        }
+
         cfg.additional_dirs.push(new_entry.clone());
         self.save_config(&cfg)?;
         Ok(WorkspaceMutationResponse {
@@ -285,21 +378,41 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         ws_id: &str,
         entry: WorkspaceEntryInput,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
-        let mut cfg = self.load_config();
+        let mut cfg = self.load_config()?;
         let target = cfg
             .additional_dirs
             .iter_mut()
             .find(|d| d.get("id").and_then(|v| v.as_str()) == Some(ws_id))
             .ok_or_else(|| WorkspaceError::WorkspaceNotFound(ws_id.to_string()))?;
-        target["id"] = serde_json::json!(entry.id);
-        target["path"] = serde_json::json!(entry.path);
-        target["access"] = serde_json::json!(entry.access);
-        if let Some(pf) = &entry.prompt_file {
+
+        // Partial-update semantics: every body field is optional, and we
+        // only mutate the fields the desktop actually supplied. This
+        // restores the pre-ADR-040 `UpdateWorkspaceRequest { access?,
+        // alias? }` shape so the common `{access}` PUT (access-level
+        // toggle in the desktop manager) keeps working without the
+        // desktop having to re-send every other field.
+        //
+        // The `id` field is intentionally ignored — the URL path is the
+        // authoritative selector. If the desktop happens to send a
+        // different id we silently keep the original; this avoids a
+        // 422 when an old desktop build happens to echo the path id
+        // back, and matches the historical behaviour.
+        if let Some(path) = entry.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            target["path"] = serde_json::json!(path);
+        }
+        if let Some(access) = entry.access.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            target["access"] = serde_json::json!(access);
+        }
+        if let Some(alias) = entry.alias.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            target["alias"] = serde_json::json!(alias);
+        }
+        if let Some(pf) = entry.prompt_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             target["prompt_file"] = serde_json::json!(pf);
         }
         if let Some(la) = entry.last_active {
             target["last_active"] = serde_json::json!(la);
         }
+
         let updated = target.clone();
         self.save_config(&cfg)?;
         Ok(WorkspaceMutationResponse {
@@ -313,7 +426,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         ws_id: &str,
         body: PromptFileBody,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
-        let mut cfg = self.load_config();
+        let mut cfg = self.load_config()?;
         let target = cfg
             .additional_dirs
             .iter_mut()
@@ -331,7 +444,7 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         &self,
         ws_id: &str,
     ) -> Result<WorkspaceMutationResponse, WorkspaceError> {
-        let mut cfg = self.load_config();
+        let mut cfg = self.load_config()?;
         let initial_len = cfg.additional_dirs.len();
         cfg.additional_dirs
             .retain(|d| d.get("id").and_then(|v| v.as_str()) != Some(ws_id));
@@ -669,3 +782,436 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
 // We intentionally do not add a `From` impl between the two: callers
 // pass `FilePathQuery` directly via the HTTP layer's `Json` body /
 // `Query` extractor, and the runtime never constructs one from the other.
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecases::workspace_mutation::WorkspaceEntryInput;
+    use tempfile::tempdir;
+
+    /// Build a workspace service pointed at a temp dir so the
+    /// `agent_workspaces.json` it manages is fully isolated per test.
+    fn make_service(dir: &tempfile::TempDir) -> RuntimeWorkspaceMutationService {
+        RuntimeWorkspaceMutationService::new(dir.path().to_path_buf())
+    }
+
+    /// Smoke test for the create / read round-trip on the partial-update
+    /// path: a `{path, access}` body without `id` is the original
+    /// pre-ADR-040 Gateway-direct contract and must succeed.
+    #[tokio::test]
+    async fn create_workspace_minimal_payload_succeeds() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let resp = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("create_workspace succeeds");
+
+        let entry = resp.entry.expect("entry returned on create");
+        let id = entry.get("id").and_then(|v| v.as_str()).expect("id assigned");
+        assert!(
+            id.starts_with("ws-") && id.len() == "ws-".len() + 12,
+            "id should be ws-<12 hex chars>, got: {id}"
+        );
+        assert_eq!(
+            entry.get("path").and_then(|v| v.as_str()),
+            Some(dir.path().to_string_lossy().to_string()).as_deref(),
+        );
+        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-only"));
+        assert_eq!(entry.get("last_active").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(entry.get("select_count").and_then(|v| v.as_u64()), Some(0));
+        assert!(
+            entry.get("added_at").and_then(|v| v.as_str()).is_some(),
+            "added_at must be set on create"
+        );
+        // Optional fields must be omitted (not present as `null`) when
+        // the desktop didn't supply them — keeps the on-disk file
+        // minimal and avoids serde round-trip ambiguity.
+        assert!(entry.get("alias").is_none(), "alias should be absent when not supplied");
+        assert!(entry.get("prompt_file").is_none(), "prompt_file should be absent when not supplied");
+    }
+
+    /// The frontend's `WorkspaceManager` ships `{path, alias, access}`
+    /// — no `id`. This test pins that exact payload (the regression
+    /// that prompted this fix) so we never regress to a 422 again.
+    #[tokio::test]
+    async fn create_workspace_legacy_payload_persists_alias_and_id() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let resp = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-write".to_string()),
+                alias: Some("legacy".to_string()),
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("legacy {path, alias, access} payload must succeed");
+
+        let entry = resp.entry.expect("entry returned on create");
+        assert_eq!(entry.get("alias").and_then(|v| v.as_str()), Some("legacy"));
+        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-write"));
+        assert!(
+            entry.get("id").and_then(|v| v.as_str()).map(|s| s.starts_with("ws-")).unwrap_or(false),
+            "id must be server-generated when client omits it"
+        );
+    }
+
+    /// When the desktop supplies a client-side id, the runtime must
+    /// honour it AND reject duplicates with a 409.
+    #[tokio::test]
+    async fn create_workspace_rejects_duplicate_client_id() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let first = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: Some("ws-fixed".to_string()),
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("first insert succeeds");
+
+        assert_eq!(
+            first.entry.unwrap().get("id").and_then(|v| v.as_str()),
+            Some("ws-fixed")
+        );
+
+        let err = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: Some("ws-fixed".to_string()),
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect_err("duplicate id must fail");
+
+        match err {
+            WorkspaceError::BadRequest { status, .. } => assert_eq!(status, 409),
+            other => panic!("expected BadRequest 409, got {other:?}"),
+        }
+    }
+
+    /// Required-field validation must surface as 400 BEFORE any path /
+    /// config side effects, mirroring the old Gateway-direct contract.
+    #[tokio::test]
+    async fn create_workspace_missing_required_fields_is_400() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let no_path = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: None,
+                access: Some("read-only".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect_err("missing path must fail");
+        match no_path {
+            WorkspaceError::BadRequest { status, message } => {
+                assert_eq!(status, 400);
+                assert!(message.contains("path"), "msg = {message}");
+            }
+            other => panic!("expected BadRequest 400 for missing path, got {other:?}"),
+        }
+
+        let no_access = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: None,
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect_err("missing access must fail");
+        match no_access {
+            WorkspaceError::BadRequest { status, message } => {
+                assert_eq!(status, 400);
+                assert!(message.contains("access"), "msg = {message}");
+            }
+            other => panic!("expected BadRequest 400 for missing access, got {other:?}"),
+        }
+    }
+
+    /// Pointing at a file (or non-existent path) must fail with 400 —
+    /// reproduces the pre-ADR-040 `is_dir()` guard.
+    #[tokio::test]
+    async fn create_workspace_rejects_non_directory_path() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir.txt");
+        std::fs::write(&file, "x").expect("write file");
+        let svc = make_service(&dir);
+
+        let err = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: None,
+                path: Some(file.to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect_err("non-directory must fail");
+
+        match err {
+            WorkspaceError::BadRequest { status, message } => {
+                assert_eq!(status, 400);
+                assert!(
+                    message.contains("not a directory"),
+                    "msg should explain the failure, got: {message}"
+                );
+            }
+            other => panic!("expected BadRequest 400, got {other:?}"),
+        }
+    }
+
+    /// Regression for the PUT path: the desktop sends only `{access}`
+    /// when toggling read-only / read-write in the manager. The impl
+    /// must NOT clobber `path` / `id` / `alias` / `prompt_file` when
+    /// they're absent from the body.
+    #[tokio::test]
+    async fn update_workspace_access_only_does_not_clobber_other_fields() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        // Seed an entry with the full on-disk schema so we can detect
+        // any field clobbering on update.
+        let created = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: Some("ws-keep".to_string()),
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: Some("keep-me".to_string()),
+                prompt_file: Some("AGENTS.md".to_string()),
+                last_active: Some(false),
+            })
+            .await
+            .expect("create");
+        let created_id = created
+            .entry
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("id")
+            .to_string();
+
+        // Desktop toggles to read-write — sends ONLY `{access}`.
+        let updated = svc
+            .update_workspace(
+                &created_id,
+                WorkspaceEntryInput {
+                    id: None,
+                    path: None,
+                    access: Some("read-write".to_string()),
+                    alias: None,
+                    prompt_file: None,
+                    last_active: None,
+                },
+            )
+            .await
+            .expect("access-only update must succeed");
+
+        let entry = updated.entry.expect("entry returned on update");
+        assert_eq!(entry.get("access").and_then(|v| v.as_str()), Some("read-write"));
+        // All other fields MUST be preserved.
+        assert_eq!(entry.get("id").and_then(|v| v.as_str()), Some("ws-keep"));
+        assert_eq!(
+            entry.get("path").and_then(|v| v.as_str()),
+            Some(dir.path().to_string_lossy().to_string()).as_deref(),
+        );
+        assert_eq!(entry.get("alias").and_then(|v| v.as_str()), Some("keep-me"));
+        assert_eq!(entry.get("prompt_file").and_then(|v| v.as_str()), Some("AGENTS.md"));
+    }
+
+    /// Alias update via the dedicated `PUT /workspaces/{id}` body — the
+    /// alias-only branch of `update_workspace`.
+    #[tokio::test]
+    async fn update_workspace_persists_alias_change() {
+        let dir = tempdir().expect("tempdir");
+        let svc = make_service(&dir);
+
+        let created = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: Some("ws-alias".to_string()),
+                path: Some(dir.path().to_string_lossy().to_string()),
+                access: Some("read-only".to_string()),
+                alias: Some("old".to_string()),
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect("create");
+        let id = created
+            .entry
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .expect("id")
+            .to_string();
+
+        let updated = svc
+            .update_workspace(
+                &id,
+                WorkspaceEntryInput {
+                    id: None,
+                    path: None,
+                    access: None,
+                    alias: Some("new".to_string()),
+                    prompt_file: None,
+                    last_active: None,
+                },
+            )
+            .await
+            .expect("alias-only update must succeed");
+
+        assert_eq!(
+            updated.entry.unwrap().get("alias").and_then(|v| v.as_str()),
+            Some("new")
+        );
+    }
+
+    /// Internal sanity: id generator matches the pre-ADR-040 format.
+    #[test]
+    fn generate_workspace_id_format() {
+        let id = RuntimeWorkspaceMutationService::generate_workspace_id();
+        assert!(id.starts_with("ws-"), "must start with ws-, got: {id}");
+        let suffix = &id["ws-".len()..];
+        assert_eq!(suffix.len(), 12, "suffix must be 12 chars, got: {suffix}");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "suffix must be lowercase hex, got: {suffix}"
+        );
+        // Two consecutive calls must produce distinct ids.
+        let id2 = RuntimeWorkspaceMutationService::generate_workspace_id();
+        assert_ne!(id, id2, "uuid v4 must produce distinct ids");
+    }
+
+    /// Regression for the "adding a workspace wipes the existing list"
+    /// bug: a legacy `agent_workspaces.json` that carries a `version`
+    /// key (any shape — the schema no longer has that field) must load
+    /// without error, and `create_workspace` must **append** rather than
+    /// replace the whole file.
+    ///
+    /// Before the fix, `WorkspacesConfig` required `version: u32`, so a
+    /// file written with `"version": "1.0.0"` failed deserialization and
+    /// `load_config()` silently returned an empty config — the next
+    /// create persisted only the new entry, wiping every existing
+    /// workspace.
+    #[tokio::test]
+    async fn create_workspace_preserves_legacy_config_with_version_key() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let existing = serde_json::json!({
+            "id": "ws-keepme",
+            "path": "/keep/me",
+            "access": "read-only",
+            "added_at": "2026-01-01T00:00:00Z",
+            "last_active": false,
+            "select_count": 0,
+            "last_selected_at": null,
+        });
+        // Legacy shape: string version + one pre-existing workspace.
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "1.0.0",
+                "additional_dirs": [existing],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let new_path = dir.path().join("new-dir");
+        std::fs::create_dir_all(&new_path).unwrap();
+
+        let svc = make_service(&dir);
+        svc.create_workspace(WorkspaceEntryInput {
+            id: Some("ws-new".to_string()),
+            path: Some(new_path.to_string_lossy().to_string()),
+            access: Some("read-write".to_string()),
+            alias: None,
+            prompt_file: None,
+            last_active: None,
+        })
+        .await
+        .expect("create must succeed on legacy config");
+
+        // Both the pre-existing and the newly-created workspace survive.
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("config").join("agent_workspaces.json")).unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<&str> = on_disk["additional_dirs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["ws-keepme", "ws-new"]);
+        // The normalized schema no longer writes a version key.
+        assert!(
+            on_disk.get("version").is_none(),
+            "saved config should be normalized (no version key), got: {on_disk}"
+        );
+    }
+
+    /// A corrupt config file must fail the mutation with an error — not
+    /// silently fall back to an empty config and overwrite user data.
+    #[tokio::test]
+    async fn create_workspace_fails_on_corrupt_config() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            "{ this is not json",
+        )
+        .unwrap();
+
+        let new_path = dir.path().join("new-dir");
+        std::fs::create_dir_all(&new_path).unwrap();
+
+        let svc = make_service(&dir);
+        let err = svc
+            .create_workspace(WorkspaceEntryInput {
+                id: Some("ws-new".to_string()),
+                path: Some(new_path.to_string_lossy().to_string()),
+                access: Some("read-write".to_string()),
+                alias: None,
+                prompt_file: None,
+                last_active: None,
+            })
+            .await
+            .expect_err("corrupt config must fail, not wipe the file");
+
+        match err {
+            WorkspaceError::Persist(_) => {}
+            other => panic!("expected Persist error for corrupt config, got {other:?}"),
+        }
+    }
+}

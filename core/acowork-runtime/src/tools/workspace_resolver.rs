@@ -185,7 +185,6 @@ fn load_workspace_dirs(work_dir: &str) -> Vec<WorkspaceDir> {
     #[derive(Deserialize)]
     #[allow(dead_code)]
     struct WorkspaceConfig {
-        version: String,
         #[serde(default)]
         additional_dirs: Vec<WorkspaceDirEntry>,
     }

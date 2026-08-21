@@ -36,9 +36,13 @@ use serde::{Deserialize, Serialize};
 use crate::http::routes::{ApiError, AppState};
 
 /// Workspace configuration file structure (for JSON serialization)
+///
+/// Mirrors the Runtime's `agent_workspaces.json` schema. The legacy
+/// `version` key has been dropped (it carried no logic on either side);
+/// serde ignores unknown keys during deserialization, so files written
+/// by older versions still parse.
 #[derive(Debug, Serialize, Deserialize)]
 struct WorkspaceConfig {
-    pub version: String,
     pub additional_dirs: Vec<WorkspaceDir>,
 }
 

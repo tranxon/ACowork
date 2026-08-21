@@ -173,6 +173,17 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mqtt_client_slot: crate::http::server::SharedMqttClientSlot =
         Arc::new(tokio::sync::Mutex::new(None));
 
+    // Shared WorkspaceResolver — created in Phase A so the HTTP server
+    // can reload it after workspace mutations (create/update/delete).
+    // The same `Arc` is injected into SessionManager in Phase B (see
+    // `context.rs` / `session_init.rs`), so a reload triggered by a
+    // mutation handler is immediately visible to `route_workspace_switch`
+    // — a freshly-added workspace becomes selectable without a restart.
+    let workspace_resolver: crate::tools::workspace_resolver::SharedResolver =
+        Arc::new(std::sync::RwLock::new(
+            crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
+        ));
+
     if let Some(_http_port) = config.http_port {
         match crate::http::RuntimeHttpServer::start(
             std::path::PathBuf::from(&config.work_dir),
@@ -194,6 +205,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             consolidation_timer_slot.clone(),
             rag_provider_slot.clone(),
             debug_service_slot.clone(),
+            workspace_resolver.clone(),
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
@@ -507,10 +519,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     };
 
     // ── Step 4: Build tool registry + activate by manifest ──────────
-    let workspace_resolver: crate::tools::workspace_resolver::SharedResolver =
-        Arc::new(std::sync::RwLock::new(
-            crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
-        ));
 
     // Shared search key vault and provider list - same Arcs are injected
     // into AgentCore (Phase B) so that SessionManager::update_search_config

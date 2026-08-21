@@ -231,6 +231,16 @@ pub(crate) struct HttpState {
     /// message when this slot is still empty (same pattern as every
     /// other ADR-040 use-case slot).
     pub(crate) debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+    /// Shared `WorkspaceResolver` — the **same** `Arc` injected into
+    /// `SessionManager` at Phase B (see `startup/context.rs` +
+    /// `session_init.rs`). The workspace-mutation handlers reload it
+    /// after every successful create/update/delete so `route_workspace_switch`
+    /// (which validates the requested `workspace_id` via
+    /// `resolver.find_by_id`) sees newly-added workspaces without a
+    /// Runtime restart. Without this, a fresh workspace could be
+    /// persisted to disk and listed by the desktop but never selected —
+    /// the switch would fall back to `__agent_home__`.
+    workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
 }
 
 /// Handle to the running HTTP server.
@@ -274,6 +284,7 @@ impl RuntimeHttpServer {
         consolidation_timer: SharedConsolidationTimer,
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+        workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
     ) -> Result<Self, RuntimeHttpServerError> {
         let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
             .unwrap_or_default();
@@ -298,6 +309,7 @@ impl RuntimeHttpServer {
             consolidation_timer,
             rag_provider,
             debug_service,
+            workspace_resolver,
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -1105,8 +1117,37 @@ async fn create_workspace(
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
     svc.create_workspace(body)
         .await
-        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
+        .map(|r| {
+            reload_workspace_resolver(&state);
+            Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok})))
+        })
         .map_err(workspace_error_to_response)
+}
+
+/// Reload the shared `WorkspaceResolver` from disk after a successful
+/// workspace mutation (create/update/delete).
+///
+/// The resolver is built once at Phase A and injected into both
+/// `SessionManager` (for `route_workspace_switch` validation) and this
+/// `HttpState`. Persisting a new workspace to `agent_workspaces.json`
+/// without reloading leaves the in-memory resolver stale, so the new id
+/// fails `find_by_id` and the switch falls back to `__agent_home__`.
+fn reload_workspace_resolver(state: &HttpState) {
+    let mut guard = match state.workspace_resolver.write() {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "reload_workspace_resolver: resolver lock poisoned");
+            return;
+        }
+    };
+    *guard = crate::tools::workspace_resolver::WorkspaceResolver::new(
+        &state.work_dir.to_string_lossy(),
+    );
+    tracing::info!(
+        work_dir = %state.work_dir.display(),
+        allowed = guard.allowed_dirs().len(),
+        "reloaded WorkspaceResolver after workspace mutation"
+    );
 }
 
 /// `PUT /workspaces/{ws_id}` — update an existing workspace entry.
@@ -1121,7 +1162,12 @@ async fn update_workspace(
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
     svc.update_workspace(&ws_id, body)
         .await
-        .map(|r| Json(r.entry.unwrap_or(serde_json::json!({"updated": r.ok}))))
+        .map(|r| {
+            // Path/access changes must be visible to the resolver so
+            // `find_by_id` returns the updated entry for live sessions.
+            reload_workspace_resolver(&state);
+            Json(r.entry.unwrap_or(serde_json::json!({"updated": r.ok})))
+        })
         .map_err(workspace_error_to_response)
 }
 
@@ -1152,7 +1198,12 @@ async fn delete_workspace(
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
     svc.delete_workspace(&ws_id)
         .await
-        .map(|_| Json(serde_json::json!({"deleted": true, "ws_id": ws_id})))
+        .map(|_| {
+            // A deleted workspace must leave the resolver immediately —
+            // otherwise `route_workspace_switch` still accepts its id.
+            reload_workspace_resolver(&state);
+            Json(serde_json::json!({"deleted": true, "ws_id": ws_id}))
+        })
         .map_err(workspace_error_to_response)
 }
 
@@ -2766,6 +2817,21 @@ mod tests {
         Arc::new(crate::usecases::RuntimeWorkspaceMutationService::new(temp_dir))
     }
 
+    /// Build a shared WorkspaceResolver for HTTP tests.
+    ///
+    /// The mutation handlers reload the resolver from `state.work_dir`
+    /// after every successful create/update/delete, so the initial
+    /// contents are irrelevant for most tests — they just need a
+    /// non-panicking `SharedResolver` to satisfy the `start` signature.
+    /// A dedicated test (`test_create_workspace_reloads_resolver`)
+    /// constructs a resolver over its own temp dir to assert the reload
+    /// behaviour end-to-end.
+    fn new_test_workspace_resolver() -> crate::tools::workspace_resolver::SharedResolver {
+        Arc::new(std::sync::RwLock::new(
+            crate::tools::workspace_resolver::WorkspaceResolver::new_for_test(vec![]),
+        ))
+    }
+
     /// Build an agent-tools service backed by the test temp dir's
     /// `agent_mcp.json` / `agent_search.json`. Used to exercise the
     /// `/agents/{id}/mcp-servers` and `/agents/{id}/search-config`
@@ -2836,6 +2902,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -2938,6 +3005,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .unwrap();
@@ -3093,6 +3161,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -3154,6 +3223,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -3294,6 +3364,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -3459,6 +3530,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -3662,6 +3734,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -4019,6 +4092,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -4064,6 +4138,97 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(active, vec!["context7"]);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Regression for "newly-added workspace can't be selected — always
+    /// falls back to Agent Home": after `POST /workspaces` succeeds, the
+    /// shared `WorkspaceResolver` must be reloaded so
+    /// `route_workspace_switch`'s `find_by_id` validation accepts the
+    /// new id (the resolver is built once at Phase A and otherwise
+    /// never refreshed).
+    ///
+    /// The test shares the resolver `Arc` between the HTTP server and
+    /// the test body — the same ownership pattern as production
+    /// (`agent_init.rs` creates it, `session_init.rs` injects it into
+    /// SessionManager, `server.rs` reloads it).
+    #[tokio::test]
+    async fn test_create_workspace_reloads_resolver() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-http-ws-reload");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+        // The create handler validates `path` against the real fs.
+        let ws_path = temp_dir.join("my-workspace");
+        std::fs::create_dir_all(&ws_path).unwrap();
+
+        let workspace_resolver = new_test_workspace_resolver();
+        let workspace_mutation_slot: Arc<
+            tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>,
+        > = Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+            temp_dir.clone(),
+        ))));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(0)),
+            Arc::new(std::sync::RwLock::new(Vec::new())),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            workspace_mutation_slot,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            workspace_resolver.clone(),
+        )
+        .await
+        .expect("server should start");
+
+        let base = format!("http://127.0.0.1:{}", server.port);
+        let client = reqwest::Client::new();
+
+        // Precondition: resolver does not know the workspace yet.
+        {
+            let guard = workspace_resolver.read().unwrap();
+            assert!(
+                guard.find_by_id("ws-created-via-http").is_none(),
+                "resolver must start without the workspace"
+            );
+        }
+
+        let resp = client
+            .post(format!("{}/workspaces", base))
+            .json(&serde_json::json!({
+                "id": "ws-created-via-http",
+                "path": ws_path.to_string_lossy(),
+                "access": "read-write",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "POST /workspaces must succeed, got {}",
+            resp.status()
+        );
+
+        // Postcondition: the shared resolver now resolves the new id —
+        // this is exactly what `route_workspace_switch` checks.
+        let guard = workspace_resolver.read().unwrap();
+        assert!(
+            guard.find_by_id("ws-created-via-http").is_some(),
+            "resolver must see the newly-created workspace after reload (route_workspace_switch would otherwise reject it and fall back to __agent_home__)"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -4165,6 +4330,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -4638,6 +4804,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -4761,6 +4928,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -4948,6 +5116,7 @@ mod tests {
             consolidation_timer_slot,
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5001,7 +5170,9 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),        )
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+        )
         .await
         .expect("server should start");
 
@@ -5070,6 +5241,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5125,7 +5297,9 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),        )
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+        )
         .await
         .expect("server should start");
 
@@ -5212,6 +5386,7 @@ mod tests {
             Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5286,7 +5461,9 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),        )
+            Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+        )
         .await
         .expect("server should start");
 
@@ -5359,6 +5536,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5522,6 +5700,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5637,6 +5816,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5719,6 +5899,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
@@ -5815,6 +5996,7 @@ mod tests {
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(std::sync::RwLock::new(None)),
                     std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+                    new_test_workspace_resolver(),
         )
         .await
         .expect("server should start");
