@@ -150,6 +150,14 @@ pub enum ControlAction {
         session_id: String,
         tool_call_id: String,
     },
+    /// Periodic presence signal from the Desktop frontend for the
+    /// currently selected agent. Carries no payload — the act of
+    /// arriving is the signal. Routes to `IdleWatcherHandle::record_heartbeat`
+    /// and never to `dispatch_inbound` (does NOT represent a user action
+    /// in the conversation sense). Crash-safe: if the frontend stops
+    /// sending, heartbeats simply stop arriving and the watcher falls
+    /// back to inbound-based deadline accounting after `heartbeat_timeout`.
+    ActiveHeartbeat,
     /// Unknown or unimplemented command.
     Unsupported {
         command_type: String,
@@ -257,6 +265,9 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
         mqtt_proto::control_command::Command::CancelTool(ct) => ControlAction::CancelTool {
             session_id: ct.session_id,
             tool_call_id: ct.tool_call_id,
+        },
+        mqtt_proto::control_command::Command::ActiveHeartbeat(_) => {
+            ControlAction::ActiveHeartbeat
         },
         mqtt_proto::control_command::Command::Intent(intent) => ControlAction::IntentReceived {
             from: intent.from,

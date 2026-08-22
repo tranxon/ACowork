@@ -698,3 +698,56 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
         }
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// ADR-XXX: ActiveHeartbeat — frontend presence signal for idle-watch
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Protobuf round-trip: ActiveHeartbeat is an empty payload — the act of
+/// arriving is the signal, no data is carried.
+#[test]
+fn test_control_command_active_heartbeat_encode_decode() {
+    let cmd = ControlCommand {
+        agent_id: "com.acowork.test".into(),
+        command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
+    };
+    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let bytes = env.encode_to_vec();
+    let decoded = DataEnvelope::decode(bytes.as_slice()).unwrap();
+    match decoded.payload {
+        Some(Payload::ControlCommand(cmd)) => match cmd.command {
+            Some(Command::ActiveHeartbeat(_)) => {} // expected
+            other => panic!("Expected ActiveHeartbeat, got {:?}", other),
+        },
+        _ => panic!("Expected ControlCommand"),
+    }
+}
+
+/// `parse_control_payload` must map the proto enum into the dedicated
+/// `ControlAction::ActiveHeartbeat` variant — distinct from
+/// `ControlAction::Unsupported { .. }` (which old Runtimes map unknown
+/// variants to).
+#[test]
+fn test_parse_control_active_heartbeat() {
+    let cmd = ControlCommand {
+        agent_id: "com.acowork.test".into(),
+        command: Some(Command::ActiveHeartbeat(mqtt_proto::ActiveHeartbeat {})),
+    };
+    let env = DataEnvelope { version: 1, payload: Some(Payload::ControlCommand(cmd)) };
+    let bytes = env.encode_to_vec();
+
+    let action = control_handler::parse_control_payload(
+        "acowork/agents/com.acowork.test/control/active_heartbeat",
+        &bytes,
+    );
+    match action {
+        Some(ControlAction::ActiveHeartbeat) => {} // expected
+        Some(ControlAction::Unsupported { command_type }) => {
+            panic!(
+                "ActiveHeartbeat must NOT be mapped to Unsupported; got command_type={:?}",
+                command_type
+            );
+        }
+        other => panic!("Expected ActiveHeartbeat ControlAction, got {:?}", other),
+    }
+}

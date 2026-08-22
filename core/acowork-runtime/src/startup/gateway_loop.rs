@@ -71,6 +71,21 @@ pub(crate) async fn phase_d_run(
             while let Some((topic, payload)) = rx.recv().await {
                 match crate::mqtt::control_handler::parse_control_payload(&topic, &payload) {
                     Some(action) => {
+                        // Presence heartbeat is a signal-only command: it
+                        // touches the idle watcher and does NOT route to
+                        // dispatch_inbound (no InboundMessage, no session
+                        // task to wake). It is the user's "I'm here, keep
+                        // the agent warm" pulse, semantically distinct from
+                        // record_inbound which fires on event-driven user
+                        // actions (send/stop/switch/etc.).
+                        if matches!(action, crate::mqtt::control_handler::ControlAction::ActiveHeartbeat) {
+                            if let Some(watcher) = idle_watcher.as_ref() {
+                                watcher.record_heartbeat();
+                            }
+                            tracing::trace!(topic, "frontend active heartbeat received");
+                            continue;
+                        }
+
                         if let Some((session_id, msg)) = control_action_to_inbound(action) {
                             // Reset the auto-sleep deadline on every parsed
                             // user action. `None` means the user chose
@@ -341,6 +356,19 @@ fn control_action_to_inbound(
             tracing::warn!(command_type, "Unsupported MQTT control command");
             None
         }
+
+        // ── Presence heartbeat (defensive) ──────────────────────────────
+        //
+        // The phase_d_run dispatcher catches `ControlAction::ActiveHeartbeat`
+        // upstream and routes it to `IdleWatcherHandle::record_heartbeat`
+        // WITHOUT going through this mapper. This arm is therefore
+        // unreachable in normal flow, but is required by the exhaustive
+        // `match` over `ControlAction` and acts as a defensive net: if a
+        // future caller forgets to short-circuit, the heartbeat is
+        // silently dropped here rather than synthesised into an
+        // `InboundMessage` that the session task cannot meaningfully
+        // handle (no session_id, no payload).
+        ControlAction::ActiveHeartbeat => None,
     }
 }
 

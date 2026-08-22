@@ -677,7 +677,26 @@ message ControlCommand {
 
     // ── Session lifecycle (1) — ADR-038 ──
     OpenSession         open_session          = 29;
+
+    // ── Presence (1) — frontend ↔ runtime idle heartbeat ──
+    //
+    // Periodically broadcast by the Desktop frontend (~every 15s) for the
+    // currently selected agent. Pure observer signal — does NOT carry any
+    // state-transition semantics. The Runtime's idle_watcher maintains
+    // `last_heartbeat_at_ms` independently from `last_inbound_at_ms` and
+    // renews the idle deadline while the heartbeat is fresh.
+    //
+    // Crash-safe by construction: if the frontend exits / disconnects,
+    // heartbeats simply stop arriving and the watcher falls through to
+    // the normal inbound-based deadline check after `heartbeat_timeout`.
+    ActiveHeartbeat     active_heartbeat      = 32;
   }
+}
+
+// Empty payload — the heartbeat carries no data, only the act of being
+// sent. Topic alone identifies the target agent
+// (acowork/agents/{id}/control/active_heartbeat).
+message ActiveHeartbeat {
 }
 
 message CreateSession {
