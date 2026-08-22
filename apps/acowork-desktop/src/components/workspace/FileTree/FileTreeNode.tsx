@@ -1,5 +1,4 @@
-import { memo, useCallback, useState, useRef, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { memo, useCallback, useState, useRef, useEffect, useMemo } from "react";
 import { ChevronRight, FilePlus, FolderPlus, MessageSquarePlus, Trash2, Copy, ClipboardPaste, Eye, Check, Code, Pencil, ExternalLink } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { getFileIcon } from "./fileIcons";
@@ -8,7 +7,11 @@ import { useChatStore } from "../../../stores/chatStore";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
-import { useContextMenuPosition } from "../../../hooks/useContextMenuPosition";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../../common/ContextMenu";
 import { isGatewayLocal } from "../../../lib/config";
 import type { TreeEntry } from "../../../stores/workspaceStore";
 
@@ -135,10 +138,7 @@ export const FileTreeNode = memo(function FileTreeNode({
   // (see src/hooks/useContextMenuPosition) so the menu flips above the
   // cursor and stays inside the viewport when right-clicked near the
   // bottom/right edge.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
-    pointer: contextMenu,
-  });
+  const ctxMenu = useContextMenu();
 
   // Inline rename state — controlled by the parent via `renameTarget`.
   // When `renameTarget === relPath` the name span is replaced by an
@@ -183,7 +183,6 @@ export const FileTreeNode = memo(function FileTreeNode({
    * target lives in a single place alongside the "New File / Folder /
    * Paste" flows. */
   const beginRename = useCallback(() => {
-    setContextMenu(null);
     onRequestRename?.(relPath, entry.name);
   }, [onRequestRename, relPath, entry.name]);
 
@@ -229,25 +228,6 @@ export const FileTreeNode = memo(function FileTreeNode({
 
   const addAttachedContext = useChatStore((s) => s.addAttachedContext);
 
-  // Close context menu on click outside or Escape
-  useEffect(() => {
-    if (!contextMenu) return;
-    const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setContextMenu(null);
-      }
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setContextMenu(null);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, [contextMenu]);
-
   const handleClick = useCallback(() => {
     if (isDir) {
       // Directories: select (for toolbar "create in selected dir" target)
@@ -269,21 +249,17 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, onDoubleClick, entry, relPath]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY });
-  }, []);
+    ctxMenu.openAt(e);
+  }, [ctxMenu]);
 
   const handleNewFile = useCallback(() => {
     const parentPath = isDir ? relPath : relPath.substring(0, relPath.lastIndexOf("/"));
     onContextNewItem?.("file", parentPath);
-    setContextMenu(null);
   }, [isDir, relPath, onContextNewItem]);
 
   const handleNewFolder = useCallback(() => {
     const parentPath = isDir ? relPath : relPath.substring(0, relPath.lastIndexOf("/"));
     onContextNewItem?.("dir", parentPath);
-    setContextMenu(null);
   }, [isDir, relPath, onContextNewItem]);
 
   const handleAddToChat = useCallback(() => {
@@ -293,7 +269,6 @@ export const FileTreeNode = memo(function FileTreeNode({
       name: entry.name,
       absPath,
     });
-    setContextMenu(null);
   }, [agentId, sessionId, isDir, relPath, entry.name, absPath, addAttachedContext]);
 
   const handleDelete = useCallback(async () => {
@@ -314,24 +289,20 @@ export const FileTreeNode = memo(function FileTreeNode({
     if (confirmed) {
       onDelete?.(relPath, isDir);
     }
-    setContextMenu(null);
   }, [isDir, relPath, entry.name, onDelete]);
 
   const handleCopy = useCallback(() => {
     onCopy?.(relPath, isDir);
-    setContextMenu(null);
   }, [isDir, relPath, onCopy]);
 
   const handlePaste = useCallback(() => {
     const parentPath = isDir ? relPath : relPath.substring(0, relPath.lastIndexOf("/"));
     onPaste?.(parentPath);
-    setContextMenu(null);
   }, [isDir, relPath, onPaste]);
 
   const handlePreview = useCallback(() => {
     const workspaceId = useWorkspaceStore.getState().sessionWorkspaceMap[sessionId] ?? "__agent_home__";
     void openPreview(agentId, workspaceId, relPath);
-    setContextMenu(null);
   }, [agentId, sessionId, relPath, openPreview]);
 
   /** Right-click "Reveal in File Explorer" — local-mode only.
@@ -341,7 +312,6 @@ export const FileTreeNode = memo(function FileTreeNode({
    * so the parent's error-toast contract is preserved end-to-end. */
   const handleReveal = useCallback(() => {
     onReveal?.(relPath);
-    setContextMenu(null);
   }, [relPath, onReveal]);
 
   const handleTogglePromptFile = useCallback(() => {
@@ -351,7 +321,6 @@ export const FileTreeNode = memo(function FileTreeNode({
     const isActive = workspace?.prompt_file === entry.name;
     const newPromptFile = isActive ? null : entry.name;
     void state.setPromptFile(agentId, workspaceId, newPromptFile);
-    setContextMenu(null);
   }, [agentId, sessionId, entry.name]);
 
   // Check if this file qualifies as a prompt file (CLAUDE.md / AGENTS.md)
@@ -359,6 +328,107 @@ export const FileTreeNode = memo(function FileTreeNode({
   const workspaceId = useWorkspaceStore((s) => s.sessionWorkspaceMap[sessionId] ?? "__agent_home__");
   const workspace = useWorkspaceStore((s) => s.workspaces.find((ws) => ws.id === workspaceId));
   const isActivePromptFile = workspace?.prompt_file === entry.name;
+
+  // Memoised menu items. Rebuilt only when the flags that gate item
+  // visibility change (previewable / prompt-file / rename / reveal /
+  // paste availability) — keeps the memoized FileTreeNode from churning
+  // the ContextMenu child on unrelated re-renders.
+  const ctxMenuItems = useMemo<ContextMenuItem[]>(() => {
+    const items: ContextMenuItem[] = [];
+
+    items.push({
+      key: "add-to-chat",
+      icon: <MessageSquarePlus size={14} />,
+      label: t("workspace.contextMenu.addToChat"),
+      onClick: handleAddToChat,
+    });
+    if (isPreviewable) {
+      items.push({
+        key: "preview",
+        icon: <Eye size={14} />,
+        label: t("workspace.contextMenu.preview"),
+        onClick: handlePreview,
+      });
+    }
+    if (isPromptFile) {
+      items.push({
+        key: "toggle-prompt-file",
+        icon: isActivePromptFile ? (
+          <Check size={14} style={{ color: "#22c55e" }} />
+        ) : (
+          <Code size={14} />
+        ),
+        label: isActivePromptFile ? "取消注入上下文" : "注入上下文",
+        onClick: handleTogglePromptFile,
+      });
+    }
+    items.push({
+      key: "new-file",
+      icon: <FilePlus size={14} />,
+      label: t("workspace.contextMenu.newFile"),
+      dividerBefore: true,
+      onClick: handleNewFile,
+    });
+    items.push({
+      key: "new-folder",
+      icon: <FolderPlus size={14} />,
+      label: t("workspace.contextMenu.newFolder"),
+      onClick: handleNewFolder,
+    });
+    items.push({
+      key: "copy",
+      icon: <Copy size={14} />,
+      label: t("workspace.contextMenu.copy"),
+      dividerBefore: true,
+      onClick: handleCopy,
+    });
+    items.push({
+      key: "paste",
+      icon: <ClipboardPaste size={14} />,
+      label: t("workspace.contextMenu.paste"),
+      disabled: !useWorkspaceStore.getState().copiedEntry,
+      onClick: handlePaste,
+    });
+    if (onRename) {
+      items.push({
+        key: "rename",
+        icon: <Pencil size={14} />,
+        label: t("workspace.contextMenu.rename"),
+        onClick: beginRename,
+      });
+    }
+    // "Reveal in File Explorer" — local-mode only.
+    // In remote mode (Gateway on a different machine) opening the file
+    // manager would reveal a folder the user can't see, so we hide the
+    // menu item entirely. Matches VSCode's behaviour for remote
+    // workspaces and keeps the menu clean. `isGatewayLocal()` is checked
+    // again inside `revealItem` as defence in depth — see workspaceStore.ts.
+    if (onReveal && isGatewayLocal()) {
+      items.push({
+        key: "reveal",
+        icon: <ExternalLink size={14} />,
+        label: t("workspace.contextMenu.reveal"),
+        title: t("workspace.contextMenu.reveal"),
+        onClick: handleReveal,
+      });
+    }
+    items.push({
+      key: "delete",
+      icon: <Trash2 size={14} />,
+      label: t("workspace.contextMenu.delete"),
+      variant: "danger",
+      onClick: handleDelete,
+    });
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    isPreviewable,
+    isPromptFile,
+    isActivePromptFile,
+    onRename,
+    onReveal,
+    t,
+  ]);
 
   // DnD visibility state — kept as locals because they're pure
   // derivations of parent-supplied props; recomputing inside JSX would
@@ -460,120 +530,16 @@ export const FileTreeNode = memo(function FileTreeNode({
         )}
       </div>
 
-      {/* Context menu portal — rendered to document.body to escape virtual list transform containment */}
-      {contextMenu && createPortal(
-        <div
-          ref={menuRef}
-          className="context-menu"
-          style={contextMenuStyle}
-        >
-          <button
-            type="button"
-            onClick={handleAddToChat}
-            className="context-menu-item"
-          >
-            <MessageSquarePlus className="context-menu-item__icon" />
-            {t("workspace.contextMenu.addToChat")}
-          </button>
-          {isPreviewable && (
-            <button
-              type="button"
-              onClick={handlePreview}
-              className="context-menu-item"
-            >
-              <Eye className="context-menu-item__icon" />
-              {t("workspace.contextMenu.preview")}
-            </button>
-          )}
-          {isPromptFile && (
-            <button
-              type="button"
-              onClick={handleTogglePromptFile}
-              className="context-menu-item"
-            >
-              {isActivePromptFile ? (
-                <Check className="context-menu-item__icon" style={{ color: "#22c55e" }} />
-              ) : (
-                <Code className="context-menu-item__icon" />
-              )}
-              {isActivePromptFile ? "取消注入上下文" : "注入上下文"}
-            </button>
-          )}
-          <div className="context-menu-divider" />
-          <button
-            type="button"
-            onClick={handleNewFile}
-            className="context-menu-item"
-          >
-            <FilePlus className="context-menu-item__icon" />
-            {t("workspace.contextMenu.newFile")}
-          </button>
-          <button
-            type="button"
-            onClick={handleNewFolder}
-            className="context-menu-item"
-          >
-            <FolderPlus className="context-menu-item__icon" />
-            {t("workspace.contextMenu.newFolder")}
-          </button>
-          <div className="context-menu-divider" />
-          <button
-            type="button"
-            onClick={handleCopy}
-            className="context-menu-item"
-          >
-            <Copy className="context-menu-item__icon" />
-            {t("workspace.contextMenu.copy")}
-          </button>
-          <button
-            type="button"
-            onClick={handlePaste}
-            disabled={!useWorkspaceStore.getState().copiedEntry}
-            className="context-menu-item"
-          >
-            <ClipboardPaste className="context-menu-item__icon" />
-            {t("workspace.contextMenu.paste")}
-          </button>
-          {onRename && (
-            <button
-              type="button"
-              onClick={beginRename}
-              className="context-menu-item"
-            >
-              <Pencil className="context-menu-item__icon" />
-              {t("workspace.contextMenu.rename")}
-            </button>
-          )}
-          {/* "Reveal in File Explorer" — local-mode only.
-           *
-           * In remote mode (Gateway on a different machine) opening
-           * the file manager would reveal a folder the user can't see,
-           * so we hide the menu item entirely. Matches VSCode's
-           * behaviour for remote workspaces and keeps the menu clean.
-           * `isGatewayLocal()` is checked again inside `revealItem`
-           * as defence in depth — see workspaceStore.ts. */}
-          {onReveal && isGatewayLocal() && (
-            <button
-              type="button"
-              onClick={handleReveal}
-              className="context-menu-item"
-              title={t("workspace.contextMenu.reveal")}
-            >
-              <ExternalLink className="context-menu-item__icon" />
-              {t("workspace.contextMenu.reveal")}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={handleDelete}
-            className="context-menu-item context-menu-item--danger"
-          >
-            <Trash2 className="context-menu-item__icon" />
-            {t("workspace.contextMenu.delete")}
-          </button>
-        </div>,
-        document.body,
-      )}
+      {/* Context menu — unified component. Renders to document.body to
+          escape virtual-list transform containment (see ContextMenu.tsx). */}
+      <ContextMenu
+        isOpen={ctxMenu.isOpen}
+        menuProps={ctxMenu.menuProps}
+        items={ctxMenuItems}
+        payload={undefined}
+        selectionAtOpen={ctxMenu.selectionAtOpen}
+        onClose={ctxMenu.close}
+      />
     </>
   );
 });

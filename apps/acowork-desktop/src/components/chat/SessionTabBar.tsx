@@ -1,11 +1,14 @@
-import { useState, useRef, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isProcessing } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
 import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
@@ -251,11 +254,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   const [listOpen, setListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
-  const [tabContextMenu, setTabContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
-  // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
-  const { menuRef: tabMenuRef, style: tabMenuStyle } = useContextMenuPosition({
-    pointer: tabContextMenu ? { x: tabContextMenu.x, y: tabContextMenu.y } : null,
-  });
+  // Right-click context menu on session tabs. Payload is the sessionId of
+  // the tab the user right-clicked. Outside-click / Escape / portal
+  // positioning are all owned by `useContextMenu`.
+  const tabMenu = useContextMenu<{ sessionId: string }>();
   const scrollableRef = useRef<ScrollableTabBarHandle>(null);
 
   // Get title for a session
@@ -339,15 +341,12 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   // ── Session tab right-click menu ──────────────────────────────────────
   const handleTabContextMenu = (e: React.MouseEvent, sessionId: string) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setTabContextMenu({ sessionId, x: e.clientX, y: e.clientY });
+    tabMenu.openAt(e, { sessionId });
   };
 
   // Close the right-clicked session itself. If it's currently looping,
   // defer to the existing confirm dialog; otherwise close immediately.
   const handleContextCloseChat = async (sessionId: string) => {
-    setTabContextMenu(null);
     const status = getStatus(sessionId);
     if (isProcessing(status)) {
       setClosingSessionId(sessionId);
@@ -361,7 +360,6 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   // Mirrors VS Code's "Close Others" — runs sequentially to give each
   // session a chance to switch the active selection cleanly.
   const handleContextCloseOthers = async (keepSessionId: string) => {
-    setTabContextMenu(null);
     const others = openSessionIds.filter((id) => id !== keepSessionId);
     for (const id of others) {
       // Skip sessions currently streaming — closing them would interrupt
@@ -374,29 +372,44 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   };
 
   const handleContextOpenNewSession = () => {
-    setTabContextMenu(null);
     createSession(agentId);
   };
 
-  // Dismiss the right-click menu on outside click / Escape.
-  useEffect(() => {
-    if (!tabContextMenu) return;
-    const close = () => setTabContextMenu(null);
-    const handleMouseDown = (e: MouseEvent) => {
-      if (tabMenuRef.current && !tabMenuRef.current.contains(e.target as Node)) {
-        close();
-      }
-    };
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    document.addEventListener("mousedown", handleMouseDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleMouseDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [tabContextMenu]);
+  // Memoised menu items. Built only when the right-clicked session or
+  // the open-tab count changes (which gates the disabled flags).
+  const tabMenuItems = useMemo<ContextMenuItem<{ sessionId: string }>[]>(() => {
+    const sid = tabMenu.payload?.sessionId;
+    if (!sid) return [];
+    const canClose = openSessionIds.length > 1;
+    const items: ContextMenuItem<{ sessionId: string }>[] = [
+      {
+        key: "close-chat",
+        icon: <X size={14} />,
+        label: t("sessionTabBar.closeChat"),
+        disabled: !canClose,
+        // Disable when only one tab remains — keep at least one open so
+        // the chat area never ends up empty.
+        onClick: ({ payload }) => payload && handleContextCloseChat(payload.sessionId),
+      },
+      {
+        key: "close-others",
+        icon: <XSquare size={14} />,
+        label: t("sessionTabBar.closeOtherChats"),
+        disabled: !canClose,
+        // Same guard: "Close others" is a no-op when there are no others.
+        onClick: ({ payload }) => payload && handleContextCloseOthers(payload.sessionId),
+      },
+      {
+        key: "new-session",
+        icon: <Plus size={14} />,
+        label: t("sessionTabBar.openNewSession"),
+        dividerBefore: true,
+        onClick: handleContextOpenNewSession,
+      },
+    ];
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabMenu.payload?.sessionId, openSessionIds.length, t]);
 
   if (!agent) return null;
 
@@ -550,46 +563,14 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
       )}
 
       {/* Session tab right-click context menu — uses global .context-menu classes */}
-      {tabContextMenu && createPortal(
-        <div
-          ref={tabMenuRef}
-          className="context-menu"
-          style={tabMenuStyle}
-          onContextMenu={(e) => e.preventDefault()}
-        >
-          <button
-            type="button"
-            onClick={() => handleContextCloseChat(tabContextMenu.sessionId)}
-            // Disable when only one tab remains — keep at least one open so
-            // the chat area never ends up empty.
-            disabled={openSessionIds.length <= 1}
-            className="context-menu-item"
-          >
-            <X className="context-menu-item__icon" />
-            {t("sessionTabBar.closeChat")}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleContextCloseOthers(tabContextMenu.sessionId)}
-            // Same guard: "Close others" is a no-op when there are no others.
-            disabled={openSessionIds.length <= 1}
-            className="context-menu-item"
-          >
-            <XSquare className="context-menu-item__icon" />
-            {t("sessionTabBar.closeOtherChats")}
-          </button>
-          <div className="context-menu-divider" />
-          <button
-            type="button"
-            onClick={handleContextOpenNewSession}
-            className="context-menu-item"
-          >
-            <Plus className="context-menu-item__icon" />
-            {t("sessionTabBar.openNewSession")}
-          </button>
-        </div>,
-        document.body,
-      )}
+      <ContextMenu<{ sessionId: string }>
+        isOpen={tabMenu.isOpen}
+        menuProps={tabMenu.menuProps}
+        items={tabMenuItems}
+        payload={tabMenu.payload}
+        selectionAtOpen={tabMenu.selectionAtOpen}
+        onClose={tabMenu.close}
+      />
     </div>
   );
 }

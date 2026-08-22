@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -18,7 +17,11 @@ import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
-import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { HtmlPreviewView } from "./HtmlPreviewView";
@@ -61,14 +64,10 @@ export function FileEditorPanel({ width }: { width: number }) {
     const theme = useSettingsStore((s) => s.theme);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const [closingFileId, setClosingFileId] = useState<string | null>(null);
-    // Tab right-click context menu (fileId, viewport position)
-    const [tabContextMenu, setTabContextMenu] = useState<
-        { fileId: string; x: number; y: number } | null
-    >(null);
-    // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
-    const { menuRef: tabMenuRef, style: tabMenuStyle } = useContextMenuPosition({
-        pointer: tabContextMenu ? { x: tabContextMenu.x, y: tabContextMenu.y } : null,
-    });
+    // Tab right-click context menu. Payload is the fileId of the tab that
+    // was right-clicked — items read it from `useContextMenu().payload` to
+    // decide which file to act on.
+    const tabMenu = useContextMenu<{ fileId: string }>();
     // Batch close confirmation (Close Others / Close All with dirty files)
     const [batchCloseRequest, setBatchCloseRequest] = useState<
         { kind: "others" | "all"; fileIds: string[]; dirtyCount: number; keepFileId?: string } | null
@@ -875,30 +874,9 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     // ── Tab right-click menu (VSCode-style: Close / Close Others / Close All) ──
 
-    // Close the menu on outside click or Escape
-    useEffect(() => {
-        if (!tabContextMenu) return;
-        const handleClickOutside = (e: MouseEvent) => {
-            if (tabMenuRef.current && !tabMenuRef.current.contains(e.target as Node)) {
-                setTabContextMenu(null);
-            }
-        };
-        const handleEscape = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setTabContextMenu(null);
-        };
-        document.addEventListener("mousedown", handleClickOutside);
-        document.addEventListener("keydown", handleEscape);
-        return () => {
-            document.removeEventListener("mousedown", handleClickOutside);
-            document.removeEventListener("keydown", handleEscape);
-        };
-    }, [tabContextMenu]);
-
     const handleTabContextMenu = useCallback((e: React.MouseEvent, file: OpenFile) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setTabContextMenu({ fileId: file.id, x: e.clientX, y: e.clientY });
-    }, []);
+        tabMenu.openAt(e, { fileId: file.id });
+    }, [tabMenu]);
 
     /**
      * Send didClose to LSP and dispose Monaco models for a set of files.
@@ -957,7 +935,6 @@ export function FileEditorPanel({ width }: { width: number }) {
             name: file.fileName,
             absPath,
         });
-        setTabContextMenu(null);
     }, [selectedAgentId, activeSessionId, addAttachedContext]);
 
     /**
@@ -969,7 +946,6 @@ export function FileEditorPanel({ width }: { width: number }) {
      */
     const handleTabRefresh = useCallback(async (file: OpenFile) => {
         if (file.kind !== "file" || file.loading) return;
-        setTabContextMenu(null);
         if (file.dirty) {
             const confirmed = window.confirm(
                 `This file has unsaved changes. Discard and reload from disk?`,
@@ -980,7 +956,6 @@ export function FileEditorPanel({ width }: { width: number }) {
     }, [refreshFile]);
 
     const handleCloseTab = useCallback((file: OpenFile) => {
-        setTabContextMenu(null);
         if (file.dirty) {
             // Reuse the single-file unsaved-changes dialog
             setClosingFileId(file.id);
@@ -991,7 +966,6 @@ export function FileEditorPanel({ width }: { width: number }) {
     }, [cleanupClosedFiles, closeFile]);
 
     const handleCloseOthers = useCallback((file: OpenFile) => {
-        setTabContextMenu(null);
         const others = openFiles.filter((f) => f.id !== file.id);
         if (others.length === 0) return;
         // Activate the kept tab first so the surviving tab is the focused one
@@ -1013,7 +987,6 @@ export function FileEditorPanel({ width }: { width: number }) {
     }, [openFiles, cleanupClosedFiles, closeOthers, setActiveFile]);
 
     const handleCloseAll = useCallback(() => {
-        setTabContextMenu(null);
         if (openFiles.length === 0) return;
         const dirtyCount = openFiles.filter((f) => f.dirty).length;
         if (dirtyCount > 0) {
@@ -1029,12 +1002,103 @@ export function FileEditorPanel({ width }: { width: number }) {
     }, [openFiles, cleanupClosedFiles, closeAllFiles]);
 
     const handleTabPreview = useCallback((file: OpenFile) => {
-        setTabContextMenu(null);
         if (file.kind !== "file") return;
         // openPreview is idempotent: if the file is already open it activates it
         // and switches the mode in place, otherwise it opens it as a preview tab.
         openPreview(file.agentId, file.workspaceId, file.relPath);
     }, [openPreview]);
+
+    // Tab right-click menu items. Built only when the right-clicked file
+    // changes or any of the relevant gates (active agent/session, file
+    // kind, loading state, mode) flip — so the disabled flags stay
+    // accurate without rebuilding on every render.
+    const tabMenuItems = useMemo<ContextMenuItem<{ fileId: string }>[]>(() => {
+        const target = tabMenu.payload?.fileId
+            ? openFiles.find((f) => f.id === tabMenu.payload!.fileId)
+            : undefined;
+        if (!target) return [];
+        const canCloseOthers = openFiles.length > 1;
+        const canCloseAll = openFiles.length > 0;
+        // Add to Chat / Refresh only apply to workspace files — URL-preview
+        // tabs have no relPath/absPath to attach and no Gateway endpoint
+        // to refetch.
+        const showFileActions = target.kind === "file";
+        const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
+        const canRefresh = showFileActions && !target.loading;
+        // Preview is only useful for files that have a preview view
+        // (Markdown / HTML), and only when the tab is currently in source
+        // mode — switching preview → preview would be a no-op.
+        const canPreview = showFileActions
+            && target.mode === "edit"
+            && /\.(md|html?)$/i.test(target.fileName);
+
+        const items: ContextMenuItem<{ fileId: string }>[] = [];
+
+        if (showFileActions) {
+            items.push({
+                key: "add-to-chat",
+                icon: <MessageSquarePlus size={14} />,
+                label: t("workspace.contextMenu.addToChat"),
+                disabled: !canAddToChat,
+                onClick: () => { if (canAddToChat) handleTabAddToChat(target); },
+            });
+            items.push({
+                key: "refresh",
+                icon: <RefreshCw size={14} />,
+                label: t("fileEditor.refresh"),
+                disabled: !canRefresh,
+                onClick: () => { if (canRefresh) void handleTabRefresh(target); },
+            });
+            items.push({
+                key: "open-preview",
+                icon: <Eye size={14} />,
+                label: t("fileEditor.openPreview"),
+                disabled: !canPreview,
+                title: canPreview ? undefined : t("fileEditor.previewDisabled"),
+                onClick: () => { if (canPreview) handleTabPreview(target); },
+            });
+            // Close-group items below are visually separated from the
+            // "view" group (Add to Chat / Refresh / Preview) by a divider.
+            items.push({
+                key: "close",
+                icon: <X size={14} />,
+                label: t("fileEditor.close"),
+                dividerBefore: true,
+                onClick: () => handleCloseTab(target),
+            });
+        } else {
+            // URL-preview tabs have no "view" group — divider before close
+            // would be visually orphaned, so just put the close item.
+            items.push({
+                key: "close",
+                icon: <X size={14} />,
+                label: t("fileEditor.close"),
+                onClick: () => handleCloseTab(target),
+            });
+        }
+        items.push({
+            key: "close-others",
+            icon: <XSquare size={14} />,
+            label: t("fileEditor.closeOthers"),
+            disabled: !canCloseOthers,
+            onClick: () => { if (canCloseOthers) handleCloseOthers(target); },
+        });
+        items.push({
+            key: "close-all",
+            icon: <Files size={14} />,
+            label: t("fileEditor.closeAll"),
+            disabled: !canCloseAll,
+            onClick: () => { if (canCloseAll) handleCloseAll(); },
+        });
+        return items;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+        tabMenu.payload?.fileId,
+        openFiles,
+        selectedAgentId,
+        activeSessionId,
+        t,
+    ]);
 
     const confirmBatchClose = useCallback(() => {
         if (!batchCloseRequest) return;
@@ -1358,98 +1422,15 @@ export function FileEditorPanel({ width }: { width: number }) {
                 />
             )}
 
-            {/* Tab right-click context menu (VSCode-style) */}
-            {tabContextMenu && createPortal(
-                <div
-                    ref={tabMenuRef}
-                    className="context-menu"
-                    style={tabMenuStyle}
-                    onContextMenu={(e) => e.preventDefault()}
-                >
-                    {(() => {
-                        const target = openFiles.find((f) => f.id === tabContextMenu.fileId);
-                        if (!target) return null;
-                        const canCloseOthers = openFiles.length > 1;
-                        const canCloseAll = openFiles.length > 0;
-                        // Add to Chat / Refresh only apply to workspace files —
-                        // URL-preview tabs have no relPath/absPath to attach and
-                        // no Gateway endpoint to refetch.
-                        const showFileActions = target.kind === "file";
-                        const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
-                        const canRefresh = showFileActions && !target.loading;
-                        // Preview is only useful for files that have a preview view
-                        // (Markdown / HTML), and only when the tab is currently in
-                        // source mode — switching preview → preview would be a no-op.
-                        const canPreview = showFileActions
-                            && target.mode === "edit"
-                            && /\.(md|html?)$/i.test(target.fileName);
-                        return (
-                            <>
-                                {showFileActions && (
-                                    <>
-                                        <button
-                                            type="button"
-                                            onClick={() => canAddToChat && handleTabAddToChat(target)}
-                                            disabled={!canAddToChat}
-                                            className="context-menu-item"
-                                        >
-                                            <MessageSquarePlus className="context-menu-item__icon" />
-                                            {t("workspace.contextMenu.addToChat")}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => canRefresh && handleTabRefresh(target)}
-                                            disabled={!canRefresh}
-                                            className="context-menu-item"
-                                        >
-                                            <RefreshCw className="context-menu-item__icon" />
-                                            {t("fileEditor.refresh")}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => canPreview && handleTabPreview(target)}
-                                            disabled={!canPreview}
-                                            className="context-menu-item"
-                                            title={canPreview ? undefined : t("fileEditor.previewDisabled")}
-                                        >
-                                            <Eye className="context-menu-item__icon" />
-                                            {t("fileEditor.openPreview")}
-                                        </button>
-                                        <div className="context-menu-divider" />
-                                    </>
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={() => handleCloseTab(target)}
-                                    className="context-menu-item"
-                                >
-                                    <X className="context-menu-item__icon" />
-                                    {t("fileEditor.close")}
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => canCloseOthers && handleCloseOthers(target)}
-                                    disabled={!canCloseOthers}
-                                    className="context-menu-item"
-                                >
-                                    <XSquare className="context-menu-item__icon" />
-                                    {t("fileEditor.closeOthers")}
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => canCloseAll && handleCloseAll()}
-                                    disabled={!canCloseAll}
-                                    className="context-menu-item"
-                                >
-                                    <Files className="context-menu-item__icon" />
-                                    {t("fileEditor.closeAll")}
-                                </button>
-                            </>
-                        );
-                    })()}
-                </div>,
-                document.body,
-            )}
+            {/* Tab right-click context menu (VSCode-style) — unified component. */}
+            <ContextMenu<{ fileId: string }>
+                isOpen={tabMenu.isOpen}
+                menuProps={tabMenu.menuProps}
+                items={tabMenuItems}
+                payload={tabMenu.payload}
+                selectionAtOpen={tabMenu.selectionAtOpen}
+                onClose={tabMenu.close}
+            />
 
             {/* Batch close confirmation (Close Others / Close All with dirty files) */}
             {batchCloseRequest && (

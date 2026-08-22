@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, Children, isValidElement } from "react";
-import { createPortal } from "react-dom";
+import React, { useState, useCallback, Children, isValidElement, useMemo } from "react";
 import { Copy, ChevronDown, ChevronRight, Wrench, AlertTriangle, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,7 +10,6 @@ import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
 import { CodeBlock } from "./CodeBlock";
-import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
@@ -19,26 +17,14 @@ import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { pickOpenActionForPath } from "../editor/markdownLinkResolver";
 import type { AttachedItem } from "../../lib/types";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
+import { copySelectionOrFallback } from "../../lib/clipboard";
 
 // ── Utilities ─────────────────────────────────────────────────────────
-
-/** Shape of a single item rendered inside the bubble context menu.  Kept
- *  intentionally small so callers can compose their own item lists without
- *  having to know about the wrapper's internal state (selection, copy). */
-export interface BubbleMenuItem {
-  /** Stable key for React reconciliation. */
-  key: string;
-  /** Lucide icon shown on the left of the label. */
-  icon: React.ReactNode;
-  /** Visible label — usually a `t("...")` translation. */
-  label: string;
-  /** Click handler.  The wrapper closes the menu after invoking it. */
-  onClick: () => void;
-  /** Disabled state — rendered with reduced opacity and `not-allowed`. */
-  disabled?: boolean;
-  /** Optional colour variant — reuses the global context-menu classes. */
-  variant?: "default" | "danger" | "warning";
-}
 
 /**
  * Strip common leading whitespace from multi-line strings.
@@ -150,171 +136,7 @@ const markdownComponents = {
   },
 };
 
-// ── Message Wrapper ───────────────────────────────────────────────────
-
-/** Wrapper that provides right-click context menu for copying text */
-interface MessageContentWrapperProps {
-  children: React.ReactNode;
-  /** Extra menu items appended below the default Copy action.  Use for
-   *  message-type-specific affordances (e.g. "Resend" on user bubbles).
-   *  Items are rendered in the order provided. */
-  extraMenuItems?: BubbleMenuItem[];
-}
-
-/**
- * Wraps a message bubble's visual content and attaches a right-click context
- * menu anchored at the cursor.
- *
- * The menu is rendered through `createPortal` to `document.body` so that
- * `position: fixed` is anchored to the **viewport** rather than the nearest
- * transformed ancestor.  `VirtualMessageList` translates each row with
- * `transform: translateY(...)`, which under CSS Containing Block rules
- * makes `position: fixed` resolve against the row container instead of the
- * viewport — the symptom users reported was the menu "floating far from
- * the bubble".  Same trick used in `FileTreeNode.tsx:417`.
- */
-function MessageContentWrapper({
-  children,
-  extraMenuItems,
-}: MessageContentWrapperProps) {
-  const { t } = useTranslation();
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  // Viewport-aware positioning: shared hook handles flip-above + edge-clamp.
-  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
-    pointer: contextMenu,
-  });
-
-  // Track whether the last right-click hit text that produced a selection
-  // — used to enable/disable the Copy item without re-reading the
-  // selection on every render.
-  const [hasSelection, setHasSelection] = useState(false);
-
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    // Always show the menu on right-click; some items (e.g. "Resend") do
-    // not require a text selection.  Copy stays disabled when nothing is
-    // selected — see `BubbleMenuItem.disabled` below.
-    const selection = window.getSelection();
-    setHasSelection(!!selection?.toString().trim());
-    setContextMenu({ x: e.clientX, y: e.clientY });
-  }, []);
-
-  const handleCopy = useCallback(async () => {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString();
-    if (selectedText) {
-      try {
-        await navigator.clipboard.writeText(selectedText);
-      } catch (err) {
-        // Fallback for older browsers
-        const textArea = document.createElement("textarea");
-        textArea.value = selectedText;
-        textArea.style.position = "fixed";
-        textArea.style.left = "-9999px";
-        document.body.appendChild(textArea);
-        textArea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textArea);
-      }
-    }
-    setContextMenu(null);
-  }, []);
-
-  // Wrap any extra item click so the menu always closes — the wrapper
-  // owns the close-on-action contract so callers can stay focused on
-  // *what* happens, not *when* the menu disappears.
-  const invokeAndClose = useCallback((item: BubbleMenuItem) => {
-    return () => {
-      if (item.disabled) return;
-      item.onClick();
-      setContextMenu(null);
-    };
-  }, []);
-
-  // Close context menu on outside click (but not on right-click)
-  useEffect(() => {
-    if (!contextMenu) return;
-
-    const handleClick = (e: MouseEvent) => {
-      // Check if click is outside the context menu
-      const target = e.target as Node;
-      if (wrapperRef.current && !wrapperRef.current.contains(target)) {
-        setContextMenu(null);
-      }
-    };
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setContextMenu(null);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [contextMenu]);
-
-  // Stable key for the Copy action — keeps React happy across re-renders.
-  const copyKey = "copy";
-
-  // Default items: Copy (always first).  Extra items appended below.
-  const copyItem: BubbleMenuItem = {
-    key: copyKey,
-    icon: <Copy size={14} />,
-    label: t("chatPanel.copy"),
-    onClick: handleCopy,
-    disabled: !hasSelection,
-  };
-
-  const allItems: BubbleMenuItem[] = [copyItem, ...(extraMenuItems ?? [])];
-
-  // Portal target must exist in the DOM — guard for SSR / very-early mount.
-  const portalTarget = typeof document !== "undefined" ? document.body : null;
-
-  return (
-    <>
-      <div ref={wrapperRef} onContextMenu={handleContextMenu}>{children}</div>
-      {contextMenu && portalTarget && createPortal(
-        <div
-          ref={menuRef}
-          className="context-menu context-menu--compact"
-          style={contextMenuStyle}
-          onContextMenu={(e) => e.stopPropagation()}
-        >
-          {allItems.map((item) => {
-            const variantClass =
-              item.variant === "danger"
-                ? "context-menu-item--danger"
-                : item.variant === "warning"
-                  ? "context-menu-item--warning"
-                  : undefined;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                className={`context-menu-item${variantClass ? ` ${variantClass}` : ""}`}
-                onClick={invokeAndClose(item)}
-                disabled={item.disabled}
-                aria-disabled={item.disabled ? "true" : undefined}
-              >
-                <span className="context-menu-item__icon">{item.icon}</span>
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </div>,
-        portalTarget,
-      )}
-    </>
-  );
-}
-
-// ── Message Bubble ────────────────────────────────────────────────────
+// ── Message Bubble ─────���──────────────────────────────────────────────
 
 /** Single message bubble */
 const MessageBubble = React.memo(function MessageBubble({
@@ -339,6 +161,24 @@ const MessageBubble = React.memo(function MessageBubble({
   // Live names — received as props from ChatPanel so React.memo can detect
   // profile changes (name/avatar edits update all rendered bubbles instantly).
   const liveUserName = liveUserNameProp ?? message.senderDisplayName;
+
+  // ── Right-click context menu ──────────────────────────────────────────
+  // Unified hook + component handles open/close/portal/position/escape.
+  // The legacy in-component implementation carried two bugs:
+  //   1. `handleContextMenu` read `window.getSelection()` at right-click
+  //      time and used it to gate the Copy item — but a bare right-click
+  //      creates no selection, so the item was always disabled until the
+  //      user pre-drag-selected some text first.
+  //   2. `handleCopy` re-read `window.getSelection()` inside the button's
+  //      onClick. WKWebView / WebKit clear the page selection the moment
+  //      a `<button>` gains focus on mouseup, so by the time onClick
+  //      fired the selection string was empty and nothing got copied.
+  // Both bugs are fixed here by snapshotting the selection at
+  // right-click time (in `useContextMenu`) and forwarding it via
+  // `selectionAtOpen`. See `src/lib/clipboard.ts` and
+  // `src/components/common/ContextMenu/useContextMenu.ts` for the
+  // cross-cutting implementation.
+  const menu = useContextMenu();
 
   // ── Attachment chip handlers ────────────────────────────────────────
   // Stable per (currentSessionId) so re-renders don't churn React.memo
@@ -373,22 +213,67 @@ const MessageBubble = React.memo(function MessageBubble({
     void useChatStore.getState().sendMessage(message.content, agentId);
   }, [message.content]);
 
-  // Stable items array — rebuilt only when content (or language) changes.
-  // Wrapped in useMemo so React.memo peer bubbles don't see prop churn.
-  const userExtraMenuItems = React.useMemo<BubbleMenuItem[]>(() => {
-    if (!message.content) return [];
-    return [{
-      key: "resend",
-      icon: <RotateCcw size={14} />,
-      label: t("chatPanel.resend"),
-      onClick: handleResend,
-    }];
-  }, [message.content, handleResend, t]);
+  // ── Copy handler ────────────────────────────────────────────────────
+  // Copies whatever the user had selected when the menu opened. If the
+  // user right-clicked without selecting anything first, fall back to the
+  // whole message body — matches the macOS / Windows "right-click →
+  // Copy" expectation. The selection snapshot is captured in
+  // `useContextMenu.openAt` BEFORE button focus can clear it (the root
+  // cause of the original bug).
+  const handleCopy = useCallback((selectionAtOpen: string) => {
+    void copySelectionOrFallback(selectionAtOpen || (message.content ?? ""));
+  }, [message.content]);
+
+  // ── Menu items ──────────────────────────────────────────────────────
+  // useMemo keeps the array stable across renders — important because
+  // `<ContextMenu>` is a child of the React.memo-wrapped MessageBubble;
+  // a fresh array each render would force ContextMenu to re-render every
+  // time even when nothing relevant changed. Items only depend on
+  // content (Copy / Resend need it) and the two translation keys.
+  const items = useMemo<ContextMenuItem[]>(() => {
+    const list: ContextMenuItem[] = [];
+
+    // Copy is always present on bubbles that have content. The Copy
+    // action uses the selection-at-open snapshot from the click context,
+    // so it works whether or not the user pre-selected text.
+    if (message.content) {
+      list.push({
+        key: "copy",
+        icon: <Copy size={14} />,
+        label: t("chatPanel.copy"),
+        onClick: ({ selectionAtOpen }) => {
+          void handleCopy(selectionAtOpen);
+        },
+      });
+    }
+
+    // Resend is user-bubble-only. No disabled state — either the
+    // message has content (we got past the `if` above) or the item is
+    // not rendered at all.
+    if (message.type === "user" && message.content) {
+      list.push({
+        key: "resend",
+        icon: <RotateCcw size={14} />,
+        label: t("chatPanel.resend"),
+        onClick: () => handleResend(),
+      });
+    }
+
+    return list;
+  }, [message.content, message.type, handleCopy, handleResend, t]);
+
+  // Common right-click trigger — bound to whichever layout wrapper the
+  // message type uses (see each branch below). No payload: items read
+  // what they need from their closures (message, handlers).
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => menu.openAt(e),
+    [menu],
+  );
 
   if (message.type === "user") {
     return (
-      <MessageContentWrapper extraMenuItems={userExtraMenuItems}>
-        <div className="flex items-start justify-end gap-2">
+      <>
+        <div className="flex items-start justify-end gap-2" onContextMenu={onContextMenu}>
           <div className="min-w-0 flex-1 flex flex-col items-end">
             {liveUserName && (
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
@@ -407,65 +292,101 @@ const MessageBubble = React.memo(function MessageBubble({
             className="shrink-0 mt-1"
           />
         </div>
-      </MessageContentWrapper>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
   if (message.type === "assistant") {
     if (!displayContent) return null;
     return (
-      <MessageContentWrapper>
-        <div className="min-w-0 flex flex-col ml-12">
-<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
-                <StreamMarkdown content={displayContent} />
-              </div>
+      <>
+        <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
+              <StreamMarkdown content={displayContent} />
             </div>
           </div>
-      </MessageContentWrapper>
+        </div>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
   if (message.type === "thought") {
     return (
-      <MessageContentWrapper>
-        <div className="min-w-0 flex flex-col ml-12">
-<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              <ThinkBlock
-                content={message.content}
-                startTime={message.startTime}
-                endTime={message.endTime}
-              />
-            </div>
+      <>
+        <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <ThinkBlock
+              content={message.content}
+              startTime={message.startTime}
+              endTime={message.endTime}
+            />
           </div>
-      </MessageContentWrapper>
+        </div>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
   if (message.type === "error") {
     return (
-      <MessageContentWrapper>
-        <div className="min-w-0 flex flex-col ml-12">
-<div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
-              <div className="flex items-start gap-2 min-w-0">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                <div className="min-w-0 flex-1">
-                  <div className="whitespace-pre-wrap break-words">{message.content}</div>
-                  {message.errorDetail && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-300 dark:text-zinc-500 dark:hover:text-zinc-400 select-none">
-                        Details
-                      </summary>
-                      <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-all">
-                        {message.errorDetail}
-                      </pre>
-                    </details>
-                  )}
-                </div>
+      <>
+        <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words overflow-hidden" style={fontSizeStyle}>
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <div className="min-w-0 flex-1">
+                <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                {message.errorDetail && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-300 dark:text-zinc-500 dark:hover:text-zinc-400 select-none">
+                      Details
+                    </summary>
+                    <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-pre-wrap break-all">
+                      {message.errorDetail}
+                    </pre>
+                  </details>
+                )}
               </div>
             </div>
           </div>
-      </MessageContentWrapper>
+        </div>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
@@ -478,20 +399,29 @@ const MessageBubble = React.memo(function MessageBubble({
     // entry is reconstructed into the `AttachedItem` discriminated union.
     if (!meta) {
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 select-text">
               {message.content}
             </div>
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
     if (metaType === "file_upload") {
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <AttachmentChipRow
               item={{
                 type: "file_upload",
@@ -505,7 +435,16 @@ const MessageBubble = React.memo(function MessageBubble({
               pending={!!message._isOptimistic}
             />
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
@@ -514,8 +453,8 @@ const MessageBubble = React.memo(function MessageBubble({
       // store rather than threading a prop through every bubble.
       const selectedAgentId = useAgentStore.getState().selectedAgentId;
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <AttachmentChipRow
               item={{
                 type: "image_upload",
@@ -532,14 +471,23 @@ const MessageBubble = React.memo(function MessageBubble({
               pending={!!message._isOptimistic}
             />
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
     if (metaType === "attached_file") {
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <AttachmentChipRow
               item={{
                 type: "attached_file",
@@ -552,14 +500,23 @@ const MessageBubble = React.memo(function MessageBubble({
               pending={!!message._isOptimistic}
             />
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
     if (metaType === "attached_selection") {
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <AttachmentChipRow
               item={{
                 type: "attached_selection",
@@ -574,14 +531,23 @@ const MessageBubble = React.memo(function MessageBubble({
               pending={!!message._isOptimistic}
             />
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
     if (metaType === "attached_folder") {
       return (
-        <MessageContentWrapper>
-          <div className="flex justify-center">
+        <>
+          <div className="flex justify-center" onContextMenu={onContextMenu}>
             <AttachmentChipRow
               item={{
                 type: "attached_folder",
@@ -594,35 +560,61 @@ const MessageBubble = React.memo(function MessageBubble({
               pending={!!message._isOptimistic}
             />
           </div>
-        </MessageContentWrapper>
+          <ContextMenu
+            isOpen={menu.isOpen}
+            menuProps={menu.menuProps}
+            items={items}
+            payload={undefined}
+            selectionAtOpen={menu.selectionAtOpen}
+            onClose={menu.close}
+            compact
+          />
+        </>
       );
     }
 
     // Fallback: generic system message (non-attachment system entries
     // like session notifications, etc.).
     return (
-      <MessageContentWrapper>
-        <div className="flex justify-center">
+      <>
+        <div className="flex justify-center" onContextMenu={onContextMenu}>
           <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 select-text">
             {message.content}
           </div>
         </div>
-      </MessageContentWrapper>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
   if (message.type === "compaction") {
     return (
-      <MessageContentWrapper>
-        {/* ml-12 mirrors assistant/thought/error: content starts to the right of the avatar. */}
-        <div className="ml-12">
+      <>
+        <div className="ml-12" onContextMenu={onContextMenu}>
           <CompactionCard
             summary={message.content}
             meta={message.compactionMeta}
             timestampMs={message.timestamp}
           />
         </div>
-      </MessageContentWrapper>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 
@@ -646,8 +638,8 @@ const MessageBubble = React.memo(function MessageBubble({
 
   if (message.type === "tool_result") {
     return (
-      <MessageContentWrapper>
-        <div className="flex justify-start">
+      <>
+        <div className="flex justify-start" onContextMenu={onContextMenu}>
           <button
             className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-zinc-500 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-400 dark:hover:bg-zinc-800"
             onClick={() => setExpanded(!expanded)}
@@ -664,7 +656,16 @@ const MessageBubble = React.memo(function MessageBubble({
             </pre>
           )}
         </div>
-      </MessageContentWrapper>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
     );
   }
 

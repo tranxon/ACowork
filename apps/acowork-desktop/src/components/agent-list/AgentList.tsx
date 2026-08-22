@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from "react";
+import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useToast } from "../common/ToastProvider";
@@ -16,7 +16,11 @@ import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isProcessing, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { useContextMenuPosition } from "../../hooks/useContextMenuPosition";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
 
 interface AgentListProps {
   width?: number;
@@ -57,13 +61,8 @@ export function AgentList({ width }: AgentListProps) {
   }, [sessionStatesByAgent]);
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
   const { addToast } = useToast();
-  const [contextMenu, setContextMenu] = useState<{ agentId: string; x: number; y: number } | null>(null);
+  const agentMenu = useContextMenu<{ agentId: string }>();
   const [installing, setInstalling] = useState(false);
-  // Viewport-aware positioning for the agent right-click menu: shared hook
-  // flips above when near the bottom and clamps inside the viewport.
-  const { menuRef, style: contextMenuStyle } = useContextMenuPosition({
-    pointer: contextMenu ? { x: contextMenu.x, y: contextMenu.y } : null,
-  });
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -143,12 +142,10 @@ export function AgentList({ width }: AgentListProps) {
     }
   }, [agentsNeedingTitle, fetchLatestSession]);
 
-  // Close context menu and add menu on click outside
+  // Close the "+ add agent" popover on outside click. The agent right-click
+  // menu handles its own close inside `useContextMenu`.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setContextMenu(null);
-      }
       if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
         setAddMenuOpen(false);
       }
@@ -199,7 +196,6 @@ export function AgentList({ width }: AgentListProps) {
         return next;
       });
     }
-    setContextMenu(null);
   };
 
   const handleDebugStart = async (agentId: string) => {
@@ -218,7 +214,6 @@ export function AgentList({ width }: AgentListProps) {
         return next;
       });
     }
-    setContextMenu(null);
   };
 
   const handleStop = async (agentId: string) => {
@@ -239,7 +234,6 @@ export function AgentList({ width }: AgentListProps) {
         }
       },
     });
-    setContextMenu(null);
   };
 
   const handleUninstall = (agentId: string) => {
@@ -265,15 +259,98 @@ export function AgentList({ width }: AgentListProps) {
         }
       },
     });
-    setContextMenu(null);
   };
 
-  const handleContextMenu = (e: React.MouseEvent, agentId: string) => {
-    e.preventDefault();
-    setContextMenu({ agentId, x: e.clientX, y: e.clientY });
-  };
+  // Open the unified context menu. `useContextMenu.openAt` handles
+  // preventDefault / stopPropagation / payload capture / selection snapshot
+  // — see src/components/common/ContextMenu/useContextMenu.ts.
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, agentId: string) => {
+      agentMenu.openAt(e, { agentId });
+    },
+    [agentMenu],
+  );
 
-  const contextAgent = contextMenu?.agentId ? agentsMap[contextMenu.agentId]?.meta : undefined;
+  const contextAgent = agentMenu.payload?.agentId
+    ? agentsMap[agentMenu.payload.agentId]?.meta
+    : undefined;
+
+  // Memoised menu items. Built only when the resolved `contextAgent`
+  // changes (so the Start / Stop / Uninstall variants flip correctly when
+  // the user right-clicks a different agent) or when translations change.
+  const agentMenuItems = useMemo<ContextMenuItem<{ agentId: string }>[]>(() => {
+    const aid = agentMenu.payload?.agentId;
+    if (!aid) return [];
+    const items: ContextMenuItem<{ agentId: string }>[] = [];
+
+    if (contextAgent && !contextAgent.running) {
+      items.push({
+        key: "start",
+        icon: <Play size={14} />,
+        label: t("agentList.contextStart"),
+        onClick: ({ payload }) => payload && handleStart(payload.agentId),
+      });
+      items.push({
+        key: "start-debug",
+        icon: <Bug size={14} />,
+        label: t("agentList.contextStartInDebug"),
+        variant: "warning",
+        onClick: ({ payload }) => payload && handleDebugStart(payload.agentId),
+      });
+    }
+    if (contextAgent && contextAgent.running) {
+      items.push({
+        key: "stop",
+        icon: <Square size={14} />,
+        label: t("agentList.contextStop"),
+        onClick: ({ payload }) => payload && handleStop(payload.agentId),
+      });
+    }
+    items.push({
+      key: "details",
+      icon: <Info size={14} />,
+      label: t("agentList.contextDetails"),
+      onClick: ({ payload }) => payload && setDetailAgentId(payload.agentId),
+    });
+    items.push({
+      key: "clone",
+      icon: <Copy size={14} />,
+      label: t("agentList.contextClone"),
+      onClick: () => {
+        if (!contextAgent) return;
+        setCloneSource({
+          agentId: contextAgent.agent_id,
+          agentName: contextAgent.display_name ?? contextAgent.name,
+        });
+      },
+    });
+    items.push({
+      key: "publish",
+      icon: <Package size={14} />,
+      label: t("agentList.contextPublish"),
+      onClick: () => {
+        if (!contextAgent) return;
+        setPublishTarget({
+          agentId: contextAgent.agent_id,
+          agentName: contextAgent.display_name ?? contextAgent.name,
+        });
+      },
+    });
+    if (contextAgent && contextAgent.agent_id !== "com.acowork.system") {
+      items.push({
+        key: "uninstall",
+        icon: <Trash2 size={14} />,
+        label: t("agentList.contextUninstall"),
+        variant: "danger",
+        dividerBefore: true,
+        onClick: ({ payload }) => payload && handleUninstall(payload.agentId),
+      });
+    }
+    return items;
+    // contextAgent is the only signal that changes which items appear;
+    // handlers are stable references from React state machinery below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentMenu.payload?.agentId, contextAgent, t]);
   const filteredAgents = agentsList.filter((a) =>
     a.name.toLowerCase().includes(searchQuery.toLowerCase()),
   );
@@ -502,97 +579,15 @@ export function AgentList({ width }: AgentListProps) {
         )}
       </div>
 
-      {/* Context menu */}
-      {contextMenu && (
-        <div
-          ref={menuRef}
-          className="context-menu"
-          style={contextMenuStyle}
-        >
-          {contextAgent && !contextAgent.running && (
-            <>
-              <button
-                type="button"
-                className="context-menu-item"
-                onClick={() => handleStart(contextMenu.agentId)}
-              >
-                <Play className="context-menu-item__icon" /> {t("agentList.contextStart")}
-              </button>
-              <button
-                type="button"
-                className="context-menu-item context-menu-item--warning"
-                onClick={() => handleDebugStart(contextMenu.agentId)}
-              >
-                <Bug className="context-menu-item__icon" /> {t("agentList.contextStartInDebug")}
-              </button>
-            </>
-          )}
-          {contextAgent && contextAgent.running && (
-            <>
-              <button
-                type="button"
-                className="context-menu-item"
-                onClick={() => handleStop(contextMenu.agentId)}
-              >
-                <Square className="context-menu-item__icon" /> {t("agentList.contextStop")}
-              </button>
-            </>
-          )}
-          <button
-            type="button"
-            className="context-menu-item"
-            onClick={() => {
-              setDetailAgentId(contextMenu.agentId);
-              setContextMenu(null);
-            }}
-          >
-            <Info className="context-menu-item__icon" /> {t("agentList.contextDetails")}
-          </button>
-          <button
-            type="button"
-            className="context-menu-item"
-            onClick={() => {
-              if (contextAgent) {
-                setCloneSource({
-                  agentId: contextAgent.agent_id,
-                  agentName: contextAgent.display_name ?? contextAgent.name,
-                });
-                setContextMenu(null);
-              }
-            }}
-          >
-            <Copy className="context-menu-item__icon" /> {t("agentList.contextClone")}
-          </button>
-          <button
-            type="button"
-            className="context-menu-item"
-            onClick={() => {
-              if (contextAgent) {
-                setPublishTarget({
-                  agentId: contextAgent.agent_id,
-                  agentName: contextAgent.display_name ?? contextAgent.name,
-                });
-                setContextMenu(null);
-              }
-            }}
-          >
-            <Package className="context-menu-item__icon" /> {t("agentList.contextPublish")}
-          </button>
-
-          {contextAgent && contextAgent.agent_id !== "com.acowork.system" && (
-            <>
-              <div className="context-menu-divider" />
-              <button
-                type="button"
-                className="context-menu-item context-menu-item--danger"
-                onClick={() => handleUninstall(contextMenu.agentId)}
-              >
-                <Trash2 className="context-menu-item__icon" /> {t("agentList.contextUninstall")}
-              </button>
-            </>
-          )}
-        </div>
-      )}
+      {/* Unified context menu — items only depend on the right-clicked agent. */}
+      <ContextMenu<{ agentId: string }>
+        isOpen={agentMenu.isOpen}
+        menuProps={agentMenu.menuProps}
+        items={agentMenuItems}
+        payload={agentMenu.payload}
+        selectionAtOpen={agentMenu.selectionAtOpen}
+        onClose={agentMenu.close}
+      />
 
       {/* Confirm dialog */}
       <ConfirmDialog
