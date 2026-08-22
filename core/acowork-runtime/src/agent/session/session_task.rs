@@ -101,6 +101,13 @@ pub enum SessionMessage {
     /// SessionTask can inject them into its AgentCore and start emitting
     /// debug events without a process restart.
     EnableDebugMode(DebugHandles),
+    /// Disable debug mode at runtime (after Gateway pushes DisableDebugMode).
+    /// The SessionTask calls `AgentCore::clear_debug_mode()` so subsequent
+    /// agent_loop iterations stop emitting debug events. No payload, because
+    /// the per-session observer is replaced with the production no-op slot;
+    /// the SessionManager already cleared its `debug_controllers` and
+    /// `debug_event_senders` maps on the way out.
+    DisableDebugMode,
     /// Close the session gracefully: trigger distillation and free resources.
     /// JSONL history is preserved (use Delete to also remove the file).
     Close,
@@ -220,6 +227,7 @@ impl std::fmt::Debug for SessionMessage {
                 f.debug_struct("Stop").field("reason", reason).finish()
             }
             SessionMessage::EnableDebugMode(_) => f.debug_tuple("EnableDebugMode").finish(),
+            SessionMessage::DisableDebugMode => f.debug_tuple("DisableDebugMode").finish(),
             SessionMessage::Close => f.debug_tuple("Close").finish(),
             SessionMessage::CompactContext => f.debug_tuple("CompactContext").finish(),
             SessionMessage::CompressAction(action) => f
@@ -1210,6 +1218,18 @@ impl SessionTask {
                     // into AgentCore (ADR-013: Observer Pipeline).
                     let observer = DebugObserverImpl::new(handles);
                     agent_loop.core.set_debug_mode(observer);
+                }
+                Some(SessionMessage::DisableDebugMode) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "SessionTask: clearing debug mode from existing session"
+                    );
+                    // Symmetric counterpart to EnableDebugMode above.
+                    // The SessionManager already cleared its controller/sender
+                    // maps and `runtime_debug_handles`; we only need to drop
+                    // the observer on AgentCore so future agent_loop iterations
+                    // emit no debug events.
+                    agent_loop.core.clear_debug_mode();
                 }
                 Some(SessionMessage::Close) => {
                     tracing::info!(

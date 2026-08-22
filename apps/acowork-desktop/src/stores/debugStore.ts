@@ -171,6 +171,38 @@ interface DebugStore {
   // Actions
   connect: (agentId: string) => void;
   disconnect: () => void;
+  /**
+   * Tear down DevMode for the currently-attached agent. Symmetric
+   * counterpart to the "Enable Debug" button wired in
+   * `ResultsPanel.tsx` (which calls the Tauri command directly +
+   * then `connect()`s). Idempotent: if DevMode is already off this
+   * is a no-op apart from a single `fetchAgents()` round-trip to
+   * confirm the state.
+   *
+   * Order of operations mirrors the enable path inverted:
+   *
+   *   1. `invoke("disable_agent_debug", { agentId })` — hits
+   *      Gateway's `/api/agents/{id}/debug/disable` proxy hook,
+   *      which forwards to Runtime's `/api/debug/disable`. On a
+   *      2xx the Gateway flips `running_agents[id].debug_state`
+   *      to `Disabled`.
+   *   2. `useAgentStore.getState().fetchAgents()` — refresh the
+   *      agent list so `selectedAgent.debug_state === "disabled"`
+   *      becomes visible to the UI. Without this, the next render
+   *      would still see the stale `"enabled"` value and the Debug
+   *      Panel would stay mounted.
+   *   3. `get().disconnect()` — drop the local attach; the
+   *      `debug-event` listener stays registered for the app
+   *      lifetime but events for the just-detached agent are
+   *      filtered by `debugAgentId === null`.
+   *
+   * Errors from step 1 are surfaced to the caller (the "Exit
+   * Debug" button) so it can show a toast / keep the button
+   * enabled. Steps 2-3 run only on success — a partial failure
+   * (Runtime tore down but Gateway proxy flaked) leaves the local
+   * store consistent with the Runtime's truth.
+   */
+  disableDebugMode: () => Promise<void>;
   rpc: (
     method: "GET" | "POST",
     path: string,
@@ -242,6 +274,93 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
     // `debug-event` listener stays registered for the app lifetime -
     // events are filtered by `debugAgentId` in `_handleDebugEvent`.
     set({ connected: false, debugAgentId: null });
+  },
+
+  // ── DevMode lifecycle ────────────────────────────────────────────────
+  //
+  // `connect()` is purely local: it registers a debug-event listener
+  // and attaches to a running agent that is *already* in DevMode.
+  // `disableDebugMode()` is the inverse across the full stack: it
+  // asks the Runtime to tear down DevMode, refreshes the agent
+  // list so the UI sees the new `debug_state = "disabled"`, and
+  // detaches locally. Together with the existing
+  // `enable_agent_debug` Tauri command invoked from
+  // `ResultsPanel.tsx`, these two actions form the symmetric
+  // enable/disable pair the "Exit Debug" button needs.
+
+  disableDebugMode: async () => {
+    const agentId = get().debugAgentId;
+    if (!agentId) {
+      log.warn(
+        "[debugStore] disableDebugMode() no-op: no debug session attached",
+      );
+      return;
+    }
+    log.debug("[debugStore] disableDebugMode() calling Tauri command", {
+      agentId,
+    });
+    try {
+      // Step 1: ask the Runtime to tear DevMode down. The Tauri
+      // command is `disable_agent_debug` (see
+      // `apps/acowork-desktop/src-tauri/src/commands/debug.rs`),
+      // which routes through the same Gateway wildcard proxy as the
+      // generic `debug_rpc` and unwraps the Runtime's
+      // `{ disabled, already_disabled }` envelope.
+      await invoke<{ disabled: boolean; already_disabled: boolean }>(
+        "disable_agent_debug",
+        { agentId },
+      );
+    } catch (err) {
+      // Surface the error to the caller; do NOT continue with the
+      // local disconnect — that would leave the UI thinking DevMode
+      // is off while the Runtime is still in DevMode. The caller
+      // (the "Exit Debug" button) can retry.
+      log.error(
+        "[debugStore] disableDebugMode() Tauri command failed:",
+        err,
+      );
+      throw err;
+    }
+
+    log.debug(
+      "[debugStore] disableDebugMode() Tauri command ok, refreshing agents",
+    );
+    // Step 2: refresh the agent list so `selectedAgent.debug_state`
+    // flips to `"disabled"` on the next render. Without this the
+    // store still reports the stale `"enabled"` value and the
+    // Debug Panel stays mounted until the next natural refresh
+    // cycle.
+    try {
+      await useAgentStore.getState().fetchAgents();
+    } catch (err) {
+      // The Runtime side is the source of truth — the Gateway's
+      // `proxy_debug_rpc` hook already flipped `debug_state` to
+      // `Disabled` when step 1's 2xx response landed. A failed
+      // `fetchAgents` only means the agentStore cache is stale, so
+      // patch it locally: `ResultsPanel`'s auto-connect effect runs
+      // off `debug_state === "enabled"` and would otherwise see the
+      // stale value, re-attach the Debug Panel to an agent whose
+      // DevMode is already gone, and leave the user with a panel
+      // where every RPC 503s. The next periodic refresh overwrites
+      // this local patch with the same value anyway. Log loudly so
+      // the on-call engineer notices the transient network failure.
+      log.warn(
+        "[debugStore] disableDebugMode() fetchAgents failed — patching local debug_state=disabled:",
+        err,
+      );
+      useAgentStore.getState().patchAgentMeta(agentId, {
+        debug_state: "disabled",
+      });
+    }
+
+    // Step 3: detach locally. Reuses `disconnect()` so the
+    // semantics are identical to the natural "agent stopped or
+    // debug_state flipped externally" path.
+    get().disconnect();
+    log.info(
+      "[debugStore] disableDebugMode() complete: DevMode torn down, agent list refreshed, local session detached",
+      { agentId },
+    );
   },
 
   // ── RPC ────────────────────────────────────────────────────────────

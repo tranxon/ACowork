@@ -12,6 +12,7 @@
 //! | Method | Path                            | DebugService call         |
 //! |--------|---------------------------------|---------------------------|
 //! | POST   | `/api/debug/enable`             | (no service call — flips DevMode on at runtime) |
+//! | POST   | `/api/debug/disable`            | (no service call — tears DevMode down at runtime) |
 //! | POST   | `/api/debug/resume`             | `resume(session_id)`      |
 //! | POST   | `/api/debug/pause`              | `pause(session_id)`       |
 //! | POST   | `/api/debug/step`               | `step(session_id, …)`     |
@@ -473,6 +474,63 @@ async fn post_enable(
     }
 }
 
+/// `POST /api/debug/disable` — tear DevMode down at runtime.
+///
+/// Symmetric counterpart to [`post_enable`]. The body is empty
+/// (DevMode is per-agent, there is no per-session parameter) and the
+/// response carries a single boolean `disabled` flag plus an
+/// `already_disabled` no-op confirmation so the Desktop can show
+/// "DevMode is off" / "DevMode just turned off" without re-querying
+/// agent state.
+async fn post_disable(
+    State(state): State<super::server::HttpState>,
+) -> Result<Json<DebugHttpResponse<DisableDebugResult>>, DebugHttpError> {
+    let outcome = crate::startup::debug_enable::disable_debug_mode_and_clear_slot(
+        &state.debug_service,
+        &state.session_manager_slot,
+    )
+    .await;
+
+    match outcome {
+        crate::startup::debug_enable::DebugDisableOutcome::AlreadyDisabled => {
+            Ok(Json(DebugHttpResponse::ok(DisableDebugResult {
+                disabled: true,
+                already_disabled: true,
+            })))
+        }
+        crate::startup::debug_enable::DebugDisableOutcome::NewlyDisabled => {
+            tracing::info!(
+                "DevMode disabled at runtime via HTTP — /api/debug/* routes return 503 again"
+            );
+            Ok(Json(DebugHttpResponse::ok(DisableDebugResult {
+                disabled: true,
+                already_disabled: false,
+            })))
+        }
+        crate::startup::debug_enable::DebugDisableOutcome::SessionManagerUnavailable => {
+            // Same shape as `post_enable` — 503 with a stable
+            // -32000 code so the Desktop can reuse its retry path.
+            // The service slot stays untouched here; the user can
+            // retry once Phase B has wired SessionManager.
+            Err(DebugHttpError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                -32000,
+                "SessionManager not ready (Phase B still running) — retry shortly",
+            ))
+        }
+    }
+}
+
+/// Response payload for `POST /api/debug/disable`.
+///
+/// `already_disabled: true` means the slot was already empty before
+/// the call — no teardown happened, just a status confirmation.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisableDebugResult {
+    pub disabled: bool,
+    pub already_disabled: bool,
+}
+
 // ── Router ────────────────────────────────────────────────────────────
 
 use axum::extract::Query;
@@ -484,6 +542,7 @@ use axum::extract::Query;
 pub(crate) fn debug_routes() -> Router<super::server::HttpState> {
     Router::new()
         .route("/api/debug/enable", post(post_enable))
+        .route("/api/debug/disable", post(post_disable))
         .route("/api/debug/resume", post(post_resume))
         .route("/api/debug/pause", post(post_pause))
         .route("/api/debug/step", post(post_step))

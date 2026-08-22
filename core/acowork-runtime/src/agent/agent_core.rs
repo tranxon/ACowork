@@ -969,6 +969,30 @@ impl AgentCore {
         self.debug_observer = DebugObserverSlot::dev(observer);
     }
 
+    /// Tear down the DevMode observer on this `AgentCore`, restoring
+    /// production-mode semantics. Symmetric counterpart to
+    /// [`Self::set_debug_mode`] — used by the runtime
+    /// `POST /api/debug/disable` flow (ADR-048 follow-up) to exit
+    /// DevMode without an agent restart.
+    ///
+    /// After this call:
+    /// - The `debug_observer` slot is `Production`; all `on_*` hooks
+    ///   become no-ops at the compiler-discriminated level (same
+    ///   zero-overhead guarantee as a never-enabled agent).
+    /// - The pending-injection slot is also cleared, so any in-flight
+    ///   rewind/patch dispatched before disable arrives cannot fire
+    ///   after the toggle.
+    pub fn clear_debug_mode(&mut self) {
+        if !self.debug_observer.is_dev_mode() {
+            tracing::debug!(
+                "AgentCore::clear_debug_mode: no-op (observer already in Production)"
+            );
+            return;
+        }
+        tracing::info!("AgentCore::clear_debug_mode: dropping DevMode observer");
+        self.debug_observer = DebugObserverSlot::production();
+    }
+
     pub fn set_debug_pending_injection(
         &mut self,
         ch: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,

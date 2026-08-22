@@ -2810,6 +2810,106 @@ After installation, ask the user to re-enable the MCP server.",
         self.debug_service.clone()
     }
 
+    /// Tear down DevMode at runtime (ADR-048 follow-up).
+    ///
+    /// Symmetric counterpart to [`Self::enable_debug_mode`]. Called by
+    /// the `POST /api/debug/disable` HTTP route so the user can exit
+    /// DevMode from the Debug Panel without restarting the agent.
+    ///
+    /// What gets cleared:
+    ///
+    /// 1. `debug_service = None` — the next call to
+    ///    `debug_service_slot` will see an empty slot and the HTTP
+    ///    `/api/debug/*` routes will return 503 again.
+    /// 2. `runtime_debug_handles = None` — new sessions created after
+    ///    the disable call no longer inherit a DevMode observer.
+    /// 3. `debug_controllers` + `debug_event_senders` maps cleared —
+    ///    any leftover `DebugController` instances from the live map
+    ///    lose their last references and drop. The
+    ///    `RuntimeDebugService` (already gone via step 1) was the
+    ///    only other reader, so this is safe.
+    /// 4. `SessionMessage::DisableDebugMode` pushed to every live
+    ///    session's inbound channel — `SessionTask` calls
+    ///    `AgentCore::clear_debug_mode()` on the next iteration so
+    ///    future `agent_loop` cycles stop emitting debug events.
+    ///    Pending inbound messages ahead of `DisableDebugMode` still
+    ///    run with the DevMode observer (the production migration is
+    ///    strictly forward-only and does not need to retro-rewrite
+    ///    history).
+    /// 5. The pending-debug slot on every session is reset to `None`
+    ///    so a `pending DebugHandles` left over from an in-flight
+    ///    `EnableDebugMode` (delivered after the user clicked
+    ///    "Exit Debug") cannot be picked up by the next agent_loop
+    ///    iteration once DevMode has been torn down.
+    ///
+    /// Idempotent: if DevMode was never enabled, all four clears are
+    /// no-ops and the call returns immediately. This matches the
+    /// idempotency contract of [`Self::enable_debug_mode`].
+    pub async fn disable_debug_mode(&mut self) {
+        if self.runtime_debug_handles.is_none() && self.debug_service.is_none() {
+            tracing::debug!(
+                "disable_debug_mode: no-op (DevMode was never enabled on this Runtime)"
+            );
+            return;
+        }
+
+        tracing::info!("SessionManager::disable_debug_mode: tearing down DevMode");
+
+        // (1) Drop the late-bind DebugService first — the HTTP slot
+        // is read on every `/api/debug/*` request, so clearing this
+        //     before we touch the underlying maps guarantees that no
+        //     RPC can land mid-teardown.
+        self.debug_service = None;
+
+        // (4) Push DisableDebugMode to every session before we
+        //     release the per-session controllers — the SessionTask
+        //     handler in session_task.rs reads the observer pointer
+        //     and calls `core.clear_debug_mode()`; we want that to
+        //     happen while the controllers are still registered so
+        //     any concurrent RPC that already grabbed a controller
+        //     can finish without surprising the session.
+        for (sid, session_handle) in &self.sessions {
+            // Reset pending-debug-injection first so a stale handles
+            // pointer cannot be applied after the toggle.
+            {
+                let mut pending = session_handle.pending_debug_handles.lock().await;
+                *pending = None;
+            }
+            let msg = SessionMessage::DisableDebugMode;
+            if session_handle.inbound_tx.send(msg).await.is_err() {
+                tracing::warn!(
+                    session_id = %sid,
+                    "SessionManager: failed to push DisableDebugMode to session (channel closed)"
+                );
+            } else {
+                tracing::info!(
+                    session_id = %sid,
+                    "SessionManager: pushed DisableDebugMode to existing session"
+                );
+            }
+        }
+
+        // (2) Drop the shared template — new sessions will read
+        //     `None` and stay in production mode.
+        self.runtime_debug_handles = None;
+
+        // (3) Drop per-session controllers + senders. Their only
+        //     remaining reader was the now-`None` `debug_service`,
+        //     so dropping the maps is safe.
+        {
+            let mut controllers = self.debug_controllers.write().await;
+            controllers.clear();
+        }
+        {
+            let mut senders = self.debug_event_senders.write().await;
+            senders.clear();
+        }
+
+        tracing::info!(
+            "disable_debug_mode: DevMode torn down — debug service slot, per-session controllers/senders, and runtime handles cleared"
+        );
+    }
+
     /// Push EnableDebugMode to every existing session so they inject the
     /// debug handles into their AgentCore without a restart.
     ///

@@ -25,6 +25,16 @@
 //! Debug", that field is necessarily `null` because the agent isn't in
 //! DevMode yet. Routing through a dedicated command avoids the
 //! chicken-and-egg.
+//!
+//! The same reasoning applies to `disable_agent_debug` (ADR-048
+//! follow-up, "Exit Debug" button): once DevMode is off the
+//! `debugStore.debugAgentId` slot is still set for the duration of the
+//! user's session, so the generic `debug_rpc` would technically still
+//! fire — but routing through a dedicated command keeps the symmetric
+//! enable/disable pair obvious to grep for, and matches the runtime's
+//! `POST /api/debug/disable` shape (`{"disabled": bool,
+//! "already_disabled": bool}`) without forcing the frontend to remember
+//! an extra path string.
 
 use std::collections::HashMap;
 
@@ -79,6 +89,57 @@ pub async fn enable_agent_debug(
     };
     serde_json::from_value::<EnableDebugResult>(data)
         .map_err(|e| format!("malformed /api/debug/enable response: {}", e))
+}
+
+/// Response shape for `disable_agent_debug` — mirrors the Runtime's
+/// `DisableDebugResult` (see `acowork-runtime/src/http/debug.rs`).
+///
+/// `already_disabled: true` means the Runtime reported a no-op
+/// confirmation (DevMode was already off); the Desktop still needs
+/// to refresh the agent list so the `agentStore.selectedAgentId`
+/// view flips back to "Enable Debug", but no Debug Panel teardown
+/// is necessary because it was already gone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisableDebugResult {
+    pub disabled: bool,
+    pub already_disabled: bool,
+}
+
+/// Tear DevMode down at runtime for `agent_id`. Symmetric counterpart
+/// to [`enable_agent_debug`].
+///
+/// Routes through the same Gateway wildcard proxy:
+/// `POST /api/agents/{agent_id}/debug/disable` -> Runtime
+/// `/api/debug/disable`. The Gateway's `proxy_debug_rpc` hook
+/// updates `running_agents[id].debug_state = Disabled` on a 2xx
+/// response, so after this command returns the Desktop's next
+/// `fetchAgents` call will report `debug_state = "disabled"` and the
+/// Debug Panel + step/pause/resume controls unmount in favour of the
+/// "Enable Debug" placeholder.
+///
+/// The body is intentionally empty: there is no per-session
+/// parameter (DevMode is per-agent), and the disable flow does not
+/// need to know the previous `debug_port` (unlike enable, which
+/// echoes it for the API parity with the legacy `--debug-port`
+/// config knob).
+///
+/// Idempotent — calling twice is safe. The second call returns
+/// `already_disabled: true` and the agent-list refresh is a no-op
+/// (state stays Disabled).
+#[tauri::command]
+pub async fn disable_agent_debug(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<DisableDebugResult, String> {
+    let data = {
+        let client = state.gateway.read().await;
+        client
+            .debug_rpc(&agent_id, "POST", "disable", None, None)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    serde_json::from_value::<DisableDebugResult>(data)
+        .map_err(|e| format!("malformed /api/debug/disable response: {}", e))
 }
 
 /// Relay a Debug Protocol HTTP RPC to the Runtime via the Gateway.

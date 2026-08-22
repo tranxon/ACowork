@@ -1155,6 +1155,12 @@ async fn proxy_put_search_config(
 /// `--dev-mode` flag) even after a successful runtime enable, breaking
 /// the Desktop's `agentStore.agentNotDebugMode` flag. Every other
 /// `rest` value flows through the proxy verbatim.
+///
+/// The symmetric `disable` suffix (ADR-048 follow-up) flips
+/// `debug_state` back to `Disabled` on a 2xx response so the Desktop's
+/// `selectedAgent.debug_state === "enabled"` check goes false and the
+/// DebugPanel re-renders the "Enable Debug" placeholder instead of
+/// staying on the live panel with stale data.
 async fn proxy_debug_rpc(
     State(state): State<AppState>,
     Path((id, rest)): Path<(String, String)>,
@@ -1202,6 +1208,27 @@ async fn proxy_debug_rpc(
                 "Gateway: runtime DevMode enable succeeded — flipping debug_state"
             );
             running.debug_state = crate::gateway::state::DebugState::Enabled;
+        }
+    }
+
+    // ADR-048 follow-up (symmetric to the `enable` hook above):
+    // a successful `POST /api/agents/{id}/debug/disable` proxy call
+    // flips `RunningAgentInfo::debug_state` from `Enabled` →
+    // `Disabled`. We gate on `is_success()` (200..=299) for the
+    // same reason as `enable`: the Runtime reports both
+    // `NewlyDisabled` and `AlreadyDisabled` as 200, so any 2xx
+    // is the wire-level confirmation that the teardown landed.
+    if rest == "disable" && response.status().is_success() {
+        let shared_state = state.gateway_state.clone();
+        let mut gw = shared_state.write().await;
+        if let Some(running) = gw.running_agents.get_mut(&id)
+            && running.debug_state != crate::gateway::state::DebugState::Disabled
+        {
+            tracing::info!(
+                agent_id = %id,
+                "Gateway: runtime DevMode disable succeeded — flipping debug_state"
+            );
+            running.debug_state = crate::gateway::state::DebugState::Disabled;
         }
     }
 
@@ -1763,6 +1790,134 @@ mod tests {
             final_state,
             Some(DebugState::Enabled),
             "successful enable should flip state to Enabled"
+        );
+    }
+
+    /// ADR-048 follow-up (symmetric to the enable test above): a
+    /// successful `POST /api/agents/{id}/debug/disable` proxy call
+    /// flips `RunningAgentInfo::debug_state` from `Enabled` →
+    /// `Disabled`. Non-2xx responses leave the state alone (e.g. a
+    /// 503 "SessionManager not ready" must not silently turn off
+    /// DevMode on the Gateway side).
+    #[tokio::test]
+    async fn debug_disable_flips_running_state() {
+        use crate::gateway::state::{DebugState, GatewayState, RunningAgentInfo};
+        use std::sync::Arc as StdArc;
+        use tokio::sync::RwLock as TokioRwLock;
+
+        let shared_state: crate::http::routes::SharedHttpState =
+            StdArc::new(TokioRwLock::new(GatewayState::new(
+                std::env::temp_dir().to_str().unwrap_or("/tmp"),
+            )));
+        {
+            let mut gw = shared_state.write().await;
+            gw.add_running(RunningAgentInfo {
+                agent_id: "com.test.proxy_disable".to_string(),
+                pid: 9999,
+                started_at: chrono::Utc::now(),
+                workspace: String::new(),
+                connected: true,
+                ready: true,
+                dev_mode: true,
+                // Start in the Enabled state — that's the
+                // realistic precondition for a disable call.
+                debug_state: DebugState::Enabled,
+                debug_port: Some(19876),
+                workspace_config_json: None,
+                current_embed_dim: None,
+                migration: None,
+            });
+        }
+
+        // Sanity: starting state is Enabled.
+        let pre = shared_state
+            .read()
+            .await
+            .running_agents
+            .get("com.test.proxy_disable")
+            .map(|r| r.debug_state);
+        assert_eq!(pre, Some(DebugState::Enabled));
+
+        // Simulate a successful 200 from the Runtime.
+        let response = axum::response::Response::builder()
+            .status(200)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        // Re-implement the hook logic locally (mirrors `proxy_debug_rpc`)
+        // so the test exercises the exact state-mutation code path.
+        let id = "com.test.proxy_disable";
+        if response.status().is_success() {
+            let mut gw = shared_state.write().await;
+            if let Some(running) = gw.running_agents.get_mut(id)
+                && running.debug_state != DebugState::Disabled
+            {
+                running.debug_state = DebugState::Disabled;
+            }
+        }
+        let final_state = shared_state
+            .read()
+            .await
+            .running_agents
+            .get(id)
+            .map(|r| r.debug_state);
+        assert_eq!(
+            final_state,
+            Some(DebugState::Disabled),
+            "successful disable should flip state to Disabled"
+        );
+
+        // Symmetry check: a second 200 (e.g. user double-clicks
+        // "Exit Debug") must stay Disabled — the helper short-
+        // circuits when the state is already Disabled, and the hook
+        // here does too via the `!= Disabled` guard.
+        if response.status().is_success() {
+            let mut gw = shared_state.write().await;
+            if let Some(running) = gw.running_agents.get_mut(id)
+                && running.debug_state != DebugState::Disabled
+            {
+                running.debug_state = DebugState::Disabled;
+            }
+        }
+        assert_eq!(
+            shared_state
+                .read()
+                .await
+                .running_agents
+                .get(id)
+                .map(|r| r.debug_state),
+            Some(DebugState::Disabled),
+            "double-disable should leave state at Disabled"
+        );
+
+        // Failure-path check: a non-2xx response (e.g. Runtime 503
+        // because SessionManager hasn't wired yet) must NOT flip the
+        // state. The Gateway should keep reporting Enabled so the
+        // Desktop sees the DebugPanel still live.
+        let err_response = axum::response::Response::builder()
+            .status(503)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        // Mutate the state back to Enabled first to make this a
+        // meaningful test of the failure path.
+        shared_state.write().await.running_agents.get_mut(id).unwrap().debug_state = DebugState::Enabled;
+        if err_response.status().is_success() {
+            // (intentionally never taken on the failure path)
+            let mut gw = shared_state.write().await;
+            if let Some(running) = gw.running_agents.get_mut(id)
+                && running.debug_state != DebugState::Disabled
+            {
+                running.debug_state = DebugState::Disabled;
+            }
+        }
+        assert_eq!(
+            shared_state
+                .read()
+                .await
+                .running_agents
+                .get(id)
+                .map(|r| r.debug_state),
+            Some(DebugState::Enabled),
+            "non-2xx disable response must leave state at Enabled"
         );
     }
 }

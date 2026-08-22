@@ -17,6 +17,7 @@ import {
   RefreshCw,
   RotateCcw,
   Bug,
+  LogOut,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
@@ -122,6 +123,7 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     sessionStates,
     connect,
     disconnect,
+    disableDebugMode,
     resume,
     pause: pauseDebug,
     step,
@@ -153,6 +155,13 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
   // `enable_agent_debug` Tauri command is awaiting a response, so the
   // user can't double-click and double-fire the wiring.
   const [enablingDebug, setEnablingDebug] = useState(false);
+  // Symmetric to `enablingDebug`: disables the "Exit Debug" button
+  // while the runtime `disable_agent_debug` Tauri command +
+  // `fetchAgents()` round-trip is in flight. The double-click
+  // scenario matters here too — Runtime `disable_debug_mode` is
+  // idempotent, but `fetchAgents()` would race with itself if the
+  // user double-clicks.
+  const [disablingDebug, setDisablingDebug] = useState(false);
   const [editingSection, setEditingSection] = useState<{
     iteration: number;
     section: string;
@@ -402,6 +411,49 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   </ControlButton>
                   <ControlButton onClick={() => restart(activeSessionId)} title={t("resultsPanel.buttonRestart")} disabled={!debugAgentId}>
                     <RefreshCw className="h-3.5 w-3.5" />
+                  </ControlButton>
+                  {/* ADR-048 follow-up: the "Exit Debug" button is
+                      the only control here that doesn't manipulate
+                      a *session's* DebugState — it tears down the
+                      agent-wide DevMode at the Runtime via
+                      `useDebugStore.disableDebugMode()`. After it
+                      fires the agent flips back to
+                      `debug_state = "disabled"`, the Debug Panel
+                      unmounts, and the user sees the "Enable Debug"
+                      placeholder again. No agent restart needed.
+                      Visually distinct (red hue, log-out icon) so
+                      the user reads it as a state exit, not a
+                      session-level toggle. */}
+                  <div className="ml-auto" />
+                  <ControlButton
+                    onClick={async () => {
+                      if (disablingDebug) return;
+                      setDisablingDebug(true);
+                      try {
+                        log.debug(
+                          "[ResultsPanel] exit_debug: invoking disableDebugMode",
+                        );
+                        await disableDebugMode();
+                        log.debug(
+                          "[ResultsPanel] exit_debug: disableDebugMode ok",
+                        );
+                      } catch (err) {
+                        log.error(
+                          "[ResultsPanel] exit_debug failed:",
+                          err,
+                        );
+                      } finally {
+                        setDisablingDebug(false);
+                      }
+                    }}
+                    title={
+                      disablingDebug
+                        ? t("resultsPanel.exitingDebug")
+                        : t("resultsPanel.buttonExitDebug")
+                    }
+                    disabled={disablingDebug || !debugAgentId}
+                  >
+                    <LogOut className="h-3.5 w-3.5 text-red-500 dark:text-red-400" />
                   </ControlButton>
                   {hasPendingPatches && (
                     <>

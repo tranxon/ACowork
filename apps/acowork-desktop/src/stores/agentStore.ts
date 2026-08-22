@@ -289,8 +289,11 @@ interface AgentStoreState {
     online: boolean,
     sleeping?: boolean,
   ) => void;
-  /** Patch specific meta fields without a full state reload. */
-  patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "display_name" | "role">>) => void;
+  /** Patch specific meta fields without a full state reload.
+   *  `debug_state` is writable because the debug flow (exit DevMode)
+   *  may need to align the local cache to the Gateway's confirmed
+   *  state when a refresh fails. */
+  patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "display_name" | "role" | "debug_state">>) => void;
 
   // ── Profile actions ──
 

@@ -590,6 +590,11 @@ pub fn run() {
             commands::debug::debug_rpc,
             // ADR-048 follow-up: runtime DevMode activation (no agent restart).
             commands::debug::enable_agent_debug,
+            // ADR-048 follow-up: symmetric counterpart to the enable
+            // command — tears DevMode down at runtime so the user can
+            // exit the Debug Panel without stopping + restarting the
+            // agent.
+            commands::debug::disable_agent_debug,
             // ADR-033 Phase 3: MQTT real-time event commands
             commands::chat_mqtt::connect_mqtt,
             commands::chat_mqtt::disconnect_mqtt,
