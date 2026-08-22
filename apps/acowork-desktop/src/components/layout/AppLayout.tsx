@@ -420,11 +420,27 @@ export function AppLayout() {
   }, [isDebugMode]);
 
   // ── Switch to status tab when agent stops ────────────────────────
+  // Covers every tab gated on agentRunning in RightNavBar (workspace /
+  // memory / setup / tools / debug). When the agent stops while one of
+  // these is foreground, the corresponding nav button disappears but
+  // the panel content would otherwise render an empty-state shell —
+  // bounce back to status to keep nav and panel consistent.
+  // Single source of truth: ResultsPanel used to host a duplicate of
+  // this effect (with `tools` covered but `debug`/`workspace` missing),
+  // so it was deleted here in favor of this single canonical copy.
   const prevRunning = useRef(selectedAgent?.running);
   useEffect(() => {
     const isRunning = selectedAgent?.running ?? false;
     const wasRunning = prevRunning.current;
-    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup")) {
+    if (
+      !isRunning &&
+      wasRunning !== false &&
+      (activeTab === "memory" ||
+        activeTab === "setup" ||
+        activeTab === "tools" ||
+        activeTab === "debug" ||
+        activeTab === "workspace")
+    ) {
       setActiveTab("status");
     }
     prevRunning.current = isRunning;

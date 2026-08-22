@@ -241,17 +241,6 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDebugMode]);
 
-  // ── Switch to status tab when agent stops ────────────────────────
-  const prevRunning = useRef(selectedAgent?.running);
-  useEffect(() => {
-    const isRunning = selectedAgent?.running ?? false;
-    const wasRunning = prevRunning.current;
-    if (!isRunning && wasRunning !== false && (activeTab === "memory" || activeTab === "setup" || activeTab === "tools")) {
-      onTabChange("status");
-    }
-    prevRunning.current = isRunning;
-  }, [selectedAgent?.running, activeTab]);
-
   // ADR-034 Phase 5: Agent status query (fire-and-forget, no UI rendering yet).
   // Guarded on running+ready — the status endpoint proxies through the
   // Runtime and 503s against an unregistered one.  When the user starts the

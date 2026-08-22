@@ -34,7 +34,7 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // naïve `fill="currentColor"` on lucide's single self-intersecting
     // path collapses both lids into one solid blob, losing the "open"
     // visual). `icon` is intentionally omitted.
-    { tab: "workspace", i18nKey: "resultsPanel.workspace", show: true },
+    { tab: "workspace", i18nKey: "resultsPanel.workspace", show: agentRunning },
     // status uses the shared FilledGaugeIcon/OutlineGaugeIcon so the
     // filled state preserves the needle via SVG mask. Lucide's Activity
     // (heartbeat zigzag) had almost no body to fill — it just turned
@@ -55,11 +55,15 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // mask, the spine (M12 20v-9, fully inside the body) would be
     // drowned by `fill="currentColor"` and the bug would lose its
     // segmented look. `icon` is intentionally omitted.
-    // ADR-048 follow-up: the debug tab is a regular panel — always
-    // visible so the "Enable Debug" button is reachable even when the
-    // agent is not yet in DevMode. Placed last so it sits at the bottom
-    // of the nav rail, visually separated from the content tabs.
-    { tab: "debug", i18nKey: "resultsPanel.debug", show: true },
+    // ADR-048 follow-up: ADR-048 guards the "agent running but DevMode
+    // off" path — the runtime `enable_agent_debug` button is rendered
+    // inside the debug tab when `debug_state !== "enabled"`. That branch
+    // already implies agentRunning, so gating the nav entry on
+    // agentRunning preserves the ADR's intent while removing an empty
+    // `noAgentDebug` placeholder when nothing is running. Placed last so
+    // it sits at the bottom of the nav rail, visually separated from the
+    // content tabs.
+    { tab: "debug", i18nKey: "resultsPanel.debug", show: agentRunning },
   ];
 
   return (

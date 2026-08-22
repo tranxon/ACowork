@@ -58,7 +58,7 @@ interface LayoutState {
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
-    activePanelTab: "workspace",
+    activePanelTab: "status",
     setActivePanelTab: (tab) => set({ activePanelTab: tab }),
 
     resultsCollapsed: false,
