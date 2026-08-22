@@ -682,6 +682,7 @@ impl DesktopMqttClient {
                     Some(mqtt_proto::control_command::Command::CompactContext(_)) => "compact_context",
                     Some(mqtt_proto::control_command::Command::CompressAction(_)) => "compress_action",
                     Some(mqtt_proto::control_command::Command::Intent(_)) => "intent",
+                    Some(mqtt_proto::control_command::Command::ActiveHeartbeat(_)) => "active_heartbeat",
                     None => "chat_message",
                 }
             }
