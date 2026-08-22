@@ -29,6 +29,10 @@ use crate::usecases::memory_query::MemoryStats;
 pub(crate) struct MemoryNodeRecord {
     pub node_id: u64,
     pub node_type: String,
+    /// Secondary classification inside the storage layer (Knowledge
+    /// sub_type or Autobiographical category). `None` for Episodic/Procedural.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,
@@ -73,6 +77,7 @@ pub(crate) struct GetNodeOutput {
     pub node_id: u64,
     pub found: bool,
     pub node_type: String,
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,
@@ -90,6 +95,10 @@ pub(crate) struct ListNodesParams {
     pub page: u32,
     pub size: u32,
     pub node_type: String,
+    /// Sub-classification filter (Fact / Preference / Relation / Procedure for
+    /// Knowledge; Identity / Capability / Limitation / Preference / History /
+    /// Relationship for Autobiographical). Empty string = no filter.
+    pub sub_type: String,
     pub keyword: String,
     pub time_range: String,
 }
@@ -98,7 +107,7 @@ pub(crate) struct ListNodesParams {
 
 /// Convert a [`GetNodeOutput`] to JSON.
 pub(crate) fn get_output_to_json(out: &GetNodeOutput) -> serde_json::Value {
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "node_id": out.node_id,
         "found": out.found,
         "node_type": out.node_type,
@@ -111,7 +120,11 @@ pub(crate) fn get_output_to_json(out: &GetNodeOutput) -> serde_json::Value {
         "status": out.status,
         "properties": out.properties,
         "message": out.message,
-    })
+    });
+    if let Some(ref st) = out.sub_type {
+        obj["sub_type"] = serde_json::Value::String(st.clone());
+    }
+    obj
 }
 
 // ── Empty-result helpers ─────────────────────────────────────────────
@@ -158,6 +171,7 @@ pub(crate) fn list_nodes(
         page: params.page,
         size: params.size,
         node_type: params.node_type,
+        sub_type: params.sub_type,
         keyword: params.keyword,
         time_range: params.time_range,
     };
@@ -172,6 +186,7 @@ pub(crate) fn list_nodes(
             .map(|n| MemoryNodeRecord {
                 node_id: n.node_id,
                 node_type: n.node_type,
+                sub_type: n.sub_type,
                 content: n.content,
                 confidence: n.confidence,
                 decay_score: n.decay_score,
@@ -221,6 +236,7 @@ pub(crate) fn get_node(
                 node_id,
                 found: false,
                 node_type: String::new(),
+                sub_type: None,
                 content: String::new(),
                 confidence: 0.0,
                 decay_score: 0.0,
@@ -238,6 +254,7 @@ pub(crate) fn get_node(
         node_id: detail.node_id,
         found: detail.found,
         node_type: detail.node_type,
+        sub_type: detail.sub_type,
         content: detail.content,
         confidence: detail.confidence,
         decay_score: detail.decay_score,
@@ -404,6 +421,7 @@ mod tests {
             node_id: 7,
             found: true,
             node_type: "Episodic".to_string(),
+            sub_type: None,
             content: "[user] hi".to_string(),
             confidence: 0.5,
             decay_score: 0.9,
@@ -419,5 +437,28 @@ mod tests {
         assert_eq!(v["found"], true);
         assert_eq!(v["node_type"], "Episodic");
         assert_eq!(v["message"], "ok");
+        // sub_type is omitted when None
+        assert!(v.get("sub_type").is_none());
+    }
+
+    #[test]
+    fn get_output_to_json_includes_sub_type_when_present() {
+        let out = GetNodeOutput {
+            node_id: 9,
+            found: true,
+            node_type: "Knowledge".to_string(),
+            sub_type: Some("preference".to_string()),
+            content: "likes dark mode".to_string(),
+            confidence: 0.9,
+            decay_score: 0.5,
+            created_at: 100,
+            last_accessed_at: 100,
+            access_count: 0,
+            status: "Active".to_string(),
+            properties: HashMap::new(),
+            message: "ok".to_string(),
+        };
+        let v = get_output_to_json(&out);
+        assert_eq!(v["sub_type"], "preference");
     }
 }

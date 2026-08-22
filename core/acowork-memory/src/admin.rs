@@ -33,6 +33,19 @@ use acowork_core::error::Result;
 pub struct AdminNodeRecord {
     pub node_id: u64,
     pub node_type: String,
+    /// Secondary classification inside the storage layer.
+    ///
+    /// For `Knowledge` nodes: `Fact` | `Preference` | `Relation` | `Procedure`.
+    /// For `Autobiographical` nodes: `Identity` | `Capability` | `Limitation`
+    /// | `Preference` | `History` | `Relationship`. `None` for `Episodic`
+    /// and `Procedural` nodes (which have no sub-classification).
+    ///
+    /// Drives the memory panel's per-`Autobiographical` sub-filter and the
+    /// Knowledge column-grouping in the desktop UI. Serialised with
+    /// `skip_serializing_if = "Option::is_none"` so older clients see no
+    /// change in the JSON wire format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,
@@ -52,6 +65,19 @@ pub struct AdminListNodesParams {
     /// Filter by node type ("Episodic" / "Knowledge" / "Procedural" /
     /// "Autobiographical"). Empty string = no filter.
     pub node_type: String,
+    /// Filter by sub-classification within the chosen `node_type`:
+    ///
+    /// - `Knowledge`: `Fact` | `Preference` | `Relation` | `Procedure`
+    /// - `Autobiographical`: `Identity` | `Capability` | `Limitation`
+    ///   | `Preference` | `History` | `Relationship`
+    ///
+    /// Empty string = no filter. Only meaningful when `node_type` is set
+    /// to `Knowledge` or `Autobiographical`; for other types the filter
+    /// is ignored because those labels have no sub-classification.
+    ///
+    /// This is the lever the memory panel uses to drill into, e.g.,
+    /// "Autobiographical → Limitation" without fetching the whole label.
+    pub sub_type: String,
     /// Case-insensitive substring filter applied to the rendered content.
     /// Empty string = no filter.
     pub keyword: String,
@@ -81,6 +107,8 @@ pub struct AdminNodeDetail {
     pub node_id: u64,
     pub found: bool,
     pub node_type: String,
+    /// Secondary classification (see [`AdminNodeRecord::sub_type`]).
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,

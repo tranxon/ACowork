@@ -382,7 +382,6 @@ impl MemoryProvider for InMemoryProvider {
             conflict_resolutions: Vec::new(),
         }))
     }
-
     // ── Ambiguous conflict confirmation ────────────────────────────────
 
     fn should_trigger_confirmation(&self) -> Result<bool> {
@@ -620,6 +619,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
         let result = provider.process_memory_store(&input).unwrap();
         assert!(result.is_some());

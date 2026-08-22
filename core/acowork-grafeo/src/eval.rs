@@ -166,6 +166,7 @@ fn eval_information_extraction() -> f32 {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb.clone()),
+            autobiographical: None,
         };
         if store.process_memory_store(&input).is_err() {
             continue;
@@ -232,7 +233,8 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.8),
         source_episode_id: None,
         embedding: Some(emb_a),
-    };
+        autobiographical: None,
+        };
     let input_b = MemoryStoreInput {
         content: "User prefers dark mode in editor".to_string(),
         sub_type: KnowledgeSubType::Preference,
@@ -242,7 +244,8 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.85),
         source_episode_id: None,
         embedding: Some(emb_b),
-    };
+        autobiographical: None,
+        };
 
     let _ = store.process_memory_store(&input_a);
     let result_b = store.process_memory_store(&input_b);
@@ -264,7 +267,8 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.8),
         source_episode_id: None,
         embedding: Some(proc_emb),
-    };
+        autobiographical: None,
+        };
 
     if store.process_memory_store(&proc_input).is_ok() {
         // Verify it can be found via search.

@@ -2,7 +2,7 @@ import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { ArrowLeft, Trash2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { useNodeTypeLabel } from "./nodeTypeI18n";
+import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -36,6 +36,7 @@ function formatDate(ts: number): string {
 export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailProps) {
   const { t } = useTranslation();
   const labelOf = useNodeTypeLabel();
+  const subLabelOf = useSubTypeLabel();
   const colors = getTypeColor(node.node_type);
   const decayLabel = (() => {
     const tier = getDecayTier(node.decay_score);
@@ -74,6 +75,15 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           >
             {labelOf(node.node_type)}
           </span>
+          {node.sub_type && (
+            <span
+              className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+              data-sub-type={node.sub_type}
+              title={node.sub_type}
+            >
+              {subLabelOf(node.node_type, node.sub_type)}
+            </span>
+          )}
           <span className="text-[11px] text-zinc-400 dark:text-zinc-500">#{node.node_id}</span>
         </div>
       </div>

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ConflictSignal, KnowledgeSubType, NodeStatus};
+use crate::types::{AutobioCategory, ConflictSignal, KnowledgeSubType, NodeStatus};
 
 // ============================================================================
 // Embedding function type alias
@@ -67,6 +67,9 @@ pub struct MemoryStoreInput {
     /// Natural language content from LLM.
     pub content: String,
     /// Knowledge sub-type: Fact | Preference | Relation.
+    ///
+    /// Ignored when `autobiographical` is `Some` — autobiographical writes
+    /// route to `AutobiographicalNode` regardless of `sub_type`.
     pub sub_type: KnowledgeSubType,
     /// Optional subject hint (defaults to "user").
     pub subject: Option<String>,
@@ -80,6 +83,41 @@ pub struct MemoryStoreInput {
     pub source_episode_id: Option<u64>,
     /// Pre-computed embedding vector.
     pub embedding: Option<Vec<f32>>,
+    /// Optional autobiographical path.
+    ///
+    /// When `Some`, the pipeline writes to `AutobiographicalNode` instead of
+    /// `KnowledgeNode` / `ProceduralNode`. `sub_type`, `subject`, `predicate`,
+    /// `object` are ignored in this case. Idempotent on `(aspect, key)` —
+    /// re-emitting the same key updates the existing node in place.
+    pub autobiographical: Option<AutobiographicalStoreInput>,
+}
+
+/// Subset of `MemoryStoreInput` that targets the autobiographical (self-
+/// knowledge) layer.
+///
+/// The LLM populates this when the content is about *the Agent itself* —
+///
+/// identity, capabilities, limitations, self-preferences, milestones, or
+/// long-term relationships — rather than about the user or the world. This
+/// distinguishes "I tend to give conclusions first" (autobiographical
+/// preference) from "user prefers concise replies" (knowledge preference).
+#[derive(Debug, Clone)]
+pub struct AutobiographicalStoreInput {
+    /// Self-knowledge aspect (identity / capability / limitation /
+    /// preference / history / relationship).
+    pub aspect: AutobioCategory,
+    /// Optional key for idempotent updates (e.g. "style", "name").
+    ///
+    /// When `None`, a stable key is derived from `aspect` + the first 8
+    /// words of `content` (lower-cased, snake_cased).
+    pub key: Option<String>,
+    /// Provenance of this knowledge. Defaults to `"user_statement"`.
+    ///
+    /// Conventional values:
+    /// - `"user_statement"` — user directly told the agent
+    /// - `"important_event"` — significant interaction worth recording
+    /// - `"self_evaluation"` — internal reflection (rare for instant path)
+    pub source: Option<String>,
 }
 
 /// Action recommended by the conflict resolver.

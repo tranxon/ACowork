@@ -4,6 +4,7 @@
 //! this module handles the full lifecycle: embedding-based dedup, three-layer
 //! conflict detection, and status assignment (Active / Pending).
 
+use acowork_memory::consolidation::AutobiographicalStoreInput;
 use acowork_memory::ConflictSignal;
 use chrono::Utc;
 use grafeo_common::types::NodeId;
@@ -13,7 +14,10 @@ use crate::conflict::{
 };
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
-use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, ProceduralNode, labels};
+use crate::types::{
+    AutobioCategory, AutobiographicalNode, KnowledgeNode, KnowledgeSubType, NodeStatus,
+    ProceduralNode, labels,
+};
 use grafeo_common::types::Value;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +70,67 @@ const DIRECT_ACTIVE_THRESHOLD: f32 = 0.85;
 /// Default confidence assigned when the LLM does not provide one.
 const DEFAULT_CONFIDENCE: f32 = 0.7;
 
+/// Confidence boost applied when an autobiographical write re-confirms an
+/// existing node (idempotent update on `(aspect, key)`).
+const AUTOBIO_RECONFIRM_BOOST: f32 = 0.05;
+
+/// Confidence ceiling for autobiographical nodes after repeated re-confirms.
+/// Capped below 1.0 so re-confirms always have room to grow.
+const AUTOBIO_MAX_CONFIDENCE: f32 = 0.98;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Derive a stable, idempotency-safe key for an autobiographical write.
+///
+/// For non-History aspects the key is `aspect:<slug-of-content>` so multiple
+/// writes about the same self-fact collapse into one node. For History each
+/// milestone gets a per-event key (slug + epoch nanos suffix) so distinct
+/// events are not collapsed — History nodes are time-stamped append-only
+/// records, not canonical slots.
+fn derive_autobiographical_key(aspect: AutobioCategory, content: &str) -> String {
+    let slug = slugify_first_n_words(content, 8);
+    match aspect {
+        AutobioCategory::History => {
+            // Append nanos timestamp so concurrent milestone records get
+            // distinct slots even if their content wording is identical.
+            let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+            format!("history:{}:{}", slug, nanos)
+        }
+        _ => format!("{}:{}", aspect.as_str().to_lowercase(), slug),
+    }
+}
+
+/// Snake-case-slug of the first N whitespace-separated tokens.
+///
+/// Non-alphanumeric characters collapse to `_`, then leading/trailing `_`
+/// are trimmed so a token like `@abc@` becomes `abc` (not `_abc_`). Tokens
+/// with no alphanumeric content at all (pure punctuation, e.g. `!!!` or
+/// `___`) are skipped entirely. CJK characters pass through `is_alphanumeric`
+/// and are preserved as-is.
+fn slugify_first_n_words(content: &str, n: usize) -> String {
+    let mut out = String::new();
+    for tok in content.split_whitespace().take(n) {
+        let cleaned: String = tok
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect();
+        let cleaned = cleaned.trim_matches('_');
+        if cleaned.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('_');
+        }
+        out.push_str(cleaned);
+    }
+    if out.is_empty() {
+        out.push_str("entry");
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Types (re-exported from acowork-memory)
 // ---------------------------------------------------------------------------
@@ -87,8 +152,7 @@ pub struct ConflictCandidate {
     pub existing_node_id: NodeId,
     /// Conflict signal details from the three-layer detector.
     pub conflict_signal: ConflictSignal,
-}
-
+    }
 // ---------------------------------------------------------------------------
 // GrafeoStore methods
 // ---------------------------------------------------------------------------
@@ -97,6 +161,10 @@ impl GrafeoStore {
     /// Process a `memory_store` tool call from the LLM.
     ///
     /// Pipeline:
+    /// - **Autobiographical path** (`input.autobiographical.is_some()`):
+    ///   idempotent `(aspect, key)` upsert into `AutobiographicalNode`.
+    ///   Status is forced to Active by `store_autobiographical` (autobiographical
+    ///   nodes never participate in decay).
     /// - **Procedure category**: creates a `ProceduralNode` directly (no
     ///   conflict detection — procedures don't conflict with facts).
     /// - **Fact / Preference / Relation**: runs the full pipeline:
@@ -110,6 +178,15 @@ impl GrafeoStore {
     /// Returns the created/updated node ID, or `None` if a duplicate was skipped.
     pub fn process_memory_store(&self, input: &MemoryStoreInput) -> Result<Option<ProcessResult>> {
         let confidence = input.confidence.unwrap_or(DEFAULT_CONFIDENCE);
+
+        // --- Autobiographical path (highest priority) ---
+        // When the LLM explicitly marks a write as autobiographical, route
+        // straight to AutobiographicalNode regardless of sub_type. This
+        // covers the "user about the agent" case (e.g. "you're too verbose")
+        // that has no other write channel.
+        if let Some(ref autobio) = input.autobiographical {
+            return self.process_autobiographical(input, autobio, confidence);
+        }
 
         // --- Procedure path: create ProceduralNode directly ---
         if matches!(input.sub_type, KnowledgeSubType::Procedure) {
@@ -217,7 +294,6 @@ impl GrafeoStore {
             conflict_resolutions,
         }))
     }
-
     /// Process a `memory_store` tool call with `category="procedure"`.
     ///
     /// Pipeline:
@@ -297,7 +373,96 @@ impl GrafeoStore {
             conflict_resolutions: Vec::new(),
         }))
     }
+    /// Process a `memory_store` tool call with `autobiographical` set.
+    ///
+    /// Autobiographical writes are **idempotent on `(aspect, key)`**: if an
+    /// `AutobiographicalNode` already exists with the same key, its `value`,
+    /// `source`, `confidence`, and `updated_at` are refreshed in place. This
+    /// matches the design intent — self-knowledge is canonical per slot, not
+    /// multi-instance. History events get a per-event key (derived from content
+    /// + timestamp) so re-recording the same milestone creates a distinct node.
+    ///
+    /// No embedding-based dedup and no cross-type conflict detection — the
+    /// autobiographical layer is structurally separate from knowledge and
+    /// procedure layers (different Label, never-decaying, single canonical
+    /// value per key).
+    ///
+    /// Returns the existing or newly-created node ID.
+    fn process_autobiographical(
+        &self,
+        input: &MemoryStoreInput,
+        autobio: &AutobiographicalStoreInput,
+        confidence: f32,
+    ) -> Result<Option<ProcessResult>> {
+        let aspect = autobio.aspect.clone();
+        let key = autobio
+            .key
+            .clone()
+            .unwrap_or_else(|| derive_autobiographical_key(aspect.clone(), &input.content));
+        let source = autobio
+            .source
+            .clone()
+            .unwrap_or_else(|| "user_statement".to_string());
 
+        // History events are recorded per occurrence, not upserted — give
+        // each milestone its own slot so the user can browse them later.
+        let upsert = !matches!(aspect, AutobioCategory::History);
+
+        if upsert
+            && let Some(mut existing) = self.find_autobiographical_by_key(&key)?
+        {
+            // Refresh in place. Confidence is bumped slightly (capped) since
+            // re-confirmation reinforces the existing self-knowledge.
+            existing.value = input.content.clone();
+            existing
+                .metadata
+                .insert("source".to_string(), serde_json::Value::String(source.clone()));
+            // Take the higher of (existing + boost) and the new write, then
+            // cap at AUTOBIO_MAX_CONFIDENCE. Order matters: `max` first so a
+            // 1.0 input cannot punch through the ceiling.
+            existing.confidence = (existing.confidence + AUTOBIO_RECONFIRM_BOOST)
+                .max(confidence)
+                .min(AUTOBIO_MAX_CONFIDENCE);
+            existing.updated_at = Utc::now();
+            // store_autobiographical respects explicit Dormant; force Active
+            // by re-setting (status field forced to Active in store_*).
+            existing.status = NodeStatus::Active;
+            self.update_autobiographical(&existing)?;
+
+            return Ok(Some(ProcessResult {
+                node_id: existing
+                    .id
+                    .map(|id| id.as_u64())
+                    .unwrap_or_default(),
+                conflict_resolutions: Vec::new(),
+            }));
+        }
+
+        let node = AutobiographicalNode {
+            id: None,
+            category: aspect,
+            key,
+            value: input.content.clone(),
+            confidence,
+            source_episode_id: input.source_episode_id.map(NodeId::new),
+            embedding: input.embedding.clone(),
+            status: NodeStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("source".to_string(), serde_json::Value::String(source));
+                m
+            },
+        };
+
+        let new_id = self.store_autobiographical(&node)?;
+
+        Ok(Some(ProcessResult {
+            node_id: new_id.as_u64(),
+            conflict_resolutions: Vec::new(),
+        }))
+    }
     /// Check if a similar procedural node already exists (dedup).
     ///
     /// Returns the ID of the most similar existing ProceduralNode if
@@ -570,6 +735,61 @@ mod tests {
         chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()
     }
 
+    // =====================================================================
+    // slugify_first_n_words — idempotency-key derivation edge cases
+    // =====================================================================
+
+    #[test]
+    fn slugify_basic_words() {
+        assert_eq!(
+            slugify_first_n_words("I tend to give conclusions first", 8),
+            "i_tend_to_give_conclusions_first"
+        );
+    }
+
+    #[test]
+    fn slugify_respects_token_limit() {
+        assert_eq!(
+            slugify_first_n_words("one two three four five six seven eight nine", 8),
+            "one_two_three_four_five_six_seven_eight"
+        );
+    }
+
+    #[test]
+    fn slugify_skips_pure_punctuation_tokens() {
+        // Multi-char `_` runs and pure-symbol tokens must be skipped, not
+        // emitted as `___` segments. Regression for the old `cleaned == "_"`
+        // check that only matched a single underscore.
+        assert_eq!(slugify_first_n_words("!!! hello ___ world", 8), "hello_world");
+        assert_eq!(slugify_first_n_words("...", 8), "entry");
+    }
+
+    #[test]
+    fn slugify_trims_surrounding_symbols() {
+        // Mixed tokens collapse non-alphanumerics to `_` then trim the edges,
+        // so `@abc@` becomes `abc` (not `_abc_`).
+        assert_eq!(slugify_first_n_words("@abc@ def", 8), "abc_def");
+        assert_eq!(slugify_first_n_words("(hello) world", 8), "hello_world");
+    }
+
+    #[test]
+    fn slugify_empty_and_whitespace_only() {
+        assert_eq!(slugify_first_n_words("", 8), "entry");
+        assert_eq!(slugify_first_n_words("   ", 8), "entry");
+    }
+
+    #[test]
+    fn slugify_preserves_cjk() {
+        // CJK characters pass `is_alphanumeric` and are kept as-is.
+        assert_eq!(slugify_first_n_words("中文 测试", 8), "中文_测试");
+    }
+
+    #[test]
+    fn slugify_no_leading_separator_when_first_token_skipped() {
+        // A leading punctuation token must not leave a dangling `_` prefix.
+        assert_eq!(slugify_first_n_words("!!! hello", 8), "hello");
+    }
+
     /// Create a constant-value embedding (all elements same).
     /// NOTE: All constant vectors have cosine similarity = 1.0 regardless of value.
     fn const_emb(v: f32) -> Vec<f32> {
@@ -610,6 +830,7 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -638,6 +859,7 @@ mod tests {
             confidence: Some(0.6),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -663,6 +885,7 @@ mod tests {
             confidence: None, // defaults to 0.7
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -691,6 +914,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         let id1 = store.process_memory_store(&input1).unwrap();
         assert!(id1.is_some());
@@ -706,6 +930,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)), // identical direction
+                autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
         assert!(id2.is_none(), "duplicate should return None");
@@ -731,6 +956,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
 
@@ -746,6 +972,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(flipped_emb(9)), // cos ≈ 0.953 > 0.95
+                autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
         // T4.5: Should NOT be None — it's a knowledge update, not a duplicate.
@@ -771,6 +998,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
 
@@ -784,6 +1012,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
         assert!(
@@ -808,6 +1037,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -855,6 +1085,7 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -914,6 +1145,7 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)), // cos ≈ 0.922 with const_emb(1.0)
+                autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1066,6 +1298,7 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
 
         let conflicts = store.detect_knowledge_conflicts(&input).unwrap();
@@ -1091,6 +1324,7 @@ mod tests {
             confidence: None,
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
 
         let conflicts = store.detect_knowledge_conflicts(&input).unwrap();
@@ -1113,6 +1347,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1158,6 +1393,7 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1208,6 +1444,7 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1245,6 +1482,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1275,6 +1513,7 @@ mod tests {
             confidence: Some(0.6),
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
 
         let result = store.process_memory_store(&input).unwrap();
@@ -1346,6 +1585,7 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         let result1 = store.process_memory_store(&input1).unwrap();
         assert!(result1.is_some());
@@ -1361,6 +1601,7 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)), // identical
+                autobiographical: None,
         };
         let result2 = store.process_memory_store(&input2).unwrap();
         assert!(result2.is_some());
@@ -1400,6 +1641,7 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
 
@@ -1413,6 +1655,7 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(flipped_emb(40)),
+            autobiographical: None,
         };
         let result2 = store.process_memory_store(&input2).unwrap();
         assert!(result2.is_some());
@@ -1421,5 +1664,326 @@ mod tests {
         let graph = store.db.graph_store();
         let count = graph.nodes_by_label(labels::PROCEDURAL).len();
         assert_eq!(count, 2, "different procedures should both be stored");
+    }
+
+    // =====================================================================
+    // Autobiographical path tests
+    //
+    // `process_memory_store` with `input.autobiographical = Some(...)`
+    // must route to AutobiographicalNode (Label: Autobiographical) and
+    // behave idempotently on `(aspect, key)` for non-History aspects.
+    // =====================================================================
+
+    /// Basic autobiographical write: produces a node with the requested
+    /// aspect and the supplied value, on the Autobiographical label.
+    #[test]
+    fn test_process_autobiographical_basic() {
+        let store = test_store();
+
+        let input = MemoryStoreInput {
+            content: "I tend to give conclusions first".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Preference,
+                key: Some("style".to_string()),
+                source: Some("user_statement".to_string()),
+            }),
+        };
+
+        let result = store.process_memory_store(&input).unwrap();
+        assert!(result.is_some(), "autobiographical write must return Some(id)");
+        // Note: the underlying grafeo engine assigns node IDs starting from 0
+        // for the first node in an in-memory store, so we don't assert `> 0`.
+        // Equality between successive writes (idempotent update) is the
+        // real correctness signal — covered by the idempotent_update test.
+        let _id = result.unwrap().node_id;
+
+        // Verify the node landed on the Autobiographical label with the
+        // expected aspect / value.
+        let node = store
+            .find_autobiographical_by_key("style")
+            .unwrap()
+            .expect("autobiographical node should be retrievable by key");
+        assert_eq!(node.category, AutobioCategory::Preference);
+        assert_eq!(node.value, "I tend to give conclusions first");
+        assert_eq!(
+            node.status,
+            NodeStatus::Active,
+            "autobiographical status must be Active (forced by store_autobiographical)"
+        );
+        assert_eq!(
+            node.metadata.get("source").and_then(|v| v.as_str()),
+            Some("user_statement")
+        );
+    }
+
+    /// Same (aspect, key) re-write updates in place instead of creating a
+    /// duplicate node. Confidence is bumped on re-confirmation.
+    #[test]
+    fn test_process_autobiographical_idempotent_update() {
+        let store = test_store();
+
+        let first = MemoryStoreInput {
+            content: "I tend to give conclusions first".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.85),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Preference,
+                key: Some("style".to_string()),
+                source: Some("user_statement".to_string()),
+            }),
+        };
+        let id1 = store.process_memory_store(&first).unwrap().unwrap().node_id;
+
+        let second = MemoryStoreInput {
+            content: "I always give a short summary before details".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.95),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Preference,
+                key: Some("style".to_string()),
+                source: Some("user_statement".to_string()),
+            }),
+        };
+        let id2 = store.process_memory_store(&second).unwrap().unwrap().node_id;
+
+        assert_eq!(id1, id2, "idempotent update must reuse node id");
+
+        let updated = store.find_autobiographical_by_key("style").unwrap().unwrap();
+        assert_eq!(updated.value, "I always give a short summary before details");
+        assert!(
+            (updated.confidence - 0.95).abs() < 1e-4,
+            "confidence should be the higher of the two writes (or bumped), got {}",
+            updated.confidence
+        );
+
+        // Only one node exists for this key.
+        let by_category = store
+            .find_autobiographical_by_category(AutobioCategory::Preference)
+            .unwrap();
+        assert_eq!(by_category.len(), 1);
+    }
+
+    /// History writes are append-only: each write produces a distinct node.
+    #[test]
+    fn test_process_autobiographical_history_append_only() {
+        let store = test_store();
+
+        let mk = || MemoryStoreInput {
+            content: "Learned weekly-report skill".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::History,
+                key: None, // derived per-event
+                source: Some("important_event".to_string()),
+            }),
+        };
+
+        let id1 = store.process_memory_store(&mk()).unwrap().unwrap().node_id;
+        // Sleep is unnecessary: derive_autobiographical_key uses nanos for
+        // History, so back-to-back writes still get distinct keys.
+        let id2 = store.process_memory_store(&mk()).unwrap().unwrap().node_id;
+        assert_ne!(id1, id2);
+
+        let history = store
+            .find_autobiographical_by_category(AutobioCategory::History)
+            .unwrap();
+        assert_eq!(history.len(), 2, "history is append-only by design");
+    }
+
+    /// autobiographical path has higher priority than sub_type. Even with
+    /// sub_type=Procedure, an autobiographical input routes to the
+    /// Autobiographical label, not the Procedural one.
+    #[test]
+    fn test_process_autobiographical_takes_priority_over_subtype() {
+        let store = test_store();
+
+        let input = MemoryStoreInput {
+            content: "I handle bash carefully".to_string(),
+            sub_type: KnowledgeSubType::Procedure, // would normally route to ProceduralNode
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Limitation,
+                key: Some("bash_caution".to_string()),
+                source: None,
+            }),
+        };
+
+        let _id = store.process_memory_store(&input).unwrap().unwrap().node_id;
+
+        // The node should be retrievable via the autobiographical API.
+        let node = store
+            .find_autobiographical_by_key("bash_caution")
+            .unwrap()
+            .expect("must exist on Autobiographical label");
+        assert_eq!(node.category, AutobioCategory::Limitation);
+        assert_eq!(node.value, "I handle bash carefully");
+
+        // Procedural label must be untouched.
+        let graph = store.db.graph_store();
+        let proc_count = graph.nodes_by_label(labels::PROCEDURAL).len();
+        assert_eq!(proc_count, 0, "autobiographical path must not write to Procedural");
+    }
+
+    /// Default confidence for autobiographical uses the explicit value if
+    /// supplied; otherwise the caller is responsible for defaulting (the tool
+    /// layer applies AUTOBIO_DEFAULT_CONFIDENCE=0.85 before calling here).
+    #[test]
+    fn test_process_autobiographical_uses_supplied_confidence() {
+        let store = test_store();
+
+        let input = MemoryStoreInput {
+            content: "I am running on qwen3:8b".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.7),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Capability,
+                key: Some("model".to_string()),
+                source: None,
+            }),
+        };
+        store.process_memory_store(&input).unwrap();
+
+        let node = store.find_autobiographical_by_key("model").unwrap().unwrap();
+        assert!(
+            (node.confidence - 0.7).abs() < 1e-4,
+            "confidence must reflect supplied value, got {}",
+            node.confidence
+        );
+    }
+
+    /// Re-confirming an existing autobiographical node with a higher
+    /// confidence lifts it past the existing value (max-not-sum semantics).
+    #[test]
+    fn test_process_autobiographical_reconfirm_uses_higher_confidence() {
+        let store = test_store();
+
+        let low = MemoryStoreInput {
+            content: "I sometimes struggle with bash".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.5),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Limitation,
+                key: Some("bash".to_string()),
+                source: None,
+            }),
+        };
+        store.process_memory_store(&low).unwrap();
+
+        let high = MemoryStoreInput {
+            content: "I sometimes struggle with bash".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.95),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Limitation,
+                key: Some("bash".to_string()),
+                source: None,
+            }),
+        };
+        store.process_memory_store(&high).unwrap();
+
+        let node = store.find_autobiographical_by_key("bash").unwrap().unwrap();
+        assert!(
+            node.confidence >= 0.95,
+            "high-confidence re-confirm must lift the score, got {}",
+            node.confidence
+        );
+        assert!(
+            node.confidence < 1.0,
+            "re-confirm must stay below 1.0 (capped at AUTOBIO_MAX_CONFIDENCE), got {}",
+            node.confidence
+        );
+    }
+
+    /// A 1.0-confidence re-confirm must be capped at AUTOBIO_MAX_CONFIDENCE
+    /// (0.98), not punch through to 1.0. Regression for the `.min().max()`
+    /// ordering bug where `max(confidence)` ran after the ceiling.
+    #[test]
+    fn test_process_autobiographical_reconfirm_caps_at_max_confidence() {
+        let store = test_store();
+
+        let first = MemoryStoreInput {
+            content: "I am a coding assistant".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(0.5),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Identity,
+                key: Some("role".to_string()),
+                source: None,
+            }),
+        };
+        store.process_memory_store(&first).unwrap();
+
+        let maxed = MemoryStoreInput {
+            content: "I am a coding assistant".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: None,
+            predicate: None,
+            object: None,
+            confidence: Some(1.0),
+            source_episode_id: None,
+            embedding: None,
+            autobiographical: Some(AutobiographicalStoreInput {
+                aspect: AutobioCategory::Identity,
+                key: Some("role".to_string()),
+                source: None,
+            }),
+        };
+        store.process_memory_store(&maxed).unwrap();
+
+        let node = store.find_autobiographical_by_key("role").unwrap().unwrap();
+        assert!(
+            (node.confidence - AUTOBIO_MAX_CONFIDENCE).abs() < 1e-4,
+            "1.0 re-confirm must be capped at AUTOBIO_MAX_CONFIDENCE ({}), got {}",
+            AUTOBIO_MAX_CONFIDENCE,
+            node.confidence
+        );
     }
 }

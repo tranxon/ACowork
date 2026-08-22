@@ -24,6 +24,10 @@ pub struct MemoryNodeQuery {
     pub page: u32,
     pub size: u32,
     pub node_type: String,
+    /// Sub-classification filter (Knowledge / Autobiographical only).
+    /// See [`crate::http::memory_query::ListNodesParams::sub_type`].
+    #[serde(default)]
+    pub sub_type: String,
     pub keyword: String,
     pub time_range: String,
 }
@@ -33,6 +37,10 @@ pub struct MemoryNodeQuery {
 pub struct MemoryNode {
     pub node_id: u64,
     pub node_type: String,
+    /// Secondary classification (see [`AdminNodeRecord::sub_type`]).
+    /// `None` for Episodic/Procedural nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,

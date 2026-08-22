@@ -432,7 +432,6 @@ mod tests {
         };
         (tool, provider)
     }
-
     /// Migrated from test_memory_recall_empty_result: uses InMemoryProvider
     /// instead of GrafeoStore to verify empty retrieval works.
     #[tokio::test]
@@ -463,6 +462,7 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            autobiographical: None,
         };
         let result = provider.process_memory_store(&input).unwrap();
         assert!(result.is_some());

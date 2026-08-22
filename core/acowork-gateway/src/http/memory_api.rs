@@ -38,6 +38,14 @@ pub struct MemoryNodesQuery {
     pub size: Option<u32>,
     /// Filter by node type: Knowledge, Episodic, Procedural, Autobiographical
     pub r#type: Option<String>,
+    /// Sub-classification filter:
+    /// - `Knowledge`: `Fact` | `Preference` | `Relation` | `Procedure`
+    /// - `Autobiographical`: `Identity` | `Capability` | `Limitation`
+    ///   | `Preference` | `History` | `Relationship`
+    ///
+    /// Ignored for `Episodic` / `Procedural` (no sub-classification).
+    #[serde(default)]
+    pub sub_type: Option<String>,
     /// Keyword search in node content
     pub keyword: Option<String>,
     /// Time range filter: 1h, 1d, 7d, 30d, all
@@ -63,6 +71,10 @@ impl MemoryNodesQuery {
 pub struct MemoryNodeResponse {
     pub node_id: u64,
     pub node_type: String,
+    /// Secondary classification inside the storage layer (Knowledge sub_type
+    /// or Autobiographical category). `None` for Episodic/Procedural.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_type: Option<String>,
     pub content: String,
     pub confidence: f64,
     pub decay_score: f64,
@@ -141,6 +153,7 @@ mod tests {
             page: None,
             size: None,
             r#type: None,
+            sub_type: None,
             keyword: None,
             time_range: None,
         };
@@ -154,11 +167,33 @@ mod tests {
             page: Some(0),
             size: Some(200),
             r#type: None,
+            sub_type: None,
             keyword: None,
             time_range: None,
         };
         assert_eq!(query.effective_page(), 1); // 0 -> 1
         assert_eq!(query.effective_size(), 100); // capped at 100
+    }
+
+    #[test]
+    fn test_memory_nodes_query_sub_type_roundtrip() {
+        // The query struct must deserialise the `sub_type` field for the
+        // Autobiographical sub-filter that the Desktop panel sends. URL
+        // deserialisation itself is exercised by axum's `Query` extractor
+        // in the integration suite — here we just assert the field is
+        // wired correctly through serde_json so a future rename does
+        // not silently drop the value.
+        let q: MemoryNodesQuery = serde_json::from_value(serde_json::json!({
+            "type": "Autobiographical",
+            "sub_type": "Limitation",
+            "page": 1,
+            "size": 20,
+        }))
+        .expect("memory nodes query should deserialise");
+        assert_eq!(q.r#type.as_deref(), Some("Autobiographical"));
+        assert_eq!(q.sub_type.as_deref(), Some("Limitation"));
+        assert_eq!(q.effective_page(), 1);
+        assert_eq!(q.effective_size(), 20);
     }
 
     #[test]

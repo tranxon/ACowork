@@ -219,6 +219,7 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
         let result = store.process_memory_store(&input).unwrap();
         assert!(result.is_some());
@@ -264,6 +265,7 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
         store.process_memory_store(&input).unwrap();
 
@@ -369,6 +371,7 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
         store.process_memory_store(&input).unwrap();
 
@@ -414,6 +417,7 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            autobiographical: None,
         };
         let result = store.process_memory_store(&input).unwrap();
         let new_id = result.unwrap().node_id;

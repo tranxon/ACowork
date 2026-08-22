@@ -7,16 +7,34 @@
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
-use acowork_memory::consolidation::MemoryStoreInput;
-use acowork_memory::types::KnowledgeSubType;
+use acowork_memory::consolidation::{AutobiographicalStoreInput, MemoryStoreInput};
+use acowork_memory::types::{AutobioCategory, KnowledgeSubType};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
 use crate::memory::MemorySessionHandle;
 
-/// Default confidence when LLM does not provide one.
+/// Default confidence when LLM does not provide one for non-autobiographical
+/// categories.
 const DEFAULT_CONFIDENCE: f32 = 0.7;
+
+/// Default confidence for autobiographical writes. Higher than the generic
+/// default because the autobiographical channel is meant for high-confidence
+/// signals (user explicitly said "you're too verbose", agent clearly hit a
+/// milestone) — low-confidence self-knowledge should not be recorded.
+const AUTOBIO_DEFAULT_CONFIDENCE: f32 = 0.85;
+
+/// Discriminated category for the memory_store tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StoreCategory {
+    /// Knowledge about the user or the world — goes to KnowledgeNode.
+    Knowledge(KnowledgeSubType),
+    /// Behavior pattern — goes to ProceduralNode.
+    Procedure,
+    /// Self-knowledge about the Agent — goes to AutobiographicalNode.
+    Autobiographical,
+}
 
 /// Memory store tool — allows an Agent to store memories for later recall.
 ///
@@ -32,7 +50,6 @@ pub struct MemoryStoreTool {
     /// `None` when no Grafeo store is available (degraded mode).
     handle: Option<Arc<MemorySessionHandle>>,
 }
-
 impl MemoryStoreTool {
     pub fn new(agent_id: &str, handle: Option<Arc<MemorySessionHandle>>) -> Self {
         Self {
@@ -44,27 +61,47 @@ impl MemoryStoreTool {
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "memory_store".to_string(),
-            description: "Store a fact, preference, relationship, or behavioral pattern in long-term memory for later recall. \
-                Describe what you want to remember in natural language in 'content'. \
-                Choose 'category': 'fact' for objective truths, 'preference' for user tastes/habits, \
-                'relation' for entity relationships, 'procedure' for behavioral patterns (when X happens, do Y). \
-                Estimate your confidence in this knowledge (0.0-1.0). \
-                Optionally provide keywords to help retrieval.".to_string(),
+            description: "Store a memory in long-term memory for later recall. \
+                Use category to choose the right layer:\n\
+                - 'fact': objective truth about the user or world (Knowledge).\n\
+                - 'preference': user taste/habit (Knowledge).\n\
+                - 'relation': entity relationship between user and others (Knowledge).\n\
+                - 'procedure': behavioral pattern — 'when X, do Y' (Procedural).\n\
+                - 'autobiographical': knowledge about the AGENT itself — identity, capability, \
+                  limitation, self-preference, milestone, or long-term relationship. \
+                  Use this whenever the user says something about the agent (e.g. 'you're too verbose', \
+                  'good job on that report', 'you keep forgetting X'). Requires the 'aspect' parameter.\n\
+                Describe what to remember in 'content' (natural language, no need to split triples). \
+                Estimate your confidence (0.0-1.0). Optionally provide keywords.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "Natural language description of what to remember (e.g. 'User lives in Beijing', 'User prefers dark mode over light mode', 'When user asks for summary, reply in 3 sentences max')"
+                        "description": "Natural language description of what to remember (e.g. 'User lives in Beijing', 'User prefers dark mode over light mode', 'When user asks for summary, reply in 3 sentences max', 'I tend to give conclusions first')"
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["fact", "preference", "relation", "procedure"],
-                        "description": "Type of knowledge: 'fact' (objective truth), 'preference' (user taste/habit), 'relation' (entity relationship), 'procedure' (behavioral pattern: when X, do Y)"
+                        "enum": ["fact", "preference", "relation", "procedure", "autobiographical"],
+                        "description": "Knowledge layer: 'fact' (objective truth), 'preference' (user taste/habit), 'relation' (entity relationship), 'procedure' (behavioral pattern: when X, do Y), 'autobiographical' (knowledge about the agent itself — requires 'aspect')."
+                    },
+                    "aspect": {
+                        "type": "string",
+                        "enum": ["identity", "capability", "limitation", "preference", "history", "relationship"],
+                        "description": "REQUIRED when category='autobiographical'. Which dimension of self-knowledge: 'identity' (name/role), 'capability' (skills/tools), 'limitation' (boundaries/weaknesses), 'preference' (agent's own style), 'history' (milestone/important event), 'relationship' (long-term connection with someone)."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Optional idempotency key for autobiographical writes. Re-storing with the same key updates the existing node in place (use for slots like 'style', 'name', 'language'). If omitted, a key is derived from content. Ignored for non-autobiographical categories."
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["user_statement", "important_event", "self_evaluation"],
+                        "description": "Optional provenance for autobiographical writes. Defaults to 'user_statement'. Ignored for non-autobiographical categories."
                     },
                     "confidence": {
                         "type": "number",
-                        "description": "Your confidence in this knowledge (0.0-1.0). High confidence (>=0.85) creates an Active node; lower creates Pending for later verification. Default 0.7."
+                        "description": "Your confidence in this knowledge (0.0-1.0). High confidence (>=0.85) creates an Active node; lower creates Pending for later verification. Default 0.7 for knowledge/procedure, 0.85 for autobiographical."
                     },
                     "keywords": {
                         "type": "array",
@@ -72,19 +109,40 @@ impl MemoryStoreTool {
                         "description": "Optional keywords to help retrieval (e.g. ['beijing', 'location', 'home'])"
                     }
                 },
-                "required": ["content", "category"]
+                "required": ["content", "category"],
+                "allOf": [
+                    {
+                        "if": { "properties": { "category": { "const": "autobiographical" } }, "required": ["category"] },
+                        "then": { "required": ["aspect"] }
+                    }
+                ]
             }),
         }
     }
 }
 
-/// Parse category string to KnowledgeSubType.
-fn parse_category(s: &str) -> Option<KnowledgeSubType> {
+/// Parse category string to one of the supported `StoreCategory` variants.
+fn parse_category(s: &str) -> Option<StoreCategory> {
     match s.to_lowercase().as_str() {
-        "fact" => Some(KnowledgeSubType::Fact),
-        "preference" => Some(KnowledgeSubType::Preference),
-        "relation" => Some(KnowledgeSubType::Relation),
-        "procedure" => Some(KnowledgeSubType::Procedure),
+        "fact" => Some(StoreCategory::Knowledge(KnowledgeSubType::Fact)),
+        "preference" => Some(StoreCategory::Knowledge(KnowledgeSubType::Preference)),
+        "relation" => Some(StoreCategory::Knowledge(KnowledgeSubType::Relation)),
+        "procedure" => Some(StoreCategory::Procedure),
+        "autobiographical" => Some(StoreCategory::Autobiographical),
+        _ => None,
+    }
+}
+
+/// Parse autobiographical aspect string (lowercase tool input) to the
+/// canonical-case `AutobioCategory` enum.
+fn parse_autobio_aspect(s: &str) -> Option<AutobioCategory> {
+    match s.to_lowercase().as_str() {
+        "identity" => Some(AutobioCategory::Identity),
+        "capability" => Some(AutobioCategory::Capability),
+        "limitation" => Some(AutobioCategory::Limitation),
+        "preference" => Some(AutobioCategory::Preference),
+        "history" => Some(AutobioCategory::History),
+        "relationship" => Some(AutobioCategory::Relationship),
         _ => None,
     }
 }
@@ -129,14 +187,14 @@ impl Tool for MemoryStoreTool {
             }
         };
 
-        let sub_type = match parse_category(category_str) {
-            Some(t) => t,
+        let category = match parse_category(category_str) {
+            Some(c) => c,
             None => {
                 return Ok(ToolResult {
                     ok: false,
                     content: String::new(),
                     error: Some(format!(
-                        "Invalid category '{}'. Must be 'fact', 'preference', 'relation', or 'procedure'.",
+                        "Invalid category '{}'. Must be 'fact', 'preference', 'relation', 'procedure', or 'autobiographical'.",
                         category_str
                     )),
                     token_usage: None,
@@ -144,12 +202,62 @@ impl Tool for MemoryStoreTool {
             }
         };
 
+        // --- Resolve autobiographical aspect if needed ---
+        let autobio_input = match &category {
+            StoreCategory::Autobiographical => {
+                let aspect_str = match params.get("aspect").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => {
+                        return Ok(ToolResult {
+                            ok: false,
+                            content: String::new(),
+                            error: Some(
+                                "Missing required parameter 'aspect' for category='autobiographical'. \
+                                 Must be one of: identity, capability, limitation, preference, history, relationship."
+                                    .to_string(),
+                            ),
+                            token_usage: None,
+                        });
+                    }
+                };
+                let aspect = match parse_autobio_aspect(aspect_str) {
+                    Some(a) => a,
+                    None => {
+                        return Ok(ToolResult {
+                            ok: false,
+                            content: String::new(),
+                            error: Some(format!(
+                                "Invalid aspect '{}'. Must be one of: identity, capability, limitation, preference, history, relationship.",
+                                aspect_str
+                            )),
+                            token_usage: None,
+                        });
+                    }
+                };
+                let key = params
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let source = params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some(AutobiographicalStoreInput { aspect, key, source })
+            }
+            _ => None,
+        };
+
         // --- Validate confidence (optional, clamp 0.0-1.0) ---
+        let default_confidence = if autobio_input.is_some() {
+            AUTOBIO_DEFAULT_CONFIDENCE
+        } else {
+            DEFAULT_CONFIDENCE
+        };
         let confidence = params
             .get("confidence")
             .and_then(|v| v.as_f64())
             .map(|c| c.clamp(0.0, 1.0) as f32)
-            .unwrap_or(DEFAULT_CONFIDENCE);
+            .unwrap_or(default_confidence);
 
         // --- Extract optional keywords ---
         let _keywords: Option<Vec<String>> = params.get("keywords").and_then(|v| {
@@ -167,16 +275,38 @@ impl Tool for MemoryStoreTool {
         let provider = self.handle.as_ref().and_then(|h| h.provider());
         match provider {
             Some(provider) => {
-                let category_display = sub_type.as_str();
+                // For non-autobiographical categories, sub_type still drives
+                // routing (Knowledge vs Procedural). For autobiographical, the
+                // input's autobiographical field takes priority.
+                let sub_type_for_knowledge = match &category {
+                    StoreCategory::Knowledge(s) => s.clone(),
+                    StoreCategory::Procedure => KnowledgeSubType::Procedure,
+                    // Sub_type value is ignored when autobiographical is set,
+                    // but we still need to satisfy the type. Use Fact as
+                    // a neutral placeholder.
+                    StoreCategory::Autobiographical => KnowledgeSubType::Fact,
+                };
+                let category_display = match &category {
+                    StoreCategory::Knowledge(s) => s.as_str().to_string(),
+                    // Procedure routes to ProceduralNode whose sub-type display
+                    // is "Procedure" — keep the existing casing for backward
+                    // compat with callers/tests parsing the result content.
+                    StoreCategory::Procedure => "Procedure".to_string(),
+                    StoreCategory::Autobiographical => autobio_input
+                        .as_ref()
+                        .map(|a| format!("autobiographical/{}", a.aspect.as_str()))
+                        .unwrap_or_else(|| "autobiographical".to_string()),
+                };
                 let input = MemoryStoreInput {
                     content: content.clone(),
-                    sub_type,
+                    sub_type: sub_type_for_knowledge,
                     subject: None,
                     predicate: None,
                     object: None,
                     confidence: Some(confidence),
                     source_episode_id: None,
                     embedding: None,
+                    autobiographical: autobio_input,
                 };
 
                 match provider.process_memory_store(&input) {
@@ -218,11 +348,19 @@ impl Tool for MemoryStoreTool {
                     "mem_{}",
                     &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
                 );
+                let category_display = match &category {
+                    StoreCategory::Knowledge(s) => s.as_str().to_string(),
+                    StoreCategory::Procedure => "Procedure".to_string(),
+                    StoreCategory::Autobiographical => autobio_input
+                        .as_ref()
+                        .map(|a| format!("autobiographical/{}", a.aspect.as_str()))
+                        .unwrap_or_else(|| "autobiographical".to_string()),
+                };
                 Ok(ToolResult {
                     ok: true,
                     content: format!(
                         "Stored {cat}: \"{content}\" (confidence: {conf:.2}, agent: {agent}, id: {id})",
-                        cat = sub_type.as_str(),
+                        cat = category_display,
                         content = content,
                         conf = confidence,
                         agent = self.agent_id,
@@ -258,12 +396,11 @@ mod tests {
             .collect();
         assert!(required.contains(&"content"));
         assert!(required.contains(&"category"));
-        // key should NOT be in schema
+        // aspect must be conditionally required via allOf when
+        // category=autobiographical.
         assert!(
-            !spec.input_schema["properties"]
-                .as_object()
-                .unwrap()
-                .contains_key("key")
+            spec.input_schema["allOf"].is_array(),
+            "allOf branch should declare conditional requirement for aspect"
         );
     }
 
@@ -569,5 +706,245 @@ mod tests {
         // Verify node was stored.
         let stats = provider.stats().unwrap();
         assert_eq!(stats.node_count, 1);
+    }
+
+    // ── Autobiographical category tests ─────────────────────────────────
+    //
+    // The autobiographical category is the new entry point for "user about
+    // the agent" knowledge (e.g. "you're too verbose", "good job"). It
+    // requires an `aspect` parameter and routes to AutobiographicalNode.
+
+    /// Schema declares autobiographical + aspect.
+    #[test]
+    fn test_memory_store_spec_includes_autobiographical() {
+        let spec = MemoryStoreTool::spec_value();
+        let enum_values: Vec<&str> = spec.input_schema["properties"]["category"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(enum_values.contains(&"autobiographical"));
+        assert!(
+            spec.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("aspect")
+        );
+        let aspect_enum: Vec<&str> = spec.input_schema["properties"]["aspect"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            aspect_enum,
+            vec![
+                "identity",
+                "capability",
+                "limitation",
+                "preference",
+                "history",
+                "relationship"
+            ]
+        );
+    }
+
+    /// autobiographical category without aspect is rejected with a clear error.
+    #[tokio::test]
+    async fn test_memory_store_autobiographical_missing_aspect() {
+        let tool = MemoryStoreTool::new("com.test.agent", None);
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "I tend to give conclusions first",
+                    "category": "autobiographical"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Missing required parameter 'aspect'"));
+    }
+
+    /// autobiographical category with invalid aspect is rejected.
+    #[tokio::test]
+    async fn test_memory_store_autobiographical_invalid_aspect() {
+        let tool = MemoryStoreTool::new("com.test.agent", None);
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "I am a coding assistant",
+                    "category": "autobiographical",
+                    "aspect": "mood"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("Invalid aspect 'mood'"));
+    }
+
+    /// autobiographical category with valid params falls through to degraded
+    /// fallback (no provider attached) and reports the category+aspect.
+    #[tokio::test]
+    async fn test_memory_store_autobiographical_fallback_display() {
+        let tool = MemoryStoreTool::new("com.test.agent", None);
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "I tend to give conclusions first",
+                    "category": "autobiographical",
+                    "aspect": "preference"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok);
+        let content = result.content;
+        assert!(
+            content.contains("autobiographical/Preference"),
+            "Expected category+aspect in display, got: {content}"
+        );
+        // Default confidence for autobiographical is 0.85.
+        assert!(
+            content.contains("0.85"),
+            "Expected default autobio confidence 0.85, got: {content}"
+        );
+    }
+
+    /// End-to-end autobiographical storage + idempotent re-write on (aspect, key).
+    ///
+    /// Uses the real GrafeoStore in-memory backend so we exercise the full
+    /// upsert path (find_autobiographical_by_key + update_autobiographical).
+    #[cfg(feature = "grafeo-backend")]
+    #[tokio::test]
+    async fn test_memory_store_autobiographical_grafeo_idempotent() {
+        use acowork_grafeo::GrafeoStore;
+        use acowork_memory::types::AutobioCategory;
+
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        handle.set_provider(store.clone());
+        let tool = MemoryStoreTool::new("com.test.agent", Some(handle));
+
+        // First write — establishes node at key "style".
+        let r1 = tool
+            .execute(
+                serde_json::json!({
+                    "content": "I tend to give conclusions first",
+                    "category": "autobiographical",
+                    "aspect": "preference",
+                    "key": "style",
+                    "source": "user_statement",
+                    "confidence": 0.9
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r1.ok, "first write failed: {:?}", r1.error);
+        let first_id = extract_node_id(&r1.content);
+
+        // Second write with same key — should update in place, not create new.
+        let r2 = tool
+            .execute(
+                serde_json::json!({
+                    "content": "I always give a short summary before details",
+                    "category": "autobiographical",
+                    "aspect": "preference",
+                    "key": "style",
+                    "confidence": 0.95
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r2.ok, "second write failed: {:?}", r2.error);
+        let second_id = extract_node_id(&r2.content);
+        assert_eq!(
+            first_id, second_id,
+            "Idempotent update should reuse the same node id; got {first_id} vs {second_id}"
+        );
+
+        // Verify value was refreshed.
+        let node = store
+            .find_autobiographical_by_key("style")
+            .unwrap()
+            .expect("autobiographical node must exist");
+        assert_eq!(node.category, AutobioCategory::Preference);
+        assert_eq!(node.value, "I always give a short summary before details");
+        assert!(
+            node.confidence >= 0.95,
+            "Confidence should track the highest input, got {}",
+            node.confidence
+        );
+    }
+
+    /// History aspect creates a distinct node per write — milestones are
+    /// append-only, not upserted.
+    #[cfg(feature = "grafeo-backend")]
+    #[tokio::test]
+    async fn test_memory_store_autobiographical_history_per_event() {
+        use acowork_grafeo::GrafeoStore;
+        use acowork_memory::types::AutobioCategory;
+
+        let store: Arc<dyn acowork_memory::MemoryProvider> =
+            Arc::new(GrafeoStore::new_in_memory().unwrap());
+        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
+        handle.set_provider(store.clone());
+        let tool = MemoryStoreTool::new("com.test.agent", Some(handle));
+
+        let r1 = tool
+            .execute(
+                serde_json::json!({
+                    "content": "Learned weekly-report skill",
+                    "category": "autobiographical",
+                    "aspect": "history"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r1.ok);
+
+        let r2 = tool
+            .execute(
+                serde_json::json!({
+                    "content": "Learned weekly-report skill",
+                    "category": "autobiographical",
+                    "aspect": "history"
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(r2.ok);
+        let id1 = extract_node_id(&r1.content);
+        let id2 = extract_node_id(&r2.content);
+        assert_ne!(
+            id1, id2,
+            "History writes should produce distinct nodes, got {id1} == {id2}"
+        );
+
+        let history = store
+            .find_autobiographical_by_category(AutobioCategory::History)
+            .unwrap();
+        assert_eq!(history.len(), 2, "two distinct history nodes expected");
+    }
+
+    /// Extract the node_id from a successful memory_store result's content.
+    /// Format: "Stored ... (confidence: ..., id: <id>)".
+    #[cfg(feature = "grafeo-backend")]
+    fn extract_node_id(content: &str) -> u64 {
+        let after = content.rsplit("id: ").next().unwrap();
+        let after = after.trim_end_matches(')').trim();
+        after
+            .parse::<u64>()
+            .unwrap_or_else(|e| panic!("could not parse node_id from {content:?}: {e}"))
     }
 }

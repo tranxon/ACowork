@@ -693,6 +693,15 @@ export interface ProviderListEntry {
 export interface MemoryNodeResponse {
   node_id: number;
   node_type: string;
+  /**
+   * Secondary classification inside the storage layer. For `Knowledge`
+   * nodes: `Fact` | `Preference` | `Relation` | `Procedure`. For
+   * `Autobiographical` nodes: `Identity` | `Capability` | `Limitation`
+   * | `Preference` | `History` | `Relationship`. `undefined` for
+   * `Episodic` / `Procedural` nodes. Drives the panel's per-row
+   * badge and the secondary sub-filter dropdown.
+   */
+  sub_type?: string;
   content: string;
   confidence: number;
   decay_score: number;

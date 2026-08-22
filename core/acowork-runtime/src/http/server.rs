@@ -749,6 +749,7 @@ async fn get_memory_graph(
         page: 1,
         size: 100_000,
         node_type: String::new(),
+        sub_type: String::new(),
         keyword: String::new(),
         time_range: "all".to_string(),
     };
@@ -798,6 +799,12 @@ struct ListNodesQuery {
     /// Filter by node type ("Episodic" / "Knowledge" / "Procedural" / "Autobiographical").
     #[serde(default, rename = "type")]
     node_type: Option<String>,
+    /// Sub-classification filter (Knowledge / Autobiographical only):
+    /// `Fact` | `Preference` | `Relation` | `Procedure` for Knowledge;
+    /// `Identity` | `Capability` | `Limitation` | `Preference` | `History`
+    /// | `Relationship` for Autobiographical. Ignored for other types.
+    #[serde(default)]
+    sub_type: Option<String>,
     /// Case-insensitive substring filter.
     #[serde(default)]
     keyword: Option<String>,
@@ -819,6 +826,7 @@ async fn get_memory_nodes(
         page: params.page.unwrap_or(1),
         size: params.size.unwrap_or(20),
         node_type: params.node_type.unwrap_or_default(),
+        sub_type: params.sub_type.unwrap_or_default(),
         keyword: params.keyword.unwrap_or_default(),
         time_range: params.time_range.unwrap_or_default(),
     };

@@ -346,7 +346,9 @@ struct AutobiographicalNode {
     aspect: AutobiographicalAspect,  // 自我认知的维度
     content: String,                 // 具体内容
     confidence: f32,
-    source: String,                  // "manifest" / "self_evaluation" / "user_statement"
+    source: String,                  // "manifest" / "self_evaluation" / "user_statement" / "important_event"
+                                        // v3.11: 由 memory_store(category=autobiographical) 即时写入时
+                                        //        LLM 通过 `source` 参数标注, 取值集合扩展为 4 项
     updated_at: DateTime,
 
     // 自传体记忆不参与遗忘衰减——这是 Agent 的核心身份
@@ -370,8 +372,8 @@ enum AutobiographicalAspect {
 
 1. **Manifest 派生**（自动）：从 `manifest.toml` 的 `agent.name`、`agent.description`、`skills/` 列表自动生成 Identity 和 Capability 节点
 2. **自我评估**（定期）：Agent 空闲时，根据 SkillExperience 的 model_compatibility 和执行统计，生成/更新 Limitation 节点（"在 qwen3:8b 上，复杂推理任务的成功率约 60%"）
-3. **用户陈述**（即时）：用户直接表达对 Agent 的评价（"你太啰嗦了"），巩固管道提取为 Preference 节点
-4. **重要事件**（即时）：关键交互（首次学会新 Skill、重大错误修正、用户表达强烈情绪）记录为 History 节点
+3. **用户陈述**（即时）：用户直接表达对 Agent 的评价（"你太啰嗦了"），由 LLM 在 Tool Call 阶段调用 `memory_store` 工具，传入 `category: "autobiographical"` + `aspect: "Preference"` 落地。详见 §4.1 工具定义。
+4. **重要事件**（即时）：关键交互（首次学会新 Skill、重大错误修正、用户表达强烈情绪）由 LLM 判断后调用 `memory_store` 工具，传入 `category: "autobiographical"` + `aspect: "History"`（按事件追加，append-only）落地。同一事件不会因反复写入而膨胀。
 
 **自传体记忆的注入：**
 
@@ -432,7 +434,7 @@ PendingKnowledgeNode：
 
 选择 Tool Call 的核心理由：即时提取的目标是"能用"而非"完美"。LLM 天然具备判断"什么值得记住"的能力——"今天天气如何"不值得存，它自己就知道。Phase 3 的离线巩固再用专用 prompt 做深度提取补漏。
 
-**memory_store 工具定义（Phase 2 简化版）**：
+**memory_store 工具定义（Phase 2 简化版，v3.11 扩展自传体入口）**：
 
 ```json
 {
@@ -447,8 +449,21 @@ PendingKnowledgeNode：
       },
       "category": {
         "type": "string",
-        "enum": ["fact", "preference", "procedure"],
-        "description": "信息类型：fact=客观事实, preference=用户偏好, procedure=行为模式"
+        "enum": ["fact", "preference", "relation", "procedure", "autobiographical"],
+        "description": "信息类型：fact=客观事实, preference=用户偏好, relation=人物/实体关系, procedure=行为模式, autobiographical=Agent 自我认知（须配合 aspect 参数，见下）"
+      },
+      "aspect": {
+        "type": "string",
+        "enum": ["Identity", "Capability", "Limitation", "Preference", "History", "Relationship"],
+        "description": "仅当 category=autobiographical 时必填。自传体六维分类（详见 §3.3）。Identity/Capability/Limitation/Preference/Relationship 使用幂等 upsert（同 key 覆盖），History 走 append-only（每次新建节点）。"
+      },
+      "key": {
+        "type": "string",
+        "description": "仅当 category=autobiographical 且 aspect 不是 History 时建议填写。幂等键：相同 key 多次写入会更新同一节点而不是新建。History 节点不需要 key——其本身就是事件流水。"
+      },
+      "source": {
+        "type": "string",
+        "description": "可选，autobiographical 节点的来源标签（如「user_statement」「important_event」），便于审计与离线分类统计。"
       },
       "confidence": {
         "type": "string",
@@ -466,11 +481,14 @@ PendingKnowledgeNode：
 }
 ```
 
+> **⚠️ 注意**：category=autobiographical 时 `aspect` 必填。工具 schema 通过 JSON Schema 的 `allOf` 条件分支声明这一约束（`if category=autobiographical then aspect required`），帮助 LLM 客户端在调用前完成校验；Runtime 端在 `MemoryStoreTool` 中再做一次兜底校验（缺失或非法 `aspect` 会返回 `invalid_aspect` 错误），双保险保证自传体写入不会落到错误的分层。
+
 **接口简化设计理由**：
 - 旧设计要求 LLM 拆分三元组 `{subject, predicate, object}`，负担重且不可靠（同一事实可能拆出不同 predicate）
 - 新设计让 LLM 用自然语言描述要记住什么，Runtime 负责后续的结构化处理
 - keywords 可复用同轮 memory_hint.e 的值，LLM 甚至可以不填，由 Runtime 自动合并
 - 三元组提取移至离线巩固阶段（Phase 3），此时 LLM 有完整上下文和充裕时间
+- `autobiographical` 类目是 §3.3 中"用户陈述（即时）"与"重要事件（即时）"两条来源的具体实现——LLM 不再需要等待离线巩固去发现自传体节点，可在 Tool Call 阶段直接写入；保留 Manifest 派生与离线自我评估两条自动路径不变
 
 详见 docs/review/04-p2-s2-design-review.md §6.9
 
@@ -481,7 +499,8 @@ PendingKnowledgeNode：
 ```
 即时阶段 Prompt（约 100 tokens）：
   ─ 事实识别：判断本轮是否包含值得记住的新信息
-  ─ 类型标注：category = fact / preference / procedure
+  ─ 类型标注：category = fact / preference / relation / procedure / autobiographical
+  ─ 自传体维度：仅当 category=autobiographical 时标注 aspect ∈ {Identity, Capability, Limitation, Preference, History, Relationship}
   ─ 关键词提取：提取核心实体（复用 memory_hint.e）
   ─ 置信度评估：confidence = high / medium / low
 
@@ -1196,6 +1215,25 @@ Agent A 需要某项知识，直接向拥有该知识的 Agent B 发送 Intent �
 - 通过 **Grafeo Label** 实现（而非枚举字段），利用 Label 隔离实现类型区分
 - 每种 Label 有独立的 properties schema 和检索索引
 - 认知分层与 LPG Label 一一映射（见 §0 分层原则）
+
+### 8.1.1 子分类（sub_type / category）— v3.11 新增
+
+部分 NodeType 在认知功能之上还有一层**子分类**，用于面板的二级筛选与离线统计：
+
+| NodeType            | 子分类字段    | 取值集合                                                                   | 存储位置                                | 详见     |
+|---------------------|----------------|-----------------------------------------------------------------------------|----------------------------------------|----------|
+| `Knowledge`         | `sub_type`     | `Fact` / `Preference` / `Relation` / `Procedure`                           | Node property `sub_type`               | §3.1     |
+| `Autobiographical`  | `category`     | `Identity` / `Capability` / `Limitation` / `Preference` / `History` / `Relationship` | Node property `category`               | §3.3     |
+| `Episodic`          | —             | 无子分类                                                                  | —                                       | §2       |
+| `Procedural`        | —             | 无子分类                                                                  | —                                       | §3.2     |
+
+**写入语义（v3.11 明确化）：**
+- `Knowledge` 子分类由 `memory_store(category=…)` 工具即时写入时一次性确定（见 §4.1）；离线巩固阶段不再做二次分类（避免引入幻觉）。`Fact`/`Preference`/`Relation`/`Procedure` 与 `category` enum 一一对应。
+- `Autobiographical` 子分类由 Manifest 派生（§3.3 路径 1）、离线自我评估（路径 2）、以及 `memory_store(category="autobiographical", aspect=…)` 即时写入（路径 3、4）共同填充。History 节点 append-only，其余五类按 `key` 幂等 upsert。
+
+**读取语义：**
+- `AdminNodeRecord.sub_type` 在序列化时只在节点有子分类时携带（`skip_serializing_if = "Option::is_none"`），避免 Episodic / Procedural 节点多出一个恒为空的字段。
+- `GET /memory/nodes` 接受 `sub_type` 查询参数（Knowledge / Autobiographical 有效），用于面板的二级下拉筛选。Episodic / Procedural 携带 `sub_type=` 查询参数被服务端忽略（不隐藏节点）。
 
 ### 8.2 Zone 概念 — 业务场景分区（暂缓实现）
 

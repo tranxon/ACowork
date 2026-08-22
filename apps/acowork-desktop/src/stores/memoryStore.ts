@@ -16,6 +16,18 @@ import { log } from "../lib/logger";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
+  /**
+   * Sub-classification filter (only meaningful when `type` is `Knowledge`
+   * or `Autobiographical`).
+   *
+   * Knowledge:    `Fact` | `Preference` | `Relation` | `Procedure`
+   * Autobiographical: `Identity` | `Capability` | `Limitation`
+   *                | `Preference` | `History` | `Relationship`
+   *
+   * `""` = no filter. Ignored by the backend when `type` is `Episodic` or
+   * `Procedural` (those labels have no sub-classification).
+   */
+  subType: string;
   keyword: string;
   timeRange: "1h" | "1d" | "7d" | "30d" | "all";
 }
@@ -76,7 +88,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
   total: 0,
   stats: null,
   selectedNodeId: null,
-  filters: { type: "All", keyword: "", timeRange: "all" },
+  filters: { type: "All", subType: "", keyword: "", timeRange: "all" },
   page: 1,
   pageSize: 20,
   loading: false,
@@ -93,6 +105,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
         size: String(pageSize),
       });
       if (filters.type !== "All") params.set("type", filters.type);
+      if (filters.subType) params.set("sub_type", filters.subType);
       if (filters.keyword) params.set("keyword", filters.keyword);
       if (filters.timeRange !== "all") params.set("time_range", filters.timeRange);
 

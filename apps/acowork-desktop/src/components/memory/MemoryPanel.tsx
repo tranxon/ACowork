@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useMemoryStore } from "../../stores/memoryStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
@@ -9,6 +9,7 @@ import { AlertTriangle, Info } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
+import { subTypeOptions } from "./nodeTypeI18n";
 
 export function MemoryPanel() {
   const { t } = useTranslation();
@@ -42,6 +43,16 @@ export function MemoryPanel() {
     setSelectedNodeId,
     clearMemory,
   } = useMemoryStore();
+
+  // Sub-filter dropdown is only meaningful for Knowledge and
+  // Autobiographical nodes — those are the labels that carry a sub_type.
+  // Computing the option list here (rather than in `subTypeOptions`) keeps
+  // the i18n t() binding reactive when the user switches locales.
+  const subTypeChoices = useMemo(
+    () => subTypeOptions(t, filters.type),
+    [t, filters.type],
+  );
+  const subFilterVisible = filters.type === "Knowledge" || filters.type === "Autobiographical";
 
   // Live migration progress for the currently selected agent, used to drive
   // the "重建中…" button label and a tiny progress fraction in the banner.
@@ -161,16 +172,25 @@ export function MemoryPanel() {
         <div className="flex gap-2">
           <select
             value={filters.type}
-            onChange={(e) =>
+            onChange={(e) => {
+              const nextType = e.target.value as
+                | "All"
+                | "Knowledge"
+                | "Episodic"
+                | "Procedural"
+                | "Autobiographical";
+              // When the user moves off a label that supports sub_type, the
+              // previous sub-filter becomes meaningless. Clearing it here
+              // keeps the URL state honest and avoids sending a stale
+              // `sub_type=` param on subsequent fetches.
               setFilters({
-                type: e.target.value as
-                  | "All"
-                  | "Knowledge"
-                  | "Episodic"
-                  | "Procedural"
-                  | "Autobiographical",
-              })
-            }
+                type: nextType,
+                subType:
+                  nextType === "Knowledge" || nextType === "Autobiographical"
+                    ? filters.subType
+                    : "",
+              });
+            }}
             className="min-w-0 flex-1 appearance-none rounded-md border border-zinc-200 bg-modal-surface py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
             style={{
               backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
@@ -207,6 +227,28 @@ export function MemoryPanel() {
             <option value="30d">{t("memoryPanel.last30Days")}</option>
           </select>
         </div>
+        {subFilterVisible && subTypeChoices.length > 0 && (
+          <select
+            value={filters.subType}
+            onChange={(e) => setFilters({ subType: e.target.value })}
+            aria-label={t("memoryPanel.subTypeAriaLabel")}
+            data-testid="memory-sub-type-filter"
+            className="w-full appearance-none rounded-md border border-zinc-200 bg-modal-surface py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
+            style={{
+              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+              backgroundPosition: 'right 0.5rem center',
+              backgroundRepeat: 'no-repeat',
+              backgroundSize: '1.5em 1.5em',
+            }}
+          >
+            <option value="">{t("memoryPanel.allSubTypes")}</option>
+            {subTypeChoices.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Stats cards */}

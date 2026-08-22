@@ -58,6 +58,7 @@ impl MemoryAdminService for GrafeoStore {
         // Reject unfiltered queries when the database is too large.
         let has_filter = !params.keyword.is_empty()
             || !params.node_type.is_empty()
+            || !params.sub_type.is_empty()
             || (!params.time_range.is_empty() && params.time_range != "all");
         if !has_filter {
             let total_nodes: usize = MEMORY_LABELS
@@ -102,6 +103,24 @@ impl MemoryAdminService for GrafeoStore {
                         continue;
                     }
 
+                    // Sub-type filter (Knowledge / Autobiographical only).
+                    // Episodic and Procedural labels have no `sub_type`
+                    // property, so the filter is *only* applied to labels
+                    // that actually carry one. This matches the panel UX:
+                    // the sub-filter dropdown is only offered when the
+                    // primary type is Knowledge or Autobiographical, and
+                    // asking for sub_type=X with `type=Episodic` must NOT
+                    // hide Episodic rows.
+                    if !params.sub_type.is_empty()
+                        && (*label == labels::KNOWLEDGE || *label == labels::AUTOBIOGRAPHICAL)
+                    {
+                        let node_sub_type = extract_sub_type(label, &n);
+                        match node_sub_type {
+                            Some(ref s) if s == &params.sub_type => {}
+                            _ => continue,
+                        }
+                    }
+
                     let created_at = n
                         .get_property("created_at")
                         .and_then(|v| v.as_timestamp())
@@ -134,9 +153,11 @@ impl MemoryAdminService for GrafeoStore {
                         .and_then(|v| v.as_str())
                         .unwrap_or("Active")
                         .to_string();
+                    let sub_type = extract_sub_type(label, &n);
                     all_entries.push(AdminNodeRecord {
                         node_id: id.0,
                         node_type: label.to_string(),
+                        sub_type,
                         content,
                         confidence,
                         decay_score,
@@ -250,6 +271,7 @@ impl MemoryAdminService for GrafeoStore {
                 node_id,
                 found: true,
                 node_type: label.to_string(),
+                sub_type: extract_sub_type(label, &n),
                 content,
                 confidence,
                 decay_score,
@@ -266,6 +288,7 @@ impl MemoryAdminService for GrafeoStore {
             node_id,
             found: false,
             node_type: String::new(),
+            sub_type: None,
             content: String::new(),
             confidence: 0.0,
             decay_score: 0.0,
@@ -420,6 +443,28 @@ impl MemoryAdminService for GrafeoStore {
 
 // ── Helper functions (moved from memory_query.rs) ─────────────────────
 
+/// Extract the secondary classification of a memory node, if any.
+///
+/// - `Knowledge`: reads the `sub_type` property (`Fact` / `Preference` /
+///   `Relation` / `Procedure`).
+/// - `Autobiographical`: reads the `category` property — the memory panel
+///   surfaces this as the `Autobiographical` sub-filter (`Identity` /
+///   `Capability` / `Limitation` / `Preference` / `History` / `Relationship`).
+/// - `Episodic` / `Procedural`: returns `None` (no secondary classification).
+///
+/// Returns `None` if the property is missing — older nodes written before
+/// the field was tracked will simply lack the sub-filter UI affordance.
+fn extract_sub_type(label: &str, n: &Node) -> Option<String> {
+    let property_name = match label {
+        "Knowledge" => "sub_type",
+        "Autobiographical" => "category",
+        _ => return None,
+    };
+    n.get_property(property_name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Extract a human-readable content string from a Grafeo node.
 fn extract_node_content(label: &str, n: &Node) -> String {
     match label {
@@ -486,5 +531,175 @@ fn json_to_grafeo_value(v: &serde_json::Value) -> Value {
         }
         serde_json::Value::String(s) => Value::String(s.clone().into()),
         other => Value::String(other.to_string().into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the sub-classification filter (`sub_type`) that powers the
+    //! memory panel's secondary drill-down (e.g. "Autobiographical →
+    //! Limitation", "Knowledge → Preference"). The filter is the contract
+    //! front-end code depends on, so its semantics are exercised here
+    //! against a real in-memory GrafeoStore.
+
+    use super::*;
+    use crate::grafeo::GrafeoStore;
+    use crate::labels;
+    use grafeo_common::types::Value;
+
+    fn test_store() -> GrafeoStore {
+        GrafeoStore::new_in_memory().expect("in-memory store should open")
+    }
+
+    /// Seed two Knowledge nodes with different sub_types, one
+    /// Autobiographical Limitation node, and one Episodic node. Returns
+    /// the store so each test can run in isolation.
+    fn seed_mixed_store() -> GrafeoStore {
+        let store = test_store();
+
+        // Knowledge / Fact
+        store
+            .store_node(
+                labels::KNOWLEDGE,
+                [
+                    ("subject", Value::from("Rust")),
+                    ("sub_type", Value::from("Fact")),
+                    ("content", Value::from("Rust is a systems language")),
+                ],
+            )
+            .unwrap();
+
+        // Knowledge / Preference
+        store
+            .store_node(
+                labels::KNOWLEDGE,
+                [
+                    ("subject", Value::from("dark mode")),
+                    ("sub_type", Value::from("Preference")),
+                    ("content", Value::from("user prefers dark UI")),
+                ],
+            )
+            .unwrap();
+
+        // Autobiographical / Limitation
+        store
+            .store_node(
+                labels::AUTOBIOGRAPHICAL,
+                [
+                    ("key", Value::from("no-bash-rm")),
+                    ("category", Value::from("Limitation")),
+                    ("value", Value::from("I do not run destructive shell commands unsupervised")),
+                ],
+            )
+            .unwrap();
+
+        // Episodic — never has a sub_type
+        store
+            .store_node(
+                labels::EPISODIC,
+                [
+                    ("role", Value::from("user")),
+                    ("content", Value::from("hello")),
+                ],
+            )
+            .unwrap();
+
+        store
+    }
+
+    #[test]
+    fn list_nodes_sub_type_knowledge_preference() {
+        let store = seed_mixed_store();
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Knowledge".to_string(),
+            sub_type: "Preference".to_string(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 1, "only the Preference node should match");
+        assert_eq!(out.nodes[0].node_type, "Knowledge");
+        assert_eq!(out.nodes[0].sub_type.as_deref(), Some("Preference"));
+    }
+
+    #[test]
+    fn list_nodes_sub_type_autobiographical_limitation() {
+        let store = seed_mixed_store();
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Autobiographical".to_string(),
+            sub_type: "Limitation".to_string(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 1);
+        assert_eq!(out.nodes[0].node_type, "Autobiographical");
+        assert_eq!(out.nodes[0].sub_type.as_deref(), Some("Limitation"));
+    }
+
+    #[test]
+    fn list_nodes_sub_type_returns_empty_when_no_match() {
+        let store = seed_mixed_store();
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Autobiographical".to_string(),
+            sub_type: "Identity".to_string(), // not seeded
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 0);
+        assert!(out.nodes.is_empty());
+    }
+
+    #[test]
+    fn list_nodes_sub_type_empty_is_no_filter() {
+        let store = seed_mixed_store();
+        // Empty sub_type must not filter — should return all 4 seeded nodes.
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: String::new(),
+            sub_type: String::new(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 4, "empty sub_type must behave as no filter");
+    }
+
+    #[test]
+    fn list_nodes_sub_type_combines_with_node_type_filter() {
+        let store = seed_mixed_store();
+        // Asking for sub_type=Limitation but node_type=Knowledge must return
+        // nothing — the sub-classification belongs to a different label.
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Knowledge".to_string(),
+            sub_type: "Limitation".to_string(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 0, "sub_type from another label must not match");
+    }
+
+    #[test]
+    fn list_nodes_sub_type_against_episodic_is_ignored() {
+        let store = seed_mixed_store();
+        // Episodic nodes have no sub-classification, so any sub_type filter
+        // must let them through — the panel uses sub_type only to drill into
+        // Knowledge / Autobiographical, never to filter Episodic out.
+        let out = store.list_nodes(&AdminListNodesParams {
+            page: 1,
+            size: 100,
+            node_type: "Episodic".to_string(),
+            sub_type: "anything".to_string(),
+            keyword: String::new(),
+            time_range: "all".to_string(),
+        });
+        assert_eq!(out.total, 1, "sub_type filter must not affect Episodic nodes");
+        assert_eq!(out.nodes[0].node_type, "Episodic");
     }
 }

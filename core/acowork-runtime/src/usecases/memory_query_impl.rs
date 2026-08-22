@@ -44,6 +44,7 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             page: query.page,
             size: query.size,
             node_type: query.node_type.clone(),
+            sub_type: query.sub_type.clone(),
             keyword: query.keyword.clone(),
             time_range: query.time_range.clone(),
         };
@@ -56,6 +57,7 @@ impl MemoryQueryService for GrafeoMemoryAdapter {
             .map(|n| MemoryNode {
                 node_id: n.node_id,
                 node_type: n.node_type,
+                sub_type: n.sub_type,
                 content: n.content,
                 confidence: n.confidence,
                 decay_score: n.decay_score,
