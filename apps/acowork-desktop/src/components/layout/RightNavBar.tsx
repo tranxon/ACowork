@@ -46,9 +46,6 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // middle disk-separator line stays visible on selection; `icon` is
     // intentionally omitted.
     { tab: "memory", i18nKey: "resultsPanel.memory", show: agentRunning },
-    // setup uses the shared FilledSettingsIcon/OutlineSettingsIcon so the
-    // center hole is preserved on selection; `icon` is intentionally omitted.
-    { tab: "setup", i18nKey: "resultsPanel.setup", show: agentRunning },
     { tab: "tools", icon: Wrench, i18nKey: "resultsPanel.tools", show: agentRunning },
     // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
     // state preserves the central spine line via SVG mask. Without the
@@ -60,10 +57,13 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // inside the debug tab when `debug_state !== "enabled"`. That branch
     // already implies agentRunning, so gating the nav entry on
     // agentRunning preserves the ADR's intent while removing an empty
-    // `noAgentDebug` placeholder when nothing is running. Placed last so
-    // it sits at the bottom of the nav rail, visually separated from the
-    // content tabs.
+    // `noAgentDebug` placeholder when nothing is running.
     { tab: "debug", i18nKey: "resultsPanel.debug", show: agentRunning },
+    // setup uses the shared FilledSettingsIcon/OutlineSettingsIcon so the
+    // center hole is preserved on selection; `icon` is intentionally omitted.
+    // Placed last so the settings gear sits at the bottom of the nav rail,
+    // visually separated from the content tabs.
+    { tab: "setup", i18nKey: "resultsPanel.setup", show: agentRunning },
   ];
 
   return (
