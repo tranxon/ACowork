@@ -29,6 +29,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "../../i18n/useTranslation";
+import { useActiveHeartbeatForSelection } from "../../hooks/useActiveHeartbeat";
 import { Bot, Check, Cpu } from "lucide-react";
 import { log } from "../../lib/logger";
 
@@ -114,6 +115,14 @@ export function AppLayout() {
       });
     }
   }, []);
+
+  // ADR-XXX: Presence heartbeat for the idle-watcher. The selected
+  // agent's Runtime renews its idle deadline while this hook's
+  // interval is alive; switching agents (or closing the webview)
+  // cleanly stops the heartbeats so the previous agent's Runtime can
+  // resume normal idle accounting. Single integration point at the
+  // app shell — do NOT mount additional copies elsewhere.
+  useActiveHeartbeatForSelection();
 
   // Refs to track latest panel widths for proportional window-resize scaling
   const fileWidthValueRef = useRef(fileWidth);
