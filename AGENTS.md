@@ -16,6 +16,7 @@ cd core && cargo test
 ## Debug & Log 
 
 When debugging, consult the latest log file to rapidly identify the root cause
+{HOME_DIR} is the current user home folder.
 
 * gateway Log: {HOME_DIR}\.acowork\acowork-gateway\data\logs
 * desktop Log: {HOME_DIR}\.acowork\desktop-app\logs
