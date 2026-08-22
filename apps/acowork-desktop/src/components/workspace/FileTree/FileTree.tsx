@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { FilePlus, FolderPlus, ClipboardPaste } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useWorkspaceStore, type TreeEntry } from "../../../stores/workspaceStore";
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
 import { FileTreeNode } from "./FileTreeNode";
+import { useTranslation } from "../../../i18n/useTranslation";
+import {
+    ContextMenu,
+    useContextMenu,
+    type ContextMenuItem,
+} from "../../common/ContextMenu";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -68,6 +75,78 @@ interface FileTreeProps {
     onPointerDownTreeEntry?: (relPath: string, isDir: boolean, e: React.PointerEvent) => void;
 }
 
+/**
+ * Shape of the workspace-root clipboard — kept loose so this helper does
+ * not depend on the full `WorkspaceState`. Mirrors `useWorkspaceStore`'s
+ * `copiedEntry` field; the test file uses a minimal stub of the same shape.
+ */
+export interface RootContextCopiedEntry {
+    agentId: string;
+    workspaceId: string;
+    path: string;
+    type: "file" | "directory";
+}
+
+export interface RootContextMenuDeps {
+    /** File / dir create handler (mirrors FileTreeProps.onContextNewItem). */
+    onContextNewItem?: (type: "file" | "dir", parentPath: string) => void;
+    /** Paste handler (mirrors FileTreeProps.onPaste). */
+    onPaste?: (parentPath: string) => void | Promise<void>;
+    /** Workspace-root clipboard entry — when non-null, "Paste" is enabled. */
+    copiedEntry?: RootContextCopiedEntry | null;
+}
+
+/**
+ * Build the workspace-root context menu items. Pure function — extracted
+ * from `FileTree` so tests can drive it without rendering the whole
+ * virtualised tree.
+ *
+ * Only operations meaningful at the root are exposed:
+ *   - New File   — `parentPath = ""` means the workspace root
+ *   - New Folder — `parentPath = ""` means the workspace root
+ *   - Paste      — disabled when `copiedEntry` is null
+ *
+ * Single-entry ops (Copy / Rename / Delete / Reveal / Add to Chat /
+ * Preview / Toggle Prompt File) are intentionally absent — they have
+ * no meaningful target here.
+ *
+ * Exported for unit testing only. Not part of the public API.
+ */
+export function buildRootContextMenuItems(
+    t: (key: string) => string,
+    deps: RootContextMenuDeps,
+): ContextMenuItem[] {
+    const { onContextNewItem, onPaste, copiedEntry } = deps;
+    return [
+        {
+            key: "new-file",
+            icon: <FilePlus size={14} />,
+            label: t("workspace.contextMenu.newFile"),
+            onClick: () => {
+                onContextNewItem?.("file", "");
+            },
+        },
+        {
+            key: "new-folder",
+            icon: <FolderPlus size={14} />,
+            label: t("workspace.contextMenu.newFolder"),
+            onClick: () => {
+                onContextNewItem?.("dir", "");
+            },
+        },
+        {
+            key: "paste",
+            icon: <ClipboardPaste size={14} />,
+            label: t("workspace.contextMenu.paste"),
+            dividerBefore: true,
+            disabled: !copiedEntry,
+            onClick: () => {
+                void onPaste?.("");
+            },
+        },
+    ];
+}
+
 export function FileTree({
     agentId,
     workspaceId,
@@ -92,8 +171,19 @@ export function FileTree({
     const treeCache = useWorkspaceStore((s) => s.treeCache);
     const fetchTree = useWorkspaceStore((s) => s.fetchTree);
     const treeLoadingPaths = useWorkspaceStore((s) => s.treeLoadingPaths);
+    const copiedEntry = useWorkspaceStore((s) => s.copiedEntry);
     const toggleTreeExpandedPath = useChatStore((s) => s.toggleTreeExpandedPath);
     const expandTreeToPath = useChatStore((s) => s.expandTreeToPath);
+    const { t } = useTranslation();
+
+    /** Right-click on the empty area below the rows (the scroller
+     * padding / unscrolled region) — semantically equivalent to a
+     * right-click on the workspace root, so we offer the same actions
+     * that work at the root: New File / New Folder / Paste. Single-entry
+     * ops (Copy / Rename / Delete / Reveal / Add to Chat / Preview /
+     * Toggle Prompt File) are deliberately excluded — they have no
+     * meaningful target here. */
+    const ctxMenu = useContextMenu();
 
     /** Build cache key prefix: agentId:workspaceId (tree cache is NOT per-session) */
     const treeCachePrefix = `${agentId}:${workspaceId}`;
@@ -211,6 +301,44 @@ export function FileTree({
         [onSelectPath],
     );
 
+    /** Right-click handler attached to the scroller element. Reacts only
+     * when the right-click landed OUTSIDE any row — the row's own
+     * `onContextMenu` already calls `e.stopPropagation()` via the
+     * shared `useContextMenu.openAt`, so in normal operation this
+     * handler only fires for true empty-area clicks. We still defend
+     * against the corner case (e.g. if a future refactor drops the
+     * stopPropagation) by checking `closest('[data-rel-path]')` so
+     * we never double-open the menu.
+     *
+     * `ctxMenu.openAt` does the preventDefault + stopPropagation itself,
+     * so the browser's native context menu never appears here. */
+    const handleScrollerContextMenu = useCallback(
+        (e: React.MouseEvent<HTMLDivElement>) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest("[data-rel-path]")) {
+                // A row was clicked — that row's own handler owns this
+                // gesture; don't open the root menu on top of it.
+                return;
+            }
+            ctxMenu.openAt(e);
+        },
+        [ctxMenu],
+    );
+
+    /** Empty-area (workspace-root) menu items. Memoised so React.memo
+     * on the wrapped `<ContextMenu>` consumer doesn't churn. `copiedEntry`
+     * is subscribed above so the `Paste` disabled flag tracks the
+     * clipboard contents in real time. */
+    const rootCtxMenuItems = useMemo<ContextMenuItem[]>(
+        () =>
+            buildRootContextMenuItems(t, {
+                onContextNewItem,
+                onPaste,
+                copiedEntry,
+            }),
+        [t, onContextNewItem, onPaste, copiedEntry],
+    );
+
     // Virtual scrolling setup.
     //
     // Row height is derived from CSS geometry (`line-height × font-size +
@@ -278,6 +406,11 @@ export function FileTree({
         <div
             ref={scrollRef}
             className="file-tree-scroller flex-1 min-h-0 overflow-auto"
+            /* Right-click on the empty area (scrollbar gutter / padding /
+             * below-the-last-row space) opens the workspace-root menu.
+             * Row hits stop here because FileTreeNode calls
+             * `e.stopPropagation()` from its own `useContextMenu.openAt`. */
+            onContextMenu={handleScrollerContextMenu}
         >
             <div
                 style={{
@@ -330,6 +463,18 @@ export function FileTree({
                     );
                 })}
             </div>
+
+            {/* Workspace-root context menu — same renderer as the per-row
+                menu (ContextMenu) so we get portal-to-body + outside-click +
+                Escape behaviour for free. Renders nothing when closed. */}
+            <ContextMenu
+                isOpen={ctxMenu.isOpen}
+                menuProps={ctxMenu.menuProps}
+                items={rootCtxMenuItems}
+                payload={undefined}
+                selectionAtOpen={ctxMenu.selectionAtOpen}
+                onClose={ctxMenu.close}
+            />
         </div>
     );
 }
