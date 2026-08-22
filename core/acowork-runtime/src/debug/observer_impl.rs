@@ -13,14 +13,16 @@
 
 use std::sync::Arc;
 
+use acowork_core::providers::traits::ChatMessage;
 use tokio::sync::Notify;
 
 use super::DebugHandles;
 use super::controller::{
-    ContextSnapshot, ContextSnapshotSections, DebugController, DebugState, SectionContent,
+    ContextSnapshot, ContextSnapshotSections, DebugController, DebugState, NamedSection,
+    SectionContent,
 };
 use super::observer::ContextSnapshotRequest;
-use super::protocol::DebugPhase;
+use super::protocol::{DebugPhase, RequestParams};
 use super::events::{DebugEvent, DebugEventSender};
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
@@ -225,12 +227,22 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         // Apply pending patches
         let mut patches_applied = false;
         if let Some(patches) = ctrl.pending_patches.take() {
-            context_builder.apply_patches(&patches);
-            tracing::info!(
-                session_id = %session_id,
-                "Debug: pending patches applied to context builder and consumed"
-            );
-            patches_applied = true;
+            match context_builder.apply_patches(&patches) {
+                Ok(()) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "Debug: pending patches applied to context builder and consumed"
+                    );
+                    patches_applied = true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Debug: pending patches rejected (not applied)"
+                    );
+                }
+            }
         }
 
         // Consume re-execute pending flag
@@ -321,12 +333,6 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         }
         let tool_defs_str = serde_json::Value::Array(all_defs).to_string();
 
-        let skill_str = req
-            .context_builder
-            .skill_instructions()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
         tracing::info!(
             iter = iter,
             ws_has = req.context_builder.workspace_context().is_some(),
@@ -335,78 +341,140 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             "capture_context_snapshot: workspace_context status"
         );
 
-        // Assemble the full system content as it will be sent to the LLM:
-        // base system prompt + workspace prompt file content (if any).
-        // This mirrors ContextBuilder::build() so the debug snapshot accurately
-        // reflects what the LLM actually receives.
-        let base_prompt = req.context_builder.system_prompt();
-        let prompt_file_section = req
+        // Produce the section list in build() injection order (ADR-054 §3.1).
+        // The list mirrors exactly what ContextBuilder::build() appends to
+        // the system content (plus tool_definitions which travels separately
+        // in ChatRequest.tools, and messages which is step 4).
+        let mut named: Vec<NamedSection> = Vec::with_capacity(10);
+
+        // 1. Base system prompt (standalone — workspace_prompt_file is NOT
+        //    merged in anymore; ADR-054 step 3 un-split so the panel can
+        //    patch each independently).
+        named.push(NamedSection::new(
+            "system_prompt",
+            req.context_builder.system_prompt().to_string(),
+            req.model,
+        ));
+
+        // 2. Identity context
+        if let Some(identity) = req.context_builder.identity_context() {
+            named.push(NamedSection::new("identity_context", identity.to_string(), req.model));
+        }
+
+        // 2.2 Workspace context
+        if let Some(ws) = req.context_builder.workspace_context() {
+            named.push(NamedSection::new("workspace_context", ws.to_string(), req.model));
+        }
+
+        // 2.5 Retrieved memory
+        if let Some(mem) = req.context_builder.retrieved_memory() {
+            named.push(NamedSection::new("retrieved_memory", mem.to_string(), req.model));
+        }
+
+        // 2.5b Ambiguous-confirmation hint (P3-4) — NEW in ADR-054 step 3.
+        if let Some(hint) = req.context_builder.ambiguous_confirmation_hint() {
+            named.push(NamedSection::new(
+                "ambiguous_confirmation_hint",
+                hint.to_string(),
+                req.model,
+            ));
+        }
+
+        // 2.6 Skill instructions
+        if let Some(skills) = req.context_builder.skill_instructions() {
+            named.push(NamedSection::new("skill_instructions", skills.to_string(), req.model));
+        }
+
+        // 2.7 Todo list — NEW in ADR-054 step 3.
+        if let Some(todos) = req.context_builder.todo_context() {
+            named.push(NamedSection::new("todo_context", todos.to_string(), req.model));
+        }
+
+        // 3. Environment (override wins, else auto-detect)
+        let env_text = req
             .context_builder
-            .workspace_prompt_file()
-            .map(|content| format!("\n\n## Workspace Prompt File\n{content}"))
-            .unwrap_or_default();
-        let full_system_content = format!("{base_prompt}{prompt_file_section}");
+            .environment_override()
+            .map(|s| s.to_string())
+            .unwrap_or_else(crate::agent::context::detect_environment_text);
+        named.push(NamedSection::new("environment", env_text, req.model));
 
-        let sections = ContextSnapshotSections {
-            system_prompt: SectionContent::new(full_system_content, req.model),
-            workspace_context: SectionContent::new(
-                req.context_builder
-                    .workspace_context()
-                    .unwrap_or_default()
-                    .to_string(),
+        // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md) — NEW standalone
+        //    section in ADR-054 step 3 (was merged into system_prompt).
+        if let Some(prompt_file) = req.context_builder.workspace_prompt_file() {
+            named.push(NamedSection::new(
+                "workspace_prompt_file",
+                prompt_file.to_string(),
                 req.model,
-            ),
-            environment: SectionContent::new(
-                req.context_builder
-                    .environment_override()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(crate::agent::context::detect_environment_text),
-                req.model,
-            ),
-            tool_definitions: SectionContent::new(tool_defs_str, req.model),
-            skill_instructions: SectionContent::new(skill_str, req.model),
-            retrieved_memory: SectionContent::new(
-                req.context_builder
-                    .retrieved_memory()
-                    .unwrap_or_default()
-                    .to_string(),
-                req.model,
-            ),
-            identity_context: SectionContent::new(
-                req.context_builder
-                    .identity_context()
-                    .unwrap_or_default()
-                    .to_string(),
-                req.model,
-            ),
+            ));
+        }
+
+        // 3.5 Tool definitions (passed separately in ChatRequest.tools)
+        named.push(NamedSection::new("tool_definitions", tool_defs_str, req.model));
+
+        // 3.6 Messages (conversation history) — ADR-054 step 4.
+        // Metadata only: the full content is lazy-loaded via
+        // `getSection(iteration, "messages")` from `messages_by_iteration`.
+        // ADR-054: the snapshot holds a SHALLOW `Arc` clone of the history
+        // (O(1), no deep copy); HistoryManager mutates copy-on-write so the
+        // stored Arc retains the exact history as of this build iteration.
+        // The JSON is serialized once here (to compute size/token/hash) and
+        // again on demand — acceptable for a developer tool (ADR-054 §6).
+        let messages_snapshot: Arc<Vec<ChatMessage>> = req.history.messages_arc();
+        let messages_json = serde_json::to_string(&messages_snapshot).unwrap_or_default();
+        let messages_meta = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(messages_json.as_bytes());
+            SectionContent::metadata_only(
+                messages_json.len(),
+                crate::token::count_text(&messages_json, req.model),
+                format!("{:x}", hasher.finalize()),
+            )
         };
+        named.push(NamedSection {
+            key: "messages".to_string(),
+            content: messages_meta,
+        });
 
-        let total_token_estimate = sections.system_prompt.token_estimate
-            + sections.workspace_context.token_estimate
-            + sections.environment.token_estimate
-            + sections.tool_definitions.token_estimate
-            + sections.skill_instructions.token_estimate
-            + sections.retrieved_memory.token_estimate
-            + sections.identity_context.token_estimate;
+        let sections = ContextSnapshotSections { sections: named };
+
+        let total_token_estimate = sections.total_token_estimate();
+
+        // ADR-054 step 2: surface the ChatRequest control params so the
+        // panel can show what the LLM was actually asked with.
+        let request_params = RequestParams {
+            model: req.model.to_string(),
+            temperature: req.context_builder.temperature().map(|t| t as f64),
+            max_tokens: req.max_tokens,
+            reasoning_effort: req
+                .context_builder
+                .reasoning_effort()
+                .map(|r| r.to_string()),
+            thinking_mode: req.context_builder.thinking_mode().map(|s| s.to_string()),
+        };
 
         let snapshot = ContextSnapshot {
             iteration: iter,
             built_at: chrono::Utc::now(),
             sections,
             total_token_estimate,
+            request_params,
         };
 
-        // Store in controller
+        // Store in controller — snapshot metadata + lazy message content.
         let mut ctrl_guard = self.ctrl.lock().await;
         ctrl_guard.current_model = Some(req.model.to_string());
+        ctrl_guard.store_messages(iter, messages_snapshot);
         ctrl_guard.store_context_snapshot(snapshot.clone());
 
-        // Push onContextBuilt event
+        // Push onContextBuilt event (carries request_params so the panel's
+        // metadata bar renders without a follow-up RPC — ADR-054 step 2).
         let context_sections = super::protocol::ContextSections::from(&snapshot.sections);
         let sent = self.event_tx.send(DebugEvent::ContextBuilt {
             iteration: snapshot.iteration,
             sections: context_sections,
             total_token_estimate: snapshot.total_token_estimate,
+            request_params: snapshot.request_params.clone(),
         });
 
         tracing::info!(
@@ -417,14 +485,41 @@ impl super::observer::DebugObserver for DebugObserverImpl {
         );
     }
 
+    fn on_iteration_complete(&self, history: &HistoryManager) {
+        let Ok(mut ctrl) = self.ctrl.try_lock() else {
+            return;
+        };
+        let iteration = ctrl.iteration;
+        if iteration == 0 {
+            return;
+        }
+        let model = ctrl.current_model.clone().unwrap_or_default();
+        ctrl.store_messages_with_meta(iteration, history.messages_arc(), &model);
+        tracing::info!(
+            iteration,
+            message_count = history.len(),
+            "Debug: iteration messages snapshot refreshed (incl. assistant reply)"
+        );
+    }
+
     fn apply_pending_patches(&self, builder: &mut ContextBuilder) -> bool {
         let Ok(mut ctrl_guard) = self.ctrl.try_lock() else {
             return false;
         };
         if let Some(patches) = ctrl_guard.pending_patches.take() {
-            builder.apply_patches(&patches);
-            tracing::info!("Debug: pending patches applied to context builder after resume");
-            true
+            match builder.apply_patches(&patches) {
+                Ok(()) => {
+                    tracing::info!("Debug: pending patches applied to context builder after resume");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Debug: pending patches rejected after resume"
+                    );
+                    false
+                }
+            }
         } else {
             false
         }

@@ -131,6 +131,24 @@ impl ContextBuilder {
         self.reasoning_effort.as_ref()
     }
 
+    /// Get the current temperature override, if set.
+    ///
+    /// `None` means the per-agent fallback chain applies at build time
+    /// (`agent_config.temperature` → `manifest.llm.temperature` →
+    /// [`DEFAULT_TEMPERATURE`]). ADR-054: exposed so the debug snapshot
+    /// can report the request params the LLM actually received.
+    pub fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    /// Get the current Anthropic thinking mode ("extended" | "adaptive"), if set.
+    ///
+    /// ADR-054: exposed so the debug snapshot can report the request
+    /// params the LLM actually received.
+    pub fn thinking_mode(&self) -> Option<&str> {
+        self.thinking_mode.as_deref()
+    }
+
     /// Set model override (from `model_switch` or session initialization)
     pub fn with_override_model(mut self, model: String) -> Self {
         self.override_model = Some(model);
@@ -294,30 +312,54 @@ impl ContextBuilder {
 
     /// Apply a debug PatchSet to the context builder.
     ///
-    /// Only non-None fields in the patch are applied; existing fields
-    /// that are not patched remain unchanged.
-    pub fn apply_patches(&mut self, patches: &crate::debug::protocol::PatchSet) {
-        if let Some(ref prompt) = patches.system_prompt {
-            self.set_system_prompt(prompt.clone());
+    /// Only sections present in the patch are applied; sections that are
+    /// not patched remain unchanged. Unknown section keys are rejected
+    /// (ADR-054 §6 typo safety) and a `TypeMismatch` error is returned if
+    /// a patch value's variant doesn't match the section's expected type.
+    ///
+    /// Per-section patch semantics (type validation, empty-string clearing,
+    /// tool_definitions array check) live in [`resolve_patch`] — the SAME
+    /// resolution path used by `handle_patch_context` for snapshot preview,
+    /// so preview and apply-time behavior can never drift.
+    pub fn apply_patches(
+        &mut self,
+        patches: &crate::debug::protocol::PatchSet,
+    ) -> Result<(), crate::debug::protocol::PatchError> {
+        for (key, value) in &patches.patches {
+            match resolve_patch(key, value)? {
+                ResolvedPatch::Text(content) => match key.as_str() {
+                    "system_prompt" => self.set_system_prompt(content),
+                    "workspace_context" => self.set_workspace_context(content),
+                    "environment" => self.set_environment_override(content),
+                    "skill_instructions" => self.set_skill_instructions(content),
+                    "workspace_prompt_file" => self.set_workspace_prompt_file(Some(content)),
+                    "todo_context" => self.set_todo_context(Some(content)),
+                    "ambiguous_confirmation_hint" => {
+                        self.set_ambiguous_confirmation_hint(content);
+                    }
+                    _ => unreachable!("resolve_patch only yields Text for text sections"),
+                },
+                ResolvedPatch::Json(value) => match key.as_str() {
+                    "retrieved_memory" => self.set_retrieved_memory_patch(value.to_string()),
+                    "identity_context" => self.set_identity_context(value.to_string()),
+                    _ => unreachable!("resolve_patch only yields Json for json sections"),
+                },
+                ResolvedPatch::ToolDefinitions(defs) => {
+                    debug_assert_eq!(key, "tool_definitions");
+                    self.set_tool_definitions(defs);
+                }
+                // Empty string clears the section — build() falls back:
+                // environment → auto-detect; the three ADR-054 sections → omitted.
+                ResolvedPatch::Clear => match key.as_str() {
+                    "environment" => self.set_environment_override(String::new()),
+                    "workspace_prompt_file" => self.set_workspace_prompt_file(None),
+                    "todo_context" => self.set_todo_context(None),
+                    "ambiguous_confirmation_hint" => self.clear_ambiguous_confirmation_hint(),
+                    _ => unreachable!("resolve_patch only yields Clear for clearable sections"),
+                },
+            }
         }
-        if let Some(ref workspace) = patches.workspace_context {
-            self.set_workspace_context(workspace.clone());
-        }
-        if let Some(ref env) = patches.environment {
-            self.set_environment_override(env.clone());
-        }
-        if let Some(ref tools) = patches.tool_definitions {
-            self.set_tool_definitions(tools.clone());
-        }
-        if let Some(ref skills) = patches.skill_instructions {
-            self.set_skill_instructions(skills.clone());
-        }
-        if let Some(ref memory) = patches.retrieved_memory {
-            self.set_retrieved_memory_patch(memory.to_string());
-        }
-        if let Some(ref identity) = patches.identity_context {
-            self.set_identity_context(identity.to_string());
-        }
+        Ok(())
     }
 
     /// Clear retrieved memory context.
@@ -340,6 +382,33 @@ impl ContextBuilder {
     /// this hint guides the Agent to naturally ask the user about them.
     pub fn set_ambiguous_confirmation_hint(&mut self, hint: String) {
         self.ambiguous_confirmation_hint = Some(hint);
+    }
+
+    /// Clear the ambiguous-confirmation hint.
+    ///
+    /// ADR-054: debug patch empty-string clearing semantics — an empty
+    /// string patch removes the section so `build()` omits it entirely
+    /// (consistent with `workspace_prompt_file` / `todo_context`).
+    pub fn clear_ambiguous_confirmation_hint(&mut self) {
+        self.ambiguous_confirmation_hint = None;
+    }
+
+    /// Get the ambiguous-confirmation hint text, if set.
+    ///
+    /// ADR-054: exposed so the debug snapshot can surface this section
+    /// (previously invisible — a common "why is the agent asking
+    /// disambiguation questions" blind spot).
+    pub fn ambiguous_confirmation_hint(&self) -> Option<&str> {
+        self.ambiguous_confirmation_hint.as_deref()
+    }
+
+    /// Get the todo list context text, if set.
+    ///
+    /// ADR-054: exposed so the debug snapshot can surface this section
+    /// (previously invisible — a common "why is the agent looping on a
+    /// stale todo list" blind spot).
+    pub fn todo_context(&self) -> Option<&str> {
+        self.todo_context.as_deref()
     }
 
     // ── Section accessors for debug ContextSnapshot ──
@@ -648,6 +717,91 @@ impl ContextBuilder {
     }
 }
 
+/// Build a [`PatchError::TypeMismatch`] for a section patch whose value
+/// variant doesn't match the section's expected type.
+fn patch_type_mismatch(
+    key: &str,
+    expected: &'static str,
+    value: &crate::debug::protocol::PatchValue,
+) -> crate::debug::protocol::PatchError {
+    crate::debug::protocol::PatchError::TypeMismatch {
+        section: key.to_string(),
+        expected,
+        actual: value.variant_name(),
+    }
+}
+
+/// Result of resolving a debug patch value against a section key.
+///
+/// ADR-054: the per-section patch semantics (type validation, empty-string
+/// clearing, tool_definitions array check) live in ONE place — [`resolve_patch`]
+/// — shared by `ContextBuilder::apply_patches` (actual application at build
+/// time) and `handle_patch_context` (snapshot preview at RPC time), so the
+/// two can never drift on edge cases (type mismatch, empty string, non-array
+/// tool_definitions).
+pub enum ResolvedPatch {
+    /// String content for text-valued sections.
+    Text(String),
+    /// JSON value for `retrieved_memory` / `identity_context`.
+    Json(serde_json::Value),
+    /// Tool definitions — validated as a JSON array.
+    ToolDefinitions(Vec<serde_json::Value>),
+    /// Section cleared: `build()` falls back (environment → auto-detect;
+    /// workspace_prompt_file / todo_context / ambiguous_confirmation_hint → omitted).
+    Clear,
+}
+
+/// Resolve a `(section key, patch value)` pair into the final content to
+/// apply/store, or [`ResolvedPatch::Clear`] for empty-string clearing.
+///
+/// Validates the value variant against the section's expected type and
+/// rejects mismatches with [`PatchError::TypeMismatch`] (ADR-054 §6 typo
+/// safety). Unknown keys are rejected with [`PatchError::UnknownSection`].
+pub fn resolve_patch(
+    key: &str,
+    value: &crate::debug::protocol::PatchValue,
+) -> Result<ResolvedPatch, crate::debug::protocol::PatchError> {
+    use crate::debug::protocol::{PatchError, PatchValue};
+
+    match key {
+        "system_prompt" | "workspace_context" | "skill_instructions" => match value {
+            PatchValue::Text { value } => Ok(ResolvedPatch::Text(value.clone())),
+            _ => Err(patch_type_mismatch(key, "text", value)),
+        },
+        // environment: empty string clears the override — build() falls
+        // back to auto-detected platform info.
+        "environment" => match value {
+            PatchValue::Text { value } if value.is_empty() => Ok(ResolvedPatch::Clear),
+            PatchValue::Text { value } => Ok(ResolvedPatch::Text(value.clone())),
+            _ => Err(patch_type_mismatch(key, "text", value)),
+        },
+        "tool_definitions" => match value {
+            PatchValue::Json { value } => match value.as_array() {
+                Some(defs) => Ok(ResolvedPatch::ToolDefinitions(defs.clone())),
+                None => Err(PatchError::TypeMismatch {
+                    section: key.to_string(),
+                    expected: "json array",
+                    actual: "json non-array",
+                }),
+            },
+            _ => Err(patch_type_mismatch(key, "json", value)),
+        },
+        "retrieved_memory" | "identity_context" => match value {
+            PatchValue::Json { value } => Ok(ResolvedPatch::Json(value.clone())),
+            _ => Err(patch_type_mismatch(key, "json", value)),
+        },
+        // ADR-054 step 3 sections: empty string clears (consistent clearing
+        // semantics across all three — previously ambiguous_confirmation_hint
+        // had none).
+        "workspace_prompt_file" | "todo_context" | "ambiguous_confirmation_hint" => match value {
+            PatchValue::Text { value } if value.is_empty() => Ok(ResolvedPatch::Clear),
+            PatchValue::Text { value } => Ok(ResolvedPatch::Text(value.clone())),
+            _ => Err(patch_type_mismatch(key, "text", value)),
+        },
+        _ => Err(PatchError::UnknownSection(key.to_string())),
+    }
+}
+
 /// Detect and format the environment info text that gets injected into
 /// the system prompt. Used by debug snapshot capture and ContextBuilder::build().
 pub fn detect_environment_text() -> String {
@@ -747,6 +901,124 @@ mod tests {
         assert!(
             system.contains("zh-CN"),
             "system prompt must contain the raw Language value so the directive is resolvable; got:\n{system}"
+        );
+    }
+
+    // ── apply_patches / resolve_patch (ADR-054 single-source semantics) ──
+
+    #[test]
+    fn apply_patches_empty_string_clears_adr054_sections() {
+        use crate::debug::protocol::{PatchSet, PatchValue};
+        use std::collections::HashMap;
+
+        let mut builder = ContextBuilder::new("base".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_todo_context(Some("task A".to_string()));
+        builder.set_ambiguous_confirmation_hint("hint".to_string());
+        builder.set_workspace_prompt_file(Some("CLAUDE.md content".to_string()));
+
+        // Empty string clears all three ADR-054 step-3 sections consistently.
+        let patches = PatchSet {
+            patches: HashMap::from([
+                (
+                    "todo_context".to_string(),
+                    PatchValue::Text { value: String::new() },
+                ),
+                (
+                    "ambiguous_confirmation_hint".to_string(),
+                    PatchValue::Text { value: String::new() },
+                ),
+                (
+                    "workspace_prompt_file".to_string(),
+                    PatchValue::Text { value: String::new() },
+                ),
+            ]),
+        };
+        builder.apply_patches(&patches).expect("clear must succeed");
+
+        assert!(builder.todo_context().is_none(), "todo_context cleared");
+        assert!(
+            builder.ambiguous_confirmation_hint().is_none(),
+            "ambiguous_confirmation_hint cleared"
+        );
+        assert!(
+            builder.workspace_prompt_file().is_none(),
+            "workspace_prompt_file cleared"
+        );
+
+        // build() must omit the cleared sections entirely.
+        let manifest = test_manifest();
+        let history = HistoryManager::new(10000);
+        let request = builder.build(&manifest, &history, None, 32_768);
+        let system = &request.messages[0].content;
+        assert!(!system.contains("Active Task List"), "todo omitted");
+        assert!(
+            !system.contains("Memory Conflicts Needing Confirmation"),
+            "ambiguous hint omitted"
+        );
+        assert!(!system.contains("Workspace Prompt File"), "prompt file omitted");
+    }
+
+    #[test]
+    fn apply_patches_rejects_type_mismatch_and_non_array_tools() {
+        use crate::debug::protocol::{PatchError, PatchSet, PatchValue};
+        use std::collections::HashMap;
+
+        let mut builder = ContextBuilder::new("base".to_string());
+
+        // JSON patch on a text section → TypeMismatch.
+        let err = builder
+            .apply_patches(&PatchSet {
+                patches: HashMap::from([(
+                    "system_prompt".to_string(),
+                    PatchValue::Json {
+                        value: serde_json::json!({ "not": "text" }),
+                    },
+                )]),
+            })
+            .expect_err("json patch for text section must error");
+        assert!(matches!(
+            err,
+            PatchError::TypeMismatch { section, .. } if section == "system_prompt"
+        ));
+
+        // Non-array JSON on tool_definitions → TypeMismatch.
+        let err = builder
+            .apply_patches(&PatchSet {
+                patches: HashMap::from([(
+                    "tool_definitions".to_string(),
+                    PatchValue::Json {
+                        value: serde_json::json!({ "not": "an array" }),
+                    },
+                )]),
+            })
+            .expect_err("non-array tool_definitions must error");
+        assert!(matches!(
+            err,
+            PatchError::TypeMismatch { section, .. } if section == "tool_definitions"
+        ));
+    }
+
+    #[test]
+    fn apply_patches_empty_environment_falls_back_to_detect() {
+        use crate::debug::protocol::{PatchSet, PatchValue};
+        use std::collections::HashMap;
+
+        let mut builder = ContextBuilder::new("base".to_string());
+        builder.set_environment_override("custom env".to_string());
+        assert!(builder.environment_override().is_some());
+
+        builder
+            .apply_patches(&PatchSet {
+                patches: HashMap::from([(
+                    "environment".to_string(),
+                    PatchValue::Text { value: String::new() },
+                )]),
+            })
+            .expect("clear environment must succeed");
+        assert!(
+            builder.environment_override().is_none(),
+            "empty string clears the override — build() falls back to auto-detect"
         );
     }
 

@@ -332,6 +332,15 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "iteration": ev.iteration,
                     "total_token_estimate": ev.total_token_estimate,
                     "sections": serde_json::Value::Object(sections),
+                    // ADR-054 step 2: control params carried on the event so
+                    // the metadata bar renders without a follow-up RPC.
+                    "request_params": ev.request_params.as_ref().map(|rp| serde_json::json!({
+                        "model": rp.model,
+                        "temperature": rp.temperature,
+                        "max_tokens": rp.max_tokens,
+                        "reasoning_effort": rp.reasoning_effort,
+                        "thinking_mode": rp.thinking_mode,
+                    })),
                 });
                 let _ = app_handle.emit("debug-event", event);
             }

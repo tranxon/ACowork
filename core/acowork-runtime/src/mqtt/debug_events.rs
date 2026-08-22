@@ -184,74 +184,43 @@ fn encode_event(session_id: &str, event: DebugEvent) -> (String, data_envelope::
             iteration,
             sections,
             total_token_estimate,
+            request_params,
         } => {
             // Convert the wire-friendly `ContextSections` (with `SectionMeta`
             // metadata only) into the protobuf `SectionMeta` map. The proto
             // SectionMeta is freshly defined here for the debug events;
             // reusing the same field shape keeps the wire format consistent
             // with the agent loop's debug snapshots.
-            let mut sections_map = std::collections::HashMap::new();
-            sections_map.insert(
-                "system_prompt".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.system_prompt.size_bytes as u64,
-                    token_estimate: sections.system_prompt.token_estimate as u64,
-                    hash: sections.system_prompt.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "workspace_context".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.workspace_context.size_bytes as u64,
-                    token_estimate: sections.workspace_context.token_estimate as u64,
-                    hash: sections.workspace_context.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "environment".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.environment.size_bytes as u64,
-                    token_estimate: sections.environment.token_estimate as u64,
-                    hash: sections.environment.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "tool_definitions".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.tool_definitions.size_bytes as u64,
-                    token_estimate: sections.tool_definitions.token_estimate as u64,
-                    hash: sections.tool_definitions.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "skill_instructions".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.skill_instructions.size_bytes as u64,
-                    token_estimate: sections.skill_instructions.token_estimate as u64,
-                    hash: sections.skill_instructions.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "retrieved_memory".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.retrieved_memory.size_bytes as u64,
-                    token_estimate: sections.retrieved_memory.token_estimate as u64,
-                    hash: sections.retrieved_memory.hash.clone(),
-                },
-            );
-            sections_map.insert(
-                "identity_context".to_string(),
-                acowork_core::mqtt_proto::SectionMeta {
-                    size_bytes: sections.identity_context.size_bytes as u64,
-                    token_estimate: sections.identity_context.token_estimate as u64,
-                    hash: sections.identity_context.hash.clone(),
-                },
-            );
+            // ADR-054: `ContextSections` is now a Vec<SectionMeta> — iterate
+            // instead of hardcoding the 7 fields so future sections
+            // (messages, todo_context, workspace_prompt_file, ...) flow
+            // through with zero changes here.
+            let sections_map = sections
+                .sections
+                .iter()
+                .map(|meta| {
+                    (
+                        meta.key.clone(),
+                        acowork_core::mqtt_proto::SectionMeta {
+                            size_bytes: meta.size_bytes as u64,
+                            token_estimate: meta.token_estimate as u64,
+                            hash: meta.hash.clone(),
+                        },
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
             let msg = DebugContextBuiltEvent {
                 session_id: session_id.to_string(),
                 iteration,
                 total_token_estimate: total_token_estimate as u64,
                 sections: sections_map,
+                request_params: Some(acowork_core::mqtt_proto::RequestParams {
+                    model: request_params.model.clone(),
+                    temperature: request_params.temperature,
+                    max_tokens: request_params.max_tokens,
+                    reasoning_effort: request_params.reasoning_effort.clone(),
+                    thinking_mode: request_params.thinking_mode.clone(),
+                }),
             };
             (
                 "onContextBuilt".to_string(),
@@ -346,41 +315,50 @@ mod tests {
     #[test]
     fn encode_context_built_event() {
         let sections = ContextSections {
-            system_prompt: SectionMeta {
-                size_bytes: 100,
-                token_estimate: 25,
-                hash: "h1".to_string(),
-            },
-            workspace_context: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
-            environment: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
-            tool_definitions: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
-            skill_instructions: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
-            retrieved_memory: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
-            identity_context: SectionMeta {
-                size_bytes: 0,
-                token_estimate: 0,
-                hash: String::new(),
-            },
+            sections: vec![
+                SectionMeta {
+                    key: "system_prompt".to_string(),
+                    size_bytes: 100,
+                    token_estimate: 25,
+                    hash: "h1".to_string(),
+                },
+                SectionMeta {
+                    key: "workspace_context".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+                SectionMeta {
+                    key: "environment".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+                SectionMeta {
+                    key: "tool_definitions".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+                SectionMeta {
+                    key: "skill_instructions".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+                SectionMeta {
+                    key: "retrieved_memory".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+                SectionMeta {
+                    key: "identity_context".to_string(),
+                    size_bytes: 0,
+                    token_estimate: 0,
+                    hash: String::new(),
+                },
+            ],
         };
         let (suffix, payload) = encode_event(
             "sess-1",
@@ -388,6 +366,13 @@ mod tests {
                 iteration: 3,
                 sections,
                 total_token_estimate: 25,
+                request_params: crate::debug::protocol::RequestParams {
+                    model: "gpt-4o".to_string(),
+                    temperature: Some(0.7),
+                    max_tokens: Some(2048),
+                    reasoning_effort: None,
+                    thinking_mode: None,
+                },
             },
         );
         assert_eq!(suffix, "onContextBuilt");
@@ -396,10 +381,16 @@ mod tests {
                 assert_eq!(msg.session_id, "sess-1");
                 assert_eq!(msg.iteration, 3);
                 assert_eq!(msg.total_token_estimate, 25);
+                assert_eq!(msg.sections.len(), 7, "all 7 sections must be encoded");
                 let sys = msg.sections.get("system_prompt").unwrap();
                 assert_eq!(sys.size_bytes, 100);
                 assert_eq!(sys.token_estimate, 25);
                 assert_eq!(sys.hash, "h1");
+                // ADR-054 step 2: request params ride the event.
+                let rp = msg.request_params.expect("request_params must be set");
+                assert_eq!(rp.model, "gpt-4o");
+                assert_eq!(rp.temperature, Some(0.7));
+                assert_eq!(rp.max_tokens, Some(2048));
             }
             _ => panic!("expected DebugContextBuiltEvent payload"),
         }

@@ -55,6 +55,10 @@ pub enum DebugEvent {
         iteration: u32,
         sections: protocol::ContextSections,
         total_token_estimate: usize,
+        /// ADR-054 step 2: control params of the ChatRequest that built
+        /// this snapshot — carried on the event so the panel's metadata
+        /// bar renders without a follow-up RPC.
+        request_params: protocol::RequestParams,
     },
     /// Execution state changed (Running/Paused/Stepping/Stopped)
     ExecutionStateChanged {

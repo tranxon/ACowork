@@ -219,17 +219,25 @@ result: { "breakpoints": [...] }
 
 ### 3.4 上下文快照与检查（Context Snapshot & Inspection）
 
-DevMode 下，Agent Runtime 在每轮迭代的 `BuildContext` 阶段完成后，自动捕获**上下文构建结果**。调试面板按轮次将其树状展开，仅展示 5 个控制面 section：
+DevMode 下，Agent Runtime 在每轮迭代的 `BuildContext` 阶段完成后，自动捕获**上下文构建结果**。调试面板按轮次将其树状展开。
+
+> **ADR-054（2026-09）**：section 从硬编码 7 字段改为**内容寻址列表**（`Vec<NamedSection>`），并按 `ContextBuilder::build()` 的实际注入顺序产出。新增 3 个此前被合并/丢失的 section（`workspace_prompt_file` / `todo_context` / `ambiguous_confirmation_hint`）与 `messages`（对话消息，懒加载）。前端不再硬编码 section 集合——**渲染 snapshot 实际产出的 sections**，未启用的 section 自然不出现。
 
 | Section | 内容 | 调试用途 |
 |---------|------|---------|
-| `system_prompt` | 系统级指令 | 调试 prompt 工程 |
-| `tool_definitions` | 可用工具及参数 Schema | 验证工具注册、修复 Schema 错误 |
-| `skill_instructions` | 加载的 SKILL.md 内容 | 调试 Skill 行为 |
-| `retrieved_memory` | Grafeo 检索的记忆节点 | 验证记忆检索质量 |
+| `system_prompt` | 系统级指令（base prompt，**不再合并** workspace_prompt_file） | 调试 prompt 工程 |
 | `identity_context` | 用户身份字段 | 检查身份注入 |
+| `workspace_context` | Workspace 自格式化上下文 | 验证 workspace 注入 |
+| `retrieved_memory` | Grafeo 检索的记忆节点 | 验证记忆检索质量 |
+| `ambiguous_confirmation_hint` | P3-4 冲突确认提示（≥3 个 pending ambiguous conflict 时注入） | 排查"Agent 为何突然问消歧问题" |
+| `skill_instructions` | 加载的 SKILL.md 内容 | 调试 Skill 行为 |
+| `todo_context` | Agent 内部 active task list | 排查"在错误 todo 上循环" |
+| `environment` | 平台环境信息（override 或自动检测） | 检查环境注入 |
+| `workspace_prompt_file` | CLAUDE.md / AGENTS.md 内容（独立呈现） | 区分"agent 自带 prompt"与"workspace 配置" |
+| `tool_definitions` | 可用工具及参数 Schema | 验证工具注册、修复 Schema 错误 |
+| `messages` | 构建时点的完整对话历史（元数据在快照，**内容懒加载**） | 排查"LLM 实际看到了什么" |
 
-> **设计决策**：`conversation_history` **排除**在调试面板外。左侧聊天面板已按时间线完整展示所有消息——调试面板不需要重复展示只读的对话结果，聚焦于"控制面"即可。
+> **设计决策**：`messages` 在 ADR-054 之前**排除**在调试面板外。2026-09 起纳入——对话内容是否被正确喂给 LLM 是 debug 最大盲区，且通过懒加载（仅展开时传输）保证性能。
 
 ```rust
 /// 获取指定轮次的上下文构建快照（仅返回元数据摘要，不含完整内容）
@@ -240,25 +248,39 @@ params: {
 result: {
     "iteration": 3,
     "built_at": "2026-05-09T12:00:00Z",
+    // ADR-054: sections 是带 key 的元数据数组（按 build() 注入顺序）
     "sections": {
-        "system_prompt":      { "size_bytes": 2048, "token_estimate": 512,  "hash": "a1b2..." },
-        "tool_definitions":   { "size_bytes": 4096, "token_estimate": 1024, "hash": "e5f6..." },
-        "skill_instructions": { "size_bytes": 1536, "token_estimate": 384,  "hash": "i9j0..." },
-        "retrieved_memory":   { "size_bytes": 3072, "token_estimate": 768,  "hash": "m3n4..." },
-        "identity_context":   { "size_bytes": 512,  "token_estimate": 128,  "hash": "q7r8..." }
+        "sections": [
+            { "key": "system_prompt",      "size_bytes": 2048, "token_estimate": 512,  "hash": "a1b2..." },
+            { "key": "tool_definitions",   "size_bytes": 4096, "token_estimate": 1024, "hash": "e5f6..." },
+            { "key": "skill_instructions", "size_bytes": 1536, "token_estimate": 384,  "hash": "i9j0..." },
+            { "key": "retrieved_memory",   "size_bytes": 3072, "token_estimate": 768,  "hash": "m3n4..." },
+            { "key": "identity_context",   "size_bytes": 512,  "token_estimate": 128,  "hash": "q7r8..." },
+            { "key": "messages",           "size_bytes": 0,    "token_estimate": 0,    "hash": "lazy"  }
+        ]
     },
     "total_token_estimate": 2816,
-    "phase": "BuildContext"
+    "phase": "BuildContext",
+    // ADR-054: 构建该快照的 ChatRequest 控制参数（缺省项为 null）
+    "request_params": {
+        "model": "gpt-4o",
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "reasoning_effort": "medium",
+        "thinking_mode": null
+    }
 }
 
 /// 懒加载某个 section 的完整内容（用户在调试面板点击展开时按需拉取）
+/// ADR-054: section 名不再硬编码——传入 snapshot.sections 中的任意 key；
+/// "messages" 走特殊懒加载路径（从 messages_by_iteration 序列化返回）。
 method: "debugger.getSection"
 params: {
     "iteration": 3,
-    "section": "tool_definitions"  // 5 个 section 名之一
+    "section": "tool_definitions"  // snapshot.sections[].key 之一
 }
 result: {
-    "content": "...",               // 完整文本内容
+    "content": "...",               // 完整文本内容；messages 为 JSON 数组字符串
     "hash": "e5f6...",              // 内容完整性校验
     "token_count": 1024
 }
@@ -294,14 +316,19 @@ result: {
 /// 为下一次 reExecute 修补上下文 section
 /// 补丁是临时的——仅在下次 reExecute 时生效，执行后或 rewind 后自动清除。
 /// 可多次调用以增量构建补丁。
+/// ADR-054: PatchSet 改为 HashMap<String, PatchValue>，每个值带
+/// `{ type: "text" | "json", value }` 标签；未知 section 名被拒绝（typo 安全）。
 method: "debugger.patchContext"
 params: {
     "patches": {
-        "system_prompt": "Updated system instructions...",    // 可选
-        "tool_definitions": [{ "name": "...", ... }],          // 可选：替换工具列表
-        "skill_instructions": "Updated skill content...",      // 可选
-        "retrieved_memory": [...],                             // 可选：覆盖检索记忆
-        "identity_context": { "field": "value" }               // 可选
+        "system_prompt":            { "type": "text", "value": "Updated system instructions..." },
+        "tool_definitions":         { "type": "json", "value": [{ "name": "...", ... }] },
+        "skill_instructions":       { "type": "text", "value": "Updated skill content..." },
+        "retrieved_memory":         { "type": "json", "value": [...] },
+        "identity_context":         { "type": "json", "value": { "field": "value" } },
+        "workspace_prompt_file":    { "type": "text", "value": "... (空串清除)" },
+        "todo_context":             { "type": "text", "value": "... (空串清除)" },
+        "ambiguous_confirmation_hint": { "type": "text", "value": "..." }
     }
     // 每个 key 均为可选——仅传入的 section 会被修补，其余保持不变
 }
@@ -546,7 +573,7 @@ Agent Runtime 的 DevMode 是生产模式的**超集**：
 |------|---------|---------|
 | Debug Protocol | HTTP RPC `/api/debug/*`（localhost Runtime HTTP）+ MQTT 调试事件 publisher（共享 `:19875`） | 不注册 routes、不 spawn publisher |
 | 主循环 | 受调试器控制（Pause/Step/Resume） | 自动连续执行 |
-| 上下文快照 | 每轮自动创建上下文快照（5 section） | 不创建 |
+| 上下文快照 | 每轮自动创建上下文快照（ADR-054：动态 section 列表，最多 11 个） | 不创建 |
 | 上下文编辑 | 支持迭代级回退与修补（`rewind`/`patchContext`/`reExecute`） | 不支持 |
 | 消息快照 | 每步自动创建 ConversationSnapshot | 不快照 |
 | Provider 切换 | 动态可切换（`debugger.switchProvider`） | 按 manifest 固定配置 |
@@ -679,7 +706,7 @@ body: { "package_path": "...", "export_to": "/user/choosen/path" }
 | 决策 | 选择 | 理由 |
 |------|------|------|
 | 协议格式（ADR-048） | HTTP REST（RPC）+ MQTT pub/sub（事件） | 与生产 IPC 完全同构（ADR-033 / ADR-034），无需引入第三种协议栈；ACL / 多用户隔离天然继承 |
-| 调试面板范围 | 仅 5 个控制面 section，排除 conversation_history | conversation_history 已在左侧聊天面板完整展示；调试面板聚焦于可编辑的"控制面"上下文 |
+| 调试面板范围 | ADR-054：动态 section 列表（最多 11 个，含 messages/todo/ambiguous/workspace_prompt_file） | ADR-054 前仅 5 个控制面 section；2026-09 起 messages 纳入（懒加载），覆盖 LLM 实际看到的全部上下文 |
 | 上下文快照 | 元数据摘要 + 懒加载 | 每轮 <500 字节元数据（size/token/hash），section 内容按需拉取；配合虚拟滚动保证百轮对话的流畅性 |
 | 上下文编辑模型 | rewind + patchContext + reExecute 分离 | rewind 不自动触发执行，编辑后需显式 reExecute；补丁临时生效，执行后自动清除 |
 | 快照机制 | 记录 message_count | 极轻量，无需深拷贝；messages 是 append-only，截断即可回滚 |

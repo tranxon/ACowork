@@ -31,23 +31,38 @@ type DebugState = "Running" | "Paused" | "Stepping" | "Stopped";
 const DEBUG_STATES: ReadonlySet<string> = new Set(["Running", "Paused", "Stepping", "Stopped"]);
 
 interface SectionMeta {
+  /** Section key ("system_prompt", "workspace_context", ...). */
+  key: string;
   size_bytes: number;
   token_estimate: number;
   hash: string;
+}
+
+/** Mirrors backend `RequestParams` (ADR-054 step 2). */
+export interface RequestParams {
+  model: string;
+  temperature?: number | null;
+  max_tokens?: number | null;
+  reasoning_effort?: string | null;
+  thinking_mode?: string | null;
 }
 
 interface ContextSnapshotMeta {
   iteration: number;
   built_at: string;
   /**
-   * Section metadata keyed by section name (system_prompt, ...).
-   * Both sources use this shape: the `onContextBuilt` MQTT event
-   * (proto map) and the `GET /api/debug/context/{iter}` RPC result
-   * (ContextSections struct - same seven keys).
+   * Section metadata list, ordered by the backend's `build()` injection
+   * order (ADR-054). Both sources converge to this shape:
+   * - `GET /api/debug/context/{iter}` RPC result (ContextSections now a
+   *   `Vec<SectionMeta>` — each element carries its `key`)
+   * - `onContextBuilt` MQTT event (proto `map<string, SectionMeta>` is
+   *   converted to the same list in `_handleDebugEvent`)
    */
-  sections: Record<string, SectionMeta>;
+  sections: SectionMeta[];
   total_token_estimate: number;
   phase: Phase;
+  /** ADR-054 step 2: control params of the ChatRequest that built this snapshot. */
+  request_params: RequestParams;
 }
 
 interface SectionContent {
@@ -71,6 +86,8 @@ interface PerSessionDebugState {
   snapshots: ContextSnapshotMeta[];
   sectionCache: Map<string, SectionContent>;
   hasPendingPatches: boolean;
+  /** ADR-054 step 2: request params of the current iteration (from getState). */
+  requestParams: RequestParams | null;
 }
 
 function freshPerSessionState(): PerSessionDebugState {
@@ -84,6 +101,7 @@ function freshPerSessionState(): PerSessionDebugState {
     snapshots: [],
     sectionCache: new Map(),
     hasPendingPatches: false,
+    requestParams: null,
   };
 }
 
@@ -115,9 +133,14 @@ interface DebugEventPayload {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
-  // onContextBuilt
-  sections?: Record<string, SectionMeta>;
+  // onContextBuilt — proto `map<string, SectionMeta>` (keys are the
+  // section names; each value has no `key` field). Converted to
+  // `SectionMeta[]` in `_handleDebugEvent` before storing.
+  sections?: Record<string, Omit<SectionMeta, "key">>;
   total_token_estimate?: number;
+  // ADR-054 step 2: control params of the ChatRequest that built this
+  // snapshot (now carried on the MQTT event itself).
+  request_params?: RequestParams | null;
   // onStateChange
   new_state?: string;
 }
@@ -266,6 +289,24 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       get().getState(sessionId).catch((e) => {
         log.warn("[debugStore] connect() deferred getState failed:", e);
       });
+    }, 0);
+
+    // ADR-054 step 2 fallback: re-sync existing context snapshots so the
+    // request-params metadata bar and section list are complete even if
+    // MQTT events were dropped before the listener attached (QoS 0
+    // semantics, ADR-048 §2.4). Idempotent — getContextSnapshot replaces
+    // the entry in place.
+    setTimeout(async () => {
+      const sessionId = useChatStore.getState().getActiveSessionId(agentId);
+      if (!sessionId) return;
+      const s = useDebugStore.getState().sessionStates[sessionId];
+      for (const snap of s?.snapshots ?? []) {
+        await get()
+          .getContextSnapshot(sessionId, snap.iteration)
+          .catch((e) => {
+            log.warn("[debugStore] connect() snapshot re-sync failed:", e);
+          });
+      }
     }, 0);
   },
 
@@ -432,6 +473,12 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         const total_token_estimate = event.total_token_estimate ?? 0;
         log.debug("[debugStore] onContextBuilt: sid=", targetSid, "iteration=", iteration, "sections=", !!sections);
         if (sections) {
+          // ADR-054: proto map -> list. Order is unspecified by the map;
+          // the panel sorts by SECTION_ORDER at render time.
+          const sectionsList: SectionMeta[] = Object.entries(sections).map(([key, meta]) => ({
+            key,
+            ...meta,
+          }));
           setSession((current) => {
             const currentSnapshots = current.snapshots;
             const maxExisting = currentSnapshots.length > 0
@@ -449,7 +496,18 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
               ...current,
               snapshots: [
                 ...currentSnapshots,
-                { iteration, built_at: new Date().toISOString(), sections, total_token_estimate, phase: current.phase },
+                {
+                  iteration,
+                  built_at: new Date().toISOString(),
+                  sections: sectionsList,
+                  total_token_estimate,
+                  phase: current.phase,
+                  // ADR-054 step 2: request params now ride on the MQTT
+                  // event itself; the fallback covers older/edge payloads
+                  // (a later getState / getContextSnapshot re-sync will
+                  // overwrite the entry with the full values).
+                  request_params: event.request_params ?? { model: "", temperature: null, max_tokens: null, reasoning_effort: null, thinking_mode: null },
+                },
               ],
             };
           });
@@ -525,6 +583,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
       state: DebugState;
       usage: { prompt_tokens: number; completion_tokens: number };
       paused?: boolean;
+      request_params?: RequestParams | null;
     };
     if (result) {
       const debugState = result.state ?? "Running";
@@ -535,6 +594,7 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
         promptTokens: result.usage?.prompt_tokens ?? 0,
         completionTokens: result.usage?.completion_tokens ?? 0,
         paused: debugState === "Paused",
+        requestParams: result.request_params ?? null,
       });
     }
   },
@@ -543,20 +603,32 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   getContextSnapshot: async (sessionId: string | null, iteration: number) => {
     if (!sessionId) return;
+    // Backend `GetContextSnapshotResult` now carries
+    // `sections: { sections: SectionMeta[] }` (ADR-054).
     const result = (await get().rpc("GET", `context/${iteration}`, {
       query: { session_id: sessionId },
     })) as
-      | (ContextSnapshotMeta & { sections: Record<string, SectionMeta> })
+      | (Omit<ContextSnapshotMeta, "sections"> & {
+          sections: { sections: SectionMeta[] };
+        })
       | undefined;
     if (result) {
+      const normalized: ContextSnapshotMeta = {
+        iteration: result.iteration,
+        built_at: result.built_at,
+        sections: result.sections.sections,
+        total_token_estimate: result.total_token_estimate,
+        phase: result.phase,
+        request_params: result.request_params ?? { model: "", temperature: null, max_tokens: null, reasoning_effort: null, thinking_mode: null },
+      };
       applySessionDebug(sessionId, (s) => {
         const idx = s.snapshots.findIndex((sn) => sn.iteration === iteration);
         if (idx >= 0) {
           const updated = [...s.snapshots];
-          updated[idx] = result;
+          updated[idx] = normalized;
           return { ...s, snapshots: updated };
         }
-        return { ...s, snapshots: [...s.snapshots, result] };
+        return { ...s, snapshots: [...s.snapshots, normalized] };
       });
     }
   },
@@ -590,11 +662,22 @@ export const useDebugStore = create<DebugStore>((set, get) => ({
 
   patchContext: async (sessionId: string | null, patches: Record<string, unknown>) => {
     if (!sessionId) return;
+    // ADR-054: PatchSet is now `HashMap<String, PatchValue>` with a tagged
+    // `{ type: "text" | "json", value }` payload per section. Normalize
+    // plain JS values into the tagged wire form here so callers (the
+    // panel's onSaveEdit) don't need to know each section's value kind.
+    const normalized: Record<string, { type: "text" | "json"; value: unknown }> = {};
+    for (const [key, value] of Object.entries(patches)) {
+      normalized[key] =
+        typeof value === "string"
+          ? { type: "text", value }
+          : { type: "json", value };
+    }
     // Body shape matches Runtime `DebugRpcBody` (http/debug.rs):
     // `patches` is a `PatchContextParams { patches: PatchSet }`, i.e.
     // the patch set is nested one level under a `patches` key.
     await get().rpc("POST", "context/patch", {
-      body: { session_id: sessionId, patches: { patches } },
+      body: { session_id: sessionId, patches: { patches: normalized } },
     });
     patchSessionDebug(sessionId, { hasPendingPatches: true });
   },

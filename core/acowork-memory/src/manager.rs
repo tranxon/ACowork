@@ -64,6 +64,23 @@ pub struct MemoryManagerConfig {
     pub pagerank_weight: f64,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
+    /// Per-turn auto-injection of retrieved memories (default: **false**).
+    ///
+    /// When disabled, `MemoryManager::retrieve_and_inject` is NOT called
+    /// from the agent loop — the LLM can still trigger explicit deep recall
+    /// via the `memory_recall` tool (`MemoryQuery::deep_recall`).
+    ///
+    /// **Why off by default (2026-09-12 decision)**:
+    /// 1. Different agent types need different recall profiles (coding
+    ///    agents value project context; chat agents value user preference).
+    /// 2. The Grafeo memory layer (triples / preference nodes) is not yet
+    ///    mature enough for unsupervised per-turn injection.
+    /// 3. Retrieving with the raw user message as the query yields
+    ///    low-precision results that can mislead the LLM.
+    ///
+    /// Re-enable per agent once the memory layer matures, or once an
+    /// agent-specific query strategy exists.
+    pub auto_inject_enabled: bool,
 }
 
 impl Default for MemoryManagerConfig {
@@ -77,6 +94,7 @@ impl Default for MemoryManagerConfig {
             enable_graph_expand: true,
             pagerank_weight: 0.1,
             record_async: true,
+            auto_inject_enabled: false,
         }
     }
 }
@@ -175,6 +193,11 @@ impl MemoryManager {
     /// Create a new MemoryManager with the given configuration.
     pub fn new(config: MemoryManagerConfig) -> Self {
         Self { config }
+    }
+
+    /// Read the manager's configuration (e.g. to check feature switches).
+    pub fn config(&self) -> &MemoryManagerConfig {
+        &self.config
     }
 
     /// Retrieve relevant memories for the current query.
@@ -1265,6 +1288,9 @@ mod tests {
         assert_eq!(config.default_min_score, 0.0);
         assert!(config.enable_graph_expand);
         assert!(config.record_async);
+        // 2026-09-12: per-turn auto-injection is OFF by default (see the
+        // field doc for rationale). Re-enable deliberately per agent.
+        assert!(!config.auto_inject_enabled);
     }
 
     #[test]

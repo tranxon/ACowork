@@ -983,6 +983,20 @@ message DebugContextBuiltEvent {
   /// Section metadata: size_bytes, token_estimate, hash. Same fields as
   /// `DebugUsage`-style meta records in the existing protocol.
   map<string, SectionMeta> sections = 4;
+  /// ADR-054 step 2: control params of the ChatRequest that built this
+  /// snapshot (model / temperature / max_tokens / reasoning / thinking).
+  /// Carried on the event so the panel's metadata bar renders immediately
+  /// without a follow-up RPC round-trip.
+  RequestParams request_params = 5;
+}
+
+/// Control params of a ChatRequest — mirrors the Debug Panel metadata bar.
+message RequestParams {
+  string model = 1;
+  optional double temperature = 2;
+  optional uint32 max_tokens = 3;
+  optional string reasoning_effort = 4;
+  optional string thinking_mode = 5;
 }
 
 /// Lightweight section metadata (size / tokens / hash).

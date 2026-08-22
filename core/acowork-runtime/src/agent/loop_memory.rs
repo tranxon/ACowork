@@ -70,6 +70,23 @@ impl super::loop_::AgentLoop {
                 handle.set_session_id(sid.clone());
             }
 
+        // Per-turn auto-injection is OFF by default (MemoryManagerConfig).
+        //
+        // 2026-09-12 decision (temporary disable): different agent types
+        // need different recall profiles; the Grafeo memory layer (triples /
+        // preference nodes) is not yet mature enough for unsupervised
+        // injection; and raw user-message queries yield low-precision hits
+        // that can mislead the LLM. The `memory_recall` tool remains
+        // available for explicit deep recall.
+        //
+        // NOTE: `clear_retrieved_memory()` and `set_session_id()` above
+        // still run so stale memory from previous turns never leaks into
+        // the next build, and the tool handle stays in sync.
+        if !manager.config().auto_inject_enabled {
+            tracing::debug!("Memory auto-inject disabled (auto_inject_enabled=false)");
+            return vec![];
+        }
+
         let mut query =
             acowork_memory::MemoryQuery::auto_inject(user_message.to_string(), current_session_id);
 

@@ -1222,6 +1222,15 @@ impl AgentLoop {
             // session_core.title asynchronously; this checkpoint picks it
             // up at the earliest opportunity after the LLM round-trip.
             self.flush_pending_title();
+
+            // ADR-054 follow-up: refresh this iteration's messages snapshot
+            // so it includes the current iteration's assistant reply / tool
+            // results (the context-build snapshot predates the LLM call and
+            // therefore only contains history up to the user message).
+            self.core
+                .debug_observer
+                .on_iteration_complete(&self.session.history);
+
             match iteration_result {
                 IterationResult::TextResponse(content) => {
                     // Consume redundant channel-based Stop/StopLoop that
@@ -1436,6 +1445,8 @@ impl AgentLoop {
                 iteration: debug_iter,
                 model: current_model,
                 all_tools: &self.core.all_tools,
+                max_tokens: chat_request.max_tokens,
+                history: &self.session.history,
             })
             .await;
 

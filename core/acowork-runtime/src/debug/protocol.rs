@@ -10,6 +10,8 @@
 //! See docs/design/10-debug-protocol.md and
 //! docs/adr/zh/ADR-048-debug-protocol-mqtt-http.md.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 // ── Execution Control ─────────────────────────────────────────────────
@@ -73,9 +75,35 @@ pub struct DebugUsage {
 
 // ── Context Snapshot Types ────────────────────────────────────────────
 
+/// Control parameters of the ChatRequest that produced a context snapshot.
+///
+/// ADR-054: previously invisible to the debug panel. `max_tokens` is the
+/// final value after capabilities + hard-cap + safety compression in
+/// `ContextBuilder::build()`; it is captured at the snapshot call site
+/// (it isn't a `ContextBuilder` field).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RequestParams {
+    /// Actual model used for the LLM call.
+    pub model: String,
+    /// Temperature override, if any (build() falls back to DEFAULT_TEMPERATURE).
+    pub temperature: Option<f64>,
+    /// Final max_tokens (post capping), if sent to the provider.
+    pub max_tokens: Option<u32>,
+    /// Reasoning effort ("auto" | "off" | "low" | "medium" | "high" | "max").
+    pub reasoning_effort: Option<String>,
+    /// Anthropic thinking mode ("extended" | "adaptive").
+    pub thinking_mode: Option<String>,
+}
+
 /// Section metadata (same as in controller for serialization).
+///
+/// `key` names the section ("system_prompt", "workspace_context", ...).
+/// ADR-054: `ContextSections` moved from a 7-field struct to a
+/// content-addressed `Vec<SectionMeta>` so new sections (messages,
+/// todo_context, workspace_prompt_file, ...) need no protocol change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SectionMeta {
+    pub key: String,
     pub size_bytes: usize,
     pub token_estimate: usize,
     pub hash: String,
@@ -89,19 +117,19 @@ pub struct GetContextSnapshotResult {
     pub sections: ContextSections,
     pub total_token_estimate: usize,
     pub phase: DebugPhase,
+    /// ADR-054: control params of the ChatRequest that built this snapshot.
+    pub request_params: RequestParams,
 }
 
-/// Seven control-plane sections of context (all content injected into the
-/// LLM request that is NOT user input or LLM output).
+/// Context sections of one iteration (metadata only, ordered by the
+/// same injection order as `ContextBuilder::build()`).
+///
+/// ADR-054: was a struct of 7 hardcoded fields; now a list so the UI can
+/// render whatever sections the backend actually produced without a
+/// frontend/backend re-deploy in lockstep.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSections {
-    pub system_prompt: SectionMeta,
-    pub workspace_context: SectionMeta,
-    pub environment: SectionMeta,
-    pub tool_definitions: SectionMeta,
-    pub skill_instructions: SectionMeta,
-    pub retrieved_memory: SectionMeta,
-    pub identity_context: SectionMeta,
+    pub sections: Vec<SectionMeta>,
 }
 
 /// Parameters for `debugger.getContextSnapshot` and `debugger.getSection`.
@@ -151,54 +179,73 @@ pub struct PatchContextParams {
 
 /// Set of patches to apply to context sections.
 ///
+/// ADR-054: was a struct of 7 `Option<T>` fields; now a content-addressed
+/// `HashMap<String, PatchValue>` so new sections (messages, todo_context,
+/// ambiguous_confirmation_hint, workspace_prompt_file) need no struct
+/// change. `apply_patches()` validates keys against the known section
+/// list and rejects unknown ones (typo safety).
+///
 /// Multiple `patchContext` calls are merged incrementally: each call
 /// overwrites only the sections it specifies, leaving previously patched
 /// sections intact.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PatchSet {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_context: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub environment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_definitions: Option<Vec<serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skill_instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retrieved_memory: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub identity_context: Option<serde_json::Value>,
+    /// Key = section name ("system_prompt" / "messages" / ...)
+    #[serde(flatten)]
+    pub patches: HashMap<String, PatchValue>,
+}
+
+/// Value of a single context patch.
+///
+/// `Text` is for string-valued sections (system_prompt, workspace_context,
+/// environment, skill_instructions, messages); `Json` is for JSON-valued
+/// sections (tool_definitions, retrieved_memory, identity_context).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum PatchValue {
+    Text { value: String },
+    Json { value: serde_json::Value },
+}
+
+impl PatchValue {
+    /// The wire variant name ("text" | "json") — used in type-mismatch errors.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            PatchValue::Text { .. } => "text",
+            PatchValue::Json { .. } => "json",
+        }
+    }
 }
 
 impl PatchSet {
     /// Merge another PatchSet into this one, overwriting only the sections
-    /// that the other PatchSet specifies. Sections that are None in the
-    /// other set are left unchanged in this one.
+    /// that the other PatchSet specifies. Sections absent from the other
+    /// set are left unchanged in this one.
     pub fn merge(&mut self, other: PatchSet) {
-        if other.system_prompt.is_some() {
-            self.system_prompt = other.system_prompt;
-        }
-        if other.workspace_context.is_some() {
-            self.workspace_context = other.workspace_context;
-        }
-        if other.environment.is_some() {
-            self.environment = other.environment;
-        }
-        if other.tool_definitions.is_some() {
-            self.tool_definitions = other.tool_definitions;
-        }
-        if other.skill_instructions.is_some() {
-            self.skill_instructions = other.skill_instructions;
-        }
-        if other.retrieved_memory.is_some() {
-            self.retrieved_memory = other.retrieved_memory;
-        }
-        if other.identity_context.is_some() {
-            self.identity_context = other.identity_context;
-        }
+        self.patches.extend(other.patches);
     }
+}
+
+/// Error produced while applying a [`PatchSet`] to a [`ContextBuilder`].
+///
+/// ADR-054 §6: keying patches by string loses compile-time section names,
+/// so unknown keys must be rejected at apply time instead of silently
+/// ignored (typo safety).
+///
+/// Validation is centralized in `ContextBuilder::resolve_patch` (the single
+/// source of truth shared with `handle_patch_context`) — it rejects unknown
+/// keys with [`PatchError::UnknownSection`] and value/section type
+/// mismatches with [`PatchError::TypeMismatch`].
+#[derive(Debug, thiserror::Error)]
+pub enum PatchError {
+    #[error("Unknown section: {0}")]
+    UnknownSection(String),
+    #[error("Section {section} expects {expected} patch, got {actual}")]
+    TypeMismatch {
+        section: String,
+        expected: &'static str,
+        actual: &'static str,
+    },
 }
 
 /// Parameters for `debugger.editMessage`.

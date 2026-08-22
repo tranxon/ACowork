@@ -14,6 +14,7 @@
 //! safety nets for when the LLM-based compaction itself cannot execute.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use acowork_core::protocol::ProtocolType;
 use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
@@ -72,8 +73,16 @@ pub(crate) const COMPACTION_SUMMARY_NAME: &str = "compaction_summary";
 
 /// History manager for conversation
 pub struct HistoryManager {
-    /// Conversation messages
-    messages: Vec<ChatMessage>,
+    /// Conversation messages.
+    ///
+    /// ADR-054: held behind `Arc` so debug context snapshots can retain a
+    /// shallow reference (`Arc::clone`) to the exact history of their build
+    /// iteration instead of deep-copying the whole conversation per iteration.
+    /// All mutations go through `Arc::make_mut` (copy-on-write): when no
+    /// snapshot holds the buffer (non-debug mode) mutations are in-place
+    /// zero-copy; when snapshots share it, the first mutation after a
+    /// snapshot clones once and subsequent mutations reuse that buffer.
+    messages: Arc<Vec<ChatMessage>>,
     /// Maximum token budget for history
     max_tokens: u64,
     /// Current estimated token count for the conversation prompt.
@@ -97,7 +106,7 @@ impl HistoryManager {
     /// Create new history manager with token budget.
     pub fn new(max_tokens: u64) -> Self {
         Self {
-            messages: Vec::new(),
+            messages: Arc::new(Vec::new()),
             max_tokens,
             current_tokens: 0,
             protocol_type: ProtocolType::default(),
@@ -166,12 +175,27 @@ impl HistoryManager {
 
     /// Get reference to messages
     pub fn messages(&self) -> &[ChatMessage] {
-        &self.messages
+        self.messages.as_slice()
     }
 
-    /// Get mutable reference to messages
+    /// Get an `Arc` clone of the messages (O(1), no copy).
+    ///
+    /// ADR-054: debug context snapshots hold this shallow reference so
+    /// `messages_by_iteration` shares the underlying buffer instead of
+    /// deep-copying per iteration. Mutations after this clone go through
+    /// [`Arc::make_mut`], so the clone retains the exact history as of the
+    /// snapshot's build iteration.
+    pub fn messages_arc(&self) -> Arc<Vec<ChatMessage>> {
+        Arc::clone(&self.messages)
+    }
+
+    /// Get mutable reference to messages (copy-on-write).
+    ///
+    /// When other `Arc` clones exist (e.g. a debug snapshot), this clones
+    /// the buffer once; subsequent mutations reuse that buffer. When this
+    /// is the sole owner, the buffer is mutated in place with zero copies.
     pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
-        &mut self.messages
+        Arc::make_mut(&mut self.messages)
     }
 
     /// Get current estimated token count
@@ -243,7 +267,7 @@ impl HistoryManager {
             Some(&self.protocol_type),
         );
         self.current_tokens += tokens;
-        self.messages.push(message);
+        self.messages_mut().push(message);
     }
 
     /// Append multiple messages
@@ -255,7 +279,7 @@ impl HistoryManager {
                 Some(&self.protocol_type),
             );
         }
-        self.messages.extend(messages);
+        self.messages_mut().extend(messages);
     }
 
     /// Bulk-load a pre-built message sequence from session resume.
@@ -268,7 +292,7 @@ impl HistoryManager {
     /// input (the restorer guarantees tool_call/tool_result pairing and
     /// system/compaction-marker ordering invariants).
     pub fn load_restored(&mut self, messages: Vec<ChatMessage>) {
-        self.messages = messages;
+        self.messages = Arc::new(messages);
         self.current_tokens = self
             .messages
             .iter()
@@ -359,7 +383,7 @@ impl HistoryManager {
                         .count_message(m, self.model_for_counting(), Some(&self.protocol_type))
                 })
                 .sum();
-            self.messages.drain(first_removable..round_end);
+            self.messages_mut().drain(first_removable..round_end);
             self.current_tokens = self.current_tokens.saturating_sub(dropped_tokens);
             removed += round_end - first_removable;
         }
@@ -378,7 +402,7 @@ impl HistoryManager {
 
     /// Clear all messages
     pub fn clear(&mut self) {
-        self.messages.clear();
+        self.messages = Arc::new(Vec::new());
         self.current_tokens = 0;
     }
 
@@ -401,7 +425,7 @@ impl HistoryManager {
         if target_len >= self.messages.len() {
             return;
         }
-        self.messages.truncate(target_len);
+        self.messages_mut().truncate(target_len);
         // Recalculate token count
         self.current_tokens = self
             .messages
@@ -458,8 +482,8 @@ impl HistoryManager {
         if removed > 0 {
             // Actually remove the messages
             let end = first_removable + removed;
-            self.messages
-                .drain(first_removable..end.min(self.messages.len()));
+            let drain_end = end.min(self.messages.len());
+            self.messages_mut().drain(first_removable..drain_end);
             tracing::debug!(
                 removed,
                 remaining_tokens = self.current_tokens,
@@ -518,7 +542,7 @@ impl HistoryManager {
                     Some(&self.protocol_type),
                 );
                 self.current_tokens = self.current_tokens.saturating_sub(tokens);
-                self.messages.remove(i);
+                self.messages_mut().remove(i);
                 removed += 1;
             }
         }
@@ -529,7 +553,7 @@ impl HistoryManager {
 
     /// Returns 1 if replaced, 0 if not found or already compressed.
     pub fn abandon_tool_result(&mut self, tool_call_id: &str) -> usize {
-        for msg in &mut self.messages {
+        for msg in self.messages_mut() {
             if !matches!(msg.role, MessageRole::Tool) {
                 continue;
             }
@@ -556,7 +580,7 @@ impl HistoryManager {
     ///
     /// Returns 1 if restored, 0 if not found or already raw.
     pub fn retrieve_tool_result(&mut self, tool_call_id: &str, original_content: &str) -> usize {
-        for msg in &mut self.messages {
+        for msg in self.messages_mut() {
             if !matches!(msg.role, MessageRole::Tool) {
                 continue;
             }
@@ -583,7 +607,7 @@ impl HistoryManager {
         let model = self.model_for_counting().to_string();
         let pt = self.protocol_type.clone();
         let mut total = 0u64;
-        for msg in &self.messages {
+        for msg in self.messages.iter() {
             total = total.saturating_add(self.counter.count_message(msg, &model, Some(&pt)));
         }
         self.current_tokens = total;
@@ -737,7 +761,7 @@ impl HistoryManager {
         system_prompt: &str,
         identity_context: Option<&str>,
     ) -> std::result::Result<(String, acowork_core::providers::traits::UsageInfo), RuntimeError> {
-        let messages_text = crate::episode_distill::format_messages(&self.messages);
+        let messages_text = crate::episode_distill::format_messages(self.messages.as_slice());
         if messages_text.is_empty() {
             return Err(RuntimeError::Tool(
                 "Cannot compact empty history".to_string(),
@@ -851,7 +875,7 @@ impl HistoryManager {
         }
 
         // Remove middle section
-        self.messages.drain(system_count..tail_start);
+        self.messages_mut().drain(system_count..tail_start);
 
         // Insert compaction summary as a User message with marker.
         //
@@ -876,7 +900,7 @@ impl HistoryManager {
             self.model_for_counting(),
             Some(&self.protocol_type),
         );
-        self.messages.insert(system_count, summary_msg);
+        self.messages_mut().insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
 
         tracing::debug!(
@@ -940,6 +964,55 @@ mod tests {
         hm.append(make_message(MessageRole::User, "Hello world"));
         assert_eq!(hm.len(), 1);
         assert!(hm.token_count() > 0);
+    }
+
+    #[test]
+    fn messages_arc_is_shallow_and_copy_on_write() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(ChatMessage::user("hello".to_string()));
+        hm.append(ChatMessage::assistant("hi".to_string()));
+
+        // Snapshot A: shallow Arc clone — O(1), shares the live buffer.
+        let snap_a = hm.messages_arc();
+        assert_eq!(snap_a.len(), 2);
+
+        // Mutate after the clone: COW clones once; the snapshot retains the
+        // exact build-time history while the live history advances.
+        hm.append(ChatMessage::user("second turn".to_string()));
+        assert_eq!(snap_a.len(), 2, "snapshot must retain build-time history");
+        assert_eq!(hm.messages().len(), 3, "live history advances");
+
+        // Snapshot B taken after the mutation sees the new state.
+        let snap_b = hm.messages_arc();
+        assert_eq!(snap_b.len(), 3);
+
+        // Multiple snapshots without intervening mutation share one buffer.
+        let snap_c = hm.messages_arc();
+        assert!(
+            Arc::ptr_eq(&snap_b, &snap_c),
+            "no mutation between clones => same underlying buffer"
+        );
+        assert!(
+            !Arc::ptr_eq(&snap_a, &snap_b),
+            "mutation between clones => distinct buffers"
+        );
+    }
+
+    #[test]
+    fn messages_arc_survives_rewind_truncate() {
+        let mut hm = HistoryManager::new(100_000);
+        for i in 0..5 {
+            hm.append(ChatMessage::user(format!("m{i}")));
+        }
+        let snap = hm.messages_arc();
+        assert_eq!(snap.len(), 5);
+
+        // Debug rewind truncates live history; the snapshot keeps the
+        // pre-rewind buffer (lazy getSection(iteration, "messages") still
+        // returns the full conversation as of that build).
+        hm.truncate_to(3);
+        assert_eq!(snap.len(), 5, "snapshot keeps pre-rewind history");
+        assert_eq!(hm.messages().len(), 3, "live history truncated");
     }
 
     #[test]

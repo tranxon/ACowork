@@ -107,6 +107,15 @@ pub trait DebugObserver: Send + Sync {
     /// Called after `ContextBuilder::build()` completes.
     async fn on_context_built(&self, _req: ContextSnapshotRequest<'_>) {}
 
+    /// Called after an iteration finishes (all exit paths: text reply,
+    /// tool-call chain, stop, pause).
+    ///
+    /// ADR-054 follow-up: refreshes the iteration's `messages` snapshot so
+    /// it includes the current iteration's assistant reply / tool results
+    /// (the context-build snapshot is captured before the LLM call and
+    /// therefore only contains history up to the user message).
+    fn on_iteration_complete(&self, _history: &HistoryManager) {}
+
     /// Apply any pending patches to the context builder.
     /// Returns true if patches were applied.
     fn apply_pending_patches(&self, _builder: &mut ContextBuilder) -> bool {
@@ -139,6 +148,19 @@ pub struct ContextSnapshotRequest<'a> {
     pub model: &'a str,
     /// All tools (built-in + MCP) — needed for tool definitions snapshot.
     pub all_tools: &'a [Arc<dyn Tool>],
+    /// Final `max_tokens` of the built ChatRequest (post capping).
+    ///
+    /// ADR-054 step 2: not a `ContextBuilder` field — it is computed in
+    /// `build()` from manifest + gateway capabilities, so the call site
+    /// passes the built request's value.
+    pub max_tokens: Option<u32>,
+    /// Conversation history as of the context build.
+    ///
+    /// ADR-054 step 4: the observer shallow-snapshots `history.messages()`
+    /// into `messages_by_iteration` and derives the `messages` section's
+    /// size/token/hash metadata without storing the content in the
+    /// snapshot itself.
+    pub history: &'a HistoryManager,
 }
 
 // ── Debug Observer Slot (Enum Dispatch) ───────────────────────────────
@@ -247,6 +269,14 @@ impl DebugObserverSlot {
         match self {
             DebugObserverSlot::Production => {}
             DebugObserverSlot::Dev(obs) => obs.on_context_built(req).await,
+        }
+    }
+
+    /// Delegate [`DebugObserver::on_iteration_complete`].
+    pub fn on_iteration_complete(&self, history: &HistoryManager) {
+        match self {
+            DebugObserverSlot::Production => {}
+            DebugObserverSlot::Dev(obs) => obs.on_iteration_complete(history),
         }
     }
 

@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use acowork_core::providers::traits::ChatMessage;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use super::protocol::{ContextSections, DebugPhase, DebugUsage, SectionMeta};
+use super::protocol::{ContextSections, DebugPhase, DebugUsage, RequestParams, SectionMeta};
 
 // ── Debug Execution State ─────────────────────────────────────────────
 
@@ -60,18 +61,73 @@ pub struct ContextSnapshot {
     pub built_at: chrono::DateTime<chrono::Utc>,
     pub sections: ContextSnapshotSections,
     pub total_token_estimate: usize,
+    /// ADR-054: control params of the ChatRequest that built this snapshot.
+    pub request_params: RequestParams,
 }
 
-/// The seven control-plane sections with their content.
+/// The context sections of one snapshot, ordered by `build()` injection order.
+///
+/// ADR-054: was a struct of 7 hardcoded fields; now a content-addressed
+/// `Vec<NamedSection>` so new sections (messages, todo_context,
+/// workspace_prompt_file, ...) require no struct change and the UI can
+/// render whatever the backend produced.
 #[derive(Debug, Clone)]
 pub struct ContextSnapshotSections {
-    pub system_prompt: SectionContent,
-    pub workspace_context: SectionContent,
-    pub environment: SectionContent,
-    pub tool_definitions: SectionContent,
-    pub skill_instructions: SectionContent,
-    pub retrieved_memory: SectionContent,
-    pub identity_context: SectionContent,
+    /// Sections in `build()` injection order (n ≤ ~11, linear lookup is fine)
+    pub sections: Vec<NamedSection>,
+}
+
+/// A named context section with its content and metadata.
+#[derive(Debug, Clone)]
+pub struct NamedSection {
+    /// Section key ("system_prompt", "messages", ...)
+    pub key: String,
+    pub content: SectionContent,
+}
+
+impl NamedSection {
+    /// Create a named section with model-aware token estimation.
+    pub fn new(key: impl Into<String>, content: String, model: &str) -> Self {
+        Self {
+            key: key.into(),
+            content: SectionContent::new(content, model),
+        }
+    }
+
+    /// Convert to serializable metadata (without content).
+    pub fn to_meta(&self) -> SectionMeta {
+        SectionMeta {
+            key: self.key.clone(),
+            size_bytes: self.content.size_bytes,
+            token_estimate: self.content.token_estimate,
+            hash: self.content.hash.clone(),
+        }
+    }
+}
+
+impl ContextSnapshotSections {
+    /// Look up a section by key (O(n), n ≤ ~11 — no index needed).
+    pub fn find(&self, key: &str) -> Option<&NamedSection> {
+        self.sections.iter().find(|s| s.key == key)
+    }
+
+    /// Mutable lookup by key — used to refresh metadata in place.
+    pub fn find_mut(&mut self, key: &str) -> Option<&mut NamedSection> {
+        self.sections.iter_mut().find(|s| s.key == key)
+    }
+
+    /// Get the content of a section by key (for lazy fetch).
+    pub fn get_content(&self, key: &str) -> Option<&SectionContent> {
+        self.find(key).map(|s| &s.content)
+    }
+
+    /// Total token estimate across all sections.
+    pub fn total_token_estimate(&self) -> usize {
+        self.sections
+            .iter()
+            .map(|s| s.content.token_estimate)
+            .sum()
+    }
 }
 
 /// Content of a single context section with metadata.
@@ -108,6 +164,20 @@ impl SectionContent {
         Self::build(content, token_estimate)
     }
 
+    /// Create a metadata-only SectionContent — content is NOT stored.
+    ///
+    /// ADR-054 step 4: the `messages` section carries only size/token/hash
+    /// metadata in the snapshot; the actual content is lazy-loaded via
+    /// `getSection(iteration, "messages")` from `messages_by_iteration`.
+    pub fn metadata_only(size_bytes: usize, token_estimate: usize, hash: String) -> Self {
+        Self {
+            content: String::new(),
+            size_bytes,
+            token_estimate,
+            hash,
+        }
+    }
+
     /// Internal constructor shared by [`new`] and [`with_token_count`].
     fn build(content: String, token_estimate: usize) -> Self {
         use sha2::{Digest, Sha256};
@@ -126,27 +196,12 @@ impl SectionContent {
             hash,
         }
     }
-
-    /// Convert to serializable metadata (without content).
-    pub fn to_meta(&self) -> SectionMeta {
-        SectionMeta {
-            size_bytes: self.size_bytes,
-            token_estimate: self.token_estimate,
-            hash: self.hash.clone(),
-        }
-    }
 }
 
 impl From<&ContextSnapshotSections> for ContextSections {
     fn from(s: &ContextSnapshotSections) -> Self {
         Self {
-            system_prompt: s.system_prompt.to_meta(),
-            workspace_context: s.workspace_context.to_meta(),
-            environment: s.environment.to_meta(),
-            tool_definitions: s.tool_definitions.to_meta(),
-            skill_instructions: s.skill_instructions.to_meta(),
-            retrieved_memory: s.retrieved_memory.to_meta(),
-            identity_context: s.identity_context.to_meta(),
+            sections: s.sections.iter().map(|ns| ns.to_meta()).collect(),
         }
     }
 }
@@ -165,6 +220,14 @@ pub struct DebugController {
     pub conversation_snapshots: Vec<ConversationSnapshot>,
     /// Context snapshots (indexed by iteration)
     pub context_snapshots: HashMap<u32, ContextSnapshot>,
+    /// Conversation messages per iteration (ADR-054 step 4).
+    ///
+    /// `Arc<Vec<ChatMessage>>` shares the underlying buffer across the
+    /// history snapshots; each iteration holds one clone of the (possibly
+    /// trimmed) history as it was when the context was built. Content is
+    /// lazy-loaded via `getSection(iteration, "messages")` and never
+    /// serialized into `ContextSnapshot` itself.
+    pub messages_by_iteration: HashMap<u32, Arc<Vec<ChatMessage>>>,
     /// Pending patches for context re-execution
     pub pending_patches: Option<super::protocol::PatchSet>,
     /// Target iteration for rewind (set by `debugger.rewind`, consumed by SessionTask)
@@ -212,6 +275,7 @@ impl DebugController {
             iteration: 0,
             conversation_snapshots: Vec::new(),
             context_snapshots: HashMap::new(),
+            messages_by_iteration: HashMap::new(),
             pending_patches: None,
             rewind_target: None,
             re_execute_pending: false,
@@ -247,6 +311,49 @@ impl DebugController {
     /// Get a context snapshot by iteration.
     pub fn get_context_snapshot(&self, iteration: u32) -> Option<&ContextSnapshot> {
         self.context_snapshots.get(&iteration)
+    }
+
+    /// Store the conversation messages for an iteration (ADR-054 step 4).
+    pub fn store_messages(&mut self, iteration: u32, messages: Arc<Vec<ChatMessage>>) {
+        self.messages_by_iteration.insert(iteration, messages);
+    }
+
+    /// Store the conversation messages for an iteration AND refresh the
+    /// `messages` section metadata in the context snapshot.
+    ///
+    /// Called at iteration completion: the stored messages then include
+    /// the current iteration's assistant reply / tool results, which the
+    /// context-build snapshot (captured before the LLM call) cannot
+    /// contain. The size/token/hash metadata is recomputed so
+    /// `getSection(iteration, "messages")` returns values consistent with
+    /// the lazy-loaded content.
+    pub fn store_messages_with_meta(
+        &mut self,
+        iteration: u32,
+        messages: Arc<Vec<ChatMessage>>,
+        model: &str,
+    ) {
+        self.messages_by_iteration.insert(iteration, messages.clone());
+
+        if let Some(snap) = self.context_snapshots.get_mut(&iteration)
+            && let Some(section) = snap.sections.find_mut("messages")
+        {
+            let json = serde_json::to_string(&messages).unwrap_or_default();
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(json.as_bytes());
+            section.content = SectionContent::metadata_only(
+                json.len(),
+                crate::token::count_text(&json, model),
+                format!("{:x}", hasher.finalize()),
+            );
+            snap.total_token_estimate = snap.sections.total_token_estimate();
+        }
+    }
+
+    /// Get the conversation messages for an iteration, if stored.
+    pub fn get_messages(&self, iteration: u32) -> Option<&Arc<Vec<ChatMessage>>> {
+        self.messages_by_iteration.get(&iteration)
     }
 
     /// Take the rewind target, clearing it from the controller.
@@ -317,6 +424,10 @@ impl DebugController {
             .retain(|s| s.iteration <= target_iteration);
         self.context_snapshots
             .retain(|&iter, _| iter <= target_iteration);
+        // ADR-054 step 4: messages are tied to the same iteration space —
+        // drop everything after the rewind target to keep memory bounded.
+        self.messages_by_iteration
+            .retain(|&iter, _| iter <= target_iteration);
     }
 
     /// Clear all stored state (for restarting).
@@ -326,6 +437,7 @@ impl DebugController {
         self.iteration = 0;
         self.conversation_snapshots.clear();
         self.context_snapshots.clear();
+        self.messages_by_iteration.clear();
         self.pending_patches = None;
         self.rewind_target = None;
         self.re_execute_pending = false;
@@ -335,5 +447,74 @@ impl DebugController {
 impl Default for DebugController {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acowork_core::providers::traits::MessageRole;
+
+    fn chat_message(role: MessageRole, content: &str) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn snapshot_with_messages_meta(iteration: u32) -> ContextSnapshot {
+        let named = vec![NamedSection {
+            key: "messages".to_string(),
+            content: SectionContent::metadata_only(0, 0, "stale-hash".to_string()),
+        }];
+        ContextSnapshot {
+            iteration,
+            built_at: chrono::Utc::now(),
+            sections: ContextSnapshotSections { sections: named },
+            total_token_estimate: 0,
+            request_params: RequestParams {
+                model: "gpt-4o".to_string(),
+                temperature: None,
+                max_tokens: None,
+                reasoning_effort: None,
+                thinking_mode: None,
+            },
+        }
+    }
+
+    #[test]
+    fn store_messages_with_meta_updates_messages_and_section_meta() {
+        let mut ctrl = DebugController::new();
+        ctrl.store_context_snapshot(snapshot_with_messages_meta(1));
+
+        let messages = Arc::new(vec![
+            chat_message(MessageRole::User, "hello"),
+            chat_message(MessageRole::Assistant, "hi there"),
+        ]);
+        ctrl.store_messages_with_meta(1, messages, "gpt-4o");
+
+        // messages_by_iteration updated.
+        assert_eq!(ctrl.get_messages(1).unwrap().len(), 2);
+        // Section meta refreshed: hash differs from the stale value and
+        // size/token reflect the actual serialized content.
+        let snap = ctrl.get_context_snapshot(1).unwrap();
+        let sec = snap.sections.find("messages").unwrap();
+        assert_ne!(sec.content.hash, "stale-hash");
+        assert!(sec.content.size_bytes > 0);
+        assert!(sec.content.token_estimate > 0);
+        assert!(snap.total_token_estimate > 0);
+    }
+
+    #[test]
+    fn store_messages_with_meta_without_snapshot_is_meta_noop() {
+        let mut ctrl = DebugController::new();
+        let messages = Arc::new(vec![chat_message(MessageRole::User, "hello")]);
+        ctrl.store_messages_with_meta(2, messages, "gpt-4o");
+
+        // Messages are stored regardless.
+        assert_eq!(ctrl.get_messages(2).unwrap().len(), 1);
+        // No context snapshot for iteration 2 — no panic, nothing to refresh.
+        assert!(ctrl.get_context_snapshot(2).is_none());
     }
 }

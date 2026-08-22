@@ -198,6 +198,11 @@ pub struct DebugStateSnapshot {
     pub usage: DebugUsage,
     pub paused: bool,
     pub state: String,
+    /// ADR-054 step 2: request params of the current (latest) context
+    /// snapshot, if one exists yet. Lets the panel's metadata bar show
+    /// model / temperature / max_tokens / reasoning / thinking without
+    /// a separate snapshot fetch.
+    pub request_params: Option<super::protocol::RequestParams>,
 }
 
 /// `debugger.getState` — full controller state.
@@ -205,6 +210,10 @@ pub async fn handle_get_state(
     ctrl: &mut DebugController,
 ) -> Result<DebugStateSnapshot, DebugError> {
     let current_state = ctrl.state;
+    let request_params = ctrl
+        .context_snapshots
+        .get(&ctrl.iteration)
+        .map(|s| s.request_params.clone());
     let state = DebugStateSnapshot {
         iteration: ctrl.iteration,
         phase: ctrl.phase,
@@ -224,6 +233,7 @@ pub async fn handle_get_state(
             .unwrap_or_default()
             .trim_matches('"')
             .to_string(),
+        request_params,
     };
     tracing::debug!(
         iteration = ctrl.iteration,
@@ -249,6 +259,7 @@ pub async fn handle_get_context_snapshot(
                 sections,
                 total_token_estimate: snap.total_token_estimate,
                 phase: DebugPhase::BuildContext,
+                request_params: snap.request_params.clone(),
             })
         }
         None => Err(DebugError::NotFound(format!(
@@ -274,21 +285,52 @@ pub async fn handle_get_section(
             params.iteration
         ))
     })?;
-    let section_content = match params.section.as_str() {
-        "system_prompt" => &snap.sections.system_prompt,
-        "workspace_context" => &snap.sections.workspace_context,
-        "environment" => &snap.sections.environment,
-        "tool_definitions" => &snap.sections.tool_definitions,
-        "skill_instructions" => &snap.sections.skill_instructions,
-        "retrieved_memory" => &snap.sections.retrieved_memory,
-        "identity_context" => &snap.sections.identity_context,
-        _ => {
-            return Err(DebugError::InvalidParams(format!(
-                "Unknown section: {}",
-                params.section
-            )));
-        }
-    };
+
+    // ADR-054 step 4: the `messages` section stores metadata only in the
+    // snapshot; its content is lazy-loaded from `messages_by_iteration`
+    // (the full conversation as of the context build). getSection is the
+    // single RPC for both paths — no separate handler needed.
+    if params.section == "messages" {
+        let messages = ctrl
+            .get_messages(params.iteration)
+            .ok_or_else(|| {
+                DebugError::NotFound(format!(
+                    "No stored messages for iteration {}",
+                    params.iteration
+                ))
+            })?;
+        let json = serde_json::to_string(messages.as_ref())
+            .map_err(|e| DebugError::Internal(format!("messages serialize failed: {e}")))?;
+        let meta = snap
+            .sections
+            .find("messages")
+            .map(|s| s.to_meta());
+        tracing::info!(
+            iteration = params.iteration,
+            message_count = messages.len(),
+            json_len = json.len(),
+            "Debug: getSection returning lazy-loaded messages"
+        );
+        return Ok(GetSectionResult {
+            content: json,
+            hash: meta.as_ref().map(|m| m.hash.clone()).unwrap_or_default(),
+            token_count: meta
+                .as_ref()
+                .map(|m| m.token_estimate)
+                .unwrap_or_default(),
+        });
+    }
+
+    // ADR-054: content-addressed lookup — any section the snapshot produced
+    // (7 original + messages/todo_context/workspace_prompt_file in later
+    // steps) is reachable without a new match arm.
+    let section_content = snap
+        .sections
+        .find(&params.section)
+        .map(|s| &s.content)
+        .ok_or_else(|| {
+            DebugError::InvalidParams(format!("Unknown section: {}", params.section))
+        })?;
     tracing::info!(
         iteration = params.iteration,
         section = %params.section,
@@ -395,46 +437,73 @@ pub async fn handle_patch_context(
     // getSection returns the patched content, not the original.
     // merged_patches is owned (not borrowed from ctrl), so no borrow conflict.
     let current_iter = ctrl.iteration;
+
+    // ADR-054: resolve ALL patches up front through the single source of
+    // truth (`context::resolve_patch`) — unknown keys (typo safety) and
+    // type mismatches fail the RPC here, regardless of whether a snapshot
+    // exists yet. The resolved values are then used to preview the patched
+    // snapshot; apply-time reuses the same resolution, so preview and
+    // actual application can never drift.
+    let resolved: Vec<(String, crate::agent::context::ResolvedPatch)> = merged_patches
+        .patches
+        .iter()
+        .map(|(key, value)| {
+            crate::agent::context::resolve_patch(key, value)
+                .map(|r| (key.clone(), r))
+                .map_err(|e| {
+                    DebugError::InvalidParams(format!("Invalid patch for section {key}: {e}"))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+
     // Use the model stored by capture_context_snapshot for
     // model-aware token counting via the unified API.
     // Clone before get_mut() to avoid borrow conflict.
     let model_owned = ctrl.current_model.clone().unwrap_or_default();
     let model: &str = &model_owned;
     if let Some(snap) = ctrl.context_snapshots.get_mut(&current_iter) {
-        if let Some(ref prompt) = merged_patches.system_prompt {
-            snap.sections.system_prompt =
-                super::controller::SectionContent::new(prompt.clone(), model);
-        }
-        if let Some(ref tools) = merged_patches.tool_definitions {
-            let content = serde_json::to_string_pretty(tools)
-                .unwrap_or_else(|_| serde_json::to_string(tools).unwrap_or_default());
-            snap.sections.tool_definitions = super::controller::SectionContent::new(content, model);
-        }
-        if let Some(ref skills) = merged_patches.skill_instructions {
-            snap.sections.skill_instructions =
-                super::controller::SectionContent::new(skills.clone(), model);
-        }
-        if let Some(ref memory) = merged_patches.retrieved_memory {
-            let content = memory.to_string();
-            snap.sections.retrieved_memory = super::controller::SectionContent::new(content, model);
-        }
-        if let Some(ref identity) = merged_patches.identity_context {
-            let content = identity.to_string();
-            snap.sections.identity_context = super::controller::SectionContent::new(content, model);
-        }
-        if let Some(ref workspace) = merged_patches.workspace_context {
-            snap.sections.workspace_context =
-                super::controller::SectionContent::new(workspace.clone(), model);
-        }
-        if let Some(ref env) = merged_patches.environment {
-            // Empty string clears the override — build() falls back
-            // to auto-detect.  The snapshot must match this behavior.
-            let content = if env.is_empty() {
-                crate::agent::context::detect_environment_text()
-            } else {
-                env.clone()
-            };
-            snap.sections.environment = super::controller::SectionContent::new(content, model);
+        for (key, patch) in &resolved {
+            let sections = &mut snap.sections.sections;
+            match patch {
+                crate::agent::context::ResolvedPatch::Text(content) => {
+                    if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
+                        named.content = super::controller::SectionContent::new(
+                            content.clone(),
+                            model,
+                        );
+                    }
+                }
+                crate::agent::context::ResolvedPatch::Json(v) => {
+                    if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
+                        named.content =
+                            super::controller::SectionContent::new(v.to_string(), model);
+                    }
+                }
+                crate::agent::context::ResolvedPatch::ToolDefinitions(defs) => {
+                    if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
+                        let content = serde_json::to_string_pretty(defs)
+                            .unwrap_or_else(|_| serde_json::to_string(defs).unwrap_or_default());
+                        named.content = super::controller::SectionContent::new(content, model);
+                    }
+                }
+                crate::agent::context::ResolvedPatch::Clear => match key.as_str() {
+                    // environment cleared → build() falls back to auto-detect;
+                    // the snapshot mirrors that by showing the detected text.
+                    "environment" => {
+                        if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
+                            named.content = super::controller::SectionContent::new(
+                                crate::agent::context::detect_environment_text(),
+                                model,
+                            );
+                        }
+                    }
+                    // workspace_prompt_file / todo_context /
+                    // ambiguous_confirmation_hint cleared → build() omits the
+                    // section; the snapshot drops it too (render what the
+                    // backend will actually produce).
+                    _ => sections.retain(|s| s.key != *key),
+                },
+            }
         }
         tracing::info!(
             iteration = current_iter,
@@ -497,8 +566,9 @@ mod tests {
     use crate::debug::events::DebugEventBus;
     use crate::debug::protocol::{
         DebugPhase, DebugUsage, GetContextSnapshotParams, GetSectionParams, PatchContextParams,
-        PatchSet, RewindParams,
+        PatchSet, PatchValue, RewindParams,
     };
+    use std::collections::HashMap;
 
     // ── Helpers ───────────────────────────────────────────────────────
 
@@ -508,6 +578,29 @@ mod tests {
     /// Build a fresh `DebugController` for one test case.
     fn fresh_controller() -> DebugController {
         DebugController::new()
+    }
+
+    /// Build a named section with a fixed token count (deterministic tests).
+    fn named_section(key: &str, content: &str, token: usize) -> super::super::controller::NamedSection {
+        super::super::controller::NamedSection {
+            key: key.to_string(),
+            content: SectionContent::with_token_count(content.to_string(), token),
+        }
+    }
+
+    /// Build the original 7-section snapshot (ADR-054 step 1 shape).
+    fn seven_sections(system_prompt: (&str, usize)) -> ContextSnapshotSections {
+        ContextSnapshotSections {
+            sections: vec![
+                named_section("system_prompt", system_prompt.0, system_prompt.1),
+                named_section("workspace_context", "", 0),
+                named_section("environment", "", 0),
+                named_section("tool_definitions", "", 0),
+                named_section("skill_instructions", "", 0),
+                named_section("retrieved_memory", "", 0),
+                named_section("identity_context", "", 0),
+            ],
+        }
     }
 
     /// Build a per-session `DebugEventSender` backed by a fresh
@@ -702,20 +795,12 @@ mod tests {
     #[tokio::test]
     async fn get_context_snapshot_returns_result_for_existing_iteration() {
         let mut ctrl = fresh_controller();
-        let section_content = SectionContent::with_token_count("hello".to_string(), 1);
         let snap = ContextSnapshot {
             iteration: 3,
             built_at: chrono::Utc::now(),
-            sections: ContextSnapshotSections {
-                system_prompt: section_content,
-                workspace_context: SectionContent::with_token_count(String::new(), 0),
-                environment: SectionContent::with_token_count(String::new(), 0),
-                tool_definitions: SectionContent::with_token_count(String::new(), 0),
-                skill_instructions: SectionContent::with_token_count(String::new(), 0),
-                retrieved_memory: SectionContent::with_token_count(String::new(), 0),
-                identity_context: SectionContent::with_token_count(String::new(), 0),
-            },
+            sections: seven_sections(("hello", 1)),
             total_token_estimate: 1,
+            request_params: Default::default(),
         };
         ctrl.context_snapshots.insert(3, snap);
 
@@ -726,6 +811,8 @@ mod tests {
         assert_eq!(result.iteration, 3);
         assert_eq!(result.total_token_estimate, 1);
         assert_eq!(result.phase, DebugPhase::BuildContext);
+        assert_eq!(result.sections.sections.len(), 7);
+        assert_eq!(result.sections.sections[0].key, "system_prompt");
     }
 
     // ── handle_get_section ────────────────────────────────────────────
@@ -738,16 +825,9 @@ mod tests {
             ContextSnapshot {
                 iteration: 7,
                 built_at: chrono::Utc::now(),
-                sections: ContextSnapshotSections {
-                    system_prompt: SectionContent::with_token_count("sys-body".to_string(), 5),
-                    workspace_context: SectionContent::with_token_count(String::new(), 0),
-                    environment: SectionContent::with_token_count(String::new(), 0),
-                    tool_definitions: SectionContent::with_token_count(String::new(), 0),
-                    skill_instructions: SectionContent::with_token_count(String::new(), 0),
-                    retrieved_memory: SectionContent::with_token_count(String::new(), 0),
-                    identity_context: SectionContent::with_token_count(String::new(), 0),
-                },
+                sections: seven_sections(("sys-body", 5)),
                 total_token_estimate: 5,
+                request_params: Default::default(),
             },
         );
 
@@ -772,16 +852,9 @@ mod tests {
             ContextSnapshot {
                 iteration: 1,
                 built_at: chrono::Utc::now(),
-                sections: ContextSnapshotSections {
-                    system_prompt: SectionContent::with_token_count(String::new(), 0),
-                    workspace_context: SectionContent::with_token_count(String::new(), 0),
-                    environment: SectionContent::with_token_count(String::new(), 0),
-                    tool_definitions: SectionContent::with_token_count(String::new(), 0),
-                    skill_instructions: SectionContent::with_token_count(String::new(), 0),
-                    retrieved_memory: SectionContent::with_token_count(String::new(), 0),
-                    identity_context: SectionContent::with_token_count(String::new(), 0),
-                },
+                sections: seven_sections(("", 0)),
                 total_token_estimate: 0,
+                request_params: Default::default(),
             },
         );
 
@@ -813,6 +886,94 @@ mod tests {
         assert!(matches!(err, DebugError::NotFound(_)));
     }
 
+    #[tokio::test]
+    async fn get_section_lazy_loads_messages_from_messages_by_iteration() {
+        use acowork_core::providers::traits::{ChatMessage, MessageRole};
+        use std::sync::Arc;
+
+        let mut ctrl = fresh_controller();
+        ctrl.current_model = Some("test-model".to_string());
+
+        let msgs: Arc<Vec<ChatMessage>> = Arc::new(vec![
+            ChatMessage::user("hello debugger".to_string()),
+            ChatMessage::assistant("hi there".to_string()),
+            ChatMessage {
+                role: MessageRole::Tool,
+                content: "[tool result]".to_string(),
+                ..Default::default()
+            },
+        ]);
+
+        // Snapshot carries the messages section metadata only (ADR-054 step 4).
+        let mut sections = seven_sections(("sys", 1));
+        let meta_json = serde_json::to_string(msgs.as_ref()).unwrap();
+        sections.sections.push(super::super::controller::NamedSection {
+            key: "messages".to_string(),
+            content: SectionContent::metadata_only(meta_json.len(), 3, "msg-hash".to_string()),
+        });
+        ctrl.context_snapshots.insert(
+            7,
+            ContextSnapshot {
+                iteration: 7,
+                built_at: chrono::Utc::now(),
+                sections,
+                total_token_estimate: 1,
+                request_params: Default::default(),
+            },
+        );
+        ctrl.store_messages(7, msgs.clone());
+
+        let r = handle_get_section(
+            &mut ctrl,
+            GetSectionParams {
+                iteration: 7,
+                section: "messages".to_string(),
+            },
+        )
+        .await
+        .expect("get_section(messages) ok");
+        assert_eq!(r.hash, "msg-hash");
+        assert_eq!(r.token_count, 3);
+        // Round-trip: JSON in the response must deep-equal the stored messages.
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&r.content).unwrap();
+        let stored: Vec<serde_json::Value> = serde_json::from_str(&meta_json).unwrap();
+        assert_eq!(parsed.len(), 3, "all messages must round-trip");
+        assert_eq!(parsed, stored, "lazy-loaded messages must deep-equal history");
+    }
+
+    #[tokio::test]
+    async fn get_section_messages_returns_not_found_when_messages_not_stored() {
+        let mut ctrl = fresh_controller();
+        let mut sections = seven_sections(("sys", 0));
+        sections.sections.push(super::super::controller::NamedSection {
+            key: "messages".to_string(),
+            content: SectionContent::metadata_only(0, 0, String::new()),
+        });
+        ctrl.context_snapshots.insert(
+            1,
+            ContextSnapshot {
+                iteration: 1,
+                built_at: chrono::Utc::now(),
+                sections,
+                total_token_estimate: 0,
+                request_params: Default::default(),
+            },
+        );
+        // NOTE: no ctrl.store_messages(1, ...) — simulates a rewind-cleared
+        // or pre-step-4 snapshot.
+
+        let err = handle_get_section(
+            &mut ctrl,
+            GetSectionParams {
+                iteration: 1,
+                section: "messages".to_string(),
+            },
+        )
+        .await
+        .expect_err("missing messages must error");
+        assert!(matches!(err, DebugError::NotFound(_)));
+    }
+
     // ── handle_rewind ─────────────────────────────────────────────────
 
     #[tokio::test]
@@ -821,8 +982,12 @@ mod tests {
         ctrl.iteration = 10;
         ctrl.rewind_target = None;
         ctrl.pending_patches = Some(PatchSet {
-            system_prompt: Some("stale".into()),
-            ..Default::default()
+            patches: HashMap::from([(
+                "system_prompt".to_string(),
+                PatchValue::Text {
+                    value: "stale".to_string(),
+                },
+            )]),
         });
         ctrl.conversation_snapshots.push(ConversationSnapshot {
             id: "snap-10".into(),
@@ -910,16 +1075,9 @@ mod tests {
             ContextSnapshot {
                 iteration: 4,
                 built_at: chrono::Utc::now(),
-                sections: ContextSnapshotSections {
-                    system_prompt: SectionContent::with_token_count("orig".into(), 1),
-                    workspace_context: SectionContent::with_token_count(String::new(), 0),
-                    environment: SectionContent::with_token_count(String::new(), 0),
-                    tool_definitions: SectionContent::with_token_count("[]".into(), 0),
-                    skill_instructions: SectionContent::with_token_count(String::new(), 0),
-                    retrieved_memory: SectionContent::with_token_count(String::new(), 0),
-                    identity_context: SectionContent::with_token_count(String::new(), 0),
-                },
+                sections: seven_sections(("orig", 1)),
                 total_token_estimate: 1,
+                request_params: Default::default(),
             },
         );
 
@@ -928,8 +1086,12 @@ mod tests {
             &mut ctrl,
             PatchContextParams {
                 patches: PatchSet {
-                    system_prompt: Some("patched-A".into()),
-                    ..Default::default()
+                    patches: HashMap::from([(
+                        "system_prompt".to_string(),
+                        PatchValue::Text {
+                            value: "patched-A".to_string(),
+                        },
+                    )]),
                 },
             },
         )
@@ -937,7 +1099,10 @@ mod tests {
         .expect("patch ok");
         assert!(ctrl.pending_patches.is_some());
         let snap = ctrl.context_snapshots.get(&4).unwrap();
-        assert_eq!(snap.sections.system_prompt.content, "patched-A");
+        assert_eq!(
+            snap.sections.find("system_prompt").unwrap().content.content,
+            "patched-A"
+        );
 
         // Second call: incremental merge — only `tool_definitions`
         // overrides; system_prompt from first patch must survive.
@@ -945,8 +1110,12 @@ mod tests {
             &mut ctrl,
             PatchContextParams {
                 patches: PatchSet {
-                    tool_definitions: Some(vec![serde_json::json!({"name": "x"})]),
-                    ..Default::default()
+                    patches: HashMap::from([(
+                        "tool_definitions".to_string(),
+                        PatchValue::Json {
+                            value: serde_json::json!([{ "name": "x" }]),
+                        },
+                    )]),
                 },
             },
         )
@@ -954,13 +1123,145 @@ mod tests {
         .expect("patch ok");
         let snap = ctrl.context_snapshots.get(&4).unwrap();
         assert_eq!(
-            snap.sections.system_prompt.content, "patched-A",
+            snap.sections.find("system_prompt").unwrap().content.content,
+            "patched-A",
             "previous system_prompt patch must survive merge"
         );
         assert!(
-            snap.sections.tool_definitions.content.contains("\"name\": \"x\""),
+            snap.sections
+                .find("tool_definitions")
+                .unwrap()
+                .content
+                .content
+                .contains("\"name\": \"x\""),
             "new tool_definitions patch must be applied"
         );
+    }
+
+    #[tokio::test]
+    async fn patch_context_rejects_unknown_section_key() {
+        let mut ctrl = fresh_controller();
+        ctrl.iteration = 1;
+        let err = handle_patch_context(
+            &mut ctrl,
+            PatchContextParams {
+                patches: PatchSet {
+                    patches: HashMap::from([(
+                        "system_promt".to_string(), // typo
+                        PatchValue::Text {
+                            value: "x".to_string(),
+                        },
+                    )]),
+                },
+            },
+        )
+        .await
+        .expect_err("unknown section must error");
+        assert!(matches!(err, DebugError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn patch_context_rejects_type_mismatch_before_storing() {
+        // ADR-054: type mismatches must fail the RPC (not silently skip),
+        // so the user sees the error instead of a no-op patch.
+        let mut ctrl = fresh_controller();
+        ctrl.iteration = 1;
+        let err = handle_patch_context(
+            &mut ctrl,
+            PatchContextParams {
+                patches: PatchSet {
+                    patches: HashMap::from([(
+                        "system_prompt".to_string(),
+                        PatchValue::Json {
+                            value: serde_json::json!({ "not": "text" }),
+                        },
+                    )]),
+                },
+            },
+        )
+        .await
+        .expect_err("json patch for a text section must error");
+        assert!(matches!(err, DebugError::InvalidParams(_)));
+        assert!(
+            ctrl.pending_patches.is_none(),
+            "rejected patch must not be stored as pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_context_rejects_non_array_tool_definitions() {
+        // tool_definitions requires a JSON array — an object must fail at
+        // RPC time (previously it previewed as "success" and only failed
+        // silently at apply time).
+        let mut ctrl = fresh_controller();
+        ctrl.iteration = 1;
+        let err = handle_patch_context(
+            &mut ctrl,
+            PatchContextParams {
+                patches: PatchSet {
+                    patches: HashMap::from([(
+                        "tool_definitions".to_string(),
+                        PatchValue::Json {
+                            value: serde_json::json!({ "not": "an array" }),
+                        },
+                    )]),
+                },
+            },
+        )
+        .await
+        .expect_err("non-array tool_definitions must error");
+        assert!(matches!(err, DebugError::InvalidParams(_)));
+        assert!(ctrl.pending_patches.is_none());
+    }
+
+    #[tokio::test]
+    async fn patch_context_empty_string_clears_section_from_snapshot() {
+        // ADR-054: empty-string clearing semantics must be identical between
+        // the snapshot preview and apply-time. The snapshot must drop the
+        // cleared section (build() will omit it).
+        let mut ctrl = fresh_controller();
+        ctrl.iteration = 4;
+        ctrl.current_model = Some("test-model".to_string());
+        let mut sections = seven_sections(("sys", 1));
+        sections.sections.push(super::super::controller::NamedSection {
+            key: "todo_context".to_string(),
+            content: SectionContent::with_token_count("old todos".to_string(), 2),
+        });
+        ctrl.context_snapshots.insert(
+            4,
+            ContextSnapshot {
+                iteration: 4,
+                built_at: chrono::Utc::now(),
+                sections,
+                total_token_estimate: 3,
+                request_params: Default::default(),
+            },
+        );
+
+        handle_patch_context(
+            &mut ctrl,
+            PatchContextParams {
+                patches: PatchSet {
+                    patches: HashMap::from([(
+                        "todo_context".to_string(),
+                        PatchValue::Text {
+                            value: String::new(), // clear
+                        },
+                    )]),
+                },
+            },
+        )
+        .await
+        .expect("empty-string clear must succeed");
+
+        let snap = ctrl.context_snapshots.get(&4).unwrap();
+        assert!(
+            snap.sections.find("todo_context").is_none(),
+            "cleared section must be dropped from the snapshot"
+        );
+        // The patch itself is stored for the next reExecute — apply_patches
+        // resolves the same empty string to Clear and omits the section.
+        assert!(ctrl.pending_patches.is_some());
     }
 
     // ── handle_re_execute ─────────────────────────────────────────────
@@ -969,8 +1270,12 @@ mod tests {
     async fn re_execute_with_pending_patches_returns_has_patches_true() {
         let mut ctrl = fresh_controller();
         ctrl.pending_patches = Some(PatchSet {
-            system_prompt: Some("x".into()),
-            ..Default::default()
+            patches: HashMap::from([(
+                "system_prompt".to_string(),
+                PatchValue::Text {
+                    value: "x".to_string(),
+                },
+            )]),
         });
         let outcome = handle_re_execute(&mut ctrl).await.expect("re_execute ok");
         assert!(outcome.has_patches);

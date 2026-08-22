@@ -19,6 +19,14 @@ interface SectionContentType {
   token_count: number;
 }
 
+/** Mirrors backend `SectionMeta` (ADR-054: each entry carries its key). */
+export interface SectionMetaType {
+  key: string;
+  size_bytes: number;
+  token_estimate: number;
+  hash: string;
+}
+
 export type { SectionContentType };
 
 export const SECTION_LABELS: Record<string, string> = {
@@ -27,23 +35,152 @@ export const SECTION_LABELS: Record<string, string> = {
   environment: "Environment",
   tool_definitions: "Tool Definitions",
   skill_instructions: "Skill Instructions",
-  retrieved_memory: "Retrieved Memory",
+  // ADR-051 P3: this section is the AUTO-INJECTED memory (retrieve_and_inject
+  // runs every user turn before the LLM call) — it is NOT a memory_recall
+  // tool call, so the chat conversation will not show it as a tool step.
+  retrieved_memory: "Retrieved Memory (auto-injected)",
   identity_context: "Identity Context",
+  // ADR-054 step 3: sections previously merged/lost, now standalone.
+  workspace_prompt_file: "Workspace Prompt File (CLAUDE.md / AGENTS.md)",
+  todo_context: "Active Task List",
+  ambiguous_confirmation_hint: "Memory Conflicts Hint",
+  // ADR-054 step 4: lazy-loaded; refreshed at iteration end so it includes
+  // the current iteration's assistant reply (not just the pre-LLM history).
+  messages: "Conversation Messages",
 };
 
 export const SECTION_ORDER = [
+  // Strictly follows ContextBuilder::build() injection order so the UI
+  // reproduces the system prompt the LLM actually sees (ADR-054 §3.2).
   "system_prompt",
-  "workspace_context",
-  "environment",
-  "tool_definitions",
-  "skill_instructions",
-  "retrieved_memory",
   "identity_context",
+  "workspace_context",
+  "retrieved_memory",
+  "ambiguous_confirmation_hint",
+  "skill_instructions",
+  "todo_context",
+  "environment",
+  "workspace_prompt_file",
+  "tool_definitions",
+  "messages",
 ];
 
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
+}
+
+/**
+ * Format a temperature value for the request-params metadata bar.
+ * Shows at most 3 decimal places (kills float noise like
+ * 0.10000000000000001) but keeps at least 2 (0.1 → "0.10").
+ */
+export function formatTemperature(value: number): string {
+  const fixed = value.toFixed(3);
+  const trimmed = fixed.replace(/0+$/, "").replace(/\.$/, "");
+  const [int, frac] = trimmed.split(".");
+  return frac && frac.length >= 2 ? trimmed : `${int}.${(frac ?? "").padEnd(2, "0")}`;
+}
+
+// ── Conversation messages viewer (ADR-054 step 4) ──────────────────────
+//
+// The `messages` section's content is a JSON array of ChatMessage
+// (lazy-loaded from `getSection(iteration, "messages")`). Rendered as a
+// scrollable list with per-role badges and collapsible tool_calls. This
+// mirrors the wire shape of `acowork_core::providers::traits::ChatMessage`
+// (role / content / name / tool_calls / reasoning_content / content_parts).
+
+interface WireChatMessage {
+  role?: string;
+  content?: string;
+  name?: string | null;
+  tool_calls?: Array<{
+    id?: string;
+    type?: string;
+    function?: { name?: string; arguments?: string };
+  }>;
+  reasoning_content?: string | null;
+}
+
+const ROLE_BADGE_CLASSES: Record<string, string> = {
+  user: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+  assistant: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+  tool: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  system: "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300",
+};
+
+function MessagesView({ content }: { content?: string }) {
+  if (!content) {
+    return (
+      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+        <Loader className="h-2.5 w-2.5 animate-spin" />
+        Loading messages...
+      </div>
+    );
+  }
+  let messages: WireChatMessage[] = [];
+  try {
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) messages = parsed;
+  } catch {
+    // Not valid JSON — fall back to plain text (e.g. error payload).
+    return (
+      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+        {content.slice(0, 4000)}
+        {content.length > 4000 && <span className="text-zinc-400">... (truncated)</span>}
+      </pre>
+    );
+  }
+  return (
+    <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
+      {messages.length === 0 && (
+        <div className="text-[10px] text-zinc-400">(empty conversation)</div>
+      )}
+      {messages.map((m, i) => {
+        const role = m.role ?? "unknown";
+        return (
+          <div
+            key={i}
+            className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-1 dark:border-zinc-600 dark:bg-zinc-800/60"
+          >
+            <div className="mb-0.5 flex flex-wrap items-center gap-1.5 text-[9px]">
+              <span
+                className={cn(
+                  "rounded px-1 py-px font-medium uppercase",
+                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                )}
+              >
+                {role}
+              </span>
+              {m.name && <span className="font-mono text-zinc-400">{m.name}</span>}
+              <span className="ml-auto font-mono text-zinc-400">#{i}</span>
+            </div>
+            {m.reasoning_content && (
+              <details className="mb-0.5 text-[9px] text-zinc-400">
+                <summary className="cursor-pointer">reasoning_content</summary>
+                <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {m.reasoning_content}
+                </pre>
+              </details>
+            )}
+            <pre className="whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+              {m.content ?? ""}
+            </pre>
+            {m.tool_calls && m.tool_calls.length > 0 && (
+              <details className="mt-0.5 text-[9px] text-zinc-400">
+                <summary className="cursor-pointer">
+                  tool_calls ({m.tool_calls.length})
+                </summary>
+                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
+                  {JSON.stringify(m.tool_calls, null, 2).slice(0, 2000)}
+                </pre>
+              </details>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 
@@ -122,9 +259,18 @@ export function SnapshotNode({
   snapshot: {
     iteration: number;
     built_at: string;
-    sections: Record<string, { size_bytes: number; token_estimate: number; hash: string }>;
+    /** ADR-054: content-addressed list (was a Record of 7 hardcoded keys). */
+    sections: SectionMetaType[];
     total_token_estimate: number;
     phase: string;
+    /** ADR-054 step 2: control params of the ChatRequest that built this snapshot. */
+    request_params?: {
+      model?: string;
+      temperature?: number | null;
+      max_tokens?: number | null;
+      reasoning_effort?: string | null;
+      thinking_mode?: string | null;
+    } | null;
   };
   expandedSections: Set<string>;
   sectionCache: Map<string, { content: string; hash: string; token_count: number }>;
@@ -195,13 +341,43 @@ export function SnapshotNode({
         </Tooltip>
       </div>
 
-      {/* Sections */}
+      {/* ADR-054 step 2: request params metadata bar — only non-empty
+          entries are shown; the whole bar is hidden when nothing is set.
+          One param per line so narrow panels don't wrap mid-value. */}
+      {!collapsed &&
+        (() => {
+          const rp = snapshot.request_params;
+          const items: string[] = [];
+          if (rp?.model) items.push(`Model: ${rp.model}`);
+          if (rp?.temperature != null) items.push(`Temperature: ${formatTemperature(rp.temperature)}`);
+          if (rp?.max_tokens != null) items.push(`max_tokens: ${rp.max_tokens}`);
+          if (rp?.reasoning_effort) items.push(`reasoning: ${rp.reasoning_effort}`);
+          if (rp?.thinking_mode) items.push(`thinking: ${rp.thinking_mode}`);
+          if (items.length === 0) return null;
+          return (
+            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-400">
+              {items.map((item) => (
+                <div key={item} className="whitespace-nowrap leading-4">
+                  {item}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+
+      {/* Sections — ADR-054: render whatever the backend produced, sorted
+          by SECTION_ORDER (build() injection order); unknown keys sort last
+          and fall back to the raw key as label. */}
       {!collapsed && (
         <div className="ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-50 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600 dark:bg-zinc-800/30">
-          {SECTION_ORDER.map((sectionKey) => {
-            const section = snapshot.sections[sectionKey];
-            if (!section) return null;
-
+          {[...snapshot.sections]
+            .sort((a, b) => {
+              const ia = SECTION_ORDER.indexOf(a.key);
+              const ib = SECTION_ORDER.indexOf(b.key);
+              return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+            })
+            .map((section) => {
+            const sectionKey = section.key;
             const cacheKey = `${snapshot.iteration}:${sectionKey}`;
             const isExpanded = expandedSections.has(cacheKey);
             const cachedContent = sectionCache.get(cacheKey);
@@ -226,7 +402,10 @@ export function SnapshotNode({
                       {formatBytes(section.size_bytes)} / ~{section.token_estimate} tok
                     </span>
                   </button>
-                  {/* Edit button — opens inline editor with the section's full content */}
+                  {/* Edit button — opens inline editor with the section's full content.
+                      The messages section is read-only in ADR-054 step 4
+                      (patch support is out of scope) — no editor for it. */}
+                  {sectionKey !== "messages" && (
                   <Tooltip content={t("debugPanel.editSection")} variant="plain">
                   <button
                     onClick={async () => {
@@ -247,13 +426,17 @@ export function SnapshotNode({
                     <Edit3 className="h-2.5 w-2.5" />
                   </button>
                   </Tooltip>
+                  )}
                 </div>
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
                   <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-100 p-2 text-zinc-600 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                    {/* Inline editing mode */}
-                    {editingSection &&
+                    {/* ADR-054 step 4: messages render as a conversation
+                        list, not raw JSON text. */}
+                    {sectionKey === "messages" ? (
+                      <MessagesView content={cachedContent?.content} />
+                    ) : editingSection &&
                       editingSection.iteration === snapshot.iteration &&
                       editingSection.section === sectionKey ? (
                       <div className="flex flex-col gap-1.5">
