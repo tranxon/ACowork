@@ -147,6 +147,8 @@ impl DebugObserverImpl {
                         iteration: None,
                         max_iterations: None,
                         retry_info: None,
+                        reason: Some(crate::agent::session_state::PauseReason::Debug),
+                        message: None,
                     });
                     // Use tokio::select! with rewind_notify so that
                     // rewinds are applied immediately (notification-driven)

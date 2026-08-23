@@ -25,6 +25,12 @@ const TIMEOUT_RETRY_THRESHOLD_MS = 5 * 60 * 1000;
  * click the button to skip the wait. When the timer expires, the backend
  * automatically retries the LLM request.
  *
+ * ADR-014: the banner is derived directly from `sessionStatus` — the backend
+ * owns the pause state; the frontend keeps no mirrored `retryWaitInfo` cache.
+ * The countdown epoch (`startedAt`) is tracked locally: it is reset whenever
+ * the retry info payload changes (new attempt / different wait), so the timer
+ * stays aligned with the backend's wait window.
+ *
  * IMPORTANT: this component owns its own `bannerSlot` wrapper and returns
  * `null` when not visible. Callers MUST NOT wrap `<RetryWaitBanner />` in
  * an outer wrapper, or an empty wrapper with `mt-1.5` will sit in the DOM
@@ -36,13 +42,28 @@ export function RetryWaitBanner() {
   const currentSessionId = useChatStore((s) =>
     selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null,
   );
-  const retryWaitInfo = useChatStore((s) => {
+  const sessionStatus = useChatStore((s) => {
     if (!selectedAgentId || !currentSessionId) return null;
-    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.retryWaitInfo ?? null;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.sessionStatus ?? null;
   });
 
+  // Derive retry info directly from the backend status — no mirrored cache.
+  const retryInfo = sessionStatus?.status === "paused" ? sessionStatus.detail?.retry_info ?? null : null;
+
+  // Local countdown epoch — reset whenever the retry payload changes so the
+  // timer reflects the backend's wait window (a new 429 restarts the count).
+  const [startedAt, setStartedAt] = useState<number>(0);
+  const lastRetryKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = retryInfo ? `${retryInfo.wait_ms}:${retryInfo.attempt}` : null;
+    if (key !== lastRetryKeyRef.current) {
+      lastRetryKeyRef.current = key;
+      setStartedAt(retryInfo ? Date.now() : 0);
+    }
+  }, [retryInfo]);
+
   // Determine if this is a timeout retry (long wait) or 429 retry (short wait)
-  const isTimeoutMode = retryWaitInfo !== null && retryWaitInfo.waitMs >= TIMEOUT_RETRY_THRESHOLD_MS;
+  const isTimeoutMode = retryInfo !== null && retryInfo.wait_ms >= TIMEOUT_RETRY_THRESHOLD_MS;
 
   // Local countdown state — derived from startedAt + waitMs
   const [remainingMs, setRemainingMs] = useState<number>(0);
@@ -50,20 +71,20 @@ export function RetryWaitBanner() {
 
   // Recalculate remaining time every animation frame for smooth countdown
   const tick = useCallback(() => {
-    if (!retryWaitInfo) {
+    if (!retryInfo) {
       setRemainingMs(0);
       return;
     }
-    const elapsed = Date.now() - retryWaitInfo.startedAt;
-    const remaining = Math.max(0, retryWaitInfo.waitMs - elapsed);
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, retryInfo.wait_ms - elapsed);
     setRemainingMs(remaining);
     if (remaining > 0) {
       rafRef.current = requestAnimationFrame(tick);
     }
-  }, [retryWaitInfo]);
+  }, [retryInfo, startedAt]);
 
   useEffect(() => {
-    if (retryWaitInfo) {
+    if (retryInfo) {
       rafRef.current = requestAnimationFrame(tick);
     } else {
       setRemainingMs(0);
@@ -74,7 +95,7 @@ export function RetryWaitBanner() {
         rafRef.current = null;
       }
     };
-  }, [retryWaitInfo, tick]);
+  }, [retryInfo, tick]);
 
   const handleSkip = () => {
     if (selectedAgentId) {
@@ -82,10 +103,10 @@ export function RetryWaitBanner() {
     }
   };
 
-  if (!retryWaitInfo || !selectedAgentId || !currentSessionId) return null;
+  if (!retryInfo || !selectedAgentId || !currentSessionId) return null;
 
   const remainingSec = Math.ceil(remainingMs / 1000);
-  const totalSec = Math.ceil(retryWaitInfo.waitMs / 1000);
+  const totalSec = Math.ceil(retryInfo.wait_ms / 1000);
 
   const label = isTimeoutMode
     ? "Response timeout"
@@ -120,7 +141,7 @@ export function RetryWaitBanner() {
             <span className="tabular-nums font-mono font-bold">
               {remainingSec}s
             </span>
-            {" "}({retryWaitInfo.attempt}/{retryWaitInfo.maxAttempts})
+            {" "}({retryInfo.attempt}/{retryInfo.max_attempts})
           </span>
         </span>
 
@@ -129,7 +150,7 @@ export function RetryWaitBanner() {
             ? "text-[var(--color-accent)]/70 dark:text-[var(--color-accent)]/70"
             : "text-orange-600/70 dark:text-orange-400/70"
         }`}>
-          {retryWaitInfo.provider}
+          {retryInfo.provider}
         </span>
 
         <div className="ml-auto flex items-center gap-1.5">
@@ -161,7 +182,7 @@ export function RetryWaitBanner() {
             }`}
           >
             <ButtonIcon className="h-3 w-3" />
-            <span>{buttonLabel}</span>
+            {buttonLabel}
           </button>
         </div>
       </div>

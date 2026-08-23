@@ -183,17 +183,6 @@ interface SessionChatState {
   messageOffset: number;
   messageLimit: number;
   messageTotal: number;
-  iterationLimitPaused: { iteration: number; maxIterations: number; message: string } | null;
-  /** Loop detected pause — populated from loop_detected_paused event */
-  loopDetectedPaused: { message: string } | null;
-  /** 429 retry wait info — populated from session_state when the provider is rate-limited */
-  retryWaitInfo: {
-    waitMs: number;
-    attempt: number;
-    maxAttempts: number;
-    provider: string;
-    startedAt: number; // Date.now() for frontend countdown timer
-  } | null;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
@@ -274,9 +263,6 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messageOffset: 0,
   messageLimit: 0,
   messageTotal: 0,
-  iterationLimitPaused: null,
-  loopDetectedPaused: null,
-  retryWaitInfo: null,
   pendingApproval: {},
   pendingQuestions: [],
   isLoadingSession: false,
@@ -1177,8 +1163,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
-        iterationLimitPaused: null,
-        loopDetectedPaused: null,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1199,8 +1183,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
-        iterationLimitPaused: null,
-        loopDetectedPaused: null,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1491,14 +1473,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           reason: "user_requested",
         },
       });
-      if (sessionId) {
-        set((state) => ({
-          ...updateSessionState(state, agentId, sessionId, {
-            iterationLimitPaused: null,
-            loopDetectedPaused: null,
-          }),
-        }));
-      }
     } catch (error) {
       log.error("[ChatStore] Failed to send continue signal:", error);
     }
@@ -2244,8 +2218,7 @@ function mergeDocumentUploads(entries: ConversationEntry[], agentId: string): Ch
 // ── WebSocket event handler — routes by event.session_id ──────────────
 
 const CONTENT_EVENT_TYPES = new Set([
-  "done", "error", "tool_approval_needed", "ask_question", "iteration_limit_paused",
-  "loop_detected_paused",
+  "done", "error", "tool_approval_needed", "ask_question",
   "context_usage", "session_state", "stopped", "todo_list_updated",
   "compacting_started", "compacting_ended", "model_confirmed", "reasoning_effort_confirmed",
   "reasoning_started", "reasoning_ended",
@@ -2682,30 +2655,14 @@ export function handleMessageEvent(
     }
 
     case "iteration_limit_paused": {
-      if (sid) {
-        const { iteration, max_iterations, message } = data as {
-          iteration: number;
-          max_iterations: number;
-          message: string;
-        };
-        set((state) => updateSessionState(state, agentId, sid, {
-          iterationLimitPaused: {
-            iteration,
-            maxIterations: max_iterations,
-            message,
-          },
-        }));
-      }
+      // ADR-014: Pause UX is derived from session_state (Paused detail with
+      // reason/message). This transient event is intentionally ignored —
+      // the frontend no longer mirrors pause flags from separate channels.
       break;
     }
 
     case "loop_detected_paused": {
-      if (sid) {
-        const { message } = data as { message: string };
-        set((state) => updateSessionState(state, agentId, sid, {
-          loopDetectedPaused: { message },
-        }));
-      }
+      // ADR-014: same as iteration_limit_paused — derived from session_state.
       break;
     }
 
@@ -2918,8 +2875,6 @@ export function handleMessageEvent(
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestions = [];
-              sessionPatch.iterationLimitPaused = null;
-              sessionPatch.loopDetectedPaused = null;
 
               // ADR-035 C2/O2: if activeStream still has unfrozen content
               // at idle, record_complete was lost (QoS edge case). Trigger
@@ -2938,20 +2893,6 @@ export function handleMessageEvent(
                   get().loadSessionMessages(agentId, sid);
                 });
               }
-            }
-
-            // 429 retry UX: populate retryWaitInfo when paused with retry_info
-            if (status.status === "paused" && status.detail?.retry_info) {
-              sessionPatch.retryWaitInfo = {
-                waitMs: status.detail.retry_info.wait_ms,
-                attempt: status.detail.retry_info.attempt,
-                maxAttempts: status.detail.retry_info.max_attempts,
-                provider: status.detail.retry_info.provider,
-                startedAt: Date.now(),
-              };
-            } else if (prev.sessionStatus?.status === "paused" && status.status !== "paused") {
-              sessionPatch.retryWaitInfo = null;
-              sessionPatch.loopDetectedPaused = null;
             }
 
             const sessionResult = updateSessionState(state, agentId, sid, sessionPatch);

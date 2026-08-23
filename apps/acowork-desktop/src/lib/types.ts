@@ -926,6 +926,13 @@ export type SessionStatus =
         max_attempts: number;
         provider: string;
       };
+      /**
+       * Why the session paused (mirrors runtime `PauseReason`).
+       * `undefined` for 429 retry waits — `retry_info` disambiguates those.
+       */
+      reason?: "iteration_limit" | "loop_detected" | "debug";
+      /** Human-readable pause message (e.g. iteration limit hint / loop detection detail) */
+      message?: string;
     };
   };
 

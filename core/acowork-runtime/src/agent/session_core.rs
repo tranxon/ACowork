@@ -1085,6 +1085,8 @@ mod tests {
                     max_attempts: 3,
                     provider: "mock-provider".to_string(),
                 }),
+                reason: None,
+                message: None,
             };
         }
         // Verify the status is now Paused with retry info
