@@ -34,6 +34,16 @@ const markdownComponents = {
         }
         return <pre>{children}</pre>;
     },
+    /** Wrap <table> in a horizontally-scrollable container so an
+     *  oversized column (URL / hash / path) doesn't squeeze the
+     *  title column mid-word. Mirrors the same override in
+     *  MessageBubble / CompactionCard; visual chrome (border / radius)
+     *  lives on the wrapper via .prose-table-scroll (see globals.css). */
+    table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
+        <div className="prose-table-scroll">
+            <table {...rest}>{children}</table>
+        </div>
+    ),
 };
 
 interface MarkdownPreviewViewProps {

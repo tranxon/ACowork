@@ -888,11 +888,7 @@ body {
 .prose table {
   border-collapse: separate;
   border-spacing: 0;
-  border-radius: 0.375rem;
-  overflow: hidden;
-  width: 100%;
-  border-left: 1px solid var(--tw-prose-td-borders);
-  border-top: 1px solid var(--tw-prose-td-borders);
+  min-width: 100%;
 }
 
 .prose th,
@@ -900,8 +896,10 @@ body {
   border-right: 1px solid var(--tw-prose-td-borders);
   border-bottom: 1px solid var(--tw-prose-td-borders);
   padding: 0.5em 0.75em;
-  overflow-wrap: break-word;
-  word-break: break-word;
+  /* overflow-wrap:anywhere: break oversized unbreakable tokens (URL,
+     hex hash, long path) without forcing normal short words onto
+     multiple lines. */
+  overflow-wrap: anywhere;
 }
 
 .prose th:last-child,
@@ -914,17 +912,33 @@ body {
   border-bottom: none;
 }
 
+/* Horizontal-scroll wrapper for markdown tables. Owns the outer
+   border, rounded corners and overflow so the inner <table> can
+   grow beyond the container without clipping or breaking titles.
+   The .prose table itself only sets min-width: 100% (see above);
+   everything visual (border / radius / scroll) lives here. */
+.prose-table-scroll {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+  overflow-x: auto;
+  border-radius: 0.375rem;
+  border: 1px solid var(--tw-prose-td-borders);
+}
+
 /* Table body — subtle zebra striping for readability.
    th (title) is one shade deeper than td (body) so the header row
    visually grounds the table; the body is a touch lighter.
    Title/body colors come from @theme's --color-chat-* tokens,
-   which auto-flip in .dark — no per-rule override needed. */
+   which auto-flip in .dark — no per-rule override needed.
+   white-space:nowrap keeps header titles on a single line so a
+   sibling column with a long token can't squeeze them mid-word. */
 .prose th {
   background-color: var(--color-chat-title);
   border-color: var(--tw-prose-th-borders);
   border-bottom: 1px solid var(--tw-prose-th-borders);
   font-weight: 600;
   color: hsl(240 5% 12%);
+  white-space: nowrap;
 }
 
 .dark .prose th {
@@ -1044,10 +1058,9 @@ body {
   margin-top: 0;
 }
 
-/* Table spacing */
+/* Table font size — smaller than body text to keep wide tables readable.
+   Margin lives on the .prose-table-scroll wrapper (see above). */
 .prose table {
-  margin-top: 0.6em;
-  margin-bottom: 0.6em;
   font-size: 0.88em;
 }
 

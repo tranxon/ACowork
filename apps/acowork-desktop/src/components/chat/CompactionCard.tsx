@@ -5,6 +5,17 @@ import remarkGfm from "remark-gfm";
 import type { CompactionEventMeta } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 
+/** ReactMarkdown component overrides for the compaction summary.
+ *  Only needs the table wrapper — same as MessageBubble / MarkdownPreviewView
+ *  so behavior is consistent across chat, file preview and compaction card. */
+const markdownComponents = {
+  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
+    <div className="prose-table-scroll">
+      <table {...rest}>{children}</table>
+    </div>
+  ),
+};
+
 interface CompactionCardProps {
   /** Summary text (already stripped of `<summary>` tags by the store). */
   summary: string;
@@ -95,7 +106,7 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
             style={{ fontSize: CARD_FONT_SIZE }}
           >
             {summary ? (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{summary}</ReactMarkdown>
             ) : (
               <span className="italic text-zinc-400">{t("compactionCard.empty")}</span>
             )}
