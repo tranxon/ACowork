@@ -1440,7 +1440,26 @@ pub enum SessionStatusDto {
         /// 429 retry wait info. `None` for non-retry pauses.
         #[serde(skip_serializing_if = "Option::is_none")]
         retry_info: Option<RetryPauseInfoDto>,
+        /// Why the session paused. `None` for 429 retry waits (retry_info
+        /// already disambiguates them). Mirrors `PauseReason` from runtime.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<PauseReasonDto>,
+        /// Human-readable pause message. Mirrors the runtime field.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
+}
+
+/// Reason a session entered `Paused` (DTO mirror of runtime `PauseReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReasonDto {
+    /// Iteration limit reached — awaiting a user decision to continue or stop.
+    IterationLimit,
+    /// Loop detector triggered — awaiting a user decision to continue or stop.
+    LoopDetected,
+    /// Debugger paused the session (DevMode debug protocol).
+    Debug,
 }
 
 /// 429 rate-limit retry pause information (DTO).
@@ -1848,6 +1867,71 @@ mod tests {
                 assert!(spec_json.contains("model_id"));
             }
             _ => panic!("Expected SidecarEndpointUpdate variant"),
+        }
+    }
+
+    #[test]
+    fn test_paused_dto_serializes_reason_and_message() {
+        let paused = SessionStatusDto::Paused {
+            iteration: Some(3),
+            max_iterations: Some(5),
+            retry_info: None,
+            reason: Some(PauseReasonDto::IterationLimit),
+            message: Some("Iteration limit reached (3/5). Click Continue to proceed.".into()),
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        let parsed: SessionStatusDto = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SessionStatusDto::Paused {
+                iteration,
+                max_iterations,
+                retry_info,
+                reason,
+                message,
+            } => {
+                assert_eq!(iteration, Some(3));
+                assert_eq!(max_iterations, Some(5));
+                assert!(retry_info.is_none());
+                assert_eq!(reason, Some(PauseReasonDto::IterationLimit));
+                assert!(message.as_deref().unwrap().contains("Iteration limit reached"));
+            }
+            _ => panic!("Expected Paused variant"),
+        }
+    }
+
+    #[test]
+    fn test_paused_dto_retry_skips_reason_and_message() {
+        // 429 retry pause: reason/message are None and must be omitted from
+        // the JSON so the frontend only sees retry_info.
+        let paused = SessionStatusDto::Paused {
+            iteration: None,
+            max_iterations: None,
+            retry_info: Some(RetryPauseInfoDto {
+                wait_ms: 300_000,
+                attempt: 1,
+                max_attempts: 3,
+                provider: "mock-provider".into(),
+            }),
+            reason: None,
+            message: None,
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert!(json.contains("retry_info"));
+        assert!(!json.contains("reason"));
+        assert!(!json.contains("message"));
+        let parsed: SessionStatusDto = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SessionStatusDto::Paused {
+                retry_info,
+                reason,
+                message,
+                ..
+            } => {
+                assert!(retry_info.is_some());
+                assert!(reason.is_none());
+                assert!(message.is_none());
+            }
+            _ => panic!("Expected Paused variant"),
         }
     }
 }

@@ -378,8 +378,20 @@ export function ChatPanel() {
     if (!currentSessionId) return null;
     return agent?.sessionStates[currentSessionId] ?? null;
   });
-  const iterationLimitPaused = sessionState?.iterationLimitPaused ?? null;
-  const loopDetectedPaused = sessionState?.loopDetectedPaused ?? null;
+  // ADR-014: iteration-limit / loop-detected pause UX is derived directly
+  // from the backend sessionStatus (Paused.detail.reason + message) — no
+  // separate store flags from transient events.
+  const pausedDetail = sessionStatus?.status === "paused" ? sessionStatus.detail : null;
+  const iterationLimitPaused = pausedDetail?.reason === "iteration_limit"
+    ? {
+        iteration: pausedDetail.iteration ?? 0,
+        maxIterations: pausedDetail.max_iterations ?? 0,
+        message: pausedDetail.message ?? "Iteration limit reached.",
+      }
+    : null;
+  const loopDetectedPaused = pausedDetail?.reason === "loop_detected"
+    ? { message: pausedDetail.message ?? "Loop detected — session paused." }
+    : null;
   const serverError = sessionState?.serverError ?? null;
   const pendingApproval = sessionState?.pendingApproval ?? {};
   const pendingQuestions = sessionState?.pendingQuestions ?? [];
@@ -418,9 +430,9 @@ export function ChatPanel() {
   // ADR-049: phase is the single source of truth for indicator visibility.
   // UI banners (waiting / tool_executing / waiting_approval) are derived
   // directly from this — no flag composition. `paused` is intentionally
-  // not handled here: DebugPausedBanner / RetryWaitBanner /
-  // iterationLimitPaused / loopDetectedPaused already cover all 4
-  // backend paths to the `Paused` state.
+  // not handled here: DebugPausedBanner / RetryWaitBanner / the
+  // iteration-limit & loop-detected banners (derived from Paused.detail)
+  // already cover all 4 backend paths to the `Paused` state.
   const phase = getProcessingPhase(sessionStatus);
   const currentModel = sessionState?.model ?? null;
   const currentProvider = sessionState?.provider ?? null;
@@ -1387,8 +1399,9 @@ export function ChatPanel() {
             <RetryWaitBanner />
             {/* ADR-049: Phase indicators driven by getProcessingPhase().
                 Each phase maps to a dot color + i18n label. paused is not
-                handled here: DebugPausedBanner / RetryWaitBanner /
-                iterationLimitPaused / loopDetectedPaused cover all paths. */}
+                handled here: DebugPausedBanner / RetryWaitBanner / the
+                iteration-limit & loop-detected banners (derived from
+                Paused.detail) cover all paths. */}
             {phase === "thinking" && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse" />
