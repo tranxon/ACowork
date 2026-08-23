@@ -1445,7 +1445,7 @@ export function ChatPanel() {
 {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -1466,7 +1466,7 @@ export function ChatPanel() {
             )}
             {loopDetectedPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2338,4 +2338,3 @@ function ReasoningEffortMenu({
     </ToolbarDropdownTrigger>
   );
 }
-

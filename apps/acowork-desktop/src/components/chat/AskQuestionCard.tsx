@@ -71,8 +71,7 @@ export function AskQuestionCard({ event, onAnswer }: AskQuestionCardProps) {
       {/* Header */}
       <div className="flex items-start gap-1.5 mb-1.5">
         <MessageCircleQuestion
-          className="h-3.5 w-3.5 shrink-0 mt-0.5"
-          style={{ color: "var(--color-accent)" }}
+          className="h-3.5 w-3.5 shrink-0 mt-0.5 text-zinc-500 dark:text-zinc-400"
         />
         <div className="min-w-0 flex-1">
           {event.title && (

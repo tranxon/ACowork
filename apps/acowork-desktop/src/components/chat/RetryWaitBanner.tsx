@@ -15,11 +15,11 @@ const TIMEOUT_RETRY_THRESHOLD_MS = 5 * 60 * 1000;
  * Countdown banner shown when the LLM provider returns 429 (rate-limited)
  * or the LLM stream times out, and the retry wait exceeds 10 seconds.
  *
- * Two modes:
- * - **429 mode** (waitMs < 5 min): orange/amber tones, "Rate limited" text,
- *   "Skip Wait" button.
- * - **Timeout mode** (waitMs >= 5 min): indigo/blue tones, "Response timeout"
- *   text, "Retry Now" button.
+ * Two modes differ only in copy/icon (both share the same zinc banner chrome
+ * with an accent-colored skip button):
+ * - **429 mode** (`waitMs < 5 min`): "Rate limited" text, "Skip Wait" button.
+ * - **Timeout mode** (`waitMs >= 5 min`): "Response timeout" text,
+ *   "Retry Now" button.
  *
  * In both modes, a real-time countdown timer is displayed and the user can
  * click the button to skip the wait. When the timer expires, the backend
@@ -123,19 +123,11 @@ export function RetryWaitBanner() {
       <div
         role="status"
         aria-live="polite"
-        className={`inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border px-4 py-2 select-none ${
-          isTimeoutMode
-            ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)] dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
-            : "border-orange-200 bg-orange-50/80 text-orange-900 dark:border-orange-900/50 dark:bg-orange-950/40 dark:text-orange-100"
-        }`}
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300"
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">
-          <Clock className={`h-3.5 w-3.5 ${
-            isTimeoutMode
-              ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]"
-              : "text-orange-600 dark:text-orange-400"
-          }`} />
+          <Clock className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
           <span className="text-xs font-medium">
             {label} — retrying in{" "}
             <span className="tabular-nums font-mono font-bold">
@@ -145,27 +137,15 @@ export function RetryWaitBanner() {
           </span>
         </span>
 
-        <span className={`hidden sm:inline text-[11px] ${
-          isTimeoutMode
-            ? "text-[var(--color-accent)]/70 dark:text-[var(--color-accent)]/70"
-            : "text-orange-600/70 dark:text-orange-400/70"
-        }`}>
+        <span className="hidden sm:inline text-[11px] text-zinc-500/70 dark:text-zinc-400/70">
           {retryInfo.provider}
         </span>
 
         <div className="ml-auto flex items-center gap-1.5">
           {/* Countdown progress bar */}
-          <div className={`hidden sm:block h-1.5 w-16 rounded-full ${
-            isTimeoutMode
-              ? "bg-[var(--color-accent)]/30 dark:bg-[var(--color-accent)]/30"
-              : "bg-orange-200 dark:bg-orange-800/50"
-          }`}>
+          <div className="hidden sm:block h-1.5 w-16 rounded-full bg-zinc-200 dark:bg-zinc-700">
             <div
-              className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${
-                isTimeoutMode
-                  ? "bg-[var(--color-accent)]"
-                  : "bg-orange-500"
-              }`}
+              className="h-full rounded-full bg-zinc-400 transition-[width] duration-1000 ease-linear dark:bg-zinc-500"
               style={{
                 width: `${Math.max(0, Math.min(100, ((totalSec - remainingSec) / totalSec) * 100))}%`,
               }}
@@ -175,11 +155,7 @@ export function RetryWaitBanner() {
           <button
             type="button"
             onClick={handleSkip}
-            className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-white transition-colors ${
-              isTimeoutMode
-                ? "bg-[var(--color-accent)] hover:brightness-90"
-                : "bg-orange-500 hover:bg-orange-600"
-            }`}
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
           >
             <ButtonIcon className="h-3 w-3" />
             {buttonLabel}
