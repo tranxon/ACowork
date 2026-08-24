@@ -1,5 +1,6 @@
 //! Tools module
 
+pub mod arguments;
 pub mod builtin;
 pub mod mcp_manager;
 pub mod output;

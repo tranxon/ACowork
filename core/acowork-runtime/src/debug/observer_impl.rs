@@ -27,6 +27,7 @@ use super::events::{DebugEvent, DebugEventSender};
 use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::session_state::SessionStatus;
+use crate::util::text::TextPreview;
 
 // ── Debug Observer Implementation ─────────────────────────────────────
 
@@ -339,7 +340,7 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             iter = iter,
             ws_has = req.context_builder.workspace_context().is_some(),
             ws_len = req.context_builder.workspace_context().map(|s| s.len()).unwrap_or(0),
-            ws_preview = ?req.context_builder.workspace_context().map(|s| &s[..s.len().min(80)]),
+            ws_preview = ?req.context_builder.workspace_context().map(|s| s.preview(80)),
             "capture_context_snapshot: workspace_context status"
         );
 

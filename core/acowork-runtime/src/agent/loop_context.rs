@@ -1369,18 +1369,18 @@ impl AgentLoop {
             // Use 3.5 as a middle-ground multiplier and add 10% padding for safety.
             let max_chars = ((per_result_budget as f64) * 3.5 * 1.1) as usize;
 
-            // Find a UTF-8 safe cut point within budget
-            let mut cut = max_chars.min(result.len());
-            while cut > 0 && !result.is_char_boundary(cut) {
-                cut -= 1;
-            }
+            // Find a UTF-8 safe cut point within budget.
+            // Replaced ad-hoc loop with the project-wide `util::text::truncate_utf8`
+            // so the same character-boundary guarantee lives in exactly one place.
+            let safe = crate::util::text::truncate_utf8(result, max_chars.min(result.len()));
+            let mut cut = safe.len();
 
             // Try to cut at a newline for readability
-            if let Some(nl_pos) = result[..cut].rfind('\n').filter(|&p| p > cut / 2) {
+            if let Some(nl_pos) = safe.rfind('\n').filter(|&p| p > cut / 2) {
                 cut = nl_pos;
             }
 
-            let kept = &result[..cut];
+            let kept = &safe[..cut];
             let dropped_tokens = orig_tokens.saturating_sub(per_result_budget);
 
             let truncation_marker = format!(

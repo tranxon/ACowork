@@ -592,9 +592,12 @@ impl SessionManager {
             self.streaming_lines.clone(),
         );
 
-        // ADR-014: Create watch channel for session status
+        // ADR-014: Create watch channel for session status.
+        // Keep `status_tx` so we can clone it into the panic-handler closure
+        // below (the panic handler must be able to push `SessionStatus::Errored`
+        // after `task` itself has been dropped).
         let (status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
-        task.set_status_tx(status_tx);
+        task.set_status_tx(status_tx.clone());
 
         // Register per-session urgent_stop Notify so fire_urgent_stop()
         // only wakes this session's tokio::select! branches.
@@ -618,20 +621,18 @@ impl SessionManager {
         // tokio::spawn silently swallows the panic and the only symptom is a
         // "Session channel closed" warning with no root cause.
         let sid = session_id.clone();
+        let panic_status_tx = status_tx.clone();
+        let panic_chunk_tx = self.config.chunk_tx.clone();
         let join_handle = tokio::spawn(async move {
             let result = std::panic::AssertUnwindSafe(task.run())
                 .catch_unwind()
                 .await;
             if let Err(panic_err) = result {
-                let msg = panic_err
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| panic_err.downcast_ref::<String>().map(|s| s.as_str()))
-                    .unwrap_or("<non-string panic payload>");
-                tracing::error!(
-                    session_id = %sid,
-                    panic.payload = %msg,
-                    "SessionTask panicked — session will be unreachable until re-activation"
+                handle_session_task_panic(
+                    &sid,
+                    panic_err,
+                    &panic_status_tx,
+                    panic_chunk_tx.as_ref(),
                 );
             }
         });
@@ -3005,6 +3006,71 @@ After installation, ask the user to re-enable the MCP server.",
     }
 }
 
+/// Handle a SessionTask panic: promote the session to [`SessionStatus::Errored`]
+/// and emit a terminal [`ChunkEvent::Error`] so the frontend exits the
+/// "replying…" / "agent is running" UI immediately.
+///
+/// **Why a standalone function**: the panic-recovery path must be unit-testable
+/// end-to-end (see `tests::panic_handler_*`) without spawning a real
+/// SessionTask — the function only depends on the two downstream channels.
+///
+/// **Robustness contract** (must never panic itself — it runs inside a panic
+/// handler context):
+/// - `status_tx.send()` is best-effort: `Err` only when zero receivers remain.
+/// - `chunk_tx.try_send()` is non-blocking and best-effort: a full or closed
+///   channel logs a warning instead of propagating an error.
+fn handle_session_task_panic(
+    session_id: &str,
+    panic_err: Box<dyn std::any::Any + Send>,
+    status_tx: &tokio::sync::watch::Sender<SessionStatus>,
+    chunk_tx: Option<&tokio::sync::mpsc::Sender<SessionChunkEvent>>,
+) {
+    let msg = panic_err
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic_err.downcast_ref::<String>().map(|s| s.as_str()))
+        .unwrap_or("<non-string panic payload>");
+    tracing::error!(
+        session_id = %session_id,
+        panic.payload = %msg,
+        "SessionTask panicked — promoting session to Errored state and emitting terminal error event"
+    );
+
+    // (1) Push Errored status — fires watch subscribers (HTTP /state,
+    //     state-relay to chunk channel, MQTT gateway bridge).
+    let errored_status = SessionStatus::Errored {
+        reason: "session_task_panicked".to_string(),
+        message: format!("Session task panicked: {msg}"),
+        last_iteration: None, // panic may happen pre-iteration; we don't know
+        recoverable: false,
+    };
+    let _ = status_tx.send(errored_status);
+
+    // (2) Push a terminal Error chunk so the frontend can clear any
+    //     "replying…" / "agent is running" UI immediately.
+    if let Some(tx) = chunk_tx {
+        let user_message =
+            "The agent's session task terminated unexpectedly. \
+             Please start a new session to continue.";
+        let chunk = SessionChunkEvent {
+            session_id: session_id.to_string(),
+            event: crate::agent::loop_::ChunkEvent::Error {
+                user_message: user_message.to_string(),
+                detail: format!("SessionTask panicked: {msg}"),
+                error_type: "session_task_panicked".to_string(),
+                message_id: format!("panic-{session_id}"),
+            },
+        };
+        if let Err(e) = tx.try_send(chunk) {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to push panic-recovery chunk event (channel full or closed)"
+            );
+        }
+    }
+}
+
 /// Format a `UserProfile` into an identity context text block for the LLM system prompt.
 ///
 /// Produces a human-readable summary like:
@@ -3896,5 +3962,113 @@ mod tests {
             initial_session_id,
             "per-session sender must be tagged with the originating session_id (not the template's empty id)"
         );
+    }
+
+    // ── panic handler (handle_session_task_panic) ─────────────────
+
+    /// End-to-end: a SessionTask panic must (1) promote the watch status to
+    /// `Errored` and (2) emit a terminal `ChunkEvent::Error` so the frontend
+    /// exits the "replying…" state. This is the automated guard for the
+    /// 2026-08-24 incident (session frozen in Thinking until runtime restart).
+    #[test]
+    fn panic_handler_pushes_errored_status_and_terminal_chunk() {
+        let (status_tx, mut status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<SessionChunkEvent>(8);
+
+        handle_session_task_panic(
+            "sess_1",
+            Box::new("end byte index 200 is not a char boundary; it is inside '原'".to_string()),
+            &status_tx,
+            Some(&chunk_tx),
+        );
+
+        // (1) watch 收到 Errored
+        assert!(status_rx.has_changed().unwrap());
+        let status = status_rx.borrow_and_update().clone();
+        assert_eq!(
+            status,
+            SessionStatus::Errored {
+                reason: "session_task_panicked".into(),
+                message: "Session task panicked: end byte index 200 is not a char boundary; it is inside '原'"
+                    .into(),
+                last_iteration: None,
+                recoverable: false,
+            }
+        );
+
+        // (2) chunk 收到 terminal Error 事件
+        let chunk = chunk_rx
+            .try_recv()
+            .expect("terminal error chunk must be emitted");
+        assert_eq!(chunk.session_id, "sess_1");
+        match chunk.event {
+            crate::agent::loop_::ChunkEvent::Error {
+                user_message,
+                detail,
+                error_type,
+                message_id,
+            } => {
+                assert_eq!(error_type, "session_task_panicked");
+                assert_eq!(message_id, "panic-sess_1");
+                assert!(detail.contains("not a char boundary"));
+                assert!(user_message.contains("new session"));
+            }
+            other => panic!("expected Error chunk, got {other:?}"),
+        }
+    }
+
+    /// Robustness: the panic handler runs inside a panic-handler context and
+    /// MUST NOT panic itself when downstream channels are closed/detached.
+    #[test]
+    fn panic_handler_survives_closed_channels() {
+        // watch 无接收者
+        let (status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        drop(status_rx);
+        // chunk channel closed（前端已断开）
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<SessionChunkEvent>(8);
+        drop(chunk_rx);
+        handle_session_task_panic(
+            "sess_2",
+            Box::new("boom".to_string()),
+            &status_tx,
+            Some(&chunk_tx),
+        );
+
+        // chunk_tx = None 路径
+        handle_session_task_panic("sess_3", Box::new("boom".to_string()), &status_tx, None);
+    }
+
+    /// Panic payload may be a `String`, a `&'static str`, or a non-string
+    /// value (`panic!` with a number, custom struct, etc.) — all must be
+    /// sanitized into a displayable message without panicking.
+    #[test]
+    fn panic_handler_non_string_payload_is_sanitized() {
+        let (status_tx, mut status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        handle_session_task_panic("sess_4", Box::new(42u32), &status_tx, None);
+        assert!(status_rx.has_changed().unwrap());
+        let status = status_rx.borrow_and_update().clone();
+        match status {
+            SessionStatus::Errored { message, .. } => {
+                assert!(
+                    message.contains("<non-string panic payload>"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn panic_handler_static_str_payload_is_extracted() {
+        let (status_tx, mut status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        handle_session_task_panic("sess_5", Box::new("static str panic"), &status_tx, None);
+        assert!(status_rx.has_changed().unwrap());
+        let status = status_rx.borrow_and_update().clone();
+        match status {
+            SessionStatus::Errored { message, .. } => {
+                assert!(message.contains("static str panic"), "got: {message}");
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
     }
 }

@@ -118,7 +118,7 @@ pub enum TodoStatus {
 /// The 6-variant state machine eliminates the "semantic black hole" where
 /// TTFT wait, streaming output, and tool execution all looked identical
 /// to the UI.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status", content = "detail")]
 #[derive(Default)]
 pub enum SessionStatus {
@@ -178,6 +178,46 @@ pub enum SessionStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// Session entered an unrecoverable error state and the SessionTask has
+    /// stopped processing further inputs. The frontend should display the
+    /// message and offer the user a way to start a new session.
+    ///
+    /// **Trigger**: emitted by [`crate::agent::session::session_manager`]
+    /// when the underlying `SessionTask` panics, or when any other
+    /// unrecoverable runtime error (e.g. a non-resumable loop-detector
+    /// tripwire) terminates the loop. Previously such incidents left the
+    /// session frozen in `Thinking`/`LlmStreaming` forever, with no signal
+    /// to the frontend that the agent had died (the user-perceived 2026-08-24
+    /// incident: 1500+ seconds of "replying…" until manual runtime restart).
+    ///
+    /// **Wire format** (`tag = "status", content = "detail"`, `rename_all = "snake_case"`):
+    /// ```json
+    /// {"status": "errored", "detail": {"reason": "session_task_panicked",
+    ///                                  "message": "...",
+    ///                                  "last_iteration": 2,
+    ///                                  "recoverable": false}}
+    /// ```
+    ///
+    /// `recoverable: false` today is the contract: there is no continuation. The
+    /// frontend should clear any "replying…" indicator and let the user start a
+    /// fresh session.
+    Errored {
+        /// Short machine-readable reason code (e.g. `"session_task_panicked"`,
+        /// `"infinite_loop_detected"`).  Stable across releases — safe for
+        /// analytics / telemetry correlation.
+        reason: String,
+        /// Human-readable message safe to display in the UI.
+        message: String,
+        /// Iteration at which the error occurred, if known.  `None` when the
+        /// failure happened *before* the first iteration (e.g. during session
+        /// initialisation).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_iteration: Option<u32>,
+        /// Whether the session can be safely resumed by submitting another
+        /// `ChatMessage`.  Currently always `false` — the frontend should
+        /// redirect to a new session.
+        recoverable: bool,
+    },
 }
 
 /// Reason a session entered [`SessionStatus::Paused`].
@@ -202,7 +242,7 @@ pub enum PauseReason {
 ///
 /// Emitted inside [`SessionStatus::Paused::retry_info`] when the provider
 /// enters a retry wait whose duration exceeds the UX threshold (10 s).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetryPauseInfo {
     /// Wait duration in milliseconds
     pub wait_ms: u64,
@@ -232,6 +272,15 @@ impl SessionStatus {
                 | Self::WaitingApproval { .. }
                 | Self::Paused { .. }
         )
+    }
+
+    /// Returns true if the session is in the [`Self::Errored`] terminal state.
+    ///
+    /// The frontend uses this to break out of "agent is replying…" indicators
+    /// that would otherwise remain stuck forever (see the [`Self::Errored`]
+    /// doc comment for the 2026-08-24 incident).
+    pub fn is_errored(&self) -> bool {
+        matches!(self, Self::Errored { .. })
     }
 }
 
@@ -590,5 +639,92 @@ mod tests {
             let back: PauseReason = serde_json::from_str(&json).unwrap();
             assert_eq!(back, reason);
         }
+    }
+
+    // ── Errored status ────────────────────────────────────────────
+
+    #[test]
+    fn errored_serializes_with_snake_case_tag() {
+        let status = SessionStatus::Errored {
+            reason: "session_task_panicked".into(),
+            message: "end byte index 200 is not a char boundary; it is inside '原'".into(),
+            last_iteration: Some(2),
+            recoverable: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"status\":\"errored\""));
+        assert!(json.contains("\"reason\":\"session_task_panicked\""));
+        assert!(json.contains("\"recoverable\":false"));
+        assert!(json.contains("\"last_iteration\":2"));
+    }
+
+    #[test]
+    fn errored_omits_last_iteration_when_none() {
+        let status = SessionStatus::Errored {
+            reason: "session_task_panicked".into(),
+            message: "init failed".into(),
+            last_iteration: None,
+            recoverable: false,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(!json.contains("last_iteration"));
+    }
+
+    #[test]
+    fn errored_is_not_active_but_is_errored() {
+        let status = SessionStatus::Errored {
+            reason: "x".into(),
+            message: "y".into(),
+            last_iteration: None,
+            recoverable: false,
+        };
+        assert!(status.is_errored());
+        assert!(!status.is_active(), "Errored must NOT be active — frontend must exit 'replying' indicator");
+    }
+
+    #[test]
+    fn errored_roundtrips_through_json() {
+        // 序列化 → 反序列化 → 再序列化，验证 wire format 双向稳定
+        let original = SessionStatus::Errored {
+            reason: "session_task_panicked".into(),
+            message: "byte index 200 is not a char boundary".into(),
+            last_iteration: Some(2),
+            recoverable: false,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let back: SessionStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, original);
+
+        // 全 variant roundtrip（状态机完整可逆性）
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::LlmAwaitingFirstChunk,
+            SessionStatus::Thinking,
+            SessionStatus::LlmStreaming { message_id: Some("m1".into()) },
+            SessionStatus::ToolExecuting,
+            SessionStatus::WaitingApproval { request_id: "r1".into() },
+            SessionStatus::Paused {
+                iteration: Some(1),
+                max_iterations: Some(3),
+                retry_info: None,
+                reason: Some(PauseReason::LoopDetected),
+                message: Some("loop".into()),
+            },
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: SessionStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, status, "roundtrip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn idle_is_neither_active_nor_errored() {
+        assert!(!SessionStatus::Idle.is_active());
+        assert!(!SessionStatus::Idle.is_errored());
+    }
+
+    #[test]
+    fn default_is_idle() {
+        assert_eq!(SessionStatus::default(), SessionStatus::Idle);
     }
 }

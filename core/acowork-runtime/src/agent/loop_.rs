@@ -1825,7 +1825,6 @@ impl AgentLoop {
 mod tests {
     use super::*;
     use crate::agent::agent_core::BuiltinToolEntry;
-    use crate::agent::loop_llm::make_incomplete_marker;
     use crate::agent::loop_tools::execute_single_tool;
     use acowork_core::providers::mock::MockProvider;
     use acowork_core::providers::traits::{FunctionCall, MessageRole, ToolCall};
@@ -3218,12 +3217,22 @@ mod tests {
 
     /// Verify that TOOL_CALL_INCOMPLETE marker is detected and tool execution
     /// is skipped, returning the embedded message to the LLM.
+    ///
+    /// **2026-08-24 update**: marker is now produced by
+    /// [`crate::tools::arguments::make_incomplete_marker`] and contains the raw
+    /// arguments as a hint so the LLM can see its original intent on the next
+    /// iteration.  Asserts the new marker shape.
     #[tokio::test]
     async fn test_incomplete_tool_call_skipped() {
         let tools = entries(vec![Arc::new(EchoTool)]);
 
-        // Simulate the marker that the streaming assembler injects
-        let incomplete_args = make_incomplete_marker("echo", 42);
+        // Simulate the marker that the streaming assembler injects.
+        // New API: pass the raw content as a hint (here a stub since the
+        // caller doesn't know the original).
+        let incomplete_args = crate::tools::arguments::make_incomplete_marker_with_len(
+            "echo",
+            42,
+        );
         let tc = ToolCall {
             id: "call_incomplete".to_string(),
             call_type: "function".to_string(),
@@ -3241,10 +3250,11 @@ mod tests {
             "Tool should NOT be executed, got: {}",
             result
         );
-        // Must contain the error message from the marker
+        // New marker message says "not parseable as JSON" instead of
+        // "truncated during streaming"
         assert!(
-            result.contains("truncated during streaming"),
-            "Result should explain truncation: {}",
+            result.contains("not parseable as JSON"),
+            "Result should explain JSON failure: {}",
             result
         );
         assert!(
@@ -3255,7 +3265,13 @@ mod tests {
     }
 
     /// Verify that genuinely unparseable JSON (e.g. LLM hallucinated output)
-    /// does not silently degrade to {} — it returns a clear error.
+    /// does not silently degrade to {} — it returns a clear error AND surfaces
+    /// the raw content as a hint so the LLM can recover next iteration.
+    ///
+    /// **2026-08-24 update**: route through
+    /// [`crate::tools::arguments::resolve`] which extracts JSON from
+    /// natural-language-wrapped streams (DeepSeek case) and preserves the
+    /// raw text in the error message.
     #[tokio::test]
     async fn test_invalid_json_tool_call_error() {
         let tools = entries(vec![Arc::new(EchoTool)]);
@@ -3287,6 +3303,41 @@ mod tests {
         assert!(
             result.contains("NOT executed"),
             "Result should state it was NOT executed: {}",
+            result
+        );
+        // 2026-08-24 hardening: the raw arguments must be surfaced as a hint
+        // so the LLM can see its original intent on the next iteration.
+        assert!(
+            result.contains("raw arguments"),
+            "Result should include the raw arguments hint: {}",
+            result
+        );
+    }
+
+    /// Regression: natural-language-wrapped JSON (the 2026-08-24 DeepSeek
+    /// incident: "全景 + P0 的单一文档，还是拆分成 2 个文档？{...}") should be
+    /// *recovered* and the tool executed normally, instead of being rejected
+    /// and losing the LLM's reasoning.
+    #[tokio::test]
+    async fn test_natural_language_prefix_is_recovered() {
+        let tools = entries(vec![Arc::new(EchoTool)]);
+
+        let tc = ToolCall {
+            id: "call_recovered".to_string(),
+            call_type: "function".to_string(),
+            function: FunctionCall {
+                name: "echo".to_string(),
+                arguments: r#"全景 + P0 的单一文档，还是拆分成 2 个文档？{"message": "hello"}"#
+                    .to_string(),
+            },
+        };
+
+        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, None).await;
+
+        // Tool WAS executed because we recovered the JSON
+        assert!(
+            result.contains("Echo: hello"),
+            "Tool should execute after JSON recovery, got: {}",
             result
         );
     }

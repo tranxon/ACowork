@@ -6,7 +6,9 @@
 //! crash the session task.
 //!
 //! Constants and helpers defined here provide consistent, project-wide
-//! truncation behaviour.
+//! truncation behaviour.  The underlying character-boundary-safe slice
+//! logic is the project-wide [`crate::util::text::truncate_utf8`] helper;
+//! the markers and append-policies specific to *tool output* stay here.
 
 /// Default maximum bytes for a single tool output (256 KB).
 ///
@@ -49,16 +51,13 @@ pub const MAX_RESULT_COUNT: usize = 1000;
 /// valid UTF-8 boundaries.  Returns the original string if it fits; otherwise
 /// appends [`TRUNCATED_LINE_MARKER`].
 pub fn truncate_line(line: &str) -> String {
-    if line.len() <= MAX_LINE_OUTPUT_BYTES {
+    let truncated = crate::util::text::truncate_utf8(line, MAX_LINE_OUTPUT_BYTES);
+    if truncated.len() == line.len() {
         return line.to_string();
     }
-    let mut end = MAX_LINE_OUTPUT_BYTES;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = line[..end].to_string();
-    truncated.push_str(TRUNCATED_LINE_MARKER);
-    truncated
+    let mut out = truncated.to_string();
+    out.push_str(TRUNCATED_LINE_MARKER);
+    out
 }
 
 /// Truncate a **full output string** to [`MAX_OUTPUT_BYTES`], preserving
@@ -67,27 +66,16 @@ pub fn truncate_line(line: &str) -> String {
 ///
 /// Returns `(maybe_truncated_string, was_truncated_bool)`.
 pub fn truncate_output(output: &str) -> (String, bool) {
-    if output.len() <= MAX_OUTPUT_BYTES {
+    let truncated = crate::util::text::truncate_utf8(output, MAX_OUTPUT_BYTES);
+    if truncated.len() == output.len() {
         return (output.to_string(), false);
     }
-    let mut end = MAX_OUTPUT_BYTES;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = output[..end].to_string();
-    truncated.push_str(TRUNCATED_OUTPUT_MARKER);
-    (truncated, true)
+    let mut out = truncated.to_string();
+    out.push_str(TRUNCATED_OUTPUT_MARKER);
+    (out, true)
 }
 
-/// Truncate a string to `max_bytes` while preserving UTF-8 character
-/// boundaries.  Returns a sub-slice (no allocation).
-pub fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
-    if input.len() <= max_bytes {
-        return input;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !input.is_char_boundary(end) {
-        end -= 1;
-    }
-    &input[..end]
-}
+// Re-exported so older internal callers (none in mainline today, but
+// possibly in plugins) keep working.  The single source of truth is
+// [`crate::util::text::truncate_utf8`].
+pub use crate::util::text::truncate_utf8;
