@@ -30,6 +30,7 @@ use acowork_core::ShellApprovalThreshold;
 use super::loop_::{AgentLoop, ControlDecision};
 use crate::agent::inbound::InboundMessage;
 use super::loop_approval::{ApprovalDecision, ApprovalHandle, APPROVAL_TIMEOUT, APPROVAL_TIMEOUT_SECS};
+use crate::util::text::TextPreview;
 
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
@@ -679,24 +680,28 @@ pub(crate) async fn execute_single_tool(
     // and reject genuinely unparseable arguments (e.g. LLM hallucinated output).
     // Early return on parse failure avoids the old silent "{}" degradation
     // that caused LLM retry loops.
-    let params: serde_json::Value = match serde_json::from_str(params_str) {
-        Ok(p) => p,
-        Err(e) => {
+    //
+    // Route through `arguments::resolve` instead of bare `serde_json::from_str` so
+    // we recover JSON wrapped in natural-language prefixes (DeepSeek 2026-08-24
+    // incident) and surface the original content as a hint in the returned error
+    // message — letting the LLM see its raw intent on the next iteration.
+    let params: serde_json::Value = match crate::tools::arguments::resolve(params_str) {
+        crate::tools::arguments::ResolvedArgs::Valid(v)
+        | crate::tools::arguments::ResolvedArgs::Recovered { value: v, .. } => v,
+        crate::tools::arguments::ResolvedArgs::Invalid { raw, reason } => {
             tracing::warn!(
                 tool = %tool_name,
-                params_len = params_str.len(),
-                params_preview = %&params_str[..params_str.len().min(200)],
-                error = %e,
-                "Failed to parse tool call arguments as JSON — returning error to LLM"
+                params_len = raw.len(),
+                reason = %reason,
+                params_preview = %raw.preview(200),
+                "Failed to parse tool call arguments as JSON — returning error to LLM with raw content as hint"
             );
             return (
                 format!(
-                    "Error: Tool '{}' arguments are not valid JSON and could not be parsed: {}. \
-                     This call was NOT executed. \
-                     Arguments preview (first 200 bytes): {}",
-                    tool_name,
-                    e,
-                    &params_str[..params_str.len().min(200)]
+                    "Error: Tool '{tool_name}' arguments are not valid JSON and could not be parsed: {reason}.\n\
+                     This call was NOT executed. Your original raw arguments are preserved below for reference:\n\n\
+                     --- raw arguments ---\n{}\n--- end ---",
+                    raw.preview(200)
                 ),
                 false,
             );
@@ -711,7 +716,7 @@ pub(crate) async fn execute_single_tool(
             params
                 .get("message")
                 .and_then(|v| v.as_str())
-                .unwrap_or("Tool call arguments were truncated during streaming")
+                .unwrap_or("Tool call arguments were not valid JSON")
                 .to_string(),
             false,
         );

@@ -40,3 +40,7 @@ When another agent subscribes via `identity:observe` Intent:
 - Use JSON-like format for identity data
 - Always include confidence scores with identity values
 - When uncertain about an identity update, do NOT store it — say "I'm not confident enough to update this information"
+
+## File Reference
+Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 
+Do not wrap paths in quotes — they become unclickable.

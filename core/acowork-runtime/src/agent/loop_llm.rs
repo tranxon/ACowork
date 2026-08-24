@@ -21,6 +21,7 @@ use super::loop_::{AgentLoop, ChunkEvent, ControlDecision};
 use crate::agent::session_state::SessionStatus;
 use crate::cancellation::select_on_cancel;
 use crate::error::{Result, RuntimeError};
+use crate::util::text::TextPreview;
 
 impl AgentLoop {
     /// Call LLM with streaming, accumulating content and tool calls.
@@ -325,18 +326,52 @@ impl AgentLoop {
                                 {
                                     // Validate JSON before applying — stream interruption can
                                     // leave incomplete arguments that would fail at tool execution.
-                                    if serde_json::from_str::<serde_json::Value>(args).is_ok() {
-                                        tc.function.arguments = args.clone();
-                                    } else {
-                                        tracing::error!(
-                                            tool_name = %tc.function.name,
-                                            index = i,
-                                            raw_len = args.len(),
-                                            raw_preview = %&args[..args.len().min(200)],
-                                            "Accumulated tool call arguments are not valid JSON"
-                                        );
-                                        tc.function.arguments =
-                                            make_incomplete_marker(&tc.function.name, args.len());
+                                    //
+                                    // Route through `arguments::resolve` instead of
+                                    // `serde_json::from_str(...).is_ok()` so we recover
+                                    // valid JSON wrapped in a natural-language prefix
+                                    // (DeepSeek 2026-08-24 incident) and preserve the
+                                    // original content as a hint in the marker message.
+                                    match crate::tools::arguments::resolve(args) {
+                                        crate::tools::arguments::ResolvedArgs::Valid(value) => {
+                                            // Serialize the JSON back to a string for
+                                            // storage in ToolCall.function.arguments
+                                            // (the provider trait is typed as String).
+                                            if let Ok(s) = serde_json::to_string(&value) {
+                                                tc.function.arguments = s;
+                                            }
+                                        }
+                                        crate::tools::arguments::ResolvedArgs::Recovered {
+                                            value,
+                                            ..
+                                        } => {
+                                            if let Ok(s) = serde_json::to_string(&value) {
+                                                tc.function.arguments = s;
+                                            }
+                                            tracing::warn!(
+                                                tool_name = %tc.function.name,
+                                                index = i,
+                                                raw_len = args.len(),
+                                                "Recovered tool call arguments from natural-language-wrapped stream"
+                                            );
+                                        }
+                                        crate::tools::arguments::ResolvedArgs::Invalid { raw, reason } => {
+                                            tracing::error!(
+                                                tool_name = %tc.function.name,
+                                                index = i,
+                                                raw_len = raw.len(),
+                                                reason = %reason,
+                                                raw_preview = %raw.preview(200),
+                                                "Accumulated tool call arguments are not valid JSON and could not be recovered"
+                                            );
+                                            // Preserve the raw content as the marker hint so
+                                            // the LLM can see its original intent next iteration.
+                                            tc.function.arguments =
+                                                crate::tools::arguments::make_incomplete_marker(
+                                                    &tc.function.name,
+                                                    &raw,
+                                                );
+                                        }
                                     }
                                 }
                                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
@@ -533,24 +568,56 @@ impl AgentLoop {
                 {
                     // Validate JSON before applying — stream interruption can
                     // leave incomplete arguments that would fail at tool execution.
-                    if serde_json::from_str::<serde_json::Value>(args).is_ok() {
-                        tracing::info!(
-                            tool_name = %tc.function.name,
-                            index = i,
-                            accumulated_len = args.len(),
-                            "Applying accumulated arguments to tool call"
-                        );
-                        tc.function.arguments = args.clone();
-                    } else {
-                        tracing::error!(
-                            tool_name = %tc.function.name,
-                            index = i,
-                            raw_len = args.len(),
-                            raw_preview = %&args[..args.len().min(200)],
-                            "Accumulated tool call arguments are not valid JSON"
-                        );
-                        tc.function.arguments =
-                            make_incomplete_marker(&tc.function.name, args.len());
+                    //
+                    // Route through `arguments::resolve` instead of
+                    // `serde_json::from_str(...).is_ok()` so we recover
+                    // valid JSON wrapped in a natural-language prefix
+                    // (DeepSeek 2026-08-24 incident) and preserve the
+                    // original content as a hint in the marker message.
+                    match crate::tools::arguments::resolve(args) {
+                        crate::tools::arguments::ResolvedArgs::Valid(value) => {
+                            if let Ok(s) = serde_json::to_string(&value) {
+                                tracing::info!(
+                                    tool_name = %tc.function.name,
+                                    index = i,
+                                    accumulated_len = s.len(),
+                                    "Applying accumulated arguments to tool call"
+                                );
+                                tc.function.arguments = s;
+                            }
+                        }
+                        crate::tools::arguments::ResolvedArgs::Recovered { value, .. } => {
+                            if let Ok(s) = serde_json::to_string(&value) {
+                                tracing::info!(
+                                    tool_name = %tc.function.name,
+                                    index = i,
+                                    accumulated_len = s.len(),
+                                    "Applying accumulated arguments to tool call"
+                                );
+                                tc.function.arguments = s;
+                            }
+                            tracing::warn!(
+                                tool_name = %tc.function.name,
+                                index = i,
+                                raw_len = args.len(),
+                                "Recovered tool call arguments from natural-language-wrapped stream"
+                            );
+                        }
+                        crate::tools::arguments::ResolvedArgs::Invalid { raw, reason } => {
+                            tracing::error!(
+                                tool_name = %tc.function.name,
+                                index = i,
+                                raw_len = raw.len(),
+                                reason = %reason,
+                                raw_preview = %raw.preview(200),
+                                "Accumulated tool call arguments are not valid JSON and could not be recovered"
+                            );
+                            tc.function.arguments =
+                                crate::tools::arguments::make_incomplete_marker(
+                                    &tc.function.name,
+                                    &raw,
+                                );
+                        }
                     }
                 }
                 // If arguments already non-empty (GLM/DeepSeek same-chunk pattern),
@@ -597,23 +664,14 @@ fn build_stopped_response(content: String, reasoning_content: String) -> ChatRes
 
 /// Build a structured error marker for truncated/incomplete tool call arguments.
 ///
-/// Returns valid JSON that `execute_single_tool` can parse and detect,
-/// causing it to skip actual tool execution and return a clear error message
-/// to the LLM. This avoids the "empty `{}`" silent degradation that previously
-/// caused LLM retry loops.
-///
-/// IMPORTANT: The message string is a *prompt-level* constraint, not a code-level
-/// guarantee — its effectiveness depends on the LLM's ability to follow instructions.
+/// **Moved to [`crate::tools::arguments::make_incomplete_marker`]**.
+#[deprecated(
+    since = "0.1.0",
+    note = "use crate::tools::arguments::make_incomplete_marker instead — the streaming assembler (loop_llm.rs) and the tool executor (loop_tools.rs) now share the same marker factory"
+)]
+#[allow(dead_code)]
 pub(crate) fn make_incomplete_marker(tool_name: &str, raw_len: usize) -> String {
-    serde_json::json!({
-        "error": "TOOL_CALL_INCOMPLETE",
-        "message": format!(
-            "Tool '{}' arguments were truncated during streaming \
-             (received {} bytes, invalid JSON). \
-             This call was NOT executed — do NOT retry with the same call. \
-             If the task requires this tool, generate the full arguments in a new call.",
-            tool_name, raw_len
-        )
-    })
-    .to_string()
+    // Legacy signature kept for backwards compatibility.  New code should
+    // call `crate::tools::arguments::make_incomplete_marker(name, hint)` directly.
+    crate::tools::arguments::make_incomplete_marker_with_len(tool_name, raw_len)
 }
