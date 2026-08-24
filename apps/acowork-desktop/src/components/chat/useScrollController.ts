@@ -144,10 +144,45 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   const [isNearBottom, setIsNearBottom] = useState(true);
   const [isNearTop, setIsNearTop] = useState(false);
 
+  // ── Auto-follow mode ──
+  // User intent: "I want to stay anchored at the latest content".
+  // When true, the controller hides the "jump to latest" button and
+  // forces scrollToBottom() on every liveUpdate, so streaming content
+  // continuously keeps the user at the tail.  When the user actively
+  // scrolls away from the bottom (> EDGE_THRESHOLD_PX), this flips to
+  // false and the button reappears.
+  //
+  // Why useState (not useRef): drives showScrollToBottom, which gates
+  // a DOM element. Re-render cost is negligible (only flips on user
+  // intent, not on every streaming delta).
+  const [followMode, setFollowMode] = useState(true);
+  // Mirror ref so the subscribe callback (registered once, see
+  // useEffect below) can read the latest followMode without re-subscribing
+  // on every flip. Same pattern as adapterRef / vmlRefRef above.
+  const followModeRef = useRef(followMode);
+  followModeRef.current = followMode;
+  // Helper: setFollowMode updates BOTH state and ref synchronously.
+  // The state update drives the re-render (and thus showScrollToBottom),
+  // while the ref update lets the subscribe callback — which was
+  // registered ONCE on first render and reads followModeRef.current —
+  // see the new value immediately, before the re-render commits.
+  // Without the ref update, a liveUpdate fired in the same tick as
+  // jumpToTop would still see the stale followMode and wrongly call
+  // vml.scrollToBottom() (yanking the user back to the tail).
+  const setFollowModeSync = useCallback((next: boolean) => {
+    followModeRef.current = next;
+    setFollowMode(next);
+  }, []);
+
   // `showScrollToBottom`: show when the user is NOT viewing the latest
   // content.  Two triggers:
   //   1. User scrolled away from bottom (!isNearBottom)
   //   2. Data window doesn't cover the tail (!isAtTail)
+  // Gate: NEVER show while followMode is active.  followMode is the
+  // user's explicit intent to stay anchored at the tail; while it is
+  // on, any divergence from the latest content is resolved by
+  // auto-scrolling (see the contradiction-resolver effect below), so
+  // the button would only ever appear as a stale flash.
   // Note: `adapter.hasPendingFlush()` is intentionally NOT used here.
   // A pending flush only means there are live stream entries (e.g. a
   // thinking block) that are already folded into `adapter.blocks` at the
@@ -161,8 +196,18 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // `initializedRef` is only set when `blocksLen > 0` - so for an empty
   // session the initial state never gets corrected.
   const hasBlocks = adapter.blocks.length > 0;
-  const showScrollToBottom = hasBlocks
+  // Raw need signal (no followMode gate): true when the data-derived
+  // flags say the user is not viewing the latest content.  This is the
+  // single truth source for "user needs to go to the bottom" — it drives
+  // the contradiction resolver below and the arrow button.
+  const needsLatestContent = hasBlocks
     && (!isNearBottom || !adapter.isAtTail());
+  // Final UI flag: NEVER show the arrow while followMode is active.
+  // followMode is the user's explicit intent to stay anchored at the
+  // tail; while it is on, any divergence from the latest content is
+  // resolved by auto-scrolling (the contradiction resolver), so the
+  // button would only ever appear as a stale flash.
+  const showScrollToBottom = needsLatestContent && !followMode;
   const showScrollToTop = hasBlocks
     && (!isNearTop || adapter.hasOlder);
 
@@ -186,7 +231,8 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     initializedRef.current = false;
     setIsNearBottom(true); // fresh session starts at bottom
     setIsNearTop(false);   // ...not at top
-  }, [sessionKey]);
+    setFollowModeSync(true); // new session → auto-follow by default
+  }, [sessionKey, setFollowModeSync]);
 
   // ── Init-scroll effect (useLayoutEffect — before paint) ──
   // Data-driven restoration: the saved snapshot carries a stable
@@ -372,6 +418,19 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
           const vml = vmlRefRef.current.current;
           if (vml) {
             void vml.isStreamingBlockInViewport();
+            // Auto-follow: when followMode is active, ALWAYS force the
+            // scroll to the tail on content growth.  Deliberately NO DOM
+            // distance check here — in a virtualized list the scrollHeight
+            // delta of an incoming stream block is not reliable within the
+            // same tick (measurement hasn't run), so a distance guard
+            // mis-detects "scrolled away" while the user is still visually
+            // at the bottom.  That mis-detection was the bug where the
+            // arrow reappeared during streaming.  Cancelling followMode is
+            // owned EXCLUSIVELY by handleScroll (user scroll direction +
+            // DOM distance) — see the comment there.
+            if (followModeRef.current) {
+              vml.scrollToBottom();
+            }
           }
           // Content grew — passive edge proximity may have changed.
           scheduleEdgeCheck();
@@ -401,6 +460,38 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // Called from the scroll container's onScroll event (bound in
   // ChatPanel).  This is the PRIMARY pagination trigger — event-driven,
   // rAF-throttled.  Zero CPU when the user is not scrolling.
+  // Also drives followMode transitions in BOTH directions:
+  //   - followMode=true  + user scroll-up past the threshold → cancel.
+  //   - followMode=false + user scroll-down into the bottom zone → re-arm.
+  //
+  // Why direction + DOM distance (not the isNearBottom state):
+  //   The old check read `isNearBottom` from state, which is one render
+  //   behind inside a scroll handler.  When jumpToBottom() programmatically
+  //   scrolls to the tail, that scroll fires this handler while the state
+  //   still holds the PRE-scroll value (false, because the user had scrolled
+  //   up before clicking the arrow) — so followMode was cancelled by our own
+  //   programmatic scroll, and every subsequent liveUpdate stopped
+  //   auto-scrolling.  That was the "arrow reappears after clicking it
+  //   during streaming" bug.
+  //   Guard #1 (direction): programmatic scrolls (jumpToBottom / the
+  //   liveUpdate auto-follow) only move scrollTop DOWN (increasing), so
+  //   they can never cancel followMode.  Only a user-initiated scroll-up
+  //   (decreasing scrollTop) can.
+  //   Guard #2 (distance): read the DOM (always current in a scroll
+  //   handler) instead of state.
+  //   initializedRef gate: before init-scroll the container isn't
+  //   positioned yet; a session-switch clamp scroll must not cancel the
+  //   fresh session's followMode.
+  //
+  // Why a SYMMETRIC re-arm path (scroll-down into the bottom zone):
+  //   Without this, a single scroll-up → scroll-down cycle can leave
+  //   followMode stuck false: scroll-up clears it, then any subsequent
+  //   scroll-down event is a no-op, so new messages stop auto-scrolling
+  //   even though the user is visually at the tail.  Re-arming here
+  //   matches the original requirement: "when the chat box is at the
+  //   bottom, followMode is true" — both the first session-open state
+  //   AND any state where the user has manually returned to the tail.
+  const prevScrollTopRef = useRef(0);
   const handleScroll = useCallback(() => {
     // NOTE: do NOT set initializedRef here.  When a session switches,
     // the old content is removed → scrollHeight shrinks → the browser
@@ -409,25 +500,94 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     // the new session's data loads.  Setting initializedRef=true here
     // would block the init-scroll effect from restoring the position.
     scheduleEdgeCheck();
-  }, [scheduleEdgeCheck]);
+
+    const container = containerRefRef.current.current;
+    if (!container || !initializedRef.current) return;
+
+    const scrollTop = container.scrollTop;
+    const distFromBottom =
+      container.scrollHeight - (scrollTop + container.clientHeight);
+    const nearBottom = distFromBottom <= EDGE_THRESHOLD_PX;
+    const scrollingUp = scrollTop < prevScrollTopRef.current;
+    prevScrollTopRef.current = scrollTop;
+
+    if (followModeRef.current) {
+      // Active follow → user scroll-up past the threshold cancels it.
+      // Programmatic scrolls (jumpToBottom / liveUpdate auto-follow)
+      // only move scrollTop DOWN (scrollingUp=false), so they cannot
+      // trip this branch — see "Guard #1" above.
+      if (scrollingUp && distFromBottom > EDGE_THRESHOLD_PX) {
+        setFollowModeSync(false);
+      }
+    } else {
+      // followMode off → user scroll-down into the bottom zone re-arms
+      // it.  Without this, followMode can get stuck false after a
+      // scroll-up → scroll-down cycle and new messages stop
+      // auto-scrolling even though the user is visually at the tail.
+      // Re-arming mirrors the initial session-open default: as soon as
+      // the user is "at the bottom" again, followMode becomes true.
+      if (!scrollingUp && nearBottom) {
+        setFollowModeSync(true);
+      }
+    }
+  }, [scheduleEdgeCheck, setFollowModeSync]);
 
   // ── Jump primitives ──
   // Two-phase: (1) adapter loads data pages until the window covers
   // the target edge; (2) controller commands VML to scroll the DOM.
   // The adapter only owns data — the controller owns DOM side-effects.
   const jumpToBottom = useCallback(() => {
+    // User explicitly asked to anchor at the latest content → re-enable
+    // auto-follow so subsequent streaming deltas keep them pinned.
+    setFollowModeSync(true);
     void adapter.scrollToBottom().then(() => {
       const vml = vmlRefRef.current.current;
       if (vml) vml.scrollToBottom();
     });
-  }, [adapter]);
+  }, [adapter, setFollowModeSync]);
 
   const jumpToTop = useCallback(() => {
+    // User explicitly asked to jump to the oldest content → exit
+    // auto-follow; the button should reappear when new messages arrive
+    // (which would happen at the top, not the bottom they came from).
+    setFollowModeSync(false);
     void adapter.scrollToTop().then(() => {
       const vml = vmlRefRef.current.current;
       if (vml) vml.scrollToTop();
     });
-  }, [adapter]);
+  }, [adapter, setFollowModeSync]);
+
+  // ── Contradiction resolver (auto-follow convergence) ──
+  // followMode says "keep me anchored at the latest content", but the
+  // raw data-derived signal can still report the user is NOT at the
+  // latest content (needsLatestContent=true) — e.g. content grew and
+  // checkEdges hasn't caught up, or the tail page is still loading.
+  // When the two disagree, the button must NOT appear; instead execute
+  // the jump-to-bottom action directly (same code path as the arrow
+  // button) so the viewport converges to the tail.  This is the single
+  // source of truth: followMode=true means auto-scroll, period — never
+  // a visible arrow.
+  //
+  // Why ref (not dep) for jumpToBottom:
+  //   The effect deps are the two booleans only.  jumpToBottom's identity
+  //   changes on every ChatPanel re-render because the `adapter` arg is a
+  //   fresh facade object each render (see chatListAdapter.ts:628
+  //   useAdapterFacade).  Including it in the deps would re-fire the
+  //   effect on EVERY render while `followMode && needsLatestContent`
+  //   holds true — and each fire calls adapter.scrollToBottom(), which
+  //   triggers a ChatPanel re-render via the chatStore subscription,
+  //   re-creating `adapter` and the `jumpToBottom` closure, and the loop
+  //   repeats: "Maximum update depth exceeded" on resume-from-sleep
+  //   (when many spurious re-renders happen at once).  Mirror via ref so
+  //   the latest jumpToBottom is invoked without re-firing the effect.
+  const jumpToBottomRef = useRef(jumpToBottom);
+  jumpToBottomRef.current = jumpToBottom;
+
+  useEffect(() => {
+    if (followMode && needsLatestContent) {
+      jumpToBottomRef.current();
+    }
+  }, [followMode, needsLatestContent]);
 
   // ── isAtLatest ──
   // Preserved for ChatPanel's scroll-snapshot logic (nav-back restore).

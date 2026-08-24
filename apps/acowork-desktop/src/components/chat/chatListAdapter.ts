@@ -34,7 +34,7 @@
  * new export; C5 will switch consumers to v2 and the v1 file will be
  * deleted.
  */
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { useChatStore } from "../../stores/chatStore";
 import {
   type ChatAdapterEvent,
@@ -310,8 +310,15 @@ class AdapterStore {
     // Already at tail?  NOTE: this intentionally uses `limit > 0`
     // (NOT `isAtTail()`) because `limit === 0` means "no page loaded" -
     // scrollToBottom must still trigger an HTTP load in that case.
+    //
+    // No bumpVersion on this branch: the cursor didn't move, no
+    // chatStore write happened, and the liveBuffer is already driven
+    // by subscribeChatAdapter.  A gratuitous version bump here used to
+    // feed the "effect → setState → effect" loop driven by the
+    // contradiction-resolver effect in useScrollController (followMode
+    // + needsLatestContent holding true across many spurious
+    // re-renders — e.g. on resume-from-sleep).
     if (cur.messageLimit > 0 && cur.messageOffset + cur.messageLimit >= cur.messageTotal) {
-      this.bumpVersion();
       return;
     }
     // Single jump: replace cache with the tail page.
@@ -575,13 +582,14 @@ export function useChatListAdapter(
     store ? store.getSnapshot : noopGetSnapshot,
   );
 
-  // For null keys, return the frozen noop adapter.
-  if (!store) {
-    return NOOP_ADAPTER;
-  }
-
   // Build the public ChatListAdapter surface.  Memoized so consumers
-  // can re-render only when `snapshot` actually changes.
+  // can re-render only when `snapshot` actually changes.  Called
+  // UNCONDITIONALLY (even when `store` is null) — see useAdapterFacade
+  // for the null-handling — so the hook count stays stable across
+  // renders where the session key toggles null.  An earlier version
+  // did `if (!store) return NOOP_ADAPTER;` here, which caused React's
+  // "change in the order of Hooks" error (position 78 flipped from
+  // useState to useMemo the first time a session was bound).
   return useAdapterFacade(store, snapshot);
 }
 
@@ -610,43 +618,60 @@ const NOOP_ADAPTER: ChatListAdapterV2 = {
 
 /**
  * Build the public ChatListAdapter facade bound to a per-session store.
- * The returned object identity is stable per `store` + `snapshot.blocks`
- * tuple — when neither changes, the same object is returned, so React
- * skips downstream re-renders that don't depend on changed properties.
+ * The returned object identity is stable across renders as long as
+ * `snapshot` is unchanged — every consumer re-render that does NOT
+ * change data (e.g. parent re-renders, focus events, sleep-resume
+ * resume) will get back the SAME facade reference, so downstream
+ * `useEffect(..., [adapter])` and `useCallback(..., [adapter])` hooks
+ * do not re-fire spuriously.  When the adapter snapshot genuinely
+ * changes (chatStore update / liveBuffer mutation), `useSyncExternalStore`
+ * has already replaced `snapshot` with a fresh reference, so the memo
+ * rebuilds and consumers re-render with the new data.
+ *
+ * Without this memo, the old `return { ... }` allocation produced a
+ * fresh facade on every render — a known footgun that fed an
+ * "effect → setState → effect" loop in the contradiction-resolver
+ * effect of useScrollController (see the comment on that effect).
+ *
+ * MUST be called unconditionally by the consumer (useChatListAdapter):
+ * `useMemo` runs every render, and skipping it on the null branch
+ * would flip the hook count and trip Rules of Hooks the moment a
+ * session key becomes bound.  When `store` is null the factory
+ * returns the frozen NOOP_ADAPTER instead.
  */
 function useAdapterFacade(
-  store: AdapterStore,
+  store: AdapterStore | null,
   snapshot: AdapterSnapshot,
 ): ChatListAdapterV2 {
-  // We don't use useMemo here because the snapshot itself is the
-  // single source of truth.  Returning a freshly-constructed facade
-  // on every render would force a re-render of every consumer; we
-  // instead expose the snapshot's `blocks` directly (which is the
-  // actual re-render driver) and bind the methods to the store
-  // (which has stable identity).  React's useSyncExternalStore already
-  // gates re-renders on snapshot identity.
-  return {
-    blocks: snapshot.blocks,
-    totalBlocks: snapshot.blocks.length,
-    messageOffset: snapshot.messageOffset,
-    messageLimit: snapshot.messageLimit,
-    messageTotal: snapshot.messageTotal,
-    cacheGeneration: store.cacheGeneration,
-    isAtTail: store.isAtTail,
-    hasPendingFlush: store.hasPendingFlush,
-    hasOlder: snapshot.hasOlder,
-    hasNewer: snapshot.hasNewer,
-    isLoading: snapshot.isLoading,
-    loadPrevPage: store.loadPrevPage,
-    loadNextPage: store.loadNextPage,
-    loadInitialPage: store.loadInitialPage,
-    loadPageForMessage: store.loadPageForMessage,
-    loadPageForBlockId: store.loadPageForBlockId,
-    scrollToTop: store.scrollToTop,
-    scrollToBottom: store.scrollToBottom,
-    scrollToPosition: store.scrollToPosition,
-    subscribe: store.subscribe,
-  };
+  return useMemo<ChatListAdapterV2>(() => {
+    // store may be null when no session is bound; in that case return
+    // the frozen noop so consumers can still call no-op methods safely.
+    // The check lives INSIDE the factory so the useMemo call itself is
+    // unconditional from the consumer's perspective (Rules of Hooks).
+    if (!store) return NOOP_ADAPTER;
+    return {
+      blocks: snapshot.blocks,
+      totalBlocks: snapshot.blocks.length,
+      messageOffset: snapshot.messageOffset,
+      messageLimit: snapshot.messageLimit,
+      messageTotal: snapshot.messageTotal,
+      cacheGeneration: store.cacheGeneration,
+      isAtTail: store.isAtTail,
+      hasPendingFlush: store.hasPendingFlush,
+      hasOlder: snapshot.hasOlder,
+      hasNewer: snapshot.hasNewer,
+      isLoading: snapshot.isLoading,
+      loadPrevPage: store.loadPrevPage,
+      loadNextPage: store.loadNextPage,
+      loadInitialPage: store.loadInitialPage,
+      loadPageForMessage: store.loadPageForMessage,
+      loadPageForBlockId: store.loadPageForBlockId,
+      scrollToTop: store.scrollToTop,
+      scrollToBottom: store.scrollToBottom,
+      scrollToPosition: store.scrollToPosition,
+      subscribe: store.subscribe,
+    };
+  }, [store, snapshot]);
 }
 
 // Re-export the in-store event API for the controller (C4) to hook into
