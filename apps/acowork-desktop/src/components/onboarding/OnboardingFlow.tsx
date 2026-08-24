@@ -13,6 +13,7 @@ import type { GatewayMode, ModelInfo } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
+import { Dropdown } from "../common/Dropdown";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ModelMultiSelect } from "../harness/ModelMultiSelect";
 import brandMark from "../../../../../assets/brand-mark.svg";
@@ -468,15 +469,11 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
         <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <div className="flex items-center gap-2">
             <span className="text-lg">🔑</span>
-            <select
+            <Dropdown
               value={provider}
-              onChange={(e) => handleProviderChange(e.target.value)}
-              className="w-full rounded-md border border-zinc-200 px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-            >
-              {dynamicProviders.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
+              onChange={(v) => handleProviderChange(v)}
+              options={dynamicProviders.map((p) => ({ value: p.id, label: p.name }))}
+            />
           </div>
 
           {/* API Key input */}
@@ -584,52 +581,32 @@ function IdentityStep({
         </div>
         <div>
           <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.languageLabel")}</label>
-          <select
+          <Dropdown
             value={language}
-            onChange={(e) => onUpdate({ language: e.target.value })}
-            className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-              backgroundPosition: 'right 0.5rem center',
-              backgroundRepeat: 'no-repeat',
-              backgroundSize: '1.5em 1.5em',
-              paddingRight: '2rem',
-              appearance: 'none',
-              WebkitAppearance: 'none',
-              MozAppearance: 'none',
-            }}
-          >
-            <option value="zh-CN">{t("onboarding.identity.languages.zh-CN")}</option>
-            <option value="zh-TW">{t("onboarding.identity.languages.zh-TW")}</option>
-            <option value="en">{t("onboarding.identity.languages.en")}</option>
-            <option value="ja">{t("onboarding.identity.languages.ja")}</option>
-            <option value="ko">{t("onboarding.identity.languages.ko")}</option>
-          </select>
+            onChange={(v) => onUpdate({ language: v })}
+            options={[
+              { value: "zh-CN", label: t("onboarding.identity.languages.zh-CN") },
+              { value: "zh-TW", label: t("onboarding.identity.languages.zh-TW") },
+              { value: "en", label: t("onboarding.identity.languages.en") },
+              { value: "ja", label: t("onboarding.identity.languages.ja") },
+              { value: "ko", label: t("onboarding.identity.languages.ko") },
+            ]}
+          />
         </div>
         <div>
           <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.timezoneLabel")}</label>
-          <select
+          <Dropdown
             value={timezone}
-            onChange={(e) => onUpdate({ timezone: e.target.value })}
-            className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-              backgroundPosition: 'right 0.5rem center',
-              backgroundRepeat: 'no-repeat',
-              backgroundSize: '1.5em 1.5em',
-              paddingRight: '2rem',
-              appearance: 'none',
-              WebkitAppearance: 'none',
-              MozAppearance: 'none',
-            }}
-          >
-            <option value="Asia/Shanghai">Asia/Shanghai</option>
-            <option value="Asia/Tokyo">Asia/Tokyo</option>
-            <option value="America/New_York">America/New_York</option>
-            <option value="America/Los_Angeles">America/Los_Angeles</option>
-            <option value="Europe/London">Europe/London</option>
-            <option value="UTC">UTC</option>
-          </select>
+            onChange={(v) => onUpdate({ timezone: v })}
+            options={[
+              { value: "Asia/Shanghai", label: "Asia/Shanghai" },
+              { value: "Asia/Tokyo", label: "Asia/Tokyo" },
+              { value: "America/New_York", label: "America/New_York" },
+              { value: "America/Los_Angeles", label: "America/Los_Angeles" },
+              { value: "Europe/London", label: "Europe/London" },
+              { value: "UTC", label: "UTC" },
+            ]}
+          />
         </div>
         <div>
           <label className="mb-1 block text-xs text-zinc-500">{t("onboarding.identity.cityLabel")}</label>

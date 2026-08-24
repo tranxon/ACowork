@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem};
+use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType, ProviderListItem};
 use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
@@ -128,8 +128,15 @@ pub struct AgentCore {
 
     /// Provider→compact_model mapping from provider_list at AgentHello.
     pub(crate) provider_compact_models: HashMap<String, Option<String>>,
+    /// ADR-056: Global default compact model reference — `(provider_id, model_id)`.
+    /// Set from `AvailableProviders.default_compact_model` at session init.
+    /// Top-priority candidate in the distillation fallback chain
+    /// (`resolve_distill_model`). `None` means no global override; runtime
+    /// then falls back to `provider_compact_models` (Level 2) and finally the
+    /// session's current chat model (Level 3).
+    pub(crate) default_compact_model: Option<(String, String)>,
     /// LLM temperature override (from Gateway config via agent_config.json).
-    /// Layer 1 in the resolution chain.
+    /// Level 1 in the resolution chain.
     pub(crate) temperature_override: Option<f32>,
     /// LLM temperature from manifest.toml [llm].temperature (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of temperature_override
@@ -273,6 +280,7 @@ impl AgentCore {
             search_provider_list: Arc::new(RwLock::new(Vec::new())),
             compat_cache: None,
             provider_compact_models: HashMap::new(),
+            default_compact_model: None,
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
@@ -964,6 +972,42 @@ impl AgentCore {
         vault.get(provider_id).cloned()
     }
 
+    /// ADR-056: Whether the global default compact model's provider is
+    /// actually usable right now. A provider is usable when either:
+    ///
+    ///   1. it has a non-empty API key in the in-memory vault (cloud
+    ///      providers), or
+    ///   2. it is a local provider — no key required, reachable via a
+    ///      local base_url (Ollama native protocol, or any base_url
+    ///      pointing at localhost / 127.0.0.1 / 0.0.0.0 / ::1).
+    ///
+    /// This is what `resolve_distill_model` consults before accepting
+    /// Level 1 — without the local-provider branch, a user-chosen Ollama
+    /// default (ADR-056 §2.3 "chat 用 deepseek,蒸馏用本地 qwen2.5:0.5b")
+    /// would always be rejected and the feature would never fire.
+    pub fn is_default_compact_provider_available(&self) -> bool {
+        let Some((pid, _)) = self.default_compact_model.as_ref() else {
+            return false;
+        };
+        // 1) Cloud provider with a configured key.
+        if self
+            .get_provider_api_key(pid)
+            .map(|k| !k.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        // 2) Local provider — no key required, but must still be present in
+        //    the provider list with a reachable local base_url.
+        let list = self.global_provider_list.read().unwrap();
+        list.iter()
+            .find(|p| p.id == *pid)
+            .is_some_and(|p| {
+                matches!(p.protocol_type, ProtocolType::Ollama)
+                    || crate::providers::is_local_base_url(&p.base_url)
+            })
+    }
+
     pub fn set_debug_mode(&mut self, observer: crate::debug::DebugObserverImpl) {
         tracing::info!(is_dev = crate::debug::observer::DebugObserver::is_dev_mode(&observer), "AgentCore::set_debug_mode called (observer pipeline)");
         self.debug_observer = DebugObserverSlot::dev(observer);
@@ -1096,6 +1140,7 @@ impl Clone for AgentCore {
             search_provider_list: self.search_provider_list.clone(),
             compat_cache: self.compat_cache.clone(),
             provider_compact_models: self.provider_compact_models.clone(),
+            default_compact_model: self.default_compact_model.clone(),
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,

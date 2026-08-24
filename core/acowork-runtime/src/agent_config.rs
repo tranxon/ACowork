@@ -1058,10 +1058,12 @@ pub fn save_agent_provider_config_from_available(
     work_dir: &Path,
     providers: &[acowork_core::protocol::ProviderListItem],
     version: u64,
+    default_compact_model: Option<&acowork_core::protocol::CompactModelRef>,
 ) -> Result<(), String> {
     let cfg = acowork_core::protocol::AgentProviderConfig {
         providers: providers.to_vec(),
         version,
+        default_compact_model: default_compact_model.cloned(),
     };
     save_agent_provider_config(work_dir, &cfg)
 }

@@ -687,6 +687,21 @@ export interface ProviderListEntry {
   custom?: boolean;
 }
 
+// ── ADR-056: Global default compact model (cross-provider pick) ──────
+
+/** Cross-provider reference to a (provider_id, model_id) pair.
+ *  Lives at the top level of `provider_list.json` — independent of
+ *  any single provider's `compact_model` field. */
+export interface CompactModelRef {
+  provider_id: string;
+  model_id: string;
+}
+
+/** Response from `GET /api/settings/default-compact-model`. */
+export interface DefaultCompactModelResponse {
+  default_compact_model: CompactModelRef | null;
+}
+
 // ── Memory types ──────────────────────────────────────────────────────
 
 /** Single memory node in the list response */

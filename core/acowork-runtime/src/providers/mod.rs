@@ -8,6 +8,20 @@ pub mod registry;
 pub mod reliable;
 pub mod router;
 
+/// ADR-056: Whether a provider `base_url` points at a local machine —
+/// i.e. the provider is self-hosted and callable **without** an API key.
+///
+/// Used by the distillation availability checks (`AgentCore` /
+/// `available_cache`) to accept local providers (Ollama, LM Studio, …)
+/// whose `api_key` is empty by design, while still rejecting cloud
+/// providers whose key was revoked/never configured.
+pub fn is_local_base_url(url: &str) -> bool {
+    url.contains("localhost")
+        || url.contains("127.0.0.1")
+        || url.contains("0.0.0.0")
+        || url.contains("[::1]")
+}
+
 /// Parse the HTTP `Retry-After` header value into milliseconds.
 ///
 /// Supports two formats per RFC 7231:

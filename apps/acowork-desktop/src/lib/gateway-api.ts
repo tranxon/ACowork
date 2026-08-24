@@ -20,6 +20,8 @@ import type {
   LspServerStatusEntry,
   LspServersConfig,
   LspServersWithStatus,
+  CompactModelRef,
+  DefaultCompactModelResponse,
 } from "./types";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
@@ -518,3 +520,54 @@ export async function runLspInstall(
 }
 
 
+// ── Settings API ────────────────────────────────────────────────────────
+//
+// ADR-056: Global default compact model. The Gateway persists this on the
+// `provider_list.json` top-level `default_compact_model` field and pushes
+// it as part of `acowork/global/providers` (AvailableProviders) via MQTT
+// retained, so Runtimes can apply the three-tier distillation fallback.
+
+/**
+ * `GET /api/settings/default-compact-model` — read the user's current
+ * global pick. Returns `null` when not configured.
+ */
+export async function getDefaultCompactModel(
+  gatewayUrl = getGatewayUrl(),
+): Promise<CompactModelRef | null> {
+  const resp = await fetch(`${gatewayUrl}/api/settings/default-compact-model`);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch default compact model: ${resp.status}`);
+  }
+  const data = (await resp.json()) as DefaultCompactModelResponse;
+  return data.default_compact_model ?? null;
+}
+
+/**
+ * `PUT /api/settings/default-compact-model` — set or clear the global
+ * default. Pass `null` to clear (Runtime then falls back to provider
+ * compact_model and current chat model only).
+ *
+ * Returns the new value (as persisted by the Gateway).
+ *
+ * Throws on validation failure (unknown provider_id, or model_id not
+ * belonging to that provider) — Gateway returns HTTP 422 with the
+ * `error` field set (ADR-056 §4.1).
+ */
+export async function setDefaultCompactModel(
+  ref: CompactModelRef | null,
+  gatewayUrl = getGatewayUrl(),
+): Promise<CompactModelRef | null> {
+  const resp = await fetch(`${gatewayUrl}/api/settings/default-compact-model`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ default_compact_model: ref }),
+  });
+  const data = (await resp.json().catch(() => ({}))) as {
+    default_compact_model?: CompactModelRef | null;
+    error?: string;
+  };
+  if (!resp.ok) {
+    throw new Error(data.error ?? `Failed to set default compact model: ${resp.status}`);
+  }
+  return data.default_compact_model ?? null;
+}

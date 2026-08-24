@@ -250,7 +250,6 @@ impl super::loop_::AgentLoop {
                     "No tail messages to distill — skipping"
                 );
             } else {
-                let provider = self.core.provider.clone();
                 let memory_provider = self.core.memory_provider().cloned();
                 let emb_provider = self.core.embedding_provider.clone();
                 // ADR-027: clone ConversationSession so the spawned task can
@@ -269,12 +268,19 @@ impl super::loop_::AgentLoop {
                         acc.push('\n');
                         acc
                     });
-                let model_name = self.resolve_distill_model(&combined_text);
+                let resolved_distill = self.resolve_distill_model(&combined_text);
                 let distill_max_tokens = self.core.config.distill_max_tokens;
                 // Snapshot user identity (small text block) so the spawned
                 // task is independent of `self` and so the summary is written
                 // in the user's preferred language.
                 let identity_context = self.session.identity_context().map(String::from);
+
+                // ADR-056: pick the right Provider instance for tail
+                // distillation — shared helper, same semantics as
+                // `compact_history_if_needed`. Reuses the session provider
+                // unless the resolved target lives on a different one.
+                let (compact_provider, model_name, tier) =
+                    self.distill_provider(&resolved_distill);
 
                 tracing::info!(
                     session_id = %session_id,
@@ -282,6 +288,7 @@ impl super::loop_::AgentLoop {
                     tail_message_count = tail_messages.len(),
                     is_compacted = self.session.is_compacted,
                     model = %model_name,
+                    tier = ?tier,
                     "Spawning tail distillation for session close"
                 );
 
@@ -289,7 +296,7 @@ impl super::loop_::AgentLoop {
                 tokio::spawn(async move {
                     match crate::episode_distill::EpisodeDistiller::compact_messages(
                         &tail_messages,
-                        provider.as_ref(),
+                        compact_provider.as_ref(),
                         &model_name,
                         distill_max_tokens,
                         identity_context.as_deref(),

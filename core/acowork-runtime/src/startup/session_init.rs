@@ -271,6 +271,24 @@ pub(crate) async fn phase_b_init_session(
             );
         }
 
+        // ADR-056: Surface the global default compact model from
+        // `AgentProviderConfig` (mirrors `AvailableProviders.default_compact_model`)
+        // into `AgentCore.default_compact_model`. The MQTT path is the
+        // authoritative source for runtime sessions; the on-disk field is
+        // the cold-start cache populated by the MQTT handler.
+        if let Some(cm) = ctx
+            .provider_config
+            .as_ref()
+            .and_then(|c| c.default_compact_model.as_ref())
+        {
+            c.default_compact_model = Some((cm.provider_id.clone(), cm.model_id.clone()));
+            tracing::info!(
+                provider_id = %cm.provider_id,
+                model_id = %cm.model_id,
+                "Populated AgentCore.default_compact_model from resource cache"
+            );
+        }
+
         // ADR-033: MQTT available_cache is the only source of provider API keys
         // (gRPC hello_config path removed per ADR-040). The available cache
         // is updated by the Runtime MQTT event loop whenever the Gateway

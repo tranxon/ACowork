@@ -777,8 +777,14 @@ impl AgentLoop {
                     let prompt = crate::prompt::TITLE_PROMPT
                         .replace("{language}", &lang)
                         .replace("{user_message}", title_input);
-                    let provider = self.core.provider.clone();
-                    let compact_model = self.resolve_distill_model(title_input);
+                    // ADR-056: title generation uses the same distillation
+                    // target resolution + provider rebuild as compaction, so
+                    // a cross-provider global default (e.g. local Ollama)
+                    // drives the title call too — never a mismatched
+                    // (session provider, other-provider model) pair.
+                    let resolved_distill = self.resolve_distill_model(title_input);
+                    let (provider, compact_model, _tier) =
+                        self.distill_provider(&resolved_distill);
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
                     // ADR-028: clone the AgentCore so the spawned task can

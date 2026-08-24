@@ -661,6 +661,8 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
 
         let payload = AvailableProviders {
             version: 42,
+            // ADR-056: no global default compact model in this fixture.
+            default_compact_model: None,
             providers: vec![
                 ProviderRef {
                     id: "anthropic".into(),
