@@ -15,6 +15,7 @@ import {
 import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import i18n from "../../i18n";
 import { log } from "../../lib/logger";
 
@@ -399,10 +400,9 @@ export function ProfileTab() {
             {/* Language */}
             <div>
               <label className="mb-1 block text-xs text-zinc-500">{t("settings.language")}</label>
-              <select
+              <Dropdown
                 value={language}
-                onChange={(e) => {
-                  const lng = e.target.value;
+                onChange={(lng) => {
                   log.debug("[ProfileTab] Switching language to:", lng);
                   setLanguage(lng);
                   i18n.changeLanguage(lng).then(() => {
@@ -412,49 +412,21 @@ export function ProfileTab() {
                     saveField(backendUser.user_id, "language", lng);
                   }
                 }}
-                className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                  backgroundPosition: 'right 0.5rem center',
-                  backgroundRepeat: 'no-repeat',
-                  backgroundSize: '1.5em 1.5em',
-                  paddingRight: '2rem',
-                  appearance: 'none',
-                  WebkitAppearance: 'none',
-                  MozAppearance: 'none',
-                }}
-              >
-                {languages.map((l) => (
-                  <option key={l.value} value={l.value}>{l.label}</option>
-                ))}
-              </select>
+                options={languages.map((l) => ({ value: l.value, label: l.label }))}
+              />
             </div>
 
             {/* Timezone */}
             <div>
               <label className="mb-1 block text-xs text-zinc-500">{t("settings.timezone")}</label>
-              <select
+              <Dropdown
                 value={timezone}
-                onChange={(e) => {
-                  setTimezone(e.target.value);
-                  saveField(backendUser.user_id, "timezone", e.target.value);
+                onChange={(tz) => {
+                  setTimezone(tz);
+                  saveField(backendUser.user_id, "timezone", tz);
                 }}
-                className="w-full rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                  backgroundPosition: 'right 0.5rem center',
-                  backgroundRepeat: 'no-repeat',
-                  backgroundSize: '1.5em 1.5em',
-                  paddingRight: '2rem',
-                  appearance: 'none',
-                  WebkitAppearance: 'none',
-                  MozAppearance: 'none',
-                }}
-              >
-                {TIMEZONES.map((tz) => (
-                  <option key={tz} value={tz}>{tz}</option>
-                ))}
-              </select>
+                options={TIMEZONES.map((tz) => ({ value: tz, label: tz }))}
+              />
             </div>
 
             {/* City */}

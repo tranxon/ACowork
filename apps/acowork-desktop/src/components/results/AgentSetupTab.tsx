@@ -11,6 +11,7 @@ import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Switch } from "../common/Switch";
+import { Dropdown } from "../common/Dropdown";
 import {
   clearAgentAvatarCache,
   fetchAvatarAssets,
@@ -871,10 +872,9 @@ export function AgentSetupTab() {
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.idleTimeout")}
         </label>
-        <select
+        <Dropdown
           value={idleTimeoutDisplayValue(profile.idleTimeoutSecs)}
-          onChange={(e) => {
-            const v = e.target.value;
+          onChange={(v) => {
             if (v === "") {
               saveField("idleTimeoutSecs", undefined);
               return;
@@ -882,26 +882,12 @@ export function AgentSetupTab() {
             const n = parseInt(v, 10);
             saveField("idleTimeoutSecs", Number.isFinite(n) && n >= 0 ? n : undefined);
           }}
-          className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-          style={{
-            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-            backgroundPosition: 'right 0.5rem center',
-            backgroundRepeat: 'no-repeat',
-            backgroundSize: '1.5em 1.5em',
-          }}
-        >
-          {/* Placeholder shown when the stored value is undefined or no
-              longer a preset (e.g. legacy 300/900). Never silently
-              relabel a non-preset value as "30 minutes". */}
-          <option value="" disabled hidden>
-            {t("agentSetup.idleTimeoutPlaceholder")}
-          </option>
-          {IDLE_TIMEOUT_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {t(opt.labelKey)}
-            </option>
-          ))}
-        </select>
+          placeholder={{ value: "", label: t("agentSetup.idleTimeoutPlaceholder") }}
+          options={IDLE_TIMEOUT_OPTIONS.map((opt) => ({
+            value: String(opt.value),
+            label: t(opt.labelKey),
+          }))}
+        />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.idleTimeoutDesc")}
         </p>
@@ -912,7 +898,7 @@ export function AgentSetupTab() {
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
           {t("agentSetup.shellCommandApproval")}
         </label>
-        <select
+        <Dropdown
           value={
             // Legacy "never" (pre-rename) is normalized to "auto_approve" so
             // profiles saved before the rename still show the right option.
@@ -920,23 +906,14 @@ export function AgentSetupTab() {
               ? "auto_approve"
               : (profile.shellApprovalThreshold ?? "medium")
           }
-          onChange={(e) => {
-            const v = e.target.value;
-            saveField("shellApprovalThreshold", v);
-          }}
-          className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 focus:border-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:text-zinc-200"
-          style={{
-            backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-            backgroundPosition: 'right 0.5rem center',
-            backgroundRepeat: 'no-repeat',
-            backgroundSize: '1.5em 1.5em',
-          }}
-        >
-          <option value="medium">{t("agentSetup.approvalMedium")}</option>
-          <option value="low">{t("agentSetup.approvalLow")}</option>
-          <option value="high">{t("agentSetup.approvalHigh")}</option>
-          <option value="auto_approve">{t("agentSetup.approvalAutoApprove")}</option>
-        </select>
+          onChange={(v) => saveField("shellApprovalThreshold", v)}
+          options={[
+            { value: "medium", label: t("agentSetup.approvalMedium") },
+            { value: "low", label: t("agentSetup.approvalLow") },
+            { value: "high", label: t("agentSetup.approvalHigh") },
+            { value: "auto_approve", label: t("agentSetup.approvalAutoApprove") },
+          ]}
+        />
         <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
           {t("agentSetup.approvalDesc")}
         </p>

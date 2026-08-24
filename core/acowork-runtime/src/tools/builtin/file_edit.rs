@@ -83,12 +83,12 @@ impl FileEditTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_edit".to_string(),
-            description: "Edit a file by replacing an exact string match with new content. Exact matching is preferred; if exact matching fails, whitespace-flexible line matching is attempted.".to_string(),
+            description: "Edit a file by replacing an exact string match with new content. Exact matching is preferred; Ensure that before calling, use file_read to re-read the target area; Strictly copy old_text byte-by-byte: indentation, CRLF, and trailing whitespace must exactly match the actual file.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path" },
-                    "old_text": { "type": "string", "description": "The exact text to find and replace. Exact matching is tried first; if it fails, whitespace-flexible line matching is attempted." },
+                    "old_text": { "type": "string", "description": "The exact text to find and replace. Strictly copy old_text byte-by-byte: indentation, CRLF, and trailing whitespace must exactly match the actual file. CRLF is common in Windows repositories." },
                     "new_text": { "type": "string", "description": "The replacement text" }
                 },
                 "required": ["path", "old_text", "new_text"]

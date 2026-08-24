@@ -517,12 +517,14 @@ async fn mqtt_only_loop(
                         provider_count = update.provider_list.len(),
                         version = update.provider_list_version,
                         key_count = update.provider_key_vault.len(),
+                        has_default_compact = update.default_compact_model.is_some(),
                         "Applying acowork/global/providers update to SessionManager"
                     );
                     session_manager.lock().await.update_global_provider_list(
                         update.provider_list,
                         update.provider_list_version,
                         update.provider_key_vault,
+                        update.default_compact_model,
                     );
                 }
             }

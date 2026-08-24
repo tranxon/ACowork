@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use acowork_core::protocol::{
-    EmbeddingModelsFile, McpKeyEntry, McpListItem, ProviderListItem, ProviderModelEntry,
-    SearchKeyEntry, SearchProviderListItem, UserProfileListFile,
+    CompactModelRef, EmbeddingModelsFile, McpKeyEntry, McpListItem, ProviderListItem,
+    ProviderModelEntry, SearchKeyEntry, SearchProviderListItem, UserProfileListFile,
 };
 
 /// In-memory resource cache loaded at Gateway startup.
@@ -39,11 +39,18 @@ pub struct ResourceCache {
 }
 
 /// Versioned provider list persisted to disk.
+///
+/// ADR-056: Also carries `default_compact_model` — the user's global pick
+/// for cross-provider distillation. Lives at the top level (not inside any
+/// `providers[]` entry) so it can refer to any provider by id.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[derive(Default)]
 pub struct ProviderListFile {
     pub version: u64,
     pub providers: Vec<ProviderListItem>,
+    /// ADR-056: Global default compact model. `None` = no global override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compact_model: Option<CompactModelRef>,
 }
 
 /// Versioned MCP server list persisted to disk.
@@ -338,6 +345,58 @@ pub fn save_provider_list(data_dir: &Path, list: &ProviderListFile) -> Result<()
         "Provider list saved"
     );
     Ok(())
+}
+
+/// ADR-056: Validate that `(provider_id, model_id)` points to an existing
+/// model inside `providers[]`. Returns `Ok(())` on success, or an `Err`
+/// describing the mismatch — used by HTTP handlers to reject malformed
+/// `default_compact_model` updates with HTTP 422.
+pub fn validate_compact_model_ref(
+    list: &ProviderListFile,
+    r: &CompactModelRef,
+) -> Result<(), String> {
+    let Some(provider) = list.providers.iter().find(|p| p.id == r.provider_id) else {
+        return Err(format!(
+            "default_compact_model: provider_id '{}' not found in provider_list",
+            r.provider_id
+        ));
+    };
+    if !provider.models.iter().any(|m| m.id == r.model_id) {
+        return Err(format!(
+            "default_compact_model: model_id '{}' is not a model of provider '{}'",
+            r.model_id, r.provider_id
+        ));
+    }
+    Ok(())
+}
+
+/// ADR-056: Set (or clear) the global default compact model on the in-memory
+/// `ProviderListFile`, bumping `version` so MQTT retained republish fires.
+///
+/// `value = None` clears the global default (Runtime then degrades to the
+/// legacy provider.compact_model → chat-model fallback chain).
+///
+/// Returns the previous value (if any) on success; `Err` is returned when
+/// `(provider_id, model_id)` does not point to an existing model. The
+/// in-memory state is **not** mutated on error — caller decides whether
+/// to persist.
+pub fn set_default_compact_model(
+    list: &mut ProviderListFile,
+    value: Option<CompactModelRef>,
+) -> Result<Option<CompactModelRef>, String> {
+    if let Some(ref r) = value {
+        validate_compact_model_ref(list, r)?;
+    }
+    let prev = list.default_compact_model.take();
+    list.default_compact_model = value;
+    list.version = list.version.saturating_add(1);
+    tracing::info!(
+        new = ?list.default_compact_model,
+        prev = ?prev,
+        version = list.version,
+        "default_compact_model updated"
+    );
+    Ok(prev)
 }
 
 /// Save the MCP list to disk.
@@ -789,6 +848,7 @@ mod tests {
         let dir = temp_dir("save-provider");
         let list = ProviderListFile {
             version: 1,
+            default_compact_model: None,
             providers: vec![ProviderListItem {
                 id: "openai".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
@@ -912,5 +972,221 @@ mod tests {
         assert_eq!(cache.provider_list.version, 0);
         assert_eq!(cache.mcp_list.version, 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── ADR-056: default_compact_model setter tests ────────────────────
+
+    /// Build a small `ProviderListFile` fixture for setter tests.
+    /// Two providers (`ollama` and `deepseek`) with distinct model lists.
+    fn fixture_provider_list() -> ProviderListFile {
+        ProviderListFile {
+            version: 7,
+            default_compact_model: None,
+            providers: vec![
+                ProviderListItem {
+                    id: "ollama".to_string(),
+                    base_url: "http://localhost:11434/v1".to_string(),
+                    protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                    compact_model: None,
+                    custom: false,
+                    models: vec![
+                        ProviderModelEntry {
+                            id: "qwen2.5:0.5b".to_string(),
+                            capabilities: acowork_core::protocol::ModelCapabilitiesInfo {
+                                context_window: 32_000,
+                                ..fixture_min_caps()
+                            },
+                            max_output_tokens_limit: 32_768,
+                        },
+                        ProviderModelEntry {
+                            id: "llama3:8b".to_string(),
+                            capabilities: acowork_core::protocol::ModelCapabilitiesInfo {
+                                context_window: 8_000,
+                                ..fixture_min_caps()
+                            },
+                            max_output_tokens_limit: 16_384,
+                        },
+                    ],
+                },
+                ProviderListItem {
+                    id: "deepseek".to_string(),
+                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                    compact_model: Some("deepseek-v4-flash".to_string()),
+                    custom: false,
+                    models: vec![ProviderModelEntry {
+                        id: "deepseek-v4-flash".to_string(),
+                        capabilities: acowork_core::protocol::ModelCapabilitiesInfo {
+                            context_window: 64_000,
+                            ..fixture_min_caps()
+                        },
+                        max_output_tokens_limit: 32_768,
+                    }],
+                },
+            ],
+        }
+    }
+
+    fn fixture_min_caps() -> acowork_core::protocol::ModelCapabilitiesInfo {
+        acowork_core::protocol::ModelCapabilitiesInfo {
+            context_window: 0,
+            max_output_tokens: 4096,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: None,
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+        }
+    }
+
+    #[test]
+    fn test_load_old_provider_list_without_default_compact() {
+        // ADR-056 §8: legacy `provider_list.json` without `default_compact_model`
+        // must deserialize to `None` (no migration needed).
+        let dir = temp_dir("old-provider-list");
+        let raw = r#"{
+            "version": 42,
+            "providers": [
+                {
+                    "id": "legacy",
+                    "base_url": "https://example.invalid/v1",
+                    "protocol_type": "openai",
+                    "custom": false,
+                    "models": []
+                }
+            ]
+        }"#;
+        std::fs::write(provider_list_path(&dir), raw).unwrap();
+        let loaded = load_provider_list(&dir);
+        assert_eq!(loaded.version, 42);
+        assert_eq!(loaded.providers.len(), 1);
+        assert!(loaded.default_compact_model.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_default_compact_model_happy_path() {
+        let mut list = fixture_provider_list();
+        let prev_version = list.version;
+        let prev = set_default_compact_model(
+            &mut list,
+            Some(CompactModelRef {
+                provider_id: "ollama".to_string(),
+                model_id: "qwen2.5:0.5b".to_string(),
+            }),
+        )
+        .expect("ollama::qwen2.5:0.5b is a valid ref");
+
+        // Returns previous (None here), bumps version, mutates the field.
+        assert!(prev.is_none());
+        assert_eq!(list.default_compact_model.as_ref().unwrap().provider_id, "ollama");
+        assert_eq!(list.default_compact_model.as_ref().unwrap().model_id, "qwen2.5:0.5b");
+        assert!(list.version > prev_version, "version must monotonically increase");
+    }
+
+    #[test]
+    fn test_set_default_compact_model_persists_and_round_trips() {
+        let dir = temp_dir("default-compact-persist");
+        let mut list = fixture_provider_list();
+        set_default_compact_model(
+            &mut list,
+            Some(CompactModelRef {
+                provider_id: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+            }),
+        )
+        .unwrap();
+        save_provider_list(&dir, &list).unwrap();
+
+        let loaded = load_provider_list(&dir);
+        assert_eq!(
+            loaded.default_compact_model,
+            Some(CompactModelRef {
+                provider_id: "deepseek".to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+            })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_default_compact_model_unknown_provider_is_rejected() {
+        let mut list = fixture_provider_list();
+        let result = set_default_compact_model(
+            &mut list,
+            Some(CompactModelRef {
+                provider_id: "anthropic".to_string(), // not in fixture
+                model_id: "claude-3-5-sonnet".to_string(),
+            }),
+        );
+        assert!(result.is_err(), "unknown provider_id must be rejected");
+        // State must NOT be mutated on error.
+        assert!(list.default_compact_model.is_none());
+        // Version must NOT have been bumped on error.
+        assert_eq!(list.version, fixture_provider_list().version);
+    }
+
+    #[test]
+    fn test_set_default_compact_model_model_not_in_provider_is_rejected() {
+        // Cross-provider sanity: `qwen2.5:0.5b` belongs to ollama, not deepseek.
+        let mut list = fixture_provider_list();
+        let result = set_default_compact_model(
+            &mut list,
+            Some(CompactModelRef {
+                provider_id: "deepseek".to_string(),
+                model_id: "qwen2.5:0.5b".to_string(),
+            }),
+        );
+        assert!(result.is_err(), "model from another provider must be rejected");
+        assert!(list.default_compact_model.is_none());
+    }
+
+    #[test]
+    fn test_set_default_compact_model_clear_with_none() {
+        let mut list = fixture_provider_list();
+        // Set then clear.
+        set_default_compact_model(
+            &mut list,
+            Some(CompactModelRef {
+                provider_id: "ollama".to_string(),
+                model_id: "qwen2.5:0.5b".to_string(),
+            }),
+        )
+        .unwrap();
+        assert!(list.default_compact_model.is_some());
+
+        let prev = set_default_compact_model(&mut list, None).unwrap();
+        assert_eq!(
+            prev,
+            Some(CompactModelRef {
+                provider_id: "ollama".to_string(),
+                model_id: "qwen2.5:0.5b".to_string(),
+            })
+        );
+        assert!(list.default_compact_model.is_none());
+    }
+
+    #[test]
+    fn test_set_default_compact_model_version_monotonic_under_repeat() {
+        let mut list = fixture_provider_list();
+        let v0 = list.version;
+        let ref_v = CompactModelRef {
+            provider_id: "ollama".to_string(),
+            model_id: "qwen2.5:0.5b".to_string(),
+        };
+        // Two updates → two bumps, never decrease.
+        set_default_compact_model(&mut list, Some(ref_v.clone())).unwrap();
+        let v1 = list.version;
+        assert!(v1 > v0);
+        set_default_compact_model(&mut list, Some(ref_v)).unwrap();
+        let v2 = list.version;
+        assert!(v2 > v1);
     }
 }

@@ -105,6 +105,8 @@ acowork/global/
 │                              # payload = AvailableProviders {
 │                              #   version: u64,
 │                              #   providers: [ProviderRef],   # 仅包含 Gateway 验证过的
+│                              #   default_compact_model:   # [ADR-056] 跨 provider 备选项
+│                              #     Option<CompactModelRef>,# 全局默认精简模型(Runtime 蒸馏 fallback 链 Level 1)
 │                              # }
 │                              # 注：ProviderRef 内嵌 `api_key` 字段
 │                              # （Gateway 在 PUBLISH 前从 Vault 解密后填入）
@@ -151,6 +153,7 @@ acowork/global/
   - embedding model 加载完成 / 卸载 → PUBLISH `acowork/global/embedding_models`(retain=true)
   - Runtime 启动时立即收到 retained 当前快照;后续状态变化收到 push
   - **ADR-042**:用户在 Settings 增/改/删 user profile 或切换 active user → Gateway 重 publish `acowork/global/user_profile`(retain=true)。Runtime 收到后通过 `SessionManager::update_user_identity` broadcast 到所有 session 的 `ContextBuilder.identity_context`。
+  - **ADR-056**:用户在 Harness 的"全局默认精简模型"卡片里选了一个跨 provider 的 `(provider_id, model_id)` 引用并保存(走 `PUT /api/settings/default-compact-model`)→ Gateway 写盘 + 自触发 publisher → `AvailableProviders.default_compact_model` 字段更新 → 重 publish `acowork/global/providers`(retain=true)。Runtime 收到后用此字段刷新 `AgentCore.default_compact_model`,成为蒸馏 fallback 链 Level 1 候选。
 - **无 HTTP 兜底**：Runtime 启动后 `SUB acowork/global/#` 立即收到所有 retained 快照；断线重连后再次 SUB 同样立即收到最新 retained。MQTT Retained Message 原生语义已覆盖"快照 + 增量"两种需求，**不**提供 `GET /api/global/{kind}/available` 这类 HTTP 兜底接口。
 - **冲突解决**:Runtime 收到 push 时比较 `version`,新版本覆盖本地缓存,旧版本忽略(防止乱序)。
 - **QoS**:1(状态变更不能丢)。

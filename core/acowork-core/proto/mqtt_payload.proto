@@ -87,6 +87,25 @@ message AvailableProviders {
   /// Monotonic version. Runtime compares to detect stale pushes.
   uint64 version = 1;
   repeated ProviderRef providers = 2;
+  // ADR-056: Global default compact model — picked by the user from across
+  // all configured providers. Runtime distillation fallback chain:
+  //   ① this field (if Some and the target provider is available)
+  //   ② provider.compact_model on the session's current provider
+  //   ③ the session's current chat model
+  // Absent / unset = no global override; behavior degrades to legacy chain.
+  optional CompactModelRef default_compact_model = 7;
+}
+
+/// ADR-056: Reference to a (provider_id, model_id) pair.
+///
+/// Used for cross-provider selections such as the global default compact
+/// model. Mirrors the on-disk `agent_provider.json` top-level
+/// `default_compact_model` object.
+message CompactModelRef {
+  /// Provider identifier (matches `ProviderRef.id`).
+  string provider_id = 1;
+  /// Model identifier within that provider.
+  string model_id = 2;
 }
 
 /// Available MCP servers — Gateway health-check verified.

@@ -307,6 +307,16 @@ fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
     AvailableProviders {
         version: cache.version,
         providers,
+        // ADR-056: forward the global default compact model so Runtime can
+        // resolve the distillation fallback chain without an extra round-trip.
+        // `None` (i.e. not set in `provider_list.json`) means "no global
+        // override" — Runtime falls back to provider.compact_model and chat.
+        default_compact_model: cache.default_compact_model.clone().map(|r| {
+            mqtt_proto::CompactModelRef {
+                provider_id: r.provider_id,
+                model_id: r.model_id,
+            }
+        }),
     }
 }
 

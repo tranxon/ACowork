@@ -502,7 +502,14 @@
     "discoverFailed": "模型发现失败",
     "providerIdExists": "服务商 ID 已存在",
     "customProviderNoKey": "自定义服务商 — 使用接口地址",
-    "optional": "可选"
+    "optional": "可选",
+    "globalCompactModel": {
+      "title": "全局默认精简模型",
+      "description": "跨 provider 的精简（摘要/蒸馏）默认目标。找不到时回退到当前服务商的 compact_model，再回退到当前聊天模型。",
+      "noneLabel": "— 不设置",
+      "unavailable": "已不可用",
+      "saveFailed": "保存失败：{{error}}"
+    }
   },
   "harnessSearch": {
     "searchProviderManagement": "搜索服务商管理",

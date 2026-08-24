@@ -108,6 +108,9 @@ pub struct ProviderUpdate {
     pub provider_list: Vec<acowork_core::protocol::ProviderListItem>,
     pub provider_list_version: u64,
     pub provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry>,
+    /// ADR-056: Global default compact model reference forwarded from
+    /// `AvailableProviders.default_compact_model`. `None` = no global override.
+    pub default_compact_model: Option<acowork_core::protocol::CompactModelRef>,
 }
 
 /// Search provider update pushed from MQTT poll loop to SessionManager.
@@ -613,7 +616,7 @@ impl RuntimeMqttClient {
                                             // so the Runtime can load it on restart.
                                             // API keys are NOT persisted - they stay in
                                             // available_cache (in-memory only).
-                                            let (provider_list, version, key_vault) =
+                                            let (provider_list, version, key_vault, default_compact_model) =
                                                 match cache_write.providers.as_ref() {
                                                     Some(p) => {
                                                         let list =
@@ -622,9 +625,16 @@ impl RuntimeMqttClient {
                                                             );
                                                         let keys =
                                                             extract_provider_keys(&p.providers);
-                                                        (list, p.version, keys)
+                                                        // ADR-056: forward the global default
+                                                        // compact model reference.
+                                                        let dcm = p.default_compact_model.as_ref()
+                                                            .map(|r| acowork_core::protocol::CompactModelRef {
+                                                                provider_id: r.provider_id.clone(),
+                                                                model_id: r.model_id.clone(),
+                                                            });
+                                                        (list, p.version, keys, dcm)
                                                     }
-                                                    None => (vec![], 0, vec![]),
+                                                    None => (vec![], 0, vec![], None),
                                                 };
                                             drop(cache_write);
 
@@ -633,6 +643,7 @@ impl RuntimeMqttClient {
                                                 &poll_work_dir,
                                                 &provider_list,
                                                 version,
+                                                default_compact_model.as_ref(),
                                             ) {
                                                 tracing::warn!(
                                                     agent_id = %poll_agent_id,
@@ -643,6 +654,7 @@ impl RuntimeMqttClient {
                                                 tracing::info!(
                                                     agent_id = %poll_agent_id,
                                                     provider_count = provider_list.len(),
+                                                    has_default_compact = default_compact_model.is_some(),
                                                     "Synced provider list from acowork/global/providers into agent_provider.json"
                                                 );
                                             }
@@ -653,6 +665,7 @@ impl RuntimeMqttClient {
                                                     provider_list,
                                                     provider_list_version: version,
                                                     provider_key_vault: key_vault,
+                                                    default_compact_model,
                                                 };
                                                 if let Err(e) = tx.send(update) {
                                                     tracing::warn!(

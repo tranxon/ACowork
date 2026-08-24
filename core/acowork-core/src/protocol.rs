@@ -159,6 +159,20 @@ impl ModelCapabilitiesInfo {
     }
 }
 
+/// ADR-056: Cross-provider reference to a (provider_id, model_id) pair.
+///
+/// Used for global selections that span providers, such as the user's
+/// chosen default compact model. Mirrors the on-disk
+/// `agent_provider.json` top-level `default_compact_model` object and
+/// the `AvailableProviders.default_compact_model` proto field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CompactModelRef {
+    /// Provider identifier (matches `ProviderListItem.id`).
+    pub provider_id: String,
+    /// Model identifier within that provider (matches `ProviderModelEntry.id`).
+    pub model_id: String,
+}
+
 /// Provider list entry — delivered by Gateway to Runtime via AgentHelloResult.
 ///
 /// Contains all metadata needed to construct a Provider instance
@@ -311,6 +325,13 @@ pub struct AgentProviderConfig {
     pub providers: Vec<ProviderListItem>,
     /// Monotonic version for diff sync (mirrors AvailableProviders.version).
     pub version: u64,
+    /// ADR-056: Global default compact model reference — picked by the user
+    /// in the Harness from across all configured providers. Runtime uses this
+    /// as the top-priority candidate in the distillation fallback chain.
+    /// `None` (or absent in on-disk JSON) means no global override; the
+    /// runtime then falls back to `provider.compact_model` and the chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compact_model: Option<CompactModelRef>,
 }
 
 /// Per-agent search configuration — persisted to agent_search.json.

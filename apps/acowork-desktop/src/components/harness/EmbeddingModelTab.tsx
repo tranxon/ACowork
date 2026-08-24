@@ -5,6 +5,7 @@ import type { EmbeddingModelWithStatus, SelectModelMigrationResponse } from "../
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
+import { Dropdown } from "../common/Dropdown";
 import { fetchEmbeddingModels, downloadEmbeddingModel, selectEmbeddingModel, fetchEmbeddingModelStatus, testEmbeddingModel, deleteEmbeddingModel, startMigration, selectEmbeddingModelWithMigration } from "../../lib/gateway-api";
 import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2 } from "lucide-react";
@@ -709,25 +710,16 @@ function ModelCard({
                 <div className="flex shrink-0 items-center gap-1.5">
                     {/* Variant selector — show when downloading and model has multiple variants */}
                     {hasVariants && (model.status === "not_downloaded" || model.status === "service_not_running" || model.status === "unknown" || model.status === "downloading" || model.status.startsWith("failed")) && (
-                        <select
+                        <Dropdown
+                            size="small"
                             value={selectedVariant}
-                            onChange={(e) => setSelectedVariant(e.target.value)}
+                            onChange={setSelectedVariant}
                             disabled={isBusy}
-                            className="h-7 appearance-none rounded-md border border-zinc-200 bg-modal-surface px-1.5 text-[11px] text-zinc-700 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-600 dark:text-zinc-300"
-                            style={{
-                                backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                                backgroundPosition: 'right 0.25rem center',
-                                backgroundRepeat: 'no-repeat',
-                                backgroundSize: '1.2em 1.2em',
-                                paddingRight: '1.25rem',
-                            }}
-                        >
-                            {variants.map((v) => (
-                                <option key={v} value={v}>
-                                    {VARIANT_LABELS[v] ?? v.toUpperCase()}
-                                </option>
-                            ))}
-                        </select>
+                            options={variants.map((v) => ({
+                                value: v,
+                                label: VARIANT_LABELS[v] ?? v.toUpperCase(),
+                            }))}
+                        />
                     )}
                     {/* Download button — show when not downloaded/loaded or unknown */}
                     {(model.status === "not_downloaded" || model.status === "service_not_running" || model.status === "unknown" || model.status === "downloading" || model.status.startsWith("failed")) && (
