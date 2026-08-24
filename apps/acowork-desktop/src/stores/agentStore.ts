@@ -277,6 +277,8 @@ interface AgentStoreState {
   createSession: (agentId: string) => Promise<void>;
   deleteSession: (agentId: string, sessionId: string) => Promise<void>;
   closeSession: (agentId: string, sessionId: string) => Promise<void>;
+  /** Rename a session: optimistic local update + MQTT `update_session_title`. */
+  renameSession: (agentId: string, sessionId: string, title: string) => Promise<void>;
   /** Update a session's title locally (no API call). */
   updateSessionTitle: (sessionId: string, title: string) => void;
 
@@ -861,6 +863,38 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       set((state) => patchAgent(state, agentId, { sessionTitle: undefined }));
     } catch (e) {
       log.error("[AgentStore] Failed to delete session:", e);
+    }
+  },
+
+  renameSession: async (agentId: string, sessionId: string, title: string) => {
+    // Optimistic local update — the tab strip, session dropdown, and
+    // AgentList sidebar all read `agents[agentId].sessions`, so patch it
+    // before the MQTT roundtrip. The Runtime persists the same title via
+    // `ConversationSession::update_title_force`.
+    set((state) => {
+      const storage = state.agents[agentId];
+      if (!storage) return state;
+      const idx = storage.sessions.findIndex((s) => s.session_id === sessionId);
+      if (idx === -1) return state;
+      const sessions = [...storage.sessions];
+      sessions[idx] = { ...sessions[idx], title };
+      return patchAgent(state, agentId, {
+        sessions,
+        // Keep the sidebar's "latest session title" in sync when the renamed
+        // session is the most recently created one (same heuristic used by
+        // fetchSessions when it derives `sessionTitle` from `sessions[0]`).
+        ...(idx === 0 ? { sessionTitle: title } : {}),
+      });
+    });
+
+    try {
+      await invoke("mqtt_publish_control", {
+        agentId,
+        command: "update_session_title",
+        payloadJson: { session_id: sessionId, title },
+      });
+    } catch (e) {
+      log.error("[AgentStore] Failed to rename session:", e);
     }
   },
 
