@@ -1809,18 +1809,20 @@ After installation, ask the user to re-enable the MCP server.",
         provider_list: Vec<acowork_core::protocol::ProviderListItem>,
         provider_list_version: u64,
         provider_key_vault: Vec<acowork_core::protocol::ProviderKeyEntry>,
+        default_compact_model: Option<acowork_core::protocol::CompactModelRef>,
     ) {
         tracing::info!(
             provider_count = provider_list.len(),
             version = provider_list_version,
             key_count = provider_key_vault.len(),
+            has_default_compact = default_compact_model.is_some(),
             "SessionManager: updating global provider list"
         );
 
         // The shared `core` is wrapped in `Arc<AgentCore>` and may be cloned
-        // by SessionTasks; mutate `provider_compact_models` and the version
-        // counter only when we are the sole owner. The provider_list and
-        // key vault live behind `Arc<RwLock<...>>` and can be updated
+        // by SessionTasks; mutate `provider_compact_models`, `default_compact_model`,
+        // and the version counter only when we are the sole owner. The provider_list
+        // and key vault live behind `Arc<RwLock<...>>` and can be updated
         // regardless of refcount.
         if let Some(c) = Arc::get_mut(&mut self.core) {
             c.provider_compact_models.clear();
@@ -1829,6 +1831,13 @@ After installation, ask the user to re-enable the MCP server.",
                     .insert(provider.id.clone(), provider.compact_model.clone());
             }
             c.provider_list_version = provider_list_version;
+            // ADR-056: Sync the global default compact model. Sessions
+            // created after this point will inherit it via the per-session
+            // AgentCore clone. Existing in-flight sessions pick up the new
+            // value lazily on their next resolve_distill_model() call.
+            c.default_compact_model = default_compact_model
+                .as_ref()
+                .map(|r| (r.provider_id.clone(), r.model_id.clone()));
         } else {
             tracing::warn!(
                 "SessionManager: AgentCore Arc has multiple owners; \

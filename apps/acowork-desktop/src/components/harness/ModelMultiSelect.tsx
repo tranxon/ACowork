@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ModelInfo, ModelCapabilitiesInfo, ModelCapabilitiesMap } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { ModelCapEditor } from "./ModelCapEditor";
 import { useTranslation } from "../../i18n/useTranslation";
 
@@ -372,16 +373,12 @@ export function ModelMultiSelect({
           <label className="mb-1 block text-xs text-zinc-500">
             {t("harness.compactModel")}
           </label>
-          <select
+          <Dropdown
             value={compactModel ?? ""}
-            onChange={(e) => onCompactModelChange(e.target.value)}
-            className="w-full rounded-md border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-          >
-            <option value="">{t("harness.useCurrentModel")}</option>
-            {selected.map((m) => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
+            onChange={(v) => onCompactModelChange?.(v)}
+            placeholder={{ value: "", label: t("harness.useCurrentModel") }}
+            options={selected.map((m) => ({ value: m, label: m }))}
+          />
         </div>
       )}
     </div>

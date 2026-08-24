@@ -18,6 +18,7 @@ pub mod models_api;
 pub mod publish_api;
 pub mod routes;
 pub mod server;
+pub mod settings_api;
 pub mod skills_api;
 pub mod users_api;
 pub mod provider_api;

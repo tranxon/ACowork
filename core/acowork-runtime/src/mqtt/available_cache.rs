@@ -123,13 +123,25 @@ impl AvailableResourceCache {
         }
     }
 
-    /// Check if a provider is in the available list.
+    /// Check if a provider is in the available list AND callable.
+    ///
+    /// ADR-056: a provider is callable when it either carries a non-empty
+    /// API key (cloud) or points at a local base_url (self-hosted Ollama
+    /// etc. — empty key by design). This mirrors
+    /// `AgentCore::is_default_compact_provider_available`, which is what
+    /// `resolve_distill_model` actually consults at distillation time.
+    ///
+    /// Note: the proto `ProviderRef` carries the decrypted key (empty for
+    /// local providers) and `base_url`, so no Vault round-trip is needed.
     #[allow(dead_code)]
     pub fn is_provider_available(&self, provider_id: &str) -> bool {
-        self.providers
-            .as_ref()
-            .map(|p| p.providers.iter().any(|pr| pr.id == provider_id))
-            .unwrap_or(false)
+        let Some(available) = self.providers.as_ref() else {
+            return false;
+        };
+        available.providers.iter().any(|pr| {
+            pr.id == provider_id
+                && (!pr.api_key.is_empty() || crate::providers::is_local_base_url(&pr.base_url))
+        })
     }
 
     /// Check if an MCP server is in the available list.
@@ -222,10 +234,57 @@ mod tests {
             payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
                 AvailableProviders {
                     version: 5,
+                    // ADR-056: No global default compact model in this fixture.
+                    default_compact_model: None,
+                    providers: vec![
+                        acowork_core::mqtt_proto::ProviderRef {
+                            id: "openai".to_string(),
+                            base_url: "https://api.openai.com/v1".to_string(),
+                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
+                            models: vec![],
+                            compact_model: String::new(),
+                            custom: false,
+                            api_key: "sk-test".to_string(),
+                        },
+                        // Local provider — empty key by design, still callable.
+                        acowork_core::mqtt_proto::ProviderRef {
+                            id: "ollama-local".to_string(),
+                            base_url: "http://localhost:11434/v1".to_string(),
+                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
+                            models: vec![],
+                            compact_model: String::new(),
+                            custom: false,
+                            api_key: String::new(),
+                        },
+                    ],
+                },
+            )),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+
+        cache.update_from_mqtt("acowork/global/providers", &payload);
+
+        // Cloud provider with key → available; unknown provider → not.
+        assert!(cache.is_provider_available("openai"));
+        assert!(!cache.is_provider_available("anthropic"));
+        assert_eq!(cache.providers.as_ref().unwrap().version, 5);
+    }
+
+    #[test]
+    fn test_is_provider_available_local_provider_without_key() {
+        // ADR-056 §9.1 ①: local provider (empty api_key + local base_url)
+        // counts as available — distillation can target it without a key.
+        let mut cache = AvailableResourceCache::new();
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                AvailableProviders {
+                    version: 1,
+                    default_compact_model: None,
                     providers: vec![acowork_core::mqtt_proto::ProviderRef {
-                        id: "openai".to_string(),
-                        base_url: "https://api.openai.com/v1".to_string(),
-                        protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
+                        id: "ollama-local".to_string(),
+                        base_url: "http://localhost:11434/v1".to_string(),
+                        protocol_type: acowork_core::mqtt_proto::LlmProtocol::Ollama as i32,
                         models: vec![],
                         compact_model: String::new(),
                         custom: false,
@@ -234,13 +293,53 @@ mod tests {
                 },
             )),
         };
-        let payload = prost::Message::encode_to_vec(&envelope);
+        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
+        assert!(cache.is_provider_available("ollama-local"));
+    }
 
-        cache.update_from_mqtt("acowork/global/providers", &payload);
-
-        assert!(cache.is_provider_available("openai"));
+    #[test]
+    fn test_is_provider_available_cloud_without_key_is_unavailable() {
+        // ADR-056 §9.1 ②: cloud provider with empty api_key is NOT callable
+        // (key revoked / never configured) → distillation falls back.
+        let mut cache = AvailableResourceCache::new();
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                AvailableProviders {
+                    version: 1,
+                    default_compact_model: None,
+                    providers: vec![acowork_core::mqtt_proto::ProviderRef {
+                        id: "anthropic".to_string(),
+                        base_url: "https://api.anthropic.com/v1".to_string(),
+                        protocol_type: acowork_core::mqtt_proto::LlmProtocol::Anthropic as i32,
+                        models: vec![],
+                        compact_model: String::new(),
+                        custom: false,
+                        api_key: String::new(),
+                    }],
+                },
+            )),
+        };
+        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
         assert!(!cache.is_provider_available("anthropic"));
-        assert_eq!(cache.providers.as_ref().unwrap().version, 5);
+    }
+
+    #[test]
+    fn test_is_provider_available_unknown_provider() {
+        // ADR-056 §9.1 ③: provider absent from the available list → not available.
+        let mut cache = AvailableResourceCache::new();
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                AvailableProviders {
+                    version: 1,
+                    default_compact_model: None,
+                    providers: vec![],
+                },
+            )),
+        };
+        cache.update_from_mqtt("acowork/global/providers", &prost::Message::encode_to_vec(&envelope));
+        assert!(!cache.is_provider_available("ghost-provider"));
     }
 
     #[test]

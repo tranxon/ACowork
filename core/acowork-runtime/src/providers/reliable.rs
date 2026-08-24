@@ -199,6 +199,8 @@ impl ReliableProvider {
                     max_attempts: self.retry_config.max_attempts,
                     provider: provider_name.to_string(),
                 }),
+                reason: None,
+                message: None,
             };
         }
         if let Some(ref tx) = self.chunk_sender

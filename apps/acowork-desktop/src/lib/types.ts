@@ -687,6 +687,21 @@ export interface ProviderListEntry {
   custom?: boolean;
 }
 
+// ── ADR-056: Global default compact model (cross-provider pick) ──────
+
+/** Cross-provider reference to a (provider_id, model_id) pair.
+ *  Lives at the top level of `provider_list.json` — independent of
+ *  any single provider's `compact_model` field. */
+export interface CompactModelRef {
+  provider_id: string;
+  model_id: string;
+}
+
+/** Response from `GET /api/settings/default-compact-model`. */
+export interface DefaultCompactModelResponse {
+  default_compact_model: CompactModelRef | null;
+}
+
 // ── Memory types ──────────────────────────────────────────────────────
 
 /** Single memory node in the list response */
@@ -926,6 +941,13 @@ export type SessionStatus =
         max_attempts: number;
         provider: string;
       };
+      /**
+       * Why the session paused (mirrors runtime `PauseReason`).
+       * `undefined` for 429 retry waits — `retry_info` disambiguates those.
+       */
+      reason?: "iteration_limit" | "loop_detected" | "debug";
+      /** Human-readable pause message (e.g. iteration limit hint / loop detection detail) */
+      message?: string;
     };
   };
 

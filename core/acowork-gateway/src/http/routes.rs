@@ -156,6 +156,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::proxy::proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
+        .merge(crate::http::settings_api::settings_routes())
         .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         .layer(middleware::from_fn(log_request_origin))
@@ -402,6 +403,20 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 400,
+            }),
+        )
+    }
+
+    /// ADR-056: unprocessable entity — the request is well-formed but the
+    /// referenced entity does not exist (e.g. `default_compact_model`
+    /// pointing at an unknown provider_id / model_id). Mirrors the 422
+    /// contract in ADR-056 §4.1.
+    pub fn unprocessable_entity(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(Self {
+                error: msg.to_string(),
+                code: 422,
             }),
         )
     }

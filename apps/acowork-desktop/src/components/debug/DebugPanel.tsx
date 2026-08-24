@@ -141,9 +141,9 @@ function MessagesView({ content }: { content?: string }) {
         return (
           <div
             key={i}
-            className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-1 dark:border-zinc-600 dark:bg-zinc-800/60"
+            className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-800/60"
           >
-            <div className="mb-0.5 flex flex-wrap items-center gap-1.5 text-[9px]">
+            <div className="flex flex-wrap items-center gap-1.5 text-[9px]">
               <span
                 className={cn(
                   "rounded px-1 py-px font-medium uppercase",
@@ -156,18 +156,18 @@ function MessagesView({ content }: { content?: string }) {
               <span className="ml-auto font-mono text-zinc-400">#{i}</span>
             </div>
             {m.reasoning_content && (
-              <details className="mb-0.5 text-[9px] text-zinc-400">
+              <details className="text-[9px] text-zinc-400">
                 <summary className="cursor-pointer">reasoning_content</summary>
                 <pre className="mt-0.5 whitespace-pre-wrap text-[10px] text-zinc-500 dark:text-zinc-400">
                   {m.reasoning_content}
                 </pre>
               </details>
             )}
-            <pre className="whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-600 dark:text-zinc-400">
+            <pre className="whitespace-pre-wrap text-[10px] leading-snug text-zinc-600 dark:text-zinc-400">
               {m.content ?? ""}
             </pre>
             {m.tool_calls && m.tool_calls.length > 0 && (
-              <details className="mt-0.5 text-[9px] text-zinc-400">
+              <details className="text-[9px] text-zinc-400">
                 <summary className="cursor-pointer">
                   tool_calls ({m.tool_calls.length})
                 </summary>

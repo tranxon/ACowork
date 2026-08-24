@@ -203,6 +203,8 @@ fn test_parse_invalid_payload() {
 fn test_available_providers_roundtrip() {
     let providers = mqtt_proto::AvailableProviders {
         version: 42,
+        // ADR-056: no global default compact model in this fixture.
+        default_compact_model: None,
         providers: vec![mqtt_proto::ProviderRef {
             id: "openai".into(),
             base_url: "https://api.openai.com/v1".into(),

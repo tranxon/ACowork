@@ -491,7 +491,14 @@
     "discoverFailed": "모델 검색 실패",
     "providerIdExists": "공급자 ID가 이미 존재합니다",
     "customProviderNoKey": "사용자 정의 공급자 — 베이스 URL 사용",
-    "optional": "선택사항"
+    "optional": "선택사항",
+    "globalCompactModel": {
+      "title": "귀첨 기본 결정 모델",
+      "description": "요약/망진 용 크로스 프로베이더 기본값. 찾을 수 없으면 현재 프로베이더의 compact_model으로, 그 다음에는 현재 채팅 모델로 폭일덕합니다.",
+      "noneLabel": "— 설정 안 함",
+      "unavailable": "사용 불가",
+      "saveFailed": "저장 실패：{{error}}"
+    }
   },
   "harnessSearch": {
     "searchProviderManagement": "검색 제공자 관리",

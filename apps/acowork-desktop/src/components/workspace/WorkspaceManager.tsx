@@ -5,6 +5,7 @@ import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { open } from "@tauri-apps/plugin-dialog";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
 import { useTranslation } from "../../i18n/useTranslation";
 
@@ -175,17 +176,18 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
                   <div className="flex items-center gap-3">
                     {/* Access Level Dropdown */}
-                    <select
+                    <Dropdown
                       value={dir.access}
-                      onChange={(e) => handleAccessChange(dir, e.target.value as "read-only" | "read-write")}
+                      onChange={(v) => handleAccessChange(dir, v as "read-only" | "read-write")}
                       className={`rounded-md border px-2 py-1.5 text-xs font-medium ${dir.access === "read-write"
                         ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
                         : "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
                         }`}
-                    >
-                      <option value="read-only">🔒 Read-only</option>
-                      <option value="read-write">✏️ Read-write</option>
-                    </select>
+                      options={[
+                        { value: "read-only", label: "🔒 Read-only" },
+                        { value: "read-write", label: "✏ Read-write" },
+                      ]}
+                    />
 
                     {/* Delete Button */}
                     <button

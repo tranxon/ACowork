@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { inputBase, selectBase } from "../../lib/ui-styles";
+import { inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
@@ -16,6 +17,7 @@ import { LspTab } from "./LspTab";
 import { ModelMultiSelect, defaultMakeCaps } from "./ModelMultiSelect";
 import { ProviderPicker } from "./ProviderPicker";
 import { AddProviderFlow } from "./AddProviderFlow";
+import { GlobalCompactModelCard } from "./GlobalCompactModelCard";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { ErrorBox } from "../common/ErrorBox";
@@ -241,6 +243,14 @@ function ProvidersTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
+      {/* ADR-056: Global default compact model — lives at the top of the Providers Tab. */}
+      <GlobalCompactModelCard
+        keys={keys}
+        providers={dynamicProviders}
+      />
+
+      <hr className="border-zinc-200 dark:border-zinc-700" />
+
       <div className="rounded-md border border-zinc-200 bg-modal-surface p-4 dark:border-zinc-700">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-medium">{t("harness.providerManagement")}</h2>
@@ -752,15 +762,15 @@ function McpTab() {
               </div>
               <div>
                 <label className="mb-1 block text-xs text-zinc-500">{t("harnessMcp.transport")}</label>
-                <select
+                <Dropdown
                   value={newTransport}
-                  onChange={(e) => setNewTransport(e.target.value as McpTransportDef)}
-                  className={selectBase}
-                >
-                  <option value="stdio">stdio</option>
-                  <option value="http">http</option>
-                  <option value="sse">sse</option>
-                </select>
+                  onChange={(v) => setNewTransport(v as McpTransportDef)}
+                  options={[
+                    { value: "stdio", label: "stdio" },
+                    { value: "http", label: "http" },
+                    { value: "sse", label: "sse" },
+                  ]}
+                />
               </div>
               {newTransport === "stdio" ? (
                 <>

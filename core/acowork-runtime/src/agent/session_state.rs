@@ -164,7 +164,38 @@ pub enum SessionStatus {
         /// When present, the frontend shows a countdown timer and skip button.
         #[serde(skip_serializing_if = "Option::is_none")]
         retry_info: Option<RetryPauseInfo>,
+        /// Why the session paused. Lets the frontend derive the exact UX
+        /// (continue/stop banner vs countdown vs debug controls) directly
+        /// from the status instead of mirroring transient events.
+        ///
+        /// `None` for 429 retry waits — `retry_info` is already sufficient
+        /// to disambiguate those from the other pause reasons.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<PauseReason>,
+        /// Human-readable pause message (e.g. iteration limit hint or loop
+        /// detection detail). Lets the frontend render the banner text
+        /// directly from the status — no separate event channel needed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
+}
+
+/// Reason a session entered [`SessionStatus::Paused`].
+///
+/// ADR-014: the Runtime owns session status; the frontend is read-only and
+/// derives pause UX from this field rather than caching `iteration_limit_paused`
+/// / `loop_detected_paused` events in separate store slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReason {
+    /// Iteration limit reached (`iteration == max_iterations`) — awaiting a
+    /// user decision to continue or stop.
+    IterationLimit,
+    /// Loop detector triggered (repeated identical tool call) — awaiting a
+    /// user decision to continue or stop.
+    LoopDetected,
+    /// Debugger paused the session (DevMode debug protocol).
+    Debug,
 }
 
 /// 429 rate-limit retry pause information.
@@ -504,5 +535,60 @@ impl SessionState {
     /// Access the shared snapshot Arc for external reads (SessionHandle).
     pub fn snapshot_arc(&self) -> &Arc<RwLock<SessionRuntimeSnapshot>> {
         &self.snapshot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paused_serializes_reason_and_message() {
+        let paused = SessionStatus::Paused {
+            iteration: Some(3),
+            max_iterations: Some(5),
+            retry_info: None,
+            reason: Some(PauseReason::IterationLimit),
+            message: Some("Iteration limit reached (3/5). Click Continue to proceed.".into()),
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert!(json.contains("\"status\":\"paused\""));
+        assert!(json.contains("\"reason\":\"iteration_limit\""));
+        assert!(json.contains("Iteration limit reached"));
+    }
+
+    #[test]
+    fn paused_retry_omits_reason_and_message() {
+        // 429 retry pause: reason/message are None → omitted from JSON.
+        let paused = SessionStatus::Paused {
+            iteration: None,
+            max_iterations: None,
+            retry_info: Some(RetryPauseInfo {
+                wait_ms: 300_000,
+                attempt: 1,
+                max_attempts: 3,
+                provider: "mock-provider".into(),
+            }),
+            reason: None,
+            message: None,
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert!(json.contains("retry_info"));
+        assert!(!json.contains("reason"));
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn pause_reason_roundtrips_snake_case() {
+        for (reason, expected) in [
+            (PauseReason::IterationLimit, "iteration_limit"),
+            (PauseReason::LoopDetected, "loop_detected"),
+            (PauseReason::Debug, "debug"),
+        ] {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+            let back: PauseReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, reason);
+        }
     }
 }

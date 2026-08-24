@@ -11,6 +11,7 @@ import { ACCENT_PRESETS } from "../../lib/accentPresets";
 import { Bug, Monitor } from "lucide-react";
 import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { ProfileTab } from "./ProfileTab";
 import { TabButton } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
@@ -569,10 +570,10 @@ function GeneralTab() {
             {t("settings.logLevel")}
           </label>
           <div>
-            <select
+            <Dropdown
+              className="w-[5.5rem]"
               value={currentLogLevel}
-              onChange={async (e) => {
-                const val = e.target.value;
+              onChange={async (val) => {
                 try {
                   await fetch(`${getGatewayUrl()}/api/config`, {
                     method: "PUT",
@@ -583,20 +584,14 @@ function GeneralTab() {
                   setLogLevel(val);
                 } catch { /* ignore */ }
               }}
-              className="w-[5.5rem] appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-              style={{
-                backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                backgroundPosition: 'right 0.5rem center',
-                backgroundRepeat: 'no-repeat',
-                backgroundSize: '1.5em 1.5em',
-              }}
-            >
-              <option value="trace">trace</option>
-              <option value="debug">debug</option>
-              <option value="info">info</option>
-              <option value="warn">warn</option>
-              <option value="error">error</option>
-            </select>
+              options={[
+                { value: "trace", label: "trace" },
+                { value: "debug", label: "debug" },
+                { value: "info", label: "info" },
+                { value: "warn", label: "warn" },
+                { value: "error", label: "error" },
+              ]}
+            />
           </div>
         </div>
 
@@ -606,24 +601,19 @@ function GeneralTab() {
             {t("settings.frontendLogLevel")}
           </label>
           <div>
-            <select
+            <Dropdown
+              className="w-[5.5rem]"
               value={frontendLogLevel}
-              onChange={(e) => setFrontendLogLevel(e.target.value as "trace" | "debug" | "info" | "warn" | "error" | "off")}
-              className="w-[5.5rem] appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-              style={{
-                backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-                backgroundPosition: 'right 0.5rem center',
-                backgroundRepeat: 'no-repeat',
-                backgroundSize: '1.5em 1.5em',
-              }}
-            >
-              <option value="trace">trace</option>
-              <option value="debug">debug</option>
-              <option value="info">info</option>
-              <option value="warn">warn</option>
-              <option value="error">error</option>
-              <option value="off">off</option>
-            </select>
+              onChange={(v) => setFrontendLogLevel(v as "trace" | "debug" | "info" | "warn" | "error" | "off")}
+              options={[
+                { value: "trace", label: "trace" },
+                { value: "debug", label: "debug" },
+                { value: "info", label: "info" },
+                { value: "warn", label: "warn" },
+                { value: "error", label: "error" },
+                { value: "off", label: "off" },
+              ]}
+            />
           </div>
           <p className="mt-1 text-[10px] text-zinc-400">
             {t("settings.frontendLogLevelHint")}

@@ -22,14 +22,12 @@ use crate::agent::context::ContextBuilder;
 use crate::agent::history::HistoryManager;
 use crate::agent::inbound::InboundMessage;
 use crate::agent::loop_approval::{ApprovalDecision, ApprovalHandle};
-use crate::agent::session_state::SessionState;
+use crate::agent::session_state::{PauseReason, SessionState, SessionStatus};
 use crate::config::RuntimeConfig;
 use crate::conversation::ConversationSession;
 use crate::error::{Result, RuntimeError};
 use crate::security::approval_gate::ApprovalRequest;
 use crate::tools::builtin::ask_user_question::QuestionOption;
-
-use crate::agent::session_state::SessionStatus;
 
 /// User-initiated compression actions.
 ///
@@ -779,8 +777,14 @@ impl AgentLoop {
                     let prompt = crate::prompt::TITLE_PROMPT
                         .replace("{language}", &lang)
                         .replace("{user_message}", title_input);
-                    let provider = self.core.provider.clone();
-                    let compact_model = self.resolve_distill_model(title_input);
+                    // ADR-056: title generation uses the same distillation
+                    // target resolution + provider rebuild as compaction, so
+                    // a cross-provider global default (e.g. local Ollama)
+                    // drives the title call too — never a mismatched
+                    // (session provider, other-provider model) pair.
+                    let resolved_distill = self.resolve_distill_model(title_input);
+                    let (provider, compact_model, _tier) =
+                        self.distill_provider(&resolved_distill);
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
                     // ADR-028: clone the AgentCore so the spawned task can
@@ -889,16 +893,18 @@ impl AgentLoop {
 
                 // Notify Gateway/Desktop App that iteration limit was reached
                 // ADR-014: Streaming → Paused
-                self.transition_status(SessionStatus::Paused {
-                    iteration: Some(iteration),
-                    max_iterations: Some(self.core.config.max_iterations),
-                    retry_info: None,
-                });
                 let max_iters = self.core.config.max_iterations;
                 let message = format!(
                     "Iteration limit reached ({}/{}). Click Continue to proceed.",
                     iteration, max_iters
                 );
+                self.transition_status(SessionStatus::Paused {
+                    iteration: Some(iteration),
+                    max_iterations: Some(max_iters),
+                    retry_info: None,
+                    reason: Some(PauseReason::IterationLimit),
+                    message: Some(message.clone()),
+                });
                 let _ = self.session_core.try_send_chunk(ChunkEvent::IterationLimitPaused {
                     iteration,
                     max_iterations: max_iters,
@@ -1025,6 +1031,8 @@ impl AgentLoop {
                         // The frontend RetryWaitBanner shows a countdown and
                         // "Retry Now" button; the user can skip the wait or
                         // let the timer expire for automatic retry.
+                        // reason: None — retry_info already disambiguates this
+                        // pause from iteration-limit / loop-detected / debug.
                         self.transition_status(SessionStatus::Paused {
                             iteration: Some(iteration),
                             max_iterations: Some(self.core.config.max_iterations),
@@ -1036,6 +1044,8 @@ impl AgentLoop {
                                     provider: current_model.clone(),
                                 },
                             ),
+                            reason: None,
+                            message: None,
                         });
                         tracing::warn!(
                             iteration,
@@ -1152,6 +1162,8 @@ impl AgentLoop {
                             iteration: Some(iteration),
                             max_iterations: Some(self.core.config.max_iterations),
                             retry_info: None,
+                            reason: Some(PauseReason::LoopDetected),
+                            message: Some(msg.clone()),
                         });
 
                         // Send chunk event for frontend to display the continue button
@@ -1261,6 +1273,8 @@ impl AgentLoop {
                         iteration: Some(iteration),
                         max_iterations: Some(self.core.config.max_iterations),
                         retry_info: None,
+                        reason: Some(PauseReason::Debug),
+                        message: None,
                     });
                     tracing::info!(iteration, "Iteration paused via debug panel — await resume");
                     // The next iteration's step ① (await_debug_resume) will block
@@ -1356,6 +1370,8 @@ impl AgentLoop {
                             iteration: None,
                             max_iterations: None,
                             retry_info: None,
+                            reason: Some(PauseReason::Debug),
+                            message: None,
                         });
                         if let Some(ref notify) = rewind_notify {
                             tokio::select! {

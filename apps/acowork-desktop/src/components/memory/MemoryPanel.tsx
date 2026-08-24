@@ -9,6 +9,7 @@ import { AlertTriangle, Info } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
+import { Dropdown } from "../common/Dropdown";
 import { subTypeOptions } from "./nodeTypeI18n";
 
 export function MemoryPanel() {
@@ -170,10 +171,11 @@ export function MemoryPanel() {
           className="rounded-md bg-modal-surface px-2.5 py-1.5"
         />
         <div className="flex gap-2">
-          <select
+          <Dropdown
+            className="min-w-0 flex-1"
             value={filters.type}
-            onChange={(e) => {
-              const nextType = e.target.value as
+            onChange={(v) => {
+              const nextType = v as
                 | "All"
                 | "Knowledge"
                 | "Episodic"
@@ -191,63 +193,43 @@ export function MemoryPanel() {
                     : "",
               });
             }}
-            className="min-w-0 flex-1 appearance-none rounded-md border border-zinc-200 bg-modal-surface py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-              backgroundPosition: 'right 0.5rem center',
-              backgroundRepeat: 'no-repeat',
-              backgroundSize: '1.5em 1.5em',
-            }}
-          >
-            <option value="All">{t("memoryPanel.allTypes")}</option>
-            <option value="Knowledge">{t("memoryPanel.typeKnowledge")}</option>
-            <option value="Episodic">{t("memoryPanel.typeEpisodic")}</option>
-            <option value="Procedural">{t("memoryPanel.typeProcedural")}</option>
-            <option value="Autobiographical">{t("memoryPanel.typeAutobiographical")}</option>
-          </select>
-          <select
+            options={[
+              { value: "All", label: t("memoryPanel.allTypes") },
+              { value: "Knowledge", label: t("memoryPanel.typeKnowledge") },
+              { value: "Episodic", label: t("memoryPanel.typeEpisodic") },
+              { value: "Procedural", label: t("memoryPanel.typeProcedural") },
+              { value: "Autobiographical", label: t("memoryPanel.typeAutobiographical") },
+            ]}
+          />
+          <Dropdown
+            className="min-w-0 flex-1"
             value={filters.timeRange}
-            onChange={(e) =>
+            onChange={(v) =>
               setFilters({
-                timeRange: e.target.value as "1h" | "1d" | "7d" | "30d" | "all",
+                timeRange: v as "1h" | "1d" | "7d" | "30d" | "all",
               })
             }
-            className="min-w-0 flex-1 appearance-none rounded-md border border-zinc-200 bg-modal-surface py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-              backgroundPosition: 'right 0.5rem center',
-              backgroundRepeat: 'no-repeat',
-              backgroundSize: '1.5em 1.5em',
-            }}
-          >
-            <option value="all">{t("memoryPanel.allTime")}</option>
-            <option value="1h">{t("memoryPanel.lastHour")}</option>
-            <option value="1d">{t("memoryPanel.lastDay")}</option>
-            <option value="7d">{t("memoryPanel.last7Days")}</option>
-            <option value="30d">{t("memoryPanel.last30Days")}</option>
-          </select>
+            options={[
+              { value: "all", label: t("memoryPanel.allTime") },
+              { value: "1h", label: t("memoryPanel.lastHour") },
+              { value: "1d", label: t("memoryPanel.lastDay") },
+              { value: "7d", label: t("memoryPanel.last7Days") },
+              { value: "30d", label: t("memoryPanel.last30Days") },
+            ]}
+          />
         </div>
         {subFilterVisible && subTypeChoices.length > 0 && (
-          <select
+          <Dropdown
+            className="w-full"
             value={filters.subType}
-            onChange={(e) => setFilters({ subType: e.target.value })}
+            onChange={(v) => setFilters({ subType: v })}
             aria-label={t("memoryPanel.subTypeAriaLabel")}
             data-testid="memory-sub-type-filter"
-            className="w-full appearance-none rounded-md border border-zinc-200 bg-modal-surface py-1.5 pl-2.5 pr-7 text-xs outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
-              backgroundPosition: 'right 0.5rem center',
-              backgroundRepeat: 'no-repeat',
-              backgroundSize: '1.5em 1.5em',
-            }}
-          >
-            <option value="">{t("memoryPanel.allSubTypes")}</option>
-            {subTypeChoices.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: t("memoryPanel.allSubTypes") },
+              ...subTypeChoices.map((opt) => ({ value: opt.value, label: opt.label })),
+            ]}
+          />
         )}
       </div>
 

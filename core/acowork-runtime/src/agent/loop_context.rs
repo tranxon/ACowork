@@ -45,6 +45,36 @@ pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 /// window on cold-start resume).
 pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
 
+// ── ADR-056: Distillation resolution types ────────────────────────
+
+/// ADR-056: Resolution tier for a chosen distillation target.
+///
+/// Logged on every compaction call so it's easy to verify in production
+/// which fallback chain fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DistillTier {
+    /// Level 1: `AgentCore.default_compact_model` — user's global pick
+    /// across all configured providers.
+    GlobalDefault,
+    /// Level 2: `ProviderListItem.compact_model` of the session's current
+    /// provider (the pre-ADR-056 behaviour).
+    ProviderCompact,
+    /// Level 3: the session's current chat model.
+    CurrentChat,
+}
+
+/// ADR-056: Result of resolving the (provider, model) target for a
+/// distillation / compaction call. Carries the tier so the caller can
+/// log it and pick the right `Provider` instance (cross-provider
+/// distillation requires `SessionCore::build_provider_for`, while
+/// `ProviderCompact` / `CurrentChat` can reuse `self.core.provider`).
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedDistill {
+    pub provider_id: String,
+    pub model_id: String,
+    pub tier: DistillTier,
+}
+
 impl AgentLoop {
     /// Update the LLM provider at runtime (e.g., after a `ModelSwitch`
     /// message rebuilds the Provider from the global cache).
@@ -213,53 +243,312 @@ impl AgentLoop {
     /// Priority order:
     /// 1. Provider's configured `compact_model` from provider_list (read from disk)
     /// 2. Current model (fallback when compact model unavailable or context too small)
-    pub(crate) fn resolve_distill_model(&self, content_text: &str) -> String {
+    pub(crate) fn resolve_distill_model(&self, content_text: &str) -> ResolvedDistill {
         let current_model = self.resolve_current_model(None);
-        let estimated_tokens = crate::token::count_text(content_text, &current_model) as u64;
-
-        // Path 1: resolve compact_model from current provider (in-memory).
-        // The current provider id lives on the per-session SessionState
-        // (set by ModelSwitch handler) — there is no global "current
-        // provider" on AgentCore anymore.
-        let compact_model: Option<String> = self
+        let session_pid = self
             .session
             .provider()
-            .and_then(|pid| self.core.provider_compact_models.get(pid))
-            .and_then(|cm| cm.clone());
-        if let Some(ref compact_model) = compact_model {
-            if let Some(cap) = self.core.get_model_capabilities(compact_model) {
-                if cap.context_window >= estimated_tokens {
-                    tracing::info!(
-                        compact_model = %compact_model,
+            .map(str::to_string)
+            .unwrap_or_default();
+
+        // Choose the probe model for token estimation (best effort — see doc).
+        let probe_model = self
+            .core
+            .default_compact_model
+            .as_ref()
+            .map(|(_, m)| m.clone())
+            .or_else(|| {
+                self.core
+                    .provider_compact_models
+                    .get(&session_pid)
+                    .and_then(|cm| cm.clone())
+            })
+            .unwrap_or_else(|| current_model.clone());
+        let estimated_tokens = crate::token::count_text(content_text, &probe_model) as u64;
+
+        // ── Level 1: global default compact model ──────────────────────
+        if let Some((pid, mid)) = self.core.default_compact_model.clone() {
+            if !self.core.is_default_compact_provider_available() {
+                tracing::warn!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    "Global default compact model provider unavailable, falling back to Level 2"
+                );
+            } else if let Some(cap) = self.core.get_model_capabilities(&mid) {
+                if cap.context_window < estimated_tokens {
+                    tracing::warn!(
+                        provider_id = %pid,
+                        model_id = %mid,
                         context_window = cap.context_window,
                         estimated_tokens,
-                        "Using provider's compact model for distillation"
+                        "Global default compact model context_window too small, falling back to Level 2"
                     );
-                    return compact_model.clone();
+                } else {
+                    tracing::info!(
+                        provider_id = %pid,
+                        model_id = %mid,
+                        context_window = cap.context_window,
+                        estimated_tokens,
+                        tier = "global_default",
+                        "Using global default compact model for distillation"
+                    );
+                    return ResolvedDistill {
+                        provider_id: pid,
+                        model_id: mid,
+                        tier: DistillTier::GlobalDefault,
+                    };
                 }
-                tracing::warn!(
-                    compact_model = %compact_model,
-                    context_window = cap.context_window,
-                    estimated_tokens,
-                    "Provider compact model context_window too small, falling back"
-                );
             } else {
                 tracing::warn!(
-                    compact_model = %compact_model,
-                    "Provider compact model not found in capabilities, falling back"
+                    provider_id = %pid,
+                    model_id = %mid,
+                    "Global default compact model not found in capabilities, falling back to Level 2"
                 );
             }
         }
 
-        // Path 2: compact model unavailable or context too small —
-        // fall back to the session's current model.
-        let current_model = self.resolve_current_model(None);
+        // ── Level 2: session provider's compact_model ──────────────────
+        if !session_pid.is_empty()
+            && let Some(Some(compact)) = self.core.provider_compact_models.get(&session_pid)
+        {
+            if let Some(cap) = self.core.get_model_capabilities(compact) {
+                if cap.context_window < estimated_tokens {
+                    tracing::warn!(
+                        provider_id = %session_pid,
+                        model_id = %compact,
+                        context_window = cap.context_window,
+                        estimated_tokens,
+                        "Provider compact model context_window too small, falling back to Level 3"
+                    );
+                } else {
+                    tracing::info!(
+                        provider_id = %session_pid,
+                        model_id = %compact,
+                        context_window = cap.context_window,
+                        estimated_tokens,
+                        tier = "provider_compact",
+                        "Using provider's compact model for distillation"
+                    );
+                    return ResolvedDistill {
+                        provider_id: session_pid.clone(),
+                        model_id: compact.clone(),
+                        tier: DistillTier::ProviderCompact,
+                    };
+                }
+            } else {
+                tracing::warn!(
+                    provider_id = %session_pid,
+                    model_id = %compact,
+                    "Provider compact model not found in capabilities, falling back to Level 3"
+                );
+            }
+        }
+
+        // ── Level 3: current chat model ────────────────────────────────
         tracing::info!(
-            current_model = %current_model,
+            provider_id = %session_pid,
+            model_id = %current_model,
             estimated_tokens,
+            tier = "current_chat",
             "Compact model not available or insufficient, using current model for distillation"
         );
-        current_model
+        ResolvedDistill {
+            provider_id: session_pid,
+            model_id: current_model,
+            tier: DistillTier::CurrentChat,
+        }
+    }
+
+    /// ADR-056 follow-up: Return the ordered list of usable distillation
+    /// targets for [`Self::compact_history_if_needed`].
+    ///
+    /// Differences from [`Self::resolve_distill_model`]:
+    /// - Returns **all** candidates the current state can reach (up to three),
+    ///   in priority order: `[GlobalDefault?, ProviderCompact?, CurrentChat]`.
+    /// - `CurrentChat` is always present as the last-resort fallback so the
+    ///   caller can guarantee at least one `distill_provider()` target.
+    /// - Does **not** log per-tier "Using X for distillation" messages; the
+    ///   caller logs the chosen tier after the LLM call returns.
+    ///
+    /// This is the input for the *call-phase* fallback chain: when a
+    /// higher tier's LLM call fails (network, 4xx, 5xx, parse error), the
+    /// caller iterates through `targets` until one succeeds, instead of
+    /// falling through to `trim_fifo` + `emergency_trim` (which would
+    /// destroy early context unconditionally).
+    pub(crate) fn resolve_distill_targets(&self) -> Vec<ResolvedDistill> {
+        // Reuse `resolve_distill_model` for the top-priority target — it
+        // already encodes the same selection logic as the single-tier
+        // resolver, including context-window and capability checks.
+        let top = self.resolve_distill_model("");
+        let mut out = vec![top.clone()];
+
+        // Append any tiers the top-tier selection skipped over, in priority
+        // order. We do this by re-evaluating each tier in isolation against
+        // the current `AgentCore` state.
+        if !matches!(top.tier, DistillTier::GlobalDefault)
+            && let Some(t) = self.try_global_default_target()
+            && !out.iter().any(|r| r.tier == t.tier)
+        {
+            out.insert(0, t);
+        }
+        if !matches!(top.tier, DistillTier::ProviderCompact)
+            && let Some(t) = self.try_provider_compact_target()
+            && !out.iter().any(|r| r.tier == t.tier)
+        {
+            // Insert after GlobalDefault (if any), before top.
+            let pos = out
+                .iter()
+                .position(|r| !matches!(r.tier, DistillTier::GlobalDefault))
+                .unwrap_or(out.len());
+            out.insert(pos, t);
+        }
+        // CurrentChat is the universal last-resort: always appended unless
+        // `resolve_distill_model` already chose it as the top tier. This
+        // guarantees the caller has at least one fallback even when both
+        // GlobalDefault and ProviderCompact are absent.
+        if !matches!(top.tier, DistillTier::CurrentChat) {
+            let current_model = self.resolve_current_model(None);
+            let session_pid = self
+                .session
+                .provider()
+                .map(str::to_string)
+                .unwrap_or_default();
+            let level3 = ResolvedDistill {
+                provider_id: session_pid,
+                model_id: current_model,
+                tier: DistillTier::CurrentChat,
+            };
+            if !out.iter().any(|r| r.tier == DistillTier::CurrentChat) {
+                out.push(level3);
+            }
+        }
+
+        // De-duplicate by (provider_id, model_id) preserving order — guards
+        // against the degenerate case where two tiers resolve to the same
+        // (provider, model) pair (e.g. GlobalDefault == CurrentChat).
+        let mut deduped: Vec<ResolvedDistill> = Vec::with_capacity(out.len());
+        for r in out {
+            if !deduped
+                .iter()
+                .any(|d| d.provider_id == r.provider_id && d.model_id == r.model_id)
+            {
+                deduped.push(r);
+            }
+        }
+        deduped
+    }
+
+    /// Probe whether the global default compact model can serve as a
+    /// distillation target right now. Mirrors the selection logic in
+    /// [`Self::resolve_distill_model`] but returns `None` instead of
+    /// falling through.
+    fn try_global_default_target(&self) -> Option<ResolvedDistill> {
+        let (pid, mid) = self.core.default_compact_model.as_ref()?.clone();
+        if !self.core.is_default_compact_provider_available() {
+            return None;
+        }
+        // No token-estimated context_window check here: if Level 1's
+        // context_window is too small for the actual content, the LLM
+        // call will still succeed (just produce a short summary); the
+        // *call-phase* fallback only kicks in on call failure. The
+        // selection phase already rejected this candidate via
+        // `resolve_distill_model` when context_window < estimated_tokens,
+        // so re-checking here would only produce a different answer than
+        // the top-tier resolver — keep them aligned.
+        let _ = self.core.get_model_capabilities(&mid);
+        Some(ResolvedDistill {
+            provider_id: pid,
+            model_id: mid,
+            tier: DistillTier::GlobalDefault,
+        })
+    }
+
+    /// Probe whether the session provider's `compact_model` is usable.
+    fn try_provider_compact_target(&self) -> Option<ResolvedDistill> {
+        let session_pid = self
+            .session
+            .provider()
+            .map(str::to_string)
+            .unwrap_or_default();
+        if session_pid.is_empty() {
+            return None;
+        }
+        let compact = self
+            .core
+            .provider_compact_models
+            .get(&session_pid)
+            .and_then(|cm| cm.clone())?;
+        Some(ResolvedDistill {
+            provider_id: session_pid,
+            model_id: compact,
+            tier: DistillTier::ProviderCompact,
+        })
+    }
+
+    /// ADR-056: Pick the `Provider` instance to use for a distillation /
+    /// compaction LLM call given a resolved target, and return the
+    /// `(provider, model_id, tier)` triple the caller must actually use.
+    ///
+    /// Levels 2 & 3 reuse the session's current provider (which matches the
+    /// resolved model). Level 1 may live on a *different* provider entirely,
+    /// so it is rebuilt via `SessionCore::build_provider_for` with the
+    /// target's base_url + api_key from the provider list / key vault.
+    ///
+    /// When the target provider cannot be rebuilt (removed from the list
+    /// between resolve and call), both the provider **and** the model are
+    /// demoted to the session's current chat model (Level 3) — never use a
+    /// cross-provider model_id with the session provider, the API would
+    /// reject it.
+    pub(crate) fn distill_provider(
+        &self,
+        resolved: &ResolvedDistill,
+    ) -> (Arc<dyn Provider>, String, DistillTier) {
+        let session_pid = self
+            .session
+            .provider()
+            .map(str::to_string)
+            .unwrap_or_default();
+
+        let same_provider =
+            resolved.provider_id == session_pid || resolved.provider_id.is_empty();
+        if same_provider {
+            return (
+                self.core.provider.clone(),
+                resolved.model_id.clone(),
+                resolved.tier,
+            );
+        }
+
+        match self.session_core.build_provider_for(
+            &resolved.provider_id,
+            &self.core.config,
+            &self.core.global_provider_list,
+            &self.core.provider_key_vault,
+            self.core.compat_cache.as_ref(),
+        ) {
+            Some(p) => {
+                tracing::info!(
+                    target_provider = %resolved.provider_id,
+                    target_model = %resolved.model_id,
+                    session_provider = %session_pid,
+                    tier = ?resolved.tier,
+                    "ADR-056: rebuilt provider for cross-provider distillation"
+                );
+                (p, resolved.model_id.clone(), resolved.tier)
+            }
+            None => {
+                tracing::warn!(
+                    target_provider = %resolved.provider_id,
+                    target_model = %resolved.model_id,
+                    "ADR-056: failed to rebuild provider for cross-provider distillation, demoting to session provider + current chat model"
+                );
+                (
+                    self.core.provider.clone(),
+                    self.resolve_current_model(None),
+                    DistillTier::CurrentChat,
+                )
+            }
+        }
     }
 
     /// Check context usage after LLM response and trigger compaction if needed.
@@ -308,7 +597,7 @@ impl AgentLoop {
                         acc.push('\n');
                         acc
                     });
-            let compact_model = self.resolve_distill_model(&combined_text);
+            let _resolved_distill = self.resolve_distill_model(&combined_text);
             // Compaction prompt resolution chain:
             //   1. AgentCore.compaction_prompt — package-declared
             //      `prompts/summary.md` (per-agent summarization rules).
@@ -322,21 +611,74 @@ impl AgentLoop {
                 .compaction_prompt
                 .as_deref()
                 .unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT);
-            let provider = self.core.provider.clone();
-            let memory_provider = self.core.memory_provider().cloned();
 
-            match self
-                .session
-                .history
-                .compact_via_llm(
-                    provider.as_ref(),
-                    &compact_model,
-                    system_prompt,
-                    self.session.identity_context(),
-                )
-                .await
-            {
-                Ok((summary, usage)) => {
+            // ADR-056 follow-up — call-phase fallback: try the resolved
+            // target first; on LLM call failure (network, 4xx, 5xx, parse
+            // error), step down to the next tier in `resolve_distill_targets()`
+            // order. The previous behaviour was a single attempt + unconditional
+            // `trim_fifo` + `emergency_trim` on error — which silently destroys
+            // early history when the global-default provider is down. The
+            // three-tier fallback chain mirrors the chain the *selection* phase
+            // already uses (ADR-056 §3.2), so the user only loses history when
+            // **all three** distillation targets fail.
+            let memory_provider = self.core.memory_provider().cloned();
+            let targets = self.resolve_distill_targets();
+            tracing::info!(
+                tier = ?targets.first().map(|t| t.tier),
+                provider_id = %targets.first().map(|t| t.provider_id.clone()).unwrap_or_default(),
+                model_id = %targets.first().map(|t| t.model_id.clone()).unwrap_or_default(),
+                fallback_targets = targets.len().saturating_sub(1),
+                "Distillation target resolved (with call-phase fallback chain)"
+            );
+
+            // Track which target produced the successful result so the post-
+            // success bookkeeping uses the right `compact_model` (which may
+            // differ from the top-priority one if a lower tier won).
+            let mut succeeded: Option<(
+                ResolvedDistill,
+                String,
+                (String, acowork_core::providers::traits::UsageInfo),
+            )> = None;
+            let mut last_err: Option<crate::error::RuntimeError> = None;
+            for target in &targets {
+                let (compact_provider, compact_model, _tier) = self.distill_provider(target);
+                match self
+                    .session
+                    .history
+                    .compact_via_llm(
+                        compact_provider.as_ref(),
+                        &compact_model,
+                        system_prompt,
+                        self.session.identity_context(),
+                    )
+                    .await
+                {
+                    Ok((summary, usage)) => {
+                        tracing::info!(
+                            target_provider = %target.provider_id,
+                            target_model = %target.model_id,
+                            tier = ?target.tier,
+                            summary_len = summary.len(),
+                            "Compaction LLM call succeeded"
+                        );
+                        succeeded = Some((target.clone(), compact_model, (summary, usage)));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target_provider = %target.provider_id,
+                            target_model = %target.model_id,
+                            tier = ?target.tier,
+                            error = %e,
+                            "Compaction LLM call failed, trying next tier"
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+
+            match succeeded {
+                Some((_resolved_distill, compact_model, (summary, usage))) => {
                     // ADR-027 (revised for compaction): record raw Provider
                     // usage from the compaction summary call into the session
                     // token accumulator, but **do not** overwrite `last_input`
@@ -451,10 +793,11 @@ impl AgentLoop {
                         );
                     }
                 }
-                Err(e) => {
+                None => {
                     tracing::warn!(
-                        error = %e,
-                        "LLM compaction failed, falling back to FIFO + emergency trim"
+                        error = %last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+                        target_count = targets.len(),
+                        "All distillation targets failed, falling back to FIFO + emergency trim"
                     );
                     self.session.history.trim_fifo();
                     if self.session.history.token_count() > budget {
@@ -1066,5 +1409,680 @@ impl AgentLoop {
         }
 
         truncated
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+//
+// ADR-056 §9.1: unit tests for `resolve_distill_model` three-tier fallback.
+//
+// We exercise the resolver end-to-end by constructing a real `AgentLoop`
+// (per the test scaffolding already in `loop_.rs::tests`) and then
+// mutating its `AgentCore` fields (`global_provider_list`,
+// `provider_key_vault`, `provider_compact_models`, `default_compact_model`)
+// to stage each scenario. The resolver is purely a synchronous,
+// self-contained function on `AgentLoop`, so this approach covers every
+// branch without mocking anything.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::agent_core::BuiltinToolEntry;
+    use crate::config::RuntimeConfig;
+    use acowork_core::protocol::{
+        ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry,
+    };
+    use acowork_core::providers::mock::{MockProvider, MockResponse};
+    use acowork_core::providers::traits::{
+        ChatMessage, ChatRequest, ChatResponse, MessageRole, StreamEvent, UsageInfo,
+    };
+    use acowork_core::{AgentManifest, Budget};
+    use std::sync::Arc;
+
+    // ── Fixtures ────────────────────────────────────────────────────────
+
+    fn minimal_manifest() -> AgentManifest {
+        AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.compact"
+            version = "1.0.0"
+            name = "Compact Test Agent"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "deepseek"
+            model = "deepseek-v4-flash"
+            "#,
+        )
+        .expect("manifest must parse")
+    }
+
+    fn minimal_config() -> RuntimeConfig {
+        RuntimeConfig::default()
+    }
+
+    fn caps(context_window: u64) -> ModelCapabilitiesInfo {
+        ModelCapabilitiesInfo {
+            context_window,
+            max_output_tokens: 4096,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: None,
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+        }
+    }
+
+    fn build_loop() -> AgentLoop {
+        let provider = Arc::new(MockProvider::single_text("ok"));
+        let tools: Vec<BuiltinToolEntry> = vec![];
+        let budget = Budget {
+            daily_tokens: Some(100_000),
+            monthly_tokens: None,
+            daily_cost_usd: Some(10.0),
+            monthly_cost_usd: None,
+            exceeded_action: "warn".to_string(),
+        };
+        let (loop_, _inbound_tx) = AgentLoop::new(
+            minimal_config(),
+            minimal_manifest(),
+            provider,
+            tools,
+            budget,
+            None,
+            None,
+        );
+        loop_
+    }
+
+    /// Stage two providers in the AgentCore's global_provider_list:
+    ///   `deepseek`     → deepseek-v4-flash (large), deepseek-v4-pro (large)
+    ///   `ollama-local` → qwen2.5:0.5b (32K), llama3:8b (8K)
+    ///
+    /// Only `deepseek` gets an API key — `ollama-local` is a local
+    /// provider with an empty key, mirroring the real-world setup where
+    /// Ollama needs no key. `is_default_compact_provider_available` must
+    /// accept it via the local base_url branch (ADR-056 §2.3).
+    fn seed_providers(loop_: &AgentLoop) {
+        let mut list = loop_.core.global_provider_list.write().unwrap();
+        *list = vec![
+            ProviderListItem {
+                id: "deepseek".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                compact_model: Some("deepseek-v4-flash".to_string()),
+                custom: false,
+                models: vec![
+                    ProviderModelEntry {
+                        id: "deepseek-v4-flash".to_string(),
+                        capabilities: caps(128_000),
+                        max_output_tokens_limit: 32_768,
+                    },
+                    ProviderModelEntry {
+                        id: "deepseek-v4-pro".to_string(),
+                        capabilities: caps(128_000),
+                        max_output_tokens_limit: 32_768,
+                    },
+                ],
+            },
+            ProviderListItem {
+                id: "ollama-local".to_string(),
+                base_url: "http://localhost:11434/v1".to_string(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                compact_model: None,
+                custom: false,
+                models: vec![
+                    ProviderModelEntry {
+                        id: "qwen2.5:0.5b".to_string(),
+                        capabilities: caps(32_000),
+                        max_output_tokens_limit: 16_384,
+                    },
+                    ProviderModelEntry {
+                        id: "llama3:8b".to_string(),
+                        capabilities: caps(8_000),
+                        max_output_tokens_limit: 8_192,
+                    },
+                ],
+            },
+        ];
+        drop(list);
+
+        // Only the cloud provider (deepseek) gets a key; ollama-local stays
+        // keyless (local provider, no key required).
+        let mut keys = loop_.core.provider_key_vault.write().unwrap();
+        keys.insert("deepseek".to_string(), "sk-test-deepseek".to_string());
+    }
+
+    fn set_session(loop_: &mut AgentLoop, provider: &str, model: &str) {
+        loop_.session.provider = Some(provider.to_string());
+        loop_.session.model = Some(model.to_string());
+    }
+
+    fn set_provider_compact(
+        loop_: &mut AgentLoop,
+        provider: &str,
+        compact: Option<&str>,
+    ) {
+        loop_
+            .core
+            .provider_compact_models
+            .insert(provider.to_string(), compact.map(|s| s.to_string()));
+    }
+
+    // ── resolve_distill_model: three-tier fallback ─────────────────────
+
+    #[test]
+    fn tier1_global_default_is_picked_when_set_and_available() {
+        // ADR-056 §1, §3.2: Global default wins when present and valid.
+        // Real-world flagship scenario: local Ollama model selected as the
+        // cross-provider default while the session chats with deepseek —
+        // ollama-local has NO API key here and must still be accepted via
+        // the local base_url branch.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let resolved = loop_.resolve_distill_model("hello world");
+        assert_eq!(resolved.provider_id, "ollama-local");
+        assert_eq!(resolved.model_id, "qwen2.5:0.5b");
+        assert!(matches!(resolved.tier, DistillTier::GlobalDefault));
+    }
+
+    #[test]
+    fn tier1_global_default_falls_through_when_provider_unavailable() {
+        // ADR-056 §3.2 / §7: If the global provider has no API key,
+        // fall back to Level 2 (provider.compact_model).
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+
+        loop_.core.default_compact_model =
+            Some(("anthropic".to_string(), "claude-3-haiku".to_string())); // not seeded
+
+        let resolved = loop_.resolve_distill_model("hello world");
+        assert_eq!(resolved.provider_id, "deepseek");
+        assert_eq!(resolved.model_id, "deepseek-v4-flash");
+        assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
+    }
+
+    #[test]
+    fn tier1_global_default_falls_through_when_context_too_small() {
+        // ADR-056 §3.2 / §7: Global model exists but context_window < estimate.
+        // The estimated token count from `count_text("hello world")` is tiny,
+        // but we force the scenario by using a model with a tiny context_window
+        // that is below the estimate when the input is large enough.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+
+        // Pick the tiny 8K model as global default; the probe_model-derived
+        // estimate for a long input will exceed 8K → fall back.
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "llama3:8b".to_string()));
+
+        // 50 KB of text → ~13k+ tokens by char/4 estimate, well above 8K.
+        let long_input = "x".repeat(50_000);
+        let resolved = loop_.resolve_distill_model(&long_input);
+        // Tier 1 fails (context too small) → Tier 2 fires.
+        assert_eq!(resolved.provider_id, "deepseek");
+        assert_eq!(resolved.model_id, "deepseek-v4-flash");
+        assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
+    }
+
+    #[test]
+    fn tier1_falls_through_when_model_not_in_capabilities() {
+        // ADR-056 §7: If global default points at a model_id that doesn't
+        // exist in any provider's models[], warn and fall back to Tier 2.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "ghost-model-99".to_string()));
+
+        let resolved = loop_.resolve_distill_model("hi");
+        assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
+        assert_eq!(resolved.model_id, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn no_global_default_goes_straight_to_tier2_provider_compact() {
+        // ADR-056 §3.2 base case: global default is None -> Tier 2 fires.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        assert!(loop_.core.default_compact_model.is_none());
+
+        let resolved = loop_.resolve_distill_model("hi");
+        assert_eq!(resolved.provider_id, "deepseek");
+        assert_eq!(resolved.model_id, "deepseek-v4-flash");
+        assert!(matches!(resolved.tier, DistillTier::ProviderCompact));
+    }
+
+    #[test]
+    fn tier1_and_tier2_both_fail_goes_to_tier3_current_chat() {
+        // Both global default and provider.compact_model are unusable.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        // Provider compact missing entirely.
+        set_provider_compact(&mut loop_, "deepseek", None);
+
+        // Global default -> unknown provider, will fall through.
+        loop_.core.default_compact_model =
+            Some(("anthropic".to_string(), "claude-3-haiku".to_string()));
+
+        let resolved = loop_.resolve_distill_model("hi");
+        assert_eq!(resolved.provider_id, "deepseek");
+        assert_eq!(resolved.model_id, "deepseek-v4-pro");
+        assert!(matches!(resolved.tier, DistillTier::CurrentChat));
+    }
+
+    #[test]
+    fn tier3_falls_back_to_chat_model_when_session_provider_empty() {
+        // Edge case: no session provider at all -> Tier 3 still resolves
+        // to the current chat model with empty provider_id.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        loop_.session.provider = None;
+        loop_.session.model = Some("deepseek-v4-pro".to_string());
+        set_provider_compact(&mut loop_, "deepseek", None);
+        loop_.core.default_compact_model = None;
+
+        let resolved = loop_.resolve_distill_model("hi");
+        assert_eq!(resolved.provider_id, "");
+        assert_eq!(resolved.model_id, "deepseek-v4-pro");
+        assert!(matches!(resolved.tier, DistillTier::CurrentChat));
+    }
+
+    // ── helpers: is_default_compact_provider_available ────────────────
+
+    #[test]
+    fn default_compact_provider_available_local_without_key() {
+        // ADR-056 §2.3: local provider (Ollama) needs no API key — the
+        // availability check must accept it via the local base_url branch,
+        // otherwise the flagship "chat=deepseek, distill=ollama" scenario
+        // would never fire.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+        assert!(
+            loop_.core.is_default_compact_provider_available(),
+            "local provider without key must be usable"
+        );
+    }
+
+    #[test]
+    fn default_compact_provider_unavailable_cloud_without_key() {
+        // ADR-056 §7: cloud provider whose key was revoked is NOT callable
+        // → distillation falls back to Level 2.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        loop_.core.default_compact_model =
+            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
+        assert!(loop_.core.is_default_compact_provider_available());
+
+        // Revoke the key -> no longer available.
+        loop_.core.provider_key_vault.write().unwrap().remove("deepseek");
+        assert!(!loop_.core.is_default_compact_provider_available());
+    }
+
+    #[test]
+    fn default_compact_provider_unavailable_when_not_set() {
+        let loop_ = build_loop();
+        assert!(!loop_.core.is_default_compact_provider_available());
+    }
+
+    // ── Token estimation uses compact model, not chat model ──────────
+    //
+    // Regression check for the bug fix in ADR-056 §5.2: `count_text` must
+    // be called with the probe model derived from the three-tier chain
+    // (compact model preferred), not the chat model. We can't observe
+    // count_text directly, but we can prove the resolver picks the
+    // compact model when one is available -- which means the chat model's
+    // own context_window never demotes the resolver.
+
+    #[test]
+    fn resolved_distill_uses_compact_model_when_global_default_available() {
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        // Current chat model has small-ish context.
+        set_session(&mut loop_, "deepseek", "deepseek-v4-flash");
+        set_provider_compact(&mut loop_, "deepseek", None); // no Tier 2
+
+        // Global default has ample context.
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let resolved = loop_.resolve_distill_model("some long text");
+        assert_eq!(resolved.provider_id, "ollama-local");
+        assert_eq!(resolved.model_id, "qwen2.5:0.5b");
+        assert!(matches!(resolved.tier, DistillTier::GlobalDefault));
+    }
+
+    // ── resolve_distill_targets: call-phase fallback chain ────────────
+
+    #[test]
+    fn targets_list_returns_three_tiers_in_priority_order() {
+        // All three tiers are reachable → list = [GlobalDefault,
+        // ProviderCompact, CurrentChat].
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let targets = loop_.resolve_distill_targets();
+        assert_eq!(targets.len(), 3, "expected three targets, got {targets:?}");
+        assert!(matches!(targets[0].tier, DistillTier::GlobalDefault));
+        assert!(matches!(targets[1].tier, DistillTier::ProviderCompact));
+        assert!(matches!(targets[2].tier, DistillTier::CurrentChat));
+        assert_eq!(targets[0].provider_id, "ollama-local");
+        assert_eq!(targets[1].provider_id, "deepseek");
+        assert_eq!(targets[1].model_id, "deepseek-v4-flash");
+        assert_eq!(targets[2].model_id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn targets_list_collapses_to_current_chat_when_only_tier3_is_available() {
+        // No global default + no provider compact → only Level 3 is reachable.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", None);
+        assert!(loop_.core.default_compact_model.is_none());
+
+        let targets = loop_.resolve_distill_targets();
+        assert_eq!(targets.len(), 1, "expected one target, got {targets:?}");
+        assert!(matches!(targets[0].tier, DistillTier::CurrentChat));
+        assert_eq!(targets[0].model_id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn targets_list_dedups_duplicate_provider_model_pairs() {
+        // Edge case: all three tiers resolve to the same (provider, model)
+        // (session pid = deepseek, chat = deepseek-v4-flash, provider compact
+        // = deepseek-v4-flash, global default = deepseek-v4-flash). De-dup
+        // must collapse the list to a single entry so the caller does not
+        // retry the same broken target three times.
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-flash");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        loop_.core.default_compact_model =
+            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()));
+
+        let targets = loop_.resolve_distill_targets();
+        let unique: std::collections::HashSet<(String, String)> = targets
+            .iter()
+            .map(|t| (t.provider_id.clone(), t.model_id.clone()))
+            .collect();
+        assert_eq!(
+            unique.len(),
+            targets.len(),
+            "duplicate (provider, model) pairs not allowed"
+        );
+        assert!(
+            targets.len() <= 2,
+            "expected at most 2 distinct targets (global default + maybe one other), got {targets:?}"
+        );
+        assert!(targets.iter().any(|t| matches!(t.tier, DistillTier::GlobalDefault)));
+    }
+
+    // ── compact_history_if_needed: call-phase fallback integration ────
+
+    /// Wrap a MockProvider so the FIRST call to chat() returns Error and
+    /// subsequent calls return Text. The shared state (`Arc<Mutex>`) lets
+    /// the integration test inspect the model names of every call.
+    struct Tier1FailThenSucceedProvider {
+        responses: std::sync::Arc<std::sync::Mutex<Vec<MockResponse>>>,
+        call_log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Tier1FailThenSucceedProvider {
+        fn new(fail_count: usize, success_text: &str) -> Self {
+            let mut responses = Vec::new();
+            for i in 0..fail_count {
+                responses.push(MockResponse::Error {
+                    message: format!("provider failed at call {i}"),
+                });
+            }
+            responses.push(MockResponse::Text {
+                content: success_text.to_string(),
+            });
+            Self {
+                responses: std::sync::Arc::new(std::sync::Mutex::new(responses)),
+                call_log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+        fn log(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+            self.call_log.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Tier1FailThenSucceedProvider {
+        fn name(&self) -> &str {
+            "tier1-fail-then-succeed"
+        }
+        async fn chat(
+            &self,
+            request: ChatRequest,
+        ) -> acowork_core::error::Result<ChatResponse> {
+            self.call_log
+                .lock()
+                .unwrap()
+                .push(request.model.clone());
+            let mut resp = self.responses.lock().unwrap();
+            let next = if resp.is_empty() {
+                MockResponse::Text {
+                    content: "default".to_string(),
+                }
+            } else {
+                resp.remove(0)
+            };
+            match next {
+                MockResponse::Text { content } => Ok(ChatResponse {
+                    content,
+                    usage: Some(UsageInfo {
+                        prompt_tokens: 50,
+                        completion_tokens: 25,
+                        total_tokens: 75,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                MockResponse::Error { message } => Err(
+                    acowork_core::AcoworkError::Provider(
+                        acowork_core::providers::ProviderError::unknown(message),
+                    ),
+                ),
+                _ => unimplemented!(),
+            }
+        }
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> acowork_core::error::Result<
+            Box<dyn futures_core::Stream<Item = StreamEvent> + Send>,
+        > {
+            unimplemented!()
+        }
+        async fn chat_token_count(
+            &self,
+            messages: &[ChatMessage],
+        ) -> acowork_core::error::Result<u64> {
+            Ok(messages.iter().map(|m| m.content.len() as u64 / 4).sum())
+        }
+    }
+
+    /// Provider that ALWAYS errors (for the "all tiers fail" test).
+    struct AlwaysFailProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for AlwaysFailProvider {
+        fn name(&self) -> &str {
+            "always-fail"
+        }
+        async fn chat(
+            &self,
+            _request: ChatRequest,
+        ) -> acowork_core::error::Result<ChatResponse> {
+            Err(acowork_core::AcoworkError::Provider(
+                acowork_core::providers::ProviderError::unknown("permanent failure".to_string()),
+            ))
+        }
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> acowork_core::error::Result<
+            Box<dyn futures_core::Stream<Item = StreamEvent> + Send>,
+        > {
+            unimplemented!()
+        }
+        async fn chat_token_count(
+            &self,
+            _messages: &[ChatMessage],
+        ) -> acowork_core::error::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn call_phase_fallback_skips_failing_tier_and_uses_next() {
+        // Scenario: GlobalDefault = ollama-local (unreachable in tests),
+        // so the resolver falls back to Tier 2 (ProviderCompact =
+        // deepseek-v4-flash) then Tier 3 (CurrentChat = deepseek-v4-pro).
+        // We install a session provider mock that fails on the FIRST call
+        // (= Tier 2: deepseek-v4-flash) and succeeds thereafter (= Tier 3:
+        // deepseek-v4-pro). The integration test asserts:
+        //   - Tier 2 was attempted and failed
+        //   - Tier 3 was attempted next and succeeded
+        //   - History was compacted (compaction marker present)
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        // GlobalDefault points to ollama-local which is NOT seeded as a
+        // provider with a key, so `resolve_distill_model` skips it at
+        // selection time and starts at Tier 2.
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        let _targets = loop_.resolve_distill_targets();
+        // The session_pid is deepseek; deepseek has an API key, so the
+        // selection-time fallback should NOT exclude Tier 1 here.
+        // To force the *call-phase* fallback, install a provider mock
+        // that fails on the first call regardless of which tier it is.
+        // Three targets → three attempts. First call fails, second succeeds.
+        let fail_once = Tier1FailThenSucceedProvider::new(1, "<summary>ok</summary>");
+        let call_log = fail_once.log();
+        loop_.core.update_provider(
+            std::sync::Arc::new(fail_once) as std::sync::Arc<dyn Provider>,
+            "deepseek-v4-pro".to_string(),
+        );
+
+        // Build a non-trivial history so compaction has something to do.
+        for i in 0..10 {
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: format!("Message #{i}"),
+                ..Default::default()
+            });
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::Assistant,
+                content: format!("Reply #{i}"),
+                ..Default::default()
+            });
+        }
+
+        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+
+        let log = call_log.lock().unwrap();
+        assert!(
+            log.len() >= 2,
+            "expected fallback to retry; actual call log: {log:?}"
+        );
+
+        // History was actually compacted (replace_middle_with_summary ran)
+        let has_marker = loop_
+            .session
+            .history
+            .messages()
+            .iter()
+            .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME));
+        assert!(
+            has_marker,
+            "compaction marker should be present after fallback succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_phase_fallback_when_all_tiers_fail_does_fifo_trim() {
+        // When ALL tiers fail (provider mock errors forever), history must
+        // fall back to trim_fifo + emergency_trim — the documented
+        // last-resort behaviour. The user loses early context, but the
+        // session can still continue (better than a panic or hanging
+        // request).
+        let mut loop_ = build_loop();
+        seed_providers(&loop_);
+        set_session(&mut loop_, "deepseek", "deepseek-v4-pro");
+        set_provider_compact(&mut loop_, "deepseek", Some("deepseek-v4-flash"));
+        loop_.core.default_compact_model =
+            Some(("ollama-local".to_string(), "qwen2.5:0.5b".to_string()));
+
+        loop_.core.update_provider(
+            std::sync::Arc::new(AlwaysFailProvider) as std::sync::Arc<dyn Provider>,
+            "deepseek-v4-pro".to_string(),
+        );
+
+        for i in 0..20 {
+            loop_.session.history.append(ChatMessage {
+                role: MessageRole::User,
+                content: format!("Long message {i} ").repeat(50),
+                ..Default::default()
+            });
+        }
+
+        let tokens_before = loop_.session.history.token_count();
+        loop_.compact_history_if_needed("deepseek-v4-pro", true).await;
+        let tokens_after = loop_.session.history.token_count();
+
+        // No compaction marker — the trim path was taken instead.
+        let has_marker = loop_
+            .session
+            .history
+            .messages()
+            .iter()
+            .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME));
+        assert!(
+            !has_marker,
+            "no compaction marker should exist when LLM compaction fully failed"
+        );
+
+        // History must not grow (FIFO+emergency path is the floor).
+        assert!(
+            tokens_after <= tokens_before,
+            "FIFO path must not grow history: before={tokens_before} after={tokens_after}"
+        );
     }
 }

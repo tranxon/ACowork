@@ -519,7 +519,8 @@ mod tests {
         #[cfg(windows)]
         let script = r#"
             for /L %i in (1,1,10) do @(echo line %i & ping -n 1 127.0.0.1 > NUL)
-        "#;
+        "#
+        .to_string();
         let mut cmd = bash_cmd(&script);
         let output = run_command_with_idle_timeout(&mut cmd, TEST_IDLE)
             .await

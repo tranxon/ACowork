@@ -159,6 +159,20 @@ impl ModelCapabilitiesInfo {
     }
 }
 
+/// ADR-056: Cross-provider reference to a (provider_id, model_id) pair.
+///
+/// Used for global selections that span providers, such as the user's
+/// chosen default compact model. Mirrors the on-disk
+/// `agent_provider.json` top-level `default_compact_model` object and
+/// the `AvailableProviders.default_compact_model` proto field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CompactModelRef {
+    /// Provider identifier (matches `ProviderListItem.id`).
+    pub provider_id: String,
+    /// Model identifier within that provider (matches `ProviderModelEntry.id`).
+    pub model_id: String,
+}
+
 /// Provider list entry — delivered by Gateway to Runtime via AgentHelloResult.
 ///
 /// Contains all metadata needed to construct a Provider instance
@@ -311,6 +325,13 @@ pub struct AgentProviderConfig {
     pub providers: Vec<ProviderListItem>,
     /// Monotonic version for diff sync (mirrors AvailableProviders.version).
     pub version: u64,
+    /// ADR-056: Global default compact model reference — picked by the user
+    /// in the Harness from across all configured providers. Runtime uses this
+    /// as the top-priority candidate in the distillation fallback chain.
+    /// `None` (or absent in on-disk JSON) means no global override; the
+    /// runtime then falls back to `provider.compact_model` and the chat model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compact_model: Option<CompactModelRef>,
 }
 
 /// Per-agent search configuration — persisted to agent_search.json.
@@ -1440,7 +1461,26 @@ pub enum SessionStatusDto {
         /// 429 retry wait info. `None` for non-retry pauses.
         #[serde(skip_serializing_if = "Option::is_none")]
         retry_info: Option<RetryPauseInfoDto>,
+        /// Why the session paused. `None` for 429 retry waits (retry_info
+        /// already disambiguates them). Mirrors `PauseReason` from runtime.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<PauseReasonDto>,
+        /// Human-readable pause message. Mirrors the runtime field.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
+}
+
+/// Reason a session entered `Paused` (DTO mirror of runtime `PauseReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseReasonDto {
+    /// Iteration limit reached — awaiting a user decision to continue or stop.
+    IterationLimit,
+    /// Loop detector triggered — awaiting a user decision to continue or stop.
+    LoopDetected,
+    /// Debugger paused the session (DevMode debug protocol).
+    Debug,
 }
 
 /// 429 rate-limit retry pause information (DTO).
@@ -1848,6 +1888,71 @@ mod tests {
                 assert!(spec_json.contains("model_id"));
             }
             _ => panic!("Expected SidecarEndpointUpdate variant"),
+        }
+    }
+
+    #[test]
+    fn test_paused_dto_serializes_reason_and_message() {
+        let paused = SessionStatusDto::Paused {
+            iteration: Some(3),
+            max_iterations: Some(5),
+            retry_info: None,
+            reason: Some(PauseReasonDto::IterationLimit),
+            message: Some("Iteration limit reached (3/5). Click Continue to proceed.".into()),
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        let parsed: SessionStatusDto = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SessionStatusDto::Paused {
+                iteration,
+                max_iterations,
+                retry_info,
+                reason,
+                message,
+            } => {
+                assert_eq!(iteration, Some(3));
+                assert_eq!(max_iterations, Some(5));
+                assert!(retry_info.is_none());
+                assert_eq!(reason, Some(PauseReasonDto::IterationLimit));
+                assert!(message.as_deref().unwrap().contains("Iteration limit reached"));
+            }
+            _ => panic!("Expected Paused variant"),
+        }
+    }
+
+    #[test]
+    fn test_paused_dto_retry_skips_reason_and_message() {
+        // 429 retry pause: reason/message are None and must be omitted from
+        // the JSON so the frontend only sees retry_info.
+        let paused = SessionStatusDto::Paused {
+            iteration: None,
+            max_iterations: None,
+            retry_info: Some(RetryPauseInfoDto {
+                wait_ms: 300_000,
+                attempt: 1,
+                max_attempts: 3,
+                provider: "mock-provider".into(),
+            }),
+            reason: None,
+            message: None,
+        };
+        let json = serde_json::to_string(&paused).unwrap();
+        assert!(json.contains("retry_info"));
+        assert!(!json.contains("reason"));
+        assert!(!json.contains("message"));
+        let parsed: SessionStatusDto = serde_json::from_str(&json).unwrap();
+        match parsed {
+            SessionStatusDto::Paused {
+                retry_info,
+                reason,
+                message,
+                ..
+            } => {
+                assert!(retry_info.is_some());
+                assert!(reason.is_none());
+                assert!(message.is_none());
+            }
+            _ => panic!("Expected Paused variant"),
         }
     }
 }

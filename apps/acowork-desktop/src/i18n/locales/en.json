@@ -622,7 +622,14 @@
     "discoverFailed": "Failed to discover models",
     "providerIdExists": "Provider ID already exists",
     "customProviderNoKey": "Custom provider — uses base URL",
-    "optional": "optional"
+    "optional": "optional",
+    "globalCompactModel": {
+      "title": "Global Default Compact Model",
+      "description": "Cross-provider default for summarization / distillation. Falls back to the current provider's compact_model, then to the current chat model.",
+      "noneLabel": "— Not configured",
+      "unavailable": "unavailable",
+      "saveFailed": "Save failed: {{error}}"
+    }
   },
   "harnessSearch": {
     "searchProviderManagement": "Search Provider Management",

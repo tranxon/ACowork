@@ -15,15 +15,21 @@ const TIMEOUT_RETRY_THRESHOLD_MS = 5 * 60 * 1000;
  * Countdown banner shown when the LLM provider returns 429 (rate-limited)
  * or the LLM stream times out, and the retry wait exceeds 10 seconds.
  *
- * Two modes:
- * - **429 mode** (waitMs < 5 min): orange/amber tones, "Rate limited" text,
- *   "Skip Wait" button.
- * - **Timeout mode** (waitMs >= 5 min): indigo/blue tones, "Response timeout"
- *   text, "Retry Now" button.
+ * Two modes differ only in copy/icon (both share the same zinc banner chrome
+ * with an accent-colored skip button):
+ * - **429 mode** (`waitMs < 5 min`): "Rate limited" text, "Skip Wait" button.
+ * - **Timeout mode** (`waitMs >= 5 min`): "Response timeout" text,
+ *   "Retry Now" button.
  *
  * In both modes, a real-time countdown timer is displayed and the user can
  * click the button to skip the wait. When the timer expires, the backend
  * automatically retries the LLM request.
+ *
+ * ADR-014: the banner is derived directly from `sessionStatus` — the backend
+ * owns the pause state; the frontend keeps no mirrored `retryWaitInfo` cache.
+ * The countdown epoch (`startedAt`) is tracked locally: it is reset whenever
+ * the retry info payload changes (new attempt / different wait), so the timer
+ * stays aligned with the backend's wait window.
  *
  * IMPORTANT: this component owns its own `bannerSlot` wrapper and returns
  * `null` when not visible. Callers MUST NOT wrap `<RetryWaitBanner />` in
@@ -36,13 +42,28 @@ export function RetryWaitBanner() {
   const currentSessionId = useChatStore((s) =>
     selectedAgentId ? s.agentStates[selectedAgentId]?.activeSessionId ?? null : null,
   );
-  const retryWaitInfo = useChatStore((s) => {
+  const sessionStatus = useChatStore((s) => {
     if (!selectedAgentId || !currentSessionId) return null;
-    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.retryWaitInfo ?? null;
+    return s.agentStates[selectedAgentId]?.sessionStates[currentSessionId]?.sessionStatus ?? null;
   });
 
+  // Derive retry info directly from the backend status — no mirrored cache.
+  const retryInfo = sessionStatus?.status === "paused" ? sessionStatus.detail?.retry_info ?? null : null;
+
+  // Local countdown epoch — reset whenever the retry payload changes so the
+  // timer reflects the backend's wait window (a new 429 restarts the count).
+  const [startedAt, setStartedAt] = useState<number>(0);
+  const lastRetryKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = retryInfo ? `${retryInfo.wait_ms}:${retryInfo.attempt}` : null;
+    if (key !== lastRetryKeyRef.current) {
+      lastRetryKeyRef.current = key;
+      setStartedAt(retryInfo ? Date.now() : 0);
+    }
+  }, [retryInfo]);
+
   // Determine if this is a timeout retry (long wait) or 429 retry (short wait)
-  const isTimeoutMode = retryWaitInfo !== null && retryWaitInfo.waitMs >= TIMEOUT_RETRY_THRESHOLD_MS;
+  const isTimeoutMode = retryInfo !== null && retryInfo.wait_ms >= TIMEOUT_RETRY_THRESHOLD_MS;
 
   // Local countdown state — derived from startedAt + waitMs
   const [remainingMs, setRemainingMs] = useState<number>(0);
@@ -50,20 +71,20 @@ export function RetryWaitBanner() {
 
   // Recalculate remaining time every animation frame for smooth countdown
   const tick = useCallback(() => {
-    if (!retryWaitInfo) {
+    if (!retryInfo) {
       setRemainingMs(0);
       return;
     }
-    const elapsed = Date.now() - retryWaitInfo.startedAt;
-    const remaining = Math.max(0, retryWaitInfo.waitMs - elapsed);
+    const elapsed = Date.now() - startedAt;
+    const remaining = Math.max(0, retryInfo.wait_ms - elapsed);
     setRemainingMs(remaining);
     if (remaining > 0) {
       rafRef.current = requestAnimationFrame(tick);
     }
-  }, [retryWaitInfo]);
+  }, [retryInfo, startedAt]);
 
   useEffect(() => {
-    if (retryWaitInfo) {
+    if (retryInfo) {
       rafRef.current = requestAnimationFrame(tick);
     } else {
       setRemainingMs(0);
@@ -74,7 +95,7 @@ export function RetryWaitBanner() {
         rafRef.current = null;
       }
     };
-  }, [retryWaitInfo, tick]);
+  }, [retryInfo, tick]);
 
   const handleSkip = () => {
     if (selectedAgentId) {
@@ -82,10 +103,10 @@ export function RetryWaitBanner() {
     }
   };
 
-  if (!retryWaitInfo || !selectedAgentId || !currentSessionId) return null;
+  if (!retryInfo || !selectedAgentId || !currentSessionId) return null;
 
   const remainingSec = Math.ceil(remainingMs / 1000);
-  const totalSec = Math.ceil(retryWaitInfo.waitMs / 1000);
+  const totalSec = Math.ceil(retryInfo.wait_ms / 1000);
 
   const label = isTimeoutMode
     ? "Response timeout"
@@ -102,49 +123,29 @@ export function RetryWaitBanner() {
       <div
         role="status"
         aria-live="polite"
-        className={`inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border px-4 py-2 select-none ${
-          isTimeoutMode
-            ? "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)] dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
-            : "border-orange-200 bg-orange-50/80 text-orange-900 dark:border-orange-900/50 dark:bg-orange-950/40 dark:text-orange-100"
-        }`}
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300"
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">
-          <Clock className={`h-3.5 w-3.5 ${
-            isTimeoutMode
-              ? "text-[var(--color-accent)] dark:text-[var(--color-accent)]"
-              : "text-orange-600 dark:text-orange-400"
-          }`} />
+          <Clock className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
           <span className="text-xs font-medium">
             {label} — retrying in{" "}
             <span className="tabular-nums font-mono font-bold">
               {remainingSec}s
             </span>
-            {" "}({retryWaitInfo.attempt}/{retryWaitInfo.maxAttempts})
+            {" "}({retryInfo.attempt}/{retryInfo.max_attempts})
           </span>
         </span>
 
-        <span className={`hidden sm:inline text-[11px] ${
-          isTimeoutMode
-            ? "text-[var(--color-accent)]/70 dark:text-[var(--color-accent)]/70"
-            : "text-orange-600/70 dark:text-orange-400/70"
-        }`}>
-          {retryWaitInfo.provider}
+        <span className="hidden sm:inline text-[11px] text-zinc-500/70 dark:text-zinc-400/70">
+          {retryInfo.provider}
         </span>
 
         <div className="ml-auto flex items-center gap-1.5">
           {/* Countdown progress bar */}
-          <div className={`hidden sm:block h-1.5 w-16 rounded-full ${
-            isTimeoutMode
-              ? "bg-[var(--color-accent)]/30 dark:bg-[var(--color-accent)]/30"
-              : "bg-orange-200 dark:bg-orange-800/50"
-          }`}>
+          <div className="hidden sm:block h-1.5 w-16 rounded-full bg-zinc-200 dark:bg-zinc-700">
             <div
-              className={`h-full rounded-full transition-[width] duration-1000 ease-linear ${
-                isTimeoutMode
-                  ? "bg-[var(--color-accent)]"
-                  : "bg-orange-500"
-              }`}
+              className="h-full rounded-full bg-zinc-400 transition-[width] duration-1000 ease-linear dark:bg-zinc-500"
               style={{
                 width: `${Math.max(0, Math.min(100, ((totalSec - remainingSec) / totalSec) * 100))}%`,
               }}
@@ -154,14 +155,10 @@ export function RetryWaitBanner() {
           <button
             type="button"
             onClick={handleSkip}
-            className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-white transition-colors ${
-              isTimeoutMode
-                ? "bg-[var(--color-accent)] hover:brightness-90"
-                : "bg-orange-500 hover:bg-orange-600"
-            }`}
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-[11px] font-medium text-white transition-colors hover:brightness-90"
           >
             <ButtonIcon className="h-3 w-3" />
-            <span>{buttonLabel}</span>
+            {buttonLabel}
           </button>
         </div>
       </div>

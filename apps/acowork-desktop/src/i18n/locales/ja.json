@@ -490,7 +490,14 @@
     "discoverFailed": "モデルの検出に失敗しました",
     "providerIdExists": "プロバイダ ID は既に存在します",
     "customProviderNoKey": "カスタムプロバイダ — ベース URL を使用",
-    "optional": "任意"
+    "optional": "任意",
+    "globalCompactModel": {
+      "title": "グローバルデフォルト精简モデル",
+      "description": "要約/蒸鸿用のクロスプロバイダーデフォルト。見つからない場合は現在のプロバイダーの compact_model、さらに現在のチャットモデルにフォールバックします。",
+      "noneLabel": "— 設定しない",
+      "unavailable": "使用できません",
+      "saveFailed": "保存に失敗しました：{{error}}"
+    }
   },
   "harnessSearch": {
     "searchProviderManagement": "検索プロバイダー管理",

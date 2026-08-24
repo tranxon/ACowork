@@ -86,12 +86,12 @@ export function DebugPausedBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-4 py-2 text-[var(--color-accent)] select-none dark:border-[var(--color-accent)]/40 dark:bg-[var(--color-accent)]/15 dark:text-[var(--color-accent)]"
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-zinc-200 bg-zinc-50 px-4 py-2 text-zinc-700 select-none dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300"
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">
-          <Bug className="h-3.5 w-3.5 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
-          <Pause className="h-3 w-3 text-[var(--color-accent)] dark:text-[var(--color-accent)]" />
+          <Bug className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400" />
+          <Pause className="h-3 w-3 text-zinc-500 dark:text-zinc-400" />
           <span className="text-xs font-medium">
             {stateLabel} in debug mode
           </span>

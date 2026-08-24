@@ -1,5 +1,6 @@
 import type { ModelCapabilitiesInfo } from "../../lib/types";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface ModelCapEditorProps {
@@ -127,17 +128,17 @@ export function ModelCapEditor({
           {caps.supports_reasoning && (
             <div className="mt-1.5">
               <label className="mb-0.5 block text-xs text-zinc-400">{t("harness.defaultReasoningEffort")}</label>
-              <select
+              <Dropdown
                 value={caps.default_reasoning_effort ?? "auto"}
-                onChange={(e) => onUpdate("default_reasoning_effort", e.target.value)}
-                className="w-full appearance-none rounded border border-zinc-200 bg-modal-surface px-2.5 py-1.5 text-xs text-zinc-800 outline-none transition-colors focus:border-[var(--color-accent)] dark:border-zinc-700 dark:text-zinc-200"
-              >
-                <option value="auto">Auto</option>
-                <option value="off">Off</option>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-              </select>
+                onChange={(v) => onUpdate("default_reasoning_effort", v)}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "off", label: "Off" },
+                  { value: "low", label: "Low" },
+                  { value: "medium", label: "Medium" },
+                  { value: "high", label: "High" },
+                ]}
+              />
             </div>
           )}
         </div>
