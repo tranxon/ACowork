@@ -81,3 +81,7 @@ The system will automatically render this as a high-quality SVG diagram. Do NOT 
 
 When a Mermaid node label contains special characters (e.g. `|`, `[`, `]`, `(`, `)`, `{`, `}`) or non-ASCII characters (e.g. Chinese), wrap the entire label in double quotes (e.g. `A["input: string | null"]`) to avoid parse errors and rendering failures.
 
+## File Reference
+Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 
+Do not wrap paths in quotes — they become unclickable.
+
