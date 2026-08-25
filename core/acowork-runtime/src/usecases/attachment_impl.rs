@@ -20,16 +20,26 @@
 //! ├── conversations/
 //! │   └── <sid>.jsonl       # each upload / attach is a system entry
 //! └── files/
-//!     └── <document_id>.<ext>  # blob — ext is a sanitised whitelisted
-//!                              # suffix chosen from the user's `format`
-//!                              # (see [`RuntimeAttachmentService::safe_extension`])
+//!     └── <sanitized_stem>_<document_id>.<ext>
+//!         # blob — `<sanitized_stem>` is the user-supplied filename
+//!         # cleaned up by `sanitize_stem` (so the workspace file tree
+//!         # stays readable), `document_id` is the content hash that
+//!         # keys the dedup invariant, and `<ext>` is a whitelisted
+//!         # suffix chosen from the user's `format` via `safe_extension`.
 //! ```
 //!
-//! Pre-046 files written as bare `<document_id>` (no extension) still
-//! exist on some developer disks. `read_file` falls back to that name
-//! so historic blobs remain readable; new writes always pick the
-//! suffixed name and reuse the legacy file as a dedup hit (its bytes
-//! are identical because `document_id` is content-derived).
+//! Both the safe-extension whitelist and the stem sanitiser live in the
+//! shared [`crate::usecases::attachment`] module so the write path here,
+//! the read predicate below, and the LLM hint builder in
+//! `session_task::build_attachment_hint` all agree on the on-disk name.
+//!
+//! Pre-change files written as bare `<document_id>` (no extension) or
+//! `<document_id>.<ext>` (the previous default) still exist on some
+//! developer disks. `read_file` falls back to those names so historic
+//! blobs remain readable; new writes always pick the
+//! `<name>_<document_id>.<ext>` shape and reuse a pre-existing blob with
+//! the same content as a dedup hit (its bytes are identical because
+//! `document_id` is content-derived).
 //!
 //! ## `document_id` format
 //!
@@ -75,17 +85,28 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 use crate::usecases::attachment::{
-    AttachmentError, AttachmentService, UploadFileParams, UploadedFileResponse, MAX_UPLOAD_BYTES,
+    name_matches_document_id, on_disk_name, AttachmentError, AttachmentService, UploadFileParams,
+    UploadedFileResponse, MAX_UPLOAD_BYTES,
 };
 
 /// Concrete [`AttachmentService`] backed by `<work_dir>/files/`.
 pub struct RuntimeAttachmentService {
     work_dir: PathBuf,
+    /// Serialises [`write_blob_atomic`] so two concurrent uploads of
+    /// identical bytes under different filenames cannot race past the
+    /// dedup scan and produce two on-disk files for one `document_id`.
+    /// The runtime is a single process, so a process-local mutex is
+    /// sufficient — and `tokio::sync::Mutex` is what we need here
+    /// because the protected section awaits on `fs::*` calls.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl RuntimeAttachmentService {
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self {
+            work_dir,
+            write_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// Resolve `<work_dir>/files`. Created on demand by
@@ -154,38 +175,87 @@ impl RuntimeAttachmentService {
         format!("{prefix_hex}-{suffix_hex}")
     }
 
-    /// Atomic write-tmp-rename of `bytes` to `<dir>/<document_id>.<ext>`.
+    /// List every UTF-8-valid filename in `dir`. Used by both the
+    /// write-path dedup scan and the read-path matching loop, so they
+    /// iterate the directory the same way.
+    async fn list_dir_names(dir: &Path) -> Result<Vec<String>, AttachmentError> {
+        let mut entries = fs::read_dir(dir).await.map_err(|e| {
+            AttachmentError::Persistence(format!("read_dir {}: {}", dir.display(), e))
+        })?;
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|e| {
+            AttachmentError::Persistence(format!("iter dir {}: {}", dir.display(), e))
+        })? {
+            // Bind `file_name` first — `OsString::to_str` borrows the
+            // `OsString` which is dropped at end of statement otherwise.
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Count how many on-disk entries in `dir` address `document_id`
+    /// (under any of the supported legacy / current on-disk shapes).
+    /// Drives both the write-side dedup check and the post-rename
+    /// race guard; the read path uses the matching predicate directly
+    /// to also report ambiguity.
+    async fn count_matches(dir: &Path, document_id: &str) -> Result<usize, AttachmentError> {
+        let names = Self::list_dir_names(dir).await?;
+        Ok(names
+            .iter()
+            .filter(|n| name_matches_document_id(n, document_id))
+            .count())
+    }
+
+    /// Atomic write-tmp-rename of `bytes` to
+    /// `<dir>/<sanitized_stem>_<document_id>.<safe_ext>`.
     ///
-    /// `format` selects the on-disk suffix via
-    /// [`RuntimeAttachmentService::safe_extension`].  Returns true if a
-    /// new file was created; false if a blob with the same
-    /// `document_id` was already on disk (dedup hit — the existing
-    /// file is left untouched).  A pre-046 bare `<document_id>` file is
-    /// also treated as a dedup hit for backward compatibility.
+    /// `format` selects the on-disk suffix and `filename` seeds the
+    /// readable stem — both flow through the shared helpers in
+    /// [`crate::usecases::attachment`] so the path produced here is
+    /// identical to the hint string the LLM / `doc_reader` receive.
+    ///
+    /// Returns `Ok(true)` if a new file was created and `Ok(false)` on
+    /// a dedup hit (a blob with the same `document_id` was already on
+    /// disk — the existing file is left untouched, and the caller's
+    /// `filename` is echoed back to the user as-is without rewriting
+    /// disk). The dedup check accepts all three on-disk shapes
+    /// (legacy bare / legacy suffixed / new `<stem>_<id>.<ext>`) so
+    /// pre-existing data is honoured.
+    ///
+    /// Serialised by `self.write_lock` so two concurrent uploads of
+    /// identical bytes under different filenames can't race past the
+    /// dedup scan and produce two on-disk files for the same id.
     async fn write_blob_atomic(
         &self,
         dir: &Path,
         document_id: &str,
         format: &str,
+        filename: &str,
         bytes: &[u8],
     ) -> Result<bool, AttachmentError> {
-        let ext = Self::safe_extension(format);
-        let final_path = dir.join(format!("{document_id}.{ext}"));
-        if final_path.exists() {
-            // Dedup hit — never overwrite (the bytes must be identical
-            // because the id is content-derived).
+        // Hold the per-service lock for the whole critical section.
+        // Uploads are user-initiated and infrequent, so process-wide
+        // serialisation is fine — and necessary because the section
+        // awaits on `fs::*` calls (a plain `std::sync::Mutex` would
+        // not be `Send` across `.await`).
+        let _guard = self.write_lock.lock().await;
+
+        // (1) Dedup: a blob with this `document_id` may already exist
+        // — under the legacy bare shape, the legacy suffixed shape,
+        // or a new `<stem>_<id>.<ext>` shape from a prior upload whose
+        // user filename was different. Content is identical by
+        // construction, so any existing file is authoritative — never
+        // overwrite. The first-uploaded on-disk name wins.
+        if Self::count_matches(dir, document_id).await? > 0 {
             return Ok(false);
         }
-        // Legacy compatibility: if a pre-046 bare file (no extension)
-        // with the same document_id exists, treat the upload as a
-        // dedup hit. This keeps dedup semantics stable for users who
-        // uploaded files before this version landed — the underlying
-        // bytes are identical by construction.
-        let legacy_path = dir.join(document_id);
-        if legacy_path.exists() {
-            return Ok(false);
-        }
-        let tmp_path = dir.join(format!("{document_id}.{ext}.tmp"));
+
+        let final_name = on_disk_name(document_id, format, filename);
+        let final_path = dir.join(&final_name);
+        let tmp_path = dir.join(format!("{final_name}.tmp"));
+
         {
             let mut f = fs::File::create(&tmp_path).await.map_err(|e| {
                 AttachmentError::Persistence(format!("create tmp {}: {}", tmp_path.display(), e))
@@ -197,6 +267,7 @@ impl RuntimeAttachmentService {
                 AttachmentError::Persistence(format!("sync tmp {}: {}", tmp_path.display(), e))
             })?;
         }
+
         // rename is atomic on the same filesystem on Unix; Windows
         // would need ReplaceFileW semantics but Desktop targets macOS
         // and Windows is not in scope for this runtime path.
@@ -208,48 +279,22 @@ impl RuntimeAttachmentService {
                 e
             ))
         })?;
-        Ok(true)
-    }
 
-    /// Map a user-supplied `format` (lowercased, no leading dot — e.g.
-    /// `"jpg"`, `"pdf"`) to a safe on-disk extension suffix.
-    ///
-    /// The mapping is whitelisted rather than pass-through so a hostile
-    /// or accidental format string (e.g. `"exe"`, `"html"`, `"./.."`)
-    /// never lands as a Finder / shell-trusted extension. Anything not
-    /// on the whitelist collapses to `"bin"` — the file is still
-    /// readable, just not double-click-previewable.
-    ///
-    /// This list covers every format the desktop dialog filter offers
-    /// (`pdf docx pptx xlsx png jpg jpeg gif webp`). New formats
-    /// should be added here intentionally, not by passing the raw
-    /// user value through.
-    fn safe_extension(format: &str) -> &'static str {
-        match format.to_ascii_lowercase().as_str() {
-            // Documents — must stay in lock-step with `doc_reader`'s
-            // `detect_format` whitelist (`tools/builtin/doc_reader/mod.rs`).
-            // The runtime-side `doc_reader` tool reads these blobs by
-            // absolute path and picks the extractor from the file
-            // extension. If a blob lands as `.bin` here, doc_reader will
-            // reject it as "Unsupported document format" and the LLM
-            // gets a clean error instead of the user's PDF/DOCX content.
-            "pdf" => "pdf",
-            "docx" => "docx",
-            "pptx" => "pptx",
-            "xlsx" => "xlsx",
-            // Images — same rationale: `derive_image_parts` reads the
-            // blob and wraps it in a `data:` URI whose MIME tag is the
-            // document `format` (not the on-disk suffix), so the file
-            // extension is informational here, but keeping them explicit
-            // makes Finder preview behave correctly.
-            "png" => "png",
-            "jpg" | "jpeg" => "jpg",
-            "gif" => "gif",
-            "webp" => "webp",
-            // Everything else collapses to `bin` — see the doc comment
-            // on the surrounding match arm for the threat model.
-            _ => "bin",
+        // (2) Post-rename invariant check. With the write_lock held
+        // above, the answer should always be `1`; the re-scan is a
+        // belt-and-suspenders guard against any future change that
+        // drops the lock. If a second match ever appears (e.g. from a
+        // manual file drop), the dedup hold is restored by removing
+        // our newly-written file — the other, earlier-uploaded blob
+        // remains the canonical one.
+        if Self::count_matches(dir, document_id).await? > 1 {
+            // Best-effort cleanup; if remove fails the read path's
+            // ambiguity guard will surface the situation.
+            let _ = fs::remove_file(&final_path).await;
+            return Ok(false);
         }
+
+        Ok(true)
     }
 }
 
@@ -272,8 +317,14 @@ impl AttachmentService for RuntimeAttachmentService {
         // log uniform with the read path.
         Self::validate_document_id(&document_id)?;
 
-        self.write_blob_atomic(&dir, &document_id, &params.format, &params.bytes)
-            .await?;
+        self.write_blob_atomic(
+            &dir,
+            &document_id,
+            &params.format,
+            &params.filename,
+            &params.bytes,
+        )
+        .await?;
 
         Ok(UploadedFileResponse {
             document_id,
@@ -288,35 +339,20 @@ impl AttachmentService for RuntimeAttachmentService {
     async fn read_file(&self, document_id: &str) -> Result<Vec<u8>, AttachmentError> {
         Self::validate_document_id(document_id)?;
 
-        // Resolve the on-disk path. New writes land at
-        // `<work_dir>/files/<document_id>.<safe_ext>`; pre-046 uploads
-        // may still exist as a bare `<document_id>` file. `validate_document_id`
-        // already guards against path traversal, and the entry-name
-        // prefix check below is defensive: only filenames that begin
-        // with `<document_id>` (with or without a single `.`-followed-
-        // by-anything suffix) are accepted.
-        let dir = self.files_dir();
-        let prefix = document_id.to_string();
-        let mut matched: Option<PathBuf> = None;
-        let mut entries = fs::read_dir(&dir).await.map_err(|e| {
-            AttachmentError::Persistence(format!("read_dir {}: {}", dir.display(), e))
-        })?;
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            AttachmentError::Persistence(format!("iter dir {}: {}", dir.display(), e))
-        })? {
-            // Bind `file_name` first — `OsString::to_str` borrows the
-            // `OsString` which is dropped at end of statement otherwise.
-            let file_name_os = entry.file_name();
-            let Some(name) = file_name_os.to_str() else { continue };
-            let is_match = name == prefix
-                || (name.len() > prefix.len()
-                    && name.starts_with(&prefix)
-                    && name.as_bytes()[prefix.len()] == b'.');
-            if !is_match {
+        // Ensure the `<work_dir>/files/` directory exists before
+        // listing — matches the write-path invariant and turns "no
+        // uploads yet" into a clean 404 instead of a filesystem
+        // ENOENT that surfaces as a 500. `ensure_files_dir` is a no-op
+        // when the directory is already present.
+        let dir = self.ensure_files_dir().await?;
+        let names = Self::list_dir_names(&dir).await?;
+        let mut matched: Option<&String> = None;
+        for name in &names {
+            if !name_matches_document_id(name, document_id) {
                 continue;
             }
             match matched {
-                None => matched = Some(entry.path()),
+                None => matched = Some(name),
                 Some(_) => {
                     return Err(AttachmentError::Persistence(format!(
                         "ambiguous on-disk match for document_id {document_id:?} in {}",
@@ -325,7 +361,7 @@ impl AttachmentService for RuntimeAttachmentService {
                 }
             }
         }
-        let Some(path) = matched else {
+        let Some(path) = matched.map(|n| dir.join(n)) else {
             return Err(AttachmentError::NotFound(document_id.to_string()));
         };
         match fs::read(&path).await {
@@ -360,47 +396,13 @@ mod tests {
         }
     }
 
-    /// Whitelisted formats get a real extension; everything else gets `bin`.
-    /// This guards against a hostile / accidental `"exe"` / `"html"` slipping
-    /// through into a Finder-trusted extension.
-    ///
-    /// The doc formats (`pdf docx pptx xlsx`) MUST appear here so the
-    /// `doc_reader` tool can dispatch by file extension — see
-    /// `tools/builtin/doc_reader/mod.rs::detect_format`. A `docx` blob
-    /// landing as `.bin` would make doc_reader report
-    /// `"Unsupported document format"` even though the bytes are valid.
-    #[test]
-    fn safe_extension_is_whitelisted() {
-        for (input, expected) in [
-            // Images
-            ("jpg", "jpg"),
-            ("JPG", "jpg"),
-            ("jpeg", "jpg"),
-            ("png", "png"),
-            ("gif", "gif"),
-            ("webp", "webp"),
-            // Documents — case-insensitive to be safe against a Tauri /
-            // desktop front-end that didn't lowercase.
-            ("pdf", "pdf"),
-            ("PDF", "pdf"),
-            ("docx", "docx"),
-            ("DOCX", "docx"),
-            ("pptx", "pptx"),
-            ("PPTX", "pptx"),
-            ("xlsx", "xlsx"),
-            ("XLSX", "xlsx"),
-            // Whitelist reject:
-            ("exe", "bin"),
-            ("html", "bin"),
-            ("", "bin"),
-            ("../../etc/passwd", "bin"),
-            ("./jsp", "bin"),
-        ] {
-            assert_eq!(
-                RuntimeAttachmentService::safe_extension(input),
-                expected,
-                "format={input:?} → expected {expected:?}"
-            );
+    fn params_with_name(filename: &str, format: &str, payload: &[u8]) -> UploadFileParams {
+        UploadFileParams {
+            filename: filename.to_string(),
+            format: format.to_string(),
+            bytes: payload.to_vec(),
+            width: None,
+            height: None,
         }
     }
 
@@ -414,7 +416,10 @@ mod tests {
             let (dir, svc) = fresh_service().await;
             let payload = format!("hello-{format}-bytes").into_bytes();
             let r = svc.upload_file(params(format, &payload)).await.unwrap();
-            let on_disk = dir.path().join("files").join(format!("{}.{expected_ext}", r.document_id));
+            let on_disk = dir
+                .path()
+                .join("files")
+                .join(format!("sample_{}.{expected_ext}", r.document_id));
             assert!(
                 on_disk.exists(),
                 "upload({format}) must land at {} (got doc_id={})",
@@ -424,16 +429,19 @@ mod tests {
         }
     }
 
-    /// `upload_file` writes to `<dir>/<document_id>.<ext>` with the
-    /// whitelisted suffix. Dedup behaviour (same bytes ⇒ same id) is
-    /// covered by [`upload_then_reupload_same_bytes_dedups`] below.
+    /// `upload_file` writes to `<dir>/<sanitized_stem>_<document_id>.<safe_ext>`.
+    /// Dedup behaviour (same bytes ⇒ same id) is covered by
+    /// [`upload_then_reupload_same_bytes_dedups`] below.
     #[tokio::test]
     async fn upload_writes_with_whitelisted_extension() {
         let (dir, svc) = fresh_service().await;
         let payload = b"hello-image-bytes";
         let r = svc.upload_file(params("jpg", payload)).await.unwrap();
         assert!(r.document_id.contains('-'));
-        let on_disk = dir.path().join("files").join(format!("{}.jpg", r.document_id));
+        let on_disk = dir
+            .path()
+            .join("files")
+            .join(format!("sample_{}.jpg", r.document_id));
         if !on_disk.exists() {
             // Build a helpful diagnostic list of files for the failure message.
             let mut names = Vec::new();
@@ -454,34 +462,123 @@ mod tests {
     async fn upload_unknown_format_falls_back_to_bin_extension() {
         let (dir, svc) = fresh_service().await;
         let r = svc.upload_file(params("exe", b"binary-blob")).await.unwrap();
-        let on_disk = dir.path().join("files").join(format!("{}.bin", r.document_id));
+        let on_disk = dir
+            .path()
+            .join("files")
+            .join(format!("sample_{}.bin", r.document_id));
         assert!(on_disk.exists(), "expected {} to exist", on_disk.display());
     }
 
-    /// `read_file` resolves both the new suffixed blob AND the
-    /// pre-046 bare-name legacy blob to the same bytes; ambiguous
+    /// Original filename appears on disk so the workspace file tree
+    /// stays readable. `sanitize_stem` trims the extension (we always
+    /// append our own whitelisted suffix) and Unicode characters
+    /// pass through unchanged.
+    #[tokio::test]
+    async fn upload_writes_with_readable_original_name() {
+        let (dir, svc) = fresh_service().await;
+        let r = svc
+            .upload_file(params_with_name("2024年度报告.pdf", "pdf", b"annual-report"))
+            .await
+            .unwrap();
+        let on_disk = dir
+            .path()
+            .join("files")
+            .join(format!("2024年度报告_{}.pdf", r.document_id));
+        assert!(
+            on_disk.exists(),
+            "Unicode filename must survive sanitisation: {}",
+            on_disk.display()
+        );
+    }
+
+    /// `read_file` resolves the new `<stem>_<id>.<ext>` shape AND the
+    /// pre-change bare `<id>` legacy blob to the same bytes; ambiguous
     /// collisions return a persistence error rather than guessing.
     #[tokio::test]
-    async fn read_resolves_suffixed_and_legacy_blobs() {
+    async fn read_resolves_new_and_legacy_blobs() {
         let (dir, svc) = fresh_service().await;
         let payload = b"read-me";
         let r = svc.upload_file(params("png", payload)).await.unwrap();
 
-        // New suffixed path is what `read_file` finds first.
+        // New <stem>_<id>.<ext> shape is what `read_file` finds.
         let got = svc.read_file(&r.document_id).await.unwrap();
         assert_eq!(got, payload);
 
-        // Now simulate a legacy bare file: delete the suffixed file and
+        // Now simulate a legacy bare file: delete the new file and
         // write a legacy <doc_id> blob with the same content. read_file
-        // must still find it.
-        tokio::fs::remove_file(dir.path().join("files").join(format!("{}.png", r.document_id)))
-            .await
-            .unwrap();
+        // must still find it via the shared matching predicate.
+        tokio::fs::remove_file(
+            dir.path()
+                .join("files")
+                .join(format!("sample_{}.png", r.document_id)),
+        )
+        .await
+        .unwrap();
         tokio::fs::write(dir.path().join("files").join(&r.document_id), payload)
             .await
             .unwrap();
         let got_legacy = svc.read_file(&r.document_id).await.unwrap();
         assert_eq!(got_legacy, payload);
+    }
+
+    /// `read_file` also resolves the pre-change suffixed
+    /// `<document_id>.<ext>` shape (the previous default) for backward
+    /// compatibility with developer disks that already have such
+    /// blobs on them.
+    #[tokio::test]
+    async fn read_resolves_pre_change_suffixed_blob() {
+        let (dir, svc) = fresh_service().await;
+        let payload = b"legacy-suffixed-bytes";
+        let id = RuntimeAttachmentService::compute_document_id(payload);
+
+        // Pre-create the files directory so we can drop a legacy blob
+        // outside of `upload_file` (which would normally ensure it).
+        tokio::fs::create_dir_all(dir.path().join("files")).await.unwrap();
+        // Drop a legacy `<id>.png` file directly (no upload).
+        tokio::fs::write(dir.path().join("files").join(format!("{id}.png")), payload)
+            .await
+            .unwrap();
+
+        let got = svc.read_file(&id).await.unwrap();
+        assert_eq!(got, payload);
+    }
+
+    /// When two on-disk files accidentally address the same
+    /// `document_id` (shouldn't happen under the dedup invariant, but
+    /// may happen via manual filesystem intervention), `read_file`
+    /// MUST return an `ambiguous on-disk match` error rather than
+    /// silently picking one and reading corrupted state.
+    #[tokio::test]
+    async fn read_returns_ambiguous_error_when_two_matches_exist() {
+        let (dir, svc) = fresh_service().await;
+        let payload = b"ambiguous";
+        let id = RuntimeAttachmentService::compute_document_id(payload);
+
+        // Pre-create the files directory; we drop blobs directly
+        // without going through `upload_file` to fabricate the
+        // ambiguous-on-disk state.
+        tokio::fs::create_dir_all(dir.path().join("files")).await.unwrap();
+
+        // Two files for the same id: one in the legacy suffixed
+        // shape, one in the new shape.
+        tokio::fs::write(dir.path().join("files").join(format!("{id}.png")), payload)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            dir.path().join("files").join(format!("duplicate_{id}.png")),
+            payload,
+        )
+        .await
+        .unwrap();
+
+        let err = svc.read_file(&id).await.unwrap_err();
+        match err {
+            AttachmentError::Persistence(msg) => assert!(
+                msg.contains("ambiguous on-disk match"),
+                "expected ambiguity error, got {msg:?}"
+            ),
+            other => panic!("expected Persistence ambiguity error, got {other:?}"),
+        }
     }
 
     /// Regression guard for the dedup invariant: uploading identical
@@ -506,23 +603,129 @@ mod tests {
         // And there must be exactly one file on disk matching that id
         // — i.e. the second upload was a true dedup hit, not a
         // co-located duplicate.
-        let suffixed = dir.path().join("files").join(format!("{}.png", first.document_id));
+        let suffixed = dir
+            .path()
+            .join("files")
+            .join(format!("sample_{}.png", first.document_id));
         assert!(suffixed.exists(), "suffixed blob must exist");
-        let entries = tokio::fs::read_dir(dir.path().join("files"))
-            .await
-            .unwrap();
-        let mut matches = 0usize;
-        let mut entries = entries;
-        while let Some(e) = entries.next_entry().await.unwrap() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n == first.document_id || n == format!("{}.png", first.document_id) {
-                matches += 1;
+        let names: Vec<String> = {
+            let mut entries = tokio::fs::read_dir(dir.path().join("files"))
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(e) = entries.next_entry().await.unwrap() {
+                v.push(e.file_name().to_string_lossy().into_owned());
             }
-        }
+            v
+        };
+        let matches = names
+            .iter()
+            .filter(|n| name_matches_document_id(n, &first.document_id))
+            .count();
         assert_eq!(
             matches, 1,
-            "exactly one on-disk file must carry this document_id"
+            "exactly one on-disk file must carry this document_id (dir: {names:?})"
         );
+    }
+
+    /// Same content uploaded under two DIFFERENT original filenames
+    /// MUST still dedup to one on-disk file. The first-uploaded name
+    /// wins (the response still echoes whatever filename the current
+    /// upload sent, independent of disk). This is the load-bearing
+    /// test for the new dedup-by-id scan in `write_blob_atomic` —
+    /// the previous `<id>.<ext>` scheme implicitly deduped via path
+    /// equality; we now scan for any file addressing the id.
+    #[tokio::test]
+    async fn upload_same_bytes_different_filenames_dedups_to_one_blob() {
+        let (dir, svc) = fresh_service().await;
+        let payload = b"identical-bytes-two-names";
+
+        let first = svc
+            .upload_file(params_with_name("report.pdf", "pdf", payload))
+            .await
+            .unwrap();
+        let second = svc
+            .upload_file(params_with_name("annual-report-final.pdf", "pdf", payload))
+            .await
+            .unwrap();
+        let third = svc
+            .upload_file(params_with_name("年度报告.pdf", "pdf", payload))
+            .await
+            .unwrap();
+
+        assert_eq!(first.document_id, second.document_id);
+        assert_eq!(second.document_id, third.document_id);
+
+        // The first-uploaded on-disk name should still be present and
+        // be the only one — first-uploaded-wins.
+        let first_path = dir
+            .path()
+            .join("files")
+            .join(format!("report_{}.pdf", first.document_id));
+        let second_path = dir
+            .path()
+            .join("files")
+            .join(format!("annual-report-final_{}.pdf", first.document_id));
+        let third_path = dir
+            .path()
+            .join("files")
+            .join(format!("年度报告_{}.pdf", first.document_id));
+        assert!(first_path.exists(), "first-uploaded blob must remain on disk");
+        assert!(
+            !second_path.exists(),
+            "second upload must NOT have created a second blob ({})",
+            second_path.display()
+        );
+        assert!(
+            !third_path.exists(),
+            "third upload must NOT have created a third blob ({})",
+            third_path.display()
+        );
+
+        // And exactly one match exists in the directory.
+        let names: Vec<String> = {
+            let mut entries = tokio::fs::read_dir(dir.path().join("files"))
+                .await
+                .unwrap();
+            let mut v = Vec::new();
+            while let Some(e) = entries.next_entry().await.unwrap() {
+                v.push(e.file_name().to_string_lossy().into_owned());
+            }
+            v
+        };
+        let count = names
+            .iter()
+            .filter(|n| name_matches_document_id(n, &first.document_id))
+            .count();
+        assert_eq!(count, 1, "exactly one on-disk blob for one document_id (dir: {names:?})");
+    }
+
+    /// Distinct bytes that share a sanitised stem but different ids
+    /// (because the bytes differ) MUST land as distinct files —
+    /// dedup must not over-match on the stem portion.
+    #[tokio::test]
+    async fn upload_distinct_bytes_with_same_stem_keeps_separate_blobs() {
+        let (dir, svc) = fresh_service().await;
+
+        let r1 = svc
+            .upload_file(params_with_name("report.pdf", "pdf", b"alpha"))
+            .await
+            .unwrap();
+        let r2 = svc
+            .upload_file(params_with_name("report.pdf", "pdf", b"beta"))
+            .await
+            .unwrap();
+
+        assert_ne!(r1.document_id, r2.document_id);
+        let p1 = dir
+            .path()
+            .join("files")
+            .join(format!("report_{}.pdf", r1.document_id));
+        let p2 = dir
+            .path()
+            .join("files")
+            .join(format!("report_{}.pdf", r2.document_id));
+        assert!(p1.exists() && p2.exists(), "distinct ids must land as distinct files");
     }
 
     /// Regression guard at the pure-function level: identical bytes

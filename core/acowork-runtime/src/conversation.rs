@@ -135,10 +135,13 @@ pub const ATTACHMENT_TYPE_ATTACHED_FOLDER: &str = "attached_folder";
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AttachmentMeta {
     /// User-uploaded document (PDF/DOCX/PPTX/XLSX). Filesystem blob is at
-    /// `<work_dir>/files/<document_id>`.
+    /// `<work_dir>/files/<sanitized_stem>_<document_id>.<safe_ext>` —
+    /// see [`crate::usecases::attachment::on_disk_name`].
     FileUpload(FileUploadMeta),
     /// User-uploaded image (PNG/JPG). Filesystem blob is at
-    /// `<work_dir>/files/<document_id>`. `width`/`height` are best-effort
+    /// `<work_dir>/files/<sanitized_stem>_<document_id>.<safe_ext>` —
+    /// see [`crate::usecases::attachment::on_disk_name`].
+    /// `width`/`height` are best-effort
     /// hints supplied by the desktop frontend (which uses `new Image()` to
     /// read real dimensions); a CLI client may omit them and the renderer
     /// falls back to `<img onLoad>` natural sizing.
@@ -157,7 +160,8 @@ pub enum AttachmentMeta {
 #[serde(rename_all = "snake_case")]
 pub struct FileUploadMeta {
     /// Content hash + random suffix identifying the blob on disk
-    /// (`<work_dir>/files/<document_id>`).
+    /// (`<work_dir>/files/<sanitized_stem>_<document_id>.<safe_ext>`,
+    /// see [`crate::usecases::attachment::on_disk_name`]).
     pub document_id: String,
     pub filename: String,
     /// Lowercase extension without the dot (e.g. "pdf", "docx").

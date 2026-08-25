@@ -22,6 +22,7 @@ use crate::agent::session_core::SessionCore;
 use crate::agent::session_state::SessionState;
 use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
+use crate::usecases::attachment::on_disk_name;
 
 /// Messages that can be sent to a SessionTask.
 #[derive(Clone)]
@@ -1547,12 +1548,14 @@ fn refresh_builtin_tools_dependents(
 //   attached_folder  → (no hint — no single-tool way to enumerate a folder)
 //
 // The on-disk path for `file_upload` mirrors the layout chosen by
-// `RuntimeAttachmentService::safe_extension` and
-// `RuntimeAttachmentService::write_blob_atomic`
-// (`<work_dir>/files/<document_id>.<safe_extension>`). `doc_reader`
-// resolves blobs by absolute path and dispatches on the file extension —
-// so the `<id>.pdf` / `<id>.docx` suffix is the only contract surface
-// between the upload pipeline and the read tool.
+// `attachment::on_disk_name` (the single source of truth shared with
+// `RuntimeAttachmentService::write_blob_atomic`):
+// `<work_dir>/files/<sanitized_stem>_<document_id>.<safe_ext>`.
+// `doc_reader` resolves blobs by absolute path and dispatches on the
+// file extension — so the `<ext>` suffix is the only contract surface
+// between the upload pipeline and the read tool. Keeping the call here
+// in lock-step with `on_disk_name` is what guarantees the path string
+// the LLM receives matches the actual file on disk.
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -1591,31 +1594,17 @@ fn build_attachment_hint(
                 format,
                 ..
             } => {
-                // The on-disk path mirrors
-                // `RuntimeAttachmentService::write_blob_atomic`:
-                // <work_dir>/files/<document_id>.<safe_extension>. Without
-                // `work_dir` we still emit the hint but mark the path as
-                // `<work_dir>/...` so the LLM knows it can be resolved
-                // once `current_work_dir` is set by the SessionManager.
-                let ext = match format.as_str() {
-                    "pdf" => "pdf",
-                    "docx" => "docx",
-                    "pptx" => "pptx",
-                    "xlsx" => "xlsx",
-                    "png" => "png",
-                    "jpg" | "jpeg" => "jpg",
-                    "gif" => "gif",
-                    "webp" => "webp",
-                    _ => "bin",
-                };
+                // The on-disk path is built by `attachment::on_disk_name`
+                // — the same helper `write_blob_atomic` uses — so the
+                // absolute path handed to the LLM always matches the
+                // actual file. Without `work_dir` we still emit the hint
+                // but mark the path as `<work_dir>/...` so the LLM knows
+                // it can be resolved once `current_work_dir` is set by
+                // the SessionManager.
+                let on_disk = on_disk_name(document_id, format, filename);
                 let path_str = match work_dir {
-                    Some(wd) => format!(
-                        "{}/files/{}.{}",
-                        wd.trim_end_matches('/'),
-                        document_id,
-                        ext
-                    ),
-                    None => format!("<work_dir>/files/{}.{}", document_id, ext),
+                    Some(wd) => format!("{}/files/{}", wd.trim_end_matches('/'), on_disk),
+                    None => format!("<work_dir>/files/{}", on_disk),
                 };
                 Some(format!(
                     "- file: `{}` (id={}, format={}, path={})",
@@ -1798,7 +1787,7 @@ mod tests {
         let s = build_attachment_hint("summarise this contract", Some(&items), Some("/work"));
         assert!(s.starts_with("summarise this contract\n\n"));
         assert!(
-            s.contains("- file: `report.pdf` (id=0123456789ab-3, format=pdf, path=/work/files/0123456789ab-3.pdf)"),
+            s.contains("- file: `report.pdf` (id=0123456789ab-3, format=pdf, path=/work/files/report_0123456789ab-3.pdf)"),
             "got: {s}"
         );
         // The on-disk suffix must come from the format, NOT the old
@@ -1823,7 +1812,7 @@ mod tests {
             }];
             let s = build_attachment_hint("x", Some(&items), Some("/work"));
             assert!(
-                s.contains(&format!("path=/work/files/0123456789ab-3.{ext}")),
+                s.contains(&format!("path=/work/files/report_0123456789ab-3.{ext}")),
                 "format={fmt} must yield .{ext} suffix in hint, got: {s}"
             );
         }
@@ -1845,7 +1834,7 @@ mod tests {
         }];
         let s = build_attachment_hint("x", Some(&items), None);
         assert!(
-            s.contains("path=<work_dir>/files/abc123-0.docx"),
+            s.contains("path=<work_dir>/files/report_abc123-0.docx"),
             "without work_dir hint must use placeholder, got: {s}"
         );
     }

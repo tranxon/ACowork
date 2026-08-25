@@ -296,7 +296,9 @@ export type MessageType = "user" | "assistant" | "system" | "tool_call" | "tool_
 //     form to an AttachedItem before being sent.
 // ──────────────────────────────────────────────────────────────────────
 
-/** User-uploaded document (PDF/DOCX/PPTX/XLSX). Blob at `<work_dir>/files/<documentId>`. */
+/** User-uploaded document (PDF/DOCX/PPTX/XLSX). Blob at
+ * `<work_dir>/files/<sanitizedStem>_<documentId>.<safeExt>` — see
+ * `core/acowork-runtime/src/usecases/attachment.rs::on_disk_name`. */
 export interface FileUploadItem {
   type: "file_upload";
   documentId: string;

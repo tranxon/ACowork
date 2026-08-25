@@ -5674,20 +5674,26 @@ mod tests {
         let format = body["format"].as_str().expect("format echoed back");
         assert_eq!(format, "docx", "upload response must echo the requested format");
 
-        // Step 2: The blob MUST be on disk with the real .docx extension.
-        // Pre-fix this landed as `<doc_id>.bin`, which `doc_reader`
-        // would reject with "Unsupported document format".
-        let suffixed = temp_dir.join("files").join(format!("{}.docx", document_id));
+        // Step 2: The blob MUST be on disk with the real .docx extension
+        // and the readable `<stem>_<id>` prefix. Pre-fix this landed as
+        // `<doc_id>.bin`, which `doc_reader` would reject with
+        // "Unsupported document format".
+        let suffixed = temp_dir.join("files").join(format!("report_{document_id}.docx"));
+        let dir_contents: Vec<_> = std::fs::read_dir(temp_dir.join("files"))
+            .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default();
         assert!(
             suffixed.exists(),
             "docx blob must land at {} (got dir contents: {:?})",
             suffixed.display(),
-            std::fs::read_dir(temp_dir.join("files"))
-                .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
-                .unwrap_or_default()
+            dir_contents,
         );
-        // And it MUST NOT be sitting at .bin alongside.
-        let bin_path = temp_dir.join("files").join(format!("{}.bin", document_id));
+        // And it MUST NOT be sitting as `_<id>.bin` instead of `_<id>.docx`:
+        // that would mean the safe_extension whitelist regressed and the
+        // doc_reader tool would reject the blob as "Unsupported format".
+        let bin_path = temp_dir
+            .join("files")
+            .join(format!("report_{document_id}.bin"));
         assert!(
             !bin_path.exists(),
             "docx must not regress to .bin fallback, but {} exists",
