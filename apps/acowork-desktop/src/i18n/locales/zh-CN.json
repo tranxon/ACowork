@@ -116,6 +116,8 @@
     "backToList": "返回列表",
     "copy": "复制",
     "copied": "已复制",
+    "paste": "粘贴",
+    "uploadFile": "上传文件",
     "showDetails": "显示详情",
     "hideDetails": "隐藏详情",
     "ariaLabelCopyError": "复制错误信息"

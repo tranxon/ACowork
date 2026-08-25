@@ -116,6 +116,8 @@
     "backToList": "목록으로 돌아가기",
     "copy": "복사",
     "copied": "복사됨",
+    "paste": "붙여넣기",
+    "uploadFile": "파일 업로드",
     "showDetails": "세부 정보 보기",
     "hideDetails": "세부 정보 숨기기",
     "ariaLabelCopyError": "오류 메시지 복사"

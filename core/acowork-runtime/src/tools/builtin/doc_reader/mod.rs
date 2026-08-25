@@ -3,16 +3,22 @@
 //! Each module handles one document format and exposes a single
 //! `extract_text(path, options) -> Result<String>` function.
 //!
-//! | Format | Crate        | Strategy               |
-//! |--------|-------------|------------------------|
-//! | PDF    | `pdf-extract` | Font-rendered text extraction |
-//! | DOCX   | `zip`+`quick-xml` | XML text extraction |
-//! | PPTX   | `zip`+`quick-xml` | Slide text extraction |
-//! | XLSX   | `calamine`   | Sheet / row iteration  |
+//! | Format    | Crate        | Strategy                          |
+//! |-----------|-------------|-----------------------------------|
+//! | PDF       | `pdf-extract` | Font-rendered text extraction    |
+//! | DOCX      | `zip`+`quick-xml` | XML text extraction          |
+//! | PPTX      | `zip`+`quick-xml` | Slide text extraction        |
+//! | XLSX      | `calamine`   | Sheet / row iteration             |
+//! | Text      | (std)        | Strict UTF-8 read with NUL sniff  |
+//!
+//! `text` is the fallback for everything else: Markdown, source code,
+//! logs, config files — any UTF-8 file. See [`text`] for the safety
+//! gates (size cap, NUL sniff, strict decoding).
 
 pub mod docx;
 pub mod pdf;
 pub mod pptx;
+pub mod text;
 pub mod xlsx;
 
 use std::path::Path;
@@ -53,6 +59,8 @@ const MAX_DOC_SIZE_BYTES: u64 = 50 * 1024 * 1024;
 /// Built-in document reader tool.
 ///
 /// Reads PDF, DOCX, PPTX, and XLSX files and extracts their text content.
+/// Falls back to UTF-8 plain-text extraction for every other file type
+/// (Markdown, source code, logs, ...).
 pub struct DocReaderTool;
 
 impl Default for DocReaderTool {
@@ -69,8 +77,9 @@ impl DocReaderTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "doc_reader".to_string(),
-            description: "Read and extract text from documents (PDF, DOCX, PPTX, XLSX). \
-                 Use this tool to ingest document content for analysis. \
+            description: "Read and extract text from documents (PDF, DOCX, PPTX, XLSX) and \
+                 UTF-8 plain-text files (Markdown, source code, logs, ...). \
+                 Use this tool to ingest file content for analysis. \
                  Accepts both relative paths (within workspace) and absolute paths. \
                  Returns plain text with structural markers (page/slide/sheet headers, \
                  optional Markdown tables)."
@@ -152,22 +161,68 @@ impl Tool for DocReaderTool {
             }
         }
 
-        // Detect format
+        // Detect format. PDF/DOCX/PPTX/XLSX get their dedicated
+        // extractor; anything else falls back to UTF-8 plain-text
+        // extraction — this is what makes Markdown / source code / log
+        // uploads readable (the blob store collapses unknown extensions
+        // to `.bin`, and `safe_extension` never invents new suffixes).
         let format = match detect_format(&full_path) {
             Some(f) => f,
             None => {
-                return Ok(ToolResult {
-                    ok: false,
-                    content: String::new(),
-                    error: Some(format!(
-                        "Unsupported document format: '{}'. Supported: pdf, docx, pptx, xlsx",
-                        full_path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("(none)")
-                    )),
-                    token_usage: None,
-                });
+                let full_path_clone = full_path.clone();
+                let raw = tokio::task::spawn_blocking(move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        text::extract_text(&full_path_clone)
+                    }))
+                    .map_err(|panic_payload| {
+                        let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "Unknown panic during text extraction".to_string()
+                        };
+                        format!("Text extraction panicked: {msg}")
+                    })
+                    .and_then(|r| r)
+                })
+                .await
+                .map_err(|join_err| {
+                    format!("Text extraction task cancelled or panicked: {join_err}")
+                })
+                .and_then(|r| r);
+
+                return match raw {
+                    Ok(text) => {
+                        let (truncated, was_truncated) = output::truncate_output(&text);
+                        Ok(ToolResult {
+                            ok: true,
+                            content: truncated,
+                            error: if was_truncated {
+                                Some(
+                                    "Output truncated: text content exceeded the maximum output size."
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            },
+                            token_usage: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        ok: false,
+                        content: String::new(),
+                        error: Some(format!(
+                            "Unsupported document format: '{}'. Supported: pdf, docx, pptx, xlsx, \
+                             or UTF-8 plain text (md, txt, source code, ...). {e}",
+                            full_path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("(none)")
+                        )),
+                        token_usage: None,
+                    }),
+                };
             }
         };
 
@@ -239,5 +294,62 @@ impl Tool for DocReaderTool {
                 token_usage: None,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Create a temp file and return `(dir, path)`. Keeping `dir` alive
+    /// for the rest of the test guarantees the file exists and that the
+    /// directory is cleaned up on drop.
+    fn with_temp_file(bytes: &[u8], name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        f.write_all(bytes).expect("write temp file");
+        (dir, path)
+    }
+
+    #[test]
+    fn detect_format_returns_none_for_text_extensions() {
+        for name in ["notes.md", "main.rs", "Makefile", "app.json", "blob.bin"] {
+            assert_eq!(detect_format(Path::new(name)), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn detect_format_still_resolves_documents() {
+        for name in ["a.pdf", "b.docx", "c.pptx", "d.xlsx"] {
+            assert!(detect_format(Path::new(name)).is_some(), "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_reads_text_file_without_extension_whitelist() {
+        // End-to-end fallback: a `.md` path (which after an upload lands
+        // as `.bin` on disk) must be readable as plain text — this is
+        // the contract that makes arbitrary text uploads usable.
+        let (_dir, p) = with_temp_file(b"# Hello\n", "notes.md");
+        let result = DocReaderTool::new()
+            .execute(serde_json::json!({ "path": p.to_string_lossy() }), None)
+            .await
+            .expect("execute should not fail");
+        assert!(result.ok, "text fallback must succeed: {:?}", result.error);
+        assert_eq!(result.content, "# Hello\n");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_binary_as_unreadable() {
+        let (_dir, p) = with_temp_file(b"PK\x03\x04\x00\x00", "fake.zip");
+        let result = DocReaderTool::new()
+            .execute(serde_json::json!({ "path": p.to_string_lossy() }), None)
+            .await
+            .expect("execute should not fail");
+        assert!(!result.ok);
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("Unsupported document format"), "got: {err}");
     }
 }

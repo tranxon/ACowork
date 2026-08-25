@@ -26,6 +26,8 @@
     "backToList": "Back to list",
     "copy": "Copy",
     "copied": "Copied",
+    "paste": "Paste",
+    "uploadFile": "Upload file",
     "showDetails": "Show details",
     "hideDetails": "Hide details",
     "ariaLabelCopyError": "Copy error message"
