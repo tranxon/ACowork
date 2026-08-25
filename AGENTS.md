@@ -19,21 +19,24 @@ cargo test                     # unit + integration tests
 
 ### Desktop App (Tauri v2)
 
-The desktop app depends on core crates being built first (`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-lsp-relay`).
+Core Rust crates (`acowork-gateway`, `acowork-runtime`, `acowork-embed`) must be built before the Tauri binary can launch them.
+
+**Release build** — `beforeBuildCommand` in `tauri.conf.json` handles this automatically:
 
 ```bash
-# 1. Build core Rust crates (required before desktop build)
-npm run core:build:release     # or core:build:debug for dev
-
-# 2. Frontend + Tauri packaging
-npm run build                  # i18n check → HTML preview check → tsc → vite build
-npm run tauri build            # produces platform binary in src-tauri/src/tray.bin / dist/
+# From apps/acowork-desktop/
+npm run tauri build
+# Runs: core:build:release → npm run build → tauri bundle
 ```
 
-Desktop dev mode (hot-reload frontend, uses debug core build):
+**Dev mode** — Tauri dev does not auto-build core; ensure the debug binaries exist first:
 
 ```bash
-npm run tauri dev            # starts Vite dev server + Tauri window (debug core)
+# Build core debug binaries once
+npm run core:build:debug
+
+# Then start the desktop app (Vite HMR + Tauri window)
+npm run tauri dev
 ```
 
 ## Debug & Log 
