@@ -24,7 +24,9 @@ use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
 
 // ADR-051 P2: DistilledEpisode + Triple moved to acowork-memory.
-pub use acowork_memory::{DistilledEpisode, Triple};
+// ADR-057: KnowledgeSubType added to the re-export so the parser can map
+// the LLM-supplied `sub_type` field into the corresponding enum variant.
+pub use acowork_memory::{DistilledEpisode, KnowledgeSubType, Triple};
 
 use crate::agent::loop_session::strip_think_block;
 use crate::embedding::EmbeddingProvider;
@@ -47,55 +49,82 @@ use crate::error::{Result, RuntimeError};
 // Parsing helpers
 // ---------------------------------------------------------------------------
 
-/// Parsed result from compact model output containing summary, entities, and triples.
+/// Parsed result from compact model output containing summary and triples.
+///
+/// ADR-057: The `<entities>` block was removed (D5 — entities are not modelled
+/// as graph nodes in P0). Triples now carry `confidence` + `sub_type` per
+/// field, both populated by the compact model.
 #[derive(Debug, Clone)]
 pub struct CompactOutput {
     pub summary: String,
-    pub entities: Vec<String>,
     pub triples: Vec<Triple>,
 }
 
-/// Parse the compact model's raw output (which may contain `<summary>`,
-/// `<entities>`, and `<triples>` blocks) into structured components.
+/// Parse the compact model's raw output (which contains `<summary>` and
+/// `<triples>` blocks) into structured components.
+///
+/// Each `<triples>` line is `subject | predicate | object | confidence | sub_type`.
+/// Backwards-compatible: 3-field lines (legacy) parse with `confidence = 0.7`
+/// and `sub_type = Fact`; 4-field lines (subject|predicate|object|confidence)
+/// default `sub_type = Fact`; 5-field lines use the full schema.
 ///
 /// If the output does not contain the expected block markers, the entire text
-/// is treated as the summary (backwards-compatible with pre-entity extraction).
+/// is treated as the summary (backwards-compatible with pre-block format).
 pub fn parse_compact_output(raw: &str) -> CompactOutput {
     let summary = extract_block(raw, "summary").unwrap_or_else(|| raw.trim().to_string());
-    let entities_str = extract_block(raw, "entities").unwrap_or_default();
     let triples_str = extract_block(raw, "triples").unwrap_or_default();
-
-    let entities: Vec<String> = entities_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
 
     let triples: Vec<Triple> = triples_str
         .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let parts: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
-            if parts.len() >= 3 {
-                Some(Triple {
-                    subject: parts[0].to_string(),
-                    predicate: parts[1].to_string(),
-                    object: parts[2].to_string(),
-                })
-            } else {
-                None
-            }
-        })
+        .filter_map(parse_triple_line)
         .collect();
 
-    CompactOutput {
-        summary,
-        entities,
-        triples,
+    CompactOutput { summary, triples }
+}
+
+/// Parse one `<triples>` line into a `Triple`, accepting 3, 4 or 5 fields.
+///
+/// Returns `None` for empty lines or lines with fewer than 3 fields. The
+/// `confidence` field is clamped to `[0.0, 1.0]` and the `sub_type` string is
+/// matched case-insensitively against `Fact` / `Preference` / `Relation`,
+/// falling back to `Fact` on any unrecognized value.
+fn parse_triple_line(line: &str) -> Option<Triple> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
     }
+    let parts: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Confidence defaults to 0.7 when the model emits only 3 fields (legacy);
+    // we still surface the lower-confidence fallback so the landing pipeline
+    // routes such triples through `Pending` rather than `Active`.
+    let confidence = if parts.len() >= 4 {
+        parts[3].parse::<f32>().unwrap_or(0.7).clamp(0.0, 1.0)
+    } else {
+        0.7
+    };
+
+    let sub_type = if parts.len() >= 5 {
+        match parts[4].to_ascii_lowercase().as_str() {
+            "fact" => KnowledgeSubType::Fact,
+            "preference" => KnowledgeSubType::Preference,
+            "relation" => KnowledgeSubType::Relation,
+            _ => KnowledgeSubType::Fact,
+        }
+    } else {
+        KnowledgeSubType::Fact
+    };
+
+    Some(Triple {
+        subject: parts[0].to_string(),
+        predicate: parts[1].to_string(),
+        object: parts[2].to_string(),
+        confidence,
+        sub_type,
+    })
 }
 
 /// Extract the text content between `<tag>` and `</tag>` markers.
@@ -107,12 +136,13 @@ fn extract_block(text: &str, tag: &str) -> Option<String> {
     Some(text[start..start + end].trim().to_string())
 }
 
-/// Strip entity and triple metadata blocks from compact output, leaving only
-/// the summary. Used before inserting compact model output into in-memory
-/// context (the main LLM should not see the metadata blocks).
+/// Strip triple metadata blocks from compact output, leaving only the summary.
+/// Used before inserting compact model output into in-memory context (the
+/// main LLM should not see the metadata blocks).
 pub fn strip_metadata_blocks(raw: &str) -> String {
     let mut text = raw.to_string();
-    // Remove <entities>...</entities> block
+    // Remove legacy <entities>...</entities> block (no longer emitted but the
+    // stripper remains defensive in case older compact-model output is replayed).
     if let Some(start) = text.find("<entities>")
         && let Some(end) = text[start..].find("</entities>") {
             let end = start + end + "</entities>".len();
@@ -280,7 +310,6 @@ impl EpisodeDistiller {
                 summary,
                 source_session_id: session_id.to_string(),
                 consolidated: false,
-                entities: Vec::new(),
                 triples: Vec::new(),
             },
             usage,
@@ -290,8 +319,8 @@ impl EpisodeDistiller {
     /// Write a natural-language summary directly to Grafeo as an episodic memory.
     ///
     /// This is the unified write path for both compaction summaries and
-    /// session-close tail distillations. Parses entity and triple metadata
-    /// from the compact model output and creates a DistilledEpisode.
+    /// session-close tail distillations. Parses the summary and triple
+    /// metadata from the compact model output and creates a DistilledEpisode.
     ///
     /// If `embedding_provider` is `Some`, generates an embedding vector
     /// from the summary text (200ms timeout) and stores it on the node
@@ -313,7 +342,6 @@ impl EpisodeDistiller {
             summary: parsed.summary,
             source_session_id: session_id.to_string(),
             consolidated: false,
-            entities: parsed.entities,
             triples: parsed.triples,
         };
         if let Err(e) = manager
@@ -885,7 +913,6 @@ mod tests {
             summary: "User asked about Rust async programming".to_string(),
             source_session_id: "sess-1".to_string(),
             consolidated: false,
-            entities: vec!["Rust".to_string()],
             triples: Vec::new(),
         };
         assert_eq!(episode.session_id, "sess-1");
@@ -933,5 +960,103 @@ mod tests {
             default_reasoning_effort: None,
             thinking_mode: None,
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // ADR-057 C2: Compact-output parser accepts 3/4/5-field triple lines.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_compact_output_five_fields_full_schema() {
+        let raw = "<summary>User shipped a context-compaction fix.</summary>\n\
+                   <triples>\n\
+                   User | requested | context compaction fix | 0.95 | Fact\n\
+                   User | prefers tone | concise | 0.8 | Preference\n\
+                   Project Foo | collaborates with | acowork team | 0.85 | Relation\n\
+                   </triples>";
+        let parsed = parse_compact_output(raw);
+        assert_eq!(parsed.summary, "User shipped a context-compaction fix.");
+        assert_eq!(parsed.triples.len(), 3);
+
+        let t0 = &parsed.triples[0];
+        assert_eq!(t0.subject, "User");
+        assert_eq!(t0.predicate, "requested");
+        assert_eq!(t0.object, "context compaction fix");
+        assert!((t0.confidence - 0.95).abs() < f32::EPSILON);
+        assert_eq!(t0.sub_type, KnowledgeSubType::Fact);
+
+        let t1 = &parsed.triples[1];
+        assert_eq!(t1.sub_type, KnowledgeSubType::Preference);
+
+        let t2 = &parsed.triples[2];
+        assert_eq!(t2.sub_type, KnowledgeSubType::Relation);
+    }
+
+    #[test]
+    fn parse_compact_output_three_field_legacy_defaults_sub_type_to_fact() {
+        // Legacy 3-field lines (no confidence, no sub_type) parse with
+        // confidence = 0.7 and sub_type = Fact — Pending routing path.
+        let raw = "<summary>summary</summary>\n<triples>\nUser | likes | coffee\n</triples>";
+        let parsed = parse_compact_output(raw);
+        assert_eq!(parsed.triples.len(), 1);
+        let t = &parsed.triples[0];
+        assert_eq!(t.subject, "User");
+        assert_eq!(t.predicate, "likes");
+        assert_eq!(t.object, "coffee");
+        assert!((t.confidence - 0.7).abs() < f32::EPSILON);
+        assert_eq!(t.sub_type, KnowledgeSubType::Fact);
+    }
+
+    #[test]
+    fn parse_compact_output_four_field_confidence_only() {
+        let raw = "<summary>summary</summary>\n\
+                   <triples>\n\
+                   User | prefers | dark mode | 0.92\n\
+                   </triples>";
+        let parsed = parse_compact_output(raw);
+        assert_eq!(parsed.triples.len(), 1);
+        let t = &parsed.triples[0];
+        assert!((t.confidence - 0.92).abs() < f32::EPSILON);
+        assert_eq!(t.sub_type, KnowledgeSubType::Fact);
+    }
+
+    #[test]
+    fn parse_compact_output_confidence_is_clamped() {
+        // Out-of-range confidences clamp to [0.0, 1.0]; unknown sub_type
+        // falls back to Fact (defensive, never silently drops the triple).
+        let raw = "<summary>summary</summary>\n\
+                   <triples>\n\
+                   A | rel | B | 1.5 | WeirdKind\n\
+                   C | rel | D | -0.3 | Fact\n\
+                   </triples>";
+        let parsed = parse_compact_output(raw);
+        assert_eq!(parsed.triples.len(), 2);
+        assert!((parsed.triples[0].confidence - 1.0).abs() < f32::EPSILON);
+        assert_eq!(parsed.triples[0].sub_type, KnowledgeSubType::Fact);
+        assert!(parsed.triples[1].confidence.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_compact_output_ignores_blank_lines_and_short_rows() {
+        let raw = "<summary>summary</summary>\n\
+                   <triples>\n\n\
+                   only two | fields\n\
+                   User | likes | tea | 0.6 | Fact\n\
+                   </triples>";
+        let parsed = parse_compact_output(raw);
+        assert_eq!(parsed.triples.len(), 1);
+        assert_eq!(parsed.triples[0].object, "tea");
+    }
+
+    #[test]
+    fn parse_compact_output_strip_metadata_removes_only_triples_block() {
+        // strip_metadata_blocks is what feeds the in-memory LLM context — it
+        // must strip the <triples> block but preserve <summary>. The legacy
+        // <entities> block (no longer emitted) is also stripped defensively.
+        let raw = "<summary>summary text</summary>\n\
+                   <triples>\nA | rel | B\n</triples>";
+        let stripped = strip_metadata_blocks(raw);
+        assert!(stripped.contains("summary text"));
+        assert!(!stripped.contains("<triples>"));
     }
 }

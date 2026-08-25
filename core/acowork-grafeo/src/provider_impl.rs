@@ -12,7 +12,7 @@ use acowork_memory::consolidation::{
     GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig,
 };
-use acowork_memory::provider::MemoryProvider;
+use acowork_memory::provider::{IngestResult, MemoryProvider};
 use acowork_memory::{
     AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
     MemoryQuery, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
@@ -42,7 +42,9 @@ fn grafeo_to_memory_procedural(node: GrafeoProceduralNode) -> ProceduralNode {
         activation_count: node.activation_count,
         source_skill: node.source_skill,
         learned_from: node.learned_from,
-        embedding: node.embedding,
+        // Memory contract requires a vector; storage round-trips may carry
+        // None (pre-ADR-057 nodes) which maps to an empty Vec.
+        embedding: node.embedding.unwrap_or_default(),
         status: node.status,
         created_at: node.created_at,
         updated_at: node.updated_at,
@@ -62,7 +64,12 @@ fn memory_to_grafeo_procedural(node: &ProceduralNode) -> GrafeoProceduralNode {
         activation_count: node.activation_count,
         source_skill: node.source_skill.clone(),
         learned_from: node.learned_from.clone(),
-        embedding: node.embedding.clone(),
+        // Empty Vec = "no vector" on the memory side → store as absent.
+        embedding: if node.embedding.is_empty() {
+            None
+        } else {
+            Some(node.embedding.clone())
+        },
         status: node.status.clone(),
         created_at: node.created_at,
         updated_at: node.updated_at,
@@ -732,5 +739,122 @@ impl MemoryProvider for GrafeoStore {
             .await
             .map_err(err_to_acowork)?;
         Ok(result)
+    }
+
+    // ── ADR-057 P0: Compaction distillation landing pipeline ────────────
+    //
+    // Override of the trait default (see
+    // `acowork_memory::MemoryProvider::ingest_distilled_triples`). The trait
+    // default cannot establish the `source_episode_id` reverse link or the
+    // cross-layer `SOURCED_FROM` edge because `store_episode` does not expose
+    // the NodeId (ADR-057 D4). GrafeoStore has the NodeId, so this override
+    // runs the same instant pipeline (`process_memory_store`) per triple —
+    // dedup / conflict detection / status dispatch semantics stay IDENTICAL
+    // across providers — and additionally stamps `source_episode_id` (D4)
+    // and creates the `Episodic -[SOURCED_FROM]-> Knowledge` edges (D9).
+
+    async fn ingest_distilled_triples(
+        &self,
+        episode: &acowork_memory::DistilledEpisode,
+        embedding_provider: Option<&dyn acowork_core::EmbeddingProvider>,
+    ) -> AcoworkResult<IngestResult> {
+        use crate::types::edge_types;
+
+        // Step 1: store the episode (synchronously, never loses data).
+        // Embedding failure degrades to storing without a vector (D1) — a
+        // missing vector never blocks the summary from being retrievable.
+        let episode_embedding =
+            GrafeoStore::compute_text_embedding(&episode.summary, embedding_provider).await;
+        let grafeo_episode = GrafeoEpisode {
+            id: None,
+            session_id: episode.session_id.clone(),
+            turn_index: 0,
+            role: "distilled".to_string(),
+            content: episode.summary.clone(),
+            embedding: episode_embedding,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata: std::collections::HashMap::new(),
+            importance: 0.7,
+        };
+
+        let episode_id = self
+            .store_episode_with_session(&grafeo_episode, &grafeo_episode.session_id)
+            .map_err(err_to_acowork)?;
+
+        // Step 2: land each triple through the SAME instant pipeline the
+        // trait default uses (`process_memory_store`). This guarantees
+        // object-aware dedup, conflict detection with `conflict_group_id`
+        // tagging, Active/Pending dispatch by confidence, and within-batch
+        // dedup — no semantic divergence between default and override.
+        // The earlier "batch pre-load + inline cosine" optimization was
+        // removed: it skipped object comparison (silently dropping
+        // knowledge updates) and skipped conflict detection entirely.
+        let mut knowledge_ids: Vec<u64> = Vec::with_capacity(episode.triples.len());
+        let mut conflicts_detected: usize = 0;
+
+        for triple in &episode.triples {
+            let triple_text = format!("{} {} {}", triple.subject, triple.predicate, triple.object);
+            let embedding =
+                GrafeoStore::compute_text_embedding(&triple_text, embedding_provider).await;
+            let input = MemoryStoreInput {
+                content: triple_text,
+                sub_type: triple.sub_type.clone(),
+                subject: Some(triple.subject.clone()),
+                predicate: Some(triple.predicate.clone()),
+                object: Some(triple.object.clone()),
+                confidence: Some(triple.confidence),
+                source_episode_id: Some(episode_id.0),
+                embedding,
+                autobiographical: None,
+            };
+
+            match self.process_memory_store(&input) {
+                Ok(Some(result)) => {
+                    let new_id = NodeId(result.node_id);
+                    conflicts_detected += result.conflict_resolutions.len();
+
+                    // Step 3: cross-layer SOURCED_FROM edge (D9). Best-effort:
+                    // an edge failure only loses graph diffusion for this
+                    // node, never the node itself.
+                    let props: Vec<(String, grafeo_common::types::Value)> = vec![];
+                    if let Err(e) =
+                        self.create_memory_edge(episode_id, new_id, edge_types::SOURCED_FROM, props)
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            episode = episode_id.0,
+                            knowledge = new_id.0,
+                            "SOURCED_FROM edge creation failed (diffusion lost)"
+                        );
+                    }
+
+                    knowledge_ids.push(new_id.0);
+                }
+                Ok(None) => {
+                    // Duplicate — already covered by existing knowledge.
+                    tracing::debug!(
+                        subject = %triple.subject,
+                        predicate = %triple.predicate,
+                        "distilled triple deduplicated against existing knowledge"
+                    );
+                }
+                Err(e) => {
+                    // D1 failure degradation: a single-triple failure is a
+                    // warning; the episode (and remaining triples) survive.
+                    tracing::warn!(
+                        error = %e,
+                        subject = %triple.subject,
+                        "distilled triple landing failed (skipped)"
+                    );
+                }
+            }
+        }
+
+        Ok(IngestResult {
+            episode_id: episode_id.0,
+            knowledge_ids,
+            conflicts_detected,
+        })
     }
 }

@@ -711,7 +711,7 @@ activity_signal = clamp(recency_boost + access_boost, FLOOR, 1.0)
 
 **所有节点类型的 Active → Dormant 阈值统一为 0.3。** 区别仅在于 Dormant 之后是否有 Purge 路径。
 
-> **Phase 2 实现说明**：遗忘机制采用**按需计算模型**而非后台定期扫描。每个 Agent 拥有私有 Grafeo，后台 decay 扫描会重复扫描所有 Agent 的全部节点，在 Agent 数量增长时资源开销过大。按需计算模型在查询时（`hybrid_search`）实时计算 decay_score 并过滤，语义等价但资源效率更高。后台扫描作为 Phase 3 可选优化项。
+> **Phase 2 实现说明**（2026-08-25 更新，ADR-057 G4 确认）：遗忘机制采用**后台扫描模型**（`forgetting/scan.rs`，由 Gateway Cron 调度，频率可配置），而非按需计算。选择后台扫描的理由：① decay 计算移出查询路径，P99 检索延迟更稳定；② 多 Agent 场景下按需计算会在每次查询扫描全量节点，反而更差；③ 扫描频率可按 Agent 密度独立调整。语义与按需计算等价——decay_score 公式（§5.1 乘法模型）不变，仅计算时机不同。
 
 ```
 后台定期扫描（每小时一次，可配置）

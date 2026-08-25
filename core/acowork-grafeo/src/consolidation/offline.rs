@@ -2,15 +2,23 @@
 //!
 //! Phase 2 implements a simple age-and-evidence upgrade strategy.
 //! Phase 3 adds full LLM-based re-evaluation and generalization.
+//!
+//! ADR-057 P0 (C7): the previous Step-2 *LLM triple re-extraction from
+//! unconsolidated episodes* has been deleted. New episodes are routed
+//! through [`crate::consolidation::distill::ingest_distilled_triples`]
+//! during compaction, so re-extracting on a background schedule would
+//! duplicate cost and create race conditions with the synchronous landing
+//! pipeline. The remaining steps (Pending upgrade/downgrade, generalization,
+//! history compression, relationship / limitation generation, episodic
+//! forgetting) continue to run as before.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use grafeo_common::types::Value;
 
-use crate::consolidation::conflict_llm::{LlmConflictType, classify_conflict};
 use crate::consolidation::generalization::GeneralizationConfig;
-use crate::consolidation::triple_extraction::{ExtractedTriple, TripleExtractorLlm};
+use crate::consolidation::triple_extraction::TripleExtractorLlm;
 use crate::error::Result;
 use crate::grafeo::GrafeoStore;
 use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeStatus, labels};
@@ -22,6 +30,11 @@ use crate::types::{AutobioCategory, AutobiographicalNode, KnowledgeNode, NodeSta
 pub use acowork_memory::consolidation::{OfflineConsolidationConfig, OfflineConsolidationResult};
 
 /// Result of LLM conflict resolution during offline consolidation.
+///
+/// ADR-057 C7: this struct is **kept** for API stability — `run_offline_consolidation`
+/// no longer populates the fields (Step-2 LLM extraction was deleted). New
+/// conflict resolution happens at landing time via
+/// [`crate::consolidation::distill::ingest_distilled_triples`].
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConflictResolutionResult {
     /// Total conflicts resolved.
@@ -42,8 +55,8 @@ impl GrafeoStore {
     ///
     /// Pipeline steps:
     /// 1. Standard offline consolidation (upgrade/downgrade Pending nodes)
-    /// 2. Triple extraction from unconsolidated episodes (if LLM available)
-    /// 3. Conflict resolution via LLM arbitration (if LLM available)
+    /// 2. ~~Triple extraction from unconsolidated episodes~~ (DELETED in ADR-057 C7)
+    /// 3. ~~Conflict resolution via LLM arbitration~~ (DELETED in ADR-057 C7)
     /// 4. Experience generalization to extract ProceduralNodes
     /// 5. Compress History nodes if too many
     /// 6. Auto-generate Relationship nodes for long-term users
@@ -60,53 +73,20 @@ impl GrafeoStore {
         embedding_fn: Option<Arc<dyn Fn(&str) -> Vec<f32> + Send + Sync>>,
         gen_config: Option<&GeneralizationConfig>,
     ) -> Result<OfflineConsolidationResult> {
-        // Step 1: Standard offline consolidation (upgrade/downgrade Pending nodes)
+        // Step 1: Standard offline consolidation (upgrade/downgrade Pending nodes).
         let mut result = self.run_offline_consolidation(config)?;
 
-        // Step 2: Triple extraction from unconsolidated episodes (if LLM available).
-        if let Some(llm_ref) = llm
-            && let Some(ref emb_fn) = embedding_fn {
-                let episode_contents =
-                    self.get_unconsolidated_episode_contents(config.batch_size)?;
-                if !episode_contents.is_empty() {
-                    match self
-                        .extract_triples(&episode_contents, llm_ref, emb_fn)
-                        .await
-                    {
-                        Ok(extraction_result) => {
-                            result.triples_extracted = extraction_result.triples.len();
+        // ADR-057 C7: Step 2 (LLM triple extraction from unconsolidated
+        // episodes) and Step 3 (LLM conflict arbitration) are deleted.
+        // New episodes land synchronously through `ingest_distilled_triples`,
+        // so there is no batch of unconsolidated episodes to re-extract from
+        // here. The `triples_extracted`, `conflicts_resolved`,
+        // `conflicts_evolution`, `conflicts_correction`, `conflicts_ambiguous`
+        // fields in `OfflineConsolidationResult` remain at zero — they are
+        // kept for serialization compatibility and may be repopulated by
+        // future ad-hoc reprocessing jobs.
 
-                            // T4.5: Apply knowledge updates for triples where
-                            // (subject, predicate) matches but object differs.
-                            // This marks the old node as Dormant before the new
-                            // triple is stored.
-                            if !extraction_result.triples.is_empty() {
-                                let updated =
-                                    self.apply_knowledge_updates(&extraction_result.triples)?;
-                                // Track: updated nodes are not "new" triples,
-                                // they replace existing ones.
-                                let _ = updated;
-                            }
-
-                            // Step 3: Resolve conflicts between extracted and existing knowledge.
-                            if extraction_result.deduplicated > 0 {
-                                let conflict_result =
-                                    self.resolve_conflicts_with_llm(llm_ref).await?;
-                                result.conflicts_resolved = conflict_result.resolved;
-                                result.conflicts_evolution = conflict_result.evolution;
-                                result.conflicts_correction = conflict_result.correction;
-                                result.conflicts_ambiguous = conflict_result.ambiguous;
-                            }
-                        }
-                        Err(_) => {
-                            // Triple extraction failed — continue with remaining steps.
-                            // Error is captured in result.triples_extracted remaining 0.
-                        }
-                    }
-                }
-            }
-
-        // Step 4: Experience generalization (if embedding function provided)
+        // Step 4: Experience generalization (if embedding function provided).
         if let Some(ref emb_fn) = embedding_fn {
             let gen_config = gen_config.cloned().unwrap_or_default();
             let gen_result = self.run_generalization(llm, emb_fn, &gen_config).await?;
@@ -314,137 +294,12 @@ impl GrafeoStore {
         Ok(compressed)
     }
 
-    /// Get episode content from unconsolidated episodic nodes.
-    ///
-    /// Returns (episode_id, content) pairs for episodes that have not yet
-    /// been consolidated (consolidated == false).
-    pub fn get_unconsolidated_episode_contents(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        let graph = self.db.graph_store();
-        let node_ids = graph.nodes_by_label(labels::EPISODIC);
-
-        let mut episodes = Vec::new();
-
-        for id in node_ids {
-            if episodes.len() >= limit {
-                break;
-            }
-
-            if let Some(n) = self.db.get_node(id) {
-                // Check consolidated flag — skip already-consolidated.
-                let is_consolidated = n
-                    .get_property("consolidated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-
-                if is_consolidated {
-                    continue;
-                }
-
-                // Extract content.
-                let content = n
-                    .get_property("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-
-                if content.is_empty() {
-                    continue;
-                }
-
-                let episode_id = format!("{}", id.as_u64());
-                episodes.push((episode_id, content));
-            }
-        }
-
-        Ok(episodes)
-    }
-
-    /// Resolve knowledge conflicts using LLM arbitration.
-    ///
-    /// Finds pairs of knowledge nodes with the same (subject, predicate)
-    /// but different (object), then classifies each conflict as
-    /// Evolution, Correction, or Ambiguous using LLM.
-    async fn resolve_conflicts_with_llm(
-        &self,
-        llm: &dyn TripleExtractorLlm,
-    ) -> Result<ConflictResolutionResult> {
-        let active = self.get_all_active_knowledge()?;
-
-        // Group by (subject, predicate) to find conflicts.
-        let mut groups: std::collections::HashMap<(String, String), Vec<&KnowledgeNode>> =
-            std::collections::HashMap::new();
-        for node in &active {
-            let key = (node.subject.to_lowercase(), node.predicate.to_lowercase());
-            groups.entry(key).or_default().push(node);
-        }
-
-        let mut result = ConflictResolutionResult::default();
-
-        // Process groups with 2+ nodes (potential conflicts).
-        for nodes in groups.values() {
-            if nodes.len() < 2 {
-                continue;
-            }
-
-            // Compare each pair (only the first two to limit LLM calls).
-            let old = &nodes[0];
-            let new = &nodes[1];
-
-            // Only resolve if objects differ.
-            if old.object.eq_ignore_ascii_case(&new.object) {
-                continue;
-            }
-
-            match classify_conflict(
-                &old.subject,
-                &old.predicate,
-                &old.object,
-                &new.subject,
-                &new.predicate,
-                &new.object,
-                None, // No evidence context available in offline mode
-                llm,
-            )
-            .await
-            {
-                Ok(classification) => {
-                    result.resolved += 1;
-                    match classification.conflict_type {
-                        LlmConflictType::Evolution => {
-                            // Old value is outdated — mark Dormant, new stays Active.
-                            let mut old_node = (*old).clone();
-                            old_node.status = NodeStatus::Dormant;
-                            old_node.updated_at = Utc::now();
-                            self.update_knowledge(&old_node)?;
-                            result.evolution += 1;
-                        }
-                        LlmConflictType::Correction => {
-                            // Old value was wrong — mark Dormant, new stays Active.
-                            let mut old_node = (*old).clone();
-                            old_node.status = NodeStatus::Dormant;
-                            old_node.updated_at = Utc::now();
-                            self.update_knowledge(&old_node)?;
-                            result.correction += 1;
-                        }
-                        LlmConflictType::Ambiguous => {
-                            // Both could be true — keep both, mark for user confirmation.
-                            // The Ambiguous system handles user confirmation hints separately.
-                            result.ambiguous += 1;
-                        }
-                    }
-                }
-                Err(_) => {
-                    // LLM conflict classification failed — keep both values.
-                    result.ambiguous += 1;
-                }
-            }
-        }
-
-        Ok(result)
-    }
+    // ADR-057 C7: `get_unconsolidated_episode_contents` (deleted) and
+    // `resolve_conflicts_with_llm` (deleted) were the supporting methods for
+    // the Step-2 LLM extraction that has been removed. The conflict
+    // classification helpers remain reachable from the
+    // `consolidation::conflict_llm` module for unit tests, but no production
+    // code calls them.
 
     /// Auto-generate Relationship autobiographical nodes.
     ///
@@ -655,39 +510,10 @@ impl GrafeoStore {
         Ok(transitioned)
     }
 
-    /// Enhanced Fact semantic deduplication.
-    ///
-    /// Beyond the existing `has_potential_conflict()` which checks
-    /// (subject, predicate) exact match, this method also handles:
-    /// - Same (subject, predicate) with different object → knowledge update
-    ///   (replace old with new, mark old as Dormant) instead of creating duplicate
-    ///
-    /// This is called during triple extraction when dedup is detected.
-    /// Returns the number of old nodes marked Dormant due to knowledge updates.
-    pub fn apply_knowledge_updates(&self, new_triples: &[ExtractedTriple]) -> Result<usize> {
-        let existing = self.get_all_active_knowledge()?;
-        let mut updated = 0;
-
-        for triple in new_triples {
-            // Find nodes with matching subject+predicate but different object.
-            for node in &existing {
-                if node.subject.eq_ignore_ascii_case(&triple.subject)
-                    && node.predicate.eq_ignore_ascii_case(&triple.predicate)
-                    && !node.object.eq_ignore_ascii_case(&triple.object)
-                {
-                    // Knowledge update: mark old as Dormant, new will be stored
-                    // by the caller (extract_triples) as Active.
-                    let mut old = node.clone();
-                    old.status = NodeStatus::Dormant;
-                    old.updated_at = Utc::now();
-                    self.update_knowledge(&old)?;
-                    updated += 1;
-                }
-            }
-        }
-
-        Ok(updated)
-    }
+    // ADR-057 C7: `apply_knowledge_updates` (deleted). The Step-2 LLM
+    // triple-extraction pipeline it served has been removed; new triples are
+    // landed through `ingest_distilled_triples` which performs its own
+    // status dispatch and dedup. The old routine is intentionally absent.
 }
 
 // ---------------------------------------------------------------------------

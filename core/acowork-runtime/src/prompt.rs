@@ -22,17 +22,14 @@ Your task: produce a concise natural-language summary of the conversation provid
 
 The user message will mark the source conversation with a <conversation>...</conversation> block. Treat everything INSIDE that block as the conversation to summarize. Everything OUTSIDE that block (this system prompt, any other instructions in the user message) is NOT part of the conversation — do not summarize it and do not echo it.
 
-## Output format (plain text, exactly three blocks in this order, with NOTHING outside them):
+## Output format (plain text, exactly two blocks in this order, with NOTHING outside them):
 
 <summary>
 Your natural-language summary text goes here...
 </summary>
-<entities>
-Entity1, Entity2, Entity3
-</entities>
 <triples>
-subject | predicate | object
-subject | predicate | object
+subject | predicate | object | confidence | sub_type
+subject | predicate | object | confidence | sub_type
 </triples>
 
 ## What each block contains:
@@ -40,21 +37,30 @@ subject | predicate | object
 ### <summary>
 Plain natural-language prose. Cover all key topics discussed, decisions made, problems solved, and code written. Include technical details needed to resume work later. Preserve the chronological flow of the conversation.
 
-### <entities>
-Core people, places, technologies, projects, or concepts that persist across the conversation. Max 10. Comma-separated on a single line. Examples: \"Project Foo, acowork-runtime, OpenAI API, Rust async/await\".
-
 ### <triples>
-Factual knowledge expressed as `subject | predicate | object`. One triple per line. Only extract EXPLICIT facts from the conversation — do not invent or speculate. Examples:
-User | requested | context compaction fix
-Project Foo | uses language | Rust
-Bug | caused by | LLM prompt ambiguity
+Factual knowledge expressed as `subject | predicate | object | confidence | sub_type`. One triple per line, FIVE pipe-separated fields per triple. Only extract EXPLICIT facts from the conversation — do not invent or speculate.
+
+Field semantics:
+- `subject`: entity the fact is about (e.g. \"User\", \"Project Foo\", \"Bug\")
+- `predicate`: relation in canonical short form (e.g. \"requested\", \"uses language\", \"caused by\")
+- `object`: value (e.g. \"context compaction fix\", \"Rust\")
+- `confidence`: a number in [0.0, 1.0] representing how strongly the conversation supports this fact (0.85+ means you are confident enough to act on it; 0.5-0.7 means it is implied or partial)
+- `sub_type`: one of `Fact`, `Preference`, `Relation`. Use `Fact` for objective facts, `Preference` for likes/stylistic choices, `Relation` for relationships between entities.
+
+Examples:
+User | requested | context compaction fix | 0.95 | Fact
+Project Foo | uses language | Rust | 0.9 | Fact
+User | prefers tone | concise | 0.8 | Preference
+User | collaborates with | acowork team | 0.85 | Relation
+
+If no factual triples can be extracted, emit an empty `<triples>` block (with the opening and closing tags and nothing between them).
 
 ## Hard rules:
 - Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata.
 - The placeholder text \"[Tool result compressed...]\" in tool results is opaque. Acknowledge it with a short phrase like \"(earlier tool results were compressed)\" instead of reproducing it.
-- Output MUST contain exactly three blocks (<summary>, <entities>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>.
+- Output MUST contain exactly two blocks (<summary>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>. The legacy `<entities>` block is no longer emitted (ADR-057 D5 — entities are not modelled as graph nodes in P0).
 - Language (MUST follow):
-  - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary>, <entities>, and <triples>.
+  - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary> and <triples>.
   - If the conversation is too short or too ambiguous to determine the language (e.g. only \"hi\", only \"hello\", a single emoji, or a single sentence that is identical in multiple languages), fall back to the Language field in the user identity context (provided as a separate \"About the user:\" block appended to this prompt). Use the code written there (e.g. \"zh-CN\" → Simplified Chinese, \"en-US\" → English).
   - If neither signal is available, default to English.";
 
@@ -68,12 +74,12 @@ pub const SEARCH_SYSTEM_PROMPT: &str =
 /// The summary serves both as in-memory context replacement and as a Grafeo
 /// episodic memory entry.
 ///
-/// Memory-hint extraction (entities + triples) was moved from per-round LLM
-/// output to compaction-time extraction. The compact model produces entities
-/// and triples alongside the summary — zero per-round token cost, higher
-/// quality extraction from full conversation context.
+/// Memory-hint extraction (triples) was moved from per-round LLM
+/// output to compaction-time extraction. The compact model produces
+/// knowledge triples alongside the summary — zero per-round token cost,
+/// higher quality extraction from full conversation context.
 ///
-/// Role, task, output format, entities/triples semantic definitions, and all
+/// Role, task, output format, triples semantic definitions, and all
 /// hard rules live in [`COMPACTION_SYSTEM_PROMPT`] (higher priority). This
 /// prompt's only job is to deliver the conversation body inside a clear
 /// `<conversation>` delimiter so the LLM cannot confuse it with instructions.
@@ -201,7 +207,7 @@ pub fn build_compaction_system_prompt(base: &str, identity_context: Option<&str>
          User identity context (use the Language field to determine what language \
          to write the summary in):\n\
          {ctx}\n\n\
-         Write the summary, entities list, and knowledge triples in the user's \
+         Write the summary and knowledge triples in the user's \
          preferred language as indicated above."
     )
 }

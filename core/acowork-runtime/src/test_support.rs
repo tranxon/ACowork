@@ -192,13 +192,19 @@ impl MemoryProvider for InMemoryProvider {
     fn store_procedural(&self, node: &ProceduralNode) -> Result<()> {
         let id = node.id.unwrap_or_else(|| self.alloc_id());
         let content = format!("{}: {}", node.trigger_condition, node.action_pattern);
+        // Memory contract: Vec (empty = no vector); storage side is Option.
+        let embedding = if node.embedding.is_empty() {
+            None
+        } else {
+            Some(node.embedding.clone())
+        };
         self.nodes.write().unwrap().insert(
             id,
             InMemoryNode {
                 id,
                 label: "Procedural".to_string(),
                 content,
-                embedding: node.embedding.clone(),
+                embedding,
                 session_id: None,
                 confidence: node.confidence,
                 status: node.status.clone(),

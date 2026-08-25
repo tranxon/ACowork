@@ -359,7 +359,7 @@ mod tests {
 
         // Record a failure from a tool.
         manager
-            .record_procedural_from_failure(&store, "bash", "Error: command not found")
+            .record_procedural_from_failure(&store, "bash", "Error: command not found", None)
             .unwrap();
 
         // Verify the ProceduralNode was created.
@@ -379,12 +379,12 @@ mod tests {
 
         // First failure.
         manager
-            .record_procedural_from_failure(&store, "bash", "Error: timeout")
+            .record_procedural_from_failure(&store, "bash", "Error: timeout", None)
             .unwrap();
 
         // Second failure for the same tool.
         manager
-            .record_procedural_from_failure(&store, "bash", "Error: permission denied")
+            .record_procedural_from_failure(&store, "bash", "Error: permission denied", None)
             .unwrap();
 
         // Should have only one node (reinforced, not duplicated).

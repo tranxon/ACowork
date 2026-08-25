@@ -8,6 +8,8 @@
 //! Error type changed from RuntimeError::Tool to AcoworkError::Memory.
 //! EmbeddingProvider trait imported from acowork-core.
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::{
@@ -19,6 +21,54 @@ use chrono::{DateTime, Utc};
 use acowork_core::EmbeddingProvider;
 use crate::types::DistilledEpisode;
 use acowork_core::error::{AcoworkError, Result};
+
+// ---------------------------------------------------------------------------
+// Procedural embedding fallback (ADR-057 P0 ProceduralNode embedding required)
+// ---------------------------------------------------------------------------
+//
+// All three ProceduralNode creation paths must supply a non-None embedding.
+// When a real `EmbeddingFn` is available we use it; otherwise we fall back to a
+// deterministic, dependency-free hash embedding of dimension 384 (matches
+// `HnswConfig::default().vector_dim`) so the node remains indexable from the
+// moment it is written.
+//
+// This is intentionally a pure function with no external dependencies so it
+// can live in `acowork-memory` (upstream of `acowork-grafeo`).
+
+/// Default embedding dimension. Must match `HnswConfig::default().vector_dim`.
+pub const PROCEDURAL_FALLBACK_DIM: usize = 384;
+
+/// Deterministic, dependency-free fallback embedding for procedural nodes when
+/// no `EmbeddingFn` is available. The result is not semantically meaningful,
+/// but it is stable, non-zero, and dimensionally compatible with the HNSW
+/// index so the stored `ProceduralNode` is immediately vector-searchable.
+pub fn procedural_embedding_fallback(text: &str) -> Vec<f32> {
+    let mut out = vec![0.0f32; PROCEDURAL_FALLBACK_DIM];
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let h1 = hasher.finish();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let mut h = DefaultHasher::new();
+        (h1.wrapping_add(i as u64)).hash(&mut h);
+        let v = h.finish();
+        *slot = ((v % 2000) as f32 - 1000.0) / 1000.0;
+    }
+    out
+}
+
+/// Resolve the procedural embedding using the provided `EmbeddingFn` or fall
+/// back to [`procedural_embedding_fallback`]. Never returns `None` — the
+/// `embedding` field on a persisted `ProceduralNode` must be `Some(_)` per
+/// ADR-057 P0.
+pub fn procedural_embedding_for(
+    text: &str,
+    embedding_fn: Option<&EmbeddingFn>,
+) -> Vec<f32> {
+    match embedding_fn {
+        Some(f) => f(text),
+        None => procedural_embedding_fallback(text),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -663,82 +713,35 @@ impl MemoryManager {
 
     /// Record a distilled/compacted episode into Grafeo.
     ///
-    /// Per [ADR-011], the episode contains a natural-language summary.
-    /// The summary text IS the distillation result.
-    /// Entities and triples extracted during compaction are stored as
-    /// node properties for later consolidation.
+    /// ADR-057 P0: This is now a thin wrapper around
+    /// [`MemoryProvider::ingest_distilled_triples`], which:
+    ///   - Stores the episode synchronously.
+    ///   - Lands each triple as a `KnowledgeNode` (Active ≥ 0.85, Pending
+    ///     otherwise).
+    ///   - Creates the cross-layer `Episodic -[SOURCED_FROM]-> Knowledge` edge
+    ///     so `graph_expand` reaches knowledge from episode seeds (D9).
     ///
-    /// If `embedding_provider` is `Some`, generates an embedding from
-    /// the summary text (200ms timeout) for future vector retrieval.
+    /// `metadata.triples` and `metadata.entities` are intentionally **not**
+    /// persisted (D3/D5 — no readers in the greenfield codebase).
     pub async fn record_distilled(
         &self,
         provider: &dyn MemoryProvider,
         episode: &DistilledEpisode,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<()> {
-        // Auto-generate episode embedding (200ms timeout via FallbackEmbeddingProvider).
-        let episode_embedding: Option<Vec<f32>> = if let Some(emb_prov) = embedding_provider {
-            match emb_prov.embed(&episode.summary).await {
-                Ok(vec) => {
-                    tracing::debug!(
-                        dim = vec.len(),
-                        provider = emb_prov.name(),
-                        "Auto-generated episode embedding"
-                    );
-                    Some(vec)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Episode embedding generation failed, storing without vector"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let entities_str = episode.entities.join(", ");
-        let triples_json =
-            serde_json::to_string(&episode.triples).unwrap_or_else(|_| "[]".to_string());
-
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "source_session_id".to_string(),
-            serde_json::Value::String(episode.source_session_id.clone()),
-        );
-        metadata.insert(
-            "entities".to_string(),
-            serde_json::Value::String(entities_str),
-        );
-        metadata.insert(
-            "triples".to_string(),
-            serde_json::Value::String(triples_json),
-        );
-
-        let ep = Episode {
-            session_id: episode.session_id.clone(),
-            turn_index: 0,
-            role: "distilled".to_string(),
-            content: episode.summary.clone(),
-            embedding: episode_embedding,
-            timestamp: chrono::Utc::now(),
-            consolidated: false,
-            metadata,
-            importance: 0.7,
-        };
-
-        provider
-            .store_episode(&ep)
+        let result = provider
+            .ingest_distilled_triples(episode, embedding_provider)
+            .await
             .map_err(|e| AcoworkError::Memory(format!("Failed to record distilled episode: {e}")))?;
 
         tracing::debug!(
             session_id = %episode.session_id,
             summary_len = episode.summary.len(),
-            entity_count = episode.entities.len(),
             triple_count = episode.triples.len(),
-            "Recorded distilled episode"
+            episode_id = result.episode_id,
+            knowledge_landed = result.knowledge_ids.len(),
+            conflicts_detected = result.conflicts_detected,
+            "Recorded distilled episode via ingest_distilled_triples"
         );
 
         Ok(())
@@ -758,11 +761,18 @@ impl MemoryManager {
     /// If a similar procedure already exists (dedup via
     /// `find_procedural_by_trigger`), the existing node's
     /// `fail_count` is incremented instead.
+    ///
+    /// The optional `embedding_fn` is used to compute the procedural
+    /// embedding up front (ADR-057 P0: "ProceduralNode embedding 必填").
+    /// When `embedding_fn` is `None`, a deterministic hash-based fallback
+    /// (`procedural_embedding_fallback`) is used so the stored node is
+    /// still immediately vector-searchable from the moment it is persisted.
     pub fn record_procedural_from_failure(
         &self,
         provider: &dyn MemoryProvider,
         tool_name: &str,
         error_message: &str,
+        embedding_fn: Option<&EmbeddingFn>,
     ) -> Result<()> {
         use crate::{NodeStatus, ProceduralNode};
 
@@ -800,6 +810,13 @@ impl MemoryManager {
 
         let action = format!("避免 {}；替代方案: 检查输入或重试", error_pattern);
 
+        // ADR-057 P0: ProceduralNode embedding 必填 — compute at write time so
+        // the node is vector-searchable from the moment it is persisted.
+        // Use the real EmbeddingFn when available, otherwise the deterministic
+        // hash fallback (see `procedural_embedding_for`).
+        let procedural_text = format!("{} {}", trigger, action);
+        let embedding = procedural_embedding_for(&procedural_text, embedding_fn);
+
         let node = ProceduralNode {
             id: None,
             name: format!("avoid_{}", tool_name),
@@ -811,7 +828,7 @@ impl MemoryManager {
             activation_count: 0,
             source_skill: Some(tool_name.to_string()),
             learned_from: "execution_failure".to_string(),
-            embedding: None, // No embedding at record time; filled by consolidation
+            embedding,
             status: NodeStatus::Pending, // Low confidence → Pending
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -925,9 +942,11 @@ impl MemoryManager {
         &self,
         provider: &dyn MemoryProvider,
         failures: &[(&str, &str)],
+        embedding_fn: Option<&EmbeddingFn>,
     ) {
         for (tool_name, error_message) in failures {
-            if let Err(e) = self.record_procedural_from_failure(provider, tool_name, error_message)
+            if let Err(e) =
+                self.record_procedural_from_failure(provider, tool_name, error_message, embedding_fn)
             {
                 tracing::debug!(
                     tool_name,
@@ -1625,4 +1644,37 @@ mod tests {
         );
     }
 
+    // ── ADR-057 P0: ProceduralNode embedding 必填 (Path B) ────────────────
+    //
+    // Verifies that `record_procedural_from_failure` always persists a
+    // non-None embedding, even when no EmbeddingFn is supplied (the manager
+    // falls back to the deterministic hash embedding).
+
+    #[test]
+    fn procedural_fallback_embedding_is_deterministic_and_dim_384() {
+        let a = procedural_embedding_fallback("hello world");
+        let b = procedural_embedding_fallback("hello world");
+        let c = procedural_embedding_fallback("another text");
+        assert_eq!(a, b, "same text must hash identically");
+        assert_ne!(a, c, "different text must hash differently");
+        assert_eq!(
+            a.len(),
+            PROCEDURAL_FALLBACK_DIM,
+            "fallback dim must match HnswConfig::default().vector_dim (384)"
+        );
+    }
+
+    #[test]
+    fn procedural_embedding_for_prefers_real_fn_over_fallback() {
+        let marker: EmbeddingFn = std::sync::Arc::new(|_text: &str| vec![42.0f32; 8]);
+        let v = procedural_embedding_for("any text", Some(&marker));
+        assert_eq!(v, vec![42.0f32; 8], "real fn must win over fallback");
+
+        let v = procedural_embedding_for("any text", None);
+        assert_eq!(
+            v.len(),
+            PROCEDURAL_FALLBACK_DIM,
+            "fallback used when no fn provided"
+        );
+    }
 }

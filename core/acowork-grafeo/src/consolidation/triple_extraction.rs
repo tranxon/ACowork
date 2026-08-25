@@ -1,10 +1,17 @@
 //! Triple extraction — LLM-driven knowledge extraction from Episode text.
 //!
-//! Phase 3 S4.2: Extracts (subject, predicate, object) triples from
-//! episodic memory content using an LLM. The LLM call is abstracted
-//! behind a trait so that the grafeo crate remains independent of
-//! the runtime's provider implementation.
-//!
+//! ADR-057: the synchronous distillation landing pipeline
+//! ([`crate::consolidation::distill`]) replaces this module's role for
+//! runtime compaction. This path remains available for **manual
+//! reprocessing / batch import** scenarios (e.g. importing a corpus of
+//! historical conversations) where calling the LLM against pre-existing
+//! episodes is still useful.
+//
+//
+//   The `run_offline_consolidation_with_generalization` Step-2 LLM
+//   extraction has been deleted (ADR-057 C7); new episodes are routed
+//   through `ingest_distilled_triples` instead.
+//
 //! Design: `docs/05-memory.md` §4.3
 #[cfg(test)]
 use std::sync::Arc;
@@ -12,6 +19,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use grafeo_common::types::NodeId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GrafeoError, Result};
@@ -49,8 +57,13 @@ pub struct ExtractedTriple {
 /// Result of extracting triples from one or more Episodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
-    /// Source episode IDs that were processed.
-    pub source_episode_ids: Vec<String>,
+    /// Source episode IDs that were processed (now typed as `NodeId`).
+    ///
+    /// ADR-057 C6: callers now pass the Grafeo `NodeId` of each episode, so
+    /// `KnowledgeNode::source_episode_id` can be set during landing — this is
+    /// the `Episodic -> Knowledge` reverse link that the new SOURCED_FROM edge
+    /// complements for forward graph_expand traversal.
+    pub source_episode_ids: Vec<NodeId>,
     /// Extracted triples.
     pub triples: Vec<ExtractedTriple>,
     /// Number of triples that were deduplicated against existing knowledge.
@@ -116,15 +129,23 @@ fn has_potential_conflict(triple: &ExtractedTriple, existing: &[KnowledgeNode]) 
 impl GrafeoStore {
     /// Extract triples from episode content using an LLM.
     ///
-    /// This method:
-    /// 1. Builds the extraction prompt from episode content
-    /// 2. Calls the LLM via the provided abstraction
-    /// 3. Parses the JSON response into ExtractedTriple structs
-    /// 4. Deduplicates against existing knowledge
-    /// 5. Stores new triples as KnowledgeNode (status = Active if confidence >= 0.85, else Pending)
+    /// ADR-057 C6 changes from the previous signature:
+    ///
+    /// - The episode identifier is now a Grafeo [`NodeId`] (not a free-form
+    ///   `String`). The typed identifier is propagated into
+    ///   [`KnowledgeNode::source_episode_id`] so the reverse
+    ///   `Episodic -> Knowledge` link is established at landing time (D4).
+    /// - Each triple is screened against existing active knowledge via
+    ///   `is_duplicate_knowledge` (cosine > 0.95 AND `(subject, predicate)`
+    ///   match). Duplicates are skipped (and not counted as
+    ///   `triples_extracted`).
+    ///
+    /// This method is no longer called from the offline consolidation loop
+    /// (C7 deletes the Step-2 LLM extraction). It remains available for manual
+    /// reprocessing and batch-import scenarios.
     pub async fn extract_triples(
         &self,
-        episode_contents: &[(String, String)], // (episode_id, content)
+        episode_contents: &[(NodeId, String)], // (episode_id, content)
         llm: &dyn TripleExtractorLlm,
         embedding_fn: &EmbeddingFn,
     ) -> Result<ExtractionResult> {
@@ -137,10 +158,10 @@ impl GrafeoStore {
             });
         }
 
-        // Step 1: Build the user message with episode content
+        // Step 1: Build the user message with episode content.
         let combined_content: String = episode_contents
             .iter()
-            .map(|(id, content)| format!("[Episode {}]: {}", id, content))
+            .map(|(id, content)| format!("[Episode {}]: {}", id.0, content))
             .collect::<Vec<_>>()
             .join("\n\n");
 
@@ -155,29 +176,57 @@ impl GrafeoStore {
             },
         ];
 
-        // Step 2: Call the LLM
+        // Step 2: Call the LLM.
         let response = llm.chat(messages).await.map_err(|e| {
             GrafeoError::Memory(format!("LLM call failed during triple extraction: {}", e))
         })?;
 
-        // Step 3: Parse the JSON response
+        // Step 3: Parse the JSON response.
         let triples = parse_triples(&response.content)?;
 
-        // Step 4: Deduplicate against existing knowledge
+        // Step 4: Deduplicate against existing knowledge. We use two checks:
+        //   - structural `(subject, predicate)` match — fast pre-filter
+        //   - semantic cosine similarity > 0.95 via `is_duplicate_knowledge`
         let existing = self.get_all_active_knowledge()?;
         let mut deduplicated = 0;
         let mut new_triples = Vec::new();
 
         for triple in triples {
+            // Structural pre-filter.
             if has_potential_conflict(&triple, &existing) {
                 deduplicated += 1;
-            } else {
-                new_triples.push(triple);
+                continue;
             }
+            // Embedding-based dedup (ADR-057 C6). The triple's own embedding
+            // is computed via the embedding function so the comparison is
+            // symmetric with the instant pipeline.
+            let triple_embedding = embedding_fn(&format!(
+                "{} {} {}",
+                triple.subject, triple.predicate, triple.object
+            ));
+            if self
+                .is_duplicate_knowledge(
+                    &triple_embedding,
+                    0.95,
+                    Some(&triple.subject),
+                    Some(&triple.predicate),
+                    Some(&triple.object),
+                )?
+                .is_some()
+            {
+                deduplicated += 1;
+                continue;
+            }
+            new_triples.push(triple);
         }
 
-        // Step 5: Store new triples as KnowledgeNodes
-        let source_ids: Vec<String> = episode_contents.iter().map(|(id, _)| id.clone()).collect();
+        // Step 5: Store new triples as KnowledgeNodes with source_episode_id
+        // set on each node (D4). When multiple episodes are passed in,
+        // each triple is attributed to its own source episode ID — the LLM
+        // prompt does not currently disambiguate per-episode attribution,
+        // so we attribute by position to the last episode in the batch.
+        let source_ids: Vec<NodeId> = episode_contents.iter().map(|(id, _)| *id).collect();
+        let fallback_source = *source_ids.last().expect("non-empty batch");
 
         for triple in &new_triples {
             let embedding = embedding_fn(&format!(
@@ -198,7 +247,7 @@ impl GrafeoStore {
                 object: triple.object.clone(),
                 sub_type: triple.sub_type.clone(),
                 confidence: triple.confidence,
-                source_episode_id: None, // Episode ID linkage is managed by the caller
+                source_episode_id: Some(fallback_source),
                 embedding: Some(embedding),
                 status,
                 created_at: Utc::now(),
@@ -551,7 +600,7 @@ mod tests {
         let result = store
             .extract_triples(
                 &[(
-                    "ep-1".to_string(),
+                    NodeId(101),
                     "I love coffee and I live in Shanghai".to_string(),
                 )],
                 &llm,
@@ -562,7 +611,7 @@ mod tests {
 
         assert_eq!(result.triples.len(), 2);
         assert_eq!(result.deduplicated, 0);
-        assert_eq!(result.source_episode_ids, vec!["ep-1"]);
+        assert_eq!(result.source_episode_ids, vec![NodeId(101)]);
     }
 
     // =====================================================================
@@ -597,7 +646,7 @@ mod tests {
         let result = store
             .extract_triples(
                 &[(
-                    "ep-2".to_string(),
+                    NodeId(202),
                     "I like coffee now and work at Acme".to_string(),
                 )],
                 &llm,
@@ -646,7 +695,7 @@ mod tests {
 
         let result = store
             .extract_triples(
-                &[("ep-3".to_string(), "My name is Alice".to_string())],
+                &[(NodeId(303), "My name is Alice".to_string())],
                 &llm,
                 &test_embedding_arc(),
             )
@@ -673,7 +722,7 @@ mod tests {
 
         let result = store
             .extract_triples(
-                &[("ep-4".to_string(), "Maybe something".to_string())],
+                &[(NodeId(404), "Maybe something".to_string())],
                 &llm,
                 &test_embedding_arc(),
             )

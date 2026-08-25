@@ -666,7 +666,13 @@ impl MemoryStore for GrafeoStore {
             activation_count: node.activation_count,
             source_skill: node.source_skill.clone(),
             learned_from: node.learned_from.clone(),
-            embedding: node.embedding.clone(),
+            // Memory contract carries a required Vec; storage layer keeps
+            // Option. Empty vector means "no vector" (storage round-trip).
+            embedding: if node.embedding.is_empty() {
+                None
+            } else {
+                Some(node.embedding.clone())
+            },
             status: node.status.clone(),
             created_at: node.created_at,
             updated_at: node.updated_at,

@@ -348,6 +348,17 @@ impl GrafeoStore {
             .join("_")
             .to_lowercase();
 
+        // ADR-057 P0: ProceduralNode embedding 必填. If the caller did not
+        // supply an embedding (e.g., the memory_store tool was invoked
+        // without an EmbeddingProvider), fall back to a deterministic hash
+        // embedding of the procedural text so the node is still immediately
+        // vector-searchable. Mirrors the fallback used by Path B in
+        // `acowork_memory::MemoryManager::record_procedural_from_failure`.
+        let embedding = input.embedding.clone().unwrap_or_else(|| {
+            let text = format!("{} {}", trigger, action);
+            acowork_memory::manager::procedural_embedding_fallback(&text)
+        });
+
         let node = ProceduralNode {
             id: None,
             name,
@@ -359,7 +370,7 @@ impl GrafeoStore {
             activation_count: 0,
             source_skill: None,
             learned_from: "user_feedback".to_string(),
-            embedding: input.embedding.clone(),
+            embedding: Some(embedding),
             status,
             created_at: Utc::now(),
             updated_at: Utc::now(),
