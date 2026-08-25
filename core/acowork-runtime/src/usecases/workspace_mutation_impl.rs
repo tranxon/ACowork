@@ -23,6 +23,20 @@ pub struct RuntimeWorkspaceMutationService {
     work_dir: PathBuf,
 }
 
+/// RFC3339 mtime of a file's metadata, or `None` when unavailable.
+///
+/// ADR-058: shared by `write_file`'s response so the Desktop caches the
+/// same `modified` shape the read endpoint (`WorkspaceFileDto::modified`)
+/// returns.
+fn metadata_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
+    use chrono::DateTime;
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, 0))
+        .map(|dt| dt.to_rfc3339())
+}
+
 impl RuntimeWorkspaceMutationService {
     pub fn new(work_dir: PathBuf) -> Self {
         Self { work_dir }
@@ -522,9 +536,22 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         std::fs::write(&abs_path, body.content.as_bytes())
             .map_err(|e| WorkspaceError::Persist(format!("failed to write file: {}", e)))?;
 
+        // ADR-058: echo the post-write disk metadata so the Desktop's
+        // fileEditorStore can cache `diskModified` + `diskSize` right
+        // after save (used for external-modification conflict checks).
+        let (modified, size) = std::fs::metadata(&abs_path)
+            .map(|m| (metadata_modified_rfc3339(&m), m.len()))
+            .unwrap_or((None, body.content.len() as u64));
+
+        let mut entry =
+            serde_json::json!({"written": true, "path": rel_path, "size": size});
+        if let Some(m) = modified {
+            entry["modified"] = serde_json::Value::String(m);
+        }
+
         Ok(WorkspaceMutationResponse {
             ok: true,
-            entry: Some(serde_json::json!({"written": true, "path": rel_path})),
+            entry: Some(entry),
         })
     }
 

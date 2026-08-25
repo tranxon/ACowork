@@ -56,6 +56,12 @@ message DataEnvelope {
     SessionOpened            session_opened            = 35;
     SessionNotOpened         session_not_opened        = 36;
     SessionState             session_state             = 37;
+    // ADR-058: Workspace filesystem change events (Runtime → Desktop,
+    // QoS 1, non-retained). Topic:
+    // acowork/agents/{id}/workspaces/{wid}/fs-changed
+    // Field number 38 is occupied by this message and will never be
+    // reused. Future workspace-related messages start at 39.
+    WorkspaceFsChangeEvent   workspace_fs_change_event = 38;
 
     // ── Control commands (Desktop → Runtime) ──
     ControlCommand           control_command           = 40;
@@ -651,6 +657,50 @@ message RecordCompletePayload {
   string tool_call_id = 6; // empty unless role is tool_call / tool_result
   bool is_error = 7;       // only meaningful when role is tool_result
   optional uint64 seq = 8;
+}
+
+// ── Workspace FS events (ADR-058, Runtime → Desktop, QoS 1, non-retained) ──
+
+/// Aggregated workspace filesystem changes.
+///
+/// Topic: acowork/agents/{agent_id}/workspaces/{workspace_id}/fs-changed.
+/// Published by the Runtime's `WorkspaceFsWatcher` (notify::PollWatcher,
+/// 500ms poll + 500ms aggregation window). All changes detected within
+/// one aggregation window are merged into a single event — multiple
+/// modifications of the same file coalesce to one `Modified`, and a
+/// create+delete pair inside the same window cancels out entirely.
+message WorkspaceFsChangeEvent {
+  string agent_id = 1;
+  string workspace_id = 2;
+  // All changes merged within the same aggregation window (500ms).
+  repeated FsChange changes = 3;
+  // Aggregation window flush time (epoch ms). Subscribers use it only
+  // for logging / stale-event filtering, never for ordering (MQTT is
+  // naturally ordered within one topic).
+  uint64 window_end_ms = 4;
+}
+
+/// Kind of a single filesystem change.
+///
+/// Rename is deliberately NOT a variant: notify::PollWatcher is a
+/// directory-snapshot diff with no inode pairing, so a rename degrades
+/// to `Deleted(old)` + `Created(new)` (see ADR-058 §3.1).
+enum FsChangeKind {
+  FS_CHANGE_KIND_UNSPECIFIED = 0;
+  FS_CHANGE_KIND_CREATED = 1;
+  FS_CHANGE_KIND_MODIFIED = 2;
+  FS_CHANGE_KIND_DELETED = 3;
+}
+
+/// A single filesystem change, normalized to a forward-slash
+/// workspace-relative path (same style as the HTTP tree endpoints).
+message FsChange {
+  FsChangeKind kind = 1;
+  // Forward-slash relative path within the workspace root.
+  string path = 2;
+  // Observation time (aggregator flush moment, epoch ms). The Desktop
+  // uses it for stale-event filtering and echo suppression.
+  uint64 timestamp_ms = 3;
 }
 
 // ── Control commands (§9) — Desktop → Runtime ─────────────────────────

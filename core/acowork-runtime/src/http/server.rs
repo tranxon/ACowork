@@ -268,6 +268,13 @@ pub(crate) struct HttpState {
     /// agent. `None` outside Phase B (e.g. early boot, tests that
     /// never build a SessionManager).
     pub(crate) session_manager_slot: crate::http::server::SharedSessionManagerSlot,
+    /// ADR-058: workspace FS watcher set. Created empty in Phase A,
+    /// populated by Phase C (`start_workspace_watchers`) and reconciled
+    /// after every workspace CRUD mutation (see
+    /// `sync_workspace_watchers`). Publishing goes through
+    /// [`Self::mqtt_client`] — the watcher set holds a clone of the
+    /// same slot.
+    pub(crate) workspace_watchers: crate::workspace::SharedWorkspaceWatcherSet,
 }
 
 /// Handle to the running HTTP server.
@@ -276,6 +283,10 @@ pub struct RuntimeHttpServer {
     pub listen_addr: SocketAddr,
     /// The port the server is listening on (extracted from listen_addr).
     pub port: u16,
+    /// ADR-058: the workspace FS watcher set shared with the HTTP
+    /// state. Clone this into the boot context so Phase C and the CRUD
+    /// mutation hooks reconcile the same set.
+    pub workspace_watchers: crate::workspace::SharedWorkspaceWatcherSet,
     /// The join handle for the server task. Dropping this aborts the server.
     _handle: tokio::task::JoinHandle<()>,
 }
@@ -314,6 +325,18 @@ impl RuntimeHttpServer {
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
         session_manager_slot: SharedSessionManagerSlot,
     ) -> Result<Self, RuntimeHttpServerError> {
+        // ADR-058: the workspace FS watcher set is created here so the
+        // HTTP state and the boot context share exactly one Arc. It is
+        // exposed on the returned handle for `agent_init` to clone into
+        // `AgentBootContext` (Phase C startup hook) — tests that never
+        // touch workspace events simply ignore the field.
+        let workspace_watchers: crate::workspace::SharedWorkspaceWatcherSet =
+            Arc::new(tokio::sync::Mutex::new(
+                crate::workspace::WorkspaceWatcherSet::new(
+                    agent_id.clone(),
+                    mqtt_client.clone(),
+                ),
+            ));
         let shell_risk_rules = crate::security::shell_risk::ShellRiskRules::load(&work_dir)
             .unwrap_or_default();
         let state = HttpState {
@@ -339,6 +362,7 @@ impl RuntimeHttpServer {
             debug_service,
             workspace_resolver,
             session_manager_slot,
+            workspace_watchers: workspace_watchers.clone(),
         };
 
         // ADR-034 §11.2 — 25 routes total. Control plane is intentionally
@@ -528,6 +552,7 @@ impl RuntimeHttpServer {
         Ok(Self {
             listen_addr,
             port,
+            workspace_watchers: workspace_watchers.clone(),
             _handle: handle,
         })
     }
@@ -1148,17 +1173,22 @@ async fn create_workspace(
     State(state): State<HttpState>,
     Json(body): Json<crate::usecases::workspace_mutation::WorkspaceEntryInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.create_workspace(body)
-        .await
-        .map(|r| {
+    let result = {
+        let svc = state.workspace_mutation.lock().await;
+        let svc = svc
+            .as_ref()
+            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        svc.create_workspace(body).await
+    };
+    match result {
+        Ok(r) => {
             reload_workspace_resolver(&state);
-            Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok})))
-        })
-        .map_err(workspace_error_to_response)
+            // ADR-058: reconcile watcher set with the reloaded resolver.
+            sync_workspace_watchers(&state).await;
+            Ok(Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
+        }
+        Err(e) => Err(workspace_error_to_response(e)),
+    }
 }
 
 /// Reload the shared `WorkspaceResolver` from disk after a successful
@@ -1187,25 +1217,48 @@ fn reload_workspace_resolver(state: &HttpState) {
     );
 }
 
+/// Reconcile the workspace watcher set (ADR-058) with the freshly
+/// reloaded resolver — starts watchers for new workspaces, stops
+/// watchers for removed ones, and restarts watchers whose root moved.
+///
+/// MUST be called after [`reload_workspace_resolver`] so the resolver
+/// the set syncs against is the on-disk truth.
+async fn sync_workspace_watchers(state: &HttpState) {
+    // Clone the resolver out of the std RwLock guard so the guard is
+    // not held across the tokio Mutex await (Send requirement).
+    let resolver = state
+        .workspace_resolver
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut watchers = state.workspace_watchers.lock().await;
+    watchers.sync_from_resolver(&resolver);
+}
+
 /// `PUT /workspaces/{ws_id}` — update an existing workspace entry.
 async fn update_workspace(
     State(state): State<HttpState>,
     Path(ws_id): Path<String>,
     Json(body): Json<crate::usecases::workspace_mutation::WorkspaceEntryInput>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.update_workspace(&ws_id, body)
-        .await
-        .map(|r| {
+    let result = {
+        let svc = state.workspace_mutation.lock().await;
+        let svc = svc
+            .as_ref()
+            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        svc.update_workspace(&ws_id, body).await
+    };
+    match result {
+        Ok(r) => {
             // Path/access changes must be visible to the resolver so
             // `find_by_id` returns the updated entry for live sessions.
             reload_workspace_resolver(&state);
-            Json(r.entry.unwrap_or(serde_json::json!({"updated": r.ok})))
-        })
-        .map_err(workspace_error_to_response)
+            // ADR-058: a path change restarts the watcher for this id.
+            sync_workspace_watchers(&state).await;
+            Ok(Json(r.entry.unwrap_or(serde_json::json!({"updated": r.ok}))))
+        }
+        Err(e) => Err(workspace_error_to_response(e)),
+    }
 }
 
 /// `PUT /workspaces/{ws_id}/prompt-file` — set the prompt_file field.
@@ -1229,19 +1282,24 @@ async fn delete_workspace(
     State(state): State<HttpState>,
     Path(ws_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let svc = state.workspace_mutation.lock().await;
-    let svc = svc
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
-    svc.delete_workspace(&ws_id)
-        .await
-        .map(|_| {
+    let result = {
+        let svc = state.workspace_mutation.lock().await;
+        let svc = svc
+            .as_ref()
+            .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+        svc.delete_workspace(&ws_id).await
+    };
+    match result {
+        Ok(_) => {
             // A deleted workspace must leave the resolver immediately —
             // otherwise `route_workspace_switch` still accepts its id.
             reload_workspace_resolver(&state);
-            Json(serde_json::json!({"deleted": true, "ws_id": ws_id}))
-        })
-        .map_err(workspace_error_to_response)
+            // ADR-058: also stop the deleted workspace's watcher.
+            sync_workspace_watchers(&state).await;
+            Ok(Json(serde_json::json!({"deleted": true, "ws_id": ws_id})))
+        }
+        Err(e) => Err(workspace_error_to_response(e)),
+    }
 }
 
 /// `POST /workspaces/file` — create a new text file.

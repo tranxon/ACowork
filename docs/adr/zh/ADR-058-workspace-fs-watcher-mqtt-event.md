@@ -1,7 +1,7 @@
 # ADR-058：Workspace 文件系统变化通过 MQTT 推送到 Desktop 自动刷新
 
-**状态**：提案
-**日期**：2026-09-12
+**状态**：提案（已按架构评审修订，见 [评审报告](../../review/zh/adr-058-workspace-fs-watcher-architecture-review.md)）
+**日期**：2026-09-12（修订：2026-08-25）
 **决策者**：大鱼
 **前置**：
 - [ADR-009](../en/ADR-009-gateway-workspace-isolation.md)（Gateway 不读 workspace 文件 — 仅 Runtime / Desktop 端接触 FS；**英文版**，zh 暂未翻译）
@@ -66,7 +66,7 @@ graph LR
 | Remote 模式支持 | ❌ Desktop 端无法感知远端 FS 变化 | ✅ 与现有 session events 同链路（需 broker 可达，见 §3.5） |
 | 主题归属 | 缺失（workspace 完全是被动数据源） | `agents/{id}/workspaces/{wid}/fs-changed`（按数据源命名，**Owner=Runtime**） |
 | 复用基础设施 | — | `notify` crate + `rumqttd` + Tauri emit 通道 |
-| Desktop 改动 | — | store 加 1 个 listener + FileTreeNode 重渲染条件不变 |
+| Desktop 改动 | — | store 加 2 类 listener（fs-changed 事件 + 重连/唤醒兜底全量 sync）+ FileTreeNode 重渲染条件不变 |
 
 ---
 
@@ -154,14 +154,21 @@ Desktop 当前在 Remote 模式（Gateway 跑在 WSL / 远程主机 / SSH 主机
 
 **这四点共同决定：事件权威在 Runtime，而不是 Gateway。** 方案 C 表面上是"把事件权威放在拥有 FS 的一侧"，但它把"拥有 FS 的一侧"错误地等同成了 Gateway。
 
-#### idle sleep 语义（方案 B 唯一需要回答的开放问题）
+#### idle sleep 语义（已源码实证：进程退出）
 
-方案 B 曾被质疑"agent idle sleep / 关闭后 watcher 停摆"。需先澄清一个事实：
+方案 B 曾被质疑"agent idle sleep / 关闭后 watcher 停摆"。源码已给出明确答案（`core/acowork-runtime/src/agent/idle_watcher.rs:48-49, 448-461`）：
 
-- **若 idle sleep = 进程存活、仅暂停业务处理**：notify watcher 作为独立 tokio task 继续运行，问题不存在。
-- **若 idle sleep = 进程退出**：watcher 随进程停止，期间事件丢失；`ready=true` 重发后，Desktop 通过既有 `MQTT_CONNECTED → invalidateTreeCache + fetchTree("")` 全量 sync 兜底（与 §3.4 重连策略一致，**不新增机制**）。
+```text
+On expiry: publish "sleeping" → RuntimeMqttClient::disconnect → process::exit(0)
+```
 
-> **实现约定**：watcher 的 task **不**挂在 agent 业务生命周期（session/LLM）上，而是挂在 Runtime 的 workspace 模块上，随 workspace 列表变化启停、随进程退出销毁。具体 idle sleep 的进程语义由 Runtime 现有实现决定，本 ADR 不改变它，只要求"无论哪种语义，重连/重就绪后都必须全量 sync 兜底"。
+**idle sleep = 进程退出**，watcher 随进程停止、休眠期间事件必然丢失。这不是边缘场景——idle sleep 是 Runtime 的常规路径，因此"唤醒后兜底"是本方案数据一致性的**主路径**而非可选保险：
+
+- Runtime 唤醒后重发 retained `agents/{id}/status`（`online`）——Desktop 已订阅该主题（`ALL_TOPIC_FILTERS` 首条）
+- Desktop 监听 agent `status` 的 `offline/sleeping → online` 转换 + `mqtt-status` `connected:true`，触发 `invalidateTreeCache(agentId) + fetchTree("")` 全量 sync
+- 该兜底机制**当前不存在**（`invalidateTreeCache` 唯一调用点是手动 refresh 按钮，见 §3.4），是 W5 的新增开发项与验收项
+
+> **实现约定**：watcher 的 task **不**挂在 agent 业务生命周期（session/LLM）上，而是挂在 Runtime 的 workspace 模块上，随 workspace 列表变化启停、随进程退出销毁。本 ADR 不改变 idle sleep 语义，只要求"唤醒/重连后全量 sync 兜底可靠工作"（W5 验收项）。
 
 #### 关键设计点：ADR-009 天然合规
 
@@ -224,6 +231,8 @@ message FsChange {
 
 **批量化语义**：500ms 窗口内同一文件多次修改合并为 1 条 `Modified`；created + deleted 在窗口内抵消（不推送，避免临时文件抖动噪声）。
 
+**元数据噪声语义**：`notify` 的 `Modify(Metadata)`（chmod / `touch`）与内容修改同归为 `Modified`，协议层不区分。Desktop 端 dirty 文件的冲突 UX 必须在弹窗前用磁盘 `modified`+`size` 复核（§3.3），纯元数据变化静默跳过。
+
 **Rename 语义（降级，不合并）**：`notify::PollWatcher` 是目录快照比对，不提供跨事件的 inode 配对信息，`[Delete: old, Create: new]` 的 rename 推导不可靠。因此**明确不做 `Renamed` 合并**——rename 在窗口内退化为 `Deleted(old)` + `Created(new)` 两条事件（跨窗口则分属两个窗口）。UI 收到后刷新两个父目录即可自愈，代价是 rename 后 `treeExpandedPaths` 可能丢失（已在风险表如实记录）。
 
 #### 为什么 500ms 批量化
@@ -260,6 +269,11 @@ message FsChange {
 > **模块位置**（与 §3.6 `WorkspaceWatcherSet` 同目录）：`core/acowork-runtime/src/workspace/fs_watcher.rs`。
 > 不放 `security/` 是因为本 watcher 是 **workspace 同步**关注点，不是安全审计关注点 —
 > 现有 [`security/fs_watcher.rs`](../../../core/acowork-runtime/src/security/fs_watcher.rs) 继续服务 audit_log，两者并行。
+>
+> **注意**：`core/acowork-runtime/src/workspace/` 目录**当前不存在**，W0 从零新建（含 `mod.rs` + `lib.rs` 注册）。
+> Runtime 既有 workspace 逻辑分散于 `http/server.rs`（CRUD handler）、`usecases/workspace_mutation*.rs`、
+> `tools/workspace_resolver.rs` 三处——本 ADR **不收编**它们，watcher 启停钩子直接挂在 `http/server.rs`
+> 既有 CRUD handler 中调用（见 §3.6），避免 W0 膨胀为 workspace 模块重构。
 
 ```rust
 // core/acowork-runtime/src/workspace/fs_watcher.rs
@@ -361,16 +375,17 @@ fn to_rel_path(&self, abs: &Path) -> Option<PathBuf> {
 
 ### 3.3 Desktop 端响应
 
-#### Tauri Rust backend（[apps/acowork-desktop/src-tauri/src/mqtt_client.rs](../../../apps/acowork-desktop/src-tauri/src/mqtt_client.rs)）
+#### Tauri Rust backend（两个文件分工）
 
-新主题加入 `ALL_TOPIC_FILTERS`（`mqtt_client.rs:199-230`），以便每次 ConnAck 自动重订阅；`on_message` 按 `DataEnvelope` 解包分发：
+- [`mqtt_client.rs`](../../../apps/acowork-desktop/src-tauri/src/mqtt_client.rs)：新主题加入 `ALL_TOPIC_FILTERS`（≈L199-230），以便每次 ConnAck 自动重订阅；broker 地址改为从 Gateway URL host 派生（§3.5 / W4）
+- [`commands/chat_mqtt.rs`](../../../apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs)：**topic 分发与 `DataEnvelope` 解包的实际所在**（不在 `mqtt_client.rs` 的 on_message 内联）——新增 `fs-changed` 分支，decode 后 `app.emit("acowork:workspace-fs-changed", event)`（与既有 `agent-event` / `debug-event` emit 同模式）
 
 ```rust
-// ALL_TOPIC_FILTERS 新增（QoS 1，与 messages/# 同理由：不能丢）
+// mqtt_client.rs — ALL_TOPIC_FILTERS 新增（QoS 1，与 messages/# 同理由：不能丢）
 ("acowork/agents/+/workspaces/+/fs-changed", MqttQoS::AtLeastOnce),
 
-// on_message 分发：按现有 DataEnvelope protobuf 解包路径
-// topic == "acowork/agents/{id}/workspaces/{wid}/fs-changed" 时：
+// commands/chat_mqtt.rs — topic 分发处新增分支：
+//   topic == "acowork/agents/{id}/workspaces/{wid}/fs-changed" 时：
 //   decode DataEnvelope → payload.workspace_fs_change_event
 //   → app.emit("acowork:workspace-fs-changed", event)
 ```
@@ -451,14 +466,25 @@ useEffect(() => {
 
             if (change.kind !== 'modified' || file.mode !== 'edit') continue;
 
-            // Echo 抑制：跳过自己刚保存产生的回波事件（否则每次 save 都会误弹 toast/reload）
+            // Echo 抑制：跳过自己刚保存产生的回波事件（否则每次 save 都会误弹 toast/reload）。
+            // 时钟域约束：必须用「事件到达本机的时刻」(Date.now()) 与 lastSavedAtMs 比较（同为 Desktop
+            // 本地时钟）；不能用 change.timestamp_ms（Runtime 机器的 wall clock）——Remote 模式下跨机器
+            // 时钟偏移 >1.5s 会让抑制失效或误伤真实外部变更。
             if (file.lastSavedAtMs != null &&
-                change.timestamp_ms - file.lastSavedAtMs < ECHO_SUPPRESS_MS) {
+                Date.now() - file.lastSavedAtMs < ECHO_SUPPRESS_MS) {
                 continue;
             }
 
             if (file.dirty) {
-                // dirty 文件：弹 toast 让用户决定
+                // dirty 文件：先复核再弹（防 touch/chmod 误报）——PollWatcher 的 Modify(Metadata)
+                // 与内容修改同归为 Modified（§3.1），纯 mtime 变化不应弹冲突。
+                // 复核方式：取磁盘 modified+size 与缓存 diskModified 比对（复用 GET /workspaces/file
+                // 响应字段；高频场景可后续补 HEAD 变体），未变则静默更新 diskModified 并跳过。
+                const meta = await statFile(agent_id, workspace_id, change.path);
+                if (meta.modified === file.diskModified && meta.size === file.size) {
+                    continue;
+                }
+                // 磁盘内容确实变了：弹 toast 让用户决定
                 file.diskConflict = 'modified';
                 toast({
                     type: 'warning',
@@ -506,16 +532,18 @@ set((state) => ({
 | 场景 | 行为 |
 |------|------|
 | Desktop 断线（任意时长） | 事件是**非 retained + 非持久缓存**；断线期间事件丢失。重连后靠兜底（见下） |
-| Desktop 重连 / `MQTT_CONNECTED` | 触发 `invalidateTreeCache(agentId)` + `fetchTree("")` 全量 sync |
-| Runtime 重启 / idle sleep（进程退出） | watcher 随进程停止；`ready=true` 重发后 Desktop 全量 sync 兜底 |
+| Desktop 重连 | 监听 `mqtt-status` 事件 `connected:true`（`chatStore.ts:766` 既有通道）→ 触发 `invalidateTreeCache(agentId)` + `fetchTree("")` 全量 sync。**该兜底为 W5 新增开发项**——当前不存在（`invalidateTreeCache` 唯一调用点是手动 refresh 按钮 `WorkspaceExplorer.tsx:470`） |
+| Runtime 重启 / idle sleep（进程退出，已实证 §2.1） | watcher 随进程停止；唤醒后 Runtime 重发 retained `agents/{id}/status`（`online`）→ Desktop 监听该转换触发同一兜底。**不使用 `ready` 主题**——Desktop 未订阅 `agents/+/ready`（`ALL_TOPIC_FILTERS` 无此条目），复用已订阅且 retained 的 `status` 主题，零新增订阅 |
 | Gateway 重启 | broker 重启 → Desktop 断连重连（同上）；watcher 在 Runtime 侧不受影响，事件流恢复 |
 
-> **语义修正**：Desktop 是 `clean_session=true`（`mqtt_client.rs:188-190`），断线期间 QoS 1 消息 **broker 不缓存投递**，非 retained 也不持久化。所以不存在"QoS 1 短期 buffer 重发"——正确语义是"丢失可接受 + 重连全量 sync 兜底"。
+> **语义**：Desktop 是 `clean_session=true`（`mqtt_client.rs` `ALL_TOPIC_FILTERS` 注释），断线期间 QoS 1 消息 **broker 不缓存投递**，非 retained 也不持久化。所以不存在"QoS 1 短期 buffer 重发"——正确语义是"丢失可接受 + 重连全量 sync 兜底"。
 
-**断线后 Desktop 主动 sync 的 fallback**：
+**断线后 Desktop 主动 sync 的 fallback（W5 新增，验收项）**：
 
-- `workspaceStore` 已有 `invalidateTreeCache(agentId)`，在重连后 `MQTT_CONNECTED` 事件触发一次全量同步
-- 这是兜底逻辑，不阻塞主流程
+- `workspaceStore` 已有 `invalidateTreeCache(agentId)` **能力**，但当前无重连触发方——需新增两个触发 listener：
+  1. `mqtt-status` `connected:true` → 兜底全量 sync（覆盖 Desktop 断线重连、Gateway 重启）
+  2. agent `status` retained 值 `offline/sleeping → online` 转换 → 兜底全量 sync（覆盖 Runtime 唤醒）
+- 因 idle sleep = 进程退出是常规路径（§2.1），此兜底是数据一致性的**主路径**，列为 W5 验收项而非可选保险
 
 ### 3.5 Remote 模式适配（核心收益）
 
@@ -577,7 +605,7 @@ impl WorkspaceWatcherSet {
 #### 与 Runtime 生命周期集成
 
 ```rust
-// 现有：on Phase C 完成 → 子系统就绪
+// 现有：on Phase C 完成 → 子系统就绪（startup/subsystems.rs 的 phase_c_spawn_subsystems）
 // 新增：Phase C 完成后启动所有 workspace watcher
 async fn start_workspace_watchers(&self) {
     let workspaces = self.load_workspaces().await?;  // agent_workspaces.json
@@ -586,11 +614,12 @@ async fn start_workspace_watchers(&self) {
     }
 }
 
-// workspace CRUD 处理完成后：
+// workspace CRUD 处理完成后（钩子挂在 http/server.rs 既有 CRUD handler 内，
+// 经 usecases/workspace_mutation* 调用）：
 //   add/update → ensure_watcher
 //   delete     → stop_watcher
 
-// Runtime 关闭 / idle sleep（进程退出）→ watchers.stop_all()
+// Runtime 关闭 / idle sleep（进程退出，见 §2.1）→ watchers.stop_all()
 ```
 
 > 注意：上面的 `HashMap<_, JoinHandle>` + `.abort()` 是示意。生产实现中应优先用**优雅关闭**（drop `notify_watcher` 触发 `rx` 关闭，`run()` 的 `else => break` 自然退出），`abort()` 仅作为兜底。
@@ -604,6 +633,7 @@ async fn start_workspace_watchers(&self) {
 - Desktop Tauri Rust backend 订阅 + `DataEnvelope` 解包 + emit（新增）
 - Desktop `workspaceStore` 增量 `fetchTree`（新增）
 - Desktop `fileEditorStore` modified 比对 + echo 抑制 + reload/toast（新增）
+- Desktop 重连/唤醒兜底全量 sync（`mqtt-status` `connected:true` + agent `status` retained `online` 双触发 → `invalidateTreeCache + fetchTree("")`，新增，见 §3.4）
 - **W4 包含 broker 地址从 Gateway URL host 派生**（Remote 模式下使 Desktop 知道往哪连 broker）— 这是本方案 Remote 适配的**必要技术改动**
 
 **本 ADR 范围外**（明确标记为后续 ADR）：
@@ -625,8 +655,10 @@ async fn start_workspace_watchers(&self) {
 3. **rename 降级为 Delete+Create**（不做 `Renamed` 合并）— 避免不可靠的 inode 推断
 4. **dirty 文件用 toast 而非模态对话框**（VSCode 风格非阻塞）
 5. **per-parent-path 增量 fetchTree**（保留展开状态）— 而不是全量 invalidate
-6. **echo 抑制窗口 1500ms**（save 后跳过自身回波）— 可调
+6. **echo 抑制窗口 1500ms**（save 后跳过自身回波，**同域时钟比较**）— 可调
 7. **Remote 模式需建立 broker 隧道**（见 §3.5）— 否则 Remote 实时推送不可用
+8. **重连/唤醒兜底 = W5 新增开发项**（`mqtt-status` `connected:true` + agent `status` retained `online` 双触发全量 sync；不新增 `ready` 订阅——Desktop 未订阅该主题，见 §3.4）— 列为验收项
+9. **dirty 冲突弹窗前先比对磁盘 `modified`+`size`**（防 `touch`/chmod 误报）+ echo 抑制用同域时钟（防 Remote 时钟偏移）
 
 ---
 
@@ -634,12 +666,14 @@ async fn start_workspace_watchers(&self) {
 
 | 风险 | 严重度 | 缓解 |
 |------|--------|------|
-| **Runtime idle sleep（进程退出）期间事件丢失** | 中 | `ready=true` 后 Desktop 由 `MQTT_CONNECTED`/重连触发 `invalidateTreeCache + fetchTree("")` 全量 sync 兜底；进程存活场景 watcher 独立 task 继续运行 |
-| **自己保存产生回波 → 误报冲突/多余 reload** | 中 | save 成功后回填 `lastSavedAtMs`；listener 对 `timestamp_ms - lastSavedAtMs < 1500ms` 的事件跳过（§3.3） |
+| **Runtime idle sleep（已实证 = 进程退出）期间事件丢失** | 中 | idle sleep 是常规路径（`idle_watcher.rs:48-49`：publish sleeping → disconnect → `process::exit(0)`），事件必丢；唤醒后 agent `status` retained `online` 触发兜底全量 sync（W5 新增开发项 + 验收项，见 §3.4） |
+| **自己保存产生回波 → 误报冲突/多余 reload** | 中 | save 成功后回填 `lastSavedAtMs`；listener 用**同域时钟**比较（事件到达时刻 `Date.now()` vs `lastSavedAtMs`，不使用 Runtime 的 `timestamp_ms`，规避 Remote 跨机器时钟偏移）（§3.3） |
 | **rename 无法可靠配对（PollWatcher 无 inode）** | 低 | 明确不做 `Renamed` 合并；rename 退化为 Delete+Create 两事件，UI 刷新两个父目录自愈；展开状态可能丢失（可接受，已声明） |
 | **500ms 聚合窗口 + 500ms 轮询 → 最坏 1s 延迟** | 低 | 用户感知阈值内（< 1s = "即时"）；与 VSCode 50ms 窗口相比延迟多 950ms 但 CPU 占用更低 |
 | **大 workspace（10k+ 文件）轮询 500ms CPU 占用** | 低-中 | `fs_watcher.rs:44-45` 注释称 "10k+ 文件 < 1% CPU"（**未经验证**，实现时以实测为准）；若超标，§3.7 标注为后续 ADR 跟进 |
-| **Desktop MQTT 断线后事件丢失** | 中 | 事件非 retained；重连后 `MQTT_CONNECTED` 触发 `invalidateTreeCache` 全量同步（§3.4） |
+| **Desktop MQTT 断线后事件丢失** | 中 | 事件非 retained；重连后 `mqtt-status` `connected:true` 触发 `invalidateTreeCache` 全量同步（§3.4，W5 新增） |
+| **echo 抑制跨机器时钟偏移（Remote 模式）** | 低 | 比较双方统一为 Desktop 本地时钟（事件到达时刻 vs save 时刻），不引入 Runtime wall clock（§3.3） |
+| **`touch`/chmod 触发 Modified → dirty 文件误弹冲突** | 低 | PollWatcher 的 `Modify(Metadata)` 与内容修改同归 `Modified`；dirty 分支弹窗前先取磁盘 `modified`+`size` 与缓存比对，纯元数据变化静默跳过（§3.3） |
 | **symlink 越界事件泄露** | 低 | `ingest()` 先 `path.starts_with(workspace_dir)` 过滤；`to_rel_path` 返回 `Option`，越界丢弃（§3.2） |
 | **OpenFile 缓存的 modified 在文件无变化时刷新导致误判** | 低 | `diskModified` 仅在 `GET /workspaces/file` 响应时设置；echo 抑制窗口过滤自身写入；外部变更由事件驱动而非轮询 |
 | **`quickCreateAndRename` 中右击新建 → 立刻 fetchTree 触发 Rename input 与 watcher 事件冲突** | 中 | watcher 启动后右击新建会被自己检测到 `Created` 事件并回推一次 `fetchTree`；`quickCreateAndRename` 已主动 `await fetchTree(parent)` 后再 `requestRenameFor`，watcher 推送是"确认"而非"额外动作"；确保 `renameTarget` 状态不丢失 — 测试覆盖此场景 |
@@ -650,19 +684,19 @@ async fn start_workspace_watchers(&self) {
 
 | Commit | 范围 | 主要内容 | 估计 |
 |--------|------|---------|------|
-| **W0** | Runtime: 提取 `WorkspaceFsWatcher` 模块 | 从 `security/fs_watcher.rs` 提取通用 notify 封装到 `workspace/fs_watcher.rs`，加 `FsChange` aggregation（500ms 窗口 + create/delete 抵消）；保留原 `security/fs_watcher.rs` 用于 audit_log 兼容 | +200 行 |
+| **W0** | Runtime: 新建 `WorkspaceFsWatcher` 模块 | **新建** `core/acowork-runtime/src/workspace/` 模块（目录当前不存在：`mod.rs` + `lib.rs` 注册）；从 `security/fs_watcher.rs` 提取通用 notify 封装到 `workspace/fs_watcher.rs`，加 `FsChange` aggregation（500ms 窗口 + create/delete 抵消）；保留原 `security/fs_watcher.rs` 服务 audit_log；**不收编** `http/server.rs` / `usecases/workspace_mutation*` 既有 workspace 代码 | +200 行 |
 | **W1** | Core: proto + aggregator 完整化 | `mqtt_payload.proto` 新增 `WorkspaceFsChangeEvent` / `FsChange` / `FsChangeKind` + `DataEnvelope.payload` oneof 字段 38；`WorkspaceFsWatcher::run()` 输出聚合事件流；单元测试覆盖 created/modified/deleted 各组合 + 同窗口抵消 | +150 行 |
-| **W2** | Runtime: 挂载 + MQTT 发布 | `workspace/watcher_set.rs`（HashMap dedupe + start/stop）+ Phase C 完成钩子 + workspace CRUD 后启停 + 复用 Runtime 现有 rumqttc publisher 发布 `fs-changed` | +200 行 |
+| **W2** | Runtime: 挂载 + MQTT 发布 | `workspace/watcher_set.rs`（HashMap dedupe + start/stop）+ Phase C 完成钩子（`startup/subsystems.rs` `phase_c_spawn_subsystems`）+ workspace CRUD 钩子（挂 `http/server.rs` 既有 CRUD handler）+ 复用 `publish_envelope`（`mqtt/client.rs:964`）发布 `fs-changed` | +200 行 |
 | **W3** | Runtime: 集成测试 | 临时 workspace 目录 → 模拟文件操作（create/modify/delete）→ 通过 fake MQTT broker 验证事件 payload；覆盖 happy path + 聚合窗口合并 + 同窗口 create+delete 抵消 + 越界路径丢弃 | +200 行 |
-| **W4** | Desktop Tauri: 订阅 + 解包 + emit | `mqtt_client.rs` 的 `ALL_TOPIC_FILTERS` 新增 `acowork/agents/+/workspaces/+/fs-changed`（QoS1）+ `on_message` 按 `DataEnvelope` 解包 + emit `acowork:workspace-fs-changed`；broker 地址改为从 Gateway URL host 派生（Remote 隧道场景） | +80 行 |
-| **W5** | Desktop frontend: store listeners | `workspaceStore.ts` 顶层监听 → per-parent-path 增量 fetchTree；`fileEditorStore.ts` 监听 → modified 比对 + echo 抑制 + reload/toast；`OpenFile` schema 加 `diskModified` / `lastSavedAtMs` / `diskConflict`；`openFile`/`openPreview`/`refreshFile`/`saveFile` 解 `modified` 字段；FileTreeNode 重渲染测试 | +250 行 |
+| **W4** | Desktop Tauri: 订阅 + 解包 + emit | `mqtt_client.rs`：`ALL_TOPIC_FILTERS` 新增 `acowork/agents/+/workspaces/+/fs-changed`（QoS1）+ broker 地址改为从 Gateway URL host 派生（Remote 隧道场景）；**`commands/chat_mqtt.rs`**（topic 分发 / `DataEnvelope` 解包的实际所在）：新增 `fs-changed` 分支 + emit `acowork:workspace-fs-changed` | +80 行 |
+| **W5** | Desktop frontend: store listeners + 重连/唤醒兜底 | `workspaceStore.ts` 顶层监听 → per-parent-path 增量 fetchTree；**新增重连/唤醒兜底**（`mqtt-status` `connected:true` + agent `status` retained `online` 双触发 → `invalidateTreeCache + fetchTree("")`，§3.4）；`fileEditorStore.ts` 监听 → modified 比对（同域时钟 echo 抑制 + dirty 弹窗前 `modified`+`size` 复核）+ reload/toast；`OpenFile` schema 加 `diskModified` / `lastSavedAtMs` / `diskConflict`；`openFile`/`openPreview`/`refreshFile`/`saveFile` 解 `modified` 字段；FileTreeNode 重渲染测试。**验收项：断线重连、Runtime idle sleep 唤醒后，FileTree 与磁盘状态一致** | +280 行 |
 
 **关键节点**：
 
 - W0 完成后：`WorkspaceFsWatcher` 模块独立可测试；不影响现有 audit_log 路径
 - W2 完成后：Runtime 端事件流首次可用；Desktop 暂未消费（无副作用）
 - W4 完成后：Desktop Tauri 端能收到事件但未消费（无副作用）
-- W5 完成后：完整链路通；FileTree + FileEditor 全部自动刷新
+- W5 完成后：完整链路通；FileTree + FileEditor 全部自动刷新；**重连/唤醒兜底可用并通过验收**（断线重连、idle sleep 唤醒后 FileTree 与磁盘一致）
 
 每个 commit 独立可合、可回滚。
 
@@ -710,20 +744,23 @@ async fn start_workspace_watchers(&self) {
 
 ### A.4 文件清单
 
-**新增**：
+**新增**（`core/acowork-runtime/src/workspace/` 目录**当前不存在**，W0 从零新建；不收编既有 workspace 代码——它们继续留在原位）：
 
+- `core/acowork-runtime/src/workspace/mod.rs`（W0，新建模块声明）
 - `core/acowork-runtime/src/workspace/fs_watcher.rs`（W0，单 watcher + 聚合器）
 - `core/acowork-runtime/src/workspace/watcher_set.rs`（W2，集合管理）
 
 **修改**：
 
 - `core/acowork-core/proto/mqtt_payload.proto`（W1，+30 行：proto 定义 + oneof 字段 38）
-- `core/acowork-runtime/src/workspace/mod.rs`（W0，注册新模块；W2，挂载 watcher_set）
 - `core/acowork-runtime/Cargo.toml`（W0，无新依赖 — `notify` 已有）
-- `core/acowork-runtime/src/security/mod.rs`（W0，无改动 — `security/fs_watcher.rs` 继续服务 audit_log）
-- `apps/acowork-desktop/src-tauri/src/mqtt_client.rs`（W4，+80 行：`ALL_TOPIC_FILTERS` + DataEnvelope 解包 + emit + broker 地址派生）
-- `apps/acowork-desktop/src/stores/workspaceStore.ts`（W5，+50 行：listener + per-parent-path fetch）
-- `apps/acowork-desktop/src/stores/fileEditorStore.ts`（W5，+100 行：listener + modified 比对 + echo 抑制 + reload/toast）
+- `core/acowork-runtime/src/lib.rs`（W0，注册 workspace 模块）
+- `core/acowork-runtime/src/startup/subsystems.rs`（W2，Phase C 完成后 `start_workspace_watchers`）
+- `core/acowork-runtime/src/http/server.rs`（W2，workspace CRUD handler 内挂 ensure/stop_watcher 钩子）
+- `apps/acowork-desktop/src-tauri/src/mqtt_client.rs`（W4，`ALL_TOPIC_FILTERS` + broker 地址派生）
+- `apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs`（W4，`fs-changed` topic 分支 + `DataEnvelope` 解包 + emit `acowork:workspace-fs-changed`——**topic 分发的实际所在**）
+- `apps/acowork-desktop/src/stores/workspaceStore.ts`（W5，listener + per-parent-path fetch + 重连/唤醒兜底双触发）
+- `apps/acowork-desktop/src/stores/fileEditorStore.ts`（W5，listener + modified 比对 + 同域时钟 echo 抑制 + reload/toast）
 - `apps/acowork-desktop/src/types/` 或 `lib/types.ts`（W5，+30 行：WorkspaceFsChangeEvent 类型）
 
 **测试新增**：
@@ -744,5 +781,7 @@ async fn start_workspace_watchers(&self) {
 3. **500ms 批量化窗口**（与 PollWatcher 对齐，可调）
 4. **rename 降级为 Delete+Create**（不做 `Renamed` 合并）
 5. **dirty 文件用 toast 而非模态对话框**（VSCode 风格，可改）
-6. **echo 抑制窗口 1500ms**（可调）
+6. **echo 抑制窗口 1500ms**（可调；同域时钟比较）
 7. **Remote 模式需建立 broker 隧道**（否则 Remote 实时推送退化为手动 refresh）
+8. **重连/唤醒兜底 = W5 新增开发项**（`mqtt-status` + agent `status` retained 双触发全量 sync，不新增 `ready` 订阅；列为验收项，见 §3.4）
+9. **dirty 冲突弹窗前先比对磁盘 `modified`+`size`**（防 `touch`/chmod 误报）；echo 抑制用同域时钟比较（防 Remote 时钟偏移，见 §3.3）

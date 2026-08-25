@@ -148,6 +148,29 @@ pub(crate) async fn phase_c_spawn_subsystems(
         }
     };
 
+    // ── ADR-058: start workspace FS watchers ────────────────────────
+    // Reconcile the watcher set against the shared WorkspaceResolver:
+    // every user-configured workspace (agent_workspaces.json entries)
+    // gets a watcher task that publishes fs-changed events over MQTT.
+    // Runs after the MQTT client slot is populated (Phase A) so events
+    // are publishable immediately; task lifecycle is owned by the set.
+    {
+        // Clone out of the std RwLock guard before awaiting the tokio
+        // Mutex (Send requirement for the async fn).
+        let resolver = ctx
+            .workspace_resolver
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut watchers = ctx.workspace_watcher_set.lock().await;
+        watchers.sync_from_resolver(&resolver);
+        tracing::info!(
+            agent_id = %ctx.agent_id,
+            watcher_count = watchers.watcher_count(),
+            "Workspace FS watchers started (ADR-058)"
+        );
+    }
+
     let (mcp_runtime_tx, mcp_runtime_rx) =
         tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
 

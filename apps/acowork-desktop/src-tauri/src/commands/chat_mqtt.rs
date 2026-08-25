@@ -21,6 +21,7 @@ use acowork_core::mqtt_proto::{
 };
 use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
 use crate::state::AppState;
+use acowork_core::defaults;
 
 /// Connect to the MQTT broker and start receiving events.
 ///
@@ -40,6 +41,16 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     }
 
     let user_id = "default"; // Single-user phase; multi-user will use actual user_id
+
+    // ADR-058 W4: derive the MQTT broker host from the Gateway HTTP base
+    // URL so Remote mode (Gateway behind an SSH tunnel / WSL IP) reaches
+    // the broker through the same forwarded host as :19876 HTTP. The
+    // broker port itself stays the default GATEWAY_MQTT_PORT — the
+    // tunnel is expected to forward the same port (§3.5). Local mode
+    // derives "127.0.0.1" — identical to the previous hardcode.
+    let gateway_base_url = state.gateway.read().await.base_url().to_string();
+    let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
+        .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
 
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
@@ -361,6 +372,36 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("debug-event", event);
             }
 
+            // ── Workspace FS change events (ADR-058) ──
+            //
+            // Runtime's WorkspaceFsWatcher publishes aggregated batches
+            // on `acowork/agents/{id}/workspaces/{wid}/fs-changed`
+            // (QoS 1, non-retained). Re-emitted on the dedicated
+            // `acowork:workspace-fs-changed` Tauri channel — the
+            // workspaceStore / fileEditorStore own this state; the
+            // chatStore's `handleMessageEvent` must not know about it
+            // (same channel-separation rationale as debug-event).
+            data_envelope::Payload::WorkspaceFsChangeEvent(ev) => {
+                let changes: Vec<serde_json::Value> = ev
+                    .changes
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "kind": fs_change_kind_str(c.kind),
+                            "path": c.path,
+                            "timestamp_ms": c.timestamp_ms,
+                        })
+                    })
+                    .collect();
+                let event = serde_json::json!({
+                    "agent_id": ev.agent_id,
+                    "workspace_id": ev.workspace_id,
+                    "changes": changes,
+                    "window_end_ms": ev.window_end_ms,
+                });
+                let _ = app_handle.emit("acowork:workspace-fs-changed", event);
+            }
+
             // ── Global resources & control commands: ignore (Gateway handles these) ──
             // DebugBreakpointEvent / DebugRecordStepEvent are likewise
             // reserved-but-unemitted (see Runtime mqtt/debug_events.rs);
@@ -369,7 +410,9 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         }
     };
 
-    let client = DesktopMqttClient::connect_default(
+    let client = DesktopMqttClient::connect(
+        &mqtt_host,
+        defaults::GATEWAY_MQTT_PORT,
         user_id,
         on_message,
         // ADR-036 / ADR-039: bridge `rumqttc` eventloop status → Tauri event.
@@ -827,6 +870,78 @@ fn build_control_command(
         agent_id: agent_id.to_string(),
         command: Some(cmd),
     })
+}
+
+/// Map a proto `FsChangeKind` (encoded as i32) to the string form the
+/// frontend stores dispatch on ("created" / "modified" / "deleted").
+fn fs_change_kind_str(kind: i32) -> &'static str {
+    match acowork_core::mqtt_proto::FsChangeKind::try_from(kind) {
+        Ok(acowork_core::mqtt_proto::FsChangeKind::Created) => "created",
+        Ok(acowork_core::mqtt_proto::FsChangeKind::Modified) => "modified",
+        Ok(acowork_core::mqtt_proto::FsChangeKind::Deleted) => "deleted",
+        _ => "unspecified",
+    }
+}
+
+/// Derive the MQTT broker host from the Gateway HTTP base URL
+/// (ADR-058 §3.5 / W4).
+///
+/// Remote mode expects the user to forward BOTH ports to the same host
+/// (e.g. `ssh -L 19876:localhost:19876 -L 19875:localhost:19875 wsl`),
+/// so the Gateway HTTP host is also the broker host. Returns `None` for
+/// unparseable URLs — the caller falls back to the localhost default.
+fn derive_mqtt_broker_host(gateway_base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(gateway_base_url).ok()?;
+    url.host_str().map(|h| h.to_string())
+}
+
+#[cfg(test)]
+mod adr058_tests {
+    use super::*;
+
+    /// ADR-058 review M-1: the i32 → string mapping is the Rust ↔ TS
+    /// contract the frontend stores dispatch on ("created" / "modified"
+    /// / "deleted"). Any change here must be mirrored in
+    /// `workspaceFsEvents.ts` `FsChange.kind`.
+    #[test]
+    fn fs_change_kind_str_maps_all_variants() {
+        use acowork_core::mqtt_proto::FsChangeKind as K;
+        assert_eq!(fs_change_kind_str(K::Created as i32), "created");
+        assert_eq!(fs_change_kind_str(K::Modified as i32), "modified");
+        assert_eq!(fs_change_kind_str(K::Deleted as i32), "deleted");
+        // Unspecified + any out-of-range value degrade safely.
+        assert_eq!(fs_change_kind_str(K::Unspecified as i32), "unspecified");
+        assert_eq!(fs_change_kind_str(99), "unspecified");
+        assert_eq!(fs_change_kind_str(-1), "unspecified");
+    }
+
+    /// ADR-058 review M-1: broker host derivation from the Gateway base
+    /// URL (Remote-mode tunnel support). Local URLs yield "127.0.0.1"
+    /// — identical to the previous hardcode; WSL/remote IPs pass through.
+    #[test]
+    fn derive_mqtt_broker_host_covers_local_and_remote() {
+        assert_eq!(
+            derive_mqtt_broker_host("http://127.0.0.1:19876"),
+            Some("127.0.0.1".to_string())
+        );
+        assert_eq!(
+            derive_mqtt_broker_host("http://localhost:19876"),
+            Some("localhost".to_string())
+        );
+        // Remote / WSL host behind an SSH tunnel.
+        assert_eq!(
+            derive_mqtt_broker_host("http://192.168.31.10:19876"),
+            Some("192.168.31.10".to_string())
+        );
+        // Path/query are ignored; IPv6 brackets are stripped by host_str.
+        assert_eq!(
+            derive_mqtt_broker_host("http://10.0.0.5:19876/api"),
+            Some("10.0.0.5".to_string())
+        );
+        // Unparseable input → None (caller falls back to the default).
+        assert_eq!(derive_mqtt_broker_host("not a url"), None);
+        assert_eq!(derive_mqtt_broker_host(""), None);
+    }
 }
 
 /// Convert a `session_message::Event` protobuf oneof to flat JSON

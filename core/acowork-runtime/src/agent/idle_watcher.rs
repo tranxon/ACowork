@@ -46,12 +46,17 @@
 //!      the effective timeout. Taking the max ensures the deadline always
 //!      accounts for the most recent form of activity.
 //!    - On expiry: publish `"sleeping"` to the agent status retained topic,
-//!      call `RuntimeMqttClient::disconnect`, then `process::exit(0)`. The
-//!      broker LWT will replace the payload with `"offline"` shortly after
-//!      the connection drops; the Gateway receives the `"sleeping"` payload
-//!      first (because `disconnect` waits for in-flight publishes) and uses
-//!      it to stamp the agent's `sleeping_at` timestamp so the frontend can
-//!      distinguish a sleep from a manual stop.
+//!      call `RuntimeMqttClient::disconnect`, then `process::exit(0)`.
+//!      NOTE: the broker LWT does **not** fire here — `disconnect()` sends
+//!      a clean DISCONNECT packet, and per MQTT spec (and rumqttd's
+//!      `Packet::Disconnect` handler, which deletes the stored will) no
+//!      "offline" is published. The retained status therefore stays
+//!      `"sleeping"` while the process is dead; the Gateway receives the
+//!      `"sleeping"` payload (because `disconnect` waits for in-flight
+//!      publishes) and uses it to stamp the agent's `sleeping_at`
+//!      timestamp so the frontend can distinguish a sleep from a manual
+//!      stop. Subscribers detecting a wake must treat `sleeping → online`
+//!      as the transition (see Desktop `workspaceFsEvents.ts`).
 //!
 //! This file deliberately avoids coupling to `SessionManager` directly: the
 //! watcher takes a `session_active_fn: Arc<dyn Fn() -> bool + Send + Sync>`
