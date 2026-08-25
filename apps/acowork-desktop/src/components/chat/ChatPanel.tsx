@@ -1,5 +1,6 @@
 import React, { useEffect, useInsertionEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -13,7 +14,7 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { toolbarButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { useSessionScope } from "./useSessionScope";
@@ -21,6 +22,7 @@ import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMess
 import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
+import { ContextMenu, useContextMenu } from "../common/ContextMenu";
 
 /**
  * Measure natural dimensions of an image whose src is already settable in the
@@ -473,6 +475,92 @@ export function ChatPanel() {
   // defaults, eliminating the class of bugs where per-session refs/state
   // leak across session switches.
   const session = useSessionScope(currentSessionId);
+
+  // ── Textarea DOM ref ────────────────────────────────────────────────
+  // Needed by:
+  //   - onContextMenu / paste handlers (focus check + paste-from-clipboard)
+  //   - the global `desktop://file-drop` listener (only attach when the
+  //     textarea — or a descendant — has focus; otherwise the drop is
+  //     for a different surface, e.g. the workspace tree).
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Right-click context menu for the textarea — gives the user a working
+  // "Paste / Upload File" menu since Tauri WebViews do NOT render the
+  // browser's native textarea context menu by default.
+  const textareaMenu = useContextMenu<undefined>();
+
+  // ── OS-level file drop listener ──────────────────────────────────────
+  // Tauri v2 captures OS file drag-drop at the Rust layer
+  // (`WindowEvent::DragDrop`) and re-emits the absolute paths on
+  // `desktop://file-drop`. We dispatch to the same upload pipeline as
+  // the paperclip button (`uploadFileAtPath`).
+  //
+  // Why no activeElement gating: by the time the OS drop event reaches
+  // us, the user's textarea may have lost focus to the drag operation
+  // itself — Tauri v2 fires `DragDrop::Drop` after the OS notifies the
+  // window, which is after focus may have shifted. The chat is also the
+  // only realistic drop surface (workspace panels don't have their own
+  // OS-drop handler), so we accept every drop and refocus the textarea
+  // so the user sees where the pending chips will land.
+  //
+  // Effect lifetime: set up once on mount, torn down on unmount. The
+  // upload handler is read via a ref so the listener closure stays
+  // stable (avoids re-subscribing on every render).
+  const uploadFileAtPathRef = useRef<((filePath: string) => Promise<void>) | null>(null);
+  useEffect(() => {
+    // Async listener setup race guard. `listen()` resolves asynchronously;
+    // React StrictMode (dev) double-invokes effects, and if the cleanup
+    // runs before `listen()` resolves, `unlisten` is still `undefined` —
+    // the first subscription is never torn down, leaving TWO live
+    // listeners. Every drop then dispatches `uploadFileAtPath` twice,
+    // surfacing as two identical attachment chips. `disposed` closes the
+    // race: if cleanup ran first, the late-resolved listener cancels
+    // itself immediately.
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    // Event-level dedup: a single OS drop can be re-delivered (duplicate
+    // listener, WebView event duplication). The same path set arriving
+    // within DEDUP_WINDOW_MS is treated as one drop.
+    const DEDUP_WINDOW_MS = 500;
+    let lastDropKey = "";
+    let lastDropAt = 0;
+    (async () => {
+      try {
+        const fn = await listen<string[]>("desktop://file-drop", (event) => {
+          const paths = event.payload ?? [];
+          if (paths.length === 0) return;
+          const key = paths.join("\n");
+          const now = Date.now();
+          if (key === lastDropKey && now - lastDropAt < DEDUP_WINDOW_MS) {
+            log.debug("[ChatPanel] duplicate desktop://file-drop event ignored", { paths });
+            return;
+          }
+          lastDropKey = key;
+          lastDropAt = now;
+          // Bring the textarea to the front so the user sees where the
+          // upload is going (the pending chips appear right above it).
+          textareaRef.current?.focus();
+          for (const p of paths) {
+            void uploadFileAtPathRef.current?.(p);
+          }
+        });
+        if (disposed) {
+          // Cleanup ran while we were still subscribing — cancel now.
+          fn();
+          return;
+        }
+        unlisten = fn;
+      } catch (err) {
+        if (!disposed) {
+          log.error("[ChatPanel] failed to subscribe to desktop://file-drop", err);
+        }
+      }
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // ── ADR-041 C4: ChatListAdapter ──────────────────────────────────
   // The single bridge between chatStore (data) and VirtualMessageList (render).
@@ -977,11 +1065,14 @@ export function ChatPanel() {
   const handleFileUpload = async () => {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
-      title: "Select a document or image",
-      filters: [{
-        name: "Attachments",
-        extensions: ["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "gif", "webp"],
-      }],
+      title: "Select a file to attach",
+      filters: [
+        {
+          name: "Common files",
+          extensions: ["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "gif", "webp", "md", "txt"],
+        },
+        { name: "All files", extensions: ["*"] },
+      ],
       multiple: false,
     });
 
@@ -1017,13 +1108,16 @@ export function ChatPanel() {
     await uploadFileAtPath(filePath);
   };
 
-  // Shared upload pipeline. The runtime accepts both documents and images
-  // via the same `upload_file` command; this wrapper only adds a single
+  // Shared upload pipeline. The runtime accepts documents, images AND
+  // plain-text / source files via the same `upload_file` command — the
+  // blob store collapses unknown extensions to `.bin` on disk and the
+  // `doc_reader` tool falls back to UTF-8 text extraction, so any file
+  // type is a valid attachment. This wrapper only adds a single
   // `pendingAttachedItems` entry and dispatches based on file extension.
   const uploadFileAtPath = async (filePath: string) => {
     const filename = filePath.replace(/^.*[\\/]/, "");
     const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-    if (!["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "gif", "webp"].includes(ext)) return;
+    if (!filePath) return;
 
     const tempId = `att-${Date.now()}`;
     const format = ext;
@@ -1118,6 +1212,260 @@ export function ChatPanel() {
   const handleRemovePending = (tempId: string) => {
     session.setPendingAttachedItems(prev => prev.filter((p) => p.tempId !== tempId));
   };
+
+  // Keep the latest upload function in a ref so the long-lived
+  // `desktop://file-drop` listener (set up in `useEffect` once on mount)
+  // always dispatches to the current closure — without forcing the
+  // listener to be torn down + re-installed on every render.
+  uploadFileAtPathRef.current = uploadFileAtPath;
+
+  // Disabled-flag for the chat input — mirrors the same condition used
+  // by the JSX below. Pulled out so both the input and the right-click
+  // context-menu items can read it without re-deriving.
+  const inputDisabled = gatewayStatus !== "connected" || !mqttConnected;
+
+  // ── Cross-platform paste handling ──────────────────────────────────
+  // Three entry points — keyboard (Ctrl+V / ⌘+V), context-menu "Paste",
+  // and OS-level file drop — all funnel through `uploadFileAtPath` so
+  // the UX is identical to the paperclip button.
+  //
+  // Why we always intercept onPaste instead of conditionally letting the
+  // browser handle it: in Tauri WebViews the default paste behaviour
+  // silently inserts a long file path as plain text. Users expect that
+  // path to "just become" an attachment, the same as clicking the
+  // paperclip icon. We split the clipboard text into path-shaped lines
+  // and text-shaped lines, then upload the former + insert the latter.
+  //
+  // No extension whitelist: any path-shaped clipboard line is treated as
+  // a file attachment. This mirrors `uploadFileAtPath`, which accepts
+  // every file type (the runtime collapses unknown extensions to `.bin`
+  // and `doc_reader` falls back to UTF-8 text extraction), and keeps
+  // paste / drag / button behaviour identical. Non-path lines fall
+  // through and are inserted as plain text.
+
+  /**
+   * True if `s` looks like a filesystem path. Detection by shape only —
+   * no FS stat roundtrip — because we want this to work for paths the
+   * user just copied from the OS file manager, which may or may not
+   * still exist by the time we look at them. No extension filtering is
+   * applied: every path-shaped line is uploaded as an attachment.
+   */
+  const looksLikeFilePath = (s: string): boolean => {
+    if (!s) return false;
+    if (s.startsWith("file://")) return true;
+    // Windows drive-letter path: `C:\...`, `D:/...`
+    if (/^[A-Za-z]:[\\/]/.test(s)) return true;
+    // POSIX absolute path
+    if (s.startsWith("/")) return true;
+    return false;
+  };
+
+  /** Convert `file://...` URI to a native path; pass through otherwise. */
+  const uriToPath = (s: string): string => {
+    if (!s.startsWith("file://")) return s;
+    try {
+      // `URL.pathname` on `file:///C:/...` yields `/C:/...` on most
+      // engines — strip the leading slash on Windows-style paths.
+      const pathname = new URL(s).pathname;
+      if (/^\/[A-Za-z]:/.test(pathname)) return pathname.slice(1);
+      return decodeURIComponent(pathname);
+    } catch {
+      return s;
+    }
+  };
+
+  /**
+   * Paste handler — handles BOTH file paths (uploaded) and plain text
+   * (inserted at caret).
+   *
+   * Two-stage strategy:
+   *   1. Read what the browser surface offers: `text/uri-list`,
+   *      `text/plain`, then `cd.files`. The browser-side `File` objects
+   *      don't carry a real filesystem path on Windows / Linux WebViews
+   *      (sandbox), so step 1 often yields nothing for file copies.
+   *   2. If step 1 found no paths AND the OS clipboard contains file
+   *      references, fall back to the Rust command `get_clipboard_file_paths`
+   *      which reads the platform's native clipboard (Windows CF_HDROP,
+   *      macOS NSFilenamesPboardType, Linux text/uri-list) and returns the
+   *      real absolute paths.
+   *
+   * `preventDefault` is only called when we actually have something to
+   * act on; otherwise we let the browser's default paste proceed so the
+   * user at least sees *something* happen (e.g. the filename inserted as
+   * text when the file isn't a supported attachment type).
+   */
+  const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+
+    // `text/uri-list` is the canonical X11/Wayland format for file URIs.
+    // `text/plain` carries either raw paths (some file managers) or the
+    // URI inlined — we try both.
+    const raw =
+      cd.getData("text/uri-list").trim() ||
+      cd.getData("text/plain").trim() ||
+      cd.getData("text").trim();
+
+    const lines = raw
+      ? raw
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean)
+      : [];
+    const pathLines: string[] = [];
+    const textLines: string[] = [];
+    for (const line of lines) {
+      if (looksLikeFilePath(line)) {
+        pathLines.push(uriToPath(line));
+        continue;
+      }
+      textLines.push(line);
+    }
+
+    // If the browser surface already gave us paths, act on them and stop.
+    if (pathLines.length > 0 || textLines.length > 0) {
+      e.preventDefault();
+      for (const p of pathLines) void uploadFileAtPath(p);
+      if (textLines.length > 0) {
+        const ta = e.currentTarget;
+        const insert = textLines.join("\n");
+        const { selectionStart, selectionEnd, value } = ta;
+        const next =
+          value.slice(0, selectionStart ?? value.length) +
+          insert +
+          value.slice(selectionEnd ?? value.length);
+        session.setInputValue(next);
+        const caret = (selectionStart ?? value.length) + insert.length;
+        requestAnimationFrame(() => {
+          ta.focus();
+          ta.setSelectionRange(caret, caret);
+        });
+      }
+      return;
+    }
+
+    // Browser surface yielded nothing (Windows file copies land here —
+    // CF_HDROP isn't exposed as `text/uri-list` on WebView2). Fall back
+    // to the native clipboard via the Rust backend.
+    try {
+      const nativePaths = await invoke<string[]>("get_clipboard_file_paths");
+      const valid = (nativePaths ?? []).filter((p) => p && looksLikeFilePath(p));
+      if (valid.length > 0) {
+        e.preventDefault();
+        for (const p of valid) void uploadFileAtPath(p);
+        return;
+      }
+    } catch (err) {
+      log.debug("[ChatPanel] get_clipboard_file_paths fallback failed", err);
+    }
+
+    // Last-resort: some WebViews DO populate `cd.files` even when
+    // text/uri-list is empty. Each File here only has `name` (no path),
+    // so we can't upload — but at least the user gets visual feedback
+    // by inserting the filename as text.
+    if (cd.files && cd.files.length > 0) {
+      e.preventDefault();
+      const names = Array.from(cd.files).map((f) => f.name).join("\n");
+      const ta = e.currentTarget;
+      const { selectionStart, selectionEnd, value } = ta;
+      const next =
+        value.slice(0, selectionStart ?? value.length) +
+        names +
+        value.slice(selectionEnd ?? value.length);
+      session.setInputValue(next);
+      const caret = (selectionStart ?? value.length) + names.length;
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      });
+    }
+    // else: clipboard held neither paths nor files — let the browser
+    // default paste happen so the user sees *some* response.
+  }, [session, uploadFileAtPath]);
+
+  /**
+   * Right-click handler — always opens our custom context menu because
+   * Tauri WebViews do NOT render the browser's native textarea context
+   * menu. Without this, the user gets no right-click UX at all.
+   *
+   * `preventDefault` is required to suppress the WebView's built-in
+   * (mostly empty) default menu — see `useContextMenu.ts` docs.
+   */
+  const handleTextareaContextMenu = useCallback(
+    (e: React.MouseEvent<HTMLTextAreaElement>) => {
+      e.preventDefault();
+      textareaMenu.openAt(e);
+    },
+    [textareaMenu],
+  );
+
+  // Context-menu items, memoised so menu re-renders only when the
+  // disabled state changes (i.e. when there's text to paste, or not).
+  //
+  // MUST be declared before any early-return (e.g. the "no agents" empty
+  // state below) — React's rules of hooks require hooks to be called in
+  // the same order every render. An early return that skips this useMemo
+  // produces "Rendered more hooks than during the previous render".
+  //
+  // Defined AFTER `handlePaste` and `handleFileUpload` (which it
+  // references) and AFTER `inputDisabled` (declared near the upload
+  // pipeline above) so all closure dependencies are in scope. Its hook
+  // position — directly above the early-return — is what matters.
+  const textareaMenuItems = useMemo(
+    () => [
+      {
+        key: "paste",
+        label: t("common.paste") ?? "Paste",
+        icon: <Clipboard className="h-3.5 w-3.5" />,
+        disabled: inputDisabled,
+        onClick: async () => {
+          const ta = textareaRef.current;
+          if (!ta) return;
+          ta.focus();
+          // Best-effort text read. A file-only clipboard (e.g. files
+          // copied from Explorer, CF_HDROP) carries NO text format, so
+          // `readText()` returns "" or rejects (WebView2 non-secure
+          // context) — both are fine: we hand the synthetic event to
+          // `handlePaste`, which falls through to the native
+          // `get_clipboard_file_paths` Rust command in that case and
+          // uploads the files, exactly like Ctrl+V. Text, when present,
+          // is split into path-shaped (uploaded) vs text-shaped
+          // (inserted at caret) lines by the same logic.
+          let text = "";
+          try {
+            text = (await navigator.clipboard.readText()) ?? "";
+          } catch (err) {
+            log.debug(
+              "[ChatPanel] clipboard.readText failed (file-only clipboard?) — falling back to native paths",
+              err,
+            );
+          }
+          const synthetic = {
+            clipboardData: {
+              getData: (type: string) =>
+                type === "text/plain" || type === "text" ? text : "",
+              // No File objects available outside a real paste event.
+              files: [] as unknown as FileList,
+            },
+            currentTarget: ta,
+            preventDefault: () => {},
+          } as unknown as React.ClipboardEvent<HTMLTextAreaElement>;
+          // handlePaste is async (it may invoke the Rust fallback to
+          // read native clipboard file paths). Fire-and-forget is
+          // fine here — the upload pipeline is itself async.
+          void handlePaste(synthetic);
+        },
+      },
+      {
+        key: "upload",
+        label: t("common.uploadFile") ?? "Upload File",
+        icon: <Upload className="h-3.5 w-3.5" />,
+        disabled: inputDisabled,
+        onClick: () => handleFileUpload(),
+      },
+    ],
+    [t, inputDisabled, handlePaste, handleFileUpload],
+  );
 
   // ADR-045: cancel an in-flight tool execution by tool_call_id.
   // The selected agent's active session is cancelled; we don't need toolCallId
@@ -1302,14 +1650,11 @@ export function ChatPanel() {
   }
 
   // ── Chat view ──
-  // ADR-036: input gating must reflect BOTH the Gateway HTTP health AND
-  // the MQTT realtime connection.  Before ADR-036 this only checked
-  // gateway, leaving the textarea enabled while MQTT was silently
-  // disconnected — the user could type and click send, but the message
-  // would never reach the Runtime, producing a "ghost input" state.
-  // `mqttConnected` is now driven by the Rust `mqtt-status` Tauri event
-  // so this check reflects real broker liveness.
-  const inputDisabled = gatewayStatus !== "connected" || !mqttConnected;
+  // NOTE: `inputDisabled` is defined higher up (above the "no agents"
+  // early-return below) so hook ordering stays stable when the agents
+  // map transitions between empty and non-empty across renders. The
+  // definition mirrors ADR-036 (Gateway HTTP health AND MQTT realtime
+  // liveness).
 
   return (
     <>
@@ -1838,6 +2183,7 @@ export function ChatPanel() {
           <AttachedContextChips />
           {/* Textarea area — borderless, transparent background */}
           <textarea
+            ref={textareaRef}
             value={session.inputValue}
             onChange={(e) => session.setInputValue(e.target.value)}
             placeholder={
@@ -1886,6 +2232,18 @@ export function ChatPanel() {
             onCompositionEnd={() => {
               lastCompositionEndRef.current = Date.now();
             }}
+            onPaste={handlePaste}
+            onContextMenu={handleTextareaContextMenu}
+          />
+          {/* Custom right-click menu — Tauri WebViews don't render the
+              browser's native textarea menu, so we mount our own. */}
+          <ContextMenu
+            isOpen={textareaMenu.isOpen}
+            menuProps={textareaMenu.menuProps}
+            items={textareaMenuItems}
+            payload={textareaMenu.payload}
+            selectionAtOpen={textareaMenu.selectionAtOpen}
+            onClose={textareaMenu.close}
           />
 
           {/* Bottom toolbar — @container for responsive button text collapse */}

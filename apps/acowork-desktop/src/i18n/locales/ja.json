@@ -116,6 +116,8 @@
     "backToList": "リストに戻る",
     "copy": "コピー",
     "copied": "コピーしました",
+    "paste": "貼り付け",
+    "uploadFile": "ファイルをアップロード",
     "showDetails": "詳細を表示",
     "hideDetails": "詳細を非表示",
     "ariaLabelCopyError": "エラーメッセージをコピー"

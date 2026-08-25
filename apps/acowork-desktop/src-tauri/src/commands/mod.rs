@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod chat;
 pub mod chat_mqtt;
+pub mod clipboard;
 pub mod create;
 pub mod debug;
 pub mod effects;

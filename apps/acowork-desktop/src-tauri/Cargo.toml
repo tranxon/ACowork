@@ -34,6 +34,18 @@ rumqttc = "0.25"
 # Required for MQTT payload protobuf encoding
 prost = "0.13"
 
+# OS clipboard — used by `get_clipboard_file_paths` to read CF_HDROP
+# (Windows), NSFilenamesPboardType (macOS), and text/uri-list (Linux) so
+# the chat panel can upload files that the user copied from the OS file
+# manager.  WebView2 doesn't expose real filesystem paths in the DOM
+# ClipboardEvent when files are copied, so we read the native clipboard
+# ourselves.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
 # Unix-specific: clock_gettime for sleep detection (macOS + Linux)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
