@@ -390,11 +390,51 @@ export class LspConnection {
         );
 
         // 8. Create and start MonacoLanguageClient
-        const lspClient = new MonacoLanguageClient({
-            name: `${language} LSP`,
-            clientOptions,
-            messageTransports,
-        });
+        // -------------------------------------------------------------
+        // `MonacoLanguageClient`'s constructor reads from
+        // `vscode/localExtensionHost`'s `defaultApi` proxy via
+        // `extension.api.js` -- which throws synchronously if the VS Code
+        // API services have not finished initializing yet.  Even with
+        // our orphan-recovery in `ensureVscodeApiInitialized()`, a race
+        // or a stale tab could still leave `defaultApi` unset at this
+        // exact point, so we wrap construction in try/catch and surface
+        // the failure as `error` status instead of letting it bubble and
+        // freeze the status at `connecting` (the outer `_doConnect`
+        // try/catch is in `connect()` only -- exceptions here would leave
+        // the WS open and the status stuck).
+        // -------------------------------------------------------------
+        let lspClient: MonacoLanguageClient;
+        try {
+            lspClient = new MonacoLanguageClient({
+                name: `${language} LSP`,
+                clientOptions,
+                messageTransports,
+            });
+        } catch (err) {
+            log.error(
+                "[LSP] LspConnection MonacoLanguageClient construction failed --",
+                language,
+                err,
+            );
+            // Close the WS we just opened -- nothing else is going to
+            // consume it now, and a dangling open socket would survive
+            // long enough to confuse subsequent reconnect attempts.
+            try {
+                ws.close();
+            } catch {
+                // ignore
+            }
+            this._setStatus(
+                "error",
+                formatLspError(
+                    language,
+                    `VS Code API not ready for LSP client: ${String(
+                        (err as Error)?.message ?? err,
+                    )}`,
+                ),
+            );
+            return;
+        }
 
         const t4 = performance.now();
         log.debug(

@@ -189,6 +189,7 @@
     "closeChat": "세션 닫기",
     "closeOtherChats": "다른 세션 닫기",
     "openNewSession": "새 세션 열기",
+    "rename": "이름 바꾸기…",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "deleteSession": "Delete session",

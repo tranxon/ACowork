@@ -9,7 +9,7 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare } from "lucide-react";
+import { Plus, Clock, Loader2, X, MessageCircle, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -248,7 +248,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const openSessionIds = agent?.openSessionIds ?? [];
   const activeSessionId = agent?.activeSessionId;
   const sessions = useAgentStore((s) => s.agents[agentId]?.sessions ?? []);
-  const { createSession, closeSession } = useAgentStore();
+  const { createSession, closeSession, renameSession } = useAgentStore();
   const setActiveTab = useChatStore((s) => s.setActiveTab);
   const openSession = useChatStore((s) => s.openSession);
 
@@ -259,6 +259,43 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   // positioning are all owned by `useContextMenu`.
   const tabMenu = useContextMenu<{ sessionId: string }>();
   const scrollableRef = useRef<ScrollableTabBarHandle>(null);
+
+  // Inline rename state. `renamingSessionId` is the session whose tab title
+  // is currently rendered as an input; `renameValue` is the keystroke buffer.
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const lastRenamingIdRef = useRef<string | null>(null);
+  // Mirrors `renamingSessionId` for event handlers that may fire during
+  // unmount (e.g. a stale `blur` after Escape), where the React state closure
+  // can still hold the pre-cancel value.
+  const renamingSessionIdRef = useRef<string | null>(null);
+
+  // Seed + focus + select the rename input only on the false→true transition,
+  // so re-renders (e.g. optimistic title patch) never wipe the user's typing.
+  useEffect(() => {
+    if (renamingSessionId && lastRenamingIdRef.current !== renamingSessionId) {
+      // Read the latest session title imperatively so this effect does not
+      // re-run (and cancel the focus animation frame) on unrelated session
+      // list updates while the rename input is open.
+      const session = useAgentStore
+        .getState()
+        .agents[agentId]?.sessions.find((s) => s.session_id === renamingSessionId);
+      const seed = session?.title || t("sessionTabBar.untitled");
+      setRenameValue(seed);
+      const frame = requestAnimationFrame(() => {
+        const input = renameInputRef.current;
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      });
+      lastRenamingIdRef.current = renamingSessionId;
+      return () => cancelAnimationFrame(frame);
+    }
+    if (!renamingSessionId) lastRenamingIdRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renamingSessionId, agentId, t]);
 
   // Get title for a session
   const getTitle = (sessionId: string): string => {
@@ -339,6 +376,43 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     createSession(agentId);
   };
 
+  // ── Inline rename ──────────────────────────────────────────────────────
+  const beginRename = (sessionId: string) => {
+    renamingSessionIdRef.current = sessionId;
+    setRenamingSessionId(sessionId);
+  };
+
+  const commitRename = () => {
+    const sessionId = renamingSessionIdRef.current;
+    if (!sessionId) return;
+    renamingSessionIdRef.current = null;
+    setRenamingSessionId(null);
+    const trimmed = renameValue.trim();
+    // Compare against the *displayed* title, so an untitled tab seeded with
+    // the localized "Untitled" fallback is treated as unchanged on Enter.
+    const current =
+      sessions.find((s) => s.session_id === sessionId)?.title ||
+      t("sessionTabBar.untitled");
+    // Empty / unchanged → close without a server roundtrip.
+    if (!trimmed || trimmed === current) return;
+    void renameSession(agentId, sessionId, trimmed);
+  };
+
+  const cancelRename = () => {
+    renamingSessionIdRef.current = null;
+    setRenamingSessionId(null);
+  };
+
+  const handleRenameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelRename();
+    }
+  };
+
   // ── Session tab right-click menu ──────────────────────────────────────
   const handleTabContextMenu = (e: React.MouseEvent, sessionId: string) => {
     tabMenu.openAt(e, { sessionId });
@@ -383,10 +457,17 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     const canClose = openSessionIds.length > 1;
     const items: ContextMenuItem<{ sessionId: string }>[] = [
       {
+        key: "rename",
+        icon: <Pencil size={14} />,
+        label: t("sessionTabBar.rename"),
+        onClick: ({ payload }) => payload && beginRename(payload.sessionId),
+      },
+      {
         key: "close-chat",
         icon: <X size={14} />,
         label: t("sessionTabBar.closeChat"),
         disabled: !canClose,
+        dividerBefore: true,
         // Disable when only one tab remains — keep at least one open so
         // the chat area never ends up empty.
         onClick: ({ payload }) => payload && handleContextCloseChat(payload.sessionId),
@@ -437,13 +518,37 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               {isProc && !isActive && (
                 <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
               )}
-              {/* Title */}
-              <span className={cn(
-                "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
-                isProc && isActive && "text-zinc-700 dark:text-zinc-200",
-              )}>
-                {getTitle(sessionId)}
-              </span>
+              {/* Title — double-click enters inline rename (same action as the
+                  right-click "Rename" menu item). */}
+              {renamingSessionId === sessionId ? (
+                <input
+                  ref={renameInputRef}
+                  type="text"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={handleRenameKeyDown}
+                  onBlur={commitRename}
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onContextMenu={(e) => e.stopPropagation()}
+                  aria-label={t("sessionTabBar.rename")}
+                  className="min-w-0 flex-1 rounded-sm border border-[var(--color-accent)] bg-modal-surface px-1 text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)] text-zinc-800 outline-none dark:bg-zinc-900 dark:text-zinc-100"
+                />
+              ) : (
+                <span
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    beginRename(sessionId);
+                  }}
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
+                    isProc && isActive && "text-zinc-700 dark:text-zinc-200",
+                  )}
+                >
+                  {getTitle(sessionId)}
+                </span>
+              )}
               {/* Close button — hidden when this is the only remaining tab to
                   prevent a tab-less state. Open at least one more session to
                   close this one, matching common AI IDE conventions

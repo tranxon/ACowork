@@ -189,6 +189,7 @@
     "closeChat": "關閉工作階段",
     "closeOtherChats": "關閉其他工作階段",
     "openNewSession": "開啟新工作階段",
+    "rename": "重新命名…",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
     "deleteSession": "Delete session",

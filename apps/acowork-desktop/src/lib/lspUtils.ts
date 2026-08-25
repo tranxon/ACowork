@@ -26,9 +26,143 @@ export type LspStatus =
 let vscodeApiInitPromise: Promise<void> | null = null;
 let vscodeApiInitDone = false;
 
+/**
+ * Upper bound on how long we are willing to wait for an already-running
+ * global init before declaring it orphaned and resetting the global state.
+ *
+ * `MonacoVscodeApiWrapper.start()` (10.7.0) has no try/catch around its
+ * init sequence — if any awaitable step throws between `markGlobalInit()`
+ * and `markGlobalInitDone()`, the global init promise stays pending
+ * forever and `vscodeApiInitialising` stays stuck on `true`.  Every
+ * subsequent `wrapper.start()` then hits the "already ongoing" branch
+ * which **returns immediately without doing anything**.  That is the
+ * root cause of the "stuck at `connecting`" symptom.
+ *
+ * Waiting for the orphan would hang the UI permanently, so we race the
+ * global promise against this timeout and reset state on expiry.
+ */
+const GLOBAL_INIT_TIMEOUT_MS = 30_000;
+
+/**
+ * Augmented fields that `MonacoVscodeApiWrapper` attaches to
+ * `window.MonacoEnvironment` to co-ordinate global initialization
+ * across multiple wrapper instances:
+ *
+ * - `vscodeApiGlobalInitAwait` — set by `markGlobalInit()` at the start
+ *   of `wrapper.start()` and resolved by `markGlobalInitDone()`.  It is
+ *   `undefined` both before the first start and after completion.
+ * - `vscodeApiGlobalInitResolve` — the resolver paired with the await
+ *   promise.  Held on the env object, so we can resolve an orphaned
+ *   promise ourselves on the recovery path.
+ * - `vscodeApiInitialised` — `true` once init succeeds.
+ * - `vscodeApiInitialising` — `true` while init is running.
+ *
+ * Reading these on `window.MonacoEnvironment` lets us safely co-ordinate
+ * with any other wrapper instance that may be initializing or have
+ * already completed — without racing on the (non-idempotent) start()
+ * flow which `MonacoVscodeApiWrapper` does not guard across instances.
+ */
+interface EnhancedMonacoEnvironment {
+    vscodeApiGlobalInitAwait?: Promise<void>;
+    vscodeApiGlobalInitResolve?: () => void;
+    vscodeApiInitialised?: boolean;
+    vscodeApiInitialising?: boolean;
+    viewServiceType?: string;
+}
+
+function getEnhancedMonacoEnvironment(): EnhancedMonacoEnvironment {
+    const w = window as unknown as { MonacoEnvironment?: EnhancedMonacoEnvironment };
+    if (!w.MonacoEnvironment) w.MonacoEnvironment = {};
+    return w.MonacoEnvironment;
+}
+
+/**
+ * Reset the global init flags and resolve any orphaned promise.
+ *
+ * Called as a recovery path when we detect the library has left the
+ * global init in an inconsistent state (typically: `wrapper.start()`
+ * threw mid-sequence after `markGlobalInit()` but before
+ * `markGlobalInitDone()`).
+ *
+ * After this runs, the next call to `ensureVscodeApiInitialized()`
+ * will see no orphan, no `vscodeApiInitialising`, no
+ * `vscodeApiInitialised` — and will safely re-enter Case C.
+ */
+function resetGlobalInitState(): void {
+    const env = getEnhancedMonacoEnvironment();
+    // Wake up anyone still awaiting the orphaned promise so they take
+    // their own error path instead of hanging the UI.
+    try {
+        env.vscodeApiGlobalInitResolve?.();
+    } catch {
+        // resolve() must not throw, but defend against library changes
+    }
+    env.vscodeApiGlobalInitAwait = undefined;
+    env.vscodeApiGlobalInitResolve = undefined;
+    env.vscodeApiInitialising = false;
+    env.vscodeApiInitialised = false;
+}
+
 /** Initialize VS Code API services (required by MonacoLanguageClient v10+). */
 export async function ensureVscodeApiInitialized(): Promise<void> {
     if (vscodeApiInitDone) return;
+
+    const env = getEnhancedMonacoEnvironment();
+
+    // Case A: another wrapper instance is currently initializing.
+    // `MonacoVscodeApiWrapper.start()` returns immediately in its
+    // "already ongoing" branch WITHOUT awaiting the real init — so we
+    // must await the global init promise ourselves to guarantee
+    // `defaultApi` (set by the local-extension-host post-participant)
+    // is populated before `new MonacoLanguageClient()` runs.
+    //
+    // If that promise has been orphaned by a prior failed init it will
+    // never resolve, so we race it against a timeout and recover.
+    const ongoing = env.vscodeApiGlobalInitAwait;
+    if (ongoing) {
+        if (!vscodeApiInitPromise) vscodeApiInitPromise = ongoing;
+        try {
+            await Promise.race([
+                ongoing,
+                new Promise<void>((_, reject) =>
+                    setTimeout(
+                        () =>
+                            reject(
+                                new Error(
+                                    `VS Code API global init timed out after ${GLOBAL_INIT_TIMEOUT_MS}ms — orphaned from prior failed init`,
+                                ),
+                            ),
+                        GLOBAL_INIT_TIMEOUT_MS,
+                    ),
+                ),
+            ]);
+            vscodeApiInitDone = true;
+            return;
+        } catch (err) {
+            // Orphaned (or otherwise failed) global init.  Clear the
+            // global flags and our local promise so the next caller can
+            // re-enter Case C cleanly instead of getting stuck forever
+            // in the library's "already ongoing" early-return branch.
+            log.error(
+                "[LSP] VS Code API global init wait failed — resetting orphan state:",
+                err,
+            );
+            resetGlobalInitState();
+            vscodeApiInitPromise = null;
+            throw err;
+        }
+    }
+
+    // Case B: init already completed globally (by a prior wrapper on this
+    // page, or by our own previous run).  Nothing to do — `defaultApi` is
+    // already set in the shared `vscode/localExtensionHost` module.
+    if (env.vscodeApiInitialised === true) {
+        vscodeApiInitDone = true;
+        return;
+    }
+
+    // Case C: we are the first to initialize.  Guard with our own promise
+    // so concurrent callers within this module coalesce onto one start().
     if (!vscodeApiInitPromise) {
         log.debug("[LSP] Initializing VS Code API services (first time)...");
         const t0 = performance.now();
@@ -72,8 +206,15 @@ export async function ensureVscodeApiInitialized(): Promise<void> {
                     `elapsed: ${Math.round(performance.now() - t0)}ms`,
                 );
             } catch (err) {
-                vscodeApiInitPromise = null; // allow retry
+                // Library bug: `wrapper.start()` may throw AFTER
+                // `markGlobalInit()` but BEFORE `markGlobalInitDone()`,
+                // leaving an orphaned pending promise on the global env.
+                // Subsequent `wrapper.start()` calls would then hit the
+                // "already ongoing" early-return branch forever.  We must
+                // clear that state so retries actually run.
                 log.error("[LSP] VS Code API initialization failed:", err);
+                resetGlobalInitState();
+                vscodeApiInitPromise = null;
                 throw err;
             }
         })();
