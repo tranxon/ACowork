@@ -31,7 +31,7 @@ mod tray;
 mod win_wndproc;
 use state::AppState;
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // ── Windows Job Object for Gateway process tree cleanup ────────────────────
 //
@@ -609,6 +609,11 @@ pub fn run() {
             // Desktop App and Gateway share a machine (local mode); the
             // frontend hides the corresponding menu item in remote mode.
             commands::reveal::reveal_in_file_explorer,
+            // OS clipboard file-path fallback for paste/upload. Returns
+            // the absolute paths of any files on the clipboard so the
+            // chat panel can upload files copied from the OS file manager
+            // (WebView2 doesn't expose paths in ClipboardEvent).
+            commands::clipboard::get_clipboard_file_paths,
         ])
         .setup(|app| {
             tray::setup(app)?;
@@ -779,6 +784,37 @@ pub fn run() {
                     if power::detect_resume() {
                         recover_from_wake(window.app_handle());
                     }
+                }
+
+                // ── OS-level file drop forwarding ─────────────────────────
+                // Tauri v2 captures OS file drag-drop at the Rust layer
+                // (`WindowEvent::DragDrop`) because WebView HTML5 drop
+                // events do NOT expose real filesystem paths in the
+                // sandboxed file object — only `name`/`size`/`type`.
+                //
+                // We re-emit the absolute paths to the frontend on a
+                // private event channel. `ChatPanel` listens, checks
+                // `document.activeElement` to know if the drop landed on
+                // the chat textarea, and dispatches to `upload_file` (the
+                // same pipeline as the paperclip button).
+                //
+                // Position is reported in physical pixels; the frontend
+                // multiplies by `window.devicePixelRatio` is unnecessary
+                // because we don't use position to find the target —
+                // activeElement is sufficient.
+                tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) => {
+                    let path_strings: Vec<String> = paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                    if path_strings.is_empty() {
+                        return;
+                    }
+                    tracing::info!(
+                        "[lib.rs] OS file drop received, forwarding {} path(s) to frontend",
+                        path_strings.len()
+                    );
+                    let _ = window.emit("desktop://file-drop", path_strings);
                 }
 
                 // ── Hide to tray instead of closing ──────────────────────────
