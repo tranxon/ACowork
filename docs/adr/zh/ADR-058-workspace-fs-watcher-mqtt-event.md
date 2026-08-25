@@ -186,10 +186,14 @@ acowork/agents/{agent_id}/workspaces/{workspace_id}/fs-changed
 
 MQTT 全链路 payload 是 Protobuf `DataEnvelope`（`mqtt.md` §1、`mqtt_payload.proto` 文件头）。新资源按规约**扩展 `DataEnvelope.payload` oneof**，而不是新造 serde JSON 类型：
 
+**字段号选择 38**（紧跟 `SessionState = 37`）：与 session lifecycle 同属 "Runtime → Desktop 业务事件" 语义，符合 [`mqtt_payload.proto:30-78`](../../../core/acowork-core/proto/mqtt_payload.proto#L30-L78) 的 namespace 划分（10s = Global / 20s = Agent / 30s = Session+Workspace / 40s = Control / 50s = Memory / 60s = Sidecar / 70s = Debug）。**不放 80** 是因为跨越多个 namespace 不可读。
+
 ```proto
 // core/acowork-core/proto/mqtt_payload.proto — 新增于 DataEnvelope.payload oneof
-//（字段号 80 为空闲位，且永不复用）
-WorkspaceFsChangeEvent workspace_fs_change_event = 80;
+// 字段号 38（ADR-058）：Workspace 文件系统变化，Runtime → Desktop，QoS 1，非 retained。
+// 字段号 38 已被本消息占用并保留，永不复用。如需新增 workspace 相关消息，
+// 使用 39 起下一空闲位，并在本文件头登记。
+WorkspaceFsChangeEvent workspace_fs_change_event = 38;
 
 // ── Workspace FS events (Runtime → Desktop, QoS 1, 非 retained) ──
 message WorkspaceFsChangeEvent {
@@ -253,8 +257,15 @@ message FsChange {
 
 #### 事件聚合器（500ms 窗口）
 
+> **模块位置**（与 §3.6 `WorkspaceWatcherSet` 同目录）：`core/acowork-runtime/src/workspace/fs_watcher.rs`。
+> 不放 `security/` 是因为本 watcher 是 **workspace 同步**关注点，不是安全审计关注点 —
+> 现有 [`security/fs_watcher.rs`](../../../core/acowork-runtime/src/security/fs_watcher.rs) 继续服务 audit_log，两者并行。
+
 ```rust
-// core/acowork-runtime/src/security/workspace_watcher.rs
+// core/acowork-runtime/src/workspace/fs_watcher.rs
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
+use tokio::sync::mpsc;  // 沿用 fs_watcher.rs:14 的约定（不要用 std::sync::mpsc——会阻塞 executor）
+
 pub struct WorkspaceFsWatcher {
     workspace_dir: PathBuf,
     agent_id: String,
@@ -532,7 +543,7 @@ set((state) => ({
 放 Runtime 后不再需要跨进程的 `WorkspaceWatcherRegistry`——watcher 与 workspace 列表同生命周期，由 Runtime 的 workspace 模块管理：
 
 ```rust
-// core/acowork-runtime/src/workspace/watcher.rs
+// core/acowork-runtime/src/workspace/watcher_set.rs
 pub struct WorkspaceWatcherSet {
     // 单 Runtime 进程 = 单 agent，键仅为 workspace_id
     watchers: HashMap<String, WorkspaceWatcherHandle>,
@@ -588,14 +599,17 @@ async fn start_workspace_watchers(&self) {
 
 **本 ADR 范围内**：
 
-- Runtime 端 `WorkspaceFsWatcher` 服务（新增，扩展现有 `fs_watcher.rs` 的 notify 封装）
-- `mqtt_payload.proto` 新增 `WorkspaceFsChangeEvent` / `FsChange` / `FsChangeKind` + `DataEnvelope` oneof 扩展
+- Runtime 端 `WorkspaceFsWatcher` 服务（新增 `workspace/fs_watcher.rs`，与现有 `security/fs_watcher.rs` 并行）
+- `mqtt_payload.proto` 新增 `WorkspaceFsChangeEvent` / `FsChange` / `FsChangeKind` + `DataEnvelope` oneof 字段 38
 - Desktop Tauri Rust backend 订阅 + `DataEnvelope` 解包 + emit（新增）
 - Desktop `workspaceStore` 增量 `fetchTree`（新增）
 - Desktop `fileEditorStore` modified 比对 + echo 抑制 + reload/toast（新增）
+- **W4 包含 broker 地址从 Gateway URL host 派生**（Remote 模式下使 Desktop 知道往哪连 broker）— 这是本方案 Remote 适配的**必要技术改动**
 
 **本 ADR 范围外**（明确标记为后续 ADR）：
 
+- **Remote 模式 broker 隧道建立 UX**（SSH 端口转发脚本、CLI 自动隧道、用户文档）— §3.5 已说明 Remote 实时推送需 broker 可达，但**隧道建立是用户/运维责任**，不是协议责任。本 ADR 不规定，由产品/运维在 Remote 模式文档中说明
+- **Remote 模式下 broker 不可达的 UI 提示**（连接失败时显式引导用户建立隧道）— UX 决策，单独 ADR
 - **文件系统级 undo/redo**（用户希望在 UI 内撤销外部删除）— 太复杂，与 editor undo stack 集成是独立 ADR
 - **冲突解决策略细化**（3-way merge 提示）— 后续 ADR 跟进
 - **rename 事件合并**（`Renamed` 推断）— PollWatcher 无 inode 配对，本 ADR 降级为 Delete+Create；如需恢复，后续 ADR
@@ -636,9 +650,9 @@ async fn start_workspace_watchers(&self) {
 
 | Commit | 范围 | 主要内容 | 估计 |
 |--------|------|---------|------|
-| **W0** | Runtime: 提取 `WorkspaceFsWatcher` 模块 | 从 `security/fs_watcher.rs` 提取通用 notify 封装到 `security/workspace_watcher.rs`，加 `FsChange` aggregation（500ms 窗口 + create/delete 抵消）；保留原 `security/fs_watcher.rs` 用于 audit_log 兼容 | +200 行 |
-| **W1** | Core: proto + aggregator 完整化 | `mqtt_payload.proto` 新增 `WorkspaceFsChangeEvent` / `FsChange` / `FsChangeKind` + `DataEnvelope.payload` oneof 字段 80；`WorkspaceFsWatcher::run()` 输出聚合事件流；单元测试覆盖 created/modified/deleted 各组合 + 同窗口抵消 | +150 行 |
-| **W2** | Runtime: 挂载 + MQTT 发布 | `workspace/watcher.rs`（HashMap dedupe + start/stop）+ Phase C 完成钩子 + workspace CRUD 后启停 + 复用 Runtime 现有 rumqttc publisher 发布 `fs-changed` | +200 行 |
+| **W0** | Runtime: 提取 `WorkspaceFsWatcher` 模块 | 从 `security/fs_watcher.rs` 提取通用 notify 封装到 `workspace/fs_watcher.rs`，加 `FsChange` aggregation（500ms 窗口 + create/delete 抵消）；保留原 `security/fs_watcher.rs` 用于 audit_log 兼容 | +200 行 |
+| **W1** | Core: proto + aggregator 完整化 | `mqtt_payload.proto` 新增 `WorkspaceFsChangeEvent` / `FsChange` / `FsChangeKind` + `DataEnvelope.payload` oneof 字段 38；`WorkspaceFsWatcher::run()` 输出聚合事件流；单元测试覆盖 created/modified/deleted 各组合 + 同窗口抵消 | +150 行 |
+| **W2** | Runtime: 挂载 + MQTT 发布 | `workspace/watcher_set.rs`（HashMap dedupe + start/stop）+ Phase C 完成钩子 + workspace CRUD 后启停 + 复用 Runtime 现有 rumqttc publisher 发布 `fs-changed` | +200 行 |
 | **W3** | Runtime: 集成测试 | 临时 workspace 目录 → 模拟文件操作（create/modify/delete）→ 通过 fake MQTT broker 验证事件 payload；覆盖 happy path + 聚合窗口合并 + 同窗口 create+delete 抵消 + 越界路径丢弃 | +200 行 |
 | **W4** | Desktop Tauri: 订阅 + 解包 + emit | `mqtt_client.rs` 的 `ALL_TOPIC_FILTERS` 新增 `acowork/agents/+/workspaces/+/fs-changed`（QoS1）+ `on_message` 按 `DataEnvelope` 解包 + emit `acowork:workspace-fs-changed`；broker 地址改为从 Gateway URL host 派生（Remote 隧道场景） | +80 行 |
 | **W5** | Desktop frontend: store listeners | `workspaceStore.ts` 顶层监听 → per-parent-path 增量 fetchTree；`fileEditorStore.ts` 监听 → modified 比对 + echo 抑制 + reload/toast；`OpenFile` schema 加 `diskModified` / `lastSavedAtMs` / `diskConflict`；`openFile`/`openPreview`/`refreshFile`/`saveFile` 解 `modified` 字段；FileTreeNode 重渲染测试 | +250 行 |
@@ -688,7 +702,7 @@ async fn start_workspace_watchers(&self) {
 
 - **ADR-009**：watcher 放 Runtime，Runtime 本就授权接触 workspace FS ✅（Gateway 全程零新增 FS 访问，无需修订 ADR-009）
 - **mqtt.md §3.2**：`agents/{id}/*` Owner=Runtime，主题发布者与所有者一致 ✅
-- **mqtt.md §1 / mqtt_payload.proto**：payload 走 Protobuf `DataEnvelope`，扩展 oneof 字段 80 ✅
+- **mqtt.md §1 / mqtt_payload.proto**：payload 走 Protobuf `DataEnvelope`，扩展 oneof 字段 38（紧跟 `SessionState = 37`，与 session lifecycle 同语义层级）✅
 - **ADR-033 §10**：主题命名"按数据源" ✅（`agents/{id}/workspaces/{wid}/fs-changed`）
 - **ADR-034 §4**：HTTP / MQTT 职责边界 ✅（HTTP = CRUD / bulk；MQTT = 增量事件）
 - **ADR-035 §D9.2**：流式数据归属 + 节流 ✅（500ms 聚合 = 同模式）
@@ -698,15 +712,15 @@ async fn start_workspace_watchers(&self) {
 
 **新增**：
 
-- `core/acowork-runtime/src/security/workspace_watcher.rs`（W0）
-- `core/acowork-runtime/src/workspace/watcher.rs`（W2）
+- `core/acowork-runtime/src/workspace/fs_watcher.rs`（W0，单 watcher + 聚合器）
+- `core/acowork-runtime/src/workspace/watcher_set.rs`（W2，集合管理）
 
 **修改**：
 
-- `core/acowork-core/proto/mqtt_payload.proto`（W1，+30 行：proto 定义 + oneof 字段 80）
-- `core/acowork-runtime/src/security/mod.rs`（W0，注册新模块）
+- `core/acowork-core/proto/mqtt_payload.proto`（W1，+30 行：proto 定义 + oneof 字段 38）
+- `core/acowork-runtime/src/workspace/mod.rs`（W0，注册新模块；W2，挂载 watcher_set）
 - `core/acowork-runtime/Cargo.toml`（W0，无新依赖 — `notify` 已有）
-- `core/acowork-runtime/src/workspace/mod.rs`（W2，挂载 watcher 模块 + Phase C 钩子）
+- `core/acowork-runtime/src/security/mod.rs`（W0，无改动 — `security/fs_watcher.rs` 继续服务 audit_log）
 - `apps/acowork-desktop/src-tauri/src/mqtt_client.rs`（W4，+80 行：`ALL_TOPIC_FILTERS` + DataEnvelope 解包 + emit + broker 地址派生）
 - `apps/acowork-desktop/src/stores/workspaceStore.ts`（W5，+50 行：listener + per-parent-path fetch）
 - `apps/acowork-desktop/src/stores/fileEditorStore.ts`（W5，+100 行：listener + modified 比对 + echo 抑制 + reload/toast）
@@ -714,8 +728,8 @@ async fn start_workspace_watchers(&self) {
 
 **测试新增**：
 
-- `core/acowork-runtime/src/security/workspace_watcher.rs` 内单元测试（W1）
-- `core/acowork-runtime/src/workspace/watcher.rs` 内集成测试（W3）
+- `core/acowork-runtime/src/workspace/fs_watcher.rs` 内单元测试（W1）
+- `core/acowork-runtime/src/workspace/watcher_set.rs` 内集成测试（W3）
 - `apps/acowork-desktop/src/stores/workspaceStore.test.ts`（W5，mock Tauri event）
 - `apps/acowork-desktop/src/stores/fileEditorStore.test.ts`（W5，覆盖 dirty/clean/deleted 3 路径 + echo 抑制）
 
