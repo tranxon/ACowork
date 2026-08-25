@@ -39,11 +39,16 @@ const DEFAULT_MAX_SEARCH_RESULTS: usize = 200;
 const ABSOLUTE_MAX_SEARCH_RESULTS: usize = 1000;
 const SEARCH_BAILOUT_BYTES: u64 = 1_048_576; // 1 MiB per file
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff", "tif", "mp3", "mp4", "avi",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "mp3", "mp4", "avi",
     "mov", "wav", "flac", "ogg", "webm", "mkv", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
     "o", "obj", "a", "so", "dylib", "dll", "exe", "pdb", "lib", "class", "wasm", "bc", "ll", "pyc",
     "pyo", "rlib", "rmeta", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "bin", "dat", "db",
     "sqlite", "sqlite3", "pack", "idx",
+    // NOTE: SVG (`svg`) is intentionally NOT listed here. SVG is XML text and
+    // the editor needs the raw markup as `content` so it can be edited in
+    // Monaco; base64-wrapping it made the source unreadable. The desktop
+    // preview branch handles SVG via `data:image/svg+xml;charset=utf-8,...`
+    // which works directly on the text payload.
 ];
 
 // ── Impl ───────────────────────────────────────────────────────────────────

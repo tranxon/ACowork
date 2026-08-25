@@ -4580,10 +4580,11 @@ mod tests {
             .unwrap();
         assert_eq!(decoded, tiny_jpg_bytes);
 
-        // 8b) SVG binary read test (SVG is listed in BINARY_EXTENSIONS so it
-        // gets base64-encoded, even though it's actually text; the frontend
-        // still renders it correctly in the image preview branch because
-        // mimeType starts with "image/").
+        // 8b) SVG read test. SVG is XML text, NOT a binary — it is removed
+        // from BINARY_EXTENSIONS so the editor sees the raw markup (editable
+        // in Monaco) and the desktop preview branch renders it via
+        // `data:image/svg+xml;charset=utf-8,...`. mimeType is still
+        // `image/svg+xml` so the frontend image-preview branch is selected.
         let tiny_svg = "<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1' />";
         std::fs::write(ws_dir.join("assets").join("test.svg"), tiny_svg).unwrap();
 
@@ -4603,10 +4604,9 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["mimeType"], "image/svg+xml");
         assert_eq!(body["size"], tiny_svg.len() as u64);
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(body["content"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(decoded, tiny_svg.as_bytes());
+        // Raw XML text — NOT base64. This is the contract the editor relies
+        // on to show editable source in Monaco.
+        assert_eq!(body["content"].as_str().unwrap(), tiny_svg);
 
         // 9) DELETE /workspaces/file?workspace_id=… — body {path}.
         let resp = client
