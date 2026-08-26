@@ -510,24 +510,6 @@ impl DesktopMqttClient {
         })
     }
 
-    /// Connect with default localhost and port.
-    ///
-    /// ADR-058 W4: `connect_mqtt` now derives the broker host from the
-    /// Gateway HTTP base URL (Remote-mode tunnel support), so this
-    /// helper has no production caller — kept for tests / dev tooling.
-    #[allow(dead_code)]
-    pub async fn connect_default<F, G>(
-        user_id: &str,
-        on_message: F,
-        on_status: G,
-    ) -> Result<Self, String>
-    where
-        F: Fn(MqttMessage) + Send + Sync + 'static,
-        G: Fn(MqttStatus) + Send + Sync + 'static,
-    {
-        Self::connect("127.0.0.1", 19875, user_id, on_message, on_status).await
-    }
-
     /// ADR-039 Phase 2: returns the current MQTT session state.
     ///
     /// Reserved public accessor intended for Tauri commands / DevMode that

@@ -112,6 +112,19 @@ pub struct GatewayConfig {
     /// MQTT broker configuration (ADR-033).
     #[serde(default)]
     pub mqtt: MqttConfig,
+    /// Advertise host: the address other machines should use to reach
+    /// services on this Gateway host (embed / LSP / broker endpoints
+    /// distributed to Runtime and Desktop via MQTT).
+    ///
+    /// Distinct from `mqtt.host` (bind address) — the standard split for
+    /// distributed systems (Docker / K8s advertise-addr). Bind may be
+    /// `0.0.0.0` while advertise must be a routable address.
+    ///
+    /// If unset at startup, Gateway auto-detects the first non-loopback
+    /// IP and logs a WARN (ADR-055 D3 §6.3). Defaults to `127.0.0.1`
+    /// when detection fails (single-machine compatibility).
+    #[serde(default)]
+    pub advertise_host: Option<String>,
 }
 
 /// MQTT broker configuration (ADR-033).
@@ -120,7 +133,14 @@ pub struct MqttConfig {
     /// Whether the embedded MQTT broker is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Broker listen host (localhost-only by default).
+    /// Broker listen host (bind address).
+    ///
+    /// Defaults to `127.0.0.1` (localhost-only) — single-machine topology.
+    /// For distributed deployments (ADR-055), set to `0.0.0.0` (all
+    /// interfaces) or a specific NIC IP so remote Runtime / Desktop can
+    /// connect. Pair with `advertise_host` so other machines know which
+    /// routable address to use — bind may be `0.0.0.0` but advertise
+    /// must be a specific routable IP (L3-7).
     #[serde(default = "default_mqtt_host")]
     pub host: String,
     /// Broker listen port.
@@ -140,7 +160,10 @@ impl Default for MqttConfig {
 
 fn default_true() -> bool { true }
 fn default_mqtt_host() -> String { "127.0.0.1".to_string() }
-fn default_mqtt_port() -> u16 { 19875 }
+/// Exposed as `pub(crate)` so the HTTP `/api/status` handler can report
+/// the broker port to the Desktop without duplicating the constant
+/// (ADR-055 D3 §6.3, L3-6).
+pub(crate) fn default_mqtt_port() -> u16 { 19875 }
 
 /// Data flow tuning configuration (ADR-020).
 ///
@@ -450,7 +473,26 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.data_flow.clone())
                 .unwrap_or_default(),
-            mqtt: Default::default(),
+            mqtt: {
+                let mut mqtt = file_config
+                    .as_ref()
+                    .map(|c| c.mqtt.clone())
+                    .unwrap_or_default();
+                // Allow ACOWORK_GATEWAY_MQTT_PORT env var to override the
+                // configured broker port (used by E2E tests, manual
+                // multi-instance runs, and the ADR-055 node topology
+                // verification). Mirrors the HTTP port override.
+                if let Ok(port_str) = std::env::var("ACOWORK_GATEWAY_MQTT_PORT")
+                    && let Ok(port) = port_str.parse::<u16>()
+                {
+                    mqtt.port = port;
+                }
+                mqtt
+            },
+            advertise_host: cli
+                .advertise_host
+                .clone()
+                .or(file_config.as_ref().and_then(|c| c.advertise_host.clone())),
         };
 
         config.validate()?;
@@ -474,11 +516,24 @@ impl GatewayConfig {
         Ok(base_dir.join("gateway.toml"))
     }
 
+    /// ADR-055 §3.2: the package registry — where uploaded `.agent`
+    /// source files are stored for distribution to nodes. The Node
+    /// downloads them via `GET /api/packages/{agent_id}/download`.
+    ///
+    /// Lives under `{data_dir}/package-registry` (a Gateway-private
+    /// source-of-truth copy; the install directory proper belongs to
+    /// the node).
+    pub fn package_registry_dir(&self) -> std::path::PathBuf {
+        std::path::PathBuf::from(&self.data_dir).join("package-registry")
+    }
+
     /// Ensure required directories exist
     pub fn ensure_dirs(&self) -> Result<(), GatewayError> {
+        let registry = self.package_registry_dir();
         for dir in [&self.vault_dir, &self.packages_dir, &self.data_dir] {
             std::fs::create_dir_all(dir).map_err(GatewayError::Io)?;
         }
+        std::fs::create_dir_all(&registry).map_err(GatewayError::Io)?;
         Ok(())
     }
 
@@ -542,6 +597,7 @@ impl Default for GatewayConfig {
             embedding_model: None,
             data_flow: DataFlowConfig::default(),
             mqtt: Default::default(),
+            advertise_host: None,
         }
     }
 }
@@ -577,6 +633,49 @@ fn legacy_data_dir() -> Option<PathBuf> {
                 .join("share")
                 .join("acowork-gateway")
         })
+}
+
+/// Resolve the advertise host for this Gateway (ADR-055 D3 §6.3).
+///
+/// Priority: configured `advertise_host` > auto-detected first non-loopback
+/// IPv4 > `"127.0.0.1"` (single-machine fallback). Logs a WARN whenever the
+/// auto-detected value is used so operators know the address is not pinned.
+pub(crate) fn resolve_advertise_host(config: &GatewayConfig) -> String {
+    if let Some(h) = &config.advertise_host
+        && !h.trim().is_empty()
+    {
+        return h.trim().to_string();
+    }
+    if let Some(ip) = detect_non_loopback_ip() {
+        tracing::warn!(
+            ip = %ip,
+            "advertise_host not configured — auto-detected non-loopback IP. \
+             Set [advertise_host] in gateway.toml (or --advertise-host) for \
+             deterministic behavior across restarts (ADR-055 D3)."
+        );
+        return ip;
+    }
+    "127.0.0.1".to_string()
+}
+
+/// Best-effort detection of the first non-loopback IPv4 address on this
+/// host. Uses the UDP "connect" trick: `connect` on a datagram socket
+/// does not send any packets — it only asks the kernel to resolve the
+/// route and assign the local source address, which we then read via
+/// `local_addr`. Targets the well-known anycast `1.1.1.1`; no traffic
+/// is emitted.
+fn detect_non_loopback_ip() -> Option<String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // connect on UDP does not emit packets; it only resolves the route
+    // and pins the local source address for subsequent sends.
+    socket.connect("1.1.1.1:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
+            Some(v4.to_string())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

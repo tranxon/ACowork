@@ -13,6 +13,17 @@ run_check() {
     cargo check --all
 }
 
+# ADR-055 §6.20 dependency red line: acowork-node MUST NOT depend on
+# acowork-gateway (mirrors acowork-node/tests/dependency_redline.rs).
+run_node_redline() {
+    echo "Checking acowork-node dependency red line..."
+    if grep -qE '^[[:space:]]*acowork-gateway[[:space:]]*=' core/acowork-node/Cargo.toml; then
+        echo "ERROR: acowork-node depends on acowork-gateway (ADR-055 §6.20 red line violated)"
+        exit 1
+    fi
+    echo "acowork-node dependency red line: OK"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -57,6 +68,7 @@ case "$MODE" in
         run_integration
         ;;
     all)
+        run_node_redline
         run_check
         run_clippy
         run_test

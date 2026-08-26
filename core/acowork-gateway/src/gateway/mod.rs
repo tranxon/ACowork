@@ -4,6 +4,7 @@
 //! gRPC server, lifecycle manager, package manager, and vault.
 
 pub mod state;
+pub mod node_manager;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,10 +15,7 @@ use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
 use crate::handlers::server::SharedState;
-use crate::lifecycle::manager::LifecycleManager;
-use crate::package_manager::install;
-use crate::package_manager::uninstall;
-use crate::package_manager::upgrade;
+use crate::gateway::state::SYSTEM_AGENT_ID;
 
 /// Gateway — the top-level orchestrator
 ///
@@ -32,7 +30,6 @@ use crate::package_manager::upgrade;
 pub struct Gateway {
     config: GatewayConfig,
     state: SharedState,
-    lifecycle: LifecycleManager,
 }
 
 impl Gateway {
@@ -48,11 +45,8 @@ impl Gateway {
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         config.validate()?;
 
-        let log_file_size_mb = config.log_file_size_mb;
-        let log_file_count = config.log_file_count;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
-        let packages_dir = config.packages_dir.clone();
 
         // Ensure data directory exists before opening the database
         std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -62,9 +56,6 @@ impl Gateway {
             ))
         })?;
 
-        // ADR-033: MQTT port for Runtime lifecycle (if MQTT is enabled).
-        let lifecycle_mqtt_port = if config.mqtt.enabled { Some(config.mqtt.port) } else { None };
-
         // Wire up the per-agent interaction store. Keys are agent_id, so the
         // timestamps survive agent stop/restart. Loaded eagerly so the
         // /api/agents sort order is correct from the first request.
@@ -73,28 +64,15 @@ impl Gateway {
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
-        // Restore installed agents from disk *before* wrapping into
-        // SharedState. This is the only time we can operate on the owned
-        // `GatewayState` directly; all later mutations go through the
-        // shared lock. See [`Self::restore_installed_agents_static`].
-        Self::restore_installed_agents_static(
-            &mut state,
-            std::path::Path::new(&packages_dir),
-            std::path::Path::new(&data_dir),
-        );
+        // ADR-055 §6.5: installed agents are no longer restored by an
+        // on-disk packages scan (L2-9). The local node publishes its
+        // installed-package inventory (retained InstalledAgentInfo) after
+        // it starts; the Gateway aggregates those into `installed_agents`
+        // via the MQTT dispatch path.
 
         let gateway = Self {
             config,
             state: Arc::new(RwLock::new(state)),
-            // idle_timeout removed: the decision is now owned by the Runtime
-            // (see `acowork-runtime::agent::idle_watcher`). The
-            // `Timeouts::idle_timeout_secs` TOML key is retained for backward
-            // compatibility but ignored at the Gateway.
-            lifecycle: LifecycleManager::new(
-                log_file_size_mb,
-                log_file_count,
-                lifecycle_mqtt_port,
-            ),
         };
 
         Ok(gateway)
@@ -115,12 +93,7 @@ impl Gateway {
         }
 
         // Check if System Agent is already installed
-        if self
-            .state
-            .read()
-            .await
-            .is_installed(crate::lifecycle::SYSTEM_AGENT_ID)
-        {
+        if self.state.read().await.is_installed(SYSTEM_AGENT_ID) {
             tracing::debug!("System Agent already installed, skipping bundled install");
             return;
         }
@@ -152,9 +125,10 @@ impl Gateway {
         );
         match self.install_agent_from_dir(&system_agent_src).await {
             Ok(agent_id) => {
+                // The local node re-discovers the copied package from its
+                // packages dir on startup and publishes the retained
+                // installed info; no in-memory refresh is needed here.
                 tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
-                // Refresh installed agents state
-                self.restore_installed_agents().await;
             }
             Err(e) => {
                 tracing::warn!("Failed to auto-install bundled System Agent: {}", e);
@@ -202,31 +176,21 @@ impl Gateway {
             .map_err(|e| GatewayError::Config(format!("Failed to parse manifest: {}", e)))?;
 
         let agent_id = manifest.agent_id.clone();
-        let version = manifest.version.clone();
 
-        // Copy agent files to packages directory
+        // Copy agent files to packages directory. The local node
+        // re-discovers the copied package from its packages dir on startup
+        // and publishes the retained installed info — the Gateway does NOT
+        // add it to installed_agents directly (ADR-055 §6.5 / L2-9).
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
         let agent_pkg_dir = packages_dir.join(&agent_id);
 
-        // Remove existing directory if it exists
         let _ = std::fs::remove_dir_all(&agent_pkg_dir);
         std::fs::create_dir_all(&agent_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to create package dir: {}", e)))?;
 
-        // Copy all files from src_dir to package dir
         Self::copy_dir_recursive(src_dir, &agent_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to copy agent files: {}", e)))?;
 
-        // Create AgentInfo and add to state
-        let info = crate::gateway::state::AgentInfo {
-            agent_id: agent_id.clone(),
-            version,
-            name: manifest.name.clone(),
-            install_path: agent_pkg_dir.to_string_lossy().to_string(),
-            manifest,
-        };
-
-        self.state.write().await.add_installed(info);
         Ok(agent_id)
     }
 
@@ -247,115 +211,6 @@ impl Gateway {
             }
         }
         Ok(())
-    }
-
-    /// Scan packages directory and restore installed agents from disk.
-    ///
-    /// On startup, the Gateway needs to rebuild its in-memory `installed_agents`
-    /// map by reading `manifest.toml` from each subdirectory under `packages_dir`.
-    /// Without this, agents installed in a previous session are invisible.
-    ///
-    /// **Async** wrapper that locks `self.state` and delegates to the
-    /// [`Self::restore_installed_agents_static`] helper. The split exists so
-    /// `Gateway::new` can run the same initialisation against an owned
-    /// `GatewayState` (no async runtime exists yet) before wrapping it in a
-    /// `SharedState`. After construction, all restore paths go through this
-    /// async method.
-    async fn restore_installed_agents(&mut self) {
-        let packages_dir = std::path::PathBuf::from(&self.config.packages_dir);
-        let data_dir = std::path::PathBuf::from(&self.config.data_dir);
-        let mut state = self.state.write().await;
-        Self::restore_installed_agents_static(&mut state, &packages_dir, &data_dir);
-    }
-
-    /// Synchronous restore helper that operates on an owned `&mut GatewayState`.
-    ///
-    /// Called from both [`Gateway::new`] (against a freshly constructed
-    /// owned state) and [`Gateway::restore_installed_agents`] (under the
-    /// `SharedState` write lock). Keeping the IO and field-mutation logic
-    /// here avoids duplicating it across two callers and prevents drift
-    /// between the construction-time and post-construction restore paths.
-    fn restore_installed_agents_static(
-        state: &mut GatewayState,
-        packages_dir: &std::path::Path,
-        data_dir: &std::path::Path,
-    ) {
-        if !packages_dir.exists() {
-            return;
-        }
-
-        let Ok(entries) = std::fs::read_dir(packages_dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let agent_dir = entry.path();
-            if !agent_dir.is_dir() {
-                continue;
-            }
-
-            let manifest_path = agent_dir.join("manifest.toml");
-            if !manifest_path.exists() {
-                continue;
-            }
-
-            match std::fs::read_to_string(&manifest_path) {
-                Ok(content) => match toml::from_str::<acowork_core::AgentManifest>(&content) {
-                    Ok(manifest) => {
-                        let info = crate::gateway::state::AgentInfo {
-                            agent_id: manifest.agent_id.clone(),
-                            version: manifest.version.clone(),
-                            name: manifest.name.clone(),
-                            install_path: agent_dir.to_string_lossy().to_string(),
-                            manifest,
-                        };
-                        let agent_id = info.agent_id.clone();
-                        state.add_installed(info);
-                        tracing::info!(
-                            "Restored installed agent: {} v{}",
-                            agent_id,
-                            state
-                                .installed_agents
-                                .get(&agent_id)
-                                .map(|i| i.version.as_str())
-                                .unwrap_or("?")
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse manifest at '{}': {}",
-                            manifest_path.display(),
-                            e
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read manifest at '{}': {}",
-                        manifest_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-
-        let count = state.installed_agents.len();
-        if count > 0 {
-            tracing::info!("Restored {} installed agent(s) from disk", count);
-        }
-
-        // ADR-017: Load avatar cache and apply to in-memory manifest so
-        // list_agents returns the correct avatar even for stopped agents.
-        let avatar_cache = crate::http::agent_config::load_avatar_cache(data_dir);
-        if !avatar_cache.is_empty() {
-            for (agent_id, entry) in &avatar_cache {
-                if let Some(info) = state.installed_agents.get_mut(agent_id) {
-                    info.manifest.avatar = entry.avatar.clone();
-                    info.manifest.builtin_avatar = entry.builtin_avatar.clone();
-                }
-            }
-            tracing::info!("Loaded avatar cache with {} entries", avatar_cache.len());
-        }
     }
 
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
@@ -464,13 +319,12 @@ impl Gateway {
             }
         }
 
-        // Scan packages directory and restore installed agents from disk.
-        self.restore_installed_agents().await;
+        // ADR-055 §6.5: installed agents are no longer restored by an
+        // on-disk packages scan (L2-9). The local node publishes its
+        // retained installed inventory after it starts; the Gateway
+        // aggregates those via the MQTT dispatch path.
 
         // Clean up orphaned runtime processes from a previous Gateway run.
-        // When Gateway restarts, previously running agents become orphaned
-        // (no gRPC connection). We kill them so the fresh Gateway can manage
-        // agents from a clean state.
         let orphan_count = self.cleanup_orphaned_runtimes();
         if orphan_count > 0 {
             tracing::info!(count = orphan_count, "Cleaned up orphan runtime processes");
@@ -485,17 +339,8 @@ impl Gateway {
         // available for the occasional self-state mutation.
         let shared_state: SharedState = self.state.clone();
 
-        // Auto-start the System Agent if installed.
-        // Pass the shared handle so the reaper can clean up the
-        // running-agent entry if the System Agent ever exits (e.g. a
-        // future idle-sleep policy that covers privileged agents).
-        if let Err(e) = self
-            .lifecycle
-            .auto_start_system_agent(&shared_state)
-            .await
-        {
-            tracing::warn!("Failed to auto-start System Agent: {}", e);
-        }
+        // System Agent auto-start now happens AFTER the local node is up
+        // and its installed inventory has been aggregated (see below).
 
         // Try to spawn the local embedding service (acowork-embed).
         // This is optional — if the binary is not found, embedding will
@@ -650,6 +495,13 @@ impl Gateway {
         {
             let mut gw = shared_state.write().await;
             gw.config = Some(self.config.clone());
+            // ADR-055 D3: resolve the advertise host once at startup
+            // (config > auto-detected non-loopback IP > 127.0.0.1) and
+            // cache it on GatewayState so every endpoint constructor
+            // (embed / LSP / AgentHello) reads a single source of truth.
+            let advertise = crate::config::resolve_advertise_host(&self.config);
+            tracing::info!(advertise_host = %advertise, "Resolved advertise host (ADR-055 D3)");
+            gw.advertise_host = advertise;
         }
 
         // Idle-timeout decision is owned by the Runtime now (see
@@ -847,6 +699,9 @@ impl Gateway {
         // ADR-033: Create runtime HTTP registry and agent registry.
         let runtime_http_registry = crate::http::proxy::new_shared_registry();
         let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
+        // ADR-055: node registry — the Gateway's view of Node Agents
+        // (LWT-driven online state + retained info snapshots).
+        let node_registry = crate::mqtt::node_registry::new_shared_registry();
 
         // Track whether the broker actually started — used to gate the
         // Gateway-side publisher without needing to re-check the broker
@@ -857,9 +712,17 @@ impl Gateway {
             guard.is_some()
         };
 
+        // ADR-055 §6.2: node control client — created after the MQTT
+        // client exists; shared between dispatch (NodeEvent correlation)
+        // and the HTTP handlers (command issue) via this slot.
+        let node_control_slot: std::sync::Arc<
+            tokio::sync::Mutex<Option<crate::mqtt::node_control::NodeControlClient>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
+            let node_reg_for_dispatch = node_registry.clone();
             // Pass the client into dispatch so the status re-publish
             // path (plain text → protobuf DataEnvelope) has a way to
             // call `publish_envelope`. Note: the client is created
@@ -877,23 +740,29 @@ impl Gateway {
                 tokio::sync::Mutex<Option<Arc<crate::mqtt::GatewayMqttClient>>>,
             > = std::sync::Arc::new(tokio::sync::Mutex::new(dispatch_client));
             let slot_for_cb = dispatch_client_slot.clone();
+            let node_control_slot_for_cb = node_control_slot.clone();
             let state_for_dispatch = shared_state.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
+                let node_control_slot = node_control_slot_for_cb.clone();
                 let topic = topic.clone();
                 let payload = payload.clone();
                 let reg_for_dispatch = reg_for_dispatch.clone();
                 let agent_reg_for_dispatch = agent_reg_for_dispatch.clone();
+                let node_reg_for_dispatch = node_reg_for_dispatch.clone();
                 let state_for_dispatch = state_for_dispatch.clone();
                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
+                    let node_control = node_control_slot.lock().await.clone();
                     crate::mqtt::dispatch::handle_message(
                         &topic, &payload,
                         &reg_for_dispatch,
                         &agent_reg_for_dispatch,
+                        &node_reg_for_dispatch,
                         client.as_ref(),
                         &state_for_dispatch,
+                        node_control.as_ref(),
                     );
                 });
             });
@@ -909,6 +778,11 @@ impl Gateway {
                     // AgentRegistry, which is what the Gateway itself
                     // needs).
                     *dispatch_client_slot.lock().await = Some(client.clone());
+                    // Backfill the node control client so dispatch can
+                    // correlate NodeEvent results (ADR-055 §6.2).
+                    *node_control_slot.lock().await = Some(
+                        crate::mqtt::node_control::NodeControlClient::new(client.clone()),
+                    );
                     Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
@@ -936,10 +810,106 @@ impl Gateway {
         {
             let cron_mqtt = mqtt_gw_client.clone();
             let cron_gw_state = shared_state.clone();
+            let cron_node_control = node_control_slot.lock().await.clone();
             let _cron_handle = tokio::spawn(async move {
-                crate::cron::run_cron_scheduler(cron_scheduler, cron_mqtt, cron_gw_state).await;
+                crate::cron::run_cron_scheduler(
+                    cron_scheduler,
+                    cron_mqtt,
+                    cron_gw_state,
+                    cron_node_control,
+                )
+                .await;
             });
         }
+
+        // ADR-055 §6.11: ensure a local Node Agent is running and
+        // supervise it (orphan cleanup → reuse window → spawn + reaper).
+        // Must run AFTER the MQTT broker + Gateway client are up so the
+        // retained `acowork/nodes/local/status` reuse window works.
+        let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
+            if mqtt_broker_started {
+                match crate::gateway::node_manager::ensure_local_node(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    &self.config.packages_dir,
+                    node_registry.clone(),
+                )
+                .await
+                {
+                    Ok(supervisor) => Some(supervisor),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Local node agent supervision failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // ADR-055 §6.2: auto-start the System Agent once the local node is
+        // up and its retained installed inventory has been aggregated.
+        // (When the broker is disabled the node-control slot is None, so
+        // this is a no-op.)
+        if let Some(nc) = node_control_slot.lock().await.clone() {
+            // Bounded wait for the node's retained installed info.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !shared_state.read().await.is_installed(SYSTEM_AGENT_ID)
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if !shared_state.read().await.is_installed(SYSTEM_AGENT_ID) {
+                tracing::warn!("System Agent not installed — skipping auto-start");
+            } else {
+                match nc
+                    .start_agent(acowork_core::node::LOCAL_NODE_ID, SYSTEM_AGENT_ID, false)
+                    .await
+                {
+                    Ok(event) => {
+                        if let Err(e) = crate::mqtt::node_control::NodeControlClient::check_reply(
+                            SYSTEM_AGENT_ID,
+                            &event,
+                        ) {
+                            tracing::warn!("Failed to auto-start System Agent: {}", e);
+                        } else {
+                            let mut gw = shared_state.write().await;
+                            let workspace = gw
+                                .installed_agents
+                                .get(SYSTEM_AGENT_ID)
+                                .map(|i| {
+                                    std::path::PathBuf::from(&i.install_path)
+                                        .join("workspace")
+                                        .to_string_lossy()
+                                        .to_string()
+                                })
+                                .unwrap_or_default();
+                            gw.add_running(crate::gateway::state::RunningAgentInfo {
+                                agent_id: SYSTEM_AGENT_ID.to_string(),
+                                pid: 0,
+                                started_at: chrono::Utc::now(),
+                                workspace,
+                                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                                connected: false,
+                                ready: false,
+                                dev_mode: false,
+                                debug_state: crate::gateway::state::DebugState::Disabled,
+                                debug_port: None,
+                                workspace_config_json: None,
+                                current_embed_dim: None,
+                                migration: None,
+                            });
+                            tracing::info!("Auto-started System Agent via local node");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to auto-start System Agent: {}", e),
+                }
+            }
+        }
+
+        // ADR-055 §6.2: extract the node control client (same instance
+        // as dispatch holds, sharing the pending-request table) for the
+        // HTTP handlers.
+        let node_control = node_control_slot.lock().await.clone();
 
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
@@ -951,6 +921,8 @@ impl Gateway {
                 mqtt_publisher_trigger,
                 Some(runtime_http_registry),
                 Some(agent_registry),
+                node_control,
+                Some(node_registry),
             )
             .await
             {
@@ -969,36 +941,11 @@ impl Gateway {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received shutdown signal, cleaning up...");
 
-                // Kill all running Runtime (agent) processes before exiting.
-                // This prevents orphaned Runtime processes when Gateway shuts
-                // down normally. Collect PIDs under a short read-lock, then
-                // release the lock before issuing async kill calls.
-                {
-                    let gw = shared_state.read().await;
-                    let runtime_pids: Vec<(String, u32)> = gw
-                        .running_agents
-                        .iter()
-                        .map(|(id, info)| (id.clone(), info.pid))
-                        .collect();
-                    // Drop the read lock before calling async kill operations
-                    drop(gw);
-                    for (agent_id, pid) in &runtime_pids {
-                        tracing::info!(
-                            agent_id = %agent_id,
-                            pid = pid,
-                            "Shutting down Runtime process"
-                        );
-                        if let Err(e) =
-                            crate::lifecycle::process::kill_agent_process(*pid).await
-                        {
-                            tracing::warn!(
-                                agent_id = %agent_id,
-                                error = %e,
-                                "Failed to kill Runtime process"
-                            );
-                        }
-                    }
-                }
+                // ADR-055 §6.2: Runtime processes are hosted by the node —
+                // the Gateway no longer kills them directly. The local node
+                // is shut down below (its supervisor SIGTERMs the node
+                // process group); any surviving Runtime is reaped by the
+                // next Gateway startup's orphan cleanup.
 
                 // Kill the embedding service process before exiting.
                 // This prevents acowork-embed from becoming an orphan process.
@@ -1028,6 +975,11 @@ impl Gateway {
                     }
                 }
 
+                // ADR-055 §6.11: shut down the local Node Agent.
+                if let Some(supervisor) = &local_node_supervisor {
+                    supervisor.shutdown().await;
+                }
+
                 Ok(())
             }
         };
@@ -1035,76 +987,6 @@ impl Gateway {
         shutdown_result?;
 
         Ok(())
-    }
-
-    /// Install a .agent package.
-    ///
-    /// Async because `self.state` is a tokio [`SharedState`] — the write
-    /// lock is held only across the `install_package` call (which itself
-    /// does IO, but that's pre-existing behaviour and not made worse by
-    /// this change). The daemon-side HTTP install path uses
-    /// `state.blocking_write()` directly and is unaffected.
-    pub async fn install_package(&mut self, package_path: &str) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        install::install_package(
-            std::path::Path::new(package_path),
-            packages_dir,
-            &mut state,
-            self.config.dev_mode,
-        )?;
-        Ok(format!("Package installed: {}", package_path))
-    }
-
-    /// Uninstall an agent. See [`Self::install_package`] for the async rationale.
-    pub async fn uninstall_package(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        uninstall::uninstall_package(agent_id, packages_dir, &mut state)?;
-        Ok(format!("Agent uninstalled: {}", agent_id))
-    }
-
-    /// Upgrade an agent. See [`Self::install_package`] for the async rationale.
-    pub async fn upgrade_package(
-        &mut self,
-        agent_id: &str,
-        package_path: &str,
-    ) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        upgrade::upgrade_package(
-            agent_id,
-            std::path::Path::new(package_path),
-            packages_dir,
-            &mut state,
-        )?;
-        Ok(format!("Agent upgraded: {}", agent_id))
-    }
-
-    /// Start an agent.
-    ///
-    /// `self.state` is already a [`SharedState`], so the CLI path is just
-    /// "clone the handle, hand it to `lifecycle`, done" — no
-    /// `take`/`swap` translation layer. The daemon (`run()`) and CLI
-    /// paths now share the same lifecycle signature.
-    ///
-    /// `wire_reaper = false` because in the CLI path the Gateway process
-    /// is about to exit; the reaper would outlive the call and have no
-    /// effect.
-    pub async fn start_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let state = self.state.clone();
-        self.lifecycle
-            .start_agent(agent_id, &state, false, false)
-            .await?;
-        Ok(format!("Agent started: {}", agent_id))
-    }
-
-    /// Stop a running agent. See [`Self::start_agent`] for the
-    /// SharedState rationale.
-    pub async fn stop_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let state = self.state.clone();
-        self.lifecycle.stop_agent(agent_id, &state).await?;
-        Ok(format!("Agent stopped: {}", agent_id))
     }
 
     /// List installed agents.
@@ -1129,33 +1011,16 @@ impl Gateway {
 
     /// Package an installed agent into .agent file (CLI command).
     ///
-    /// Async for SharedState symmetry with the rest of the CLI surface.
-    /// `build_package` only reads state, so we hold a `read().await` lock
-    /// for the duration.
+    /// Disabled until Phase 3 — publish build is delegated to the node.
     pub async fn package_agent(
         &self,
-        agent_id: &str,
-        output_dir: Option<&str>,
-        sign: bool,
-        key_dir: Option<&str>,
+        _agent_id: &str,
+        _output_dir: Option<&str>,
+        _sign: bool,
+        _key_dir: Option<&str>,
     ) -> Result<String, GatewayError> {
-        let output = output_dir
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("./build"));
-        let key = key_dir.map(std::path::PathBuf::from);
-
-        let state = self.state.read().await;
-        let result = crate::package_manager::publish::build_package(
-            agent_id,
-            &output,
-            sign,
-            key.as_deref(),
-            &state,
-        )?;
-
-        Ok(format!(
-            "Package built: {} ({} bytes, signed: {})",
-            result.output_path, result.file_size, result.signed
+        Err(GatewayError::Lifecycle(
+            "Publish build is not available in the node topology yet (ADR-055 Phase 3)".to_string(),
         ))
     }
 
@@ -1228,6 +1093,7 @@ mod tests {
             hf_mirrors: Vec::new(),
             data_flow: crate::config::DataFlowConfig::default(),
             mqtt: crate::config::MqttConfig::default(),
+            advertise_host: None,
         }
     }
 

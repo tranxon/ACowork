@@ -41,6 +41,13 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
+    /// ADR-055: Node control-plane client (issues agent lifecycle
+    /// commands to Node Agents and correlates the NodeEvent replies).
+    pub node_control: Option<crate::mqtt::node_control::NodeControlClient>,
+    /// ADR-055: Node registry (LWT-driven online state + retained info
+    /// snapshots). Used by handlers that route to node-local HTTP
+    /// services (e.g. `/api/fs/browse?target={node_id}`, L7-1).
+    pub node_registry: Option<crate::mqtt::SharedNodeRegistry>,
 }
 
 impl AppState {
@@ -58,6 +65,8 @@ impl AppState {
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
+            node_control: None,
+            node_registry: None,
         }
     }
 }
@@ -151,6 +160,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        .merge(crate::http::nodes_api::nodes_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
@@ -324,6 +334,11 @@ pub struct SystemStatusResponse {
     pub agents_installed: usize,
     pub agents_running: usize,
     pub uptime_secs: u64,
+    /// ADR-055 D3 §6.3: MQTT broker port for Desktop discovery.
+    /// Lets the Desktop derive the broker port dynamically instead of
+    /// assuming the default 19875 (L3-6 residual gap — ADR-058 W4 fixed
+    /// the host derivation; this closes the port half).
+    pub mqtt_port: u16,
 }
 
 /// `GET /api/status` — system status
@@ -344,6 +359,11 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         agents_installed: gw.installed_agents.len(),
         agents_running,
         uptime_secs: 0, // TODO: track actual uptime
+        mqtt_port: gw
+            .config
+            .as_ref()
+            .map(|c| c.mqtt.port)
+            .unwrap_or_else(crate::config::default_mqtt_port),
     })
 }
 

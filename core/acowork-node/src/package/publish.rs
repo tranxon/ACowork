@@ -1,19 +1,22 @@
 //! Package publishing — prepare and build/sign .agent packages
+//! (migrated from gateway `package_manager/publish.rs`, ADR-055 §6.20).
 //!
-//! S4.2: Publish prepare — validate manifest completeness, check prompts,
-//!       optional skills format check, cleanup operations.
-//! S4.3: Publish build — package agent directory into .agent ZIP, optional signing.
+//! S4.2: Publish prepare — validate manifest completeness, check
+//! prompts, optional skills format check, cleanup operations.
+//! S4.3: Publish build — package agent directory into .agent ZIP,
+//! optional signing.
 
 use std::path::Path;
 
-use crate::error::GatewayError;
-use crate::gateway::state::GatewayState;
 use acowork_core::packaging::PackageOptions;
+
+use crate::error::{NodeError, Result};
+use crate::state::NodeState;
 
 // ── S4.2: Publish prepare ──────────────────────────────────────────────
 
 /// Result of a publish prepare operation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PrepareResult {
     /// Individual check results
     pub checks: Vec<CheckItem>,
@@ -37,23 +40,20 @@ pub struct CheckItem {
 }
 
 /// Run all publish-preparation checks against an installed agent.
-///
-/// Returns `PrepareResult` with aggregated checks, warnings, and errors.
-/// If `clean` is true, performs cleanup operations (remove dev flag, etc.).
 pub fn prepare_publish(
     agent_id: &str,
     clean: bool,
-    state: &mut GatewayState,
-) -> Result<PrepareResult, GatewayError> {
+    state: &mut NodeState,
+) -> Result<PrepareResult> {
     let info = state
         .installed_agents
         .get(agent_id)
-        .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?;
+        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?;
 
     // Clone paths to avoid borrow conflicts with mutation below
     let install_path = Path::new(&info.install_path).to_path_buf();
     if !install_path.exists() {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Agent install path does not exist: {}",
             install_path.display()
         )));
@@ -68,7 +68,6 @@ pub fn prepare_publish(
     {
         let manifest = &info.manifest;
 
-        // Required fields
         if manifest.agent_id.is_empty() {
             errors.push("agent_id is empty".to_string());
             checks.push(CheckItem {
@@ -159,8 +158,7 @@ pub fn prepare_publish(
             });
         }
 
-        // LLM config: provider/model now come from resource_cache.providers,
-        // not from manifest fields. Skip empty check.
+        // LLM config: provider/model now come from resource_cache.providers.
         checks.push(CheckItem {
             name: "manifest.llm".to_string(),
             status: "ok".to_string(),
@@ -255,7 +253,6 @@ pub fn prepare_publish(
                         if skill_md.exists() {
                             match std::fs::read_to_string(&skill_md) {
                                 Ok(content) => {
-                                    // Check for YAML frontmatter (starts with ---)
                                     let has_frontmatter = content.trim_start().starts_with("---");
                                     skill_checks.push(format!(
                                         "{}: {}",
@@ -305,28 +302,27 @@ pub fn prepare_publish(
 
     // Extract dev flag before cleanup (avoid borrow conflicts)
     let manifest_dev_value = info.manifest.dev;
-    let _ = info; // drop reference (info is a &AgentInfo)
+    let _ = info; // drop reference (info is a &InstalledAgent)
 
     // ── S4.2.5: Cleanup operations ──
     if clean {
         // Remove dev flag from manifest
         if manifest_dev_value {
             let mut manifest = {
-                // Re-read manifest from disk to avoid borrow issues
                 let info = state
                     .installed_agents
                     .get(agent_id)
-                    .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
+                    .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
                     .clone();
                 info.manifest.clone()
             };
             manifest.dev = false;
             let manifest_toml = toml::to_string_pretty(&manifest).map_err(|e| {
-                GatewayError::Package(format!("Failed to serialize manifest: {}", e))
+                NodeError::Package(format!("Failed to serialize manifest: {}", e))
             })?;
             let manifest_path = install_path.join("manifest.toml");
             std::fs::write(&manifest_path, &manifest_toml)
-                .map_err(|e| GatewayError::Package(format!("Failed to write manifest: {}", e)))?;
+                .map_err(|e| NodeError::Package(format!("Failed to write manifest: {}", e)))?;
             cleaned = true;
             checks.push(CheckItem {
                 name: "cleanup.dev_removed".to_string(),
@@ -356,7 +352,6 @@ pub fn prepare_publish(
         if config_dir.exists() {
             let settings_path = config_dir.join("settings.toml");
             if settings_path.exists() {
-                // Replace with minimal defaults
                 let default_settings = "# ACowork Agent Configuration\n# See documentation for available options\n";
                 std::fs::write(&settings_path, default_settings).ok();
                 checks.push(CheckItem {
@@ -379,46 +374,38 @@ pub fn prepare_publish(
 // ── S4.3: Publish build ───────────────────────────────────────────────
 
 /// Build a .agent package from an installed agent directory.
-///
-/// Creates a ZIP archive at `output_path` using the agent's install directory,
-/// then optionally signs it using the signing keys in `key_dir`.
-///
-/// Returns the output path and file size in bytes.
 pub fn build_package(
     agent_id: &str,
     output_dir: &Path,
     sign: bool,
     key_dir: Option<&Path>,
-    state: &GatewayState,
-) -> Result<BuildResult, GatewayError> {
+    state: &NodeState,
+) -> Result<BuildResult> {
     let info = state
         .installed_agents
         .get(agent_id)
-        .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?;
+        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?;
 
     let agent_dir = Path::new(&info.install_path);
     if !agent_dir.exists() {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Agent install path does not exist: {}",
             agent_dir.display()
         )));
     }
 
-    // Generate output filename: <agent_id>-<version>.agent
     let output_filename = format!("{}-{}.agent", agent_id, info.version);
     let output_path = output_dir.join(&output_filename);
 
-    // Create output directory if needed
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            GatewayError::Package(format!("Failed to create output directory: {}", e))
+            NodeError::Package(format!("Failed to create output directory: {}", e))
         })?;
     }
 
-    // Build unsigned package using acowork-sign packager
     let opts = PackageOptions::default(); // exclude conversations/config by default
     acowork_sign::packager::build_agent_package(agent_dir, &output_path, Some(&opts))
-        .map_err(|e| GatewayError::Sign(format!("Failed to build package: {}", e)))?;
+        .map_err(|e| NodeError::Sign(format!("Failed to build package: {}", e)))?;
 
     let mut file_size = std::fs::metadata(&output_path)
         .map(|m| m.len())
@@ -433,7 +420,6 @@ pub fn build_package(
         });
         let signed_path = output_dir.join(format!("{}-{}-signed.agent", agent_id, info.version));
 
-        // Try to sign with developer key first
         match acowork_sign::sign::sign_package(
             &output_path,
             &signed_path,
@@ -441,10 +427,9 @@ pub fn build_package(
             acowork_sign::keygen::KeyType::Developer,
         ) {
             Ok(()) => {
-                // Replace unsigned with signed
                 std::fs::remove_file(&output_path).ok();
                 std::fs::rename(&signed_path, &output_path).map_err(|e| {
-                    GatewayError::Package(format!("Failed to rename signed package: {}", e))
+                    NodeError::Package(format!("Failed to rename signed package: {}", e))
                 })?;
                 signed = true;
                 file_size = std::fs::metadata(&output_path)
@@ -456,7 +441,6 @@ pub fn build_package(
                     "Package signing failed (continuing with unsigned package): {}",
                     e
                 );
-                // Keep the unsigned package
             }
         }
     }
@@ -492,16 +476,9 @@ fn is_valid_agent_id(agent_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::state::AgentInfo;
+    use crate::state::InstalledAgent;
 
-    fn temp_vault_dir(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("acowork-test-publish-{}", name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().to_string()
-    }
-
-    fn create_test_agent(state: &mut GatewayState, agent_id: &str, install_path: &str) {
+    fn create_test_agent(state: &mut NodeState, agent_id: &str, install_path: &str) {
         let install_path = Path::new(install_path);
         std::fs::create_dir_all(install_path.join("prompts")).unwrap();
         std::fs::create_dir_all(install_path.join("skills/search")).unwrap();
@@ -552,7 +529,7 @@ model = "gpt-4"
         ))
         .unwrap();
 
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -569,13 +546,8 @@ model = "gpt-4"
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let install_dir = temp_dir.join("installed");
-        let vault_dir = temp_vault_dir("prep-ok");
-        let mut state = GatewayState::new(&vault_dir);
-        create_test_agent(
-            &mut state,
-            "com.test.weather",
-            &install_dir.to_string_lossy(),
-        );
+        let mut state = NodeState::new(16);
+        create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
 
         let result = prepare_publish("com.test.weather", false, &mut state).unwrap();
         assert!(
@@ -597,7 +569,6 @@ model = "gpt-4"
 
         let install_dir = temp_dir.join("installed");
         std::fs::create_dir_all(&install_dir).unwrap();
-        // Manifest with empty description/author and no prompts/ dir (should produce warnings)
         std::fs::write(
             install_dir.join("manifest.toml"),
             r#"agent_id = "com.test.invalid"
@@ -610,10 +581,8 @@ runtime_version = "0.1.0"
 temperature = 0.7"#,
         )
         .unwrap();
-        // Don't create prompts/ dir — should trigger warning
 
-        let vault_dir = temp_vault_dir("prep-err");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
         let manifest = acowork_core::AgentManifest::from_toml(
             r#"agent_id = "com.test.invalid"
 version = "1.0.0"
@@ -626,7 +595,7 @@ temperature = 0.7
 "#,
         )
         .unwrap();
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: "com.test.invalid".to_string(),
             version: "1.0.0".to_string(),
             name: "Test".to_string(),
@@ -635,7 +604,6 @@ temperature = 0.7
         });
 
         let result = prepare_publish("com.test.invalid", false, &mut state).unwrap();
-        // Should have issues (warnings or errors) for missing prompts/ and empty fields
         assert!(
             !result.warnings.is_empty() || !result.errors.is_empty(),
             "Should have warnings or errors for missing prompts and empty fields"
@@ -656,7 +624,6 @@ temperature = 0.7
         std::fs::create_dir_all(install_dir.join("recordings")).unwrap();
         std::fs::write(install_dir.join("recordings/test.rec"), b"dummy").unwrap();
 
-        // Manifest with dev=true
         std::fs::write(
             install_dir.join("manifest.toml"),
             r#"agent_id = "com.test.dev"
@@ -673,8 +640,7 @@ model = "gpt-4"
         )
         .unwrap();
 
-        let vault_dir = temp_vault_dir("prep-clean");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
         let manifest = acowork_core::AgentManifest::from_toml(
             r#"agent_id = "com.test.dev"
 version = "1.0.0"
@@ -689,7 +655,7 @@ model = "gpt-4"
 "#,
         )
         .unwrap();
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: "com.test.dev".to_string(),
             version: "1.0.0".to_string(),
             name: "Dev Agent".to_string(),
@@ -716,13 +682,8 @@ model = "gpt-4"
 
         let install_dir = temp_dir.join("installed");
         let output_dir = temp_dir.join("output");
-        let vault_dir = temp_vault_dir("build");
-        let mut state = GatewayState::new(&vault_dir);
-        create_test_agent(
-            &mut state,
-            "com.test.weather",
-            &install_dir.to_string_lossy(),
-        );
+        let mut state = NodeState::new(16);
+        create_test_agent(&mut state, "com.test.weather", &install_dir.to_string_lossy());
 
         let result = build_package("com.test.weather", &output_dir, false, None, &state).unwrap();
         assert!(result.output_path.ends_with(".agent"));
@@ -735,8 +696,7 @@ model = "gpt-4"
 
     #[test]
     fn test_build_package_not_found() {
-        let vault_dir = temp_vault_dir("build-nf");
-        let state = GatewayState::new(&vault_dir);
+        let state = NodeState::new(16);
 
         let result = build_package(
             "com.test.nonexistent",
@@ -746,7 +706,5 @@ model = "gpt-4"
             &state,
         );
         assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&vault_dir);
     }
 }

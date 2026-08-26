@@ -36,6 +36,7 @@
 //! POST   /workspaces/file                        // NEW: create file
 //! PUT    /workspaces/file                        // NEW: overwrite file
 //! DELETE /workspaces/file                        // NEW: delete file
+//! GET    /workspaces/raw/{path}                  // ADR-055 L2-7: raw bytes (preview iframe)
 //! POST   /workspaces/dir                         // NEW: create dir
 //! DELETE /workspaces/dir                         // NEW: delete dir
 //! POST   /workspaces/copy                        // NEW: copy file/dir tree
@@ -71,7 +72,8 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -439,6 +441,14 @@ impl RuntimeHttpServer {
                     .post(create_workspace_file)
                     .put(write_workspace_file)
                     .delete(delete_workspace_file),
+            )
+            // ADR-055 L2-7: raw-bytes read for the Gateway's HTML preview
+            // iframe (the Gateway reverse-proxies `/workspace-files/…`
+            // here). Serves verbatim bytes + Content-Type — unlike the
+            // JSON envelope above.
+            .route(
+                "/workspaces/raw/{*path}",
+                get(read_workspace_raw),
             )
             .route(
                 "/workspaces/dir",
@@ -1134,6 +1144,35 @@ async fn read_workspace_file(
         .await
         .map(Json)
         .map_err(workspace_error_to_response)
+}
+
+/// `GET /workspaces/raw/{path}?workspace_id=…` — serve a file's raw bytes
+/// (ADR-055 L2-7). The Gateway reverse-proxies its `/workspace-files/…`
+/// HTML-preview endpoints here instead of reading the workspace
+/// filesystem itself. Returns `Content-Type` + verbatim bytes so the
+/// preview iframe's `<img>` / `<link>` / `<script>` sub-resources resolve.
+async fn read_workspace_raw(
+    State(state): State<HttpState>,
+    Path(file_rel_path): Path<String>,
+    Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.workspace_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let params = crate::usecases::workspace_query::ReadFileParams {
+        workspace_id: q.workspace_id,
+        path: file_rel_path,
+    };
+    let dto = svc
+        .read_file_raw(&params)
+        .await
+        .map_err(workspace_error_to_response)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, dto.mime_type)],
+        dto.bytes,
+    ))
 }
 
 /// `GET /workspaces/find` — fuzzy filename search (Ctrl+P-style palette).

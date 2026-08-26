@@ -41,6 +41,25 @@ export interface SystemStatusResponse {
   agents_installed: number;
   agents_running: number;
   uptime_secs: number;
+  /** ADR-055 D3: MQTT broker port for dynamic discovery (L3-6). */
+  mqtt_port: number;
+}
+
+/** Node Agent entry — matches Gateway HTTP API GET /api/nodes (ADR-055 §6.13.3). */
+export interface NodeInfo {
+  node_id: string;
+  online: boolean;
+  online_since?: string;
+  machine_uid?: string;
+  hostname?: string;
+  os?: string;
+  arch?: string;
+  node_version?: string;
+  protocol_version?: number;
+  capabilities: string[];
+  max_agents?: number;
+  agent_count?: number;
+  http_endpoint?: string;
 }
 
 /** Agent list entry — matches Gateway API */

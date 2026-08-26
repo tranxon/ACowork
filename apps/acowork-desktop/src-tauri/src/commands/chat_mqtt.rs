@@ -42,15 +42,27 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
     let user_id = "default"; // Single-user phase; multi-user will use actual user_id
 
-    // ADR-058 W4: derive the MQTT broker host from the Gateway HTTP base
-    // URL so Remote mode (Gateway behind an SSH tunnel / WSL IP) reaches
-    // the broker through the same forwarded host as :19876 HTTP. The
-    // broker port itself stays the default GATEWAY_MQTT_PORT — the
-    // tunnel is expected to forward the same port (§3.5). Local mode
+    // ADR-058 W4 + ADR-055 D3: derive both the MQTT broker host AND port
+    // from the Gateway so Remote mode (Gateway behind an SSH tunnel / WSL
+    // IP) reaches the broker through the same forwarded host as :19876
+    // HTTP. The host is derived from the base URL; the port is fetched
+    // dynamically from /api/status (L3-6 residual gap — ADR-058 W4 fixed
+    // the host half, ADR-055 Phase 1.3 closes the port half). Local mode
     // derives "127.0.0.1" — identical to the previous hardcode.
-    let gateway_base_url = state.gateway.read().await.base_url().to_string();
-    let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
-        .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
+    let (mqtt_host, mqtt_port) = {
+        let gw = state.gateway.read().await;
+        let gateway_base_url = gw.base_url().to_string();
+        let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
+            .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
+        // Fetch the broker port dynamically; fall back to the default on
+        // any error so the connection still attempts the canonical port.
+        let mqtt_port = gw
+            .system_status()
+            .await
+            .map(|s| s.mqtt_port)
+            .unwrap_or(defaults::GATEWAY_MQTT_PORT);
+        (mqtt_host, mqtt_port)
+    };
 
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
@@ -412,7 +424,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
     let client = DesktopMqttClient::connect(
         &mqtt_host,
-        defaults::GATEWAY_MQTT_PORT,
+        mqtt_port,
         user_id,
         on_message,
         // ADR-036 / ADR-039: bridge `rumqttc` eventloop status → Tauri event.

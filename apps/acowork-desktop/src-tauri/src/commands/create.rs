@@ -130,7 +130,7 @@ pub async fn create_agent(
     // Install via Gateway
     let client = state.gateway.read().await;
     client
-        .install_agent(&package_bytes, true)
+        .install_agent(&package_bytes, true, None)
         .await
         .map_err(|e| format!("Install failed: {}", e))?;
 

@@ -111,6 +111,8 @@ pub(crate) async fn start_http_server(
     mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger>,
     runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
+    node_control: Option<crate::mqtt::node_control::NodeControlClient>,
+    node_registry: Option<crate::mqtt::SharedNodeRegistry>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -132,6 +134,8 @@ pub(crate) async fn start_http_server(
     app_state.mqtt_publisher_trigger = mqtt_publisher_trigger;
     app_state.runtime_http_registry = runtime_http_registry;
     app_state.agent_registry = agent_registry;
+    app_state.node_control = node_control;
+    app_state.node_registry = node_registry;
 
     // Clean up stale pidfile from a previous run (if any). This is purely
     // for housekeeping — mutual exclusion is handled by port probing below.

@@ -82,6 +82,15 @@ message DataEnvelope {
 
     // ── Sidecar (Sidecar → subscribers, Retained) ──
     SidecarStatus            sidecar_status            = 60;
+
+    // ── Node control plane (ADR-055 §6.2, Node ↔ Gateway) ──
+    NodeInfo                 node_info                 = 81;
+    NodeControlCommand       node_control_command      = 82;
+    NodeEvent                node_event                = 83;
+    // ADR-055 §6.5: per-agent installed-package inventory entry
+    // (Node → Gateway, Retained). The Gateway aggregates these to
+    // rebuild its installed_agents view (Phase 2b.3 hard-cut).
+    InstalledAgentInfo       installed_agent_info      = 84;
   }
 }
 
@@ -1075,4 +1084,217 @@ message SectionMeta {
   uint64 size_bytes = 1;
   uint64 token_estimate = 2;
   string hash = 3;
+}
+
+// ── Node control plane (ADR-055 §6.2) ────────────────────────────────
+//
+// Topic family (client_id convention: "node:{node_id}"):
+//   acowork/nodes/{node_id}/status                          plain text
+//   "online"/"offline", QoS 1 Retained + LWT (mirrors the agent
+//   status topic shape — the LWT must be a fixed payload fixed at
+//   CONNECT time, so plain text is the contract).
+//   acowork/nodes/{node_id}/info                            NodeInfo
+//   envelope, QoS 1 Retained.
+//   acowork/nodes/{node_id}/events                          NodeEvent
+//   envelope, QoS 1 (node-level results: pong, diagnostics).
+//   acowork/nodes/{node_id}/agents/{agent_id}/control/{cmd} NodeControlCommand
+//   envelope, QoS 1 (Gateway → Node lifecycle commands).
+//   acowork/nodes/{node_id}/agents/{agent_id}/events        NodeEvent
+//   envelope, QoS 1 (per-agent execution results).
+//
+// Command/result correlation: every command carries a `request_id`;
+// the Node echoes it in the NodeEvent reply. QoS 1 at-least-once
+// delivery means duplicates are the norm — the Node de-duplicates by
+// `request_id` and re-sends the cached result without re-executing
+// (ADR-055 §6.2 idempotency discipline, aligned with ADR-039).
+
+/// Node metadata snapshot (always latest complete value).
+/// Topic: acowork/nodes/{node_id}/info (Retained, QoS 1)
+message NodeInfo {
+  string node_id = 1;
+  /// Machine fingerprint (UUID v4, persisted in identity.json, ADR-055
+  /// §6.12). Lets the Gateway detect "same name, different machine"
+  /// enrollment conflicts and makes enrollment idempotent.
+  string machine_uid = 2;
+  string hostname = 3;
+  string os = 4;      // std::env::consts::OS
+  string arch = 5;    // std::env::consts::ARCH
+  /// Version of the acowork-node binary (CARGO_PKG_VERSION).
+  string node_version = 6;
+  /// Node control-plane protocol version spoken by this node. The
+  /// Gateway rejects install/start commands when below its minimum
+  /// supported version (ADR-055 §6.9 version negotiation).
+  uint32 protocol_version = 7;
+  /// Capability tags — grows over the ADR-055 phases
+  /// ("process", "package", "proxy", "sidecar", "fs_browse").
+  repeated string capabilities = 8;
+  /// Maximum concurrent Runtime processes (ADR-055 §6.18, default 16).
+  uint32 max_agents = 9;
+  /// Current running agent count (informational heartbeat).
+  uint32 agent_count = 10;
+  /// This node's reverse-proxy base URL (`http://{advertise_host}:{port}`,
+  /// ADR-055 §6.3). The Gateway uses it to reach node-local HTTP services
+  /// (e.g. `/fs/browse` for remote filesystem browsing, L7-1).
+  string http_endpoint = 11;
+}
+
+/// Node → Gateway installed-agent inventory entry (ADR-055 §6.5).
+/// Topic: acowork/nodes/{node_id}/agents/{agent_id}/installed
+/// (Retained, QoS 1). The Node is the authority for its own package
+/// inventory; the Gateway aggregates these into its installed_agents
+/// view (replacing the pre-hard-cut on-disk scan, L2-9). An empty
+/// payload (zero-length retained) clears the entry on uninstall.
+message InstalledAgentInfo {
+  string agent_id = 1;
+  string version = 2;
+  string name = 3;
+  /// Node-local install path. The Gateway does NOT interpret this path
+  /// for a remote node (diagnostic/display only until the Phase 2c
+  /// reverse proxy); for the local node it is a real filesystem path.
+  string install_path = 4;
+  /// Full manifest.toml content. The Gateway parses this to rebuild its
+  /// `AgentManifest` (capability registration, cron triggers, avatar).
+  string manifest_toml = 5;
+}
+
+/// Gateway → Node command.
+/// Topic: acowork/nodes/{node_id}/agents/{agent_id}/control/{cmd}
+/// (agent-scoped lifecycle) or acowork/nodes/{node_id}/control/{cmd}
+/// (node-scoped, currently only `ping`).
+message NodeControlCommand {
+  string node_id = 1;
+  /// Correlation id — echoed by the Node in the NodeEvent reply.
+  /// QoS 1 duplicates are detected by this id and not re-executed.
+  string request_id = 2;
+  oneof command {
+    NodePing          ping           = 10;  // node-scoped liveness probe
+    NodeStart         start          = 11;  // Phase 2b
+    NodeStop          stop           = 12;  // Phase 2b
+    NodeInstall       install        = 13;  // Phase 3 (remote package distribution)
+    NodeUninstall     uninstall      = 14;  // Phase 2b
+    NodeSkillsImport  skills_import  = 15;  // Phase 2b
+    NodeAvatarUpdate  avatar_update  = 16;  // Phase 2b
+    NodeClone         clone          = 17;  // Phase 3b (node-local clone)
+    NodeUpgrade       upgrade        = 18;  // Phase 3b (package upgrade)
+    NodePublishPrepare publish_prepare = 19; // Phase 3b (publish prepare)
+    NodePublishBuild  publish_build  = 20;  // Phase 3b (publish build/sign)
+  }
+}
+
+/// Liveness probe. Topic: acowork/nodes/{node_id}/control/ping.
+message NodePing {
+}
+
+/// Start an agent Runtime on the node (idempotent: already-running
+/// returns success with the existing PID, no second spawn).
+message NodeStart {
+  string agent_id = 1;
+  bool dev_mode = 2;
+}
+
+/// Stop an agent Runtime (idempotent: already-exited returns success
+/// after cleaning residual state).
+message NodeStop {
+  string agent_id = 1;
+  string reason = 2;
+}
+
+/// Install an agent package on the node (async: Node replies 202-style
+/// in-progress event, final result on the events topic).
+message NodeInstall {
+  string agent_id = 1;
+  /// Gateway-side download URL for the .acw package (Phase 3).
+  string package_url = 2;
+  /// Node-local path of the already-spooled package file (Phase 2b
+  /// single-machine: the Gateway spools the upload and hands the node a
+  /// local path on the same filesystem). Mutually exclusive with
+  /// `package_url`.
+  string local_path = 3;
+  /// Signature strictness (ADR-055 §6.20): `true` allows unsigned
+  /// packages (local development), `false` requires a valid signature
+  /// (production). Carried from the Gateway's own `dev_mode`.
+  bool dev_mode = 4;
+}
+
+/// Uninstall an agent package (idempotent via atomic replace).
+message NodeUninstall {
+  string agent_id = 1;
+}
+
+/// Import a skills ZIP into an installed agent package.
+message NodeSkillsImport {
+  string agent_id = 1;
+  /// Node-local path of the uploaded skill archive (Phase 2b).
+  string zip_path = 2;
+}
+
+/// Update avatar assets inside an installed agent package.
+message NodeAvatarUpdate {
+  string agent_id = 1;
+  /// Serialized avatar update request (mirrors the HTTP handler shape).
+  string avatar_json = 2;
+}
+
+/// Clone an installed agent to a new agent ID (node-local operation,
+/// ADR-055 §6.6 L2-5). The source and the new agent live on the SAME
+/// node, so the clone copies the package directory directly — the
+/// cross-machine memory export/import (§6.18 agent-affinity migration)
+/// is a separate concern.
+message NodeClone {
+  string agent_id = 1;      // source agent
+  string new_agent_id = 2;  // target agent
+  string mode = 3;          // "skeleton" | "full"
+}
+
+/// Upgrade an installed agent to a new package version (async: the node
+/// pulls the package and swaps the install directory, preserving data/
+/// and config/).
+message NodeUpgrade {
+  string agent_id = 1;
+  /// Gateway-hosted download URL for the new .acw package (Phase 3b).
+  string package_url = 2;
+  /// Node-local path of an already-spooled package file. Mutually
+  /// exclusive with `package_url`.
+  string local_path = 3;
+  /// Signature strictness — mirrors `NodeInstall.dev_mode`.
+  bool dev_mode = 4;
+}
+
+/// Run publish-preparation checks against an installed agent
+/// (ADR-055 §6.6 L2-5). The node reports the structured result via
+/// `NodeEvent.result_json`.
+message NodePublishPrepare {
+  string agent_id = 1;
+  /// Whether to run cleanup (strip dev flag, clear recordings, reset
+  /// config) in addition to the checks.
+  bool clean = 2;
+}
+
+/// Build (and optionally sign) a .agent package on the node
+/// (ADR-055 §6.6 L2-5). The node reports the structured result
+/// (output_path / signed / file_size) via `NodeEvent.result_json`.
+message NodePublishBuild {
+  string agent_id = 1;
+  /// Node-local output directory. Empty = the node's own packages_dir.
+  string output_dir = 2;
+  /// Whether to sign the built package.
+  bool sign = 3;
+  /// Node-local signing key directory (ignored when `sign` is false).
+  string key_dir = 4;
+}
+
+/// Node → Gateway execution result, correlated by request_id.
+/// Topic: acowork/nodes/{node_id}/events or
+/// acowork/nodes/{node_id}/agents/{agent_id}/events (QoS 1).
+message NodeEvent {
+  string node_id = 1;
+  string request_id = 2;
+  /// "ok" | "error" | "not_implemented" | "in_progress"
+  string status = 3;
+  /// Human-readable detail (error message, diagnostics, PID, etc.).
+  string message = 4;
+  /// Optional structured result (JSON) for commands that return more
+  /// than a status string — publish prepare/build carry their
+  /// serialized result payloads here. Absent for simple commands.
+  optional string result_json = 5;
 }

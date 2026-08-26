@@ -406,10 +406,15 @@ pub async fn handle_agent_hello(
     let search_key_vault = crate::resource_cache::build_search_key_vault(&gw);
 
     // ── Embedding service info (from embed_process state) ──
+    // ADR-055 D3: use the resolved advertise host (config > auto-detected
+    // non-loopback IP > 127.0.0.1) instead of the hard-coded loopback so
+    // remote Runtime processes can reach embed / LSP endpoints across the
+    // network. Clone once so the downstream `map` closures stay move-only.
+    let advertise_host = gw.advertise_host.clone();
     let embed_endpoint = gw
         .embed_process
         .as_ref()
-        .map(|eps| format!("http://127.0.0.1:{}/v1", eps.port));
+        .map(|eps| format!("http://{}:{}/v1", advertise_host, eps.port));
     let embed_model_id = gw
         .embed_process
         .as_ref()
@@ -424,7 +429,7 @@ pub async fn handle_agent_hello(
         .lsp_relay_process
         .as_ref()
         .filter(|eps| eps.ready)
-        .map(|eps| format!("http://127.0.0.1:{}", eps.port));
+        .map(|eps| format!("http://{}:{}", advertise_host, eps.port));
 
     drop(gw);
 
@@ -713,6 +718,7 @@ mod tests {
                     name: format!("Test Agent {}", i),
                     install_path: "/tmp/test".to_string(),
                     manifest,
+                    node_id: "local".to_string(),
                 });
             }));
         }

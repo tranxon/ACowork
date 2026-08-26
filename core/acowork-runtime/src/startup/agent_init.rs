@@ -261,7 +261,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
             crate::mqtt::client::MqttConnectConfig {
-                host: "127.0.0.1",
+                // ADR-055 D3: parameterise the broker host instead of
+                // hard-coding 127.0.0.1 so the Runtime can connect to a
+                // remote / distributed Gateway broker. Defaults to
+                // 127.0.0.1 for single-machine topology (L3-5).
+                host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
                 port: mqtt_port,
                 agent_id: &loaded.manifest.agent_id,
                 agent_name: &loaded.manifest.name,
@@ -285,23 +289,43 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 // (the Gateway subscribes to this retained topic on startup; if the publish
                 // never lands, the registry stays empty and every reverse-proxy request 503s).
                 if let Some(port) = runtime_http_port {
-                    let topic = format!("acowork/agents/{}/http_port", loaded.manifest.agent_id);
+                    // ADR-055 D3: publish the full endpoint (not just the
+                    // bare port) so the Gateway stores an opaque address it
+                    // can reverse-proxy to without knowing whether it is
+                    // loopback (Phase 1) or a Node reverse-proxy (Phase 2).
+                    // Runtime HTTP stays loopback-only (D2 decision).
+                    //
+                    // ADR-055 §6.4: when the Node injects
+                    // `--http-advertise-endpoint` (the Node reverse-proxy
+                    // base URL), publish `{base}/agents/{id}` so the
+                    // Gateway routes through the Node. The Runtime only
+                    // concatenates — node-internal topology stays private
+                    // to the Node.
+                    let endpoint = match &config.http_advertise_endpoint {
+                        Some(base) => format!(
+                            "{}/agents/{}",
+                            base.trim_end_matches('/'),
+                            loaded.manifest.agent_id
+                        ),
+                        None => format!("http://127.0.0.1:{}", port),
+                    };
+                    let topic = format!("acowork/agents/{}/http_endpoint", loaded.manifest.agent_id);
                     match client.publish_raw(
                         &topic,
-                        port.to_string().as_bytes(),
+                        endpoint.as_bytes(),
                         crate::mqtt::client::MqttQoS::AtLeastOnce,
                         true, // Retained — so Gateway can discover on restart
                     ).await {
                         Ok(()) => tracing::info!(
                             agent_id=%loaded.manifest.agent_id,
-                            port,
-                            "Published retained http_port for Gateway reverse-proxy discovery"
+                            %endpoint,
+                            "Published retained http_endpoint for Gateway reverse-proxy discovery"
                         ),
                         Err(e) => tracing::error!(
                             agent_id=%loaded.manifest.agent_id,
-                            port,
+                            %endpoint,
                             error=%e,
-                            "Failed to publish retained http_port — Gateway will return 503 until the Runtime restarts and re-publishes"
+                            "Failed to publish retained http_endpoint — Gateway will return 503 until the Runtime restarts and re-publishes"
                         ),
                     }
                 }

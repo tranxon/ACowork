@@ -22,6 +22,7 @@ import type {
   LspServersWithStatus,
   CompactModelRef,
   DefaultCompactModelResponse,
+  NodeInfo,
 } from "./types";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
@@ -571,3 +572,19 @@ export async function setDefaultCompactModel(
   }
   return data.default_compact_model ?? null;
 }
+
+/**
+ * `GET /api/nodes` — list all known Node Agents (online + offline),
+ * sorted by node_id (ADR-055 §6.13.3 / Phase 3g).
+ *
+ * Returns an empty list when the Gateway has no node registry (MQTT
+ * disabled) or when no node has ever reported.
+ */
+export async function fetchNodes(gatewayUrl = getGatewayUrl()): Promise<NodeInfo[]> {
+  const resp = await fetch(`${gatewayUrl}/api/nodes`);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch nodes: ${resp.status}`);
+  }
+  return (await resp.json()) as NodeInfo[];
+}
+

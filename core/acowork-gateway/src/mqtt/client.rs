@@ -82,7 +82,12 @@ fn error_descriptor_from_rumqttc_025(err: &ConnectionError) -> ErrorDescriptor {
 /// Without re-subscribing, the Gateway silently loses agent http_port,
 /// status, and ready updates after any MQTT reconnect.
 const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
-    ("acowork/agents/+/http_port", QoS::AtLeastOnce),
+    // ADR-055 D3 / Phase 1.4: the Runtime registers its full endpoint
+    // URL ("http://127.0.0.1:{port}") on this topic. NOTE: this was
+    // originally `http_port`; the Phase 1.4 topic rename updated
+    // dispatch.rs but missed this subscription list — fixed together
+    // with the ADR-055 Phase 2a node subscriptions.
+    ("acowork/agents/+/http_endpoint", QoS::AtLeastOnce),
     ("acowork/agents/+/status", QoS::AtLeastOnce),
     // Runtime publishes "true" only after Phase A–C have all populated
     // the HTTP server's late-bind slots; the Gateway pins
@@ -92,6 +97,21 @@ const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     // `/sessions/{sid}/messages` HTTP call from the ChatPanel races with
     // Phase B and hits 503.
     ("acowork/agents/+/ready", QoS::AtLeastOnce),
+    // ADR-055 §6.2: node control plane — LWT-driven node online/offline
+    // (plain text) + node metadata (protobuf NodeInfo envelope), both
+    // retained so a fresh Gateway startup recovers the node view from
+    // the broker without polling.
+    ("acowork/nodes/+/status", QoS::AtLeastOnce),
+    ("acowork/nodes/+/info", QoS::AtLeastOnce),
+    // ADR-055 §6.2: per-agent NodeEvent results (protobuf envelope,
+    // QoS 1) — the Gateway correlates these against in-flight control
+    // commands by request_id (NodeControlClient).
+    ("acowork/nodes/+/agents/+/events", QoS::AtLeastOnce),
+    // ADR-055 §6.5: per-agent installed-package inventory (Retained).
+    // The Gateway aggregates these into its installed_agents view,
+    // replacing the pre-hard-cut on-disk packages scan (L2-9). An empty
+    // retained payload clears the entry on uninstall.
+    ("acowork/nodes/+/agents/+/installed", QoS::AtLeastOnce),
 ];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).

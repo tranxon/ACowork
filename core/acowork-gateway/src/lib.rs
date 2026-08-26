@@ -15,7 +15,6 @@ pub mod interaction_store;
 pub mod handlers;
 pub mod lifecycle;
 pub mod mqtt;
-pub mod package_manager;
 pub mod rate;
 pub mod resource_cache;
 pub mod vault;

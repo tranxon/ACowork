@@ -53,6 +53,17 @@ pub struct RuntimeConfig {
     /// ADR-033: Runtime localhost HTTP server port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_port: Option<u16>,
+    /// ADR-055 D3: Gateway MQTT broker host. Defaults to 127.0.0.1
+    /// (single-machine topology); set for remote / distributed
+    /// deployments where the broker is on another host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_host: Option<String>,
+    /// ADR-055 D3/§6.4: base URL of the Node reverse proxy (injected by
+    /// the Node at spawn time). When set, the retained `http_endpoint`
+    /// is published as `{base}/agents/{id}` instead of the direct
+    /// loopback address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_advertise_endpoint: Option<String>,
     /// Path to manifest.toml override
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_path: Option<String>,
@@ -214,6 +225,8 @@ impl Default for RuntimeConfig {
             work_dir: String::new(),
             mqtt_port: None,
             http_port: None,
+            gateway_host: None,
+            http_advertise_endpoint: None,
             manifest_path: None,
             config_dir: None,
             dev_mode: false,
@@ -249,6 +262,8 @@ impl RuntimeConfig {
             log_file_count: cli.log_file_count,
             mqtt_port: cli.mqtt_port,
             http_port: cli.http_port,
+            gateway_host: cli.gateway_host.clone(),
+            http_advertise_endpoint: cli.http_advertise_endpoint.clone(),
             ..Default::default()
         }
     }

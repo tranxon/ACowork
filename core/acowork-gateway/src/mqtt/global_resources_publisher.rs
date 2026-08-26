@@ -429,7 +429,8 @@ fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingMode
         Some(eps) if eps.ready => (
             eps.active_model_id.clone().unwrap_or_default(),
             eps.active_dimension.unwrap_or(0) as u32,
-            format!("http://127.0.0.1:{}/v1", eps.port),
+            // ADR-055 D3: advertise host instead of hard-coded 127.0.0.1.
+            format!("http://{}:{}/v1", gw.advertise_host, eps.port),
         ),
         _ => (String::new(), 0, String::new()),
     };
@@ -448,7 +449,8 @@ fn build_available_lsps(gw: &GatewayState) -> AvailableLsps {
     match &gw.lsp_relay_process {
         Some(lsp) if lsp.ready => AvailableLsps {
             version: 1,
-            endpoint: format!("http://127.0.0.1:{}", lsp.port),
+            // ADR-055 D3: advertise host instead of hard-coded 127.0.0.1.
+            endpoint: format!("http://{}:{}", gw.advertise_host, lsp.port),
             ready: true,
         },
         _ => AvailableLsps {

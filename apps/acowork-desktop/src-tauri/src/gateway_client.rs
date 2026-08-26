@@ -68,6 +68,15 @@ pub struct GatewayClient {
     base_url: String,
 }
 
+/// Minimal mirror of Gateway's `SystemStatusResponse` — only the fields
+/// the Desktop actually consumes (ADR-055 D3 §6.3: `mqtt_port` for
+/// dynamic broker discovery). Kept local so the Desktop never depends
+/// on the `acowork-gateway` crate.
+#[derive(Debug, Deserialize)]
+pub struct SystemStatusInfo {
+    pub mqtt_port: u16,
+}
+
 impl GatewayClient {
     /// Create a new GatewayClient with the default base URL
     pub fn new() -> Self {
@@ -97,6 +106,20 @@ impl GatewayClient {
 
     // ── Agent Management ───────────────────────────────────────────────
 
+    /// `GET /api/status` — system status (ADR-055 D3 §6.3).
+    ///
+    /// Used by `connect_mqtt` to derive the MQTT broker port dynamically
+    /// instead of assuming the default 19875 (L3-6 residual gap —
+    /// ADR-058 W4 fixed the host derivation; this closes the port half).
+    pub async fn system_status(&self) -> Result<SystemStatusInfo> {
+        let resp = self
+            .client
+            .get(format!("{}/api/status", self.base_url))
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
     /// `GET /api/agents`
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
         let resp = self
@@ -118,12 +141,16 @@ impl GatewayClient {
     }
 
     /// `POST /api/agents/install` — upload .agent package via multipart
+    ///
+    /// `node_id` is the target node (ADR-055 §6.13.3); `None` lets the
+    /// Gateway default to `local`.
     pub async fn install_agent(
         &self,
         package_bytes: &[u8],
         dev_mode: bool,
+        node_id: Option<&str>,
     ) -> Result<GenericMessageResponse> {
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part(
                 "package",
                 reqwest::multipart::Part::bytes(package_bytes.to_vec())
@@ -132,6 +159,9 @@ impl GatewayClient {
                     .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
             )
             .text("dev_mode", dev_mode.to_string());
+        if let Some(node) = node_id {
+            form = form.text("node_id", node.to_string());
+        }
 
         let resp = self
             .client

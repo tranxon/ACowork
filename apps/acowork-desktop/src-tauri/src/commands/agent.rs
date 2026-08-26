@@ -38,6 +38,7 @@ pub async fn install_agent(
     state: State<'_, AppState>,
     package_path: String,
     dev_mode: Option<bool>,
+    node_id: Option<String>,
 ) -> Result<GenericMessageResponse, String> {
     // Read the .agent file into memory on the Desktop App side
     let package_bytes = std::fs::read(&package_path)
@@ -50,7 +51,7 @@ pub async fn install_agent(
     // Upload bytes to Gateway via multipart
     let client = state.gateway.read().await;
     client
-        .install_agent(&package_bytes, dev_mode.unwrap_or(false))
+        .install_agent(&package_bytes, dev_mode.unwrap_or(false), node_id.as_deref())
         .await
         .map_err(|e| e.to_string())
 }
@@ -81,7 +82,7 @@ pub async fn install_bundled_agent(
 
     let client = state.gateway.read().await;
     client
-        .install_agent(&package_bytes, dev_mode.unwrap_or(true))
+        .install_agent(&package_bytes, dev_mode.unwrap_or(true), None)
         .await
         .map_err(|e| e.to_string())
 }

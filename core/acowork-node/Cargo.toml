@@ -1,0 +1,41 @@
+[package]
+name = "acowork-node"
+description = "ACowork Node Agent — per-machine Runtime process host (ADR-055)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Dependency red line (ADR-055 §6.20): this crate MUST NOT depend on
+# `acowork-gateway`. Allowed: acowork-core, acowork-mqtt-session and
+# generic third-party crates. Enforced by tests/dependency_redline.rs.
+acowork-core = { workspace = true }
+acowork-mqtt-session = { workspace = true }
+acowork-sign = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+rumqttc = { workspace = true }
+prost = { workspace = true }
+toml = { workspace = true }
+zip = { workspace = true }
+# ADR-055 §6.4: the node reverse proxy (axum) + upstream fetch (reqwest).
+# `axum` `ws` is NOT needed here — the proxy only forwards HTTP
+# (WebSocket/LSP lands in Phase 4 via `sidecar/`).
+axum = { workspace = true }
+reqwest = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
