@@ -254,6 +254,7 @@ export class LspConnection {
                     absPath,
                     language,
                     workspaceRoot,
+                    params.agentId,
                 );
                 log.debug(
                     "[LSP] LspConnection project root —",
@@ -277,7 +278,7 @@ export class LspConnection {
         const t0 = performance.now();
         let wsUrl: string;
         try {
-            wsUrl = await buildLspWsUrl(language, projectRoot);
+            wsUrl = await buildLspWsUrl(language, projectRoot, params.agentId);
         } catch (err) {
             if (signal.aborted) return;
             log.error("[LSP] LspConnection buildLspWsUrl failed —", language, err);

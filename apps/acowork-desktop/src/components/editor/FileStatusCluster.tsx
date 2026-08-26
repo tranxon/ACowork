@@ -19,6 +19,8 @@ export interface FileStatusClusterActiveFile {
     url?: string;
     relPath: string;
     loading?: boolean;
+    /** Agent hosting this file (ADR-055 §6.7 — per-agent LSP relay resolution) */
+    agentId?: string;
 }
 
 export interface EditorCursorPosition {
@@ -93,6 +95,7 @@ export function FileStatusCluster({
                                 status={lspStatus}
                                 statusMessage={lspStatusMessage}
                                 language={lspLanguage}
+                                agentId={activeFile.agentId}
                             />
                         </div>
                     )}

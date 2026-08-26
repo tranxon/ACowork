@@ -277,6 +277,7 @@ impl DesktopMqttClient {
         host: &str,
         port: u16,
         user_id: &str,
+        credentials: Option<(&str, &str)>,
         on_message: F,
         on_status: G,
     ) -> Result<Self, String>
@@ -288,6 +289,11 @@ impl DesktopMqttClient {
         let client_id = format!("user:{}:desktop:{}", user_id, pid);
 
         let mut options = MqttOptions::new(client_id.clone(), host, port);
+        // ADR-055 Phase 5a: authenticate against an auth-enabled broker
+        // (`user:{id}:desktop:{pid}` CONNECT username + http_token).
+        if let Some((username, password)) = credentials {
+            options.set_credentials(username.to_string(), password.to_string());
+        }
         // ADR-039: match the broker's `connection_timeout_ms` (5 s, see
         // `core/acowork-gateway/src/mqtt/broker.rs`). Setting the client
         // keepalive to 5 s means PINGREQs are emitted well inside the
@@ -764,6 +770,7 @@ mod tests {
             "127.0.0.1",
             port,
             "test-user",
+            None,
             |_msg| {
                 // no-op callback
             },

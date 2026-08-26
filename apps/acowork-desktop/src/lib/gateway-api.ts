@@ -14,7 +14,7 @@ import type {
   EmbeddingTestResponse,
   MigrationProgressResponse,
   SelectModelMigrationResponse,
-  LspEndpointResponse,
+  AgentLspEndpointResponse,
   LspInstallScriptResponse,
   LspInstallRunResponse,
   LspServerStatusEntry,
@@ -29,34 +29,49 @@ import { log } from "./logger";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
-// The relay endpoint is queried once and cached. On error or invalidation,
-// the cache is cleared so the next call re-fetches.
+// ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so its
+// endpoint is resolved PER AGENT via `GET /api/agents/{id}/lsp-endpoint`
+// (the node hosting the agent runs the relay). Results are cached per
+// agent. On error or invalidation, the cache entry is cleared so the
+// next call re-fetches.
 
-let relayEndpointCache: Promise<LspEndpointResponse | null> | null = null;
+const relayEndpointCache = new Map<string, Promise<string | null>>();
 
 /**
- * Get the cached LSP Relay endpoint, fetching from Gateway if needed.
+ * Get the cached LSP Relay base URL for an agent, fetching from Gateway
+ * if needed.
  *
- * Returns `null` when the relay is not available (not running or not ready).
- * On fetch error, the cache is cleared so the next call retries.
+ * Returns `null` when the relay is not available (the hosting node has
+ * not published a ready LSP relay state). On fetch error, the cache
+ * entry is cleared so the next call retries.
  */
 export async function getCachedLspRelayEndpoint(
+  agentId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<LspEndpointResponse | null> {
-  if (!relayEndpointCache) {
-    relayEndpointCache = fetchLspEndpoint(gatewayUrl)
-      .then((ep) => (ep.available && ep.port != null ? ep : null))
+): Promise<string | null> {
+  let cached = relayEndpointCache.get(agentId);
+  if (!cached) {
+    cached = fetchAgentLspEndpoint(agentId, gatewayUrl)
+      .then((ep) => (ep.ready && ep.endpoint ? ep.endpoint : null))
       .catch((err) => {
-        relayEndpointCache = null; // Clear cache on error
+        relayEndpointCache.delete(agentId); // Clear cache on error
         throw err;
       });
+    relayEndpointCache.set(agentId, cached);
   }
-  return relayEndpointCache;
+  return cached;
 }
 
-/** Invalidate the cached LSP Relay endpoint (e.g. after connection failure). */
-export function invalidateLspRelayEndpointCache(): void {
-  relayEndpointCache = null;
+/**
+ * Invalidate the cached LSP Relay endpoint for an agent, or for every
+ * agent when called without an argument (e.g. after connection failure).
+ */
+export function invalidateLspRelayEndpointCache(agentId?: string): void {
+  if (agentId !== undefined) {
+    relayEndpointCache.delete(agentId);
+  } else {
+    relayEndpointCache.clear();
+  }
 }
 
 /** Fetch all providers from Gateway's models cache */
@@ -334,33 +349,39 @@ export async function selectEmbeddingModelWithMigration(
 // ── LSP API ──────────────────────────────────────────────────────────────
 
 /**
- * Fetch the LSP Relay endpoint from the Gateway.
+ * Fetch the LSP Relay endpoint of the node hosting an agent.
  *
- * The Gateway manages the LSP Relay process and exposes its address via
- * `GET /api/lsp/endpoint`. Desktop App and Agent Runtime use this to
- * discover the relay, then connect directly.
+ * ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so the
+ * endpoint must be resolved per agent via
+ * `GET /api/agents/{id}/lsp-endpoint`. Desktop App and Agent Runtime
+ * use this to discover the relay, then connect directly.
  *
- * Returns `{ available: false, port: null }` when the relay is not running.
+ * Returns `{ ready: false, endpoint: null }` when the hosting node's
+ * relay has not published a ready state.
  */
-export async function fetchLspEndpoint(
+export async function fetchAgentLspEndpoint(
+  agentId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<LspEndpointResponse> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/endpoint`);
+): Promise<AgentLspEndpointResponse> {
+  const resp = await fetch(
+    `${gatewayUrl}/api/agents/${encodeURIComponent(agentId)}/lsp-endpoint`,
+  );
   if (!resp.ok) throw new Error(`Failed to fetch LSP endpoint: ${resp.status}`);
   return resp.json();
 }
 
 /**
- * Build the base HTTP URL for the LSP Relay.
+ * Build the base HTTP URL for the LSP Relay serving an agent.
  *
- * Returns `null` if the relay is not available.
+ * Returns `null` if the relay is not available (or no agent id was
+ * provided).
  */
 export async function getLspRelayUrl(
+  agentId?: string,
   gatewayUrl = getGatewayUrl(),
 ): Promise<string | null> {
-  const ep = await fetchLspEndpoint(gatewayUrl);
-  if (!ep.available || ep.port == null) return null;
-  return `http://${ep.host}:${ep.port}`;
+  if (!agentId) return null;
+  return getCachedLspRelayEndpoint(agentId, gatewayUrl);
 }
 
 // ── LSP Relay direct API (servers / status / install) ───────────────────

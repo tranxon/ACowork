@@ -70,11 +70,20 @@ pub struct GatewayClient {
 
 /// Minimal mirror of Gateway's `SystemStatusResponse` — only the fields
 /// the Desktop actually consumes (ADR-055 D3 §6.3: `mqtt_port` for
-/// dynamic broker discovery). Kept local so the Desktop never depends
+/// dynamic broker discovery; Phase 5a: MQTT CONNECT credentials when
+/// `mqtt.auth_enabled` is on). Kept local so the Desktop never depends
 /// on the `acowork-gateway` crate.
 #[derive(Debug, Deserialize)]
 pub struct SystemStatusInfo {
     pub mqtt_port: u16,
+    /// ADR-055 Phase 5a: MQTT CONNECT username — present only when
+    /// the Gateway has `mqtt.auth_enabled` on (None otherwise).
+    #[serde(default)]
+    pub mqtt_username: Option<String>,
+    /// ADR-055 Phase 5a: MQTT CONNECT password (http_token) — present
+    /// only when the Gateway has `mqtt.auth_enabled` on (None otherwise).
+    #[serde(default)]
+    pub mqtt_password: Option<String>,
 }
 
 impl GatewayClient {

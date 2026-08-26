@@ -49,20 +49,29 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     // dynamically from /api/status (L3-6 residual gap — ADR-058 W4 fixed
     // the host half, ADR-055 Phase 1.3 closes the port half). Local mode
     // derives "127.0.0.1" — identical to the previous hardcode.
-    let (mqtt_host, mqtt_port) = {
+    let (mqtt_host, mqtt_port, mqtt_credentials) = {
         let gw = state.gateway.read().await;
         let gateway_base_url = gw.base_url().to_string();
         let mqtt_host = derive_mqtt_broker_host(&gateway_base_url)
             .unwrap_or_else(|| defaults::GATEWAY_MQTT_HOST.to_string());
-        // Fetch the broker port dynamically; fall back to the default on
-        // any error so the connection still attempts the canonical port.
-        let mqtt_port = gw
-            .system_status()
-            .await
+        // Fetch broker discovery info dynamically; fall back to defaults
+        // on any error so the connection still attempts the canonical
+        // port. ADR-055 Phase 5a: `mqtt_username` / `mqtt_password` are
+        // present only when `mqtt.auth_enabled` is on — None keeps the
+        // anonymous connection to an auth-disabled broker.
+        let status = gw.system_status().await.ok();
+        let mqtt_port = status
+            .as_ref()
             .map(|s| s.mqtt_port)
             .unwrap_or(defaults::GATEWAY_MQTT_PORT);
-        (mqtt_host, mqtt_port)
+        let credentials = status
+            .as_ref()
+            .and_then(|s| s.mqtt_username.clone().zip(s.mqtt_password.clone()));
+        (mqtt_host, mqtt_port, credentials)
     };
+    let mqtt_credentials = mqtt_credentials
+        .as_ref()
+        .map(|(u, p)| (u.as_str(), p.as_str()));
 
     // Create callback that decodes MQTT protobuf messages and emits
     // structured flat-JSON events to the React frontend.
@@ -426,6 +435,7 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         &mqtt_host,
         mqtt_port,
         user_id,
+        mqtt_credentials,
         on_message,
         // ADR-036 / ADR-039: bridge `rumqttc` eventloop status → Tauri event.
         //
