@@ -28,11 +28,13 @@ use tokio::sync::{Mutex, RwLock};
 use prost::Message as _;
 
 use acowork_core::mqtt_proto::{
-    data_envelope, node_control_command, DataEnvelope, NodeControlCommand, NodeEvent, NodeInfo,
+    data_envelope, node_control_command, DataEnvelope, NodeControlCommand, NodeEnroll, NodeEvent,
+    NodeInfo,
 };
 use acowork_core::node::{
-    node_agent_events_topic, node_agent_installed_topic, node_events_topic, node_info_topic,
-    node_status_topic, NODE_PROTOCOL_VERSION,
+    node_agent_events_topic, node_agent_installed_topic, node_enroll_topic, node_events_topic,
+    node_info_topic, node_lsps_topic, node_sidecar_status_topic, node_status_topic,
+    NODE_PROTOCOL_VERSION,
 };
 
 use crate::config::{system_hostname, NodeConfig};
@@ -43,7 +45,7 @@ use crate::process::ProcessManager;
 use crate::state::{NodeState, SharedNodeState};
 
 use dedup::RequestDedup;
-use mqtt::{NodeMqttClient, NodeMqttMessageCallback};
+use mqtt::{NodeMqttClient, NodeMqttMessageCallback, SharedNodeMqttCredentials};
 
 /// How often the daemon re-publishes the retained `info` heartbeat
 /// (§6.15 — keeps `agent_count` / liveness fresh and lets the
@@ -89,6 +91,11 @@ async fn handle_command(
     state: &SharedNodeState,
     config: &NodeConfig,
     command: &NodeControlCommand,
+    // ADR-055 Phase 5a: the node's long-lived token, attached to
+    // package downloads as `X-ACowork-Node-Token`. `None` when not
+    // enrolled yet (downloads then work only against brokers with
+    // auth disabled).
+    node_token: Option<&str>,
 ) -> NodeEvent {
     use node_control_command::Command;
 
@@ -117,7 +124,9 @@ async fn handle_command(
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
+                command.node_id.clone(),
                 Some(config.proxy_advertise_endpoint()),
+                node_token.map(str::to_string),
             );
             match mgr.start_agent(&cmd.agent_id, state, cmd.dev_mode, true).await {
                 Ok(()) => {
@@ -137,7 +146,9 @@ async fn handle_command(
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
+                command.node_id.clone(),
                 Some(config.proxy_advertise_endpoint()),
+                node_token.map(str::to_string),
             );
             match mgr.stop_agent(&cmd.agent_id, state).await {
                 Ok(()) => {
@@ -212,7 +223,7 @@ async fn handle_command(
                     std::process::id(),
                     uuid::Uuid::new_v4()
                 ));
-                match download_package(&cmd.package_url, &tmp).await {
+                match download_package(&cmd.package_url, &tmp, node_token).await {
                     Ok(()) => {
                         spooled = Some(tmp.clone());
                         tmp
@@ -318,7 +329,7 @@ async fn handle_command(
                     std::process::id(),
                     uuid::Uuid::new_v4()
                 ));
-                match download_package(&cmd.package_url, &tmp).await {
+                match download_package(&cmd.package_url, &tmp, node_token).await {
                     Ok(()) => {
                         spooled = Some(tmp.clone());
                         tmp
@@ -409,8 +420,21 @@ async fn handle_command(
 
 /// Download a package from the Gateway registry URL to a local temp
 /// path (ADR-055 §3.2). The caller owns cleanup of `dest`.
-async fn download_package(url: &str, dest: &std::path::Path) -> Result<(), NodeError> {
-    let bytes = reqwest::get(url)
+///
+/// ADR-055 Phase 5a: when the node holds a node_token it is attached
+/// as `X-ACowork-Node-Token` — the Gateway's package channel is
+/// gated on that header when `mqtt.auth_enabled` is on.
+async fn download_package(
+    url: &str,
+    dest: &std::path::Path,
+    node_token: Option<&str>,
+) -> Result<(), NodeError> {
+    let mut request = reqwest::Client::new().get(url);
+    if let Some(token) = node_token {
+        request = request.header("X-ACowork-Node-Token", token);
+    }
+    let bytes = request
+        .send()
         .await
         .map_err(|e| NodeError::Mqtt(format!("download GET failed: {e}")))?
         .error_for_status()
@@ -421,6 +445,126 @@ async fn download_package(url: &str, dest: &std::path::Path) -> Result<(), NodeE
     std::fs::write(dest, &bytes)
         .map_err(|e| NodeError::Package(format!("download write failed: {e}")))?;
     Ok(())
+}
+
+/// ADR-055 Phase 5a: build the NodeEnroll request envelope, or `None`
+/// when no enrollment is needed — the node already holds a
+/// Gateway-issued node_token (enrollment is one-shot; the Gateway
+/// reuses the token on reconnect) or no enrollment token was provided.
+fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<DataEnvelope> {
+    if identity.node_token.is_some() {
+        return None; // Already enrolled.
+    }
+    let Some(token) = config.token.as_deref().filter(|t| !t.is_empty()) else {
+        return None; // No credential to present.
+    };
+    let info = build_node_info(identity, config, 0);
+    let enroll = NodeEnroll {
+        node_id: identity.node_id.clone(),
+        machine_uid: identity.machine_uid.clone(),
+        os: info.os,
+        arch: info.arch,
+        node_version: info.node_version,
+        protocol_version: info.protocol_version,
+        capabilities: info.capabilities,
+        enrollment_token: token.to_string(),
+    };
+    Some(DataEnvelope {
+        version: 1,
+        payload: Some(data_envelope::Payload::NodeEnroll(enroll)),
+    })
+}
+
+/// Publish the enrollment request on `acowork/nodes/{id}/enroll`
+/// (QoS 1, non-retained). Returns true when a request was actually
+/// published. Re-run on every (re)connect by the bootstrap; it is a
+/// no-op once the node holds a node_token.
+async fn publish_enroll(
+    client: &AsyncClient,
+    identity: &NodeIdentity,
+    config: &NodeConfig,
+) -> bool {
+    let Some(envelope) = build_enroll_payload(identity, config) else {
+        return false;
+    };
+    let topic = node_enroll_topic(&identity.node_id);
+    match client
+        .publish(
+            topic.clone(),
+            QoS::AtLeastOnce,
+            false,
+            prost::Message::encode_to_vec(&envelope),
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(topic = %topic, "Node enrollment request published");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, topic = %topic, "Failed to publish enrollment request");
+            false
+        }
+    }
+}
+
+/// Handle an `acowork/nodes/{id}/enroll_result` reply: persist the
+/// Gateway-issued node_token into identity.json. Returns true when
+/// the topic was an enroll_result (consumed).
+///
+/// Idempotent (ADR-055 §6.12): the token is only written when the
+/// identity has none yet — a re-enroll after a Gateway restart reuses
+/// the same token, and a node that already holds a token must never
+/// have it overwritten or cleared by a stale/error reply.
+async fn handle_enroll_result(
+    topic: &str,
+    payload: &[u8],
+    identity: &Arc<RwLock<NodeIdentity>>,
+    home: &std::path::Path,
+) -> bool {
+    let Some(node_id) = topic
+        .strip_prefix("acowork/nodes/")
+        .and_then(|rest| rest.strip_suffix("/enroll_result"))
+    else {
+        return false;
+    };
+    let Ok(envelope) = DataEnvelope::decode(payload) else {
+        tracing::warn!(topic, "Undecodable enroll_result payload");
+        return true;
+    };
+    let Some(data_envelope::Payload::NodeEnrollResult(result)) = envelope.payload else {
+        return true;
+    };
+    if result.node_id != node_id {
+        tracing::warn!(
+            topic,
+            result_node = %result.node_id,
+            "enroll_result node_id does not match topic"
+        );
+        return true;
+    }
+    if result.status != "ok" || result.node_token.is_empty() {
+        tracing::warn!(
+            topic,
+            status = %result.status,
+            message = %result.message,
+            "Enrollment rejected by Gateway — no node token issued"
+        );
+        return true;
+    }
+    let mut id = identity.write().await;
+    if id.node_token.is_some() {
+        return true; // Already persisted — never overwrite.
+    }
+    id.set_node_token(Some(result.node_token.clone()));
+    match id.save(home) {
+        Ok(()) => tracing::info!(
+            node_id = %id.node_id,
+            "Node token persisted to identity.json"
+        ),
+        Err(e) => tracing::warn!(error = %e, "Failed to persist node_token to identity.json"),
+    }
+    true
 }
 
 /// Extract (node_id, Some(agent_id)) from an agent-level control topic
@@ -485,7 +629,9 @@ impl NodeControlPlane {
                 config.log_file_count,
                 Some(config.gateway_mqtt_port),
                 config.gateway_host.clone(),
+                node_id.clone(),
                 Some(config.proxy_advertise_endpoint()),
+                identity.node_token.clone(),
             );
             mgr.readopt_orphans(&state).await
         };
@@ -503,6 +649,25 @@ impl NodeControlPlane {
         let bs_home = config.home.clone();
         let bs_gateway_addr = gateway_addr.clone();
         let bs_readopted = readopted.clone();
+        // Cloned BEFORE the bootstrap closure moves it in — the
+        // message callback (created after connect) also needs it.
+        let dispatch_identity = bs_identity.clone();
+        // The node HTTP server (proxy auth, Phase 5a) also reads the
+        // live identity — cloned before message_callback moves it.
+        let http_identity = bs_identity.clone();
+
+        // ADR-055 Phase 5a: live CONNECT credential — starts as the
+        // node_token (reconnect) or the enrollment token (first boot)
+        // and is swapped to the node_token when the enroll_result
+        // reply arrives (a consumed enrollment token would be rejected
+        // on reconnect).
+        let mqtt_credentials: SharedNodeMqttCredentials = Arc::new(Mutex::new(
+            identity
+                .node_token
+                .clone()
+                .or_else(|| config.token.clone()),
+        ));
+        let bs_credentials = mqtt_credentials.clone();
         let bootstrap = Arc::new(move |client: AsyncClient| {
             let node_id = bs_node_id.clone();
             let config = bs_config.clone();
@@ -579,10 +744,43 @@ impl NodeControlPlane {
                     }
                 }
 
+                // ADR-055 §6.7: re-assert the retained per-node LSP
+                // relay endpoint on every (re)connect — clean_session
+                // drops the broker's retained set on a fresh broker,
+                // and the sidecar supervisor's transition publishes may
+                // have happened before this ConnAck. Ready state comes
+                // from the shared process state (None → unavailable).
+                let lsp_ready = state
+                    .read()
+                    .await
+                    .lsp_relay_process
+                    .as_ref()
+                    .map(|p| p.ready)
+                    .unwrap_or(false);
+                if let Err(e) = crate::sidecar::publish_lsps_state(
+                    &client,
+                    &node_id,
+                    &config.advertise_host,
+                    config.lsp_relay_port,
+                    lsp_ready,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "Failed to publish node LSP relay state");
+                }
+
+                // ADR-055 Phase 5a: request a long-lived node token
+                // on first enrollment. One-shot — no-op once
+                // identity.node_token is set (the Gateway reuses the
+                // same token on reconnect).
+                publish_enroll(&client, &identity.read().await.clone(), &config).await;
+
                 // Control subscriptions: node-level + agent-level.
                 for filter in [
                     format!("acowork/nodes/{node_id}/control/#"),
                     format!("acowork/nodes/{node_id}/agents/+/control/#"),
+                    // ADR-055 Phase 5a: enrollment reply (own node).
+                    format!("acowork/nodes/{node_id}/enroll_result"),
                 ] {
                     if let Err(e) = client.subscribe(filter, QoS::AtLeastOnce).await {
                         tracing::warn!(error = %e, "Failed to subscribe node control filter");
@@ -642,14 +840,38 @@ impl NodeControlPlane {
         let dispatch_dedup = dedup.clone();
         let dispatch_state = state.clone();
         let dispatch_config = config.clone();
+        let dispatch_home = config.home.clone();
+        let dispatch_credentials = bs_credentials.clone();
         let message_callback: NodeMqttMessageCallback = Arc::new(move |topic, payload| {
             let node_id = dispatch_node_id.clone();
             let dedup = dispatch_dedup.clone();
             let state = dispatch_state.clone();
             let config = dispatch_config.clone();
+            let identity = dispatch_identity.clone();
+            let home = dispatch_home.clone();
+            let credentials = dispatch_credentials.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    handle_incoming(&node_id, &topic, &payload, &dedup, &state, &config).await
+                // ADR-055 Phase 5a: enrollment reply — persist the
+                // Gateway-issued node_token into identity.json and
+                // switch the live CONNECT credential so a reconnect
+                // never re-presents the (now consumed) enrollment
+                // token.
+                if handle_enroll_result(&topic, &payload, &identity, &home).await {
+                    if let Some(token) = identity.read().await.node_token.clone() {
+                        *credentials.lock().await = Some(token);
+                    }
+                    return;
+                }
+                if let Err(e) = handle_incoming(
+                    &node_id,
+                    &topic,
+                    &payload,
+                    &dedup,
+                    &state,
+                    &config,
+                    &identity,
+                )
+                .await
                 {
                     tracing::warn!(topic = %topic, error = %e, "Failed to process node control message");
                 }
@@ -660,6 +882,7 @@ impl NodeControlPlane {
             &config.gateway_host,
             config.gateway_mqtt_port,
             &node_id,
+            mqtt_credentials,
             bootstrap,
             Some(message_callback),
         )
@@ -676,12 +899,23 @@ impl NodeControlPlane {
         let proxy_state = state.clone();
         let proxy_bind = format!("{}:{}", config.proxy_bind, config.proxy_port);
         let proxy_node_id = node_id.clone();
+        // Signals that the node HTTP server (hosting `/health`) is
+        // bound — the LSP relay sidecar start waits for this so the
+        // relay's parent-health watchdog has a live target from birth.
+        let (health_tx, health_rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
             // ADR-055 §6.4 + L7-1: the node HTTP server hosts both the
             // `/agents/{id}/*` reverse proxy and the `/fs/browse` remote
             // filesystem browser on the same `:19900` listener.
-            let app = crate::proxy::router(proxy_state.clone())
-                .merge(crate::fs_browse::router(proxy_state));
+            // ADR-055 Phase 5a §6.8: the node HTTP router carries the
+            // live identity so the proxy can validate inbound
+            // `X-ACowork-Node-Token` against the issued node_token.
+            let node_http_state = crate::state::NodeHttpState {
+                node: proxy_state.clone(),
+                identity: http_identity,
+            };
+            let app = crate::proxy::router(node_http_state.clone())
+                .merge(crate::fs_browse::router(node_http_state));
             let listener = match tokio::net::TcpListener::bind(&proxy_bind).await {
                 Ok(l) => l,
                 Err(e) => {
@@ -698,10 +932,26 @@ impl NodeControlPlane {
                 node_id = %proxy_node_id,
                 "Node reverse proxy listening"
             );
+            let _ = health_tx.send(());
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!(error = %e, "Node reverse proxy terminated");
             }
         });
+
+        // ADR-055 §6.7: start the node-local LSP relay sidecar once the
+        // node HTTP server is up (its `/health` is the relay's
+        // self-exit watchdog target). Best-effort — a failed bind
+        // leaves the node running without codebase tooling.
+        if health_rx.await.is_ok() {
+            let sup_cfg = crate::sidecar::lsp_relay_supervisor::LspRelaySupervisorConfig {
+                data_dir: config.home.clone(),
+                port: config.lsp_relay_port,
+                health_url: format!("http://127.0.0.1:{}/health", config.proxy_port),
+                node_id: node_id.clone(),
+                advertise_host: config.advertise_host.clone(),
+            };
+            crate::sidecar::lsp_relay_supervisor::start_lsp_relay_supervisor(sup_cfg, state.clone());
+        }
 
         let plane = Self {
             config,
@@ -776,6 +1026,28 @@ impl NodeControlPlane {
         // record running agents that we just terminated.
         self.state.write().await.agents.clear();
 
+        // ADR-055 §6.7: terminate the node-local LSP relay sidecar and
+        // clear its retained state (the relay would otherwise linger
+        // until its parent-health watchdog notices the node /health is
+        // gone).
+        let lsp_pid = self
+            .state
+            .read()
+            .await
+            .lsp_relay_process
+            .as_ref()
+            .map(|p| p.pid);
+        if let Some(pid) = lsp_pid
+            && pid != 0
+        {
+            let _ = crate::sidecar::lsp_relay::kill_lsp_relay(pid).await;
+        }
+        {
+            let mut s = self.state.write().await;
+            s.lsp_relay_process = None;
+        }
+        let _ = dispatcher::clear_lsps_state(&self.identity.node_id).await;
+
         let status_topic = node_status_topic(&self.identity.node_id);
         if let Err(e) = self
             .client
@@ -798,11 +1070,16 @@ impl NodeControlPlane {
     /// (retained info) once, then exit. The status topic is left at
     /// "offline" because no daemon is running — daemon liveness is
     /// owned by the LWT / explicit status publishes, not enrollment.
+    ///
+    /// ADR-055 Phase 5a: with `--token` this also performs the
+    /// enrollment handshake — the Gateway replies on
+    /// `enroll_result` with a long-lived node_token, which is
+    /// persisted into identity.json before the command exits.
     pub async fn enroll(config: NodeConfig) -> Result<(), NodeError> {
         config.ensure_dirs()?;
 
         let gateway_addr = config.gateway_addr();
-        let mut identity =
+        let identity =
             NodeIdentity::load_or_create(&config.home, config.name.as_deref(), Some(&gateway_addr))?;
         let node_id = identity.node_id.clone();
 
@@ -814,11 +1091,21 @@ impl NodeControlPlane {
         // Minimal bootstrap for the one-shot enrollment: publish info
         // retained + status online, wait briefly for the QoS 1 flow,
         // then publish status offline retained and return.
-        let bs_identity = identity.clone();
+        let bs_identity = Arc::new(RwLock::new(identity.clone()));
         let bs_config = config.clone();
         let bs_state = state.clone();
         let bs_home = config.home.clone();
         let bs_gateway_addr = gateway_addr.clone();
+        // Cloned BEFORE the bootstrap closure moves it in — the
+        // message callback (created after connect) also needs it.
+        let dispatch_identity = bs_identity.clone();
+        let mqtt_credentials: SharedNodeMqttCredentials = Arc::new(Mutex::new(
+            identity
+                .node_token
+                .clone()
+                .or_else(|| config.token.clone()),
+        ));
+        let bs_credentials = mqtt_credentials.clone();
         let bootstrap = Arc::new(move |client: AsyncClient| {
             let identity = bs_identity.clone();
             let config = bs_config.clone();
@@ -826,26 +1113,31 @@ impl NodeControlPlane {
             let home = bs_home.clone();
             let gateway_addr = bs_gateway_addr.clone();
             tokio::spawn(async move {
-                let status_topic = node_status_topic(&identity.node_id);
+                let id = identity.read().await.clone();
+                let status_topic = node_status_topic(&id.node_id);
                 let _ = client
                     .publish(&status_topic, QoS::AtLeastOnce, true, "online".as_bytes())
                     .await;
-                let info = build_node_info(&identity, &config, 0);
+                let info = build_node_info(&id, &config, 0);
                 let envelope = DataEnvelope {
                     version: 1,
                     payload: Some(data_envelope::Payload::NodeInfo(info)),
                 };
                 let _ = client
                     .publish(
-                        node_info_topic(&identity.node_id),
+                        node_info_topic(&id.node_id),
                         QoS::AtLeastOnce,
                         true,
                         prost::Message::encode_to_vec(&envelope),
                     )
                     .await;
-                let mut id = identity.clone();
-                id.mark_enrolled(&gateway_addr);
-                let _ = id.save(&home);
+                // ADR-055 Phase 5a: request the long-lived node token.
+                publish_enroll(&client, &id, &config).await;
+                {
+                    let mut id = identity.write().await;
+                    id.mark_enrolled(&gateway_addr);
+                    let _ = id.save(&home);
+                }
                 let mut s = state.write().await;
                 s.set_connected(true, Some(gateway_addr));
                 s.save_snapshot(&home);
@@ -856,14 +1148,39 @@ impl NodeControlPlane {
         let dispatch_dedup = dedup.clone();
         let dispatch_state = state.clone();
         let dispatch_config = config.clone();
+        let dispatch_home = config.home.clone();
+        let dispatch_credentials = bs_credentials.clone();
+        // Kept for the final persist below — message_callback moves
+        // dispatch_identity into its closure.
+        let final_identity = dispatch_identity.clone();
         let message_callback: NodeMqttMessageCallback = Arc::new(move |topic, payload| {
             let node_id = dispatch_node_id.clone();
             let dedup = dispatch_dedup.clone();
             let state = dispatch_state.clone();
             let config = dispatch_config.clone();
+            let identity = dispatch_identity.clone();
+            let home = dispatch_home.clone();
+            let credentials = dispatch_credentials.clone();
             tokio::spawn(async move {
-                let _ =
-                    handle_incoming(&node_id, &topic, &payload, &dedup, &state, &config).await;
+                // ADR-055 Phase 5a: persist the node_token and switch
+                // the live CONNECT credential before the one-shot
+                // exits.
+                if handle_enroll_result(&topic, &payload, &identity, &home).await {
+                    if let Some(token) = identity.read().await.node_token.clone() {
+                        *credentials.lock().await = Some(token);
+                    }
+                    return;
+                }
+                let _ = handle_incoming(
+                    &node_id,
+                    &topic,
+                    &payload,
+                    &dedup,
+                    &state,
+                    &config,
+                    &identity,
+                )
+                .await;
             });
         });
 
@@ -871,6 +1188,7 @@ impl NodeControlPlane {
             &config.gateway_host,
             config.gateway_mqtt_port,
             &node_id,
+            mqtt_credentials,
             bootstrap,
             Some(message_callback),
         )
@@ -887,11 +1205,13 @@ impl NodeControlPlane {
             .await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+        let mut identity = final_identity.read().await.clone();
         identity.mark_enrolled(&gateway_addr);
         identity.save(&config.home)?;
         tracing::info!(
             node_id = %identity.node_id,
             machine_uid = %identity.machine_uid,
+            node_token = identity.node_token.as_deref().map(|_| "<set>").unwrap_or("<none>"),
             gateway = %gateway_addr,
             "Node enrolled (identity persisted)"
         );
@@ -945,6 +1265,9 @@ impl NodeControlPlane {
             &config.gateway_host,
             config.gateway_mqtt_port,
             &old_id,
+            // ADR-055 Phase 5a: present the long-lived node token so
+            // rename works against an auth-enabled broker.
+            Arc::new(Mutex::new(identity.node_token.clone())),
             bootstrap,
             None,
         )
@@ -1001,6 +1324,9 @@ impl NodeControlPlane {
             &config.gateway_host,
             config.gateway_mqtt_port,
             &node_id,
+            // ADR-055 Phase 5a: present the long-lived node token so
+            // leave works against an auth-enabled broker.
+            Arc::new(Mutex::new(identity.node_token.clone())),
             bootstrap,
             None,
         )
@@ -1107,6 +1433,18 @@ async fn clear_retained(
             )
             .await;
     }
+    // ADR-055 §6.7: also clear the node-local LSP relay retained set.
+    let _ = client
+        .publish(node_lsps_topic(node_id), QoS::AtLeastOnce, true, Vec::new())
+        .await;
+    let _ = client
+        .publish(
+            node_sidecar_status_topic(node_id, "lsp_relay"),
+            QoS::AtLeastOnce,
+            true,
+            Vec::new(),
+        )
+        .await;
 }
 
 /// SIGTERM every running Runtime tracked in the persisted snapshot and
@@ -1143,6 +1481,7 @@ async fn handle_incoming(
     dedup: &Arc<Mutex<RequestDedup>>,
     state: &SharedNodeState,
     config: &NodeConfig,
+    identity: &Arc<RwLock<NodeIdentity>>,
 ) -> Result<(), NodeError> {
     let Some((topic_node_id, agent_id)) = parse_control_topic(topic, own_node_id) else {
         // Not a control topic (e.g. our own retained publishes echoed
@@ -1199,7 +1538,8 @@ async fn handle_incoming(
         }
     }
 
-    let reply = handle_command(state, config, &command).await;
+    let node_token = identity.read().await.node_token.clone();
+    let reply = handle_command(state, config, &command, node_token.as_deref()).await;
     let reply_clone = reply.clone();
     {
         let mut d = dedup.lock().await;
@@ -1226,7 +1566,7 @@ async fn publish_event(topic: String, event: NodeEvent) -> Result<(), NodeError>
 /// Holds the daemon's SHARED client handle (not a snapshot of the
 /// client) so replies keep flowing through the current connection
 /// after a soft-restart swaps the inner `AsyncClient`.
-mod dispatcher {
+pub(crate) mod dispatcher {
     use std::sync::{Arc, OnceLock};
     use acowork_core::mqtt_proto::{data_envelope, DataEnvelope, InstalledAgentInfo, NodeEvent};
     use rumqttc::{AsyncClient, QoS};
@@ -1262,6 +1602,32 @@ mod dispatcher {
     /// retained payload removes the broker's retained message.
     pub async fn clear_installed_info(topic: String) -> Result<(), crate::error::NodeError> {
         publish_raw(topic, Vec::new(), true).await
+    }
+
+    /// Publish the retained node-local LSP relay state (ADR-055 §6.7):
+    /// the per-node `lsps` envelope + sidecar status topic. Delegates
+    /// to [`crate::sidecar::publish_lsps_state`] with the process-wide
+    /// shared handle (used by the sidecar supervisor's transitions).
+    pub async fn publish_lsps_state(
+        node_id: String,
+        advertise_host: String,
+        port: u16,
+        ready: bool,
+    ) -> Result<(), crate::error::NodeError> {
+        let Some(shared) = CLIENT.get() else {
+            tracing::warn!("Node event dispatcher not installed — dropping lsps publish");
+            return Ok(());
+        };
+        let client = shared.lock().await.clone();
+        crate::sidecar::publish_lsps_state(&client, &node_id, &advertise_host, port, ready).await
+    }
+
+    /// Clear the retained node-local LSP relay state (shutdown / leave)
+    /// — empty retained payloads remove the broker's retained messages.
+    pub async fn clear_lsps_state(node_id: &str) -> Result<(), crate::error::NodeError> {
+        use acowork_core::node::{node_lsps_topic, node_sidecar_status_topic};
+        publish_raw(node_lsps_topic(node_id), Vec::new(), true).await?;
+        publish_raw(node_sidecar_status_topic(node_id, "lsp_relay"), Vec::new(), true).await
     }
 
     async fn publish_envelope(
@@ -1302,7 +1668,7 @@ mod dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acowork_core::node::node_agent_control_topic;
+    use acowork_core::node::{node_agent_control_topic, node_enroll_result_topic};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1330,7 +1696,7 @@ mod tests {
     async fn ping_answers_ok() {
         let state = test_state();
         let config = test_config();
-        let reply = handle_command(&state, &config, &ping_command()).await;
+        let reply = handle_command(&state, &config, &ping_command(), None).await;
         assert_eq!(reply.status, "ok");
         assert_eq!(reply.message, "pong");
         assert_eq!(reply.request_id, "req-1");
@@ -1350,7 +1716,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         // The agent is not installed on this empty node → error (not
         // `not_implemented`, which was the Phase 2a placeholder).
         assert_eq!(reply.status, "error");
@@ -1372,7 +1738,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
         assert!(reply.message.contains("package_url"));
     }
@@ -1386,7 +1752,7 @@ mod tests {
             request_id: "req-4".to_string(),
             command: None,
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
     }
 
@@ -1405,7 +1771,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
     }
 
@@ -1425,7 +1791,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
         assert!(reply.message.contains("package_url"));
     }
@@ -1444,7 +1810,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
     }
 
@@ -1464,7 +1830,7 @@ mod tests {
                 },
             )),
         };
-        let reply = handle_command(&state, &config, &cmd).await;
+        let reply = handle_command(&state, &config, &cmd, None).await;
         assert_eq!(reply.status, "error");
     }
 
@@ -1519,5 +1885,122 @@ mod tests {
     fn rename_target_same_name_is_rejected() {
         let err = validate_rename_target("gpu-server", "gpu-server").unwrap_err();
         assert!(err.to_string().contains("already named"));
+    }
+
+    // ── ADR-055 Phase 5a enrollment ───────────────────────────────
+
+    fn test_identity() -> NodeIdentity {
+        NodeIdentity {
+            node_id: "gpu-1".to_string(),
+            machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+            node_token: None,
+            gateway_addr: None,
+            enrollment: EnrollmentState::Created,
+            created_at: chrono::Utc::now(),
+            enrolled_at: None,
+        }
+    }
+
+    fn enroll_result_envelope(node_token: &str, status: &str) -> Vec<u8> {
+        let result = acowork_core::mqtt_proto::NodeEnrollResult {
+            node_id: "gpu-1".to_string(),
+            machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+            node_token: node_token.to_string(),
+            status: status.to_string(),
+            message: "test reply".to_string(),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::NodeEnrollResult(result)),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[test]
+    fn build_enroll_payload_with_token() {
+        let config = NodeConfig {
+            token: Some("tok-1234".to_string()),
+            ..test_config()
+        };
+        let envelope = build_enroll_payload(&test_identity(), &config)
+            .expect("enroll payload built when token present and no node_token");
+        let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
+            panic!("expected NodeEnroll payload");
+        };
+        assert_eq!(enroll.node_id, "gpu-1");
+        assert_eq!(enroll.machine_uid, "0f0e0d0c-0b0a-4009-8007-060504030201");
+        assert_eq!(enroll.enrollment_token, "tok-1234");
+        assert_eq!(enroll.protocol_version, NODE_PROTOCOL_VERSION);
+        assert!(!enroll.capabilities.is_empty());
+        assert!(!enroll.os.is_empty() && !enroll.arch.is_empty());
+    }
+
+    #[test]
+    fn build_enroll_payload_none_without_token_or_when_enrolled() {
+        // No enrollment token → no payload.
+        assert!(build_enroll_payload(&test_identity(), &test_config()).is_none());
+        // Already holds a node_token → no payload (one-shot enrollment;
+        // the Gateway reuses the token on reconnect).
+        let mut identity = test_identity();
+        identity.node_token = Some("existing-token".to_string());
+        let config = NodeConfig {
+            token: Some("tok-1234".to_string()),
+            ..test_config()
+        };
+        assert!(build_enroll_payload(&identity, &config).is_none());
+    }
+
+    #[tokio::test]
+    async fn enroll_result_persists_node_token_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let identity = Arc::new(RwLock::new(test_identity()));
+        let topic = node_enroll_result_topic("gpu-1");
+        let payload = enroll_result_envelope("tok-node-0001", "ok");
+
+        assert!(handle_enroll_result(&topic, &payload, &identity, home).await);
+        assert_eq!(
+            identity.read().await.node_token.as_deref(),
+            Some("tok-node-0001")
+        );
+        // Persisted to disk.
+        let loaded = NodeIdentity::load(home).unwrap().unwrap();
+        assert_eq!(loaded.node_token.as_deref(), Some("tok-node-0001"));
+
+        // Idempotent: a second (stale) reply never overwrites.
+        let stale = enroll_result_envelope("tok-node-0002", "ok");
+        assert!(handle_enroll_result(&topic, &stale, &identity, home).await);
+        assert_eq!(
+            identity.read().await.node_token.as_deref(),
+            Some("tok-node-0001"),
+            "existing token must not be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_result_error_reply_does_not_write_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let identity = Arc::new(RwLock::new(test_identity()));
+        let payload = enroll_result_envelope("", "error");
+        assert!(handle_enroll_result(
+            &node_enroll_result_topic("gpu-1"),
+            &payload,
+            &identity,
+            tmp.path(),
+        )
+        .await);
+        assert_eq!(identity.read().await.node_token, None);
+    }
+
+    #[tokio::test]
+    async fn enroll_result_other_topic_is_ignored() {
+        let identity = Arc::new(RwLock::new(test_identity()));
+        assert!(!handle_enroll_result(
+            "acowork/nodes/gpu-1/info",
+            &[],
+            &identity,
+            std::path::Path::new("/tmp"),
+        )
+        .await);
     }
 }

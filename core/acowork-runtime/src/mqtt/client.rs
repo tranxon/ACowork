@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use prost::Message as _;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, QoS};
 use tokio::sync::{oneshot, Mutex};
 
@@ -120,6 +121,48 @@ pub struct ProviderUpdate {
 pub struct SearchUpdate {
     pub search_list: Vec<acowork_core::protocol::SearchProviderListItem>,
     pub search_key_vault: Vec<acowork_core::protocol::SearchKeyEntry>,
+}
+
+/// Node-local LSP relay state pushed from the MQTT poll loop to
+/// SessionManager (ADR-055 §6.7, Phase 4).
+///
+/// `endpoint: Some(..)` → the node's LSP relay is ready; the
+/// SessionManager registers the `codebase` tool. `None` → the relay is
+/// unavailable (or the node cleared its retained state); the tool is
+/// unregistered.
+#[derive(Debug, Clone)]
+pub struct LspRelayUpdate {
+    pub endpoint: Option<String>,
+}
+
+/// Decode a retained `acowork/nodes/{node_id}/lsps` payload
+/// (`DataEnvelope<AvailableLsps>`) into an [`LspRelayUpdate`].
+///
+/// An empty payload (node cleared the topic) and any decode failure
+/// both collapse to `endpoint: None` — the unavailable state.
+pub(crate) fn decode_lsps_payload(payload: &[u8]) -> LspRelayUpdate {
+    // Empty retained payload = the node cleared its lsps state
+    // (shutdown / leave) — the relay is no longer available.
+    if payload.is_empty() {
+        return LspRelayUpdate { endpoint: None };
+    }
+    let envelope = match DataEnvelope::decode(payload) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::warn!(error = %e, "node lsps payload is not a valid DataEnvelope");
+            return LspRelayUpdate { endpoint: None };
+        }
+    };
+    match envelope.payload {
+        Some(data_envelope::Payload::AvailableLsps(lsps))
+            if lsps.ready && !lsps.endpoint.is_empty() =>
+        {
+            LspRelayUpdate {
+                endpoint: Some(lsps.endpoint),
+            }
+        }
+        _ => LspRelayUpdate { endpoint: None },
+    }
 }
 
 // ── MQTT protobuf -> domain mapping helpers ─────────────────────────────
@@ -293,6 +336,24 @@ pub struct MqttConnectConfig<'a> {
     pub search_update_tx: Option<
         tokio::sync::mpsc::UnboundedSender<SearchUpdate>,
     >,
+    /// Node id this Runtime belongs to (ADR-055 §6.7, Phase 4). When
+    /// set, bootstrap subscribes to `acowork/nodes/{node_id}/lsps` and
+    /// the poll loop forwards relay state changes to `lsps_update_tx`.
+    /// `None` (standalone / Gateway-spawned) keeps the legacy behavior:
+    /// no subscription, no `codebase` tool.
+    pub node_id: Option<&'a str>,
+    /// Sink for node LSP relay state changes. The MQTT poll loop sends
+    /// an [`LspRelayUpdate`] here whenever `acowork/nodes/{id}/lsps`
+    /// retained is received. The receiver (held by `agent_init.rs` →
+    /// `gateway_loop`) forwards to SessionManager so all sessions pick
+    /// up or drop the `codebase` tool.
+    ///
+    /// Optional: when None, the MQTT event loop drops the update
+    /// (suitable for tests and Standalone mode).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub lsps_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<LspRelayUpdate>,
+    >,
     /// Per-agent workspace directory (`work_dir`). Used by the MQTT poll
     /// task to persist `acowork/global/mcps` into `agent_mcp.json::catalog`
     /// so the Tools-panel `PUT /agents/{id}/mcp-servers` validation can
@@ -301,6 +362,11 @@ pub struct MqttConnectConfig<'a> {
     /// catalog sync as MQTT-only — see startup/subsystems.rs §MCP for the
     /// rationale and the on-disk contract).
     pub work_dir: std::path::PathBuf,
+    /// ADR-055 Phase 5a: optional broker CONNECT credentials
+    /// (`node:{id}` / `agent:{id}` username + node_token). When None,
+    /// the client connects anonymously (auth disabled broker).
+    pub username: Option<&'a str>,
+    pub password: Option<&'a str>,
 }
 
 /// Event payload for `publish_tool_approval_needed`.
@@ -387,6 +453,10 @@ struct BootstrapData {
     /// Prefix used to route incoming `control/#` publishes to
     /// `control_tx` (ends with `/`, **no** `#`).
     control_filter_prefix: String,
+    /// ADR-055 §6.7 (Phase 4): the node's LSP relay topic
+    /// (`acowork/nodes/{node_id}/lsps`). `None` when the Runtime runs
+    /// without `--node-id` (standalone / Gateway-spawned).
+    node_lsps_topic: Option<String>,
 }
 
 impl RuntimeMqttClient {
@@ -426,6 +496,9 @@ impl RuntimeMqttClient {
                 "acowork/agents/{}/sessions/control/",
                 cfg.agent_id
             ),
+            node_lsps_topic: cfg
+                .node_id
+                .map(acowork_core::node::node_lsps_topic),
         });
 
         // Configure MQTT options with Last Will.
@@ -437,6 +510,12 @@ impl RuntimeMqttClient {
         // thought itself connected until the next PINGREQ 30 s later).
         options.set_keep_alive(Duration::from_secs(5));
         options.set_clean_session(true);
+
+        // ADR-055 Phase 5a: authenticate when the broker requires it
+        // (username `agent:{id}` + the spawning node's token).
+        if let (Some(u), Some(p)) = (cfg.username, cfg.password) {
+            options.set_credentials(u.to_string(), p.to_string());
+        }
 
         // ADR-039: align outgoing packet size with the broker's
         // `max_payload_size` (`GATEWAY_MQTT_MAX_PACKET_SIZE`). Without
@@ -478,6 +557,8 @@ impl RuntimeMqttClient {
         let poll_identity_tx = cfg.identity_update_tx.clone();
         let poll_provider_tx = cfg.provider_update_tx.clone();
         let poll_search_tx = cfg.search_update_tx.clone();
+        let poll_lsps_tx = cfg.lsps_update_tx.clone();
+        let poll_node_lsps_topic = bootstrap_data.node_lsps_topic.clone();
         let poll_bootstrap = bootstrap_data.clone();
         let task_shared_client = Arc::clone(&shared_client);
         let task_options = options; // moved into poll task for soft-restart
@@ -729,6 +810,18 @@ impl RuntimeMqttClient {
 
                                     if topic.starts_with(&poll_bootstrap.control_filter_prefix) {
                                         let _ = poll_control_tx.send((topic.clone(), publish.payload.to_vec()));
+                                    } else if let Some(lsps_topic) =
+                                        poll_node_lsps_topic.as_deref()
+                                        && topic == lsps_topic
+                                    {
+                                        // ADR-055 §6.7: the node's LSP relay state
+                                        // changed. Forward to SessionManager so it
+                                        // can register / unregister the codebase
+                                        // tool (retained snapshot or hot-push).
+                                        let update = decode_lsps_payload(&publish.payload);
+                                        if let Some(ref tx) = poll_lsps_tx {
+                                            let _ = tx.send(update);
+                                        }
                                     }
                                 }
                                 Ok(Event::Incoming(rumqttc::Incoming::ConnAck(_))) => {
@@ -875,7 +968,7 @@ impl RuntimeMqttClient {
     /// invoke on every (re)connect to restore both retained state
     /// and persistent subscriptions.
     ///
-    /// Implements the "Bootstrap five-step contract" of ADR-039:
+    /// Implements the "Bootstrap six-step contract" of ADR-039:
     /// 1. PUBLISH `status = online` (Retained) - overrides the Last
     ///    Will payload (`offline`) set during `connect()`.
     /// 2. PUBLISH `meta` (Retained) - agent capability descriptor.
@@ -885,6 +978,8 @@ impl RuntimeMqttClient {
     ///    control commands. Without this step, a `clean_session =
     ///    true` broker silently drops the subscription on the next
     ///    (re)connect - the symptom that prompted ADR-039.
+    /// 6. SUBSCRIBE `acowork/nodes/{node_id}/lsps` - node LSP relay
+    ///    state (ADR-055 §6.7, only when `--node-id` is set).
     async fn run_bootstrap(
         client: &AsyncClient,
         data: &BootstrapData,
@@ -939,6 +1034,19 @@ impl RuntimeMqttClient {
             .subscribe(&data.control_filter, QoS::AtLeastOnce)
             .await
             .map_err(|e| RuntimeMqttClientError::Subscribe(format!("control: {}", e)))?;
+
+        // Step 6: SUBSCRIBE the node's LSP relay topic (ADR-055 §6.7,
+        // Phase 4). Only when the Runtime was spawned with `--node-id`;
+        // standalone Runtimes have no node and skip this step (the
+        // codebase tool stays unregistered — the pre-Phase-4 behavior).
+        if let Some(lsps_topic) = data.node_lsps_topic.as_deref() {
+            client
+                .subscribe(lsps_topic, QoS::AtLeastOnce)
+                .await
+                .map_err(|e| {
+                    RuntimeMqttClientError::Subscribe(format!("node lsps: {}", e))
+                })?;
+        }
 
         Ok(())
     }
@@ -1905,6 +2013,48 @@ fn truncate_tool_result_lines(result_json: &str) -> String {
 mod tests {
     use super::*;
 
+    // ── decode_lsps_payload (ADR-055 §6.7) ────────────────────────────
+
+    fn encode_available_lsps(endpoint: &str, ready: bool) -> Vec<u8> {
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AvailableLsps(
+                acowork_core::mqtt_proto::AvailableLsps {
+                    version: 1,
+                    endpoint: endpoint.to_string(),
+                    ready,
+                },
+            )),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[test]
+    fn decode_lsps_ready_endpoint() {
+        let payload = encode_available_lsps("http://192.168.1.10:19878", true);
+        let update = decode_lsps_payload(&payload);
+        assert_eq!(update.endpoint.as_deref(), Some("http://192.168.1.10:19878"));
+    }
+
+    #[test]
+    fn decode_lsps_not_ready_drops_endpoint() {
+        let payload = encode_available_lsps("http://192.168.1.10:19878", false);
+        let update = decode_lsps_payload(&payload);
+        assert!(update.endpoint.is_none());
+    }
+
+    #[test]
+    fn decode_lsps_empty_payload_is_unavailable() {
+        let update = decode_lsps_payload(&[]);
+        assert!(update.endpoint.is_none());
+    }
+
+    #[test]
+    fn decode_lsps_garbage_payload_is_unavailable() {
+        let update = decode_lsps_payload(b"not-a-protobuf");
+        assert!(update.endpoint.is_none());
+    }
+
     #[tokio::test]
     async fn test_runtime_mqtt_client_connects_and_publishes() {
         // Start a broker (using the Gateway's broker module). Threaded
@@ -1939,7 +2089,11 @@ mod tests {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir,
+                username: None,
+                password: None,
             },
         )
         .await
@@ -2027,7 +2181,11 @@ mod tests {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir,
+                username: None,
+                password: None,
             },
         )
         .await

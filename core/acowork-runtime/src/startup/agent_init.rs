@@ -61,6 +61,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     > = None;
+    // ADR-055 §6.7 (Phase 4): receiver for node LSP relay state changes,
+    // wired through `gateway_loop` to SessionManager.
+    let mut lsps_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
+    > = None;
     let mut runtime_http_port: Option<u16> = None;
 
     // Shared session snapshot map, created here so it can be passed to both
@@ -198,8 +203,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `mqtt_client_slot` the HTTP server holds.
     let mut workspace_watcher_set: Option<crate::workspace::SharedWorkspaceWatcherSet> = None;
 
-    if let Some(_http_port) = config.http_port {
-        match crate::http::RuntimeHttpServer::start(
+    if let Some(bind_port) = config.http_port {
+        // ADR-055 §6.4: bind the Node-allocated loopback port so the
+        // Node reverse proxy has a stable `{agent_id} → port` mapping.
+        match crate::http::RuntimeHttpServer::start_with_bind_port(
+            bind_port,
             std::path::PathBuf::from(&config.work_dir),
             loaded.manifest.agent_id.clone(),
             session_snapshots.clone(),
@@ -257,6 +265,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
         let (search_update_tx, search_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
+        // ADR-055 §6.7 (Phase 4): sink for the node's LSP relay state.
+        // The MQTT event loop decodes `acowork/nodes/{id}/lsps` retained
+        // pushes; gateway_loop forwards to SessionManager so the
+        // codebase tool is registered / unregistered in all sessions.
+        let (lsps_update_tx, lsps_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::LspRelayUpdate>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
@@ -278,7 +292,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_tx: Some(identity_update_tx),
                 provider_update_tx: Some(provider_update_tx),
                 search_update_tx: Some(search_update_tx),
+                node_id: config.node_id.as_deref(),
+                lsps_update_tx: Some(lsps_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
+                username: config.mqtt_username.as_deref(),
+                password: config.mqtt_password.as_deref(),
             },
         ).await {
             Ok(client) => {
@@ -345,6 +363,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
                 search_update_rx = Some(search_update_chan_rx);
+                lsps_update_rx = Some(lsps_update_chan_rx);
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
         }
@@ -952,6 +971,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         identity_update_rx,
         provider_update_rx,
         search_update_rx,
+        lsps_update_rx,
         runtime_http_port,
         provider,
         resolved_model,

@@ -152,12 +152,19 @@ async fn start_mqtt_broker(State(state): State<AppState>) -> impl IntoResponse {
         (cfg.mqtt.host.clone(), cfg.mqtt.port)
     };
 
+    // ADR-055 Phase 5a: restart with the same credential model as the
+    // original start (None when MQTT auth was disabled at startup).
+    let broker_auth = {
+        let gw = state.gateway_state.read().await;
+        gw.mqtt_broker_auth.clone()
+    };
+
     // Retry the start a few times. The most common failure here is the
     // OS still holding the port in TIME_WAIT after a previous broker
     // listener closed; a short sleep + retry is enough to absorb it.
     let mut last_err: Option<String> = None;
     for attempt in 0..START_RETRIES {
-        match crate::mqtt::start_broker(&host, port) {
+        match crate::mqtt::start_broker_with_auth(&host, port, broker_auth.clone()) {
             Ok(handle) => {
                 let gw = state.gateway_state.read().await;
                 {

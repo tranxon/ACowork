@@ -69,6 +69,9 @@ pub enum Command {
         /// Reverse-proxy TCP port (§6.4, default 19900).
         #[arg(long, env = "ACOWORK_NODE_PROXY_PORT", default_value = "19900")]
         proxy_port: u16,
+        /// Node-local LSP relay TCP port (ADR-055 §6.7, default 19878).
+        #[arg(long, env = "ACOWORK_NODE_LSP_RELAY_PORT", default_value = "19878")]
+        lsp_relay_port: u16,
     },
     /// Register the node identity against a Gateway without staying
     /// resident (script / bulk-deployment friendly; idempotent).
@@ -198,6 +201,7 @@ impl Cli {
                 advertise_host,
                 proxy_bind,
                 proxy_port,
+                lsp_relay_port,
             }) => {
                 let config = NodeConfig {
                     home: resolve_home(home.as_deref()),
@@ -210,6 +214,7 @@ impl Cli {
                     advertise_host,
                     proxy_bind,
                     proxy_port,
+                    lsp_relay_port,
                     ..NodeConfig::default()
                 };
                 init_tracing(&config);

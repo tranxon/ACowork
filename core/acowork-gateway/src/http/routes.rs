@@ -167,7 +167,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::proxy::proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
-        .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -339,6 +338,16 @@ pub struct SystemStatusResponse {
     /// assuming the default 19875 (L3-6 residual gap — ADR-058 W4 fixed
     /// the host derivation; this closes the port half).
     pub mqtt_port: u16,
+    /// ADR-055 Phase 5a: MQTT username for the Desktop's broker
+    /// connection, present only when `mqtt.auth_enabled` is on.
+    /// Informational at this tier — CONNECT identity is keyed by
+    /// client_id (`user:{name}:desktop:{id}`), not username.
+    pub mqtt_username: Option<String>,
+    /// ADR-055 Phase 5a: MQTT password for the Desktop's broker
+    /// connection — the HttpAuth bearer token, the same value the
+    /// broker CONNECT check accepts for `user:*:desktop:*` clients.
+    /// Present only when `mqtt.auth_enabled` is on.
+    pub mqtt_password: Option<String>,
 }
 
 /// `GET /api/status` — system status
@@ -354,6 +363,24 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         gw.running_agents.len()
     };
 
+    // ADR-055 Phase 5a: MQTT credentials for the Desktop
+    // (`connect_mqtt` consumes these when present). Exposed only when
+    // MQTT auth is on; the password is the HttpAuth bearer token — the
+    // same value the broker CONNECT handler accepts for `user:*:desktop:*`.
+    let mqtt_auth_enabled = gw
+        .mqtt_broker_auth
+        .as_ref()
+        .map(|a| a.auth_enabled)
+        .unwrap_or(false);
+    let (mqtt_username, mqtt_password) = if mqtt_auth_enabled {
+        (
+            Some("desktop".to_string()),
+            state.auth.token().map(str::to_string),
+        )
+    } else {
+        (None, None)
+    };
+
     Json(SystemStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents_installed: gw.installed_agents.len(),
@@ -364,37 +391,9 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
             .as_ref()
             .map(|c| c.mqtt.port)
             .unwrap_or_else(crate::config::default_mqtt_port),
+        mqtt_username,
+        mqtt_password,
     })
-}
-
-// ── LSP Relay endpoint ────────────────────────────────────────────────
-
-/// Response for `GET /api/lsp/endpoint` — returns the LSP Relay address.
-///
-/// Desktop App and Agent Runtime use this endpoint to discover the LSP Relay,
-/// then connect directly to its WebSocket and JSON-RPC API.
-#[derive(Debug, Serialize)]
-pub struct LspEndpointResponse {
-    pub available: bool,
-    pub host: String,
-    pub port: Option<u16>,
-}
-
-/// `GET /api/lsp/endpoint` — return the LSP Relay's address.
-pub async fn lsp_endpoint(State(state): State<AppState>) -> Json<LspEndpointResponse> {
-    let gw = state.gateway_state.read().await;
-    match &gw.lsp_relay_process {
-        Some(eps) if eps.ready => Json(LspEndpointResponse {
-            available: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(eps.port),
-        }),
-        _ => Json(LspEndpointResponse {
-            available: false,
-            host: "127.0.0.1".to_string(),
-            port: None,
-        }),
-    }
 }
 
 // ── Error response helpers ────────────────────────────────────────────
@@ -509,56 +508,64 @@ mod tests {
         let resp = system_status(State(state)).await;
         assert_eq!(resp.agents_installed, 0);
         assert_eq!(resp.agents_running, 0);
+        // MQTT auth off by default → no credentials are exposed.
+        assert_eq!(resp.mqtt_username, None);
+        assert_eq!(resp.mqtt_password, None);
+    }
+
+    #[tokio::test]
+    async fn test_system_status_exposes_mqtt_credentials_when_auth_enabled() {
+        use std::sync::Mutex;
+
+        // MQTT auth enabled + HttpAuth enabled (the broker CONNECT
+        // check for `user:*:desktop:*` compares against the HttpAuth
+        // bearer token, so the Desktop gets it as its MQTT password).
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-http-status-auth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(true)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        let password = resp.mqtt_password.as_deref().expect("password exposed when auth on");
+        assert_eq!(password.len(), 64, "256-bit hex token");
+
+        // MQTT auth enabled but HttpAuth off → no password to hand out.
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(false)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        assert_eq!(resp.mqtt_password, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_build_router() {
         let state = test_app_state();
         let _router = build_router(state);
-    }
-
-    // ── LSP endpoint tests ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_no_relay() {
-        let state = test_app_state();
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert!(resp.port.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_available_when_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: true,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert_eq!(resp.port, Some(19878));
-    }
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_not_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: false,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert!(resp.port.is_none());
     }
 }
 

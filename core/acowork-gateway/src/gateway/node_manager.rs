@@ -175,11 +175,16 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
 /// client (with its `acowork/nodes/+/status` subscription) are up, so
 /// a retained `online` from an already-running node reaches the
 /// registry during the reuse window.
+///
+/// `local_token` (ADR-055 Phase 5a) is the pre-issued local node
+/// credential, forwarded to the child via `--token` when MQTT auth is
+/// enabled (None keeps the pre-5a credential-less spawn).
 pub async fn ensure_local_node(
     mqtt_host: &str,
     mqtt_port: u16,
     packages_dir: &str,
     node_registry: SharedNodeRegistry,
+    local_token: Option<String>,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
     // Step 1: kill orphans from a previous Gateway run (they point at
     // OUR port, and the reserved `local` name is Gateway-exclusive).
@@ -206,7 +211,15 @@ pub async fn ensure_local_node(
 
     let supervisor = LocalNodeSupervisor::new_shared();
     if !reused {
-        spawn_and_supervise(mqtt_host, mqtt_port, packages_dir, node_registry, supervisor.clone()).await?;
+        spawn_and_supervise(
+            mqtt_host,
+            mqtt_port,
+            packages_dir,
+            node_registry,
+            supervisor.clone(),
+            local_token.as_deref(),
+        )
+        .await?;
     }
     Ok(supervisor)
 }
@@ -219,6 +232,7 @@ async fn spawn_and_supervise(
     packages_dir: &str,
     node_registry: SharedNodeRegistry,
     supervisor: Arc<LocalNodeSupervisor>,
+    local_token: Option<&str>,
 ) -> std::io::Result<()> {
     let bin = node_binary();
     if !bin.exists() {
@@ -230,11 +244,12 @@ async fn spawn_and_supervise(
         return Ok(());
     }
 
-    let mut child = spawn_node_child(&bin, mqtt_host, mqtt_port, packages_dir)?;
+    let mut child = spawn_node_child(&bin, mqtt_host, mqtt_port, packages_dir, local_token)?;
     tracing::info!(pid = child.id(), binary = %bin.display(), "Local node agent spawned");
 
     let supervise_host = mqtt_host.to_string();
     let supervise_packages_dir = packages_dir.to_string();
+    let supervise_token = local_token.map(str::to_string);
     tokio::spawn(async move {
         loop {
             let pid = child.id();
@@ -259,7 +274,7 @@ async fn spawn_and_supervise(
                 return;
             }
 
-            match spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir) {
+            match spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref()) {
                 Ok(new_child) => {
                     child = new_child;
                     tracing::info!(pid = child.id(), "Local node agent respawned");
@@ -280,7 +295,7 @@ async fn spawn_and_supervise(
                             );
                             return;
                         }
-                        if let Ok(new_child) = spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir) {
+                        if let Ok(new_child) = spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref()) {
                             child = new_child;
                             tracing::info!(pid = child.id(), "Local node agent respawned");
                             break;
@@ -296,11 +311,14 @@ async fn spawn_and_supervise(
 
 /// Spawn the `acowork-node start` child with the spawn markers used
 /// by orphan cleanup (`--name local --gateway-mqtt-port {port}`).
+/// `token` (ADR-055 Phase 5a) is the pre-issued local node credential,
+/// forwarded as `--token` when MQTT auth is enabled.
 fn spawn_node_child(
     bin: &std::path::Path,
     mqtt_host: &str,
     mqtt_port: u16,
     packages_dir: &str,
+    token: Option<&str>,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(bin);
     cmd.args([
@@ -313,9 +331,12 @@ fn spawn_node_child(
         LOCAL_NODE_ID,
         "--packages-dir",
         packages_dir,
-    ])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::inherit());
+    ]);
+    if let Some(token) = token {
+        cmd.args(["--token", token]);
+    }
+    cmd.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
 
     #[cfg(unix)]
     {

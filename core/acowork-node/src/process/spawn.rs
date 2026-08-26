@@ -43,12 +43,21 @@ impl AgentChild {
 /// (ADR-055 L3-5): the node's own MQTT connection target, so a remote
 /// node's Runtimes reach the same broker.
 ///
+/// `node_id` is forwarded as `--node-id` (ADR-055 §6.7, Phase 4): the
+/// Runtime subscribes to `acowork/nodes/{node_id}/lsps` so it can
+/// register the `codebase` tool when this node's LSP relay is ready.
+///
 /// `http_port` is the loopback HTTP port the Node allocated for this
 /// Runtime (ADR-055 §6.4); `http_advertise_endpoint` is the Node
 /// reverse-proxy base URL (`http://{advertise_host}:{proxy_port}`)
 /// injected so the Runtime publishes `{base}/agents/{id}` as its
 /// retained `http_endpoint` (§6.3). When `None` (standalone/test), the
 /// Runtime falls back to the direct loopback endpoint.
+///
+/// `node_token` (Phase 5a): when the node holds a Gateway-issued
+/// token it is injected as `--mqtt-username agent:{id}` /
+/// `--mqtt-password {token}` so spawned Runtimes authenticate against
+/// the broker's `agent:{id}` CONNECT rule (§6.8).
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_agent_process(
     agent_id: &str,
@@ -60,8 +69,10 @@ pub async fn spawn_agent_process(
     log_file_count: u64,
     mqtt_port: Option<u16>,
     gateway_host: &str,
+    node_id: &str,
     http_port: u16,
     http_advertise_endpoint: Option<&str>,
+    node_token: Option<&str>,
     shared_state: Option<SharedNodeState>,
 ) -> Result<AgentChild> {
     // Locate the acowork-runtime binary (sibling of current executable)
@@ -100,6 +111,21 @@ pub async fn spawn_agent_process(
     // ADR-055 L3-5: forward the node's Gateway broker host so the
     // Runtime connects to the same broker the node is enrolled with.
     cmd.arg("--gateway-host").arg(gateway_host);
+
+    // ADR-055 §6.7 (Phase 4): forward the hosting node id so the Runtime
+    // subscribes to this node's LSP relay topic (`acowork/nodes/{id}/lsps`)
+    // and registers the `codebase` tool when the relay is ready.
+    cmd.arg("--node-id").arg(node_id);
+
+    // ADR-055 Phase 5a §6.8: when the node holds a Gateway-issued
+    // token, Runtimes connect to the broker with it — `agent:{id}`
+    // CONNECT usernames are accepted with the spawning node's token.
+    if let Some(token) = node_token {
+        cmd.arg("--mqtt-username")
+            .arg(format!("agent:{agent_id}"))
+            .arg("--mqtt-password")
+            .arg(token);
+    }
 
     // ADR-033: Pass MQTT port so Runtime connects via MQTT.
     if let Some(port) = mqtt_port {
@@ -335,7 +361,9 @@ mod tests {
             20,
             None,
             "127.0.0.1",
+            "test-node",
             acowork_core::node::NODE_HTTP_PORT_BASE,
+            None,
             None,
             None,
         )

@@ -563,123 +563,48 @@ impl Gateway {
             );
         }
 
-        // Spawn the LSP Relay process (acowork-lsp-relay).
-        // This is optional — if the binary is not found, LSP functionality
-        // is unavailable but the Gateway continues normally.
-        // The relay runs as an independent process with its own HTTP server,
-        // WebSocket LSP relay, and LSP process pool.
-        // See ADR-019 for the full architecture rationale.
-        let mut lsp_relay_child = None;
-        let mut lsp_relay_supervisor_cfg: Option<
-            crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig,
-        > = None;
-        {
-            let data_dir = std::path::PathBuf::from(&self.config.data_dir);
-            let lsp_relay_port = crate::lifecycle::lsp_relay::LSP_RELAY_DEFAULT_PORT;
-            let gateway_health_url = format!("http://127.0.0.1:{}/health", self.config.http.port);
-
-            // Check if an LSP Relay is already running on the expected port
-            let existing_health =
-                crate::lifecycle::lsp_relay::check_lsp_relay_health(lsp_relay_port).await;
-            if let Some(health) = existing_health {
-                let relay_state = crate::lifecycle::lsp_relay::attach_existing_lsp_relay(
-                    lsp_relay_port,
-                    Some(health),
-                );
-                tracing::info!(
-                    port = relay_state.port,
-                    ready = relay_state.ready,
-                    "Reusing existing LSP Relay process"
-                );
-                {
-                    let mut gw = shared_state.write().await;
-                    gw.lsp_relay_process = Some(relay_state);
-                }
-                lsp_relay_supervisor_cfg = Some(
-                    crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
-                        data_dir,
-                        port: lsp_relay_port,
-                        gateway_health_url,
-                    },
-                );
-            } else {
-                match crate::lifecycle::lsp_relay::spawn_lsp_relay(
-                    &data_dir,
-                    lsp_relay_port,
-                    &gateway_health_url,
-                )
-                .await
-                {
-                    Ok((relay_state, child)) => {
-                        tracing::info!(
-                            pid = relay_state.pid,
-                            port = relay_state.port,
-                            "LSP Relay process spawned"
-                        );
-                        {
-                            let mut gw = shared_state.write().await;
-                            gw.lsp_relay_process = Some(relay_state);
-                        }
-                        lsp_relay_child = Some(child);
-                        lsp_relay_supervisor_cfg = Some(
-                            crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
-                                data_dir,
-                                port: lsp_relay_port,
-                                gateway_health_url,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to spawn LSP Relay (LSP functionality will be unavailable)"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Spawn LSP Relay process reaper — clears state when the child exits.
-        if let Some(mut child) = lsp_relay_child {
-            let child_pid = child.id();
-            let state_for_reaper = shared_state.clone();
-            tokio::spawn(async move {
-                let Some(target_pid) = child_pid else {
-                    return;
-                };
-                let exit_status = child.wait().await;
-                tracing::warn!(
-                    pid = target_pid,
-                    exit_status = ?exit_status,
-                    "LSP Relay process exited"
-                );
-                let mut gw = state_for_reaper.write().await;
-                let still_ours = gw
-                    .lsp_relay_process
-                    .as_ref()
-                    .map(|eps| eps.pid == target_pid)
-                    .unwrap_or(false);
-                if still_ours {
-                    gw.lsp_relay_process = None;
-                }
-            });
-        }
-
-        // Start the LSP Relay supervisor (SSE heartbeat monitoring + restart).
-        if let Some(sup_cfg) = lsp_relay_supervisor_cfg.take() {
-            crate::lifecycle::lsp_relay_supervisor::start_lsp_relay_supervisor(
-                sup_cfg,
-                shared_state.clone(),
-            );
-        }
+        // ADR-055 §6.7 (Phase 4): the LSP relay is NO LONGER hosted
+        // here — each Node hosts its own node-local relay and publishes
+        // the retained `acowork/nodes/{node_id}/lsps` topic. The Gateway
+        // subscribes to that topic (node_registry) and serves
+        // `GET /api/agents/{id}/lsp-endpoint` from it.
 
         // ADR-033: Start MQTT broker + Gateway client BEFORE HTTP server
         // so it's available for chat handlers to publish control commands.
         let mqtt_config = self.config.mqtt.clone();
+        // ADR-055 Phase 5a: prepare the credential stores + internal
+        // tokens BEFORE the broker starts so the CONNECT auth handler
+        // installs with the full state. The HTTP token doubles as the
+        // Desktop MQTT password, so it is generated whenever either
+        // channel enables auth (the HTTP handler layer itself stays
+        // permissive in this phase — the token is only consumed by the
+        // broker CONNECT handler and /api/status).
+        let http_auth = Arc::new(crate::http::auth::HttpAuth::new(
+            http_config.auth_enabled || mqtt_config.auth_enabled,
+        ));
+        if let Err(e) = http_auth.write_token_file(&data_dir_path) {
+            tracing::warn!(error = %e, "Failed to write http_token file");
+        }
+        let enrollment_tokens = crate::mqtt::new_shared_enrollment_store(&data_dir_path);
+        let node_tokens = crate::mqtt::new_shared_node_token_store(&data_dir_path);
+        let publisher_token = crate::mqtt::enrollment::generate_token();
+        let broker_auth = crate::mqtt::broker::BrokerAuth {
+            auth_enabled: mqtt_config.auth_enabled,
+            enrollment_tokens: enrollment_tokens.clone(),
+            node_tokens: node_tokens.clone(),
+            publisher_token: publisher_token.clone(),
+            http_token: http_auth.token().map(str::to_string),
+        };
+
         let mut mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
             // ADR-033: start_broker runs in a separate OS thread
             // because rumqttd creates its own tokio runtime internally.
-            match crate::mqtt::start_broker(&mqtt_config.host, mqtt_config.port) {
+            let auth = if mqtt_config.auth_enabled {
+                Some(broker_auth.clone())
+            } else {
+                None
+            };
+            match crate::mqtt::start_broker_with_auth(&mqtt_config.host, mqtt_config.port, auth) {
                 Ok(h) => { tracing::info!(addr = %h.listen_addr, "MQTT broker started"); Some(h) }
                 Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
             }
@@ -694,6 +619,12 @@ impl Gateway {
                 *ctrl = Some(h);
             }
             tracing::info!("MQTT broker handle registered with debug control");
+        }
+        // ADR-055 Phase 5a: share the auth state so a debug-triggered
+        // broker restart keeps the same credential model.
+        {
+            let mut gw = shared_state.write().await;
+            gw.mqtt_broker_auth = Some(broker_auth);
         }
 
         // ADR-033: Create runtime HTTP registry and agent registry.
@@ -742,6 +673,13 @@ impl Gateway {
             let slot_for_cb = dispatch_client_slot.clone();
             let node_control_slot_for_cb = node_control_slot.clone();
             let state_for_dispatch = shared_state.clone();
+            // ADR-055 Phase 5a: enroll dispatch needs the credential
+            // stores + the auth flag. Cloned BEFORE the move-closure so
+            // the originals stay available (local-node token pre-issue
+            // below).
+            let enrollment_tokens_for_dispatch = enrollment_tokens.clone();
+            let node_tokens_for_dispatch = node_tokens.clone();
+            let auth_enabled_for_dispatch = mqtt_config.auth_enabled;
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
@@ -752,6 +690,8 @@ impl Gateway {
                 let agent_reg_for_dispatch = agent_reg_for_dispatch.clone();
                 let node_reg_for_dispatch = node_reg_for_dispatch.clone();
                 let state_for_dispatch = state_for_dispatch.clone();
+                let enrollment_tokens_for_cb = enrollment_tokens_for_dispatch.clone();
+                let node_tokens_for_cb = node_tokens_for_dispatch.clone();
                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
@@ -763,11 +703,35 @@ impl Gateway {
                         client.as_ref(),
                         &state_for_dispatch,
                         node_control.as_ref(),
+                        Some(&enrollment_tokens_for_cb),
+                        Some(&node_tokens_for_cb),
+                        auth_enabled_for_dispatch,
                     );
                 });
             });
 
-            match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
+            // ADR-055 Phase 5a: when MQTT auth is enabled the broker
+            // rejects credential-less connections — the publisher
+            // presents the internal startup token (client_id as the
+            // username; the CONNECT check keys on client_id + password).
+            let publisher_result = if mqtt_config.auth_enabled {
+                crate::mqtt::GatewayMqttClient::new_publisher_with_callback_and_credentials(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    callback,
+                    acowork_core::defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+                    &publisher_token,
+                )
+                .await
+            } else {
+                crate::mqtt::GatewayMqttClient::new_publisher_with_callback(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    callback,
+                )
+                .await
+            };
+            match publisher_result {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
@@ -826,6 +790,20 @@ impl Gateway {
         // supervise it (orphan cleanup → reuse window → spawn + reaper).
         // Must run AFTER the MQTT broker + Gateway client are up so the
         // retained `acowork/nodes/local/status` reuse window works.
+        // ADR-055 Phase 5a: when MQTT auth is enabled, pre-issue the
+        // local node's long-lived credential BEFORE the spawn so the
+        // child can connect + enroll on first boot (the record carries
+        // a placeholder machine_uid, claimed at enroll time).
+        let local_node_token = if mqtt_config.auth_enabled {
+            Some(
+                node_tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .upsert(acowork_core::node::LOCAL_NODE_ID, ""),
+            )
+        } else {
+            None
+        };
         let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
             if mqtt_broker_started {
                 match crate::gateway::node_manager::ensure_local_node(
@@ -833,6 +811,7 @@ impl Gateway {
                     mqtt_config.port,
                     &self.config.packages_dir,
                     node_registry.clone(),
+                    local_node_token,
                 )
                 .await
                 {
@@ -923,6 +902,7 @@ impl Gateway {
                 Some(agent_registry),
                 node_control,
                 Some(node_registry),
+                http_auth,
             )
             .await
             {
@@ -957,20 +937,6 @@ impl Gateway {
                         tracing::info!(pid = embed_state.pid, "Shutting down embedding service");
                         if let Err(e) = crate::lifecycle::embed::kill_embed_process(embed_state.pid).await {
                             tracing::warn!(error = %e, "Failed to kill embedding service process");
-                        }
-                    }
-                }
-
-                // Kill the LSP Relay process before exiting.
-                // This prevents acowork-lsp-relay from becoming an orphan process.
-                {
-                    let gw = shared_state.read().await;
-                    if let Some(ref relay_state) = gw.lsp_relay_process
-                        && relay_state.pid != 0
-                    {
-                        tracing::info!(pid = relay_state.pid, "Shutting down LSP Relay");
-                        if let Err(e) = crate::lifecycle::lsp_relay::kill_lsp_relay(relay_state.pid).await {
-                            tracing::warn!(error = %e, "Failed to kill LSP Relay process");
                         }
                     }
                 }

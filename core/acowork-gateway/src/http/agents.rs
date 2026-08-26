@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{Response, StatusCode, header},
+    http::{HeaderMap, Response, StatusCode, header},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -104,6 +104,12 @@ pub fn agent_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/avatar-file",
             get(get_avatar_file).delete(delete_avatar_file),
+        )
+        // ADR-055 §6.7 (Phase 4): resolve the LSP relay endpoint of the
+        // node hosting this agent, for Desktop code-editing features.
+        .route(
+            "/api/agents/{id}/lsp-endpoint",
+            get(get_agent_lsp_endpoint),
         )
 }
 
@@ -1212,9 +1218,15 @@ pub struct UploadFileQuery {
 /// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
 /// source file from the package registry (ADR-055 §3.2). This is how a
 /// remote Node pulls the package during an asynchronous install.
+///
+/// ADR-055 Phase 5a: when `mqtt.auth_enabled` is on, the Node must
+/// present its long-lived token as `X-ACowork-Node-Token` (any
+/// registered node token passes — the registry is node-agnostic at
+/// this tier). 401 without the header, 403 on a mismatch.
 pub async fn download_package(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
     // agent_id is a slug; reject path separators / traversal.
     if agent_id.is_empty()
@@ -1223,6 +1235,33 @@ pub async fn download_package(
         || agent_id.contains("..")
     {
         return Err(ApiError::bad_request("Invalid agent id"));
+    }
+
+    // ADR-055 Phase 5a: node-token gate on the package channel.
+    let broker_auth = state.gateway_state.read().await.mqtt_broker_auth.clone();
+    if let Some(auth) = broker_auth.filter(|a| a.auth_enabled) {
+        let provided = headers
+            .get("X-ACowork-Node-Token")
+            .and_then(|v| v.to_str().ok());
+        let Some(token) = provided else {
+            return Err(ApiError::unauthorized(
+                "Node token required (X-ACowork-Node-Token)",
+            ));
+        };
+        let valid = auth
+            .node_tokens
+            .lock()
+            .map(|store| store.any_token_matches(token))
+            .unwrap_or(false);
+        if !valid {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiError {
+                    error: "Invalid node token".to_string(),
+                    code: 403,
+                }),
+            ));
+        }
     }
 
     let registry_dir = {
@@ -1298,6 +1337,61 @@ pub(crate) async fn check_node_compatible(
         )));
     }
     Ok(())
+}
+
+/// Response for `GET /api/agents/{id}/lsp-endpoint`.
+#[derive(Debug, Serialize)]
+pub struct AgentLspEndpointResponse {
+    pub agent_id: String,
+    /// Node hosting the agent (ADR-055 §6.5); `"local"` for agents the
+    /// Gateway spawns directly.
+    pub node_id: String,
+    /// LSP relay endpoint advertised by the node, `None` when the node
+    /// has not published a ready LSP relay state yet.
+    pub endpoint: Option<String>,
+    /// Whether the node's LSP relay is ready.
+    pub ready: bool,
+}
+
+/// `GET /api/agents/{id}/lsp-endpoint` — resolve the LSP relay endpoint
+/// of the node hosting this agent.
+///
+/// ADR-055 §6.7 (Phase 4): the LSP relay is no longer a Gateway child
+/// process — each node runs its own relay sidecar and publishes a
+/// retained `acowork/nodes/{node_id}/lsps` envelope, which the Gateway
+/// mirrors into [`crate::mqtt::node_registry::NodeInfoState::lsp_endpoint`].
+///
+/// Node resolution order: running agent's host first, installed-agent
+/// inventory as fallback (agent stopped).
+pub async fn get_agent_lsp_endpoint(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentLspEndpointResponse>, (StatusCode, Json<ApiError>)> {
+    let node_id = {
+        let gw = state.gateway_state.read().await;
+        gw.running_agents
+            .get(&agent_id)
+            .map(|r| r.node_id.clone())
+            .or_else(|| gw.installed_agents.get(&agent_id).map(|i| i.node_id.clone()))
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
+    };
+
+    let endpoint = match state.node_registry.as_ref() {
+        Some(registry) => registry
+            .read()
+            .await
+            .get(&node_id)
+            .and_then(|n| n.lsp_endpoint.clone()),
+        None => None,
+    };
+    let ready = endpoint.is_some();
+
+    Ok(Json(AgentLspEndpointResponse {
+        agent_id,
+        node_id,
+        endpoint,
+        ready,
+    }))
 }
 
 /// `POST /api/agents/install` — upload and install a .agent package.

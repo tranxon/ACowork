@@ -40,6 +40,10 @@ pub struct NodeConfig {
     pub proxy_bind: String,
     /// TCP port for the node reverse proxy (`/agents/{id}/*`).
     pub proxy_port: u16,
+    /// TCP port for the node-local LSP relay sidecar (ADR-055 §6.7,
+    /// Phase 4). The relay listens on `127.0.0.1:{port}` and its
+    /// endpoint is advertised via the retained per-node `lsps` topic.
+    pub lsp_relay_port: u16,
     /// Runtime log file max size in MB before auto-split (forwarded to
     /// spawned Runtimes, mirrors the Gateway default).
     pub log_file_size_mb: u64,
@@ -60,6 +64,7 @@ impl Default for NodeConfig {
             advertise_host: "127.0.0.1".to_string(),
             proxy_bind: "0.0.0.0".to_string(),
             proxy_port: acowork_core::node::NODE_PROXY_PORT,
+            lsp_relay_port: crate::sidecar::lsp_relay::LSP_RELAY_DEFAULT_PORT,
             log_file_size_mb: 10,
             log_file_count: 20,
         }

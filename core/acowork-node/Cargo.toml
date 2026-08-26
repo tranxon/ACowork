@@ -26,11 +26,13 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 rumqttc = { workspace = true }
 prost = { workspace = true }
+futures-util = { workspace = true }
 toml = { workspace = true }
 zip = { workspace = true }
 # ADR-055 §6.4: the node reverse proxy (axum) + upstream fetch (reqwest).
-# `axum` `ws` is NOT needed here — the proxy only forwards HTTP
-# (WebSocket/LSP lands in Phase 4 via `sidecar/`).
+# `axum` `ws` is NOT needed here — the LSP relay is a separate sidecar
+# process (Phase 4, `sidecar/`); the proxy only forwards HTTP, and LSP
+# WebSocket upgrades terminate at the relay.
 axum = { workspace = true }
 reqwest = { workspace = true }
 
@@ -39,3 +41,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Router oneshot tests (proxy auth gate).
+tower = { workspace = true }

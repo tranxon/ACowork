@@ -237,6 +237,10 @@ impl Cli {
         let advertise_host = crate::config::resolve_advertise_host(&config);
         let http_port = config.http.port;
         let dev_mode = config.dev_mode;
+        // ADR-055 Phase 5a: data dir is needed by `nodes token create`
+        // (the enrollment token store lives under it) — captured before
+        // config moves into Gateway::new.
+        let data_dir = config.data_dir.clone();
         let gateway = Gateway::new(config)?;
         match self.command {
             Some(Commands::Install { package, node }) => {
@@ -371,12 +375,18 @@ impl Cli {
             Some(Commands::Nodes {
                 cmd: NodesCommands::Token { cmd: TokenCommands::Create { ttl } },
             }) => {
-                // ADR-055 §6.13.3: enrollment-token issuance lands in
-                // Phase 5a (token + ACL). Placeholder for now.
-                println!(
-                    "Enrollment token issuance is not available yet (ADR-055 Phase 5a). \
-                     Requested TTL: {ttl}"
+                // ADR-055 Phase 5a: real enrollment-token issuance. The
+                // plaintext is printed exactly once — only its sha256
+                // hash is persisted in `enrollment_tokens.json`.
+                let ttl = parse_ttl(&ttl)?;
+                let mut store = crate::mqtt::enrollment::EnrollmentTokenStore::load(
+                    std::path::Path::new(&data_dir),
                 );
+                let plaintext = store.create_token(ttl);
+                println!("Enrollment token created (one-time, TTL {}m):", ttl.as_secs() / 60);
+                println!("{plaintext}");
+                println!("\nPass it to a node on first boot:");
+                println!("  acowork-node start --token <token>");
             }
             None => {
                 if self.daemon {
@@ -396,6 +406,29 @@ impl Cli {
         }
         Ok(())
     }
+}
+
+/// Parse a TTL spec ("30m", "1h", "90s", "2d") into a Duration.
+fn parse_ttl(spec: &str) -> Result<std::time::Duration, GatewayError> {
+    let spec = spec.trim();
+    let (num, unit) = spec.split_at(spec.len().saturating_sub(1));
+    let value: u64 = num.parse().map_err(|_| {
+        GatewayError::Config(format!(
+            "invalid TTL '{spec}' (expected e.g. 30m, 1h, 90s, 2d)"
+        ))
+    })?;
+    let seconds = match unit {
+        "s" => value,
+        "m" => value * 60,
+        "h" => value * 3600,
+        "d" => value * 86400,
+        _ => {
+            return Err(GatewayError::Config(format!(
+                "invalid TTL unit '{unit}' (expected s/m/h/d)"
+            )))
+        }
+    };
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 /// Cross-platform CRLF conversion for terminal log output.
@@ -637,5 +670,34 @@ mod tests {
     fn test_cli_env_vars() {
         let cli = Cli::parse_from(["acowork-gateway", "--log-level", "debug"]);
         assert_eq!(cli.log_level, "debug");
+    }
+
+    #[test]
+    fn test_cli_parse_token_create() {
+        let cli = Cli::parse_from([
+            "acowork-gateway",
+            "nodes",
+            "token",
+            "create",
+            "--ttl",
+            "2h",
+        ]);
+        match cli.command {
+            Some(Commands::Nodes {
+                cmd: NodesCommands::Token { cmd: TokenCommands::Create { ttl } },
+            }) => assert_eq!(ttl, "2h"),
+            _ => panic!("Expected nodes token create command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ttl_units() {
+        assert_eq!(parse_ttl("30m").unwrap(), std::time::Duration::from_secs(1800));
+        assert_eq!(parse_ttl("1h").unwrap(), std::time::Duration::from_secs(3600));
+        assert_eq!(parse_ttl("90s").unwrap(), std::time::Duration::from_secs(90));
+        assert_eq!(parse_ttl("2d").unwrap(), std::time::Duration::from_secs(172800));
+        assert!(parse_ttl("30").is_err(), "missing unit must fail");
+        assert!(parse_ttl("30x").is_err(), "unknown unit must fail");
+        assert!(parse_ttl("abc").is_err(), "non-numeric must fail");
     }
 }

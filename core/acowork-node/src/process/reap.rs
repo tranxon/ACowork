@@ -246,6 +246,8 @@ mod tests {
                 "/home/u/.acowork/acowork-node/packages/com.example.weather/workspace",
                 "--gateway-host",
                 "192.168.1.10",
+                "--node-id",
+                "gpu-server",
                 "--mqtt-port",
                 "19875",
                 "--http-port",

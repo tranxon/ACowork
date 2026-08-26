@@ -89,7 +89,11 @@ fn integration_gateway_and_runtime_connect() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
             },
         )
         .await
@@ -139,7 +143,11 @@ fn integration_control_message_flow() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
             },
         ).await.unwrap();
 
@@ -224,7 +232,11 @@ fn integration_control_stop_flow() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
             },
         ).await.unwrap();
 
@@ -320,7 +332,11 @@ fn integration_multiple_messages() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
             },
         ).await.unwrap();
         let messages = ["msg-1", "msg-2", "msg-3"];
@@ -390,7 +406,11 @@ fn integration_lwt_offline_on_disconnect() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                username: None,
+                password: None,
             },
         ).await.unwrap();
 
@@ -486,7 +506,11 @@ fn integration_catalog_retained_persists_to_agent_mcp_json() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: work_dir.clone(),
+                username: None,
+                password: None,
             },
         ).await.unwrap();
 
@@ -648,7 +672,11 @@ fn integration_providers_retained_persists_to_agent_provider_json() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: work_dir.clone(),
+                username: None,
+                password: None,
             },
         )
         .await
@@ -801,7 +829,11 @@ fn integration_searches_retained_persists_to_agent_search_json() {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                node_id: None,
+                lsps_update_tx: None,
                 work_dir: work_dir.clone(),
+                username: None,
+                password: None,
             },
         )
         .await

@@ -32,9 +32,17 @@ pub struct ProcessManager {
     mqtt_port: Option<u16>,
     /// ADR-055 L3-5: Gateway MQTT broker host, forwarded to Runtimes.
     gateway_host: String,
+    /// ADR-055 §6.7 (Phase 4): the node's own id, forwarded to spawned
+    /// Runtimes (`--node-id`) so they subscribe to this node's LSP
+    /// relay topic.
+    node_id: String,
     /// ADR-055 §6.3: Node reverse-proxy base URL injected into spawned
     /// Runtimes (`--http-advertise-endpoint`).
     http_advertise_endpoint: Option<String>,
+    /// ADR-055 Phase 5a: the node's Gateway-issued token, forwarded to
+    /// spawned Runtimes (`--mqtt-username agent:{id}` /
+    /// `--mqtt-password {token}`).
+    node_token: Option<String>,
 }
 
 impl ProcessManager {
@@ -43,14 +51,18 @@ impl ProcessManager {
         log_file_count: u64,
         mqtt_port: Option<u16>,
         gateway_host: String,
+        node_id: String,
         http_advertise_endpoint: Option<String>,
+        node_token: Option<String>,
     ) -> Self {
         Self {
             log_file_size_mb,
             log_file_count,
             mqtt_port,
             gateway_host,
+            node_id,
             http_advertise_endpoint,
+            node_token,
         }
     }
 
@@ -112,8 +124,10 @@ impl ProcessManager {
             self.log_file_count,
             self.mqtt_port,
             &self.gateway_host,
+            &self.node_id,
             http_port,
             self.http_advertise_endpoint.as_deref(),
+            self.node_token.as_deref(),
             reaper_state,
         )
         .await?;
@@ -250,14 +264,30 @@ mod tests {
 
     #[test]
     fn test_process_manager_new() {
-        let mgr = ProcessManager::new(10, 20, None, "127.0.0.1".to_string(), None);
+        let mgr = ProcessManager::new(
+            10,
+            20,
+            None,
+            "127.0.0.1".to_string(),
+            "test-node".to_string(),
+            None,
+            None,
+        );
         assert_eq!(mgr.log_file_size_mb, 10);
         assert_eq!(mgr.log_file_count, 20);
     }
 
     #[tokio::test]
     async fn test_start_agent_not_installed() {
-        let mut mgr = ProcessManager::new(10, 20, None, "127.0.0.1".to_string(), None);
+        let mut mgr = ProcessManager::new(
+            10,
+            20,
+            None,
+            "127.0.0.1".to_string(),
+            "test-node".to_string(),
+            None,
+            None,
+        );
         let state: SharedNodeState = Arc::new(RwLock::new(crate::state::NodeState::new(16)));
         let result = mgr.start_agent("com.test.unknown", &state, false, false).await;
         assert!(result.is_err());
@@ -265,7 +295,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_agent_not_running() {
-        let mut mgr = ProcessManager::new(10, 20, None, "127.0.0.1".to_string(), None);
+        let mut mgr = ProcessManager::new(
+            10,
+            20,
+            None,
+            "127.0.0.1".to_string(),
+            "test-node".to_string(),
+            None,
+            None,
+        );
         let state: SharedNodeState = Arc::new(RwLock::new(crate::state::NodeState::new(16)));
         let result = mgr.stop_agent("com.test.unknown", &state).await;
         assert!(result.is_err());

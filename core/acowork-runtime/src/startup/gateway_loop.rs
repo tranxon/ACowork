@@ -157,6 +157,7 @@ pub(crate) async fn phase_d_run(
         ctx.identity_update_rx.take(),
         ctx.provider_update_rx.take(),
         ctx.search_update_rx.take(),
+        ctx.lsps_update_rx.take(),
         &config.work_dir,
         ctx.session_config_slot.clone(),
     )
@@ -402,6 +403,12 @@ async fn mqtt_only_loop(
     mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    // ADR-055 §6.7 (Phase 4): forwards the node's LSP relay state
+    // changes to SessionManager. None when running without `--node-id`
+    // (standalone / Gateway-spawned) or when MQTT is unavailable.
+    mut lsps_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
+    >,
     work_dir: &str,
     session_config_slot: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
 ) -> Result<()> {
@@ -547,6 +554,27 @@ async fn mqtt_only_loop(
                         update.search_key_vault,
                         update.search_list,
                     );
+                }
+            }
+
+            // ADR-055 §6.7 (Phase 4): node LSP relay state change →
+            // SessionManager::handle_lsp_relay_update → register /
+            // unregister the `codebase` tool in every session.
+            lsps = async {
+                match lsps_update_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(update) = lsps {
+                    tracing::info!(
+                        endpoint = update.endpoint.as_deref().unwrap_or("<none>"),
+                        "Applying node LSP relay update to SessionManager"
+                    );
+                    session_manager
+                        .lock()
+                        .await
+                        .handle_lsp_relay_update(update.endpoint);
                 }
             }
         }

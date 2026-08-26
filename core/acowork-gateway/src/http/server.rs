@@ -113,14 +113,19 @@ pub(crate) async fn start_http_server(
     agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
     node_control: Option<crate::mqtt::node_control::NodeControlClient>,
     node_registry: Option<crate::mqtt::SharedNodeRegistry>,
+    // ADR-055 Phase 5a: HttpAuth is created by the caller so the MQTT
+    // broker CONNECT handler can share the same token (Desktop MQTT
+    // password). Its `enabled` flag may be `http.auth_enabled ||
+    // mqtt.auth_enabled`.
+    auth: Arc<HttpAuth>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
         return Ok(());
     }
 
-    // Initialize auth
-    let auth = Arc::new(HttpAuth::new(http_config.auth_enabled));
+    // Token file write happens in the caller (before broker start);
+    // re-writing here is a harmless idempotent refresh.
     auth.write_token_file(data_dir)?;
 
     // Build app state

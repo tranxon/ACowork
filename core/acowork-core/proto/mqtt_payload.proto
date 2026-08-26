@@ -91,6 +91,12 @@ message DataEnvelope {
     // (Node → Gateway, Retained). The Gateway aggregates these to
     // rebuild its installed_agents view (Phase 2b.3 hard-cut).
     InstalledAgentInfo       installed_agent_info      = 84;
+    // ADR-055 §6.12 / Phase 5a security: node enrollment handshake
+    // (Node → Gateway on `acowork/nodes/{node_id}/enroll`, Gateway →
+    // Node on `acowork/nodes/{node_id}/enroll_result`). Both are
+    // QoS 1 non-retained.
+    NodeEnroll               node_enroll               = 85;
+    NodeEnrollResult         node_enroll_result        = 86;
   }
 }
 
@@ -1297,4 +1303,47 @@ message NodeEvent {
   /// than a status string — publish prepare/build carry their
   /// serialized result payloads here. Absent for simple commands.
   optional string result_json = 5;
+}
+
+/// Node → Gateway enrollment handshake (ADR-055 §6.12, Phase 5a
+/// security). Topic: acowork/nodes/{node_id}/enroll (QoS 1,
+/// non-retained). The Node presents its identity plus the one-time
+/// enrollment token (issued via `nodes token create`); the Gateway
+/// validates, then answers on the `enroll_result` topic with the
+/// long-lived `node_token`.
+message NodeEnroll {
+  string node_id = 1;
+  /// Machine fingerprint (UUID v4, persisted in identity.json) — lets
+  /// the Gateway detect "same name, different machine" conflicts and
+  /// make re-enrollment idempotent (same machine_uid reuses the token).
+  string machine_uid = 2;
+  string os = 3;      // std::env::consts::OS
+  string arch = 4;    // std::env::consts::ARCH
+  /// Version of the acowork-node binary (CARGO_PKG_VERSION).
+  string node_version = 5;
+  /// Node control-plane protocol version (mirrors NodeInfo.
+  /// protocol_version).
+  uint32 protocol_version = 6;
+  /// Capability tags — mirrors NodeInfo.capabilities.
+  repeated string capabilities = 7;
+  /// One-time enrollment token (plaintext, only ever carried in this
+  /// message). The Gateway stores only its sha256 hash and marks it
+  /// consumed on success.
+  string enrollment_token = 8;
+}
+
+/// Gateway → Node enrollment reply (ADR-055 §6.12, Phase 5a).
+/// Topic: acowork/nodes/{node_id}/enroll_result (QoS 1, non-retained).
+/// `status` mirrors the NodeEvent vocabulary ("ok" | "error").
+message NodeEnrollResult {
+  string node_id = 1;
+  string machine_uid = 2;
+  /// Long-lived per-node credential. Also used for HTTP-channel
+  /// authentication via the `X-ACowork-Node-Token` header. The Node
+  /// persists it into identity.json; present only on success.
+  string node_token = 3;
+  string status = 4;
+  /// Human-readable detail ("enrolled", "token consumed", conflict
+  /// explanation, etc.).
+  string message = 5;
 }

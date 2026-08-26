@@ -146,6 +146,13 @@ pub struct MqttConfig {
     /// Broker listen port.
     #[serde(default = "default_mqtt_port")]
     pub port: u16,
+    /// ADR-055 Phase 5a: enable the CONNECT-layer authentication model
+    /// (enrollment tokens + per-node tokens + internal publisher / HTTP
+    /// credentials). Defaults to **false** — the deployment must turn
+    /// it on explicitly (after issuing enrollment tokens via
+    /// `nodes token create`).
+    #[serde(default)]
+    pub auth_enabled: bool,
 }
 
 impl Default for MqttConfig {
@@ -154,6 +161,7 @@ impl Default for MqttConfig {
             enabled: true,
             host: default_mqtt_host(),
             port: default_mqtt_port(),
+            auth_enabled: false,
         }
     }
 }

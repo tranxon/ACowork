@@ -1390,6 +1390,15 @@ pub(crate) async fn proxy_to_runtime_with_method(
         }
     }
 
+    // ADR-055 Phase 5a: when MQTT auth is enabled, attach the
+    // long-lived token of the node hosting this agent as
+    // `X-ACowork-Node-Token` so the Runtime can authenticate the
+    // proxied request (see `acowork-node` proxy/mod.rs). No-op when
+    // auth is off, the agent is unknown, or its node is not enrolled.
+    if let Some(node_token) = resolve_node_token(state, id).await {
+        request = request.header("X-ACowork-Node-Token", node_token);
+    }
+
     if let Some(ref payload) = body {
         request = request.body(payload.clone());
     }
@@ -1425,6 +1434,26 @@ pub(crate) async fn proxy_to_runtime_with_method(
                 .into_response()
         }
     }
+}
+
+/// ADR-055 Phase 5a: resolve the long-lived node token for the node
+/// hosting `agent_id` (installed_agents first, running_agents as a
+/// fallback). Returns `None` when MQTT auth is disabled, the agent is
+/// unknown, or its node has not enrolled yet — callers treat that as
+/// "no credential to attach" rather than an error.
+async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> {
+    let gw = state.gateway_state.read().await;
+    let broker_auth = gw.mqtt_broker_auth.as_ref()?;
+    if !broker_auth.auth_enabled {
+        return None;
+    }
+    let node_id = gw
+        .installed_agents
+        .get(agent_id)
+        .map(|a| a.node_id.as_str())
+        .or_else(|| gw.running_agents.get(agent_id).map(|a| a.node_id.as_str()))?;
+    let store = broker_auth.node_tokens.lock().ok()?;
+    store.get_token(node_id).map(str::to_string)
 }
 
 /// Fetch JSON from a Runtime HTTP endpoint.

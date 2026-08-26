@@ -8,7 +8,8 @@
 //! ADR-033 proto contract).
 
 use acowork_core::mqtt_proto::{
-    data_envelope, node_control_command, DataEnvelope, NodeControlCommand, NodeEvent, NodeInfo,
+    data_envelope, node_control_command, DataEnvelope, NodeControlCommand, NodeEnroll,
+    NodeEnrollResult, NodeEvent, NodeInfo,
 };
 use prost::Message;
 
@@ -50,6 +51,29 @@ fn sample_event() -> NodeEvent {
         status: "ok".to_string(),
         message: "pong".to_string(),
         result_json: None,
+    }
+}
+
+fn sample_enroll() -> NodeEnroll {
+    NodeEnroll {
+        node_id: "gpu-1".to_string(),
+        machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+        os: "macos".to_string(),
+        arch: "aarch64".to_string(),
+        node_version: "0.1.0".to_string(),
+        protocol_version: 1,
+        capabilities: vec!["process".to_string(), "package".to_string()],
+        enrollment_token: "tok-1234".to_string(),
+    }
+}
+
+fn sample_enroll_result() -> NodeEnrollResult {
+    NodeEnrollResult {
+        node_id: "gpu-1".to_string(),
+        machine_uid: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
+        node_token: "tok-node-0001".to_string(),
+        status: "ok".to_string(),
+        message: "enrolled".to_string(),
     }
 }
 
@@ -288,5 +312,48 @@ fn node_event_result_json_round_trip() {
     };
     let json = ev.result_json.expect("result_json present");
     assert!(json.contains("output_path"));
+}
+
+#[test]
+fn golden_node_enroll_envelope() {
+    // Phase 5a enrollment handshake — pins NodeEnroll field numbers so
+    // a renumbering breaks the build instead of silently drifting the
+    // Gateway ↔ Node enrollment contract.
+    let envelope = envelope_with(data_envelope::Payload::NodeEnroll(sample_enroll()));
+    let bytes = envelope.encode_to_vec();
+    let expected = "08 01 aa 05 62 0a 05 67 70 75 2d 31 12 24 30 66 30 65 30 64 30 63 2d 30 62 30 61 2d 34 30 30 39 2d 38 30 30 37 2d 30 36 30 35 30 34 30 33 30 32 30 31 1a 05 6d 61 63 6f 73 22 07 61 61 72 63 68 36 34 2a 05 30 2e 31 2e 30 30 01 3a 07 70 72 6f 63 65 73 73 3a 07 70 61 63 6b 61 67 65 42 08 74 6f 6b 2d 31 32 33 34";
+    assert_eq!(hex(&bytes), expected.replace(' ', ""));
+
+    // Round-trip contract: the golden bytes must decode back to the
+    // same logical payload.
+    let decoded = decode_envelope(&bytes);
+    let data_envelope::Payload::NodeEnroll(enroll) = decoded.payload.expect("payload") else {
+        panic!("expected NodeEnroll payload");
+    };
+    assert_eq!(enroll.node_id, "gpu-1");
+    assert_eq!(enroll.machine_uid, "0f0e0d0c-0b0a-4009-8007-060504030201");
+    assert_eq!(enroll.protocol_version, 1);
+    assert_eq!(enroll.capabilities, vec!["process", "package"]);
+    assert_eq!(enroll.enrollment_token, "tok-1234");
+}
+
+#[test]
+fn golden_node_enroll_result_envelope() {
+    // Phase 5a enrollment reply — pins NodeEnrollResult field numbers
+    // (node_token is the long-lived per-node credential).
+    let envelope = envelope_with(data_envelope::Payload::NodeEnrollResult(sample_enroll_result()));
+    let bytes = envelope.encode_to_vec();
+    let expected = "08 01 b2 05 4a 0a 05 67 70 75 2d 31 12 24 30 66 30 65 30 64 30 63 2d 30 62 30 61 2d 34 30 30 39 2d 38 30 30 37 2d 30 36 30 35 30 34 30 33 30 32 30 31 1a 0d 74 6f 6b 2d 6e 6f 64 65 2d 30 30 30 31 22 02 6f 6b 2a 08 65 6e 72 6f 6c 6c 65 64";
+    assert_eq!(hex(&bytes), expected.replace(' ', ""));
+
+    let decoded = decode_envelope(&bytes);
+    let data_envelope::Payload::NodeEnrollResult(result) = decoded.payload.expect("payload") else {
+        panic!("expected NodeEnrollResult payload");
+    };
+    assert_eq!(result.node_id, "gpu-1");
+    assert_eq!(result.machine_uid, "0f0e0d0c-0b0a-4009-8007-060504030201");
+    assert_eq!(result.node_token, "tok-node-0001");
+    assert_eq!(result.status, "ok");
+    assert_eq!(result.message, "enrolled");
 }
 

@@ -99,6 +99,28 @@ pub struct Cli {
     /// concatenates — it never learns the node-internal topology (§6.4).
     #[arg(long, env = "ACOWORK_HTTP_ADVERTISE_ENDPOINT")]
     pub http_advertise_endpoint: Option<String>,
+
+    /// ADR-055 §6.7 (Phase 4): the node hosting this Runtime. When set,
+    /// the Runtime subscribes to the node's retained LSP relay topic
+    /// (`acowork/nodes/{node_id}/lsps`) and registers the `codebase`
+    /// tool when the relay becomes ready (and unregisters it when the
+    /// relay goes away). Injected by the Node Agent at spawn time
+    /// (`--node-id`); standalone mode omits it and the codebase tool
+    /// stays unregistered — matching the pre-Phase-4 behavior.
+    #[arg(long, env = "ACOWORK_NODE_ID")]
+    pub node_id: Option<String>,
+
+    /// ADR-055 Phase 5a: MQTT broker CONNECT username. Injected by the
+    /// Node Agent at spawn time (`agent:{id}`); standalone mode can set
+    /// it manually to authenticate against an auth-enabled broker.
+    #[arg(long, env = "ACOWORK_MQTT_USERNAME")]
+    pub mqtt_username: Option<String>,
+
+    /// ADR-055 Phase 5a: MQTT broker CONNECT password (node_token /
+    /// enrollment token). Injected by the Node Agent at spawn time;
+    /// standalone mode can set it manually.
+    #[arg(long, env = "ACOWORK_MQTT_PASSWORD")]
+    pub mqtt_password: Option<String>,
 }
 
 impl Cli {

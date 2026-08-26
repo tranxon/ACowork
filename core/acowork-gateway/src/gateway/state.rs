@@ -8,7 +8,6 @@ use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
 use crate::interaction_store::InteractionStore;
 use crate::lifecycle::embed::EmbedProcessState;
-use crate::lifecycle::lsp_relay::LspRelayProcessState;
 use crate::rate::bucket::RateLimiter;
 use crate::resource_cache::ResourceCache;
 use crate::vault::VaultFacade;
@@ -183,9 +182,6 @@ pub struct GatewayState {
     pub resource_cache: ResourceCache,
     /// Embedding service process state (None if not started).
     pub embed_process: Option<EmbedProcessState>,
-    /// LSP Relay process state (None if not started).
-    /// Managed by the LSP Relay supervisor — spawn / monitor / restart.
-    pub lsp_relay_process: Option<LspRelayProcessState>,
     /// Last user-interaction timestamp per agent (`agent_id` -> UTC time).
     /// In-memory mirror of the on-disk interaction store; source of truth
     /// for the `GET /api/agents` sort order. Persists across agent
@@ -202,6 +198,10 @@ pub struct GatewayState {
     /// Always `Some` because initialised in `GatewayState::new`.
     /// The inner `Option` is `None` when MQTT is disabled in config.
     pub mqtt_broker_control: Arc<MqttBrokerControlHandle>,
+    /// ADR-055 Phase 5a: broker CONNECT auth inputs, kept so the debug
+    /// `/api/debug/mqtt/start` endpoint can restart the broker with the
+    /// same credential state. `None` when MQTT auth is disabled.
+    pub mqtt_broker_auth: Option<crate::mqtt::broker::BrokerAuth>,
     /// ADR-055 D3: resolved advertise host for constructing endpoints
     /// distributed to Runtime / Desktop (embed, LSP, broker).
     ///
@@ -226,10 +226,10 @@ impl GatewayState {
             config: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,
-            lsp_relay_process: None,
             last_interactions: HashMap::new(),
             interaction_store: None,
             mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
+            mqtt_broker_auth: None,
             advertise_host: "127.0.0.1".to_string(),
         }
     }

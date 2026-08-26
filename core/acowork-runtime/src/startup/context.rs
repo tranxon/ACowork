@@ -47,6 +47,12 @@ pub(crate) struct AgentBootContext {
     pub search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    /// Receiver for node LSP relay state changes (ADR-055 §6.7,
+    /// Phase 4). Consumed by `gateway_loop::mqtt_only_loop` and
+    /// forwarded to `SessionManager::handle_lsp_relay_update`.
+    pub lsps_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
+    >,
     /// Control command receiver (from MQTT control topics)
     pub control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
     #[allow(dead_code)]

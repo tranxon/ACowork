@@ -31,9 +31,19 @@ pub struct NodeInfoState {
     /// Last `NodeInfo` retained snapshot (None until the first info
     /// message arrives).
     pub info: Option<NodeInfo>,
+    /// Node-local LSP relay endpoint (ADR-055 §6.7, Phase 4): the
+    /// retained `acowork/nodes/{node_id}/lsps` AvailableLsps payload.
+    /// `Some(endpoint)` while the node's relay is ready, `None` while
+    /// unavailable or before the first message.
+    pub lsp_endpoint: Option<String>,
     /// Machine fingerprint from the info snapshot — Gateway-side
     /// "same name, different machine" conflict detection (§6.12).
     pub machine_uid: Option<String>,
+    /// Long-lived per-node credential issued at enroll time (ADR-055
+    /// §6.12 / Phase 5a). Persisted in NodeTokenStore; this slot is
+    /// the in-memory mirror so HTTP handlers (X-ACowork-Node-Token
+    /// checks) and /api/nodes can read it without the store.
+    pub node_token: Option<String>,
     /// When the registry last observed any message from this node.
     pub last_updated: Instant,
     /// UTC timestamp of the last observed online transition (None
@@ -93,7 +103,9 @@ impl NodeRegistry {
                 node_id: node_id.to_string(),
                 online: false,
                 info: None,
+                lsp_endpoint: None,
                 machine_uid: None,
+                node_token: None,
                 last_updated: now,
                 online_since: None,
             }
@@ -158,7 +170,9 @@ impl NodeRegistry {
                 node_id: node_id.clone(),
                 online: false,
                 info: None,
+                lsp_endpoint: None,
                 machine_uid: None,
+                node_token: None,
                 last_updated: now,
                 online_since: None,
             }
@@ -166,6 +180,74 @@ impl NodeRegistry {
         entry.info = Some(info);
         entry.machine_uid = machine_uid;
         entry.last_updated = now;
+    }
+
+    /// Update a node's LSP relay endpoint from the retained
+    /// `acowork/nodes/{node_id}/lsps` topic (ADR-055 §6.7, Phase 4):
+    /// protobuf `DataEnvelope<AvailableLsps>`. Ready → `Some(endpoint)`;
+    /// unavailable or an empty retained payload (node cleared it) → None.
+    pub fn update_lsps_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
+        let parts: Vec<&str> = topic.split('/').collect();
+        if parts.len() != 4
+            || parts[0] != "acowork"
+            || parts[1] != "nodes"
+            || parts[3] != "lsps"
+        {
+            tracing::warn!(topic, "Invalid node lsps topic format");
+            return;
+        }
+        let node_id = parts[2].to_string();
+
+        let now = Instant::now();
+        let entry = self.nodes.entry(node_id.clone()).or_insert_with(|| {
+            tracing::info!(node_id = %node_id, "Node discovered via lsps topic");
+            NodeInfoState {
+                node_id: node_id.clone(),
+                online: false,
+                info: None,
+                lsp_endpoint: None,
+                machine_uid: None,
+                node_token: None,
+                last_updated: now,
+                online_since: None,
+            }
+        });
+
+        // Empty retained payload = the node cleared its lsps state
+        // (shutdown / leave) — the relay is no longer available.
+        if payload.is_empty() {
+            entry.lsp_endpoint = None;
+            entry.last_updated = now;
+            tracing::debug!(node_id = %node_id, "Node lsps cleared (retained empty)");
+            return;
+        }
+
+        let envelope = match DataEnvelope::decode(payload) {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!(topic, error = %e, "node lsps payload is not a valid DataEnvelope");
+                return;
+            }
+        };
+        let lsps = match envelope.payload {
+            Some(data_envelope::Payload::AvailableLsps(lsps)) => lsps,
+            _ => {
+                tracing::warn!(topic, "node lsps topic carried a non-AvailableLsps envelope");
+                return;
+            }
+        };
+
+        entry.lsp_endpoint = if lsps.ready && !lsps.endpoint.is_empty() {
+            Some(lsps.endpoint)
+        } else {
+            None
+        };
+        entry.last_updated = now;
+        tracing::debug!(
+            node_id = %node_id,
+            endpoint = ?entry.lsp_endpoint,
+            "Node registry lsps updated"
+        );
     }
 
     /// Whether a node is currently online.
@@ -194,6 +276,28 @@ impl NodeRegistry {
     #[allow(dead_code)]
     pub fn remove(&mut self, node_id: &str) {
         self.nodes.remove(node_id);
+    }
+
+    /// Record the long-lived token minted at enroll time (ADR-055
+    /// Phase 5a). Creates the entry when the node was never seen via
+    /// status/info topics (enroll may arrive first).
+    pub fn set_node_token(&mut self, node_id: &str, token: String) {
+        let now = Instant::now();
+        let entry = self.nodes.entry(node_id.to_string()).or_insert_with(|| {
+            tracing::info!(node_id, "Node registered via enrollment");
+            NodeInfoState {
+                node_id: node_id.to_string(),
+                online: false,
+                info: None,
+                lsp_endpoint: None,
+                machine_uid: None,
+                node_token: None,
+                last_updated: now,
+                online_since: None,
+            }
+        });
+        entry.node_token = Some(token);
+        entry.last_updated = now;
     }
 }
 
@@ -288,5 +392,61 @@ mod tests {
         registry.update_status_from_mqtt("acowork/nodes/alpha/status", b"online");
         let ids: Vec<String> = registry.list_nodes().into_iter().map(|n| n.node_id).collect();
         assert_eq!(ids, vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    fn lsps_envelope(endpoint: &str, ready: bool) -> Vec<u8> {
+        let lsps = acowork_core::mqtt_proto::AvailableLsps {
+            version: 1,
+            endpoint: endpoint.to_string(),
+            ready,
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AvailableLsps(lsps)),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    #[test]
+    fn lsps_topic_sets_endpoint_when_ready() {
+        let mut registry = NodeRegistry::new();
+        registry.update_lsps_from_mqtt(
+            "acowork/nodes/gpu-1/lsps",
+            &lsps_envelope("http://192.168.1.10:19878", true),
+        );
+        assert_eq!(
+            registry.get("gpu-1").unwrap().lsp_endpoint.as_deref(),
+            Some("http://192.168.1.10:19878")
+        );
+    }
+
+    #[test]
+    fn lsps_topic_clears_endpoint_when_not_ready() {
+        let mut registry = NodeRegistry::new();
+        registry.update_lsps_from_mqtt(
+            "acowork/nodes/gpu-1/lsps",
+            &lsps_envelope("http://192.168.1.10:19878", true),
+        );
+        registry.update_lsps_from_mqtt("acowork/nodes/gpu-1/lsps", &lsps_envelope("", false));
+        assert!(registry.get("gpu-1").unwrap().lsp_endpoint.is_none());
+    }
+
+    #[test]
+    fn lsps_topic_empty_retained_payload_clears_endpoint() {
+        let mut registry = NodeRegistry::new();
+        registry.update_lsps_from_mqtt(
+            "acowork/nodes/gpu-1/lsps",
+            &lsps_envelope("http://192.168.1.10:19878", true),
+        );
+        registry.update_lsps_from_mqtt("acowork/nodes/gpu-1/lsps", &[]);
+        assert!(registry.get("gpu-1").unwrap().lsp_endpoint.is_none());
+    }
+
+    #[test]
+    fn invalid_lsps_topics_are_ignored() {
+        let mut registry = NodeRegistry::new();
+        registry.update_lsps_from_mqtt("acowork/global/lsps", &lsps_envelope("x", true));
+        registry.update_lsps_from_mqtt("acowork/nodes/a/b/lsps", &lsps_envelope("x", true));
+        assert!(registry.list_nodes().is_empty());
     }
 }

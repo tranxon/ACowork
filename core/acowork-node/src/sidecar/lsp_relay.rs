@@ -1,25 +1,29 @@
-//! LSP Relay process lifecycle management.
+//! LSP Relay process lifecycle management (ADR-055 §6.7 node-local
+//! sidecar).
 //!
-//! Manages the `acowork-lsp-relay` child process: spawn at Gateway startup,
-//! health-check, and graceful shutdown. Follows the same pattern as
-//! `embed.rs` — the Gateway is responsible for spawn / monitor / restart,
-//! while the LSP Relay runs as an independent process with its own
-//! tokio runtime, HTTP server, and LSP process pool.
+//! Migrated from the Gateway's `lifecycle/lsp_relay.rs` (the pre-cut
+//! host) with a mechanical error-type re-base: `GatewayError` →
+//! [`crate::error::NodeError`], `crate::lifecycle::process::*` →
+//! [`crate::process::spawn`]. Semantics are unchanged — the Node is now
+//! the host because the LSP server must share the filesystem with the
+//! agent workspace (`root_uri = file://{workspace_root}`).
 //!
-//! See ADR-019 for the full architecture rationale.
+//! The relay's self-exit watchdog (CLI arg `--gateway-health-url`, name
+//! kept for historical compatibility) is retargeted from the Gateway
+//! `/health` to the Node's own `/health` endpoint — the parent liveness
+//! signal is now the Node, not the Gateway.
 
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
 
-use crate::error::GatewayError;
+use crate::error::{NodeError, Result};
 
 /// Shared HTTP client for LSP Relay REST calls.
 ///
-/// Single static `reqwest::Client` reused across the lifecycle module
-/// to take advantage of connection pooling — see
-/// `acowork-gateway/src/http/proxy.rs::runtime_http_client` for the
-/// canonical pattern this mirrors.
+/// Single static `reqwest::Client` reused across the sidecar module to
+/// take advantage of connection pooling — mirrors the pattern the
+/// Gateway used (`http/proxy.rs::runtime_http_client`).
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -54,9 +58,9 @@ pub struct LspRelayHealthStatus {
     pub language_count: Option<usize>,
 }
 
-/// Create gateway state for an already-running LSP Relay.
+/// Create state for an already-running LSP Relay.
 ///
-/// This is used when the Gateway detects that an LSP Relay is already
+/// This is used when the Node detects that an LSP Relay is already
 /// listening on the expected port (e.g. started manually for debugging).
 pub fn attach_existing_lsp_relay(
     port: u16,
@@ -71,32 +75,36 @@ pub fn attach_existing_lsp_relay(
 
 /// Spawn the acowork-lsp-relay process.
 ///
-/// The LSP Relay runs as a sibling process to the Gateway, listening
-/// on `127.0.0.1:{port}`. It provides WebSocket LSP relay and JSON-RPC
+/// The LSP Relay runs as a sibling process to the Node, listening on
+/// `127.0.0.1:{port}`. It provides WebSocket LSP relay and JSON-RPC
 /// API for codebase tools.
 ///
 /// # Arguments
 ///
-/// * `data_dir` — Gateway data directory (for log file).
+/// * `data_dir` — Node data directory (for the log file).
 /// * `port` — Port for the LSP Relay to listen on.
-/// * `gateway_health_url` — Gateway health URL for self-exit detection.
+/// * `node_health_url` — Node health URL for self-exit detection
+///   (passed through to the relay CLI arg `--gateway-health-url`, whose
+///   name is kept for compatibility; semantically it is now the
+///   *parent process* health URL, and the parent is the Node).
 ///
 /// Returns `(LspRelayProcessState, Child)` — the caller is responsible
 /// for reaping the child process (e.g. spawning a task that awaits
 /// `child.wait()` and clears state on exit).
 ///
 /// Note: The LSP Relay discovers its config directory via the
-/// `ACOWORK_LSP_CONFIG_DIR` environment variable, which is inherited
-/// from the Gateway process. No explicit `--lsp-config-dir` argument
-/// is passed.
+/// `ACOWORK_LSP_CONFIG_DIR` environment variable (inherited from the
+/// Node process) or the sibling-directory fallback chain in
+/// `acowork-lsp-relay/src/config.rs`. No explicit `--lsp-config-dir`
+/// argument is passed.
 pub async fn spawn_lsp_relay(
     data_dir: &Path,
     port: u16,
-    gateway_health_url: &str,
-) -> Result<(LspRelayProcessState, tokio::process::Child), GatewayError> {
+    node_health_url: &str,
+) -> Result<(LspRelayProcessState, tokio::process::Child)> {
     // Locate the acowork-lsp-relay binary (sibling of current executable)
     let relay_bin = std::env::current_exe()
-        .map_err(|e| GatewayError::Lifecycle(format!("Cannot find current executable: {}", e)))?
+        .map_err(|e| NodeError::Lifecycle(format!("Cannot find current executable: {}", e)))?
         .parent()
         .map(|p| {
             let bin_name = if cfg!(windows) {
@@ -116,7 +124,7 @@ pub async fn spawn_lsp_relay(
         });
 
     if !relay_bin.exists() {
-        return Err(GatewayError::Lifecycle(format!(
+        return Err(NodeError::Lifecycle(format!(
             "acowork-lsp-relay binary not found at {:?}",
             relay_bin
         )));
@@ -125,11 +133,11 @@ pub async fn spawn_lsp_relay(
     // Create log directory and open log file (truncate on each start)
     let log_dir = data_dir.join("logs");
     fs::create_dir_all(&log_dir).map_err(|e| {
-        GatewayError::Lifecycle(format!("Failed to create log dir {:?}: {}", log_dir, e))
+        NodeError::Lifecycle(format!("Failed to create log dir {:?}: {}", log_dir, e))
     })?;
     let log_path = log_dir.join("lsp-relay.log");
     let log_file = fs::File::create(&log_path).map_err(|e| {
-        GatewayError::Lifecycle(format!(
+        NodeError::Lifecycle(format!(
             "Failed to create LSP Relay log file {:?}: {}",
             log_path, e
         ))
@@ -142,7 +150,7 @@ pub async fn spawn_lsp_relay(
         .arg("--port")
         .arg(port.to_string())
         .arg("--gateway-health-url")
-        .arg(gateway_health_url)
+        .arg(node_health_url)
         .arg("--log-level")
         .arg("info")
         .stdout(Stdio::null())
@@ -157,14 +165,14 @@ pub async fn spawn_lsp_relay(
     }
 
     let child = cmd.spawn().map_err(|e| {
-        GatewayError::Lifecycle(format!(
+        NodeError::Lifecycle(format!(
             "Failed to spawn acowork-lsp-relay (binary: {:?}): {}",
             relay_bin, e
         ))
     })?;
 
     let pid = child.id().ok_or_else(|| {
-        GatewayError::Lifecycle(
+        NodeError::Lifecycle(
             "Failed to get PID for acowork-lsp-relay (process may have exited immediately)"
                 .to_string(),
         )
@@ -187,8 +195,8 @@ pub async fn spawn_lsp_relay(
 }
 
 /// Kill the LSP Relay process.
-pub async fn kill_lsp_relay(pid: u32) -> Result<(), GatewayError> {
-    crate::lifecycle::process::kill_agent_process(pid).await
+pub async fn kill_lsp_relay(pid: u32) -> Result<()> {
+    crate::process::spawn::kill_agent_process(pid).await
 }
 
 /// Check if the LSP Relay is healthy by calling its /health endpoint.

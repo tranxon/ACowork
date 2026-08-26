@@ -9,12 +9,14 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::error::Result;
+use crate::identity::NodeIdentity;
 
 /// A Runtime process slot in the node's process table.
 ///
@@ -97,6 +99,10 @@ pub struct NodeState {
     pub agents: HashMap<String, AgentSlot>,
     /// Local install table (installed agents, `agent_id` → info).
     pub installed_agents: HashMap<String, InstalledAgent>,
+    /// Node-local LSP relay process state (ADR-055 §6.7, Phase 4).
+    /// Managed by `sidecar::lsp_relay_supervisor` — the Node now hosts
+    /// the relay instead of the Gateway. `None` while stopped.
+    pub lsp_relay_process: Option<crate::sidecar::lsp_relay::LspRelayProcessState>,
     snapshot: NodeRuntimeSnapshot,
 }
 
@@ -106,6 +112,7 @@ impl NodeState {
             max_agents,
             agents: HashMap::new(),
             installed_agents: HashMap::new(),
+            lsp_relay_process: None,
             snapshot: NodeRuntimeSnapshot::default(),
         }
     }
@@ -197,6 +204,20 @@ impl NodeState {
 
 /// Thread-safe shared NodeState.
 pub type SharedNodeState = std::sync::Arc<RwLock<NodeState>>;
+
+/// HTTP router state shared by the node's reverse-proxy and fs_browse
+/// routers (merged onto one listener, ADR-055 §6.4).
+///
+/// Phase 5a: carries the live [`NodeIdentity`] so the proxy can
+/// validate inbound `X-ACowork-Node-Token` headers against the
+/// Gateway-issued `node_token` (§6.8).
+#[derive(Clone)]
+pub struct NodeHttpState {
+    /// Runtime process table + local install table.
+    pub node: SharedNodeState,
+    /// Live identity — `node_token` is read on every proxied request.
+    pub identity: Arc<RwLock<NodeIdentity>>,
+}
 
 /// Load a persisted snapshot, mapped to the crate Result for CLI use.
 pub fn read_snapshot(home: &Path) -> Result<Option<NodeRuntimeSnapshot>> {

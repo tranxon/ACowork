@@ -103,6 +103,14 @@ struct EventLoopGuard {
     _task: tokio::task::JoinHandle<()>,
 }
 
+/// Live CONNECT credential slot (ADR-055 Phase 5a).
+///
+/// The daemon starts with the enrollment token (first boot) and swaps
+/// in the Gateway-issued node_token once the `enroll_result` reply
+/// arrives. The poll task re-reads the slot on every soft-restart, so
+/// a reconnect never re-presents a consumed enrollment token.
+pub type SharedNodeMqttCredentials = Arc<Mutex<Option<String>>>;
+
 impl NodeMqttClient {
     /// Connect to the Gateway broker and start the poll task.
     ///
@@ -111,10 +119,19 @@ impl NodeMqttClient {
     /// so the poll task keeps retrying with backoff forever. The
     /// returned handle is usable immediately; publishes are queued by
     /// rumqttc until the connection comes up.
+    ///
+    /// ADR-055 Phase 5a: `credentials` is the live CONNECT password
+    /// (username is always `node:{node_id}`, protocol §8.5; the
+    /// broker's CONNECT auth handler keys on client_id). It starts as
+    /// the node_token (reconnect) or a one-time enrollment token
+    /// (first boot) and is swapped to the node_token when the
+    /// enrollment reply arrives. `None` skips credentials entirely
+    /// (compatible with `mqtt.auth_enabled=false` brokers).
     pub async fn connect(
         host: &str,
         port: u16,
         node_id: &str,
+        credentials: SharedNodeMqttCredentials,
         bootstrap: NodeMqttBootstrapCallback,
         message_callback: Option<NodeMqttMessageCallback>,
     ) -> Result<Self, NodeMqttClientError> {
@@ -124,6 +141,9 @@ impl NodeMqttClient {
         let mut options = MqttOptions::new(client_id.clone(), host, port);
         options.set_keep_alive(Duration::from_secs(5));
         options.set_clean_session(true);
+        if let Some(password) = credentials.lock().await.as_deref() {
+            options.set_credentials(client_id.clone(), password);
+        }
         let pkt_size = acowork_core::defaults::GATEWAY_MQTT_MAX_PACKET_SIZE;
         options.set_max_packet_size(pkt_size, pkt_size);
 
@@ -141,6 +161,7 @@ impl NodeMqttClient {
 
         let task_shared_client = Arc::clone(&shared_client);
         let task_options = options;
+        let task_credentials = Arc::clone(&credentials);
         let task_bootstrap = bootstrap;
         let task_callback = message_callback;
 
@@ -220,9 +241,17 @@ impl NodeMqttClient {
                     }
                 }
 
-                // Soft-restart: recreate client + EventLoop.
+                // Soft-restart: recreate client + EventLoop. The
+                // credentials are re-read from the live slot so a
+                // reconnect after the enrollment reply presents the
+                // node_token, never the (now consumed) enrollment token.
                 poll_state_tx.set(SessionState::Connecting);
-                let (new_client, new_eventloop) = AsyncClient::new(task_options.clone(), 50);
+                let mut fresh_options = task_options.clone();
+                if let Some(password) = task_credentials.lock().await.as_deref() {
+                    fresh_options
+                        .set_credentials(task_options.client_id().to_string(), password);
+                }
+                let (new_client, new_eventloop) = AsyncClient::new(fresh_options, 50);
                 *task_shared_client.lock().await = new_client;
                 eventloop = new_eventloop;
                 tracing::info!("Node MQTT client soft-restarted with fresh EventLoop");

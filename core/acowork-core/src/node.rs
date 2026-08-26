@@ -82,6 +82,39 @@ pub fn node_agent_installed_topic(node_id: &str, agent_id: &str) -> String {
     format!("acowork/nodes/{node_id}/agents/{agent_id}/installed")
 }
 
+/// Topic: `acowork/nodes/{node_id}/lsps` (AvailableLsps envelope,
+/// QoS 1 Retained — ADR-055 §6.7 node-local sidecar endpoint
+/// distribution; replaces the deprecated `acowork/global/lsps`).
+///
+/// The Node publishes this on every LSP relay ready/unavailable
+/// transition; the Runtime (codebase tool) and the Gateway
+/// (`GET /api/agents/{id}/lsp-endpoint`) read it.
+pub fn node_lsps_topic(node_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/lsps")
+}
+
+/// Topic: `acowork/nodes/{node_id}/sidecars/{kind}/status` (retained
+/// sidecar health snapshot — ADR-055 §6.7; migrates the legacy
+/// `acowork/sidecar/+/status` family to the node topology).
+///
+/// `kind` is the `SidecarKind::as_str()` value (e.g. `lsp_relay`).
+pub fn node_sidecar_status_topic(node_id: &str, kind: &str) -> String {
+    format!("acowork/nodes/{node_id}/sidecars/{kind}/status")
+}
+
+/// Topic: `acowork/nodes/{node_id}/enroll` (NodeEnroll envelope,
+/// QoS 1 non-retained — node enrollment handshake, ADR-055 §6.12
+/// Phase 5a security).
+pub fn node_enroll_topic(node_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/enroll")
+}
+
+/// Topic: `acowork/nodes/{node_id}/enroll_result` (NodeEnrollResult
+/// envelope, QoS 1 non-retained — Gateway → Node enrollment reply).
+pub fn node_enroll_result_topic(node_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/enroll_result")
+}
+
 /// Validate a node_id slug: `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
 /// (lowercase letters / digits / hyphens, 2–32 chars, no leading or
 /// trailing hyphen). `local` additionally requires
@@ -151,6 +184,22 @@ mod tests {
         assert_eq!(
             node_agent_installed_topic("gpu-1", "com.example"),
             "acowork/nodes/gpu-1/agents/com.example/installed"
+        );
+        assert_eq!(
+            node_lsps_topic("gpu-1"),
+            "acowork/nodes/gpu-1/lsps"
+        );
+        assert_eq!(
+            node_sidecar_status_topic("gpu-1", "lsp_relay"),
+            "acowork/nodes/gpu-1/sidecars/lsp_relay/status"
+        );
+        assert_eq!(
+            node_enroll_topic("gpu-1"),
+            "acowork/nodes/gpu-1/enroll"
+        );
+        assert_eq!(
+            node_enroll_result_topic("gpu-1"),
+            "acowork/nodes/gpu-1/enroll_result"
         );
     }
 

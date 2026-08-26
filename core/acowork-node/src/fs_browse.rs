@@ -19,7 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::state::SharedNodeState;
+use crate::state::NodeHttpState;
 
 /// Query parameters for node-local filesystem browsing.
 #[derive(Debug, Deserialize, Default)]
@@ -171,7 +171,7 @@ fn internal(msg: &str) -> FsError {
 
 /// `GET /fs/browse` — browse THIS node's filesystem directories.
 pub async fn browse_fs(
-    State(_state): State<SharedNodeState>,
+    State(_state): State<NodeHttpState>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<impl IntoResponse, FsError> {
     let requested_path = query.path.as_deref().unwrap_or("").trim();
@@ -273,8 +273,8 @@ pub async fn browse_fs(
 /// Node-local filesystem browsing routes (ADR-055 L7-1).
 ///
 /// `state` is threaded through for symmetry with the reverse-proxy router
-/// (and a future auth boundary in Phase 5a); browsing itself is stateless.
-pub fn router(state: SharedNodeState) -> Router {
+/// (the Phase 5a auth boundary); browsing itself is stateless.
+pub fn router(state: NodeHttpState) -> Router {
     Router::new()
         .route("/fs/browse", get(browse_fs))
         .with_state(state)
