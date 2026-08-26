@@ -123,19 +123,16 @@ pub(crate) async fn phase_d_run(
     {
         // Status first — `online` is the "TCP connection + AgentRegistry sees
         // us" signal that the Gateway uses for `online` / `sleeping` tracking.
+        // The `ready=true` signal was already published at the end of Phase A
+        // (see `agent_init.rs::phase_a_init_agent`) so the Gateway could
+        // start reverse-proxying Phase-A-ready endpoints (`/workspaces`,
+        // `/workspaces/tree`) without waiting on Phase B/C and the workspace
+        // FS watcher scan over potentially-large workspace roots. Re-publishing
+        // `ready=true` here would be a no-op for the Gateway registry, but
+        // skipping it keeps a single source of truth for the lifecycle signal.
         let _ = mqtt.publish_status(true).await;
-        // Then ready — `ready=true` is the "HTTP server slot populated, can
-        // serve /agents/{id}/*" signal. The Gateway gates `/api/agents` →
-        // `ready=true` on this topic, so the Desktop only issues HTTP
-        // requests after Phase B has finished wiring `session_metadata_slot`,
-        // `session_config_slot`, `memory_query_slot`, etc. Without this
-        // ordering, the Gateway reports `ready=true` ~17ms after spawn
-        // (when the Gateway just inserts the entry into `running_agents`)
-        // and the Desktop hits 503 on every `/sessions/{sid}/messages` call
-        // for the next ~3s while Phase B/C are still running.
-        let _ = mqtt.publish_ready(true).await;
         tracing::info!(
-            "Agent status+ready published via MQTT for agent={}",
+            "Phase D lifecycle publisher ready for agent={}",
             ctx.agent_id
         );
         crate::mqtt::MqttChunkPublisher::from_runtime_client(mqtt)

@@ -56,7 +56,11 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
       useWorkspaceStore.getState().reset();
       return;
     }
-    void fetchWorkspaces(selectedAgentId);
+    // Only fetch when agent is ready to avoid 503 errors during startup
+    // (Runtime HTTP port not yet registered in Gateway's reverse proxy registry).
+    if (agentReady) {
+      void fetchWorkspaces(selectedAgentId);
+    }
   }, [selectedAgentId, agentReady, fetchWorkspaces]);
 
   // Close on outside click

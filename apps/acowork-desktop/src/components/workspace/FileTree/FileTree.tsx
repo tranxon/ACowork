@@ -5,6 +5,7 @@ import { useWorkspaceStore, type TreeEntry } from "../../../stores/workspaceStor
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
+import { useAgentStore } from "../../../stores/agentStore";
 import { FileTreeNode } from "./FileTreeNode";
 import { useTranslation } from "../../../i18n/useTranslation";
 import {
@@ -213,12 +214,19 @@ export function FileTree({
 
     // Selection is owned by WorkspaceExplorer now; nothing to reset locally.
 
-    // Fetch root when agent or workspace changes
+    // Fetch root when agent or workspace changes — but only if agent is ready.
+    // Guard against race condition: Runtime HTTP port may not be registered yet
+    // during startup, causing 503 errors until the Gateway discovers it via MQTT.
+    const agentReady = useAgentStore((s) => {
+        if (!agentId) return false;
+        return s.agents[agentId]?.meta?.ready ?? false;
+    });
+
     useEffect(() => {
-        if (agentId) {
+        if (agentId && agentReady) {
             fetchTree(agentId, workspaceId, "");
         }
-    }, [agentId, workspaceId, fetchTree]);
+    }, [agentId, workspaceId, fetchTree, agentReady]);
 
     // ── Locate-in-tree: expand ancestors, lazy-load, select, scroll ───
     // The FileEditorPanel's "locate" button publishes a request via
