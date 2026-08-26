@@ -148,6 +148,47 @@ pub(crate) async fn phase_c_spawn_subsystems(
         }
     };
 
+    // ── ADR-058: start workspace FS watchers ────────────────────────
+    // Reconcile the watcher set against the shared WorkspaceResolver:
+    // every user-configured workspace (agent_workspaces.json entries)
+    // gets a watcher task that publishes fs-changed events over MQTT.
+    // Runs after the MQTT client slot is populated (Phase A) so events
+    // are publishable immediately; task lifecycle is owned by the set.
+    //
+    // The watcher scan is **spawned onto its own background task** instead
+    // of running inline. The blocking piece is `PollWatcher::watch(Recur‐
+    // siveMode::Recursive)`, which walks the entire root tree on init — a
+    // large project (`target/`, `node_modules/`, `core/target/`, ...) can
+    // take 6–8 seconds. We don't want Phase C → Phase D → `ready=true`
+    // publication to wait on that scan; `ready=true` is now published at
+    // the end of Phase A (see `agent_init.rs::phase_a_init_agent`) once
+    // the HTTP server is up, so the Desktop can start hitting
+    // `/workspaces`, `/workspaces/tree`, etc. immediately while watchers
+    // come online. Late-arriving watcher events are safe: any Desktop
+    // reconnect (or `WorkspaceFsEvents::fullSync`) triggers a full tree
+    // re-sync from the authoritative HTTP endpoint, so events missed
+    // during the watcher-warm-up window are recovered.
+    {
+        let agent_id = ctx.agent_id.clone();
+        let resolver = ctx
+            .workspace_resolver
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let watcher_set = ctx.workspace_watcher_set.clone();
+        tokio::spawn(async move {
+            // Lock + scan on the background task. PollWatcher::watch blocks
+            // the worker thread but not the runtime scheduler.
+            let mut watchers = watcher_set.lock().await;
+            watchers.sync_from_resolver(&resolver);
+            tracing::info!(
+                agent_id = %agent_id,
+                watcher_count = watchers.watcher_count(),
+                "Workspace FS watchers started (ADR-058, async)"
+            );
+        });
+    }
+
     let (mcp_runtime_tx, mcp_runtime_rx) =
         tokio::sync::mpsc::channel::<crate::tools::mcp_manager::McpConnectResult>(1);
 

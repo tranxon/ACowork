@@ -434,10 +434,23 @@ impl GrafeoStore {
                 }
                 None => {
                     // Create a new ProceduralNode
-                    let embedding = embedding_fn(&format!(
+                    let proc_text = format!(
                         "{} {}",
                         pattern.trigger_condition, pattern.action_pattern
-                    ));
+                    );
+                    // ADR-057 P0: ProceduralNode embedding 必填. If the
+                    // provided `embedding_fn` returns an empty vector (e.g.
+                    // because the EmbeddingProvider failed), fall back to a
+                    // deterministic hash embedding so the node remains
+                    // vector-indexable from the moment it is persisted.
+                    let embedding = {
+                        let v = embedding_fn(&proc_text);
+                        if v.is_empty() {
+                            acowork_memory::manager::procedural_embedding_fallback(&proc_text)
+                        } else {
+                            v
+                        }
+                    };
 
                     let mut metadata = HashMap::new();
                     metadata.insert(

@@ -191,6 +191,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
 
+    // ADR-058: workspace FS watcher set. When the HTTP server starts it
+    // creates the set (shared with its state); otherwise a standalone
+    // set is created below. Either way Phase C and the (future) CRUD
+    // hooks reconcile the same Arc. Publishing goes through the same
+    // `mqtt_client_slot` the HTTP server holds.
+    let mut workspace_watcher_set: Option<crate::workspace::SharedWorkspaceWatcherSet> = None;
+
     if let Some(_http_port) = config.http_port {
         match crate::http::RuntimeHttpServer::start(
             std::path::PathBuf::from(&config.work_dir),
@@ -217,12 +224,25 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         ).await {
             Ok(server) => {
                 runtime_http_port = Some(server.port);
+                workspace_watcher_set = Some(server.workspace_watchers.clone());
                 tracing::info!(port = server.port, "Runtime HTTP server started");
                 std::mem::forget(server);
             }
             Err(e) => tracing::warn!(error = %e, "Runtime HTTP server start failed"),
         }
     }
+
+    // Fallback for the no-HTTP-server path: create the set standalone so
+    // Phase C's startup hook always has a set to reconcile into.
+    let workspace_watcher_set: crate::workspace::SharedWorkspaceWatcherSet =
+        workspace_watcher_set.unwrap_or_else(|| {
+            Arc::new(tokio::sync::Mutex::new(
+                crate::workspace::WorkspaceWatcherSet::new(
+                    loaded.manifest.agent_id.clone(),
+                    mqtt_client_slot.clone(),
+                ),
+            ))
+        });
 
     if let Some(mqtt_port) = config.mqtt_port {
         let cache = crate::mqtt::new_shared_cache();
@@ -301,6 +321,30 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
                 search_update_rx = Some(search_update_chan_rx);
+
+                // Publish `ready=true` as soon as Phase A completes — HTTP server
+                // is listening and `http_port` is already announced, so the
+                // Gateway can proxy `/workspaces`, `/workspaces/tree` and the
+                // other Phase-A-ready endpoints immediately. Phase B/C work
+                // (conversation resume, Grafeo store load, workspace FS
+                // watchers) continues asynchronously without blocking
+                // `ready=true`. Previously this signal was deferred to Phase
+                // D and waited on `sync_from_resolver()` → PollWatcher.watch
+                // recursively walking large workspace roots (e.g. a project
+                // tree with `target/`, `node_modules/`, etc. could delay
+                // `ready=true` by 6–8 seconds even though the HTTP server
+                // was up after ~35 ms). See ADR-058 §3.4 for the Desktop
+                // reconnect-driven full tree re-sync that makes late watcher
+                // events safe.
+                let _ = mqtt_client
+                    .as_ref()
+                    .expect("just initialized above")
+                    .publish_ready(true)
+                    .await;
+                tracing::info!(
+                    agent_id=%loaded.manifest.agent_id,
+                    "Phase A ready signal published; Phase B/C continue in background"
+                );
             }
             Err(e) => tracing::warn!(error=%e, "MQTT client connect failed"),
         }
@@ -957,6 +1001,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         rag_provider_slot,
         debug_service_slot,
         session_manager_slot,
+        // ADR-058: same Arc as the one cloned into the HTTP server —
+        // Phase C reads it via `ctx.workspace_watcher_set`.
+        workspace_watcher_set,
         search_key_vault,
         search_provider_list,
         session_configs,

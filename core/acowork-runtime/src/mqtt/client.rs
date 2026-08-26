@@ -1019,10 +1019,16 @@ impl RuntimeMqttClient {
     ///
     /// Used by the idle-watcher's auto-sleep path: after publishing
     /// `"sleeping"` to the agent status retained topic, the watcher
-    /// invokes `disconnect()` so the broker kicks the Last-Will ("offline")
-    /// cleanly off the wire instead of leaving the previous Retained
-    /// payload in place. The watchdog timeout (`POLL_WATCHDOG_TIMEOUT`)
-    /// and the re-`connect` path are unaffected by this call.
+    /// invokes `disconnect()` and then exits the process.
+    ///
+    /// NOTE on the Last Will: per MQTT spec a **clean** DISCONNECT must
+    /// NOT trigger the Will — rumqttd honours this (its `Packet::Disconnect`
+    /// handler deletes the stored last will), so no "offline" is published
+    /// and the retained status stays `"sleeping"` until the Runtime wakes
+    /// and re-publishes "online". Subscribers must therefore treat
+    /// `sleeping → online` (not just `offline → online`) as a wake
+    /// transition — see `apps/acowork-desktop/src/lib/workspaceFsEvents.ts`
+    /// `isWakeTransition`.
     pub async fn disconnect(&self) -> Result<(), RuntimeMqttClientError> {
         let client = self.client().await;
         client

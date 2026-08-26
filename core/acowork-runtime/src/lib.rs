@@ -29,3 +29,4 @@ pub mod util;
 #[cfg(test)]
 pub mod test_support;
 pub mod usecases;
+pub mod workspace;

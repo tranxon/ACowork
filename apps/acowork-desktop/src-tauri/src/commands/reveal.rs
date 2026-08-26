@@ -73,7 +73,7 @@ fn spawn_reveal(path_str: &str, path_buf: &std::path::Path) -> std::io::Result<(
     #[cfg(target_os = "windows")]
     {
         // Explorer's `/select,<path>` syntax highlights the item in
-        // its parent folder. TWO non-obvious requirements to make
+        // its parent folder. THREE non-obvious requirements to make
         // explorer.exe actually do what we want:
         //
         //   1. The comma MUST NOT be separated from the path — that's
@@ -89,10 +89,23 @@ fn spawn_reveal(path_str: &str, path_buf: &std::path::Path) -> std::io::Result<(
         //      causes explorer.exe to silently fall back to opening
         //      the default location (Desktop / Quick Access).
         //
+        //   3. The path MUST use backslash separators. explorer.exe's
+        //      `/select,<path>` argv parser does NOT accept forward
+        //      slashes — it treats `/select,D:/foo/bar` as a malformed
+        //      argument and silently falls back to opening the default
+        //      Desktop folder, exactly the same way it does for the
+        //      quoted case above. (Verified empirically: forward slash
+        //      → Desktop, backslash → correct folder.) The frontend
+        //      sends forward-slash paths because that's the contract
+        //      of `TreeResponse.root`; we normalise here at the
+        //      spawn boundary so the rest of the stack can stay
+        //      platform-neutral.
+        //
         // `CommandExt::raw_arg` is the documented escape hatch: it
         // appends the argument verbatim, with NO escaping. The result
         // is the exact bytes explorer.exe needs to see on its argv.
-        let select_arg = format!("/select,{}", path_str);
+        let win_path = path_str.replace('/', "\\");
+        let select_arg = format!("/select,{}", win_path);
         Command::new("explorer.exe").raw_arg(select_arg).spawn()?;
     }
 

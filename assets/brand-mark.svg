@@ -1,9 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 96" width="360" height="96" role="img" aria-label="ACowork">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 396 96" width="396" height="96" role="img" aria-label="ACowork">
   <title>ACowork</title>
-  <text x="180" y="72" text-anchor="middle"
-        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-        font-size="80"
+  <defs>
+    <linearGradient id="bg" x1="14" y1="2" x2="98" y2="86" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F7C948"/>
+      <stop offset="100%" stop-color="#F0A92E"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <!-- warm yellow icon background -->
+  <rect x="14" y="2" width="84" height="84" rx="20" ry="20" fill="url(#bg)" filter="url(#shadow)"/>
+  <!-- refined A, switched to dark text for better yellow contrast -->
+  <text x="56" y="71"
+        font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-weight="700"
-        letter-spacing="-2.4"><tspan fill="#FBBC05">A</tspan><tspan fill="#34A853" dx="5">Co</tspan><tspan fill="#4285F4">work</tspan></text>
+        font-size="76"
+        fill="#1F2937"
+        text-anchor="middle"
+        letter-spacing="-1">A</text>
+  <!-- tighter, cleaner wordmark -->
+  <text x="106" y="71"
+        font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-weight="700"
+        font-size="74"
+        fill="#1F2937"
+        letter-spacing="-2.1">
+    <tspan fill="#23A36F">Co</tspan><tspan fill="#4D7CF3" dx="4">work</tspan>
+  </text>
 </svg>

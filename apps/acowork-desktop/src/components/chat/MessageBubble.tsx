@@ -115,16 +115,31 @@ const markdownComponents = {
         // Case 2: Local file paths — preview vs. Monaco decided by the
         // shared helper. The `href` is treated as a workspace-relative or
         // absolute path; `pickOpenActionForPath` only checks the extension.
+        //
+        // Strip a `#L42` / `#L42-L67` line-fragment before resolving: those
+        // markers are IDE conventions understood by Monaco's cursor-jump
+        // wiring, but `/workspaces/file` treats the path verbatim and a
+        // path like `src/foo.ts#L42` is NOT a valid filesystem path on the
+        // runtime side, so it would 404 every click. The fragment is
+        // preserved separately and forwarded to `openFile(..., line)` so
+        // the editor still lands on the correct line.
         const sessionId = useChatStore.getState().getActiveSessionId(agentId);
         if (!sessionId) return;
         const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(sessionId);
-        const relPath = href.replace(/^\//, "");
+        const [pathPart, fragmentPart = ""] = href.split("#", 2);
+        const relPath = pathPart.replace(/^\//, "");
+        // Match `#L42` or `#L42-L67`. Anything else (custom anchors, GitHub
+        // permalinks, etc.) is ignored — file opens with no cursor jump.
+        const lineMatch = fragmentPart.match(/^L(\d+)(?:-L(\d+))?$/);
+        const cursorLine = lineMatch ? parseInt(lineMatch[1], 10) : undefined;
         const action = pickOpenActionForPath(relPath);
         const store = useFileEditorStore.getState();
         if (action === "openPreview") {
+          // Previews don't honor `cursorLine` — they have no cursor to
+          // place. Drop it silently rather than threading a no-op param.
           void store.openPreview(agentId, workspaceId, relPath);
         } else {
-          void store.openFile(agentId, workspaceId, relPath);
+          void store.openFile(agentId, workspaceId, relPath, cursorLine);
         }
       }
     };

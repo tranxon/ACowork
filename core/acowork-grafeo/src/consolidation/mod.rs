@@ -12,6 +12,7 @@
 
 pub mod ambiguous;
 pub mod conflict_llm;
+pub mod distill;
 pub mod generalization;
 pub mod instant;
 pub mod offline;

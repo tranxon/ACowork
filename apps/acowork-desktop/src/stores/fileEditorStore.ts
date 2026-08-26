@@ -104,6 +104,19 @@ export interface OpenFile {
     url?: string;
     /** MIME type from Gateway response (e.g. "image/png", "text/html") */
     mimeType?: string;
+    // ── ADR-058: external-modification conflict tracking ──
+    /** Disk mtime (RFC3339 string) as of the last read/save — used to
+     *  distinguish real external writes from touch/chmod noise. */
+    diskModified?: string;
+    /** Disk size (bytes) as of the last read/save — pairs with diskModified. */
+    diskSize?: number;
+    /** Save-success moment (Desktop local clock, epoch ms). Used to
+     *  suppress the echo of our own write coming back via MQTT. */
+    lastSavedAtMs?: number;
+    /** Set when the file was deleted on disk while the tab is dirty. */
+    diskDeleted?: boolean;
+    /** External-change conflict state ("modified" | "deleted"). */
+    diskConflict?: "modified" | "deleted";
 }
 
 interface FileEditorState {
@@ -134,8 +147,15 @@ interface FileEditorState {
     saveFile: (fileId: string) => Promise<void>;
     /** Re-fetch file content from disk and replace both content and originalContent.
      *  Resets dirty=false. URL-preview tabs (kind === "url") are skipped.
-     *  No-op while a refresh is already in flight for this file. */
-    refreshFile: (fileId: string) => Promise<void>;
+     *  No-op while a refresh is already in flight for this file.
+     *  `opts.skipIfDirty` (ADR-058 review M-3): skip instead of overwrite
+     *  when the tab turned dirty while the fetch was in flight — used by
+     *  fs-event-triggered silent reloads so user input is never clobbered. */
+    refreshFile: (fileId: string, opts?: { skipIfDirty?: boolean }) => Promise<void>;
+    /** ADR-058: clear the external-change conflict markers on a tab
+     *  (the "Keep mine" answer to a disk-change toast). Purely local —
+     *  the disk state itself is untouched. */
+    clearDiskConflict: (fileId: string) => void;
     /** Close all open files. If `force` is false and any file is dirty,
      *  no files are closed and the function returns `false`. */
     closeAllFiles: (force?: boolean) => boolean;
@@ -251,11 +271,13 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 }));
                 return;
             }
-            const data = (await resp.json()) as { content: string; size: number; mimeType: string };
+            const data = (await resp.json()) as { content: string; size: number; mimeType: string; modified?: string };
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType }
+                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType,
+                            // ADR-058: cache disk metadata for conflict checks
+                            diskModified: data.modified, diskSize: data.size }
                         : f,
                 ),
             }));
@@ -319,11 +341,13 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 }));
                 return;
             }
-            const data = (await resp.json()) as { content: string; size: number; mimeType: string };
+            const data = (await resp.json()) as { content: string; size: number; mimeType: string; modified?: string };
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType }
+                        ? { ...f, content: data.content, originalContent: data.content, loading: false, mimeType: data.mimeType,
+                            // ADR-058: cache disk metadata for conflict checks
+                            diskModified: data.modified, diskSize: data.size }
                         : f,
                 ),
             }));
@@ -462,10 +486,29 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 }));
                 return;
             }
+            // ADR-058: parse the post-write disk metadata echoed by the
+            // Runtime (modified RFC3339 + size) and stamp lastSavedAtMs
+            // (Desktop local clock) for echo suppression in the
+            // workspace fs-changed listener.
+            const saved = (await resp.json().catch(() => ({}))) as {
+                modified?: string;
+                size?: number;
+            };
             set((state) => ({
                 openFiles: state.openFiles.map((f) =>
                     f.id === fileId
-                        ? { ...f, saving: false, originalContent: f.content, dirty: false, saveError: undefined }
+                        ? {
+                            ...f,
+                            saving: false,
+                            originalContent: f.content,
+                            dirty: false,
+                            saveError: undefined,
+                            ...(saved.modified !== undefined ? { diskModified: saved.modified } : {}),
+                            ...(saved.size !== undefined ? { diskSize: saved.size } : {}),
+                            lastSavedAtMs: Date.now(),
+                            diskConflict: undefined,
+                            diskDeleted: undefined,
+                        }
                         : f,
                 ),
             }));
@@ -479,7 +522,7 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }
     },
 
-    refreshFile: async (fileId: string) => {
+    refreshFile: async (fileId: string, opts?: { skipIfDirty?: boolean }) => {
         const file = get().openFiles.find((f) => f.id === fileId);
         if (!file) return;
         // Only workspace files have a Gateway file endpoint to refresh against.
@@ -506,21 +549,32 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 }));
                 return;
             }
-            const data = (await resp.json()) as { content: string; size: number; mimeType: string };
+            const data = (await resp.json()) as { content: string; size: number; mimeType: string; modified?: string };
             set((state) => ({
-                openFiles: state.openFiles.map((f) =>
-                    f.id === fileId
-                        ? {
-                            ...f,
-                            content: data.content,
-                            originalContent: data.content,
-                            mimeType: data.mimeType,
-                            loading: false,
-                            // Resetting both content and originalContent means dirty must be false.
-                            dirty: false,
-                        }
-                        : f,
-                ),
+                openFiles: state.openFiles.map((f) => {
+                    if (f.id !== fileId) return f;
+                    // ADR-058 (review M-3): a reload triggered by an fs
+                    // event must never clobber edits the user started
+                    // while the fetch was in flight — skip instead of
+                    // overwriting when the tab turned dirty meanwhile.
+                    if (opts?.skipIfDirty && f.dirty) return { ...f, loading: false };
+                    return {
+                        ...f,
+                        content: data.content,
+                        originalContent: data.content,
+                        mimeType: data.mimeType,
+                        loading: false,
+                        // Resetting both content and originalContent means dirty must be false.
+                        dirty: false,
+                        // ADR-058: refresh resolves any pending disk
+                        // conflict (the reload is now authoritative)
+                        // and re-caches disk metadata.
+                        diskModified: data.modified,
+                        diskSize: data.size,
+                        diskConflict: undefined,
+                        diskDeleted: undefined,
+                    };
+                }),
             }));
         } catch (e) {
             log.error("[FileEditorStore] refreshFile error:", e);
@@ -530,6 +584,14 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                 ),
             }));
         }
+    },
+
+    clearDiskConflict: (fileId: string) => {
+        set((state) => ({
+            openFiles: state.openFiles.map((f) =>
+                f.id === fileId ? { ...f, diskConflict: undefined, diskDeleted: undefined } : f,
+            ),
+        }));
     },
 
     closeAllFiles: (force?: boolean) => {

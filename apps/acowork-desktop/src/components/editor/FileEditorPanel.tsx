@@ -32,6 +32,29 @@ import { SymbolSearchPanel } from "./SymbolSearchPanel";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
+/**
+ * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
+ * characters (the standard `btoa` only accepts code points 0–255).
+ *
+ * Used by the SVG preview branch to wrap raw XML markup (delivered by the
+ * gateway as plain text — SVG is no longer in BINARY_EXTENSIONS) into a
+ * base64 data URI. Encoding to base64 avoids the fragility of percent-
+ * encoding `#`, `<`, `>` and other SVG/XML-meaningful characters in a
+ * `data:image/svg+xml;utf8,...` URI.
+ *
+ * Uses an explicit loop instead of `String.fromCharCode(...bytes)` because
+ * spread blows the call stack for inputs above ~120 KB (V8 limit ~65 535
+ * args). A plain `for` loop handles arbitrarily large SVGs.
+ */
+function encodeTextToBase64(text: string): string {
+    const bytes = new TextEncoder().encode(text);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
 export function FileEditorPanel({ width }: { width: number }) {
     const { t } = useTranslation();
 
@@ -53,6 +76,7 @@ export function FileEditorPanel({ width }: { width: number }) {
     const closeOthers = useFileEditorStore((s) => s.closeOthers);
     const closeAllFiles = useFileEditorStore((s) => s.closeAllFiles);
     const refreshFile = useFileEditorStore((s) => s.refreshFile);
+    const openFile = useFileEditorStore((s) => s.openFile);
     const openPreview = useFileEditorStore((s) => s.openPreview);
     const addAttachedContext = useChatStore((s) => s.addAttachedContext);
     const getActiveSessionId = useChatStore((s) => s.getActiveSessionId);
@@ -1008,6 +1032,18 @@ export function FileEditorPanel({ width }: { width: number }) {
         openPreview(file.agentId, file.workspaceId, file.relPath);
     }, [openPreview]);
 
+    // Switch the active tab back from image-preview mode to edit (Monaco) mode.
+    // Mirrors MarkdownPreviewView's `handleOpenAsEditor` so SVG users get the
+    // same double-click affordance as Markdown readers — edit the source by
+    // double-clicking the rendered preview. No-op for non-file kinds (URL tabs).
+    const handleImagePreviewDoubleClick = useCallback(() => {
+        const file = activeFile;
+        if (!file || file.kind !== "file") return;
+        // openFile() is idempotent: when the tab is already open it activates
+        // it and flips `mode: "preview" → "edit"` in place. See fileEditorStore.openFile.
+        void openFile(file.agentId, file.workspaceId, file.relPath);
+    }, [activeFile, openFile]);
+
     // Tab right-click menu items. Built only when the right-clicked file
     // changes or any of the relevant gates (active agent/session, file
     // kind, loading state, mode) flip — so the disabled flags stay
@@ -1026,11 +1062,15 @@ export function FileEditorPanel({ width }: { width: number }) {
         const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
         const canRefresh = showFileActions && !target.loading;
         // Preview is only useful for files that have a preview view
-        // (Markdown / HTML), and only when the tab is currently in source
-        // mode — switching preview → preview would be a no-op.
+        // (Markdown / HTML / SVG), and only when the tab is currently in source
+        // mode — switching preview → preview would be a no-op. SVG is included
+        // because its text source is editable in Monaco while the rendered form
+        // is shown in the preview branch (image mimeType `image/svg+xml`).
+        // Raster images (png/jpg/gif/webp) are intentionally excluded: their
+        // "source" is just the base64 blob, so a preview pane adds no value.
         const canPreview = showFileActions
             && target.mode === "edit"
-            && /\.(md|html?)$/i.test(target.fileName);
+            && /\.(md|html?|svg)$/i.test(target.fileName);
 
         const items: ContextMenuItem<{ fileId: string }>[] = [];
 
@@ -1265,6 +1305,12 @@ export function FileEditorPanel({ width }: { width: number }) {
                 ) : activeFile.kind === "url" ? (
                     <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
+                    // SVG preview branch. Raster images (png/jpg/gif/webp) never
+                    // reach here because `canPreview` in the tab context menu only
+                    // enables "Open Preview" for .md/.html?/.svg — see the regex
+                    // above. This means double-click-to-edit is a safe affordance:
+                    // the source we switch back to is always editable XML/text.
+                    //
                     // `bg-editor-canvas` paints the wrapper with the same Monaco `vs` / `vs-dark`
                     // background the source editor uses, so the right-hand preview column reads
                     // as one "editor canvas" distinct from the left ChatPanel bg (`#FAFAFA` /
@@ -1272,9 +1318,24 @@ export function FileEditorPanel({ width }: { width: number }) {
                     // which collapsed into the chat surface and made the image look unframed.
                     // Token is registered in globals.css @theme + .dark block; keep it in sync
                     // with Monaco — do not hard-code #FFFFFF / #1E1E1E here.
-                    <div className="flex h-full w-full items-center justify-center bg-editor-canvas">
+                    <div
+                        className="flex h-full w-full items-center justify-center bg-editor-canvas"
+                        onDoubleClick={handleImagePreviewDoubleClick}
+                        title={t("fileEditor.previewDoubleClickHint")}
+                    >
+                        {/* SVG is delivered as raw XML text (the gateway no longer
+                            lists it in BINARY_EXTENSIONS, see
+                            workspace_query_impl::BINARY_EXTENSIONS). Re-encode to
+                            base64 here so the data URI is robust against `#`,
+                            `<`, `>`, etc. that would otherwise need fragile
+                            percent-encoding. Raster images come back already
+                            base64-encoded by the gateway. */}
                         <img
-                            src={"data:" + activeFile.mimeType + ";base64," + activeFile.content}
+                            src={
+                                activeFile.mimeType === "image/svg+xml"
+                                    ? `data:${activeFile.mimeType};base64,${encodeTextToBase64(activeFile.content)}`
+                                    : `data:${activeFile.mimeType};base64,${activeFile.content}`
+                            }
                             alt={activeFile.fileName}
                             className="max-h-full max-w-full object-contain"
                         />

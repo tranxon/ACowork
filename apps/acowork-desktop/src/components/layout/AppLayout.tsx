@@ -419,20 +419,22 @@ export function AppLayout() {
     prevIsDebugMode.current = isDebugMode;
   }, [isDebugMode]);
 
-  // ── Switch to status tab when agent stops ────────────────────────
-  // Covers every tab gated on agentRunning in RightNavBar (workspace /
-  // memory / setup / tools / debug). When the agent stops while one of
-  // these is foreground, the corresponding nav button disappears but
-  // the panel content would otherwise render an empty-state shell —
-  // bounce back to status to keep nav and panel consistent.
-  // Single source of truth: ResultsPanel used to host a duplicate of
-  // this effect (with `tools` covered but `debug`/`workspace` missing),
-  // so it was deleted here in favor of this single canonical copy.
+  // ── Sync right-panel tab to agent lifecycle ──────────────────────
+  // Stop: bounce back to status. RightNavBar hides the workspace / memory
+  // / setup / tools / debug buttons once the agent stops, so leaving any
+  // of them active would render an empty-state shell.
+  // Start: jump to workspace. Workspace is the most common destination
+  // after a launch (file edits, skill browsing, locate-in-tree), and the
+  // user typically leaves status on the offline screen only until the
+  // agent actually comes up. ADR follow-up: keeps nav and panel
+  // consistent in both directions.
   const prevRunning = useRef(selectedAgent?.running);
   useEffect(() => {
     const isRunning = selectedAgent?.running ?? false;
     const wasRunning = prevRunning.current;
-    if (
+    if (isRunning && wasRunning === false) {
+      setActiveTab("workspace");
+    } else if (
       !isRunning &&
       wasRunning !== false &&
       (activeTab === "memory" ||

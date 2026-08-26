@@ -19,6 +19,7 @@
 
 use acowork_core::providers::traits::ToolCall;
 use acowork_memory::judge::{JudgeConfig, should_sample};
+use acowork_memory::consolidation::EmbeddingFn;
 use crate::memory::metrics::MetricsAlertType;
 
 use crate::agent::context::ContextBuilder;
@@ -319,6 +320,12 @@ impl super::loop_::AgentLoop {
     ///
     /// ADR-051 P3: Delegates to `MemoryManager::record_tool_failures()`.
     /// This method only handles error detection and tool_name extraction.
+    ///
+    /// ADR-057 P0: passes an `EmbeddingFn` built from the session's
+    /// `EmbeddingProvider` so the procedural embedding is computed at write
+    /// time (`ProceduralNode.embedding` is no longer deferred to
+    /// consolidation). If no provider is configured, `None` is passed and the
+    /// memory manager falls back to a deterministic hash embedding.
     pub(crate) fn record_tool_failures_to_memory(
         &self,
         tool_calls: &[ToolCall],
@@ -330,6 +337,31 @@ impl super::loop_::AgentLoop {
         };
 
         let manager = self.core.init_memory_manager();
+
+        // Build an EmbeddingFn from the session's EmbeddingProvider (if any).
+        // Mirrors the closure used by `consolidation_bg.rs` to bridge
+        // async `EmbeddingProvider::embed` into the sync `EmbeddingFn`
+        // signature expected by the manager.
+        let embedding_fn: Option<EmbeddingFn> = self
+            .core
+            .embedding_provider
+            .clone()
+            .map(|ep| {
+                let handle = tokio::runtime::Handle::current();
+                std::sync::Arc::new(move |text: &str| -> Vec<f32> {
+                    let text_owned = text.to_string();
+                    match handle.block_on(ep.embed(&text_owned)) {
+                        Ok(vec) => vec,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Embedding failed during tool failure recording; manager will use hash fallback"
+                            );
+                            Vec::new()
+                        }
+                    }
+                }) as EmbeddingFn
+            });
 
         // Collect (tool_name, error_message) pairs for failed tools.
         let failures: Vec<(&str, &str)> = tool_calls
@@ -347,7 +379,7 @@ impl super::loop_::AgentLoop {
             })
             .collect();
 
-        manager.record_tool_failures(provider.as_ref(), &failures);
+        manager.record_tool_failures(provider.as_ref(), &failures, embedding_fn.as_ref());
     }
 
     /// Run all post-compaction maintenance tasks.

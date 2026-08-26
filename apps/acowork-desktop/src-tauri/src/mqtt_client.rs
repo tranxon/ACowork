@@ -227,6 +227,12 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // the DevMode panel re-syncs via `GET /api/debug/state` after a
     // reconnect.
     ("acowork/agents/+/debug/events/#", MqttQoS::AtMostOnce),
+    // ── Workspace FS change events (ADR-058) ──
+    // Runtime publishes aggregated workspace file changes on
+    // `acowork/agents/{id}/workspaces/{wid}/fs-changed`. QoS 1 is
+    // mandatory (same reason as messages/#: a lost event desyncs the
+    // Desktop FileTree until the reconnect full-sync fallback fires).
+    ("acowork/agents/+/workspaces/+/fs-changed", MqttQoS::AtLeastOnce),
 ];
 
 /// Re-subscribe to ALL topics after a (re)connect.
@@ -505,6 +511,11 @@ impl DesktopMqttClient {
     }
 
     /// Connect with default localhost and port.
+    ///
+    /// ADR-058 W4: `connect_mqtt` now derives the broker host from the
+    /// Gateway HTTP base URL (Remote-mode tunnel support), so this
+    /// helper has no production caller — kept for tests / dev tooling.
+    #[allow(dead_code)]
     pub async fn connect_default<F, G>(
         user_id: &str,
         on_message: F,

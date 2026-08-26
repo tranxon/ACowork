@@ -6,6 +6,7 @@ import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { initMqttListener } from "./stores/chatStore";
+import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { log } from "./lib/logger";
 
 function App() {
@@ -31,6 +32,11 @@ function App() {
       sessionStorage.removeItem("acowork_recovery_reload");
       initMqttListener().catch((e) =>
         log.warn("[App] initMqttListener failed on recovery reload:", e)
+      );
+      // ADR-058: workspace fs-changed listeners die with the webview
+      // reload — re-register alongside the MQTT listener.
+      initWorkspaceFsListener().catch((e) =>
+        log.warn("[App] initWorkspaceFsListener failed on recovery reload:", e)
       );
     }
   }, [isRecoveryReload]);

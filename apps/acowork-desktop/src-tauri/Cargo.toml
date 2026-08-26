@@ -44,7 +44,10 @@ prost = "0.13"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc = "0.2"
+# objc2 (not objc 0.2): objc 0.2's sel!/msg_send! macros reference the
+# non-exported `sel_impl` macro and fail to expand under edition 2024's
+# stricter macro hygiene. objc2's proc macros are edition-2024-safe.
+objc2 = "0.6"
 
 # Unix-specific: clock_gettime for sleep detection (macOS + Linux)
 [target.'cfg(unix)'.dependencies]

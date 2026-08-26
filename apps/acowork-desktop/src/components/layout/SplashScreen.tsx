@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { initMqttListener } from "../../stores/chatStore";
+import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -66,6 +67,10 @@ async function bootGateway(): Promise<void> {
         // ADR-033: Register frontend MQTT event listener
         await initMqttListener();
         log.debug("[bootGateway] MQTT listener initialized");
+        // ADR-058: workspace fs-changed listener (auto tree refresh +
+        // editor conflict UX + reconnect full-sync fallback).
+        await initWorkspaceFsListener();
+        log.debug("[bootGateway] workspace fs listener initialized");
     } catch (err) {
         log.warn("connect_mqtt failed:", err);
     }
@@ -231,6 +236,8 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             try { await invoke("connect_mqtt"); } catch {}
             // ADR-033: (Re)register MQTT listener on retry
             try { await initMqttListener(); } catch {}
+            // ADR-058: workspace fs listener on retry
+            try { await initWorkspaceFsListener(); } catch {}
             // Poll for agent readiness
             const ready = await checkAgentReady();
             if (ready) {

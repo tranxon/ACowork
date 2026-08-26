@@ -243,6 +243,12 @@ pub(crate) struct AgentBootContext {
     /// use-case slots.
     pub session_manager_slot: crate::http::server::SharedSessionManagerSlot,
 
+    /// ADR-058: workspace FS watcher set. Created empty in Phase A
+    /// (same Arc as the one cloned into the Runtime HTTP server);
+    /// Phase C reconciles it against the shared `WorkspaceResolver`
+    /// so every user-configured workspace gets an event publisher.
+    pub workspace_watcher_set: crate::workspace::SharedWorkspaceWatcherSet,
+
     /// Shared search key vault (provider_id -> decrypted API key).
     /// Created in Phase A, passed to `WebSearchEngine` (via
     /// `all_builtin_tools`) and injected into `AgentCore` in Phase B.

@@ -6,11 +6,37 @@ ACowork.AI is a decentralized, high-security, scalable AI Agent runtime platform
 
 ## Build & Test
 
+### Core (Rust workspace)
+
 ```bash
-cd core && cargo build --release
-cd core && cargo clippy --all-targets -- -D warnings
-cd core && cargo test
-./dev/ci.sh all
+cd core
+cargo build --release          # all 12 crates
+cargo clippy --all-targets -- -D warnings
+cargo test                     # unit + integration tests
+# From project root:
+# ./dev/ci.sh all              # check + clippy + test + integration
+```
+
+### Desktop App (Tauri v2)
+
+Core Rust crates (`acowork-gateway`, `acowork-runtime`, `acowork-embed`) must be built before the Tauri binary can launch them.
+
+**Release build** — `beforeBuildCommand` in `tauri.conf.json` handles this automatically:
+
+```bash
+# From apps/acowork-desktop/
+npm run tauri build
+# Runs: core:build:release → npm run build → tauri bundle
+```
+
+**Dev mode** — Tauri dev does not auto-build core; ensure the debug binaries exist first:
+
+```bash
+# Build core debug binaries once
+npm run core:build:debug
+
+# Then start the desktop app (Vite HMR + Tauri window)
+npm run tauri dev
 ```
 
 ## Debug & Log 
