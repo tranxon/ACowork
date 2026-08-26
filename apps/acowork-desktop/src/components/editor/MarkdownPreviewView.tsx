@@ -9,6 +9,7 @@ import { CodeBlock } from "../chat/CodeBlock";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useFileTreeStore } from "../../stores/fileTree";
 import { cn } from "../../lib/utils";
 import {
     PASSTHROUGH_SCHEMES,
@@ -161,10 +162,12 @@ const ImageWithClick = React.memo(function ImageWithClick({
 export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     const { t } = useTranslation();
     const openFile = useFileEditorStore((s) => s.openFile);
-    // `treeRoots` subscription kept so React re-renders the preview when the
+    // Tree cache subscription kept so React re-renders the preview when the
     // workspace tree finishes loading (the cross-workspace resolver inside
-    // `openResolved` reads `treeRoots` on demand, not through this variable).
-    useWorkspaceStore((s) => s.treeRoots);
+    // `openResolved` reads the tree on demand, not through this variable).
+    // Subscribing to the whole `nodes` map means we re-render on every
+    // tree transition — which is also what the old `treeRoots` selector did.
+    useFileTreeStore((s) => s.nodes);
 
     /** Switch the current tab from preview mode back to edit mode. */
     const handleOpenAsEditor = useCallback(() => {

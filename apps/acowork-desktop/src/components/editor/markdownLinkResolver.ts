@@ -28,6 +28,7 @@
 
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
+import { getCachedWorkspaceRoot } from "../../stores/fileTree";
 import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
 import { showToast } from "../common/ToastProvider";
@@ -176,10 +177,10 @@ export function resolveAssetAcrossWorkspaces(
     if (PASSTHROUGH_SCHEMES.test(src)) return [];
     if (src.startsWith("#")) return [];
 
-    const { workspaces, treeRoots } = useWorkspaceStore.getState();
+    const { workspaces } = useWorkspaceStore.getState();
 
     const rootFor = (workspaceId: string): string | null => {
-        const fromTree = treeRoots[`${agentId}:${workspaceId}`];
+        const fromTree = getCachedWorkspaceRoot(agentId, workspaceId);
         if (fromTree) return fromTree;
         const ws = workspaces.find((w) => w.id === workspaceId);
         return ws?.path ?? null;

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { FilePlus, FolderPlus, ClipboardPaste } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useWorkspaceStore, type TreeEntry } from "../../../stores/workspaceStore";
+import { useWorkspaceStore } from "../../../stores/workspaceStore";
+import { useFileTreeStore, treeKey, isReadyNode, isLoading, type TreeEntry } from "../../../stores/fileTree";
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
@@ -169,9 +170,12 @@ export function FileTree({
     dropTarget = null,
     onPointerDownTreeEntry,
 }: FileTreeProps) {
-    const treeCache = useWorkspaceStore((s) => s.treeCache);
-    const fetchTree = useWorkspaceStore((s) => s.fetchTree);
-    const treeLoadingPaths = useWorkspaceStore((s) => s.treeLoadingPaths);
+    // Tree nodes are mirrored into a single Record<key, TreeNode>.
+    // Subscribing to the whole map keeps the effect deps stable; the
+    // individual reads below still re-derive per-key so render cost is
+    // proportional to the displayed nodes, not the whole map.
+    const treeNodes = useFileTreeStore((s) => s.nodes);
+    const fetchTree = useFileTreeStore((s) => s.fetch);
     const copiedEntry = useWorkspaceStore((s) => s.copiedEntry);
     const toggleTreeExpandedPath = useChatStore((s) => s.toggleTreeExpandedPath);
     const expandTreeToPath = useChatStore((s) => s.expandTreeToPath);
@@ -186,10 +190,12 @@ export function FileTree({
      * meaningful target here. */
     const ctxMenu = useContextMenu();
 
-    /** Build cache key prefix: agentId:workspaceId (tree cache is NOT per-session) */
-    const treeCachePrefix = `${agentId}:${workspaceId}`;
-    const treeRoots = useWorkspaceStore((s) => s.treeRoots);
-    const workspaceRoot = treeRoots[`${agentId}:${workspaceId}`] ?? "";
+    /**
+     * Workspace root path — taken from the cached root-path tree node.
+     * Empty string until the root fetch resolves (UI shows Loading...).
+     */
+    const rootNode = treeNodes[treeKey(agentId, workspaceId, "")];
+    const workspaceRoot = isReadyNode(rootNode) ? rootNode.root : "";
 
     // Expanded paths from the session — Zustand selector is reactive
     const expandedPathsArr = useChatStore((s) => {
@@ -259,23 +265,21 @@ export function FileTree({
             ancestors.push(parts.slice(0, i + 1).join("/"));
         }
         for (const p of ancestors) {
-            const key = `${treeCachePrefix}:${p}`;
-            if (!treeCache[key]) {
+            if (!isReadyNode(treeNodes[treeKey(agentId, workspaceId, p)])) {
                 void fetchTree(agentId, workspaceId, p);
             }
         }
-    }, [locateRequest, agentId, workspaceId, sessionId, treeCachePrefix, treeCache, expandTreeToPath, fetchTree]);
+    }, [locateRequest, agentId, workspaceId, sessionId, treeNodes, expandTreeToPath, fetchTree]);
 
     // Flatten the tree into a list respecting expanded state
     const flatNodes = useMemo<FlatNode[]>(() => {
         const result: FlatNode[] = [];
 
         function walk(relPath: string, depth: number) {
-            const cacheKey = `${treeCachePrefix}:${relPath}`;
-            const entries = treeCache[cacheKey];
-            if (!entries) return;
+            const node = treeNodes[treeKey(agentId, workspaceId, relPath)];
+            if (!isReadyNode(node)) return;
 
-            for (const entry of entries) {
+            for (const entry of node.entries) {
                 const childRelPath = relPath ? `${relPath}/${entry.name}` : entry.name;
 
                 result.push({ entry, depth, relPath: childRelPath });
@@ -288,18 +292,21 @@ export function FileTree({
 
         walk("", 0);
         return result;
-    }, [treeCachePrefix, treeCache, expandedPaths]);
+    }, [agentId, workspaceId, treeNodes, expandedPaths]);
 
     const handleToggle = useCallback(
         (relPath: string) => {
             const isCurrentlyExpanded = expandedPaths.has(relPath);
             toggleTreeExpandedPath(agentId, sessionId, relPath);
             // Lazy-load children when expanding
-            if (!isCurrentlyExpanded && !treeCache[`${treeCachePrefix}:${relPath}`]) {
+            if (
+                !isCurrentlyExpanded &&
+                !isReadyNode(treeNodes[treeKey(agentId, workspaceId, relPath)])
+            ) {
                 fetchTree(agentId, workspaceId, relPath);
             }
         },
-        [agentId, workspaceId, sessionId, treeCachePrefix, expandedPaths, treeCache, fetchTree, toggleTreeExpandedPath],
+        [agentId, workspaceId, sessionId, expandedPaths, treeNodes, fetchTree, toggleTreeExpandedPath],
     );
 
     const handleSelect = useCallback(
@@ -393,7 +400,8 @@ export function FileTree({
 
     // Empty state
     if (flatNodes.length === 0) {
-        const rootEntries = treeCache[`${treeCachePrefix}:`];
+        const rootNode = treeNodes[treeKey(agentId, workspaceId, "")];
+        const rootEntries = isReadyNode(rootNode) ? rootNode.entries : undefined;
         if (!rootEntries) {
             return (
                 <div className="flex items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
@@ -430,7 +438,7 @@ export function FileTree({
             >
                 {virtualizer.getVirtualItems().map((virtualRow) => {
                     const node = flatNodes[virtualRow.index];
-                    const isLoading = treeLoadingPaths.has(`${treeCachePrefix}:${node.relPath}`);
+                    const nodeIsLoading = isLoading(treeNodes[treeKey(agentId, workspaceId, node.relPath)]);
 
                     // FileTreeNode IS the virtualizer slot (one div owns
                     // both the slot geometry and the row semantics —
@@ -445,7 +453,7 @@ export function FileTree({
                             relPath={node.relPath}
                             absPath={workspaceRoot ? `${workspaceRoot}/${node.relPath}` : node.relPath}
                             isExpanded={expandedPaths.has(node.relPath)}
-                            isLoading={isLoading}
+                            isLoading={nodeIsLoading}
                             isSelected={selectedPath === node.relPath}
                             hasOpenDescendant={openFileDirSet.has(node.relPath)}
                             onToggle={handleToggle}

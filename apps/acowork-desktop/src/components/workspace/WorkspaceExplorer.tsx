@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
-import { useWorkspaceStore, type TreeEntry } from "../../stores/workspaceStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry } from "../../stores/fileTree";
 import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -34,8 +35,8 @@ export function WorkspaceExplorer() {
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
     const fontSize = useSettingsStore((s) => s.fontSize);
     const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
-    const invalidateTreeCache = useWorkspaceStore((s) => s.invalidateTreeCache);
-    const fetchTree = useWorkspaceStore((s) => s.fetchTree);
+    const invalidateTreeCache = useFileTreeStore((s) => s.invalidate);
+    const fetchTree = useFileTreeStore((s) => s.fetch);
     const sessionWorkspaceMap = useWorkspaceStore((s) => s.sessionWorkspaceMap);
     const createFile = useWorkspaceStore((s) => s.createFile);
     const createDir = useWorkspaceStore((s) => s.createDir);
@@ -513,10 +514,11 @@ export function WorkspaceExplorer() {
     const quickCreateAndRename = useCallback(
         async (parentPath: string, type: "file" | "dir") => {
             if (!selectedAgentId) return;
-            const treeCache = useWorkspaceStore.getState().treeCache;
-            const siblingCacheKey = `${selectedAgentId}:${currentWorkspaceId}:${parentPath}`;
+            const siblingNode = useFileTreeStore.getState().getNode(
+                treeKey(selectedAgentId, currentWorkspaceId, parentPath),
+            );
             const siblingNames = new Set<string>(
-                (treeCache[siblingCacheKey] ?? []).map((e) => e.name),
+                isReadyNode(siblingNode) ? siblingNode.entries.map((e: TreeEntry) => e.name) : [],
             );
             const baseName = "untitled";
             const name = buildUniqueName(baseName, siblingNames);
@@ -646,10 +648,11 @@ export function WorkspaceExplorer() {
 
         // Collect existing sibling names from the tree cache so we don't
         // race the server's "Destination already exists" 400.
-        const treeCache = useWorkspaceStore.getState().treeCache;
-        const siblingCacheKey = `${selectedAgentId}:${currentWorkspaceId}:${parentPath}`;
+        const siblingNode = useFileTreeStore.getState().getNode(
+            treeKey(selectedAgentId, currentWorkspaceId, parentPath),
+        );
         const siblingNames = new Set<string>(
-            (treeCache[siblingCacheKey] ?? []).map((e) => e.name),
+            isReadyNode(siblingNode) ? siblingNode.entries.map((e: TreeEntry) => e.name) : [],
         );
         const uniqueName = buildCopyName(siblingNames);
         const dest = parentPath ? `${parentPath}/${uniqueName}` : uniqueName;

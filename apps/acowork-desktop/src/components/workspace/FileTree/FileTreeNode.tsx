@@ -13,7 +13,7 @@ import {
   type ContextMenuItem,
 } from "../../common/ContextMenu";
 import { isGatewayLocal } from "../../../lib/config";
-import type { TreeEntry } from "../../../stores/workspaceStore";
+import type { TreeEntry } from "../../../stores/fileTree";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
 let _dialogModule: typeof import("@tauri-apps/plugin-dialog") | null = null;

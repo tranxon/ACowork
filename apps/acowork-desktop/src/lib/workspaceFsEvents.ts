@@ -5,7 +5,7 @@
  * commands/chat_mqtt.rs from MQTT
  * `acowork/agents/{id}/workspaces/{wid}/fs-changed`) into:
  *
- * 1. workspaceStore — per-parent-path incremental `fetchTree` refresh
+ * 1. fileTreeStore — per-parent-path incremental tree fetch
  *    (only directories already present in the cache are re-fetched, so
  *    expanded state is preserved and no unused dirs are pulled).
  * 2. fileEditorStore — external-modification conflict UX:
@@ -27,7 +27,7 @@
  */
 
 import { listen } from "@tauri-apps/api/event";
-import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useFileTreeStore, treeKey, isReadyNode } from "../stores/fileTree";
 import { useFileEditorStore } from "../stores/fileEditorStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { DEFAULT_GATEWAY_URL } from "./config";
@@ -201,7 +201,7 @@ export async function handleFsChanged(ev: WorkspaceFsChangeEvent): Promise<void>
  * root. Expanded state is preserved because no other nodes are touched.
  */
 function refreshTreesForChanges(ev: WorkspaceFsChangeEvent): void {
-    const store = useWorkspaceStore.getState();
+    const treeStore = useFileTreeStore.getState();
     const parents = new Set<string>();
     for (const change of ev.changes) {
         const idx = change.path.lastIndexOf("/");
@@ -210,11 +210,11 @@ function refreshTreesForChanges(ev: WorkspaceFsChangeEvent): void {
 
     let refreshed = 0;
     for (const parent of parents) {
-        const key = `${ev.agent_id}:${ev.workspace_id}:${parent}`;
+        const key = treeKey(ev.agent_id, ev.workspace_id, parent);
         // Skip parents we have never loaded — nothing visible to update.
-        if (!(key in store.treeCache)) continue;
-        // fetchTree dedupes in-flight requests per cache key.
-        store.fetchTree(ev.agent_id, ev.workspace_id, parent).catch((e) =>
+        if (!isReadyNode(treeStore.getNode(key))) continue;
+        // fetch dedupes in-flight requests per cache key.
+        treeStore.fetch(ev.agent_id, ev.workspace_id, parent).catch((e: unknown) =>
             log.error("[WorkspaceFsEvents] incremental fetchTree failed:", e),
         );
         refreshed++;
@@ -362,13 +362,19 @@ export function scheduleFullTreeSync(reason: string): void {
     if (now - _lastFullSyncAt < FULL_SYNC_DEDUPE_MS) return;
     _lastFullSyncAt = now;
 
-    const store = useWorkspaceStore.getState();
+    const treeStore = useFileTreeStore.getState();
+    // Collect every (agent, workspace) pair that currently has at
+    // least one cached node. The keys are NUL-delimited (see
+    // fileTree/types.ts), so a safe split is split("\u0000").
     const pairs = new Set<string>();
-    for (const key of Object.keys(store.treeCache)) {
-        // key = `${agentId}:${workspaceId}:${path}` — workspace ids and
-        // paths cannot contain ':' (ids are `ws-<hex>` / `__agent_home__`),
-        // so a greedy first-two-segments split is safe.
-        const [agentId, workspaceId] = key.split(":");
+    for (const key of Object.keys(treeStore.nodes)) {
+        const idx = key.indexOf("\u0000");
+        if (idx < 0) continue;
+        const agentId = key.substring(0, idx);
+        const rest = key.substring(idx + 1);
+        const wsIdx = rest.indexOf("\u0000");
+        if (wsIdx < 0) continue;
+        const workspaceId = rest.substring(0, wsIdx);
         pairs.add(`${agentId}\u0000${workspaceId}`);
     }
     if (pairs.size === 0) return;
@@ -376,8 +382,8 @@ export function scheduleFullTreeSync(reason: string): void {
     log.debug("[WorkspaceFsEvents] full tree re-sync", { reason, pairs: pairs.size });
     for (const pair of pairs) {
         const [agentId, workspaceId] = pair.split("\u0000");
-        store.invalidateTreeCache(agentId);
-        store.fetchTree(agentId, workspaceId, "").catch((e) =>
+        treeStore.invalidate(agentId);
+        treeStore.fetch(agentId, workspaceId, "").catch((e: unknown) =>
             log.error("[WorkspaceFsEvents] full sync fetchTree failed:", e),
         );
     }

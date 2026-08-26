@@ -3,6 +3,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useFileTreeStore, getCachedWorkspaceRoot, treeKey, isReadyNode } from "../../stores/fileTree";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useLayoutStore } from "../../stores/layoutStore";
@@ -166,12 +167,11 @@ export function FileEditorPanel({ width }: { width: number }) {
     // so we use relPath as the model path (producing file:///core/... which
     // Monaco accepts). The LSP layer then maps relative URIs to absolute ones
     // using the workspace root. See lspProviders.ts → toLspUri().
-    const treeRoots = useWorkspaceStore((s) => s.treeRoots);
     const workspaceRoot = useMemo(() => {
         if (!activeFile) return undefined;
-        const rootKey = `${activeFile.agentId}:${activeFile.workspaceId}`;
-        return treeRoots[rootKey];
-    }, [activeFile, treeRoots]);
+        const node = useFileTreeStore.getState().getNode(treeKey(activeFile.agentId, activeFile.workspaceId, ""));
+        return isReadyNode(node) ? node.root : undefined;
+    }, [activeFile]);
 
     // Determine the active language for LSP — preview-mode files don't need LSP.
     const lspLanguage = activeFile && activeFile.mode === "edit" ? activeFile.language : null;
@@ -825,8 +825,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         const { startLine, endLine } = selectionRange;
         const lineLabel = startLine === endLine ? `L${startLine}` : `L${startLine}-L${endLine}`;
         // Resolve absolute path from tree root
-        const treeRoots = useWorkspaceStore.getState().treeRoots;
-        const workspaceRoot = treeRoots[`${agentId}:${activeFile.workspaceId}`] ?? "";
+        const workspaceRoot = getCachedWorkspaceRoot(agentId, activeFile.workspaceId);
         const absPath = workspaceRoot ? `${workspaceRoot}/${activeFile.relPath}` : activeFile.relPath;
         addAttachedContext(agentId, sessionId, {
             id: `${agentId}:${activeFile.relPath}:${startLine}:${endLine}`,
@@ -950,8 +949,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         const sessionId = activeSessionId;
         if (!sessionId) return;
         // Resolve absolute path the same way as the floating selection addToChat.
-        const roots = useWorkspaceStore.getState().treeRoots;
-        const root = roots[`${agentId}:${file.workspaceId}`] ?? "";
+        const root = getCachedWorkspaceRoot(agentId, file.workspaceId);
         const absPath = root ? `${root}/${file.relPath}` : file.relPath;
         addAttachedContext(agentId, sessionId, {
             id: `${agentId}:${file.relPath}`,
