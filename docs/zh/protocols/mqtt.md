@@ -12,7 +12,7 @@
 - **Payload 编码**：Protobuf 二进制（独立文件 `mqtt_payload.proto`，独立命名空间，不与其他任何 proto 共享定义）
 - **协议版本**：MQTT 3.1.1（**不使用 MQTT 5.0**）
 - **角色库**：`rumqttd`（broker，仅 Gateway）+ `rumqttc`（client，Runtime / Desktop / Gateway publisher 统一使用），`Cargo.toml` 各一行
-- **认证**：单用户阶段依赖 localhost-only 绑定；多用户阶段启用 rumqttd 内置 ACL
+- **认证**：默认 `mqtt.auth_enabled = false`（匿名放行，localhost-only 绑定）；显式开启后启用 CONNECT 层动态鉴权（ADR-055 Phase 5a，见 §8.7）。topic 级 ACL 因 rumqttd 无能力而记录偏差，mosquitto 评估列入 Phase 5b
 
 > **MQTT 不承载 req/res 模式**：任何"等待对方回复"的场景都走 HTTP。Runtime 是 MQTT pub/sub 客户端 + localhost HTTP server（供 Gateway 反向代理大数据查询）。Gateway 是 broker 宿主 + 全局资源权威 + HTTP server + 反向代理，不做业务事件转发。
 
@@ -353,6 +353,35 @@ acowork/users/{user_id}/
     - 可用状态 = Gateway 验证后的运行时真相,MQTT pub/sub(全局共享)
     - agent 选择 = Runtime 本地持久化,HTTP 拉 config 即可
     之前误把"Gateway 计算的 per-agent 子集"放进 `agents/{id}/resource_cache` 是错误的——Gateway 不应该感知 agent 维度,资源可用性是全局维度。
+
+### 3.6 节点控制面（Node Agent 数据源，ADR-055）
+
+```
+acowork/nodes/{node_id}/
+├── status                            # [Retained + LWT] "online" | "offline"
+│                                     #   与 agent status 同构（ADR-055 §6.2）
+├── info                              # [Retained] protobuf DataEnvelope<NodeInfo>
+│                                     #   节点元数据（hostname、os、arch、runtime_version、能力集）
+├── enroll                            # [QoS 1] Node → Gateway 注册请求（Phase 5a）
+│                                     #   payload = DataEnvelope<NodeEnroll>
+│                                     #   { node_id, machine_uid, os, arch, node_version,
+│                                     #     protocol_version, capabilities, enrollment_token }
+│                                     #   开启鉴权时携带 `--token` 传入的 enrollment token
+├── enroll_result                     # [QoS 1] Gateway → Node 回执（per-request，不 retained）
+│                                     #   payload = DataEnvelope<NodeEnrollResult>
+│                                     #   { node_id, machine_uid, node_token, status, message }
+│                                     #   status = "ok" | "rejected"
+├── agents/{id}/control/{cmd}         # [QoS 1] Gateway → Node agent 生命周期指令
+│                                     #   cmd ∈ {install, uninstall, start, stop, ...}
+├── agents/{id}/events                # [QoS 1] Node → Gateway 执行结果上报
+└── lsps                              # [Retained] 节点本地 LSP relay endpoint（替代全局 lsps）
+```
+
+**Enrollment 语义（Phase 5a）**：
+
+- 首次启动（identity.json 缺失）时 Node 在 bootstrap 里 PUBLISH `enroll`；Gateway 校验 enrollment token（开启鉴权时）→ node_id 唯一性（未占用 / 同 machine_uid 复用 / 不同 machine_uid 拒绝）→ 签发（或复用）node_token 并持久化到 `{data_dir}/node_tokens.json` → 回执 `enroll_result`；Node 将 node_token 持久化进 identity.json。
+- **幂等**：同 machine_uid 重新 enroll 复用既有 node_token；Node 已持有 token 时不回写、不覆盖。
+- `enroll_result` 不 retained——回执是 per-request 应答，重连后由 CONNECT 凭据（node_token）维持身份。
 
 ---
 
@@ -746,12 +775,11 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 |---------|-------|-------|----------|---------------------|
 | Provider list（全量） | Gateway | KB | ❌（静态全量，不走 MQTT） | `GET /api/global/providers` |
 | MCP list（全量） | Gateway | KB | ❌ | `GET /api/global/mcps` |
-| LSP list（全量） | Gateway | B | ❌ | `GET /api/global/lsps` |
+| LSP relay 端点（node-local，ADR-055 §6.7） | Node | B | `acowork/nodes/{node_id}/lsps` (R, QoS 1) | `GET /api/agents/{id}/lsp-endpoint`（Gateway 按 agent → node 解析） |
 | Search list（全量） | Gateway | KB | ❌ | `GET /api/global/searches` |
 | Embedding model list（全量） | Gateway | B-KB | ❌ | `GET /api/global/embedding_models` |
 | Provider available（Gateway health-check 后） | Gateway | KB | `acowork/global/providers` (R, QoS 1) | — |
 | MCP available | Gateway | KB | `acowork/global/mcps` (R, QoS 1) | — |
-| LSP available | Gateway | B | `acowork/global/lsps` (R, QoS 1) | — |
 | Search available | Gateway | KB | `acowork/global/searches` (R, QoS 1) | — |
 | Embedding model available | Gateway | B-KB | `acowork/global/embedding_models` (R, QoS 1) | — |
 | Active user profile（ADR-042） | Gateway | B | `acowork/global/user_profile` (R, QoS 1) | —（Runtime 启动等 retained 快照，5s timeout fallback 到 None） |
@@ -905,8 +933,9 @@ client.publish(
 | 客户端 | Client ID | 用途 |
 |--------|-----------|------|
 | Gateway Publisher | `gateway:publisher` | 唯一标识 Gateway 的 MQTT 客户端（仅发 `acowork/global/#` Retained） |
-| Runtime | `agent:{agent_id}` | 业务主体，每个 Runtime 一个 |
-| Desktop | `user:{user_id}:desktop:{pid}` | 多用户场景区分（`{pid}` = 进程 PID，用于同 user 多 desktop 实例） |
+| Runtime | `agent:{agent_id}` | 业务主体，每个 Runtime 一个；Phase 5a 起 CONNECT 密码 = 宿主 Node 的 node_token（见 §8.7） |
+| Desktop | `user:{user_id}:desktop:{pid}` | 多用户场景区分（`{pid}` = 进程 PID，用于同 user 多 desktop 实例）；Phase 5a 起 CONNECT 密码 = `http_token`（见 §8.7） |
+| Node Agent | `node:{node_id}` | 节点身份（ADR-055 §6.2）；CONNECT 密码 = node_token，或首次接入时有效的 enrollment token（见 §8.7） |
 
 ### 8.6 Session Expiry & Clean Start
 
@@ -918,6 +947,39 @@ client.publish(
 > MQTT 3.1.1 不支持 Session Expiry。会话状态完全依赖 retained message + LWT；不建议通过 MQTT 持久化事件。
 
 ⚠️ **clean_start = true 的副作用**：broker **不持久化任何订阅或 in-flight 消息**。一次网络抖动或 broker 重启，客户端的 `control/#`、`global/#` 订阅会被全数丢弃。Runtime 和 Desktop 必须在 `ConnAck` 到达后**重做 §5.1.1 的 Bootstrap 五步**，把 retained 状态与持久订阅一并恢复。这条规则在 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md) §3.1 + §4 沉淀为强制合约。
+
+### 8.7 CONNECT 层鉴权（ADR-055 Phase 5a）
+
+`mqtt.auth_enabled` 默认 **false**（匿名放行，保持单机现状）；显式开启后，broker 在 CONNECT 阶段按 `client_id` + `password` 动态鉴权（rumqttd `set_auth_handler`，纯函数决策 `check_connect_auth`）：
+
+| client_id | 放行条件（password） |
+|-----------|---------------------|
+| `node:{node_id}` | == 该节点已签发的 node_token；或 == 一个有效且未消费的 enrollment token（首次接入路径） |
+| `agent:{agent_id}` | == **任一**已注册 node_token（第一档简化：不校验 agent→node 归属，ADR-055 注明） |
+| `gateway:publisher` | == Gateway 内部 publisher token（启动时生成） |
+| `user:{uid}:desktop:{pid}` | == `http_token`（auth_enabled 时 HttpAuth 已生成） |
+| 其他 | 拒绝（CONNACK 5 / 断开） |
+
+其余规则：
+
+- 凭据比较为常量时间（`constant_time_eq`）；enrollment token 只存 sha256 哈希（`{data_dir}/enrollment_tokens.json`），一次性消费。
+- Node 签发的长期凭据明文存 `{data_dir}/node_tokens.json`（node_id → {token, machine_uid, created_at}）——这是节点凭据的信任锚，保护级别等同 `http_token`。Gateway 重启后已注册 node 用 node_token 自动重连（持久化验证）。
+- **topic 级 ACL 偏差**：rumqttd 0.20 无 per-topic ACL 能力，Phase 5a 仅落地 CONNECT 层鉴权；mosquitto 切换评估列入 Phase 5b（ADR-055 §6.8）。
+- **HTTP 通道鉴权**：Node 拉取 package（`GET /api/packages/{id}/download`）与 Node 入站反代校验使用 `X-ACowork-Node-Token` header（详见 [http.md](./http.md)）；Gateway 出站反代请求自动注入该 header（按 agent → 宿主 Node 解析）。
+
+**一键接入流程**（开启鉴权后）：
+
+```bash
+# 1) Gateway 侧签发一次性 enrollment token（默认 30m，可 --ttl 调整）
+acowork-gateway nodes token create [--ttl 2h]
+
+# 2) 目标机器首启 Node（携带 token；identity.json 生成后不再需要）
+acowork-node start --gateway-host <gw> --name <node-id> --token <token>
+
+# 3) enroll 成功后 node_token 持久化进 identity.json，重启自动用 node_token 重连
+```
+
+local node（Gateway 本机）由 Gateway 预签发 node_token 注入 spawn 参数，走同一 enroll 协议（幂等复用，ADR-055 §6.11）。
 
 ---
 
@@ -1156,5 +1218,10 @@ graph TB
 - Desktop Tauri MQTT 客户端：`apps/acowork-desktop/src-tauri/src/mqtt_client.rs`
 - Protobuf 消息定义（独立文件 `mqtt_payload.proto`）：[`core/acowork-core/proto/mqtt_payload.proto`](../../../../core/acowork-core/proto/mqtt_payload.proto)
 - 默认端口（MQTT 端口 19875，broker / 客户端单一来源）：`core/acowork-core/src/defaults.rs`
+- 节点 enrollment / node token 存储：`core/acowork-gateway/src/mqtt/enrollment.rs`
+- CONNECT 鉴权决策（`check_connect_auth`）：`core/acowork-gateway/src/mqtt/broker.rs`
+- enroll 处理（校验 → 签发 → 回执）：`core/acowork-gateway/src/mqtt/dispatch.rs`
+- Node enroll 客户端 + 回执持久化：`core/acowork-node/src/control/mod.rs`
+- Runtime MQTT 凭据注入：`core/acowork-runtime/src/mqtt/client.rs`
 
 > MQTT Client 状态机、异常分类、Bootstrap 五步合约详见 [ADR-039](../adr/zh/ADR-039-mqtt-client-lifecycle.md)。

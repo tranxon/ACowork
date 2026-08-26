@@ -1,7 +1,7 @@
 # ADR-055：Runtime 远程化部署 - Node Agent 拓扑
 
-**状态**：已定案（待实施）
-**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序）
+**状态**：已定案（Phase 1–5a 实施完成；Phase 5b 待办）
+**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差）
 **决策者**：大鱼
 **前置**：
 - [ADR-033](./ADR-033-mqtt-replace-grpc-websocket.md)（MQTT 替换 gRPC + WebSocket）
@@ -299,6 +299,13 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 ```text
 acowork/nodes/{node_id}/status                      QoS1 Retained   节点上线状态（含 LWT 遗嘱：offline）
 acowork/nodes/{node_id}/info                        QoS1 Retained   节点元数据（hostname、os、arch、runtime_version、能力集）
+acowork/nodes/{node_id}/enroll                     QoS1            Node → Gateway 注册请求（Phase 5a）：
+                                                                   protobuf DataEnvelope<NodeEnroll>
+                                                                   { node_id, machine_uid, os, arch, node_version,
+                                                                     protocol_version, capabilities, enrollment_token }
+acowork/nodes/{node_id}/enroll_result              QoS1            Gateway → Node 注册回执（per-request，不 retained）：
+                                                                   DataEnvelope<NodeEnrollResult>
+                                                                   { node_id, machine_uid, node_token, status, message }
 acowork/nodes/{node_id}/agents/{id}/control/{cmd}   QoS1            Gateway → Node 的 agent 生命周期指令
                                                                     cmd ∈ {install, uninstall, start, stop,
                                                                             start_debug, skills_import,
@@ -404,9 +411,11 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 
 **第一档：可信网络（LAN/VPN/Tailscale）——Phase 5a**
 
-1. **Node 注册令牌（enrollment token）**：Gateway 配置生成一次性/长效 token（`acowork-node --enroll {token} --gateway {addr}`）；Node 首连 MQTT 时在 CONNECT 后的第一条消息里出示 token，Gateway 校验后登记 node_id ↔ token 指纹。**未注册节点的 MQTT 连接被 broker ACL 拒绝**。
-2. **节点令牌（node token）**：注册成功后 Gateway 签发 per-node 长期令牌，用于 ① Node 拉 package 的 HTTP 鉴权（`X-ACowork-Node-Token`）；② Node 反代入口校验（Gateway → Node 的反代请求携带）。
-3. **MQTT ACL 收紧**（`mqtt/acl.rs` 从 permissive 升级）：`node:{node_id}` 可 publish `acowork/nodes/{node_id}/#`、subscribe `acowork/nodes/{node_id}/agents/+/control/#` + `acowork/global/#`；`agent:{agent_id}`（Runtime）限 `acowork/agents/{agent_id}/#`；desktop 限 `acowork/agents/#` + `acowork/nodes/+/lsps`。ACL 规则表按注册清单动态生成（enrollment 通过后按 node_id 生成专属规则，见 §6.12）。
+1. **Node 注册令牌（enrollment token）**：Gateway 配置生成一次性/长效 token（`nodes token create [--ttl]`，明文一次性打印，仅存 sha256 哈希于 `{data_dir}/enrollment_tokens.json`）；Node 首连 MQTT 时在 CONNECT 后的第一条消息里出示 token（`acowork/nodes/{id}/enroll` payload），Gateway 校验后登记 node_id ↔ 令牌。**未注册节点的 MQTT 连接被 broker 拒绝（CONNACK 5）**。
+2. **节点令牌（node token）**：注册成功后 Gateway 签发 per-node 长期令牌（`{data_dir}/node_tokens.json` 持久化），用于 ① Node 拉 package 的 HTTP 鉴权（`X-ACowork-Node-Token`）；② Node 反代入口校验（Gateway → Node 的反代请求携带，Node 侧入站校验）；③ CONNECT 凭据（`node:{id}` 重连）。
+3. **MQTT 鉴权收紧（Phase 5a 已实施为 CONNECT 层动态鉴权）**：rumqttd 0.20 `set_auth_handler`，决策纯函数 `check_connect_auth(client_id, username, password)`——`node:{id}` 凭 node_token 或未消费 enrollment token；`agent:{id}` 凭任一已注册 node_token（第一档简化：不校验 agent→node 归属）；`gateway:publisher` 凭内部 publisher token；`user:*:desktop:*` 凭 `http_token`；其他拒绝。
+
+> **Phase 5a 实施偏差（2026-08-26 记录）**：§6.8 原设计为「rumqttd 内置 ACL 按 topic 动态收紧」，但 **rumqttd 0.20 无 per-topic ACL 能力**，Phase 5a 仅落地 **CONNECT 层动态鉴权**（连接身份认证，不含 topic 级授权）。topic 级 ACL 依赖 broker 能力，**mosquitto 切换评估列入 Phase 5b**（ADR-033 已把「broker 可替换」列为缓解措施，客户端全是标准 MQTT 3.1.1，切换成本可控）。
 
 **第二档：不可信网络（公网）——Phase 5b，本 ADR 定义接口不实施**
 
@@ -488,14 +497,14 @@ acowork-node enroll --gateway 192.168.1.10:19876 --token <enrollment-token> [--n
  4. PUBLISH  acowork/nodes/{node_id}/enroll (QoS1)
             payload = { machine_uid, os, arch, runtime_version, capabilities }
  5. Gateway 校验：
-    a. enrollment token 有效？（Phase 5a 前免检）
+    a. enrollment token 有效？（Phase 5a 起必检；auth_enabled=false 时免检）
     b. node_id 唯一性：
        - 未占用                        → 注册成功
        - 已被同一 machine_uid 占用      → 视为重新注册，成功（enroll 重跑）
        - 已被不同 machine_uid 占用      → 拒绝：明确报错 "node name 'gpu-server'
                                           already taken by another machine"，
                                           用户换 --name 重跑
- 6. Gateway 签发 node_token（enrollment 回执，events topic）
+ 6. Gateway 签发 node_token（enrollment 回执，`enroll_result` topic）
  7. node_token 追加持久化到 identity.json；发布 status=online + info retained
 ```
 
@@ -784,10 +793,10 @@ core/acowork-node/
 
 ### Phase 5：安全
 
-| # | 内容 |
-|---|------|
-| 5a | Node enrollment token + node token + MQTT ACL 动态化（§6.8 第一档） |
-| 5b | （接口预留）broker TLS / mosquitto 切换评估、api_key payload 加密、全链路 HTTPS |
+| # | 内容 | 状态 |
+|---|------|------|
+| 5a | Node enrollment token + node token + MQTT CONNECT 层动态鉴权（§6.8 第一档；topic ACL 因 rumqttd 无能力，偏差记录于 §6.8，mosquitto 评估移入 5b） | ✅ 已完成（2026-08-26） |
+| 5b | （接口预留）broker TLS / mosquitto 切换评估（含 topic ACL）、api_key payload 加密、全链路 HTTPS | 待办 |
 
 ### 7.1 测试策略（贯穿各 Phase 的验收构成）
 
