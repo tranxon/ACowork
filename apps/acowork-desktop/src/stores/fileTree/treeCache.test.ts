@@ -67,6 +67,34 @@ function abortableFetcher() {
   return fetcher;
 }
 
+/**
+ * A fetcher whose behavior per call we fully control: each invocation
+ * returns a fresh deferred promise whose resolve/reject we hold. Useful
+ * for asserting ORDER of calls (e.g. foreground preempts background).
+ */
+function scriptedFetcher() {
+  const calls: Array<{
+    resolve: (r: TreeResponse) => void;
+    reject: (e: unknown) => void;
+    signal: AbortSignal;
+  }> = [];
+  const fetcher = vi.fn((signal: AbortSignal) => {
+    let resolveFn: ((r: TreeResponse) => void) | null = null;
+    let rejectFn: ((e: unknown) => void) | null = null;
+    const p = new Promise<TreeResponse>((resolve, reject) => {
+      resolveFn = resolve;
+      rejectFn = reject;
+    });
+    calls.push({
+      resolve: (r) => resolveFn?.(r),
+      reject: (e) => rejectFn?.(e),
+      signal,
+    });
+    return p;
+  });
+  return { fetcher, calls };
+}
+
 describe("createTreeCache — dedup", () => {
   it("shares one in-flight Promise across concurrent callers", async () => {
     const cache = createTreeCache();
@@ -305,5 +333,220 @@ describe("createTreeCache — StrictMode double-invoke regression", () => {
     expect(n1.kind).toBe("ready");
     expect(n2.kind).toBe("ready");
     expect(n1).toBe(n2);
+  });
+});
+
+describe("createTreeCache — invalidate + fetch (authoritative refresh)", () => {
+  // Regression lock for the ea819127 follow-up: after a successful
+  // server-side mutation (create / rename / delete / paste), the UI
+  // must converge immediately. SWR's fresh-hit fast path otherwise keeps
+  // serving pre-mutation entries within `freshMs`, and the next user
+  // action against the now-stale `relPath` will 404.
+  it("invalidate-then-fetch drops the fresh entry and re-fetches synchronously", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({ now: () => t });
+    const fetcher = vi.fn().mockResolvedValue(fakeResp([{ name: "old", type: "file" }]));
+    await cache.fetch(k(), fetcher); // warm cache, fetchedAt = t
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Mutate on the server: a brand-new entry appears. Without
+    // invalidate, the next `fetch` is a fresh hit and the new entry is
+    // invisible.
+    t += 100; // still well within freshMs
+    const stillFresh = await cache.fetch(k(), fetcher);
+    expect(stillFresh.kind).toBe("ready");
+    expect(fetcher).toHaveBeenCalledTimes(1); // SWR fast-path served the stale entry
+
+    // Authoritative refresh path: drop the entry, then fetch again.
+    cache.invalidate((key) => key === k());
+    expect(cache.get(k()).kind).toBe("idle");
+
+    fetcher.mockResolvedValueOnce(fakeResp([{ name: "new", type: "file" }]));
+    const refreshed = await cache.fetch(k(), fetcher);
+    expect(refreshed.kind).toBe("ready");
+    if (refreshed.kind === "ready") {
+      expect(refreshed.entries[0].name).toBe("new");
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidate aborts an inflight fetch started before the mutation", async () => {
+    const cache = createTreeCache();
+    const df = deferredFetcher();
+    // Kick off an in-flight fetch for the pre-mutation state.
+    const p1 = cache.fetch(k(), df.fetcher);
+    expect(cache.get(k()).kind).toBe("loading");
+
+    // Mutation succeeds on the server before the previous fetch returns.
+    // Invalidate-then-refresh must abort the old fetch so its late
+    // resolution cannot race the new state.
+    cache.invalidate((key) => key === k());
+    expect(cache.get(k()).kind).toBe("idle");
+
+    // Resolve the OLD fetch AFTER the invalidate. Because the abort
+    // fired, doFetch's body returns `{kind:"idle"}` instead of writing
+    // back the stale response.
+    df.resolve(fakeResp([{ name: "stale", type: "file" }]));
+    const abandoned = await p1;
+    expect(abandoned.kind).toBe("idle");
+  });
+});
+
+describe("createTreeCache — SWR background revalidation (RFC 5861)", () => {
+  // Regression lock for the follow-up review finding: SWR's background
+  // revalidation must be INVISIBLE to the UI.
+  //   1. Failure must NOT overwrite the cached entry — the stale data
+  //      the user can already see keeps working (no error flash).
+  //   2. It must never enter `kind:"loading"` — otherwise every stale
+  //      revalidation would blank the tree (Loading... flicker).
+  //   3. A foreground fetch for the same key preempts (aborts) the
+  //      background one so the authoritative result wins.
+
+  it("failure during background revalidate preserves the stale entry (no error flash)", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({
+      now: () => t,
+      policy: { freshMs: 30_000, staleMs: 5 * 60_000, capacity: 100 },
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResp([{ name: "v1", type: "file" }]));
+    await cache.fetch(k(), fetcher);
+    expect(cache.get(k()).kind).toBe("ready");
+
+    // Move into the stale window and let the revalidate fail.
+    t += 60_000;
+    fetcher.mockRejectedValueOnce(Object.assign(new Error("503"), { status: 503 }));
+    const node = await cache.fetch(k(), fetcher);
+    expect(node.kind).toBe("stale");
+
+    // Give the background fetch a microtask to run and fail.
+    await new Promise((r) => setTimeout(r, 5));
+    const after = cache.get(k());
+    expect(after.kind).toBe("ready"); // still the OLD entries, NOT error
+    if (after.kind === "ready") {
+      expect(after.entries[0].name).toBe("v1");
+    }
+  });
+
+  it("background revalidate never enters `loading` (no flicker)", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({
+      now: () => t,
+      policy: { freshMs: 30_000, staleMs: 5 * 60_000, capacity: 100 },
+    });
+    const states: string[] = [];
+    cache.subscribe((key, node) => {
+      if (key === k()) states.push(node.kind);
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResp([{ name: "v1", type: "file" }]));
+    await cache.fetch(k(), fetcher);
+    states.length = 0; // clear the initial loading→ready transitions
+
+    t += 60_000;
+    const node = await cache.fetch(k(), fetcher); // stale hit → background
+    expect(node.kind).toBe("stale");
+    await new Promise((r) => setTimeout(r, 5));
+
+    // The ONLY state transitions after the initial load are stale→ready.
+    // A `loading` in here would mean the tree blanked during revalidate.
+    expect(states).not.toContain("loading");
+    expect(cache.get(k()).kind).toBe("ready");
+  });
+
+  it("successful background revalidate overwrites the stale entry", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({
+      now: () => t,
+      policy: { freshMs: 30_000, staleMs: 5 * 60_000, capacity: 100 },
+    });
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(fakeResp([{ name: "v1", type: "file" }]));
+    await cache.fetch(k(), fetcher);
+
+    t += 60_000;
+    fetcher.mockResolvedValueOnce(fakeResp([{ name: "v2", type: "file" }]));
+    const node = await cache.fetch(k(), fetcher);
+    expect(node.kind).toBe("stale");
+    await new Promise((r) => setTimeout(r, 5));
+    const after = cache.get(k());
+    expect(after.kind).toBe("ready");
+    if (after.kind === "ready") {
+      expect(after.entries[0].name).toBe("v2");
+    }
+  });
+
+  it("foreground fetch preempts (aborts) an in-flight background revalidate", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({
+      now: () => t,
+      policy: { freshMs: 30_000, staleMs: 5 * 60_000, capacity: 100 },
+    });
+    const sf = scriptedFetcher();
+    // First call: initial load. (scriptedFetcher defers resolution, so
+    // start the fetch, resolve call #0, then await.)
+    const initial = cache.fetch(k(), sf.fetcher);
+    sf.calls[0].resolve(fakeResp([{ name: "v1", type: "file" }]));
+    await initial;
+    expect(cache.get(k()).kind).toBe("ready");
+
+    // Second call: stale hit → background revalidate starts (call #2).
+    t += 60_000;
+    const stale = await cache.fetch(k(), sf.fetcher);
+    expect(stale.kind).toBe("stale");
+    expect(sf.calls.length).toBe(2);
+
+    // Third call: a FOREGROUND fetch (e.g. user refresh) — must abort
+    // the in-flight background request #2. Note: the cache entry is
+    // still `ready` (background never enters loading), so this goes
+    // through the stale branch again; doBackgroundFetch must preempt.
+    // To force the foreground path we jump past staleMs first.
+    t += 5 * 60_000;
+    const fg = cache.fetch(k(), sf.fetcher);
+    expect(sf.calls.length).toBe(3);
+    // The background request's signal is aborted.
+    expect(sf.calls[1].signal.aborted).toBe(true);
+
+    // Resolve the foreground with the authoritative data.
+    sf.calls[2].resolve(fakeResp([{ name: "v3", type: "file" }]));
+    const fgNode = await fg;
+    expect(fgNode.kind).toBe("ready");
+    if (fgNode.kind === "ready") {
+      expect(fgNode.entries[0].name).toBe("v3");
+    }
+    expect(cache.get(k()).kind).toBe("ready");
+  });
+
+  it("background revalidate does not join a foreground fetch already in flight", async () => {
+    let t = 1_000_000;
+    const cache = createTreeCache({
+      now: () => t,
+      policy: { freshMs: 30_000, staleMs: 5 * 60_000, capacity: 100 },
+    });
+    const sf = scriptedFetcher();
+    // Initial load.
+    const initial = cache.fetch(k(), sf.fetcher);
+    sf.calls[0].resolve(fakeResp([{ name: "v1", type: "file" }]));
+    await initial;
+
+    // Foreground fetch starts (call #2) and hangs.
+    t += 6 * 60_000; // past staleMs so the foreground path is taken
+    const fgPromise = cache.fetch(k(), sf.fetcher);
+    expect(sf.calls.length).toBe(2);
+
+    // The cache entry is now `loading` (foreground path), so another
+    // fetch joins the in-flight Promise — it must NOT spawn a third
+    // fetch even though it would otherwise hit the stale branch.
+    const joined = cache.fetch(k(), sf.fetcher);
+    expect(sf.calls.length).toBe(2);
+
+    sf.calls[1].resolve(fakeResp([{ name: "v2", type: "file" }]));
+    const [node, node2] = await Promise.all([fgPromise, joined]);
+    expect(node.kind).toBe("ready");
+    expect(node2).toBe(node);
+    expect(sf.calls.length).toBe(2);
   });
 });

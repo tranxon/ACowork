@@ -15,8 +15,10 @@
  *   - `invalidate(agentId)` is called from WS reconnect (full sync)
  *     and from `workspaceFsEvents.refreshTreesForChanges` callers that
  *     want to drop all tree state for an agent.
- *   - `abortAll()` is called on workspace switch so a stale workspace's
- *     fetches can't race the new one.
+ *   - `abortAll()` is called from `agentStore.selectAgent` so an old
+ *     agent's in-flight fetches can't race the new selection (keys are
+ *     per-agent so there's no cache contamination — this is purely a
+ *     bandwidth / freshness optimization).
  *
  * Why two layers: keeping the cache framework-free means we can unit
  * test dedup/abort/SWR with zero React/Zustand mocks; the Zustand
@@ -37,13 +39,41 @@ interface FileTreeState {
    * Kick off (or join) a fetch for one directory. Resolves with the
    * terminal node (`ready` | `stale` | `error` | `idle`). Callers
    * usually fire-and-forget; await only when they need the result.
+   *
+   * **SWR semantics apply** — a fresh cache entry (within `policy.freshMs`)
+   * is served without a network round-trip. Use this for passive
+   * updates (fs-changed events, auto-refresh timers, etc.).
+   *
+   * For *authoritative* refreshes after a mutation that just succeeded
+   * on the server (create / rename / move / delete / paste), call
+   * [`refresh`](Self::refresh) instead — otherwise the UI will keep
+   * showing the pre-mutation tree and the next action will race against
+   * stale state (issue: ea819127 introduced this regression).
    */
   fetch: (agentId: string, workspaceId: string, relPath?: string) => Promise<TreeNode>;
+  /**
+   * Force a fresh fetch for one directory, **bypassing SWR**. Use this
+   * after a successful server-side mutation (create / rename / move /
+   * delete / paste) so the UI immediately reflects the new state.
+   *
+   * The cache key for the target directory is dropped and the fetch is
+   * awaited to its terminal state. Errors are surfaced to the caller
+   * (same shape as `fetch`); the previous `ready` node is NOT restored
+   * on error — the caller should treat a failure as "tree is now
+   * unknown; the next read will start a background revalidation".
+   *
+   * Contract for mutation callers (WorkspaceExplorer / paste handler):
+   * check the returned `kind` — on `"error"` the directory was NOT
+   * re-fetched, so any `requestRenameFor(...)` targeting a node inside
+   * it will silently fail to render. Surface a toast and bail out
+   * instead of entering rename mode.
+   */
+  refresh: (agentId: string, workspaceId: string, relPath?: string) => Promise<TreeNode>;
   /** Drop everything belonging to one agent. Aborts in-flight fetches. */
   invalidate: (agentId: string) => void;
   /** Drop everything. Use on logout / hard reset. */
   clear: () => void;
-  /** Cancel all in-flight fetches without dropping cache (workspace switch). */
+  /** Cancel all in-flight fetches without dropping cache (agent switch). */
   abortAll: () => void;
   /** Read the current node for a key. Useful from non-React callers. */
   getNode: (key: TreeCacheKey) => TreeNode;
@@ -74,6 +104,22 @@ export const useFileTreeStore = create<FileTreeState>((set) => ({
     const key = treeKey(agentId, workspaceId, relPath ?? "");
     const node = await cache.fetch(key, (signal) => fetchFor(agentId, workspaceId, relPath ?? "")(signal));
     return node;
+  },
+
+  /**
+   * Authoritative refresh for one directory after a successful server
+   mutation. Drops the SWR entry and re-fetches synchronously. See the
+   interface comment for the rationale and contract.
+   */
+  async refresh(agentId, workspaceId, relPath) {
+    const path = relPath ?? "";
+    const key = treeKey(agentId, workspaceId, path);
+    // Abort any in-flight fetch for this exact key (so the SWR fast-path
+    // can't race a mutation that's mid-flight on the server) and drop
+    // the cached entry. After this point `cache.fetch(key, ...)` will
+    // always go through `doFetch` regardless of TTL.
+    cache.invalidate((k) => k === key);
+    return cache.fetch(key, (signal) => fetchFor(agentId, workspaceId, path)(signal));
   },
 
   invalidate(agentId) {
@@ -120,6 +166,25 @@ export async function fetchTreeNode(
     return await useFileTreeStore.getState().fetch(agentId, workspaceId, relPath);
   } catch (e) {
     log.error("[FileTreeStore] fetch failed:", e);
+    return { kind: "error", error: { cause: "network", message: String(e) } };
+  }
+}
+
+/**
+ * Imperative helper for non-React callers (mutation handlers, paste /
+,
+ * rename post-actions, etc.) that need to force a fresh fetch. Equivalent
+ * to `useFileTreeStore.getState().refresh(...)`.
+ */
+export async function refreshTreeNode(
+  agentId: string,
+  workspaceId: string,
+  relPath?: string,
+): Promise<TreeNode> {
+  try {
+    return await useFileTreeStore.getState().refresh(agentId, workspaceId, relPath);
+  } catch (e) {
+    log.error("[FileTreeStore] refresh failed:", e);
     return { kind: "error", error: { cause: "network", message: String(e) } };
   }
 }

@@ -156,11 +156,11 @@ export interface ResolvedAsset {
  *   2. `__agent_home__` (agent home directory).
  *   3. All other workspaces in the order returned by the store.
  *
- * Workspace root lookup prefers `treeRoots[agentId:workspaceId]` (the path
- * returned by the workspace tree API for an already-loaded workspace) and
- * falls back to `workspaces[].path` (the canonical root returned by the
- * workspaces list API). Both should normally agree; the fallback covers
- * the case where the tree API has not yet been called.
+ * Workspace root lookup prefers `getCachedWorkspaceRoot` (the path
+ * returned by the workspace tree API for an already-loaded workspace)
+ * and falls back to `workspaces[].path` (the canonical root returned by
+ * the workspaces list API). Both should normally agree; the fallback
+ * covers the case where the tree API has not yet been called.
  *
  * Returns an empty list for non-file schemes (http, data, mailto, tel,
  * asset, blob) and pure in-page anchors (`#…`). Returns a possibly-empty

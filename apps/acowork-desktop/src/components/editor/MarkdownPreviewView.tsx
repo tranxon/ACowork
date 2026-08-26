@@ -9,7 +9,7 @@ import { CodeBlock } from "../chat/CodeBlock";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { useFileTreeStore } from "../../stores/fileTree";
+import { useFileTreeStore, treeKey } from "../../stores/fileTree";
 import { cn } from "../../lib/utils";
 import {
     PASSTHROUGH_SCHEMES,
@@ -165,9 +165,10 @@ export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     // Tree cache subscription kept so React re-renders the preview when the
     // workspace tree finishes loading (the cross-workspace resolver inside
     // `openResolved` reads the tree on demand, not through this variable).
-    // Subscribing to the whole `nodes` map means we re-render on every
-    // tree transition — which is also what the old `treeRoots` selector did.
-    useFileTreeStore((s) => s.nodes);
+    // Subscribing only to THIS file's workspace root (instead of the whole
+    // `nodes` map) keeps the re-render scoped: tree transitions in other
+    // agents / workspaces no longer touch the preview.
+    useFileTreeStore((s) => s.nodes[treeKey(file.agentId, file.workspaceId, "")]);
 
     /** Switch the current tab from preview mode back to edit mode. */
     const handleOpenAsEditor = useCallback(() => {

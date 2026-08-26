@@ -7,6 +7,7 @@ import { isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { useFileTreeStore } from "./fileTree";
 import { log } from "../lib/logger";
 
 /** System Agent ID — always auto-started by Gateway */
@@ -424,6 +425,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   selectAgent: (id) => {
     if (!id) return;
     set({ selectedAgentId: id });
+
+    // The file-tree cache is keyed per (agent, workspace) so an old
+    // agent's in-flight fetches can never contaminate the new agent's
+    // entries. But they WOULD waste bandwidth and could land AFTER the
+    // user has already switched back — abort them so the UI only ever
+    // waits on the agent it can actually see. This is the call site
+    // the fileTreeStore doc comment promised ("called on workspace
+    // switch"); the session/workspace switch paths route through
+    // selectAgent as well, so a single abort here covers them.
+    useFileTreeStore.getState().abortAll();
 
     // Guard: business endpoints (fetchLatestSession → openSession →
     // fetchSessionState) all 503 against an unregistered Runtime.

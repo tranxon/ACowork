@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { FilePlus, FolderPlus, ClipboardPaste } from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
-import { useFileTreeStore, treeKey, isReadyNode, isLoading, type TreeEntry } from "../../../stores/fileTree";
+import { useFileTreeStore, treeKey, isReadyNode, isLoading, type TreeEntry, type TreeNode } from "../../../stores/fileTree";
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
@@ -171,10 +172,21 @@ export function FileTree({
     onPointerDownTreeEntry,
 }: FileTreeProps) {
     // Tree nodes are mirrored into a single Record<key, TreeNode>.
-    // Subscribing to the whole map keeps the effect deps stable; the
-    // individual reads below still re-derive per-key so render cost is
-    // proportional to the displayed nodes, not the whole map.
-    const treeNodes = useFileTreeStore((s) => s.nodes);
+    // Subscribe to ONLY the current (agent, workspace) subtree so tree
+    // transitions in other agents/workspaces don't re-render this
+    // component. `useShallow` keeps the reference stable while the
+    // filtered result is shallow-equal (unrelated updates produce the
+    // same object), so effect deps below don't churn either.
+    const treeNodes = useFileTreeStore(
+        useShallow((s) => {
+            const prefix = `${agentId}\u0000${workspaceId}\u0000`;
+            const out: Record<string, TreeNode> = {};
+            for (const k in s.nodes) {
+                if (k.startsWith(prefix)) out[k] = s.nodes[k];
+            }
+            return out;
+        }),
+    );
     const fetchTree = useFileTreeStore((s) => s.fetch);
     const copiedEntry = useWorkspaceStore((s) => s.copiedEntry);
     const toggleTreeExpandedPath = useChatStore((s) => s.toggleTreeExpandedPath);

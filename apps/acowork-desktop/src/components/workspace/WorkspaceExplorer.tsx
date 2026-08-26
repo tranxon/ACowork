@@ -37,6 +37,12 @@ export function WorkspaceExplorer() {
     const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
     const invalidateTreeCache = useFileTreeStore((s) => s.invalidate);
     const fetchTree = useFileTreeStore((s) => s.fetch);
+    // Authoritative refresh after a successful server-side mutation (create /
+    // rename / move / delete / paste). Bypasses SWR so the UI immediately
+    // reflects the new state instead of racing the SWR freshness window
+    // (regression introduced when fileTreeStore adopted stale-while-
+    // revalidate — see ea819127 fix).
+    const refreshTree = useFileTreeStore((s) => s.refresh);
     const sessionWorkspaceMap = useWorkspaceStore((s) => s.sessionWorkspaceMap);
     const createFile = useWorkspaceStore((s) => s.createFile);
     const createDir = useWorkspaceStore((s) => s.createDir);
@@ -158,19 +164,31 @@ export function WorkspaceExplorer() {
             }
             // Refresh both ends so the source disappears from its
             // old parent and the entry appears in the destination.
+            // Use `refreshTree` (bypass SWR) because we just mutated
+            // the server and need the UI to converge immediately —
+            // otherwise the SWR fresh window will keep showing the
+            // pre-move tree and any subsequent operation against the
+            // source path will 404 (regression: ea819127).
             const sourceParent =
                 sourceRelPath.includes("/")
                     ? sourceRelPath.substring(0, sourceRelPath.lastIndexOf("/"))
                     : "";
-            if (sourceParent) {
-                fetchTree(selectedAgentId, currentWorkspaceId, sourceParent);
-            } else {
-                fetchTree(selectedAgentId, currentWorkspaceId, "");
-            }
-            fetchTree(selectedAgentId, currentWorkspaceId, destParentRelPath);
+            const srcRefresh =
+                sourceParent
+                    ? refreshTree(selectedAgentId, currentWorkspaceId, sourceParent)
+                    : refreshTree(selectedAgentId, currentWorkspaceId, "");
+            const dstRefresh = refreshTree(selectedAgentId, currentWorkspaceId, destParentRelPath);
+            void Promise.all([srcRefresh, dstRefresh]).then((nodes) => {
+                if (nodes.some((n) => n.kind === "error")) {
+                    addToast({
+                        type: "error",
+                        message: `Moved ${basename}, but the tree refresh failed — the list may be stale.`,
+                    });
+                }
+            });
             return true;
         },
-        [selectedAgentId, currentWorkspaceId, renameItem, fetchTree, isSelfOrAncestor, addToast],
+        [selectedAgentId, currentWorkspaceId, renameItem, refreshTree, isSelfOrAncestor, addToast],
     );
 
     /** `pointerdown` on a tree row - records the drag candidate but
@@ -310,12 +328,25 @@ export function WorkspaceExplorer() {
             // and a fresh one will mount at `dest` (the tree re-flattens
             // on the next render of `flatNodes`).
             cancelExternalRename();
-            // Refresh the parent directory so the renamed entry shows up.
-            if (parentPath) {
-                fetchTree(selectedAgentId ?? "", currentWorkspaceId, parentPath);
-            } else {
-                fetchTree(selectedAgentId ?? "", currentWorkspaceId, "");
-            }
+            // Force-refresh the parent so the renamed entry shows up at
+            // `dest` and disappears from `relPath`. `refreshTree` bypasses
+            // SWR — a stale-while-revalidate `fetch()` would happily
+            // return the pre-rename entries within the freshMs window and
+            // leave the UI showing the old relPath until the SWR background
+            // fetch eventually lands. That race broke file rename in this
+            // workspace after ea819127 introduced SWR semantics.
+            const parentRefresh =
+                parentPath
+                    ? refreshTree(selectedAgentId ?? "", currentWorkspaceId, parentPath)
+                    : refreshTree(selectedAgentId ?? "", currentWorkspaceId, "");
+            void parentRefresh.then((node) => {
+                if (node.kind === "error") {
+                    addToast({
+                        type: "error",
+                        message: `Renamed to ${trimmed}, but the tree refresh failed — the list may be stale.`,
+                    });
+                }
+            });
             // Move selection to the new path so the toolbar's "create in
             // selected dir" target stays sensible (only meaningful for
             // directories).
@@ -326,7 +357,7 @@ export function WorkspaceExplorer() {
             }
             return true;
         },
-        [selectedAgentId, currentWorkspaceId, renameItem, fetchTree, addToast, cancelExternalRename],
+        [selectedAgentId, currentWorkspaceId, renameItem, refreshTree, addToast, cancelExternalRename],
     );
 
     /** Right-click "Rename" on an existing entry — single source of truth
@@ -536,19 +567,33 @@ export function WorkspaceExplorer() {
                 return;
             }
 
-            // Refresh the parent so the new entry shows up before we
-            // ask for rename — otherwise the FileTreeNode with the new
-            // `relPath` doesn't exist yet and the rename input never
-            // appears. fetchTree overwrites its cache entry so we don't
-            // have to invalidate the whole tree.
-            if (parentPath) {
-                await fetchTree(selectedAgentId, currentWorkspaceId, parentPath);
-            } else {
-                await fetchTree(selectedAgentId, currentWorkspaceId, "");
+            // Force-refresh the parent so the new entry shows up before we
+            // ask for rename. If we used SWR `fetch()` here and the cache
+            // entry was still fresh, we'd be served the pre-creation
+            // entries — the FileTreeNode with the new `relPath` would not
+            // exist yet and the rename input would never appear (or would
+            // appear on the wrong node), and the rename commit against the
+            // server would target a `relPath` that is not yet in the local
+            // cache. Bypassing SWR is mandatory here.
+            //
+            // `refresh` resolves to `kind:"error"` on failure instead of
+            // throwing; if the tree could not be re-fetched we must NOT
+            // enter rename mode — the target node isn't in `flatNodes`, so
+            // the rename input would silently never render.
+            const refreshed =
+                parentPath
+                    ? await refreshTree(selectedAgentId, currentWorkspaceId, parentPath)
+                    : await refreshTree(selectedAgentId, currentWorkspaceId, "");
+            if (refreshed.kind === "error") {
+                addToast({
+                    type: "error",
+                    message: `Created ${name}, but the tree refresh failed — please retry or use the Refresh button.`,
+                });
+                return;
             }
             requestRenameFor(relPath, name);
         },
-        [selectedAgentId, currentWorkspaceId, createFile, createDir, fetchTree, buildUniqueName, requestRenameFor, addToast],
+        [selectedAgentId, currentWorkspaceId, createFile, createDir, refreshTree, buildUniqueName, requestRenameFor, addToast],
     );
 
     const handleNewFile = useCallback(() => {
@@ -587,15 +632,23 @@ export function WorkspaceExplorer() {
             ? await deleteDir(selectedAgentId, currentWorkspaceId, relPath)
             : await deleteFile(selectedAgentId, currentWorkspaceId, relPath);
         if (ok) {
-            // Re-fetch parent directory
+            // Authoritative refresh (bypass SWR) — the entry is gone on
+            // disk and the cached pre-delete entries must NOT be served.
             const parentPath = relPath.substring(0, relPath.lastIndexOf("/"));
-            if (parentPath) {
-                fetchTree(selectedAgentId, currentWorkspaceId, parentPath);
-            } else {
-                fetchTree(selectedAgentId, currentWorkspaceId, "");
-            }
+            const parentRefresh =
+                parentPath
+                    ? refreshTree(selectedAgentId, currentWorkspaceId, parentPath)
+                    : refreshTree(selectedAgentId, currentWorkspaceId, "");
+            void parentRefresh.then((node) => {
+                if (node.kind === "error") {
+                    addToast({
+                        type: "error",
+                        message: `Deleted ${relPath.split("/").pop()}, but the tree refresh failed — the list may be stale.`,
+                    });
+                }
+            });
         }
-    }, [selectedAgentId, currentWorkspaceId, deleteFile, deleteDir, fetchTree]);
+    }, [selectedAgentId, currentWorkspaceId, deleteFile, deleteDir, refreshTree, addToast]);
 
     const handleCopy = useCallback((relPath: string, isDir: boolean) => {
         if (!selectedAgentId) return;
@@ -660,10 +713,23 @@ export function WorkspaceExplorer() {
         const ok = await copyItem(selectedAgentId, currentWorkspaceId, entry.path, dest);
         setCopiedEntry(null); // clear clipboard after paste (one-shot)
         if (ok) {
-            // Refresh parent BEFORE requesting rename so the new node is
-            // mounted in `flatNodes` (FileTreeNode with `relPath === dest`
-            // must exist for the rename input to render).
-            await fetchTree(selectedAgentId, currentWorkspaceId, parentPath || "");
+            // Force-refresh parent BEFORE requesting rename so the new
+            // node is mounted in `flatNodes` — `FileTreeNode` with
+            // `relPath === dest` must exist for the rename input to
+            // render. Bypass SWR for the same reason as quickCreate:
+            // a stale pre-copy cache would leave the rename input
+            // targeting a node that's not in the local tree.
+            // If the refresh fails (resolves to `kind:"error"`), the
+            // node isn't in `flatNodes` — skip rename mode and tell the
+            // user the copy succeeded but the UI can't show it yet.
+            const refreshed = await refreshTree(selectedAgentId, currentWorkspaceId, parentPath || "");
+            if (refreshed.kind === "error") {
+                addToast({
+                    type: "error",
+                    message: `Pasted as ${uniqueName}, but the tree refresh failed — please retry or use the Refresh button.`,
+                });
+                return;
+            }
             requestRenameFor(dest, uniqueName);
         } else {
             // Surface the silent failure so users know why nothing
@@ -676,7 +742,7 @@ export function WorkspaceExplorer() {
             );
             addToast({ type: "error", message: `Paste failed: ${name}` });
         }
-    }, [selectedAgentId, currentWorkspaceId, copyItem, fetchTree, setCopiedEntry, requestRenameFor, addToast]);
+    }, [selectedAgentId, currentWorkspaceId, copyItem, refreshTree, setCopiedEntry, requestRenameFor, addToast]);
 
     if (!selectedAgent?.running) {
         return (

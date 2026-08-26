@@ -51,6 +51,8 @@ export interface TreeCache {
    * Fetch or revalidate a node. Returns the eventual TreeNode:
    *   - fresh cached → returns `ready` immediately, no fetch
    *   - stale cached → returns `stale` immediately, kicks background revalidate
+   *     (the background fetch never enters `loading` and silently
+   *      preserves the stale entry on failure — RFC 5861 §3)
    *   - dedup hit    → joins the existing in-flight Promise
    *   - otherwise    → marks `loading`, fetches, resolves to `ready` | `error` | `idle`
    *
@@ -146,7 +148,18 @@ export function createTreeCache(opts?: {
   const now = opts?.now ?? (() => Date.now());
 
   const nodes = new LRU<TreeCacheKey, TreeNode>(policy.capacity);
-  const inflight = new Map<TreeCacheKey, { promise: Promise<TreeNode>; abort: AbortController }>();
+  /**
+   * In-flight fetches, tracked by cache key. The `background` flag
+   * distinguishes SWR revalidations (must NOT clobber the UI-visible
+   * state on failure — RFC 5861 §3) from foreground fetches (must
+   * transition through `loading` and surface errors). Foreground
+   * fetches abort any in-flight background revalidation for the same
+   * key before starting so the user's authoritative request wins.
+   */
+  const inflight = new Map<
+    TreeCacheKey,
+    { promise: Promise<TreeNode>; abort: AbortController; background: boolean }
+  >();
   const listeners = new Set<Listener>();
 
   const setNode = (key: TreeCacheKey, node: TreeNode) => {
@@ -181,9 +194,18 @@ export function createTreeCache(opts?: {
     key: TreeCacheKey,
     fetcher: TreeFetcher,
   ): Promise<TreeNode> => {
-    // If a fetch is already in flight for this key, just join it.
+    // Foreground fetches preempt any in-flight background revalidation
+    // for the same key — the user's authoritative request must win.
+    // Background→background dedup is handled inside doBackgroundFetch
+    // below, so we only need to consider the background case here.
     const live = inflight.get(key);
-    if (live) return live.promise;
+    if (live?.background) {
+      live.abort.abort();
+      inflight.delete(key);
+    } else if (live) {
+      // Concurrent foreground caller — join the existing Promise.
+      return live.promise;
+    }
 
     const abort = new AbortController();
     setNode(key, { kind: "loading" });
@@ -215,14 +237,62 @@ export function createTreeCache(opts?: {
         inflight.delete(key);
       }
     })();
-    inflight.set(key, { promise, abort });
+    inflight.set(key, { promise, abort, background: false });
     return promise;
   };
 
-  /** Background revalidation; fire-and-forget. Used for SWR. */
-  const revalidateInBackground = (key: TreeCacheKey, fetcher: TreeFetcher): void => {
+  /**
+   * SWR background revalidation (RFC 5861 §3). The cache entry — if
+   * one exists — MUST be preserved across this fetch:
+   *
+   *   - Loading: NOT entered. The UI keeps showing whatever it had
+   *     (`ready` or `stale`); users must not see "Loading..." flicker
+   *     because some bookkeeping code thought it was time to refresh.
+   *   - Success: overwrite with the fresh entry.
+   *   - Failure (including AbortError): silently drop. Stale data
+   *     continues to be served; the next explicit foreground `fetch`
+   *     will surface the error if the connection is still down.
+   *
+   * Dedup: if a foreground fetch is already in flight for the same
+   * key, skip — the foreground fetch will write the cache on success.
+   * Otherwise a second background revalidate is also skipped (it's
+   * already running).
+   */
+  const doBackgroundFetch = (key: TreeCacheKey, fetcher: TreeFetcher): void => {
     if (inflight.has(key)) return;
-    void doFetch(key, fetcher);
+    const abort = new AbortController();
+    const promise = (async (): Promise<TreeNode> => {
+      try {
+        const data = await fetcher(abort.signal);
+        if (abort.signal.aborted) return { kind: "idle" };
+        const node: TreeNode = {
+          kind: "ready",
+          entries: data.entries,
+          root: data.root,
+          fetchedAt: now(),
+        };
+        // Only write if no foreground fetch started in the meantime —
+        // a foreground request always takes priority over a stale
+        // background result.
+        if (!inflight.has(key) || inflight.get(key)?.background === true) {
+          setNode(key, node);
+        }
+        return node;
+      } catch {
+        // SWR invariant: background revalidation failure does NOT
+        // overwrite the cached entry. Stale data continues to be
+        // served. The next foreground fetch (e.g. after staleMs
+        // expires) will surface the underlying error to the UI.
+        return { kind: "idle" };
+      } finally {
+        // Only delete if WE are still the in-flight entry — a
+        // foreground fetch that pre-empted us would have replaced
+        // the inflight slot by now.
+        const live = inflight.get(key);
+        if (live?.abort === abort) inflight.delete(key);
+      }
+    })();
+    inflight.set(key, { promise, abort, background: true });
   };
 
   /** Drop matching entries + abort their inflight fetches. */
@@ -264,8 +334,10 @@ export function createTreeCache(opts?: {
       if (existing?.kind === "ready") {
         if (t - existing.fetchedAt < policy.freshMs) return existing;
         // 2. Stale hit — serve stale immediately, revalidate in background.
+        //    The background fetch is silent on failure (preserves the
+        //    stale entry) and on success overwrites with a fresh one.
         if (t - existing.fetchedAt < policy.staleMs) {
-          revalidateInBackground(key, fetcher);
+          doBackgroundFetch(key, fetcher);
           return { ...existing, kind: "stale" as const };
         }
       }
