@@ -23,6 +23,7 @@ import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
 import { ContextMenu, useContextMenu } from "../common/ContextMenu";
+import { useToast } from "../common/ToastProvider";
 
 /**
  * Measure natural dimensions of an image whose src is already settable in the
@@ -128,8 +129,44 @@ function setScrollSnapshot(key: string, snapshot: ChatScrollSnapshot): void {
   }
 }
 
+/**
+ * Monotonic counter for `pendingAttachedItems[].tempId`.
+ *
+ * Combined with `Date.now()` (see `nextAttachmentTempId`), this gives
+ * unique keys even when multiple uploads fire within the same millisecond
+ * — a pure `Date.now()` suffix collided when several files were uploaded
+ * at once, producing React duplicate-key warnings. Module-scoped (not
+ * React-state) because we want uniqueness across hot-reload boundaries
+ * too, and the value is purely a transient key, never persisted.
+ */
+let pendingAttachmentSeq = 0;
+
+/**
+ * Frontend mirror of `core/acowork-runtime/src/usecases/attachment.rs::MAX_UPLOAD_BYTES`
+ * (50 MiB). Used to short-circuit oversized uploads BEFORE any
+ * network roundtrip — we read the on-disk size via the Tauri `stat`
+ * command and emit a toast immediately when the file would be
+ * rejected by the runtime's `AttachmentError::PayloadTooLarge` (HTTP
+ * 413) anyway.
+ *
+ * Keep the two values in sync; the backend value is the source of
+ * truth and is enforced at the runtime, so this number is purely a
+ * UX optimization (instant feedback instead of waiting for the
+ * multipart upload to complete first).
+ */
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/** Human-readable size for toast messages (e.g. "47.3 MB"). */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 export function ChatPanel() {
   const { t } = useTranslation();
+  const { addToast } = useToast();
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => selectedAgentId ? s.agents[selectedAgentId]?.meta : undefined);
 
@@ -1119,9 +1156,41 @@ export function ChatPanel() {
     const ext = filename.split(".").pop()?.toLowerCase() ?? "";
     if (!filePath) return;
 
-    const tempId = `att-${Date.now()}`;
+    // Unique per-call: `Date.now()` alone collided when N uploads fired
+    // within the same ms (multi-file paste / concurrent paperclip
+    // clicks). The module-scoped `pendingAttachmentSeq` counter breaks
+    // ties. See declaration above.
+    const tempId = `att-${Date.now()}-${++pendingAttachmentSeq}`;
     const format = ext;
     const isImage = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
+
+    // Pre-flight size check — the runtime enforces a 50 MiB cap
+    // (see `MAX_UPLOAD_BYTES` mirror declared above + backend
+    // `acowork-runtime::usecases::MAX_UPLOAD_BYTES`). Without this
+    // check, a multi-hundred-MB PDF/PPTX would consume bandwidth +
+    // a multipart encode roundtrip before being rejected with a
+    // raw HTTP 413. Bail early with a friendly toast.
+    try {
+      const size = await invoke<number>("get_file_size", { filePath });
+      if (size > MAX_UPLOAD_BYTES) {
+        addToast({
+          type: "warning",
+          message: t("chatPanel.uploadTooLarge", {
+            filename,
+            size: formatBytes(size),
+            limit: formatBytes(MAX_UPLOAD_BYTES),
+          }) ?? `File "${filename}" is ${formatBytes(size)}, exceeds ${formatBytes(MAX_UPLOAD_BYTES)} limit`,
+        });
+        return;
+      }
+    } catch (err) {
+      // `get_file_size` failure is non-fatal: the runtime's own
+      // existence check (`Path::exists`) will produce a clean error
+      // if the file is genuinely missing. We only short-circuit on
+      // the size cap above; the existence + read errors flow through
+      // the regular `upload_file` error path below.
+      log.debug("[ChatPanel] get_file_size pre-check failed", err);
+    }
 
     // Prerequisites — emit error chip and bail before invoking the backend.
     if (!currentSessionId) {
@@ -1202,6 +1271,20 @@ export function ChatPanel() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : typeof err === "string" ? err : "Upload failed";
       log.error("[ChatPanel] Attachment upload failed:", err);
+      // For size-cap rejections, surface a dedicated warning toast —
+      // the inline chip alone was easy to miss when the user
+      // dropped several large files in a row, and the raw
+      // `upload too large: ... bytes (limit 52428800)` text was
+      // not user-friendly.
+      if (/\bupload too large\b/i.test(msg) || /\b413\b/.test(msg)) {
+        addToast({
+          type: "warning",
+          message: t("chatPanel.uploadTooLarge", {
+            filename,
+            limit: formatBytes(MAX_UPLOAD_BYTES),
+          }) ?? `"${filename}" exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} attachment limit`,
+        });
+      }
       session.setPendingAttachedItems(prev => prev.map((p) =>
         p.tempId === tempId ? { ...p, status: "error", errorMessage: msg } : p
       ));
@@ -1229,159 +1312,126 @@ export function ChatPanel() {
   // and OS-level file drop — all funnel through `uploadFileAtPath` so
   // the UX is identical to the paperclip button.
   //
-  // Why we always intercept onPaste instead of conditionally letting the
-  // browser handle it: in Tauri WebViews the default paste behaviour
-  // silently inserts a long file path as plain text. Users expect that
-  // path to "just become" an attachment, the same as clicking the
-  // paperclip icon. We split the clipboard text into path-shaped lines
-  // and text-shaped lines, then upload the former + insert the latter.
-  //
-  // No extension whitelist: any path-shaped clipboard line is treated as
-  // a file attachment. This mirrors `uploadFileAtPath`, which accepts
-  // every file type (the runtime collapses unknown extensions to `.bin`
-  // and `doc_reader` falls back to UTF-8 text extraction), and keeps
-  // paste / drag / button behaviour identical. Non-path lines fall
-  // through and are inserted as plain text.
+  // Why we always defer to the Rust clipboard reader instead of doing
+  // frontend text-shape heuristics: complex agent messages (mermaid,
+  // tables, code blocks) routinely contain lines like `/api/v1/users`,
+  // `D:/data/file.txt`, or `file:///C:/...` inside markdown. Heuristics
+  // that match on `s.startsWith("/")` or `^[A-Za-z]:[\\/]` mis-classify
+  // those as file paths and trigger uploads against strings that are
+  // not real files — producing `os error 53/161` floods and React
+  // duplicate-key warnings when multiple false positives fire in the
+  // same millisecond. Only the OS clipboard API can definitively say
+  // "these are real files", so we treat it as the single source of
+  // truth and skip the frontend heuristics entirely.
 
   /**
-   * True if `s` looks like a filesystem path. Detection by shape only —
-   * no FS stat roundtrip — because we want this to work for paths the
-   * user just copied from the OS file manager, which may or may not
-   * still exist by the time we look at them. No extension filtering is
-   * applied: every path-shaped line is uploaded as an attachment.
+   * Insert `text` at the textarea's current caret / selection range.
+   * Used by `handlePaste` and the context-menu "Paste" item — extracted
+   * so the (caret-aware) insertion logic is defined exactly once.
    */
-  const looksLikeFilePath = (s: string): boolean => {
-    if (!s) return false;
-    if (s.startsWith("file://")) return true;
-    // Windows drive-letter path: `C:\...`, `D:/...`
-    if (/^[A-Za-z]:[\\/]/.test(s)) return true;
-    // POSIX absolute path
-    if (s.startsWith("/")) return true;
-    return false;
-  };
-
-  /** Convert `file://...` URI to a native path; pass through otherwise. */
-  const uriToPath = (s: string): string => {
-    if (!s.startsWith("file://")) return s;
-    try {
-      // `URL.pathname` on `file:///C:/...` yields `/C:/...` on most
-      // engines — strip the leading slash on Windows-style paths.
-      const pathname = new URL(s).pathname;
-      if (/^\/[A-Za-z]:/.test(pathname)) return pathname.slice(1);
-      return decodeURIComponent(pathname);
-    } catch {
-      return s;
-    }
-  };
+  const insertTextAtCaret = useCallback(
+    (text: string) => {
+      const ta = textareaRef.current;
+      // `setInputValue` is a plain setter, not an updater; we read the
+      // current value straight from the textarea (or the store) and
+      // hand back the full next string.
+      const currentValue = ta?.value ?? session.inputValue;
+      if (!ta) {
+        // No focused textarea — append to the end of the input value.
+        session.setInputValue(currentValue + text);
+        return;
+      }
+      const { selectionStart, selectionEnd } = ta;
+      const start = selectionStart ?? currentValue.length;
+      const end = selectionEnd ?? currentValue.length;
+      const next = currentValue.slice(0, start) + text + currentValue.slice(end);
+      session.setInputValue(next);
+      const caret = start + text.length;
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      });
+    },
+    [session],
+  );
 
   /**
-   * Paste handler — handles BOTH file paths (uploaded) and plain text
-   * (inserted at caret).
+   * Paste handler — uploads real files from the OS clipboard; inserts
+   * plain text otherwise.
    *
-   * Two-stage strategy:
-   *   1. Read what the browser surface offers: `text/uri-list`,
-   *      `text/plain`, then `cd.files`. The browser-side `File` objects
-   *      don't carry a real filesystem path on Windows / Linux WebViews
-   *      (sandbox), so step 1 often yields nothing for file copies.
-   *   2. If step 1 found no paths AND the OS clipboard contains file
-   *      references, fall back to the Rust command `get_clipboard_file_paths`
-   *      which reads the platform's native clipboard (Windows CF_HDROP,
-   *      macOS NSFilenamesPboardType, Linux text/uri-list) and returns the
-   *      real absolute paths.
+   * Single source of truth for file detection is the Rust command
+   * `get_clipboard_file_paths`, which reads the platform's native
+   * clipboard (Windows CF_HDROP, macOS NSFilenamesPboardType, Linux
+   * text/uri-list) and returns the paths of files the OS confirms are
+   * there. Empty result ⇒ clipboard holds no real files ⇒ fall through
+   * to plain-text insertion.
    *
-   * `preventDefault` is only called when we actually have something to
-   * act on; otherwise we let the browser's default paste proceed so the
-   * user at least sees *something* happen (e.g. the filename inserted as
-   * text when the file isn't a supported attachment type).
+   * `text/plain` is consulted only for the plain-text branch (insertion).
+   * It is NEVER used to detect "paths" — see block comment above.
+   *
+   * `preventDefault` is called whenever we replace the default paste
+   * (file upload or text insertion); otherwise the browser's default
+   * paste runs so the user at least sees *something* happen.
    */
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const cd = e.clipboardData;
     if (!cd) return;
 
-    // `text/uri-list` is the canonical X11/Wayland format for file URIs.
-    // `text/plain` carries either raw paths (some file managers) or the
-    // URI inlined — we try both.
-    const raw =
-      cd.getData("text/uri-list").trim() ||
+    // Read plain text up front — needed for the "no files" branch.
+    // `text/uri-list` (X11/Wayland file URIs) and `text` are also probed
+    // for completeness, but in Tauri WebViews the dominant case is
+    // `text/plain` carrying the actual content the user copied.
+    const text =
       cd.getData("text/plain").trim() ||
-      cd.getData("text").trim();
+      cd.getData("text").trim() ||
+      cd.getData("text/uri-list").trim();
 
-    const lines = raw
-      ? raw
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter(Boolean)
-      : [];
-    const pathLines: string[] = [];
-    const textLines: string[] = [];
-    for (const line of lines) {
-      if (looksLikeFilePath(line)) {
-        pathLines.push(uriToPath(line));
-        continue;
-      }
-      textLines.push(line);
+    // ALWAYS ask the Rust backend for real clipboard files. Empty result
+    // means the clipboard does not currently hold any file references,
+    // which is the case for both an empty clipboard AND a clipboard
+    // containing arbitrary text (e.g. a copied agent message).
+    let paths: string[] = [];
+    try {
+      paths = (await invoke<string[]>("get_clipboard_file_paths")) ?? [];
+    } catch (err) {
+      // Non-fatal — surface to the debug log only. The user still gets
+      // their text inserted via the fallback branch below.
+      log.debug("[ChatPanel] get_clipboard_file_paths failed", err);
     }
+    paths = paths.filter((p): p is string => typeof p === "string" && p.length > 0);
 
-    // If the browser surface already gave us paths, act on them and stop.
-    if (pathLines.length > 0 || textLines.length > 0) {
+    if (paths.length > 0) {
+      // OS says these are real files — upload them. We deliberately do
+      // NOT also insert the `text/plain` here: when Explorer copies N
+      // files, the text payload is exactly the N paths joined by
+      // newlines, and inserting them would duplicate the upload UX.
       e.preventDefault();
-      for (const p of pathLines) void uploadFileAtPath(p);
-      if (textLines.length > 0) {
-        const ta = e.currentTarget;
-        const insert = textLines.join("\n");
-        const { selectionStart, selectionEnd, value } = ta;
-        const next =
-          value.slice(0, selectionStart ?? value.length) +
-          insert +
-          value.slice(selectionEnd ?? value.length);
-        session.setInputValue(next);
-        const caret = (selectionStart ?? value.length) + insert.length;
-        requestAnimationFrame(() => {
-          ta.focus();
-          ta.setSelectionRange(caret, caret);
-        });
-      }
+      for (const p of paths) void uploadFileAtPath(p);
       return;
     }
 
-    // Browser surface yielded nothing (Windows file copies land here —
-    // CF_HDROP isn't exposed as `text/uri-list` on WebView2). Fall back
-    // to the native clipboard via the Rust backend.
-    try {
-      const nativePaths = await invoke<string[]>("get_clipboard_file_paths");
-      const valid = (nativePaths ?? []).filter((p) => p && looksLikeFilePath(p));
-      if (valid.length > 0) {
-        e.preventDefault();
-        for (const p of valid) void uploadFileAtPath(p);
-        return;
-      }
-    } catch (err) {
-      log.debug("[ChatPanel] get_clipboard_file_paths fallback failed", err);
+    // No real files on the clipboard. If the browser gave us text, insert
+    // it at the caret — this is the dominant case when the user copies
+    // agent output (mermaid / tables / code) and pastes it back.
+    if (text) {
+      e.preventDefault();
+      insertTextAtCaret(text);
+      return;
     }
 
-    // Last-resort: some WebViews DO populate `cd.files` even when
-    // text/uri-list is empty. Each File here only has `name` (no path),
-    // so we can't upload — but at least the user gets visual feedback
-    // by inserting the filename as text.
+    // Last-resort: some WebViews populate `cd.files` even when
+    // text/plain is empty and CF_HDROP is absent. Each File has only
+    // `name` (no path), so we can't upload — but inserting the
+    // filename gives the user visual feedback.
     if (cd.files && cd.files.length > 0) {
       e.preventDefault();
       const names = Array.from(cd.files).map((f) => f.name).join("\n");
-      const ta = e.currentTarget;
-      const { selectionStart, selectionEnd, value } = ta;
-      const next =
-        value.slice(0, selectionStart ?? value.length) +
-        names +
-        value.slice(selectionEnd ?? value.length);
-      session.setInputValue(next);
-      const caret = (selectionStart ?? value.length) + names.length;
-      requestAnimationFrame(() => {
-        ta.focus();
-        ta.setSelectionRange(caret, caret);
-      });
+      insertTextAtCaret(names);
+      return;
     }
-    // else: clipboard held neither paths nor files — let the browser
-    // default paste happen so the user sees *some* response.
-  }, [session, uploadFileAtPath]);
+    // else: clipboard held neither paths nor files nor text — let the
+    // browser default paste happen so the user sees *some* response.
+  }, [insertTextAtCaret, uploadFileAtPath]);
 
   /**
    * Right-click handler — always opens our custom context menu because
@@ -1422,37 +1472,37 @@ export function ChatPanel() {
           const ta = textareaRef.current;
           if (!ta) return;
           ta.focus();
-          // Best-effort text read. A file-only clipboard (e.g. files
-          // copied from Explorer, CF_HDROP) carries NO text format, so
-          // `readText()` returns "" or rejects (WebView2 non-secure
-          // context) — both are fine: we hand the synthetic event to
-          // `handlePaste`, which falls through to the native
-          // `get_clipboard_file_paths` Rust command in that case and
-          // uploads the files, exactly like Ctrl+V. Text, when present,
-          // is split into path-shaped (uploaded) vs text-shaped
-          // (inserted at caret) lines by the same logic.
+          // Read whatever plain text the OS clipboard currently holds.
+          // A file-only clipboard (Explorer CF_HDROP) carries NO text
+          // format, so `readText()` returns "" or rejects (WebView2
+          // non-secure context) — both fine: we hand the synthetic
+          // event to `handlePaste`, which ALWAYS defers file detection
+          // to the Rust `get_clipboard_file_paths` command and uploads
+          // any real files it finds, exactly like Ctrl+V.
           let text = "";
           try {
             text = (await navigator.clipboard.readText()) ?? "";
           } catch (err) {
             log.debug(
-              "[ChatPanel] clipboard.readText failed (file-only clipboard?) — falling back to native paths",
+              "[ChatPanel] clipboard.readText failed (file-only clipboard?) — deferring to native paths",
               err,
             );
           }
           const synthetic = {
             clipboardData: {
               getData: (type: string) =>
-                type === "text/plain" || type === "text" ? text : "",
+                type === "text/plain" || type === "text" || type === "text/uri-list"
+                  ? text
+                  : "",
               // No File objects available outside a real paste event.
               files: [] as unknown as FileList,
             },
             currentTarget: ta,
             preventDefault: () => {},
           } as unknown as React.ClipboardEvent<HTMLTextAreaElement>;
-          // handlePaste is async (it may invoke the Rust fallback to
-          // read native clipboard file paths). Fire-and-forget is
-          // fine here — the upload pipeline is itself async.
+          // handlePaste is async (it invokes the Rust fallback to read
+          // native clipboard file paths). Fire-and-forget is fine —
+          // the upload pipeline is itself async.
           void handlePaste(synthetic);
         },
       },

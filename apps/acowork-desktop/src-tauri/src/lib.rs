@@ -614,6 +614,10 @@ pub fn run() {
             // chat panel can upload files copied from the OS file manager
             // (WebView2 doesn't expose paths in ClipboardEvent).
             commands::clipboard::get_clipboard_file_paths,
+            // Pre-flight file-size lookup so the chat panel can reject
+            // oversized attachments (≥ 50 MiB runtime cap) BEFORE the
+            // multipart roundtrip. See `commands::chat::get_file_size`.
+            commands::chat::get_file_size,
         ])
         .setup(|app| {
             tray::setup(app)?;

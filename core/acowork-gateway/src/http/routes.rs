@@ -5,7 +5,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     middleware::{self, Next},
     routing::get,
@@ -17,6 +17,15 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
+
+/// Global body-size cap applied at the root of the Gateway's
+/// merged router. See [`api_router`] for why we override axum's 2 MiB
+/// default — long story short: every extractor (`Json`, `Bytes`,
+/// `String`, `Multipart`, `Form`) shares this cap, so anything
+/// larger than 2 MiB was previously rejected by axum itself with an
+/// opaque error before our handlers could produce a clean JSON
+/// response.
+pub(crate) const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
@@ -159,6 +168,15 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::settings_api::settings_routes())
         .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
+        // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
+        // override axum's 2 MiB default at the root of the gateway
+        // router. Per-route service-layer limits (e.g. Runtime's
+        // `MAX_UPLOAD_BYTES` for attachments, gateway's
+        // `MAX_FILE_SIZE` for static file reads) remain the source of
+        // truth for user-facing caps — this layer only ensures those
+        // limits produce a clean error body instead of an opaque
+        // extractor parse failure.
+        .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)

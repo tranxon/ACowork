@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{get, post, put},
 };
@@ -91,6 +91,31 @@ pub enum RuntimeHttpServerError {
     #[error("Failed to bind: {0}")]
     Bind(String),
 }
+
+/// Global body-size cap for every Runtime HTTP route.
+///
+/// Axum's default `DefaultBodyLimit` is 2 MiB — which silently caps
+/// any extractor (`Json`, `Bytes`, `String`, `Multipart`, `Form`,
+/// etc.) before our handlers can read a single byte. The user-facing
+/// fallout is opaque ("Error parsing 'multipart/form-data' request"
+/// for a 9 MB PDF, generic JSON parse errors for a 3 MB request
+/// body, etc.) instead of a clean 413 + JSON error body from the
+/// service layer.
+///
+/// We raise the global cap to 64 MiB at the root router so every
+/// endpoint that legitimately needs a large body — multipart upload
+/// (`/sessions/{sid}/files`), workspace file write
+/// (`PUT /workspaces/file` with embedded content), memory node
+/// create/update payloads, etc. — can reach its handler. Per-route
+/// service-layer checks remain the source of truth for user-facing
+/// limits:
+///
+///   - attachments: [`crate::usecases::MAX_UPLOAD_BYTES`] (50 MiB)
+///   - workspace files: implicit 64 MiB ceiling via this limit;
+///
+/// anything larger is rejected at the handler with a clean error
+/// instead of at the extractor with an opaque one.
+const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Shared dispatch sender for Runtime HTTP → agent loop.
 ///
@@ -385,6 +410,14 @@ impl RuntimeHttpServer {
             // global-scoped (the desktop knows `document_id` from the
             // JSONL metadata it already loaded, no session_id needed).
             // Both route through `AttachmentService` (ADR-040).
+            //
+            // Per-route body-limit override is NOT needed here: the
+            // global `DefaultBodyLimit::max(GLOBAL_BODY_LIMIT)` layer
+            // (64 MiB) installed at the root of the router covers the
+            // `Multipart` extractor. The Runtime's own size check
+            // ([`crate::usecases::MAX_UPLOAD_BYTES`] = 50 MiB) then
+            // produces a clean 413 + JSON error body if the payload is
+            // over the user-facing limit.
             .route("/sessions/{sid}/files", post(upload_file))
             .route("/files/{document_id}", get(read_file))
             .route("/memory/graph", get(get_memory_graph))
@@ -524,6 +557,12 @@ impl RuntimeHttpServer {
             // starts the HTTP server before DebugService is wired up,
             // so handlers return 503 until Phase B populates the slot.
             .merge(crate::http::debug::debug_routes())
+            // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
+            // override axum's 2 MiB default at the root of the router.
+            // Each per-route service-layer check (e.g.
+            // `AttachmentService::PayloadTooLarge`) remains the source
+            // of truth for user-facing limits.
+            .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             .with_state(state);
 
         // Bind to 127.0.0.1:0 for a random port

@@ -27,12 +27,28 @@ mod linux;
 #[tauri::command]
 pub async fn get_clipboard_file_paths() -> Result<Vec<String>, String> {
     let paths = read_clipboard_file_paths().unwrap_or_default();
-    // Strip empty / relative entries — WebView clipboard APIs sometimes
-    // include a literal `\0` sentinel when only one file is present.
+    // Sanitise every entry:
+    //   - strip whitespace (WebView clipboard APIs sometimes include
+    //     a literal `\0` sentinel when only one file is present);
+    //   - require absolute (defends against relative paths slipping in
+    //     from a non-conformant OS payload);
+    //   - require `Path::exists()` so we never return a path that
+    //     `tokio::fs::read` would reject with `os error 53/161` during
+    //     the subsequent upload. This is the last line of defence
+    //     after the frontend's path-detection heuristic was removed
+    //     — if a stale CF_HDROP entry (e.g. user deleted the file
+    //     between Ctrl+C and Ctrl+V) is still on the clipboard, we
+    //     silently drop it instead of failing the upload.
     let cleaned: Vec<String> = paths
         .into_iter()
         .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty() && std::path::Path::new(p).is_absolute())
+        .filter(|p| {
+            if p.is_empty() {
+                return false;
+            }
+            let path = std::path::Path::new(p);
+            path.is_absolute() && path.exists()
+        })
         .collect();
     Ok(cleaned)
 }

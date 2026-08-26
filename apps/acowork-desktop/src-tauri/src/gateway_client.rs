@@ -461,6 +461,19 @@ impl GatewayClient {
             .and_then(|n| n.to_str())
             .unwrap_or("attachment.bin");
 
+        // Final existence pre-check before hitting `tokio::fs::read`.
+        // `get_clipboard_file_paths` already filters non-existent paths,
+        // but a file may be deleted between that call and now (race),
+        // and the desktop dialog (`open`) could in theory hand back a
+        // stale path on some platforms. We surface a clean error
+        // message instead of letting `tokio::fs::read` produce the
+        // raw `os error 53/161` text the user previously saw in the
+        // console.
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            return Err(anyhow::anyhow!("File not found: {}", file_path));
+        }
+
         let file_bytes = tokio::fs::read(file_path).await?;
         let part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name.to_string())

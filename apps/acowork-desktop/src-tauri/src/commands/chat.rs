@@ -30,3 +30,26 @@ pub async fn upload_file(
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Return the size of a file on disk in bytes.
+///
+/// Used by the chat panel as a pre-flight check before
+/// `upload_file` — the runtime enforces a 50 MiB cap (see
+/// `acowork-runtime::usecases::MAX_UPLOAD_BYTES`) and surfaces the
+/// rejection as HTTP 413 *after* a full multipart upload. We
+/// short-circuit oversized files here so the user gets an instant
+/// toast instead of waiting for the encoding roundtrip.
+///
+/// Returns an error if the path does not exist or is not a regular
+/// file (mirrors the existence check inside `upload_file` itself so
+/// the two paths stay consistent).
+#[tauri::command]
+pub async fn get_file_size(file_path: String) -> Result<u64, String> {
+    let path = std::path::Path::new(&file_path);
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot read file metadata: {}", e))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {}", file_path));
+    }
+    Ok(metadata.len())
+}

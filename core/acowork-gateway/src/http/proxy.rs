@@ -28,6 +28,19 @@ use tokio::sync::RwLock;
 
 use crate::http::routes::AppState;
 
+/// Maximum body size the Gateway will accept for any reverse-proxy
+/// route. The actual layer is installed at the merged-router root
+/// in [`crate::http::routes::api_router`] (see
+/// `GLOBAL_BODY_LIMIT` there for the rationale); this constant is
+/// kept as a reference point and historically used to be applied
+/// here before we lifted it to the shared router.
+///
+/// NOTE: see `crate::http::routes::GLOBAL_BODY_LIMIT` — that is the
+/// source of truth. This shim is no longer wired up but kept as a
+/// breadcrumb.
+#[allow(dead_code)]
+const FILE_UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
 /// Registry mapping id -> Runtime HTTP port.
 ///
 /// Populated by [`crate::mqtt::dispatch::handle_plaintext_message`] when the
@@ -199,6 +212,10 @@ pub fn proxy_routes() -> Router<AppState> {
         // `GET /files/{document_id}` (blob download). The Gateway is a
         // transparent reverse-proxy - multipart bodies and binary
         // responses flow through unchanged.
+        //
+        // Per-route body-limit override is NOT needed: the global
+        // `DefaultBodyLimit::max(GLOBAL_BODY_LIMIT)` layer at the
+        // proxy root covers this `Bytes` extractor.
         .route(
             "/api/agents/{id}/sessions/{sid}/files",
             post(proxy_upload_file),
@@ -306,6 +323,10 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/debug/{*rest}",
             any(proxy_debug_rpc),
         )
+        // NOTE: the global `DefaultBodyLimit` layer is applied at
+        // the merged-router level in `http::routes::api_router` so
+        // every merged sub-router (agents, chat, proxy, …) shares the
+        // same cap. See `GLOBAL_BODY_LIMIT` for the rationale.
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────
