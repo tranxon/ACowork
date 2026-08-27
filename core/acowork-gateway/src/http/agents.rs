@@ -1456,6 +1456,18 @@ pub async fn install_agent(
         .clone()
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
+    // The install command is a fire-and-forget MQTT publish (non-retained,
+    // no retry) — a target node that never enrolled would silently drop
+    // it, leaving this 202 Accepted as a false promise. Reject with 503
+    // so the caller retries once the node is online (ADR-055 §3.2).
+    if let Some(registry) = state.node_registry.as_ref()
+        && registry.read().await.get(&node_id).is_none()
+    {
+        return Err(ApiError::service_unavailable(&format!(
+            "Node '{}' has never enrolled (offline) — install requires a connected node",
+            node_id
+        )));
+    }
     node_control
         .install_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
         .await

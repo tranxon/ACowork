@@ -95,9 +95,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
         // signal and keep showing the agent as alive long after the
         // Runtime exited.
         if msg.topic.starts_with("acowork/agents/") && msg.topic.ends_with("/status") {
-            // Status topic — never fall through to protobuf decode,
-            // even if the payload is an unknown status string
-            // (parse_plaintext_agent_status already logged the warning).
+            // Plain-text status first ("online" / "sleeping" / "offline").
+            // On parse failure we FALL THROUGH to the protobuf decode
+            // below instead of returning: the Gateway re-publishes the
+            // plain-text status as a `DataEnvelope` on this same topic
+            // (`dispatch.rs`), so a binary payload here is the expected
+            // envelope, not garbage.
             if let Some(parsed) = parse_plaintext_agent_status(&msg.topic, &msg.payload) {
                 let event = serde_json::json!({
                     "type": "agent_status",
@@ -106,8 +109,8 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "sleeping": parsed.sleeping,
                 });
                 let _ = app_handle.emit("agent-event", event);
+                return;
             }
-            return;
         }
 
         // Try to decode as DataEnvelope protobuf

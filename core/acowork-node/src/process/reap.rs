@@ -34,6 +34,11 @@ pub struct RuntimeCandidate {
     pub http_port: u16,
     /// Whether the Runtime runs the Debug Protocol (`--dev-mode`).
     pub dev_mode: bool,
+    /// Broker port the Runtime connects to (`--mqtt-port`). Used to
+    /// reject candidates that belong to another Gateway instance on
+    /// this machine — an orphan adoptable only when it talks to OUR
+    /// broker (ADR-055 §6.19 multi-instance guard).
+    pub mqtt_port: Option<u16>,
 }
 
 /// Parse spawn metadata out of a Runtime command line (everything AFTER
@@ -47,6 +52,7 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
     let mut agent_id: Option<String> = None;
     let mut http_port: Option<u16> = None;
     let mut dev_mode = false;
+    let mut mqtt_port: Option<u16> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -57,6 +63,10 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
             }
             "--http-port" => {
                 http_port = args.get(i + 1).and_then(|v| v.parse::<u16>().ok());
+                i += 2;
+            }
+            "--mqtt-port" => {
+                mqtt_port = args.get(i + 1).and_then(|v| v.parse::<u16>().ok());
                 i += 2;
             }
             "--dev-mode" => {
@@ -74,6 +84,7 @@ pub fn parse_runtime_args(pid: u32, args: &[String]) -> Option<RuntimeCandidate>
         agent_id,
         http_port,
         dev_mode,
+        mqtt_port,
     })
 }
 
@@ -266,6 +277,7 @@ mod tests {
         assert_eq!(c.pid, 4242);
         assert_eq!(c.agent_id, "com.example.weather");
         assert_eq!(c.http_port, 19905);
+        assert_eq!(c.mqtt_port, Some(19875));
         assert!(!c.dev_mode);
     }
 
@@ -286,6 +298,7 @@ mod tests {
         .unwrap();
         assert!(c.dev_mode);
         assert_eq!(c.agent_id, "com.example.dev");
+        assert_eq!(c.mqtt_port, None);
     }
 
     #[test]
@@ -332,12 +345,14 @@ mod tests {
                 agent_id: "com.example.keep".to_string(),
                 http_port: 19901,
                 dev_mode: false,
+                mqtt_port: None,
             },
             RuntimeCandidate {
                 pid: 11,
                 agent_id: "com.example.stale".to_string(),
                 http_port: 19902,
                 dev_mode: false,
+                mqtt_port: None,
             },
         ];
 
@@ -360,6 +375,7 @@ mod tests {
         assert_eq!(c.pid, 4242);
         assert_eq!(c.agent_id, "com.example.weather");
         assert_eq!(c.http_port, 19905);
+        assert_eq!(c.mqtt_port, Some(19875));
         assert!(!c.dev_mode);
     }
 

@@ -234,31 +234,22 @@ impl Gateway {
             .enabled
             .then(|| format!("--mqtt-port {}", self.config.mqtt.port));
 
-        // Find all acowork-runtime processes
-        let output = match std::process::Command::new("pgrep")
-            .args(["-af", "acowork-runtime"])
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return 0, // pgrep not available, skip cleanup
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Find all acowork-runtime processes (full argv via `ps` — the
+        // `pgrep -af` variant prints bare PIDs on macOS and silently
+        // defeats every marker match).
+        let procs = crate::gateway::node_manager::find_procs_by_cmdline("acowork-runtime");
         let my_pid = std::process::id();
 
         // Filter PIDs whose command line matches our MQTT marker (if any).
-        let pids_to_kill: Vec<(u32, String)> = stdout
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
-                let pid: u32 = parts.first()?.trim().parse().ok()?;
+        let pids_to_kill: Vec<(u32, String)> = procs
+            .into_iter()
+            .filter_map(|(pid, cmdline)| {
                 if pid == my_pid {
                     return None; // don't kill self
                 }
-                let cmdline = parts.get(1).map(|s| s.trim()).unwrap_or("");
                 match &mqtt_marker {
                     Some(marker) if cmdline.contains(marker.as_str()) => {
-                        Some((pid, cmdline.to_string()))
+                        Some((pid, cmdline))
                     }
                     _ => None,
                 }
@@ -308,16 +299,6 @@ impl Gateway {
 
         // Ensure directories exist
         self.ensure_dirs()?;
-
-        // In dev_mode, auto-unlock vault with a default password
-        // so that API keys can be stored/retrieved without manual unlock.
-        // This is intentionally insecure — dev_mode is for local development only.
-        if self.config.dev_mode {
-            match self.state.write().await.vault.unlock("dev-mode-unlock") {
-                Ok(()) => tracing::info!("Vault auto-unlocked (dev_mode)"),
-                Err(e) => tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e),
-            }
-        }
 
         // ADR-055 §6.5: installed agents are no longer restored by an
         // on-disk packages scan (L2-9). The local node publishes its
@@ -769,6 +750,14 @@ impl Gateway {
             Some(trigger)
         } else { None };
 
+        // Keep a handle on the publisher trigger for the dev-mode vault
+        // auto-unlock task (below): the publisher emits its initial
+        // retained snapshot immediately, before the unlock completes, so
+        // every ProviderRef.api_key is empty in that snapshot. The unlock
+        // task republishes once keys become readable. (The original is
+        // moved into the HTTP server task further down.)
+        let unlock_republish_trigger = mqtt_publisher_trigger.clone();
+
         // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
         // Must be started AFTER MQTT client is available.
         {
@@ -785,6 +774,33 @@ impl Gateway {
                 .await;
             });
         }
+
+        // Start the HTTP API as early as possible: the desktop app's
+        // readiness probe (10 s) must see :19876 listening before the
+        // node / System Agent startup dance completes. Every dependency
+        // (broker, Gateway client, registries, node-control slot) is
+        // ready at this point.
+        let node_control = node_control_slot.lock().await.clone();
+        let http_node_registry = node_registry.clone();
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = crate::http::server::start_http_server(
+                &http_config,
+                http_state,
+                &data_dir_path,
+                log_reload_handle,
+                mqtt_gw_client,
+                mqtt_publisher_trigger,
+                Some(runtime_http_registry),
+                Some(agent_registry),
+                node_control,
+                Some(http_node_registry),
+                http_auth,
+            )
+            .await
+            {
+                tracing::error!("HTTP server failed: {}", e);
+            }
+        });
 
         // ADR-055 §6.11: ensure a local Node Agent is running and
         // supervise it (orphan cleanup → reuse window → spawn + reaper).
@@ -812,6 +828,8 @@ impl Gateway {
                     &self.config.packages_dir,
                     node_registry.clone(),
                     local_node_token,
+                    self.config.node_proxy_port,
+                    self.config.node_lsp_relay_port,
                 )
                 .await
                 {
@@ -827,88 +845,121 @@ impl Gateway {
 
         // ADR-055 §6.2: auto-start the System Agent once the local node is
         // up and its retained installed inventory has been aggregated.
-        // (When the broker is disabled the node-control slot is None, so
-        // this is a no-op.)
-        if let Some(nc) = node_control_slot.lock().await.clone() {
-            // Bounded wait for the node's retained installed info.
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !shared_state.read().await.is_installed(SYSTEM_AGENT_ID)
-                && tokio::time::Instant::now() < deadline
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            if !shared_state.read().await.is_installed(SYSTEM_AGENT_ID) {
-                tracing::warn!("System Agent not installed — skipping auto-start");
-            } else {
-                match nc
-                    .start_agent(acowork_core::node::LOCAL_NODE_ID, SYSTEM_AGENT_ID, false)
-                    .await
-                {
-                    Ok(event) => {
-                        if let Err(e) = crate::mqtt::node_control::NodeControlClient::check_reply(
-                            SYSTEM_AGENT_ID,
-                            &event,
-                        ) {
-                            tracing::warn!("Failed to auto-start System Agent: {}", e);
-                        } else {
-                            let mut gw = shared_state.write().await;
-                            let workspace = gw
-                                .installed_agents
-                                .get(SYSTEM_AGENT_ID)
-                                .map(|i| {
-                                    std::path::PathBuf::from(&i.install_path)
-                                        .join("workspace")
-                                        .to_string_lossy()
-                                        .to_string()
-                                })
-                                .unwrap_or_default();
-                            gw.add_running(crate::gateway::state::RunningAgentInfo {
-                                agent_id: SYSTEM_AGENT_ID.to_string(),
-                                pid: 0,
-                                started_at: chrono::Utc::now(),
-                                workspace,
-                                node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
-                                connected: false,
-                                ready: false,
-                                dev_mode: false,
-                                debug_state: crate::gateway::state::DebugState::Disabled,
-                                debug_port: None,
-                                workspace_config_json: None,
-                                current_embed_dim: None,
-                                migration: None,
-                            });
-                            tracing::info!("Auto-started System Agent via local node");
+        // Runs in a background task — the inventory wait can take up to
+        // 10 s and must not delay the HTTP API / readiness probe. (When
+        // the broker is disabled the node-control slot is None, so this
+        // is a no-op.)
+        {
+            let sa_slot = node_control_slot.clone();
+            let sa_state = shared_state.clone();
+            tokio::spawn(async move {
+                // Take the node-control handle WITHOUT holding the slot
+                // lock across the wait loop below. A `MutexGuard` born in
+                // an `if let` condition lives until the end of the if
+                // block — holding it here would stall every dispatch
+                // task that locks the same slot for the full 10 s wait
+                // (observed as a ~10 s delay in installed-inventory
+                // aggregation and System Agent auto-start).
+                let nc_opt = sa_slot.lock().await.clone();
+                if let Some(nc) = nc_opt {
+                    // Bounded wait for the node's retained installed info.
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while !sa_state.read().await.is_installed(SYSTEM_AGENT_ID)
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if !sa_state.read().await.is_installed(SYSTEM_AGENT_ID) {
+                        tracing::warn!("System Agent not installed — skipping auto-start");
+                    } else {
+                        match nc
+                            .start_agent(acowork_core::node::LOCAL_NODE_ID, SYSTEM_AGENT_ID, false)
+                            .await
+                        {
+                            Ok(event) => {
+                                if let Err(e) =
+                                    crate::mqtt::node_control::NodeControlClient::check_reply(
+                                        SYSTEM_AGENT_ID,
+                                        &event,
+                                    )
+                                {
+                                    tracing::warn!("Failed to auto-start System Agent: {}", e);
+                                } else {
+                                    let mut gw = sa_state.write().await;
+                                    let workspace = gw
+                                        .installed_agents
+                                        .get(SYSTEM_AGENT_ID)
+                                        .map(|i| {
+                                            std::path::PathBuf::from(&i.install_path)
+                                                .join("workspace")
+                                                .to_string_lossy()
+                                                .to_string()
+                                        })
+                                        .unwrap_or_default();
+                                    gw.add_running(crate::gateway::state::RunningAgentInfo {
+                                        agent_id: SYSTEM_AGENT_ID.to_string(),
+                                        pid: 0,
+                                        started_at: chrono::Utc::now(),
+                                        workspace,
+                                        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                                        connected: false,
+                                        ready: false,
+                                        dev_mode: false,
+                                        debug_state: crate::gateway::state::DebugState::Disabled,
+                                        debug_port: None,
+                                        workspace_config_json: None,
+                                        current_embed_dim: None,
+                                        migration: None,
+                                    });
+                                    tracing::info!("Auto-started System Agent via local node");
+                                }
+                            }
+                            Err(e) => tracing::warn!("Failed to auto-start System Agent: {}", e),
                         }
                     }
-                    Err(e) => tracing::warn!("Failed to auto-start System Agent: {}", e),
                 }
-            }
+            });
         }
 
-        // ADR-055 §6.2: extract the node control client (same instance
-        // as dispatch holds, sharing the pending-request table) for the
-        // HTTP handlers.
-        let node_control = node_control_slot.lock().await.clone();
-
-        let http_handle = tokio::spawn(async move {
-            if let Err(e) = crate::http::server::start_http_server(
-                &http_config,
-                http_state,
-                &data_dir_path,
-                log_reload_handle,
-                mqtt_gw_client,
-                mqtt_publisher_trigger,
-                Some(runtime_http_registry),
-                Some(agent_registry),
-                node_control,
-                Some(node_registry),
-                http_auth,
-            )
-            .await
-            {
-                tracing::error!("HTTP server failed: {}", e);
-            }
-        });
+        // In dev_mode, auto-unlock the vault in the background. Unlock runs
+        // Argon2id (a deliberately slow KDF, ~1 s) under the GatewayState
+        // write lock, so it must start AFTER the HTTP server is up — a
+        // boot-time unlock would serialize all startup writes behind it
+        // (the broker / node / System Agent path does not touch the vault;
+        // only provider-credential HTTP handlers do, and they queue behind
+        // the 1 s unlock at most). This is intentionally insecure —
+        // dev_mode is for local development only.
+        if self.config.dev_mode {
+            let vault_state = self.state.clone();
+            let unlock_republish = unlock_republish_trigger;
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    vault_state.blocking_write().vault.unlock("dev-mode-unlock")
+                })
+                .await;
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::info!("Vault auto-unlocked (dev_mode)");
+                        // The initial retained acowork/global/providers
+                        // snapshot predates this unlock, so every api_key
+                        // field was empty (get_provider fails while the
+                        // vault is locked) and nothing else triggers a
+                        // republish until a provider changes. Republish
+                        // now so Runtimes receive the decrypted keys.
+                        if let Some(ref trigger) = unlock_republish {
+                            trigger.trigger();
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e)
+                    }
+                    Err(e) => tracing::warn!("Vault auto-unlock task panicked: {}", e),
+                }
+            });
+        } else {
+            // No background unlock in non-dev mode — nothing to follow up.
+            drop(unlock_republish_trigger);
+        }
 
         // S5.9: Wait for either SIGTERM/SIGINT or HTTP server exit.
         // On signal, all server tasks are aborted, triggering
@@ -1060,6 +1111,8 @@ mod tests {
             data_flow: crate::config::DataFlowConfig::default(),
             mqtt: crate::config::MqttConfig::default(),
             advertise_host: None,
+            node_proxy_port: None,
+            node_lsp_relay_port: None,
         }
     }
 

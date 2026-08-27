@@ -30,8 +30,6 @@ pub struct AppState {
     pub auth: Arc<HttpAuth>,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
-    /// Whether CORS is enabled (allows any origin for remote Desktop connections)
-    pub cors_enabled: bool,
     /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
     pub mqtt_gateway_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
     /// ADR-033: MQTT global resources publisher trigger.
@@ -60,7 +58,6 @@ impl AppState {
             gateway_state,
             auth,
             log_reload_handle: None,
-            cors_enabled: false,
             mqtt_gateway_client: None,
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
@@ -97,54 +94,29 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
 
 /// Build the HTTP router with all routes
 pub fn build_router(state: AppState) -> Router {
-    // When CORS is enabled (remote Desktop ↔ Gateway scenarios),
-    // allow any origin. Otherwise, restrict to localhost.
-    let cors = if state.cors_enabled {
-        tower_http::cors::CorsLayer::permissive().allow_credentials(true)
-    } else {
-        // Local-only CORS allowlist. Covers two deployment shapes:
-        //   1. Vite dev — page served from a Vite dev server on :3000 / :5173
-        //   2. Packaged Tauri v2 desktop app:
-        //      - Windows / Linux: `https://tauri.localhost`
-        //      - macOS:           `tauri://localhost`
-        //
-        //      Tauri v2 uses HTTPS (not HTTP) for the custom protocol on
-        //      Windows/Linux (v2 migration). Without the exact scheme the
-        //      browser's `Origin` header won't match and CORS silently
-        //      blocks every `fetch()` from the MSI-installed app.
-        tower_http::cors::CorsLayer::new()
-            .allow_origin({
-                let mut origins = vec![
-                    "http://localhost:3000".parse().unwrap(),
-                    "http://localhost:5173".parse().unwrap(),
-                    "http://127.0.0.1:3000".parse().unwrap(),
-                    // Tauri v2 production WebView on Windows / Linux
-                    // (confirmed via request logging: the WebView sends
-                    //  Origin: http://tauri.localhost, not https://)
-                    "http://tauri.localhost".parse().unwrap(),
-                    "https://tauri.localhost".parse().unwrap(),
-                ];
-                // macOS Tauri v2 sends `Origin: tauri://localhost`.
-                // The `http` crate (1.4.x) may reject non-HTTP URI
-                // schemes at runtime. Use a soft parse so the gateway
-                // does not panic on startup — macOS users see a CORS
-                // error instead of a gateway crash.
-                if let Ok(v) = "tauri://localhost".parse() {
-                    origins.push(v);
-                }
-                origins
-            })
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
-    };
+    // CORS — permissive for all deployments.
+    //
+    // `CorsLayer::permissive()` alone — deliberately WITHOUT
+    // `allow_credentials(true)`: permissive() answers `*` for origin /
+    // method / header, and the CORS spec forbids combining `*` with
+    // `Access-Control-Allow-Credentials: true`. tower-http asserts at
+    // layer-build time and panics on that combination (this exact bug
+    // crashed the HTTP server once — see ensure_usable_cors_rules).
+    //
+    // Credentials are not needed: the Gateway never sends `Set-Cookie`
+    // and the desktop frontend fetches with the default
+    // `credentials: 'same-origin'`, so no cross-origin credentials are
+    // ever transmitted. The Gateway binds to loopback by default
+    // (`[http].host = 127.0.0.1`), so any origin that can reach it is
+    // already on the user's machine — 0 risk locally. For remote
+    // deployments (`[http].host = 0.0.0.0` or a LAN address), CSRF is
+    // prevented by the bearer-token middleware, not by CORS.
+    //
+    // Dev mode (Vite on :5173, Tauri custom protocol on macOS/Windows) is
+    // always cross-origin against the Gateway (:19876); a hardcoded
+    // allowlist breaks the moment the WebView resolves `localhost` to a
+    // different IP literal than the one hardcoded.
+    let cors = tower_http::cors::CorsLayer::permissive();
 
     Router::new()
         .route("/health", get(health_check))

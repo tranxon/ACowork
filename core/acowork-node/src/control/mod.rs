@@ -448,14 +448,25 @@ async fn download_package(
 }
 
 /// ADR-055 Phase 5a: build the NodeEnroll request envelope, or `None`
-/// when no enrollment is needed — the node already holds a
-/// Gateway-issued node_token (enrollment is one-shot; the Gateway
-/// reuses the token on reconnect) or no enrollment token was provided.
+/// when the node has no credential to present.
+///
+/// Enrollment is idempotent and re-run on every (re)connect: a node
+/// that already holds a Gateway-issued node_token presents it as the
+/// enrollment credential, so the Gateway can re-sync its store (e.g.
+/// after its `node_tokens.json` was lost) — the Gateway mints a fresh
+/// token in that case and the `enroll_result` reply updates the local
+/// identity. A one-shot-only enrollment could otherwise strand a node
+/// with a token the Gateway no longer recognizes, turning every
+/// reverse-proxied request into a 403 "invalid node token".
 fn build_enroll_payload(identity: &NodeIdentity, config: &NodeConfig) -> Option<DataEnvelope> {
-    if identity.node_token.is_some() {
-        return None; // Already enrolled.
-    }
-    let Some(token) = config.token.as_deref().filter(|t| !t.is_empty()) else {
+    // The one-time enrollment token (first boot, passed via CLI) wins;
+    // a persisted node_token doubles as the credential on re-enroll.
+    let Some(token) = config
+        .token
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .or(identity.node_token.as_deref())
+    else {
         return None; // No credential to present.
     };
     let info = build_node_info(identity, config, 0);
@@ -512,10 +523,13 @@ async fn publish_enroll(
 /// Gateway-issued node_token into identity.json. Returns true when
 /// the topic was an enroll_result (consumed).
 ///
-/// Idempotent (ADR-055 §6.12): the token is only written when the
-/// identity has none yet — a re-enroll after a Gateway restart reuses
-/// the same token, and a node that already holds a token must never
-/// have it overwritten or cleared by a stale/error reply.
+/// Idempotent (ADR-055 §6.12): a same-token reply is a no-op. When
+/// the Gateway mints a NEW token (its own `node_tokens.json` was
+/// lost between restarts, so a re-enroll could not reuse the old
+/// one), the reply overwrites the local token — the Gateway is the
+/// authority, and only `status=ok` + non-empty replies reach this
+/// point, so a stale/error reply can never clear or corrupt the
+/// stored credential.
 async fn handle_enroll_result(
     topic: &str,
     payload: &[u8],
@@ -553,8 +567,8 @@ async fn handle_enroll_result(
         return true;
     }
     let mut id = identity.write().await;
-    if id.node_token.is_some() {
-        return true; // Already persisted — never overwrite.
+    if id.node_token.as_deref() == Some(result.node_token.as_str()) {
+        return true; // Same token — nothing to do.
     }
     id.set_node_token(Some(result.node_token.clone()));
     match id.save(home) {
@@ -769,10 +783,11 @@ impl NodeControlPlane {
                     tracing::warn!(error = %e, "Failed to publish node LSP relay state");
                 }
 
-                // ADR-055 Phase 5a: request a long-lived node token
-                // on first enrollment. One-shot — no-op once
-                // identity.node_token is set (the Gateway reuses the
-                // same token on reconnect).
+                // ADR-055 Phase 5a: request a long-lived node token.
+                // Idempotent on every (re)connect — a node that already
+                // holds a token presents it so the Gateway can re-sync
+                // its store (one-shot enrollment would strand a node
+                // with an orphaned token after a Gateway store loss).
                 publish_enroll(&client, &identity.read().await.clone(), &config).await;
 
                 // Control subscriptions: node-level + agent-level.
@@ -1937,17 +1952,35 @@ mod tests {
 
     #[test]
     fn build_enroll_payload_none_without_token_or_when_enrolled() {
-        // No enrollment token → no payload.
+        // No enrollment token and no persisted node_token → no payload.
         assert!(build_enroll_payload(&test_identity(), &test_config()).is_none());
-        // Already holds a node_token → no payload (one-shot enrollment;
-        // the Gateway reuses the token on reconnect).
+        // Holds a node_token → still builds a payload (idempotent
+        // re-enrollment; the token doubles as the credential so the
+        // Gateway can re-sync its store after a loss).
         let mut identity = test_identity();
         identity.node_token = Some("existing-token".to_string());
+        let config = NodeConfig {
+            token: None,
+            ..test_config()
+        };
+        let envelope = build_enroll_payload(&identity, &config)
+            .expect("enroll payload built when node_token present");
+        let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
+            panic!("expected NodeEnroll payload");
+        };
+        assert_eq!(enroll.enrollment_token, "existing-token");
+        // The CLI-provided one-time token still wins over the persisted one.
+        identity.node_token = Some("persisted-token".to_string());
         let config = NodeConfig {
             token: Some("tok-1234".to_string()),
             ..test_config()
         };
-        assert!(build_enroll_payload(&identity, &config).is_none());
+        let envelope = build_enroll_payload(&identity, &config)
+            .expect("enroll payload built with CLI token");
+        let data_envelope::Payload::NodeEnroll(enroll) = envelope.payload.unwrap() else {
+            panic!("expected NodeEnroll payload");
+        };
+        assert_eq!(enroll.enrollment_token, "tok-1234");
     }
 
     #[tokio::test]
@@ -1967,14 +2000,25 @@ mod tests {
         let loaded = NodeIdentity::load(home).unwrap().unwrap();
         assert_eq!(loaded.node_token.as_deref(), Some("tok-node-0001"));
 
-        // Idempotent: a second (stale) reply never overwrites.
-        let stale = enroll_result_envelope("tok-node-0002", "ok");
-        assert!(handle_enroll_result(&topic, &stale, &identity, home).await);
+        // Idempotent: a same-token reply is a no-op (no overwrite churn).
+        let same = enroll_result_envelope("tok-node-0001", "ok");
+        assert!(handle_enroll_result(&topic, &same, &identity, home).await);
         assert_eq!(
             identity.read().await.node_token.as_deref(),
-            Some("tok-node-0001"),
-            "existing token must not be overwritten"
+            Some("tok-node-0001")
         );
+
+        // The Gateway is authoritative: a re-enrollment that mints a
+        // NEW token (its own store was lost) updates the local token.
+        let renewed = enroll_result_envelope("tok-node-0002", "ok");
+        assert!(handle_enroll_result(&topic, &renewed, &identity, home).await);
+        assert_eq!(
+            identity.read().await.node_token.as_deref(),
+            Some("tok-node-0002"),
+            "status=ok reply with a new token must re-sync the identity"
+        );
+        let loaded = NodeIdentity::load(home).unwrap().unwrap();
+        assert_eq!(loaded.node_token.as_deref(), Some("tok-node-0002"));
     }
 
     #[tokio::test]

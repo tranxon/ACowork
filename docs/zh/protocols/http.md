@@ -781,8 +781,14 @@ Authorization: Bearer <token>
 3. **多数写操作会触发热推送**：例如修改 Provider / MCP / Search 配置后，Gateway 通过
    MQTT **retained publish** 向所有已连接的 Runtime 同步最新可用列表，
    详见 [mqtt.md §全局资源可用性广播](./mqtt.md)。
-4. **CORS**：默认仅允许本地（Tauri、localhost:3000/5173）；远程 Desktop 场景需设置
-   `cors_enabled = true`。
+4. **CORS**：始终启用 `CorsLayer::permissive()`（任意 origin、任意 method、任意 header；不带
+   `allow_credentials(true)`——`*` 通配与 `Access-Control-Allow-Credentials: true` 互斥，tower-http
+   会在构建时 panic；且前端 fetch 默认 `credentials: 'same-origin'`，无需该头）。
+   dev 模式 Vite (`:5173`) 与生产模式 Tauri 自定义协议 (`tauri://localhost` / `http(s)://tauri.localhost`)
+   都属于跨源访问 Gateway (`:19876`)，任何 hardcoded allowlist 都会被浏览器把 `localhost` 解析成不同 IP 字
+   面量时打穿。本地默认 bind `127.0.0.1`——攻击者必须已经能访问本机回路才能利用 permissive CORS——
+   所以 loopback 上是 0 风险。远端部署时 CSRF 防护依赖 `Authorization: Bearer <token>`（`[http].auth_enabled = true`），
+   Gateway 不发 Set-Cookie，浏览器默认 `credentials: 'same-origin'` 不会带上 cookie。
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
 6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /

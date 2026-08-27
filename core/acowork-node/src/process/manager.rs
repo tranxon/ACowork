@@ -230,6 +230,24 @@ impl ProcessManager {
 
         let mut adopted = Vec::new();
         for c in adopt {
+            // ADR-055 §6.19 multi-instance guard: only adopt Runtimes
+            // that talk to THIS node's broker. The scan sees every
+            // acowork-runtime on the machine; when another Gateway
+            // instance runs alongside (e.g. an isolated test home next
+            // to the real install), its Runtimes carry a different
+            // `--mqtt-port` and must not be stolen — a stolen Runtime
+            // never goes online on our broker, so the agent looks dead
+            // forever (and the other instance silently lost it).
+            if c.mqtt_port != Some(self.mqtt_port.unwrap_or_default()) {
+                tracing::warn!(
+                    agent_id = %c.agent_id,
+                    pid = c.pid,
+                    runtime_mqtt_port = ?c.mqtt_port,
+                    node_mqtt_port = ?self.mqtt_port,
+                    "Re-adopt: skipping Runtime bound to a different broker (not this node's process)"
+                );
+                continue;
+            }
             let workspace = installed
                 .get(&c.agent_id)
                 .map(|info| PathBuf::from(&info.install_path).join("workspace"))

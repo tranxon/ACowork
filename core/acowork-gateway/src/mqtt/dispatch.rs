@@ -216,10 +216,13 @@ pub fn handle_plaintext_message(
                 "online" => (true, false),
                 "offline" => (false, false),
                 other => {
-                    tracing::warn!(
+                    // Expected for the Gateway's own protobuf loopback
+                    // (the AgentRegistry handles that path) and for any
+                    // future plain-text statuses; nothing to re-publish.
+                    tracing::debug!(
                         topic = %topic_owned,
                         payload = %other,
-                        "republish: unknown agent status payload"
+                        "republish: non-plain-text agent status payload, skipping"
                     );
                     return;
                 }

@@ -266,6 +266,31 @@ def decode_node_enroll_result(buf):
             "message": _field_str(f, 5)}
 
 
+def decode_available_providers_from_envelope(buf):
+    """Decode DataEnvelope → AvailableProviders → [{id, base_url, api_key}].
+
+    The api_key rides the MQTT payload DECRYPTED (mqtt.md §3.1.1); an empty
+    value means the publisher had no credential at build time (e.g. vault
+    still locked) — which is exactly the regression we guard against.
+    """
+    fields = _parse_fields(buf)
+    version = _field_uint(fields, 1)
+    for fno, wt, v in fields:
+        if wt == 2 and fno == 10:  # available_providers
+            ap = _parse_fields(v)
+            providers = []
+            for pno, pwt, pv in ap:
+                if pno == 2 and pwt == 2:  # repeated ProviderRef
+                    pf = _parse_fields(pv)
+                    providers.append({
+                        "id": _field_str(pf, 1),
+                        "base_url": _field_str(pf, 2),
+                        "api_key": _field_str(pf, 7),
+                    })
+            return version, providers
+    return version, []
+
+
 # ── Gateway Management ──────────────────────────────────────────────────
 
 class Gateway:
@@ -280,6 +305,10 @@ class Gateway:
         self.auth_enabled = auth_enabled
         self.base = f"http://127.0.0.1:{http_port}"
         self.proc = None
+        # Isolated node ports (see _write_config) — also used by stop() to
+        # sweep THIS instance's lsp-relay without touching the real one.
+        self.proxy_port = 19790
+        self.lsp_relay_port = 19789
         self._write_config()
 
     def _write_config(self):
@@ -294,6 +323,17 @@ class Gateway:
             # binds 127.0.0.1, so a LAN-detected advertise address would
             # produce an unreachable package download URL for the node.
             "advertise_host = \"127.0.0.1\"\n"
+            # Isolated node ports: the real install's local node owns
+            # the defaults (:19900 proxy / :19878 LSP relay) on this
+            # machine. Without overrides this instance's node would
+            # fail to bind its proxy and its orphan scan could even
+            # re-adopt the REAL install's Runtime (it talks to the
+            # real broker, so it never comes online here).
+            # NOTE: must stay in the root table — AFTER a [section]
+            # header these keys would belong to that table and serde
+            # would silently drop them.
+            f"node_proxy_port = {self.proxy_port}\n"
+            f"node_lsp_relay_port = {self.lsp_relay_port}\n"
             f"[http]\nport = {self.http_port}\n"
             f"[mqtt]\nenabled = true\nhost = \"127.0.0.1\"\nport = {self.mqtt_port}\n"
             f"auth_enabled = {str(self.auth_enabled).lower()}\n"
@@ -313,6 +353,7 @@ class Gateway:
         node_home = self.home / "node"
         env = {**os.environ, "ACOWORK_HOME": str(self.home),
                "ACOWORK_NODE_HOME": str(node_home)}
+        started = time.monotonic()
         self.proc = subprocess.Popen(
             [str(self.bin), "--daemon", "--log-level", "info", "--home", str(self.home)],
             env=env,
@@ -320,17 +361,23 @@ class Gateway:
             stderr=subprocess.PIPE,
             text=True,
         )
+        # TC-BOOT-01 contract: the Desktop probes /health every 300 ms for
+        # ~10 s (wait_for_gateway_ready, 34 × 300ms) and then gives up with
+        # "Gateway did not become ready within 10 seconds". If the gateway
+        # cannot serve /health inside that window the desktop boot FAILS,
+        # so the smoke test enforces the same window — not a generous 30 s.
         with httpx.Client(timeout=3) as client:
-            for _ in range(TIMEOUT):
+            for _ in range(10):
                 try:
                     r = client.get(f"{self.base}/health")
                     if r.status_code == 200:
-                        log("INFO", "Gateway ready")
+                        elapsed = time.monotonic() - started
+                        log("INFO", f"Gateway ready in {elapsed:.2f}s (desktop probe window is 10s)")
                         return True
                 except Exception:
                     pass
                 time.sleep(1)
-        fail("Gateway did not become ready")
+        fail("Gateway did not become ready within 10s (desktop probe window)")
         return False
 
     def stop(self):
@@ -362,11 +409,14 @@ class Gateway:
                 except ProcessLookupError:
                     pass
         # The node's LSP-relay sidecar has no home path on its command
-        # line (it health-checks the node proxy at :19900), so it can't
-        # be matched per-instance — sweep any leftover relay.
+        # line (it health-checks the node proxy), so it can't be matched
+        # per-instance — sweep only the relay bound to THIS instance's
+        # isolated port. The real install's relay runs on :19878 and must
+        # never be touched by an isolated-instance teardown.
         try:
-            out = subprocess.run(["pgrep", "-f", "acowork-lsp-relay"],
-                                 capture_output=True, text=True, timeout=5).stdout
+            out = subprocess.run(
+                ["pgrep", "-f", rf"acowork-lsp-relay .*--port {self.lsp_relay_port}"],
+                capture_output=True, text=True, timeout=5).stdout
         except Exception:
             out = ""
         for pid in out.split():
@@ -477,8 +527,35 @@ def wait_http_ok(base, timeout=TIMEOUT):
     return False
 
 
+def wait_node_online(http, base, node_id="local", timeout=TIMEOUT):
+    """Wait until the target node has enrolled (registry entry + online)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = http.get(f"{base}/api/nodes")
+            if r.status_code == 200:
+                for n in r.json():
+                    # /api/nodes serializes with camelCase (serde rename_all).
+                    if n.get("nodeId") == node_id and n.get("online"):
+                        return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False
+
+
 def ensure_agent_installed(http, base):
     """Install the smoke agent package if not already present (async install)."""
+    # The install command is a fire-and-forget MQTT publish — a target node
+    # that has not enrolled yet would silently drop it (the Gateway answers
+    # 503 until the node registers, ADR-055 §3.2). Wait for the node first,
+    # then give the control-topic subscription a beat to settle: the node
+    # publishes its retained info BEFORE subscribing to the control filters
+    # (bootstrap order), so "online" alone can still miss the window.
+    if not wait_node_online(http, base):
+        fail(f"node 'local' never came online — install would be dropped")
+        return False
+    time.sleep(1)
     r = http.get(f"{base}/api/agents")
     if r.status_code == 200 and any(a.get("agent_id") == AGENT_ID for a in r.json()):
         ok(f"agent already installed: {AGENT_ID}")
@@ -566,30 +643,25 @@ def test_tc_settings_02_config(http, base):
 
 
 def test_tc_setup_01_config(http, base):
-    """TC-SETUP-01: GET /api/agents/{id}/config."""
+    """TC-SETUP-01: GET /api/agents/{id}/config (must be 200 once runtime is ready)."""
     print(f"\n── TC-SETUP-01: GET /api/agents/{AGENT_ID}/config ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/config")
-    if r.status_code == 503:
-        skip("agent not started (503)")
-        return
-    if not assert_status(r, 200):
+    if r.status_code != 200:
+        fail(f"config: HTTP {r.status_code} {r.text[:200]}")
         return
     data = r.json()
     ok(f"config sections: {list(data.keys())[:8]}" if data else "empty config")
 
 
 def test_tc_setup_05_mcp(http, base):
-    """TC-SETUP-05: GET /api/agents/{id}/mcp-servers."""
+    """TC-SETUP-05: GET /api/agents/{id}/mcp-servers (must be 200 once runtime is ready)."""
     print(f"\n── TC-SETUP-05: GET /api/agents/{AGENT_ID}/mcp-servers ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/mcp-servers")
-    if r.status_code == 503:
-        skip("agent not started (503)")
-        return
     assert_status(r, 200, "mcp-servers")
 
 
 def test_tc_setup_06_search_providers(http, base):
-    """TC-SETUP-06: GET /api/agents/{id}/search-providers."""
+    """TC-SETUP-06: GET /api/agents/{id}/search-providers (may be empty list)."""
     print(f"\n── TC-SETUP-06: GET /api/agents/{AGENT_ID}/search-providers ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/search-providers")
     if r.status_code == 200:
@@ -597,7 +669,7 @@ def test_tc_setup_06_search_providers(http, base):
         provs = data.get("providers", []) if isinstance(data, dict) else data
         ok(f"search providers: {len(provs)}")
     else:
-        skip(f"HTTP {r.status_code}")
+        fail(f"search-providers: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_setup_07_model(http, base):
@@ -607,7 +679,7 @@ def test_tc_setup_07_model(http, base):
     if r.status_code == 200:
         ok(f"model: {r.json()}")
     else:
-        skip(f"HTTP {r.status_code}")
+        fail(f"model: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_harness_01_providers(http, base):
@@ -665,14 +737,14 @@ def test_tc_harness_07_search_keys(http, base):
 
 
 def test_tc_skill_01_list(http, base):
-    """TC-SKILL-01: GET /api/agents/{id}/skills."""
+    """TC-SKILL-01: GET /api/agents/{id}/skills (empty list ok)."""
     print(f"\n── TC-SKILL-01: GET /api/agents/{AGENT_ID}/skills ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/skills")
     if r.status_code == 200:
         skills = r.json().get("skills", [])
         ok(f"{len(skills)} skills")
     else:
-        skip(f"HTTP {r.status_code}")
+        fail(f"skills: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_skill_02_detail(http, base, ctx):
@@ -687,7 +759,7 @@ def test_tc_skill_02_detail(http, base, ctx):
         data = r.json()
         ok(f"skill detail: {list(data.keys())[:5]}")
     else:
-        skip(f"HTTP {r.status_code}")
+        fail(f"skill detail: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_skill_03_history(http, base, ctx):
@@ -710,7 +782,7 @@ def test_tc_ws_01_list(http, base):
     print(f"\n── TC-WS-01: GET /api/agents/{AGENT_ID}/workspaces ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/workspaces")
     if r.status_code != 200:
-        skip(f"HTTP {r.status_code}")
+        fail(f"workspaces: HTTP {r.status_code} {r.text[:200]}")
         return
     data = r.json()
     count = len(data) if isinstance(data, list) else len(data.get("workspaces", []))
@@ -722,7 +794,7 @@ def test_tc_mem_01_nodes(http, base):
     print(f"\n── TC-MEM-01: GET /api/agents/{AGENT_ID}/memory/nodes ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/memory/nodes", params={"page": 1, "size": 20})
     if r.status_code != 200:
-        skip(f"HTTP {r.status_code}")
+        fail(f"memory nodes: HTTP {r.status_code} {r.text[:200]}")
         return
     data = r.json()
     nodes = data.get("nodes", []) if isinstance(data, dict) else data
@@ -736,7 +808,7 @@ def test_tc_mem_02_stats(http, base):
     if r.status_code == 200:
         ok(f"memory stats: {list(r.json().keys())}")
     else:
-        skip(f"HTTP {r.status_code}")
+        fail(f"memory stats: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_lsp_01_endpoint(http, base):
@@ -747,7 +819,7 @@ def test_tc_lsp_01_endpoint(http, base):
         data = r.json()
         ok(f"lsp-endpoint: {data}")
     else:
-        skip(f"HTTP {r.status_code} (relay not published yet)")
+        fail(f"lsp-endpoint: HTTP {r.status_code} {r.text[:200]}")
 
 
 def test_tc_mqtt_broker(http, base):
@@ -767,6 +839,80 @@ def test_tc_mqtt_broker(http, base):
             fail("MQTT roundtrip: no echo received")
     finally:
         mq.disconnect()
+
+
+def test_boot_02_system_agent_auto_ready(mqtt_port):
+    """TC-BOOT-02: System Agent comes up by itself — no user action.
+
+    The desktop boot flow waits for com.acowork.system to reach ready
+    without any click; a regression here stalls the whole app start.
+    The ready topic carries the plaintext "true"/"false" (Retained).
+    """
+    print("\n── TC-BOOT-02: System Agent auto-ready ──")
+    mq = MqttClient()
+    if not mq.connect(port=mqtt_port):
+        fail("MQTT broker refused")
+        return
+    mq.subscribe("acowork/agents/com.acowork.system/ready", qos=1)
+    payload = mq.wait_for("acowork/agents/com.acowork.system/ready", timeout=20,
+                          predicate=lambda p: b"true" in p)
+    if payload:
+        ok("System Agent auto-started and ready (no user action)")
+    else:
+        mq.subscribe("acowork/agents/com.acowork.system/status", qos=1)
+        status = mq.wait_for("acowork/agents/com.acowork.system/status", timeout=5)
+        fail(f"System Agent not ready within 20s (last status: {status and status[:100]!r})")
+    mq.disconnect()
+
+
+def test_tc_harness_08_provider_key_mqtt_sync(http, base, mqtt_port):
+    """TC-HARNESS-08: provider API key must ride the MQTT providers payload.
+
+    Regression: the Gateway published its initial retained
+    acowork/global/providers BEFORE the dev-mode vault auto-unlock
+    finished, so every ProviderRef.api_key was empty and nothing
+    triggered a republish afterwards — Runtimes got no credentials and
+    chat failed with "invalid api key". The key must appear decrypted
+    in the MQTT payload right after the provider is created.
+    """
+    print("\n── TC-HARNESS-08: provider api_key sync via MQTT ──")
+    pid = f"smoke-key-sync-{random_suffix()}"
+    key = f"sk-smoke-{random_suffix()}"
+    r = http.post(f"{base}/api/providers",
+                  json={"provider": pid, "key": key,
+                        "base_url": "https://api.example.com/v1"})
+    if r.status_code not in (200, 201):
+        fail(f"provider create: HTTP {r.status_code} {r.text[:200]}")
+        return
+    ok(f"provider created: {pid}")
+    mq = MqttClient()
+    if not mq.connect(port=mqtt_port):
+        fail("MQTT broker refused")
+        http.delete(f"{base}/api/providers/{pid}")
+        return
+    mq.subscribe("acowork/global/providers", qos=1)
+    deadline = time.time() + 10
+    seen = None
+    while time.time() < deadline:
+        payload = mq.wait_for("acowork/global/providers", timeout=1)
+        if payload:
+            _, provs = decode_available_providers_from_envelope(payload)
+            for p in provs:
+                if p["id"] == pid:
+                    seen = p
+                    break
+        if seen:
+            break
+    mq.disconnect()
+    http.delete(f"{base}/api/providers/{pid}")
+    if not seen:
+        fail(f"provider {pid} missing from MQTT acowork/global/providers within 10s")
+        return
+    if seen["api_key"] == key:
+        ok(f"api_key rides the MQTT payload decrypted ({len(key)} chars)")
+    else:
+        fail(f"api_key mismatch on MQTT: {seen['api_key'][:8]!r}… != {key[:8]!r}…"
+             f" (vault unlock republish regression?)")
 
 
 # ── Test Cases — session & chat (needs Runtime online) ──────────────────
@@ -821,7 +967,9 @@ def wait_runtime_ready(http, base, timeout=30):
             ok("runtime services ready")
             return True
         time.sleep(0.5)
-    fail(f"runtime services not ready after {timeout}s (last HTTP {last.status_code})")
+    origin = last.headers.get("x-error-origin", "gateway")
+    fail(f"runtime services not ready after {timeout}s (last HTTP {last.status_code}, "
+         f"origin={origin}, body={last.text[:200]})")
     return False
 
 
@@ -1147,7 +1295,7 @@ def test_tc_setup_02_04_file_read(http, base, ctx):
     print("\n── TC-SETUP-02/04: file_read enable→restore ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/config")
     if r.status_code != 200:
-        skip(f"config HTTP {r.status_code}")
+        fail(f"config HTTP {r.status_code} {r.text[:200]}")
         return
     tools = r.json().get("tools", {})
     before = tools.get("file_read", {}).get("enabled", False)
@@ -1292,7 +1440,7 @@ def test_tc_mem_04_create_delete_node(http, base):
     print("\n── TC-MEM-04: memory node create→delete ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/memory/nodes", params={"page": 1, "size": 100})
     if r.status_code != 200:
-        skip(f"memory list HTTP {r.status_code}")
+        fail(f"memory list HTTP {r.status_code} {r.text[:200]}")
         return
     before = len(r.json().get("nodes", []))
     marker = f"smoke-mem-{random_suffix()}"
@@ -1358,12 +1506,9 @@ def test_tc_doc_03_reference(mq, sid):
 
 
 def test_tc_chat_03_session_list(http, base):
-    """TC-CHAT-03: GET /api/agents/{id}/sessions."""
+    """TC-CHAT-03: GET /api/agents/{id}/sessions (must be 200 once runtime is ready)."""
     print(f"\n── TC-CHAT-03: GET /api/agents/{AGENT_ID}/sessions ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/sessions")
-    if r.status_code == 503:
-        skip("agent not running (503)")
-        return
     if not assert_status(r, 200):
         return
     sessions = r.json().get("sessions", [])
@@ -1371,14 +1516,23 @@ def test_tc_chat_03_session_list(http, base):
 
 
 def test_tc_chat_04_latest_session(http, base):
-    """TC-CHAT-04: GET /api/agents/{id}/latest-session."""
+    """TC-CHAT-04: GET /api/agents/{id}/latest-session.
+
+    This is the FIRST call the frontend makes when the user clicks an
+    agent (the "loading session" spinner). A 403 here (e.g. node token
+    mismatch) makes the UI poll forever — so any non-200 is a FAIL, not
+    a skip. A fresh home legitimately has no session yet: an empty
+    session_id with HTTP 200 is fine.
+    """
     print(f"\n── TC-CHAT-04: latest-session ──")
     r = http.get(f"{base}/api/agents/{AGENT_ID}/latest-session")
-    if r.status_code == 200:
-        data = r.json()
-        ok(f"latest session: {data.get('session_id')}" if data.get("session_id") else "no session_id")
-    else:
-        skip(f"HTTP {r.status_code}")
+    if r.status_code != 200:
+        fail(f"latest-session: HTTP {r.status_code} {r.text[:200]}"
+             f" (frontend would hang on 'loading session')")
+        return
+    data = r.json()
+    sid = data.get("session_id")
+    ok(f"latest session: {sid}" if sid else "no session_id yet (fresh home, 200 OK)")
 
 
 # ── Test Cases — Phase 5a auth (isolated auth-enabled Gateway) ──────────
@@ -1543,6 +1697,81 @@ def run_auth_suite(gw_bin, node_bin, http):
         agw.stop()
 
 
+def run_recovery_suite(gw_bin, node_bin, http):
+    """Stale-token recovery (regression for the 'loading session' 403 bug).
+
+    Scenario: the node holds an orphan node_token in its identity.json
+    (left by an earlier auth-enabled run) while the Gateway's
+    node_tokens store is empty and auth_enabled=false. The node must
+    re-enroll with the persisted token, the Gateway must mint/store a
+    fresh token, both sides must converge, and proxied requests must
+    NOT answer 403 — otherwise the frontend polls latest-session forever.
+    """
+    print("\n" + "=" * 60)
+    print("Recovery Suite (stale node token + empty gateway store)")
+    print("=" * 60)
+    home = Path(tempfile.mkdtemp(prefix="acowork-smoke-recover-"))
+    gw = Gateway(gw_bin, home, AUTH_HTTP_PORT, AUTH_MQTT_PORT, auth_enabled=False)
+    # Pre-seed the node home (the Gateway spawns its local node against
+    # `ACOWORK_NODE_HOME = <home>/node`) with a stale enrolled identity.
+    stale_token = "a" * 64
+    node_dir = Path(gw.home) / "node"
+    node_dir.mkdir(parents=True, exist_ok=True)
+    (node_dir / "identity.json").write_text(json.dumps({
+        "node_id": "local",
+        "machine_uid": str(uuid.uuid4()),
+        "node_token": stale_token,
+        "enrollment": "enrolled",
+        "created_at": "2026-08-01T00:00:00Z",
+    }))
+    if not gw.start():
+        return
+    try:
+        # 1. The gateway store must converge with the node identity.
+        store_path = Path(gw.home) / "data" / "node_tokens.json"
+        deadline = time.time() + TIMEOUT
+        store_token = None
+        while time.time() < deadline:
+            if store_path.exists():
+                try:
+                    store_token = json.loads(store_path.read_text()).get("local", {}).get("token")
+                except Exception:
+                    pass
+                if store_token:
+                    break
+            time.sleep(0.5)
+        if not store_token:
+            fail("node never re-enrolled: gateway node_tokens.json empty")
+            return
+        ok(f"gateway store re-synced node token: {store_token[:8]}…")
+        if store_token == stale_token:
+            fail("gateway re-used the stale token — expected a fresh mint")
+        else:
+            ok("gateway minted a fresh token (stale one replaced)")
+        # 2. The node identity must be updated to match (never-overwrite fix).
+        identity_token = wait_identity_token(node_dir, timeout=15)
+        if identity_token == store_token:
+            ok("node identity.json converged to the gateway token")
+        else:
+            fail(f"identity.json token {identity_token and identity_token[:8]!r} != store {store_token[:8]!r}")
+        # 3. Proxied request must be 200 (the frontend 'loading session' path).
+        #    The System Agent is auto-installed + auto-started on this home.
+        base = f"http://127.0.0.1:{AUTH_HTTP_PORT}"
+        deadline = time.time() + TIMEOUT
+        last = None
+        while time.time() < deadline:
+            last = http.get(f"{base}/api/agents/com.acowork.system/latest-session")
+            if last.status_code == 200:
+                break
+            time.sleep(0.5)
+        if last and last.status_code == 200:
+            ok("proxied latest-session recovered (HTTP 200)")
+        else:
+            fail(f"proxied latest-session never 200 (last HTTP {last.status_code}) — stale token not recovered")
+    finally:
+        gw.stop()
+
+
 # ── Main ────────────────────────────────────────────────────────────────
 
 def main():
@@ -1591,6 +1820,9 @@ def main():
             fail("aborting: agent not installed")
             sys.exit(1)
 
+        # ── Boot link (desktop contract) ──
+        test_boot_02_system_agent_auto_ready(DEFAULT_MQTT_PORT)
+
         # ── Read-only (Gateway native) ──
         test_tc_chat_01_agent_list(http, base)
         test_tc_settings_01_status(http, base)
@@ -1601,6 +1833,7 @@ def main():
         test_tc_harness_06_mcp(http, base)
         test_tc_harness_07_search_keys(http, base)
         test_tc_mqtt_broker(http, base)
+        test_tc_harness_08_provider_key_mqtt_sync(http, base, DEFAULT_MQTT_PORT)
 
         # ── TC-CHAT-02: start agent, wait for MQTT online ──
         started = test_tc_chat_02_start_agent(http, base, DEFAULT_MQTT_PORT)
@@ -1666,6 +1899,10 @@ def main():
         # ── Phase 5a auth suite (isolated instance) ──
         if not args.skip_auth and not args.no_start:
             run_auth_suite(gw_bin, node_bin, http)
+
+        # ── Stale-token recovery suite (isolated instance) ──
+        if not args.no_start:
+            run_recovery_suite(gw_bin, node_bin, http)
     finally:
         if gw:
             gw.stop()

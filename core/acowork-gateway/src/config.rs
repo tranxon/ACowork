@@ -125,6 +125,16 @@ pub struct GatewayConfig {
     /// when detection fails (single-machine compatibility).
     #[serde(default)]
     pub advertise_host: Option<String>,
+    /// Optional override for the local node's reverse-proxy port
+    /// (`acowork-node --proxy-port`, default 19900). Lets a second
+    /// Gateway instance on the same machine (tests, previews) run its
+    /// own node without clashing with the primary instance's proxy.
+    #[serde(default)]
+    pub node_proxy_port: Option<u16>,
+    /// Optional override for the local node's LSP relay sidecar port
+    /// (default 19878). See `node_proxy_port`.
+    #[serde(default)]
+    pub node_lsp_relay_port: Option<u16>,
 }
 
 /// MQTT broker configuration (ADR-033).
@@ -234,9 +244,6 @@ pub struct HttpConfig {
     /// Maximum port when auto-incrementing on conflict
     #[serde(default = "default_http_port_max")]
     pub port_max: u16,
-    /// Enable CORS for Desktop App
-    #[serde(default)]
-    pub cors_enabled: bool,
     /// Enable auth token (generates random token on start)
     #[serde(default)]
     pub auth_enabled: bool,
@@ -262,7 +269,6 @@ impl Default for HttpConfig {
             host: default_http_host(),
             port: default_http_port(),
             port_max: default_http_port_max(),
-            cors_enabled: false,
             auth_enabled: false,
         }
     }
@@ -501,6 +507,8 @@ impl GatewayConfig {
                 .advertise_host
                 .clone()
                 .or(file_config.as_ref().and_then(|c| c.advertise_host.clone())),
+            node_proxy_port: file_config.as_ref().and_then(|c| c.node_proxy_port),
+            node_lsp_relay_port: file_config.as_ref().and_then(|c| c.node_lsp_relay_port),
         };
 
         config.validate()?;
@@ -606,6 +614,8 @@ impl Default for GatewayConfig {
             data_flow: DataFlowConfig::default(),
             mqtt: Default::default(),
             advertise_host: None,
+            node_proxy_port: None,
+            node_lsp_relay_port: None,
         }
     }
 }

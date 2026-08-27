@@ -1214,19 +1214,26 @@ impl RuntimeMqttClient {
     }
 }
 
-impl Drop for RuntimeMqttClient {
-    fn drop(&mut self) {
-        // Best-effort: publish "offline" before the connection drops.
-        // The Last Will ensures this happens even on crash, but a clean
-        // disconnect publishes immediately rather than waiting for keep-alive timeout.
-        let shared_client = Arc::clone(&self.shared_client);
+impl RuntimeMqttClient {
+    /// Graceful shutdown: publish `status = "offline"` (retained) and
+    /// disconnect.
+    ///
+    /// There is deliberately NO `Drop` impl that publishes: this type is
+    /// `Clone` and cheap copies are dropped all the time (e.g. the
+    /// `IdleWatcherConfig` in never-sleep mode), so a `Drop`-triggered
+    /// publish turns every one of those into a spurious retained
+    /// "offline" message — which makes the Gateway `remove_running()`
+    /// right after auto-start, dropping the ready signal that follows
+    /// (Phase 5a startup report). A crash is still covered by the Last
+    /// Will; callers that need a clean offline transition must call
+    /// [`Self::shutdown`] explicitly.
+    pub async fn shutdown(&self) {
+        let client = self.client().await;
         let status_topic = format!("acowork/agents/{}/status", self.agent_id);
-        tokio::spawn(async move {
-            let client = shared_client.lock().await.clone();
-            let _ = client
-                .publish(status_topic, QoS::AtLeastOnce, true, "offline")
-                .await;
-        });
+        let _ = client
+            .publish(status_topic, QoS::AtLeastOnce, true, "offline")
+            .await;
+        let _ = client.disconnect().await;
     }
 }
 

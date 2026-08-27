@@ -42,9 +42,12 @@ use crate::mqtt::node_registry::SharedNodeRegistry;
 /// Reserved local node id (§6.11 / §6.12).
 const LOCAL_NODE_ID: &str = acowork_core::node::LOCAL_NODE_ID;
 
-/// How long to wait for a retained `online` status before deciding to
-/// spawn (§6.11 step 2, default 3s).
-const REUSE_WINDOW: Duration = Duration::from_secs(3);
+/// How long to wait for a retained `online` from an already-running
+/// local node before spawning our own. The Gateway client re-subscribes
+/// to `acowork/nodes/+/status` immediately before this runs, so a
+/// retained message arrives within milliseconds — 500 ms is plenty.
+/// (The old 3 s window delayed every clean cold start by 3 s.)
+const REUSE_WINDOW: Duration = Duration::from_millis(500);
 
 /// Delay before respawning a crashed local node (§6.11 step 3, 60s).
 const RESPAWN_DELAY: Duration = Duration::from_secs(60);
@@ -119,6 +122,39 @@ async fn kill_process_group(pid: u32) {
     }
 }
 
+/// Find processes whose command line contains `pattern`, returning
+/// `(pid, full command line)` pairs.
+///
+/// The classic `pgrep -af` trick silently breaks on macOS: BSD pgrep
+/// ignores `-a` and prints bare PIDs, so a `splitn(2)` parse yields an
+/// empty cmdline and every orphan-cleanup check matches nothing.
+/// `ps -axo pid=,command=` is portable across Linux/macOS and prints
+/// the full argv; on Windows neither `ps` nor `pgrep` exists, so this
+/// returns empty and callers skip cleanup (same as before).
+pub(crate) fn find_procs_by_cmdline(pattern: &str) -> Vec<(u32, String)> {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(), // no ps (Windows) — skip cleanup
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, char::is_whitespace);
+            let pid: u32 = parts.next()?.trim().parse().ok()?;
+            let cmdline = parts.next().unwrap_or("").trim();
+            if cmdline.contains(pattern) {
+                Some((pid, cmdline.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Kill orphaned local-node processes from a previous Gateway run.
 ///
 /// Marker: cmdline contains `acowork-node`, `--name local`, and our
@@ -126,26 +162,15 @@ async fn kill_process_group(pid: u32) {
 /// — same limitation as `cleanup_orphaned_runtimes`; Windows-specific
 /// verification is a Phase 2b gate item.
 fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
-    let output = match std::process::Command::new("pgrep")
-        .args(["-af", "acowork-node"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return 0,
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let my_pid = std::process::id();
     let port_marker = format!("--gateway-mqtt-port {mqtt_port}");
 
-    let pids: Vec<u32> = stdout
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, char::is_whitespace);
-            let pid: u32 = parts.next()?.trim().parse().ok()?;
+    let pids: Vec<u32> = find_procs_by_cmdline("acowork-node")
+        .into_iter()
+        .filter_map(|(pid, cmdline)| {
             if pid == my_pid {
                 return None;
             }
-            let cmdline = parts.next().unwrap_or("").trim();
             if cmdline.contains("--name local") && cmdline.contains(&port_marker) {
                 Some(pid)
             } else {
@@ -185,6 +210,8 @@ pub async fn ensure_local_node(
     packages_dir: &str,
     node_registry: SharedNodeRegistry,
     local_token: Option<String>,
+    proxy_port: Option<u16>,
+    lsp_relay_port: Option<u16>,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
     // Step 1: kill orphans from a previous Gateway run (they point at
     // OUR port, and the reserved `local` name is Gateway-exclusive).
@@ -218,6 +245,8 @@ pub async fn ensure_local_node(
             node_registry,
             supervisor.clone(),
             local_token.as_deref(),
+            proxy_port,
+            lsp_relay_port,
         )
         .await?;
     }
@@ -226,6 +255,7 @@ pub async fn ensure_local_node(
 
 /// Spawn the local node child and supervise it: reaper + respawn with
 /// re-check, forever (until `shutdown()` sets the stop flag).
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_supervise(
     mqtt_host: &str,
     mqtt_port: u16,
@@ -233,6 +263,8 @@ async fn spawn_and_supervise(
     node_registry: SharedNodeRegistry,
     supervisor: Arc<LocalNodeSupervisor>,
     local_token: Option<&str>,
+    proxy_port: Option<u16>,
+    lsp_relay_port: Option<u16>,
 ) -> std::io::Result<()> {
     let bin = node_binary();
     if !bin.exists() {
@@ -244,7 +276,15 @@ async fn spawn_and_supervise(
         return Ok(());
     }
 
-    let mut child = spawn_node_child(&bin, mqtt_host, mqtt_port, packages_dir, local_token)?;
+    let mut child = spawn_node_child(
+        &bin,
+        mqtt_host,
+        mqtt_port,
+        packages_dir,
+        local_token,
+        proxy_port,
+        lsp_relay_port,
+    )?;
     tracing::info!(pid = child.id(), binary = %bin.display(), "Local node agent spawned");
 
     let supervise_host = mqtt_host.to_string();
@@ -274,7 +314,7 @@ async fn spawn_and_supervise(
                 return;
             }
 
-            match spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref()) {
+            match spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
                 Ok(new_child) => {
                     child = new_child;
                     tracing::info!(pid = child.id(), "Local node agent respawned");
@@ -295,7 +335,7 @@ async fn spawn_and_supervise(
                             );
                             return;
                         }
-                        if let Ok(new_child) = spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref()) {
+                        if let Ok(new_child) = spawn_node_child(&bin, &supervise_host, mqtt_port, &supervise_packages_dir, supervise_token.as_deref(), proxy_port, lsp_relay_port) {
                             child = new_child;
                             tracing::info!(pid = child.id(), "Local node agent respawned");
                             break;
@@ -319,6 +359,8 @@ fn spawn_node_child(
     mqtt_port: u16,
     packages_dir: &str,
     token: Option<&str>,
+    proxy_port: Option<u16>,
+    lsp_relay_port: Option<u16>,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(bin);
     cmd.args([
@@ -334,6 +376,16 @@ fn spawn_node_child(
     ]);
     if let Some(token) = token {
         cmd.args(["--token", token]);
+    }
+    // ADR-055 multi-instance: a second Gateway on the same machine
+    // (tests, previews) must not steal the primary node's reverse-proxy
+    // (:19900) or LSP relay (:19878) ports — forward the configured
+    // overrides when present.
+    if let Some(port) = proxy_port {
+        cmd.args(["--proxy-port", &port.to_string()]);
+    }
+    if let Some(port) = lsp_relay_port {
+        cmd.args(["--lsp-relay-port", &port.to_string()]);
     }
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());

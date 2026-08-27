@@ -187,10 +187,17 @@ pub struct HttpConfig {
     pub host: String,
     /// 监听端口，默认 19876
     pub port: u16,
-    /// 是否启用 CORS（开发模式），默认 false
-    pub cors_enabled: bool,
+    /// 是否启用认证（Bearer Token），默认 false
+    pub auth_enabled: bool,
 }
 ```
+
+> **CORS 始终 permissive**——所有部署场景都使用 `CorsLayer::permissive()`，不再保留
+> `[http].cors_enabled` 配置项。原因：dev 模式 Vite (`:5173`) 与生产 Tauri 自定义协议
+> (`tauri://localhost`) 都是跨源访问 Gateway (`:19876`)，hardcoded allowlist 一旦遇到浏览器
+> 把 `localhost` 解析成不同 IP 字面量就会打穿；本地默认 bind `127.0.0.1`，permissive CORS
+> 在 loopback 上没有额外风险。远端场景的 CSRF 防护靠 `Authorization: Bearer <token>`（由
+> `auth_enabled` 控制），不是 CORS。
 
 - 默认监听 `http://127.0.0.1:19876`，仅 localhost，不对外暴露
 - 端口可在 `config.toml` 中配置
@@ -410,7 +417,7 @@ HTTP API 不是独立于 IPC 通道的旁路，而是 Runtime 协议的**管理�
 |------|------|
 | 仅监听 localhost | 默认 `127.0.0.1`，不对外暴露 |
 | Vault Key 脱敏 | GET 接口不返回明文，POST 接口接收明文 |
-| 无 CORS | 生产环境不开启跨域（localhost only 天然限制） |
+| 无 CORS 白名单 | Gateway 不维护 origin allowlist（CORS 始终 permissive）——本地 loopback 0 风险 |
 | 可选 Auth Token | Gateway 生成随机 token，Desktop App 首次连接时获取，后续请求携带 `Authorization: Bearer <token>` |
 | Agent 安装校验 | 强制验证包签名（HTTP 与 MQTT 通道共享同一校验路径） |
 
@@ -435,8 +442,8 @@ Desktop App 首次连接时读取该文件 → 后续请求携带
 | 配置项 | 本机默认值 | 远端场景必填 | 说明 |
 |--------|------------|--------------|------|
 | `[http].host` | `127.0.0.1` | `0.0.0.0` 或具体网卡 IP | 否则 Desktop App 跨主机请求会被 RST |
-| `[http].cors_enabled` | `false` | `true` | 启用 `CorsLayer::permissive()`，允许 Tauri WebView 跨源请求 |
-| `[http].auth_enabled` | `false` | 视需求 | 即便开启，avatar 端点仍是公开的（见上） |
+| `[http].auth_enabled` | `false` | **远端场景必填 `true`** | 远端 Gateway 已 bind 0.0.0.0，CORS permissive + 不带 token = 全网可调，需 bearer-token 鉴权 |
+| `cors_enabled` 配置项 | _已删除_ | — | CORS 始终 permissive（见 §9.2），不需要配置开关 |
 
 远端场景下，包内头像文件位于 Gateway 机器的 `install_path` 下，Desktop App 仍然通过 `GET /api/agents/:id/avatar` 拉取，由 Gateway 从本地文件系统读取后流式响应。头像 URL 拼接 `?v=<version>` 用于 HTTP 缓存击穿，Gateway 端响应头包含 `Cache-Control: public, max-age=31536000, immutable`。
 

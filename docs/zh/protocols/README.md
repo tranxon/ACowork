@@ -18,7 +18,8 @@
 | HTTP/1.1 | TCP | Axum (Rust) | `19876` | Desktop App、CLI、运维脚本、Gateway → Runtime（反向代理） | 资源 CRUD、配置、会话查询、全局资源全量管理、大数据查询反向代理 |
 | MQTT 3.1.1 | TCP | rumqttd (嵌入 broker) + rumqttc (client) | `19875` | Gateway、Runtime 子进程、Desktop Tauri backend | 实时事件总线、状态同步、设备生命周期管理 |
 
-> **端口与绑定**：默认全部绑定 `127.0.0.1`（localhost only）。Runtime 的 localhost HTTP server 使用随机端口（`--http-port=0`），仅 Gateway 反向代理可达。可在 `gateway.toml` 的 `[http]` 节调整端口与 CORS；MQTT 端口见 [`core/acowork-gateway/configs/rumqttd.toml`](../../../core/acowork-gateway/configs/rumqttd.toml)。
+> **端口与绑定**：默认全部绑定 `127.0.0.1`（localhost only）。Runtime 的 localhost HTTP server 使用随机端口（`--http-port=0`），仅 Gateway 反向代理可达。可在 `gateway.toml` 的 `[http]` 节调整端口与 `auth_enabled`；MQTT 端口见 [`core/acowork-gateway/configs/rumqttd.toml`](../../../core/acowork-gateway/configs/rumqttd.toml)。
+> **CORS**：始终 permissive（任意 origin / method / header；不带 `allow_credentials`——`*` 通配与 `Access-Control-Allow-Credentials: true` 互斥，tower-http 会在构建时 panic；前端 fetch 默认 `credentials: 'same-origin'` 也不需要该头）。Dev (Vite `:5173`) 与 Prod (Tauri `tauri://localhost`) 都是跨源访问 Gateway `:19876`，hardcoded allowlist 不可靠；本地默认 bind loopback，没有攻击面。远端部署时安全模型靠 `auth_enabled` + Bearer Token。
 
 ---
 

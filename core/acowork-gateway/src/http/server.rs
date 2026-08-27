@@ -134,7 +134,6 @@ pub(crate) async fn start_http_server(
         auth,
     );
     app_state.log_reload_handle = log_reload_handle;
-    app_state.cors_enabled = http_config.cors_enabled;
     app_state.mqtt_gateway_client = mqtt_client;
     app_state.mqtt_publisher_trigger = mqtt_publisher_trigger;
     app_state.runtime_http_registry = runtime_http_registry;
