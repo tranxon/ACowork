@@ -4550,6 +4550,12 @@ mod tests {
         let ws_dir = temp_dir.join("ws_alpha");
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(ws_dir.join("readme.txt"), b"hello workspace\n").unwrap();
+        // Hidden entries: `.cargo` / `.gitignore` must be visible in the
+        // tree (VSCode default), `.git` must stay hidden (VSCode default
+        // `files.exclude`).
+        std::fs::create_dir_all(ws_dir.join(".cargo")).unwrap();
+        std::fs::write(ws_dir.join(".gitignore"), b"target/\n").unwrap();
+        std::fs::create_dir_all(ws_dir.join(".git")).unwrap();
 
         // Persist agent_workspaces.json so resolve_workspace_root can
         // locate the `alpha` workspace by id.
@@ -4620,6 +4626,22 @@ mod tests {
         assert!(
             entries.iter().any(|e| e["name"] == "readme.txt"),
             "tree must include readme.txt, got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        // Hidden entries are visible unless VSCode-default-excluded.
+        assert!(
+            entries.iter().any(|e| e["name"] == ".cargo"),
+            "tree must include .cargo (hidden shown), got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        assert!(
+            entries.iter().any(|e| e["name"] == ".gitignore"),
+            "tree must include .gitignore (hidden shown), got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        assert!(
+            !entries.iter().any(|e| e["name"] == ".git"),
+            "tree must NOT include .git (VSCode default exclude), got: {}",
             serde_json::to_string_pretty(&entries).unwrap()
         );
 
