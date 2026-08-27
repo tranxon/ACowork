@@ -382,6 +382,7 @@ mod tests {
                 name: "Target".to_string(),
                 install_path: "/tmp/test".to_string(),
                 manifest,
+                node_id: "local".to_string(),
             });
         }
 
@@ -431,6 +432,7 @@ mod tests {
                 name: "Target".to_string(),
                 install_path: "/tmp/test".to_string(),
                 manifest,
+                node_id: "local".to_string(),
             });
         }
 

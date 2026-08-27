@@ -6,6 +6,8 @@ import type {
   ModelInfo,
   BackendUserProfile,
   UserProfileListResponse,
+  UserProfileMutationResponse,
+  ActivateUserResponse,
   CreateUserRequest,
   UpdateUserRequest,
   EmbeddingModelsResponse,
@@ -14,7 +16,7 @@ import type {
   EmbeddingTestResponse,
   MigrationProgressResponse,
   SelectModelMigrationResponse,
-  LspEndpointResponse,
+  AgentLspEndpointResponse,
   LspInstallScriptResponse,
   LspInstallRunResponse,
   LspServerStatusEntry,
@@ -22,40 +24,55 @@ import type {
   LspServersWithStatus,
   CompactModelRef,
   DefaultCompactModelResponse,
+  NodeInfo,
 } from "./types";
 import { getGatewayUrl } from "./config";
-import { log } from "./logger";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
-// The relay endpoint is queried once and cached. On error or invalidation,
-// the cache is cleared so the next call re-fetches.
+// ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so its
+// endpoint is resolved PER AGENT via `GET /api/agents/{id}/lsp-endpoint`
+// (the node hosting the agent runs the relay). Results are cached per
+// agent. On error or invalidation, the cache entry is cleared so the
+// next call re-fetches.
 
-let relayEndpointCache: Promise<LspEndpointResponse | null> | null = null;
+const relayEndpointCache = new Map<string, Promise<string | null>>();
 
 /**
- * Get the cached LSP Relay endpoint, fetching from Gateway if needed.
+ * Get the cached LSP Relay base URL for an agent, fetching from Gateway
+ * if needed.
  *
- * Returns `null` when the relay is not available (not running or not ready).
- * On fetch error, the cache is cleared so the next call retries.
+ * Returns `null` when the relay is not available (the hosting node has
+ * not published a ready LSP relay state). On fetch error, the cache
+ * entry is cleared so the next call retries.
  */
 export async function getCachedLspRelayEndpoint(
+  agentId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<LspEndpointResponse | null> {
-  if (!relayEndpointCache) {
-    relayEndpointCache = fetchLspEndpoint(gatewayUrl)
-      .then((ep) => (ep.available && ep.port != null ? ep : null))
+): Promise<string | null> {
+  let cached = relayEndpointCache.get(agentId);
+  if (!cached) {
+    cached = fetchAgentLspEndpoint(agentId, gatewayUrl)
+      .then((ep) => (ep.ready && ep.endpoint ? ep.endpoint : null))
       .catch((err) => {
-        relayEndpointCache = null; // Clear cache on error
+        relayEndpointCache.delete(agentId); // Clear cache on error
         throw err;
       });
+    relayEndpointCache.set(agentId, cached);
   }
-  return relayEndpointCache;
+  return cached;
 }
 
-/** Invalidate the cached LSP Relay endpoint (e.g. after connection failure). */
-export function invalidateLspRelayEndpointCache(): void {
-  relayEndpointCache = null;
+/**
+ * Invalidate the cached LSP Relay endpoint for an agent, or for every
+ * agent when called without an argument (e.g. after connection failure).
+ */
+export function invalidateLspRelayEndpointCache(agentId?: string): void {
+  if (agentId !== undefined) {
+    relayEndpointCache.delete(agentId);
+  } else {
+    relayEndpointCache.clear();
+  }
 }
 
 /** Fetch all providers from Gateway's models cache */
@@ -131,7 +148,9 @@ export async function createUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to create user: ${resp.status}`);
   }
-  return resp.json();
+  // Backend responds with UserResponse { user, version } — unwrap the profile.
+  const data = (await resp.json()) as UserProfileMutationResponse;
+  return data.user;
 }
 
 /** Update an existing user profile */
@@ -149,14 +168,16 @@ export async function updateUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to update user: ${resp.status}`);
   }
-  return resp.json();
+  // Backend responds with UserResponse { user, version } — unwrap the profile.
+  const data = (await resp.json()) as UserProfileMutationResponse;
+  return data.user;
 }
 
 /** Activate a user (deactivates all others) */
 export async function activateUser(
   userId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<BackendUserProfile> {
+): Promise<ActivateUserResponse> {
   const resp = await fetch(`${gatewayUrl}/api/users/${userId}/activate`, {
     method: "POST",
   });
@@ -164,42 +185,14 @@ export async function activateUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to activate user: ${resp.status}`);
   }
+  // Backend responds with ActivateResponse { active_user_id, version }.
   return resp.json();
 }
 
-/** Reset Gateway state (reload models cache from disk or background fetch) */
-export async function resetGateway(
-  gatewayUrl = getGatewayUrl(),
-): Promise<{ status: string; source: string }> {
-  const resp = await fetch(`${gatewayUrl}/api/gateway/reset`, {
-    method: "POST",
-  });
-  if (!resp.ok) throw new Error(`Failed to reset Gateway: ${resp.status}`);
-  return resp.json();
-}
-
-/** Reset onboarding and trigger Gateway models cache reload.
- *
- *  The frontend onboarding flag is always cleared first — the user's
- *  intent is to reset the local wizard. The Gateway-side reset is
- *  best-effort: if the remote Gateway is unreachable (e.g. WSL IP drift,
- *  firewall, Gateway process not running), the wizard still reappears
- *  on reload. A previous version put `removeItem` after `await`, which
- *  silently failed to reset the UI whenever the Gateway call threw.
- */
-export async function resetOnboarding(
-  gatewayUrl = getGatewayUrl(),
-): Promise<{ status: string; source: string }> {
+/** Reset onboarding wizard state. */
+export async function resetOnboarding(): Promise<{ status: string; source: string }> {
   localStorage.removeItem("acowork_onboarding");
-  try {
-    return await resetGateway(gatewayUrl);
-  } catch (e) {
-    log.warn(
-      "Gateway reset failed (frontend onboarding state cleared anyway):",
-      e,
-    );
-    return { status: "frontend_only", source: "local" };
-  }
+  return { status: "frontend_only", source: "local" };
 }
 
 // ── Embedding Model API ──────────────────────────────────────────────────
@@ -333,33 +326,39 @@ export async function selectEmbeddingModelWithMigration(
 // ── LSP API ──────────────────────────────────────────────────────────────
 
 /**
- * Fetch the LSP Relay endpoint from the Gateway.
+ * Fetch the LSP Relay endpoint of the node hosting an agent.
  *
- * The Gateway manages the LSP Relay process and exposes its address via
- * `GET /api/lsp/endpoint`. Desktop App and Agent Runtime use this to
- * discover the relay, then connect directly.
+ * ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so the
+ * endpoint must be resolved per agent via
+ * `GET /api/agents/{id}/lsp-endpoint`. Desktop App and Agent Runtime
+ * use this to discover the relay, then connect directly.
  *
- * Returns `{ available: false, port: null }` when the relay is not running.
+ * Returns `{ ready: false, endpoint: null }` when the hosting node's
+ * relay has not published a ready state.
  */
-export async function fetchLspEndpoint(
+export async function fetchAgentLspEndpoint(
+  agentId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<LspEndpointResponse> {
-  const resp = await fetch(`${gatewayUrl}/api/lsp/endpoint`);
+): Promise<AgentLspEndpointResponse> {
+  const resp = await fetch(
+    `${gatewayUrl}/api/agents/${encodeURIComponent(agentId)}/lsp-endpoint`,
+  );
   if (!resp.ok) throw new Error(`Failed to fetch LSP endpoint: ${resp.status}`);
   return resp.json();
 }
 
 /**
- * Build the base HTTP URL for the LSP Relay.
+ * Build the base HTTP URL for the LSP Relay serving an agent.
  *
- * Returns `null` if the relay is not available.
+ * Returns `null` if the relay is not available (or no agent id was
+ * provided).
  */
 export async function getLspRelayUrl(
+  agentId?: string,
   gatewayUrl = getGatewayUrl(),
 ): Promise<string | null> {
-  const ep = await fetchLspEndpoint(gatewayUrl);
-  if (!ep.available || ep.port == null) return null;
-  return `http://${ep.host}:${ep.port}`;
+  if (!agentId) return null;
+  return getCachedLspRelayEndpoint(agentId, gatewayUrl);
 }
 
 // ── LSP Relay direct API (servers / status / install) ───────────────────
@@ -571,3 +570,19 @@ export async function setDefaultCompactModel(
   }
   return data.default_compact_model ?? null;
 }
+
+/**
+ * `GET /api/nodes` — list all known Node Agents (online + offline),
+ * sorted by node_id (ADR-055 §6.13.3 / Phase 3g).
+ *
+ * Returns an empty list when the Gateway has no node registry (MQTT
+ * disabled) or when no node has ever reported.
+ */
+export async function fetchNodes(gatewayUrl = getGatewayUrl()): Promise<NodeInfo[]> {
+  const resp = await fetch(`${gatewayUrl}/api/nodes`);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch nodes: ${resp.status}`);
+  }
+  return (await resp.json()) as NodeInfo[];
+}
+

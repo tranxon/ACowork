@@ -132,11 +132,11 @@ LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health` | 健康检查（无鉴权），含 IPC（MQTT）/ CronStore / 磁盘空间 |
-| GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用 |
+| GET | `/api/status` | 系统状态：版本、运行中 Agent 数、内存占用；`mqtt.auth_enabled` 开启时额外返回 `mqtt_username` / `mqtt_password`（Desktop MQTT 凭据下发，ADR-055 Phase 5a） |
 | GET | `/api/config` | 读取 Gateway 配置 |
 | PUT | `/api/config` | 更新日志级别、日志切分、idle_timeout、默认 provider/model、HF mirror 等 |
 | DELETE | `/api/logs` | 清空日志 |
-| GET | `/api/lsp/endpoint` | LSP Relay 端点（host + port），供 Desktop / Runtime 直连 |
+| GET | `/api/agents/{id}/lsp-endpoint` | LSP Relay 端点（node-local，ADR-055 §6.7）：按 agent 解析宿主 Node 的 relay base URL（`endpoint`/`ready` 字段），供 Desktop / Runtime 直连 |
 
 ### 4.2 Agent 包管理
 
@@ -153,6 +153,7 @@ LLM Provider / Models 全局资源、MCP 目录、嵌入模型、用户档案、
 | POST | `/api/agents/{id}/publish/build` | 构建 `.agent` 包 |
 | POST | `/api/agents/{id}/publish/export` | 导出包到目标路径 |
 | POST | `/api/agents/{id}/publish/install-locally` | 本地安装构建产物 |
+| GET | `/api/packages/{agent_id}/download` | 下载 `.agent` 包（Node install 拉取路径）；开启鉴权时校验 `X-ACowork-Node-Token`（ADR-055 Phase 5a）：缺失/不匹配 → 401/403 |
 
 ### 4.3 Agent 生命周期控制
 
@@ -295,6 +296,12 @@ Cron 由 Gateway 自管（持久化于 SQLite）。
 >
 > **Runtime 侧**真实接口见 [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs)
 > 的 25 路由清单（ADR-034 §11.2）。
+>
+> **节点反代鉴权（ADR-055 Phase 5a）**：`mqtt.auth_enabled` 开启时，Gateway
+> 出站反代按 agent_id → `installed_agents.node_id` → node registry 解析宿主
+> Node，自动注入 `X-ACowork-Node-Token: <node_token>` header；Node 入站校验
+> 该 header（已 enroll 的 Node 必须匹配 identity.node_token，不匹配 → 403 + `X-Error-Origin: node`）。
+> 未开启鉴权时无 header，行为与 Phase 4 之前完全一致。
 
 Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这意味着 Runtime 是
 **workspace config / memory / session state 的权威所有者**，Gateway 仅充当反代。
@@ -774,8 +781,14 @@ Authorization: Bearer <token>
 3. **多数写操作会触发热推送**：例如修改 Provider / MCP / Search 配置后，Gateway 通过
    MQTT **retained publish** 向所有已连接的 Runtime 同步最新可用列表，
    详见 [mqtt.md §全局资源可用性广播](./mqtt.md)。
-4. **CORS**：默认仅允许本地（Tauri、localhost:3000/5173）；远程 Desktop 场景需设置
-   `cors_enabled = true`。
+4. **CORS**：始终启用 `CorsLayer::permissive()`（任意 origin、任意 method、任意 header；不带
+   `allow_credentials(true)`——`*` 通配与 `Access-Control-Allow-Credentials: true` 互斥，tower-http
+   会在构建时 panic；且前端 fetch 默认 `credentials: 'same-origin'`，无需该头）。
+   dev 模式 Vite (`:5173`) 与生产模式 Tauri 自定义协议 (`tauri://localhost` / `http(s)://tauri.localhost`)
+   都属于跨源访问 Gateway (`:19876`)，任何 hardcoded allowlist 都会被浏览器把 `localhost` 解析成不同 IP 字
+   面量时打穿。本地默认 bind `127.0.0.1`——攻击者必须已经能访问本机回路才能利用 permissive CORS——
+   所以 loopback 上是 0 风险。远端部署时 CSRF 防护依赖 `Authorization: Bearer <token>`（`[http].auth_enabled = true`），
+   Gateway 不发 Set-Cookie，浏览器默认 `credentials: 'same-origin'` 不会带上 cookie。
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
 6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /

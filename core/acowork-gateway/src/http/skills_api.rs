@@ -20,10 +20,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path as StdPath, PathBuf};
 
-use crate::error::GatewayError;
 use crate::http::routes::{ApiError, AppState};
 
 /// Build the skill management router
@@ -200,189 +198,7 @@ pub struct ImportSkillResponse {
 }
 
 // ── Import helpers ────────────────────────────────────────────────────
-
-/// Extract a skill ZIP package to the agent's skills directory.
-///
-/// Validates the ZIP contains a SKILL.md at its root (or in a single top-level
-/// directory), parses the frontmatter to get the skill name, then extracts
-/// all files to `{install_path}/skills/{skill_name}/`.
-///
-/// Security: uses `enclosed_name()` to prevent Zip Slip path traversal.
-fn install_skill_package(
-    package_path: &StdPath,
-    skills_dir: &StdPath,
-) -> Result<String, GatewayError> {
-    // 1. Read and open ZIP
-    let data = std::fs::read(package_path).map_err(|e| {
-        GatewayError::Package(format!(
-            "Failed to read skill package '{}': {}",
-            package_path.display(),
-            e
-        ))
-    })?;
-    let reader = std::io::Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
-        GatewayError::Package(format!(
-            "Failed to read skill ZIP '{}': {}",
-            package_path.display(),
-            e
-        ))
-    })?;
-
-    // 2. Locate SKILL.md — it may be at root or inside a single top-level directory
-    let skill_md_content = extract_skill_md(&mut archive)?;
-
-    // 3. Parse SKILL.md frontmatter to extract skill name
-    let parsed = parse_skill_md(&skill_md_content).ok_or_else(|| {
-        GatewayError::Package(
-            "Invalid SKILL.md format: missing or malformed YAML frontmatter".to_string(),
-        )
-    })?;
-    let skill_name = parsed.entry.name;
-
-    // 4. Ensure the agent's skills directory exists
-    std::fs::create_dir_all(skills_dir)
-        .map_err(|e| GatewayError::Package(format!("Failed to create skills directory: {}", e)))?;
-
-    // 5. Check if a skill with the same name already exists
-    let target_skill_dir = skills_dir.join(&skill_name);
-    if target_skill_dir.exists() {
-        return Err(GatewayError::Package(format!(
-            "Skill '{}' already exists (will not overwrite)",
-            skill_name
-        )));
-    }
-
-    // 6. Create the target skill directory
-    std::fs::create_dir_all(&target_skill_dir).map_err(|e| {
-        GatewayError::Package(format!(
-            "Failed to create skill directory '{}': {}",
-            target_skill_dir.display(),
-            e
-        ))
-    })?;
-
-    // 7. Extract all files to the target skill directory
-    //    If the ZIP has a single top-level directory prefix, strip it.
-    let top_dir_name = detect_top_level_dir(&mut archive);
-    for i in 0..archive.len() {
-        let mut file = archive
-            .by_index(i)
-            .map_err(|e| GatewayError::Package(format!("ZIP read error: {}", e)))?;
-
-        let raw_path = match file.enclosed_name() {
-            Some(p) => p,
-            None => continue, // skip unsafe paths (zip-slip protection)
-        };
-
-        // Strip the top-level directory prefix if present
-        let relative_path = match &top_dir_name {
-            Some(prefix) => {
-                // Try stripping the prefix component
-                match raw_path.strip_prefix(prefix) {
-                    Ok(stripped) => stripped,
-                    Err(_) => &raw_path,
-                }
-            }
-            None => &raw_path,
-        };
-
-        // Skip empty paths (the top-level directory entry itself)
-        if relative_path.as_os_str().is_empty() {
-            continue;
-        }
-
-        let outpath = target_skill_dir.join(relative_path);
-
-        if file.is_dir() {
-            std::fs::create_dir_all(&outpath).ok();
-        } else {
-            if let Some(p) = outpath.parent()
-                && !p.exists()
-            {
-                std::fs::create_dir_all(p).ok();
-            }
-            let mut outfile = std::fs::File::create(&outpath).map_err(|e| {
-                GatewayError::Package(format!(
-                    "Failed to create file '{}': {}",
-                    outpath.display(),
-                    e
-                ))
-            })?;
-            std::io::copy(&mut file, &mut outfile).map_err(|e| {
-                GatewayError::Package(format!(
-                    "Failed to write file '{}': {}",
-                    outpath.display(),
-                    e
-                ))
-            })?;
-        }
-    }
-
-    tracing::info!(
-        "Skill '{}' imported to {}",
-        skill_name,
-        target_skill_dir.display()
-    );
-    Ok(skill_name)
-}
-
-/// Extract SKILL.md content from a ZIP archive.
-///
-/// Looks for SKILL.md at the root or inside a single top-level directory.
-fn extract_skill_md(
-    archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
-) -> Result<String, GatewayError> {
-    // Try root-level first
-    if let Ok(mut file) = archive.by_name("SKILL.md") {
-        let mut content = String::new();
-        file.read_to_string(&mut content)
-            .map_err(|e| GatewayError::Package(format!("Failed to read SKILL.md: {}", e)))?;
-        return Ok(content);
-    }
-
-    // Try inside a single top-level directory
-    let top_dir = detect_top_level_dir(archive);
-    if let Some(dir) = &top_dir {
-        let path = format!("{}/SKILL.md", dir);
-        if let Ok(mut file) = archive.by_name(&path) {
-            let mut content = String::new();
-            file.read_to_string(&mut content)
-                .map_err(|e| GatewayError::Package(format!("Failed to read SKILL.md: {}", e)))?;
-            return Ok(content);
-        }
-    }
-
-    Err(GatewayError::Package(
-        "SKILL.md not found in skill package".to_string(),
-    ))
-}
-
-/// Detect if the ZIP has a single top-level directory.
-///
-/// Returns the top-level directory name (e.g. "my-skill") if all entries
-/// share the same single top-level directory component. Returns None if
-/// entries are at root level or there are multiple top-level directories.
-fn detect_top_level_dir(archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>) -> Option<String> {
-    let mut top_dirs: Vec<String> = Vec::new();
-    for i in 0..archive.len() {
-        let file = archive.by_index(i).ok()?;
-        if let Some(path) = file.enclosed_name() {
-            let first = path.components().next()?;
-            let first_str = first.as_os_str().to_string_lossy().to_string();
-            if !top_dirs.contains(&first_str) {
-                top_dirs.push(first_str);
-            }
-            if top_dirs.len() > 1 {
-                return None; // multiple top-level entries → no single prefix
-            }
-        }
-    }
-    match top_dirs.len() {
-        1 => Some(top_dirs.into_iter().next().unwrap()),
-        _ => None,
-    }
-}
+// (skill-package extraction moved to the node — ADR-055 §6.2)
 
 /// Simple nanosecond timestamp for unique temp filenames
 fn timestamp_nanos() -> u128 {
@@ -531,66 +347,62 @@ pub async fn import_skill(
         return Err(ApiError::bad_request("Package file is empty"));
     }
 
-    // Verify agent exists and get install path
-    let install_path = {
+    // Verify agent exists
+    {
         let gw = state.gateway_state.read().await;
-        let info = gw
-            .installed_agents
-            .get(&agent_id)
-            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?;
-        info.install_path.clone()
-    };
-
-    let skills_dir = PathBuf::from(&install_path).join("skills");
+        if !gw.installed_agents.contains_key(&agent_id) {
+            return Err(ApiError::not_found(&format!("Agent not found: {}", agent_id)));
+        }
+    }
 
     let _overwrite = overwrite.unwrap_or(false);
 
-    // Spool uploaded bytes to a temp file, then call install_skill_package
-    let install_result = tokio::task::spawn_blocking(move || {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!(
-            "acowork-skill-{}-{}.zip",
-            std::process::id(),
-            timestamp_nanos(),
-        ));
-
-        // Write bytes to temp file
-        if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
-            return Err(GatewayError::Package(format!(
-                "Failed to write upload to temp file: {}",
-                e
-            )));
-        }
-
-        // Perform skill installation
-        let result = install_skill_package(&temp_file, &skills_dir);
-
-        // Best-effort cleanup of temp file
-        let _ = std::fs::remove_file(&temp_file);
-
-        result
-    })
-    .await;
-
-    match install_result {
-        Ok(Ok(skill_name)) => Ok((
-            StatusCode::CREATED,
-            Json(ImportSkillResponse {
-                success: true,
-                skill_name: skill_name.clone(),
-                message: format!("Skill '{}' imported successfully", skill_name),
-            }),
-        )),
-        Ok(Err(GatewayError::Package(msg))) => Err(ApiError::bad_request(&format!(
-            "Skill import failed: {}",
-            msg
-        ))),
-        Ok(Err(e)) => Err(ApiError::internal(&format!("Skill import failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!(
-            "Skill import task failed: {}",
+    // Spool to a node-local temp file, then delegate the import to the
+    // local node (ADR-055 §6.2). The node extracts into the agent's
+    // skills/ dir and reports the skill name in its reply.
+    let temp_file = std::env::temp_dir().join(format!(
+        "acowork-skill-{}-{}.zip",
+        std::process::id(),
+        timestamp_nanos(),
+    ));
+    if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
+        return Err(ApiError::internal(&format!(
+            "Failed to write upload to temp file: {}",
             e
-        ))),
+        )));
     }
+
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
+    let zip_path = temp_file.to_string_lossy().to_string();
+    let event = node_control
+        .skills_import(acowork_core::node::LOCAL_NODE_ID, &agent_id, &zip_path)
+        .await
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&temp_file);
+            ApiError::internal(&format!("Skill import failed: {}", e))
+        })?;
+    let _ = std::fs::remove_file(&temp_file);
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Skill import failed: {}", e)))?;
+
+    // The node reply carries "skill '{name}' imported".
+    let skill_name = event
+        .message
+        .strip_prefix("skill '")
+        .and_then(|s| s.strip_suffix("' imported"))
+        .unwrap_or("")
+        .to_string();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ImportSkillResponse {
+            success: true,
+            skill_name: skill_name.clone(),
+            message: format!("Skill '{}' imported successfully", skill_name),
+        }),
+    ))
 }
 
 /// `GET /api/agents/{id}/skills/{name}/history` — get skill execution history
@@ -626,7 +438,6 @@ pub async fn get_skill_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_parse_skill_md_basic() {
@@ -767,177 +578,5 @@ Body
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"success\":true"));
         assert!(json.contains("weekly-report"));
-    }
-
-    /// Helper: create a skill ZIP package at root level (SKILL.md at top)
-    fn create_root_level_skill_zip(dir: &StdPath) -> PathBuf {
-        let zip_path = dir.join("root-skill.zip");
-        let zip_file = std::fs::File::create(&zip_path).unwrap();
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::SimpleFileOptions::default();
-
-        zip.start_file("SKILL.md", options).unwrap();
-        zip.write_all(b"---\nname: root-skill\ndescription: A root-level skill\ntriggers:\n  - test\n---\n\nRoot skill instructions.").unwrap();
-
-        zip.start_file("prompts/action.md", options).unwrap();
-        zip.write_all(b"Action prompt content.").unwrap();
-
-        zip.finish().unwrap();
-        zip_path
-    }
-
-    /// Helper: create a skill ZIP package with a top-level directory
-    fn create_nested_skill_zip(dir: &StdPath) -> PathBuf {
-        let zip_path = dir.join("nested-skill.zip");
-        let zip_file = std::fs::File::create(&zip_path).unwrap();
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::SimpleFileOptions::default();
-
-        zip.start_file("my-skill/SKILL.md", options).unwrap();
-        zip.write_all(b"---\nname: my-skill\ndescription: A nested skill\ntriggers:\n  - nested\n---\n\nNested skill instructions.").unwrap();
-
-        zip.start_file("my-skill/prompts/action.md", options)
-            .unwrap();
-        zip.write_all(b"Nested action prompt.").unwrap();
-
-        zip.finish().unwrap();
-        zip_path
-    }
-
-    #[test]
-    fn test_install_skill_package_root_level() {
-        let tmp =
-            std::env::temp_dir().join(format!("acowork-test-skill-root-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let zip_path = create_root_level_skill_zip(&tmp);
-        let skills_dir = tmp.join("skills");
-
-        let result = install_skill_package(&zip_path, &skills_dir);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "root-skill");
-
-        // Verify extracted files
-        assert!(skills_dir.join("root-skill/SKILL.md").exists());
-        assert!(skills_dir.join("root-skill/prompts/action.md").exists());
-
-        let content =
-            std::fs::read_to_string(skills_dir.join("root-skill/prompts/action.md")).unwrap();
-        assert_eq!(content, "Action prompt content.");
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_install_skill_package_nested() {
-        let tmp =
-            std::env::temp_dir().join(format!("acowork-test-skill-nested-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let zip_path = create_nested_skill_zip(&tmp);
-        let skills_dir = tmp.join("skills");
-
-        let result = install_skill_package(&zip_path, &skills_dir);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "my-skill");
-
-        // Verify extracted files (prefix should be stripped)
-        assert!(skills_dir.join("my-skill/SKILL.md").exists());
-        assert!(skills_dir.join("my-skill/prompts/action.md").exists());
-
-        let content =
-            std::fs::read_to_string(skills_dir.join("my-skill/prompts/action.md")).unwrap();
-        assert_eq!(content, "Nested action prompt.");
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_install_skill_package_duplicate() {
-        let tmp =
-            std::env::temp_dir().join(format!("acowork-test-skill-dup-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let zip_path = create_root_level_skill_zip(&tmp);
-        let skills_dir = tmp.join("skills");
-
-        // First install should succeed
-        let result1 = install_skill_package(&zip_path, &skills_dir);
-        assert!(result1.is_ok());
-
-        // Second install should fail (duplicate)
-        let result2 = install_skill_package(&zip_path, &skills_dir);
-        assert!(result2.is_err());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_install_skill_package_missing_skill_md() {
-        let tmp =
-            std::env::temp_dir().join(format!("acowork-test-skill-nomd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        // Create ZIP without SKILL.md
-        let zip_path = tmp.join("no-skill-md.zip");
-        let zip_file = std::fs::File::create(&zip_path).unwrap();
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("readme.txt", options).unwrap();
-        zip.write_all(b"No SKILL.md here").unwrap();
-        zip.finish().unwrap();
-
-        let skills_dir = tmp.join("skills");
-        let result = install_skill_package(&zip_path, &skills_dir);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn test_detect_top_level_dir() {
-        let tmp = std::env::temp_dir().join(format!("acowork-test-prefix-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        // Nested ZIP (single top-level dir)
-        let zip_path = tmp.join("nested.zip");
-        let zip_file = std::fs::File::create(&zip_path).unwrap();
-        let mut zip = zip::ZipWriter::new(zip_file);
-        let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("my-skill/SKILL.md", options).unwrap();
-        zip.write_all(b"content").unwrap();
-        zip.start_file("my-skill/prompts/a.md", options).unwrap();
-        zip.write_all(b"prompt").unwrap();
-        zip.finish().unwrap();
-
-        let data = std::fs::read(&zip_path).unwrap();
-        let reader = std::io::Cursor::new(data);
-        let mut archive = zip::ZipArchive::new(reader).unwrap();
-        let prefix = detect_top_level_dir(&mut archive);
-        assert!(prefix.is_some());
-        assert_eq!(prefix.unwrap(), "my-skill");
-
-        // Root-level ZIP (no single top-level dir)
-        let zip_path2 = tmp.join("root.zip");
-        let zip_file2 = std::fs::File::create(&zip_path2).unwrap();
-        let mut zip2 = zip::ZipWriter::new(zip_file2);
-        zip2.start_file("SKILL.md", options).unwrap();
-        zip2.write_all(b"content").unwrap();
-        zip2.start_file("prompts/a.md", options).unwrap();
-        zip2.write_all(b"prompt").unwrap();
-        zip2.finish().unwrap();
-
-        let data2 = std::fs::read(&zip_path2).unwrap();
-        let reader2 = std::io::Cursor::new(data2);
-        let mut archive2 = zip::ZipArchive::new(reader2).unwrap();
-        let prefix2 = detect_top_level_dir(&mut archive2);
-        assert!(prefix2.is_none());
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

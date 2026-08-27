@@ -27,6 +27,7 @@ secrecy.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 base64.workspace = true
+urlencoding.workspace = true
 clap = { workspace = true, features = ["derive", "env"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -55,6 +56,7 @@ reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls"] }
 rumqttc.workspace = true
 rumqttd.workspace = true
 prost.workspace = true
+sha2.workspace = true
 tokio-stream.workspace = true
 ignore.workspace = true
 regex.workspace = true

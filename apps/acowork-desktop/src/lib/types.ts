@@ -41,6 +41,25 @@ export interface SystemStatusResponse {
   agents_installed: number;
   agents_running: number;
   uptime_secs: number;
+  /** ADR-055 D3: MQTT broker port for dynamic discovery (L3-6). */
+  mqtt_port: number;
+}
+
+/** Node Agent entry — matches Gateway HTTP API GET /api/nodes (ADR-055 §6.13.3). */
+export interface NodeInfo {
+  node_id: string;
+  online: boolean;
+  online_since?: string;
+  machine_uid?: string;
+  hostname?: string;
+  os?: string;
+  arch?: string;
+  node_version?: string;
+  protocol_version?: number;
+  capabilities: string[];
+  max_agents?: number;
+  agent_count?: number;
+  http_endpoint?: string;
 }
 
 /** Agent list entry — matches Gateway API */
@@ -1276,6 +1295,18 @@ export interface UserProfileListResponse {
   users: BackendUserProfile[];
 }
 
+/** Response from POST/PUT /api/users — matches UserResponse in acowork-gateway */
+export interface UserProfileMutationResponse {
+  user: BackendUserProfile;
+  version: number;
+}
+
+/** Response from POST /api/users/{user_id}/activate — matches ActivateResponse */
+export interface ActivateUserResponse {
+  active_user_id: string;
+  version: number;
+}
+
 /** Request body for POST /api/users */
 export interface CreateUserRequest {
   display_name: string;
@@ -1415,18 +1446,24 @@ export interface AgentSearchConfig {
 // ── LSP types ────────────────────────────────────────────────────────────
 
 /**
- * Response from `GET /api/lsp/endpoint` (Gateway).
+ * Response from `GET /api/agents/{id}/lsp-endpoint` (Gateway).
+ *
+ * ADR-055 §6.7 (Phase 4): the LSP Relay is a node-local sidecar, so the
+ * endpoint is resolved per agent — the Gateway looks up the node hosting
+ * the agent and returns that node's advertised relay base URL.
  *
  * Desktop App queries this to discover the LSP Relay's address, then
  * connects directly to the relay's WebSocket and HTTP API.
  */
-export interface LspEndpointResponse {
-  /** Whether the LSP Relay process is running and ready */
-  available: boolean;
-  /** Relay host (always "127.0.0.1" for local mode) */
-  host: string;
-  /** Relay port (null when not available) */
-  port: number | null;
+export interface AgentLspEndpointResponse {
+  /** The agent id the lookup was performed for */
+  agent_id: string;
+  /** Node hosting the agent ("local" for Gateway-spawned agents) */
+  node_id: string;
+  /** Relay base URL (e.g. "http://127.0.0.1:19878"), null when not ready */
+  endpoint: string | null;
+  /** Whether the node's LSP relay is ready */
+  ready: boolean;
 }
 
 /** LSP server entry — matches acowork_lsp_relay::config::LspServerEntry */

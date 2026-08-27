@@ -1685,10 +1685,17 @@ mod tests {
 
     #[tokio::test]
     async fn verify_runnable_stage2_stdio_lsp_server() {
+        // The stage-2 probe writes an LSP initialize handshake on stdin and
+        // expects the process to STAY ALIVE through the 5 s window (f3a86be7).
+        // A real stdio server consumes the handshake and keeps serving, so
+        // the fake binary must `sleep` after `read` — the original fixture
+        // fell through to `exit 1` right after reading the handshake line,
+        // which made `verify_command_runnable` return false.
         let path = write_fake_binary(
             "if [ \"$1\" = \"--version\" ]; then exit 1; fi\n\
              if [ \"$1\" = \"--stdio\" ]; then\n\
                  read -r _ || exit 0\n\
+                 sleep 60\n\
              fi\n\
              exit 1",
         );

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { fetchLspServers, fetchLspStatus, fetchLspStatusForLanguage, fetchLspInstallScript, runLspInstall, getLspRelayUrl } from "../../lib/gateway-api";
 import type { LspServersConfig, LspServerEntry, LspServerStatusEntry, LspHealthStatus } from "../../lib/types";
 import { CheckCircle2, XCircle, Loader2, Eye, Terminal, Code2, RefreshCw } from "lucide-react";
@@ -89,6 +90,9 @@ const LANGUAGE_COLORS: Record<string, string> = {
 export function LspTab() {
   const { t } = useTranslation();
   const status = useGatewayStore((s) => s.status);
+  // ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so the
+  // endpoint is resolved per agent — use the currently selected agent.
+  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const [config, setConfig] = useState<LspServersConfig | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,12 +108,12 @@ export function LspTab() {
 
   // Discover LSP Relay endpoint when Gateway is connected
   useEffect(() => {
-    if (status !== "connected") {
+    if (status !== "connected" || !selectedAgentId) {
       setRelayUrl(null);
       return;
     }
     let cancelled = false;
-    getLspRelayUrl()
+    getLspRelayUrl(selectedAgentId)
       .then((url) => {
         if (!cancelled) setRelayUrl(url);
       })
@@ -117,7 +121,7 @@ export function LspTab() {
         if (!cancelled) setRelayUrl(null);
       });
     return () => { cancelled = true; };
-  }, [status]);
+  }, [status, selectedAgentId]);
 
   const loadAll = useCallback(async (options: { force?: boolean } = {}) => {
     if (!relayUrl) return;

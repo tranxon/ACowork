@@ -23,6 +23,7 @@ pub mod intent;
 pub mod logging;
 pub mod manifest;
 pub mod memory;
+pub mod node;
 pub mod packaging;
 pub mod path_utils;
 pub mod permission;

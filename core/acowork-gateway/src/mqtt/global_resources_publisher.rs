@@ -21,9 +21,9 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 use acowork_core::mqtt_proto::{
-    self, AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, AvailableUsers, DataEnvelope, EmbeddingModelRef, McpRef,
-    ProviderModelRef, ProviderRef, SearchRef, UserProfileRef,
+    self, AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableSearches,
+    AvailableUsers, DataEnvelope, EmbeddingModelRef, McpRef, ProviderModelRef, ProviderRef,
+    SearchRef, UserProfileRef,
 };
 use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
@@ -37,7 +37,6 @@ mod topics {
     pub const MCPS: &str = "acowork/global/mcps";
     pub const SEARCHES: &str = "acowork/global/searches";
     pub const EMBEDDING_MODELS: &str = "acowork/global/embedding_models";
-    pub const LSPS: &str = "acowork/global/lsps";
     /// ADR-042: active user profile snapshot. Runtime uses this to populate
     /// the identity_context for the compact model's language hint.
     pub const USER_PROFILE: &str = "acowork/global/user_profile";
@@ -145,7 +144,6 @@ impl MqttGlobalResourcesPublisher {
     /// - `acowork/global/mcps` — AvailableMcps
     /// - `acowork/global/searches` — AvailableSearches
     /// - `acowork/global/embedding_models` — AvailableEmbeddingModels
-    /// - `acowork/global/lsps` — AvailableLsps
     /// - `acowork/global/user_profile` — AvailableUsers (ADR-042)
     async fn publish_all(&self) {
         let gw = self.gateway_state.read().await;
@@ -155,7 +153,6 @@ impl MqttGlobalResourcesPublisher {
         let mcps_payload = build_available_mcps(&gw);
         let searches_payload = build_available_searches(&gw);
         let embedding_payload = build_available_embedding_models(&gw);
-        let lsp_payload = build_available_lsps(&gw);
         let user_profile_payload = build_available_users(&gw);
 
         tracing::debug!(
@@ -176,7 +173,6 @@ impl MqttGlobalResourcesPublisher {
         self.publish_mcps(mcps_payload).await;
         self.publish_searches(searches_payload).await;
         self.publish_embedding_models(embedding_payload).await;
-        self.publish_lsps(lsp_payload).await;
         self.publish_user_profiles(user_profile_payload).await;
     }
 
@@ -210,14 +206,6 @@ impl MqttGlobalResourcesPublisher {
             payload: Some(mqtt_proto::data_envelope::Payload::AvailableEmbeddingModels(payload)),
         };
         self.publish_envelope_raw(topics::EMBEDDING_MODELS, &envelope).await;
-    }
-
-    async fn publish_lsps(&self, payload: AvailableLsps) {
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(mqtt_proto::data_envelope::Payload::AvailableLsps(payload)),
-        };
-        self.publish_envelope_raw(topics::LSPS, &envelope).await;
     }
 
     /// ADR-042: publish the active user profile snapshot.
@@ -429,7 +417,8 @@ fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingMode
         Some(eps) if eps.ready => (
             eps.active_model_id.clone().unwrap_or_default(),
             eps.active_dimension.unwrap_or(0) as u32,
-            format!("http://127.0.0.1:{}/v1", eps.port),
+            // ADR-055 D3: advertise host instead of hard-coded 127.0.0.1.
+            format!("http://{}:{}/v1", gw.advertise_host, eps.port),
         ),
         _ => (String::new(), 0, String::new()),
     };
@@ -440,22 +429,6 @@ fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingMode
         active_model_id,
         active_dimension,
         endpoint,
-    }
-}
-
-/// Build `AvailableLsps` from the GatewayState LSP relay process state.
-fn build_available_lsps(gw: &GatewayState) -> AvailableLsps {
-    match &gw.lsp_relay_process {
-        Some(lsp) if lsp.ready => AvailableLsps {
-            version: 1,
-            endpoint: format!("http://127.0.0.1:{}", lsp.port),
-            ready: true,
-        },
-        _ => AvailableLsps {
-            version: 1,
-            endpoint: String::new(),
-            ready: false,
-        },
     }
 }
 
@@ -548,14 +521,6 @@ mod tests {
         let payload = build_available_providers(&gw);
         assert_eq!(payload.version, 0);
         assert!(payload.providers.is_empty());
-    }
-
-    #[test]
-    fn test_build_available_lsps_no_process() {
-        let gw = GatewayState::new("/tmp/test-vault");
-        let payload = build_available_lsps(&gw);
-        assert!(!payload.ready);
-        assert!(payload.endpoint.is_empty());
     }
 
     #[tokio::test]

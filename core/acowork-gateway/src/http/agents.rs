@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Multipart, Path, Query, State},
-    http::{Response, StatusCode, header},
+    http::{HeaderMap, Response, StatusCode, header},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ use crate::http::agent_config::{
 };
 use crate::http::routes::{ApiError, AppState};
 use crate::lifecycle::process::is_process_alive;
-use crate::lifecycle::manager::SYSTEM_AGENT_ID;
+use crate::gateway::state::SYSTEM_AGENT_ID;
 use acowork_core::AgentManifest;
 
 /// Build the agent management router
@@ -46,7 +46,14 @@ pub fn agent_routes() -> Router<AppState> {
             post(upload_agent_file),
         )
         .route("/api/agents/install", post(install_agent))
+        // ADR-055 §3.2: package distribution source — remote Nodes pull
+        // the uploaded `.agent` file from the Gateway's registry here.
+        .route(
+            "/api/packages/{agent_id}/download",
+            get(download_package),
+        )
         .route("/api/agents/{id}/clone", post(clone_agent))
+        .route("/api/agents/{id}/upgrade", post(upgrade_agent))
         .route("/api/agents/{id}/start", post(start_agent))
         .route("/api/agents/{id}/stop", post(stop_agent))
         .route(
@@ -97,6 +104,12 @@ pub fn agent_routes() -> Router<AppState> {
         .route(
             "/api/agents/{id}/avatar-file",
             get(get_avatar_file).delete(delete_avatar_file),
+        )
+        // ADR-055 §6.7 (Phase 4): resolve the LSP relay endpoint of the
+        // node hosting this agent, for Desktop code-editing features.
+        .route(
+            "/api/agents/{id}/lsp-endpoint",
+            get(get_agent_lsp_endpoint),
         )
 }
 
@@ -1202,13 +1215,202 @@ pub struct UploadFileQuery {
     pub path: String,
 }
 
+/// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
+/// source file from the package registry (ADR-055 §3.2). This is how a
+/// remote Node pulls the package during an asynchronous install.
+///
+/// ADR-055 Phase 5a: when `mqtt.auth_enabled` is on, the Node must
+/// present its long-lived token as `X-ACowork-Node-Token` (any
+/// registered node token passes — the registry is node-agnostic at
+/// this tier). 401 without the header, 403 on a mismatch.
+pub async fn download_package(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    // agent_id is a slug; reject path separators / traversal.
+    if agent_id.is_empty()
+        || agent_id.contains('/')
+        || agent_id.contains('\\')
+        || agent_id.contains("..")
+    {
+        return Err(ApiError::bad_request("Invalid agent id"));
+    }
+
+    // ADR-055 Phase 5a: node-token gate on the package channel.
+    let broker_auth = state.gateway_state.read().await.mqtt_broker_auth.clone();
+    if let Some(auth) = broker_auth.filter(|a| a.auth_enabled) {
+        let provided = headers
+            .get("X-ACowork-Node-Token")
+            .and_then(|v| v.to_str().ok());
+        let Some(token) = provided else {
+            return Err(ApiError::unauthorized(
+                "Node token required (X-ACowork-Node-Token)",
+            ));
+        };
+        let valid = auth
+            .node_tokens
+            .lock()
+            .map(|store| store.any_token_matches(token))
+            .unwrap_or(false);
+        if !valid {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiError {
+                    error: "Invalid node token".to_string(),
+                    code: 403,
+                }),
+            ));
+        }
+    }
+
+    let registry_dir = {
+        let gw = state.gateway_state.read().await;
+        gw.config
+            .as_ref()
+            .map(|c| c.package_registry_dir())
+            .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?
+    };
+
+    let path = registry_dir.join(format!("{}.agent", agent_id));
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| ApiError::not_found(&format!("Package '{}' not in registry: {}", agent_id, e)))?;
+
+    let body = Body::from(bytes);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}.agent\"", agent_id),
+        )
+        .body(body)
+        .map_err(|e| ApiError::internal(&format!("Failed to build download response: {}", e)))
+}
+
+/// Read the Gateway's `dev_mode` flag (default `false` = strict
+/// signature verification on the node, ADR-055 §6.20).
+pub(crate) async fn gateway_dev_mode(state: &AppState) -> bool {
+    state
+        .gateway_state
+        .read()
+        .await
+        .config
+        .as_ref()
+        .map(|c| c.dev_mode)
+        .unwrap_or(false)
+}
+
+/// Enforce ADR-055 §6.9 version negotiation before issuing a control
+/// command: the target node's reported protocol version must be at least
+/// [`acowork_core::node::NODE_MIN_SUPPORTED_PROTOCOL_VERSION`].
+///
+/// Unknown-node / missing-info cases are NOT gated here — they are left
+/// to the command round-trip (which surfaces a timeout / offline error),
+/// because the version gate should only reject nodes whose protocol is
+/// known to be too old, not nodes that haven't reported yet.
+pub(crate) async fn check_node_compatible(
+    state: &AppState,
+    node_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(registry) = state.node_registry.as_ref() else {
+        // No node registry (MQTT disabled) — the command path fails later
+        // with a clearer "control plane unavailable" error.
+        return Ok(());
+    };
+    let reported = {
+        let reg = registry.read().await;
+        reg.get(node_id)
+            .and_then(|n| n.info.as_ref())
+            .map(|i| i.protocol_version)
+    };
+    let Some(proto) = reported else {
+        return Ok(());
+    };
+    if !acowork_core::node::is_node_protocol_compatible(proto) {
+        return Err(ApiError::bad_request(&format!(
+            "Node '{}' protocol version {} is incompatible (minimum supported {})",
+            node_id,
+            proto,
+            acowork_core::node::NODE_MIN_SUPPORTED_PROTOCOL_VERSION
+        )));
+    }
+    Ok(())
+}
+
+/// Response for `GET /api/agents/{id}/lsp-endpoint`.
+#[derive(Debug, Serialize)]
+pub struct AgentLspEndpointResponse {
+    pub agent_id: String,
+    /// Node hosting the agent (ADR-055 §6.5); `"local"` for agents the
+    /// Gateway spawns directly.
+    pub node_id: String,
+    /// LSP relay endpoint advertised by the node, `None` when the node
+    /// has not published a ready LSP relay state yet.
+    pub endpoint: Option<String>,
+    /// Whether the node's LSP relay is ready.
+    pub ready: bool,
+}
+
+/// `GET /api/agents/{id}/lsp-endpoint` — resolve the LSP relay endpoint
+/// of the node hosting this agent.
+///
+/// ADR-055 §6.7 (Phase 4): the LSP relay is no longer a Gateway child
+/// process — each node runs its own relay sidecar and publishes a
+/// retained `acowork/nodes/{node_id}/lsps` envelope, which the Gateway
+/// mirrors into [`crate::mqtt::node_registry::NodeInfoState::lsp_endpoint`].
+///
+/// Node resolution order: running agent's host first, installed-agent
+/// inventory as fallback (agent stopped).
+pub async fn get_agent_lsp_endpoint(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentLspEndpointResponse>, (StatusCode, Json<ApiError>)> {
+    let node_id = {
+        let gw = state.gateway_state.read().await;
+        gw.running_agents
+            .get(&agent_id)
+            .map(|r| r.node_id.clone())
+            .or_else(|| gw.installed_agents.get(&agent_id).map(|i| i.node_id.clone()))
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
+    };
+
+    let endpoint = match state.node_registry.as_ref() {
+        Some(registry) => registry
+            .read()
+            .await
+            .get(&node_id)
+            .and_then(|n| n.lsp_endpoint.clone()),
+        None => None,
+    };
+    let ready = endpoint.is_some();
+
+    Ok(Json(AgentLspEndpointResponse {
+        agent_id,
+        node_id,
+        endpoint,
+        ready,
+    }))
+}
+
 /// `POST /api/agents/install` — upload and install a .agent package.
+///
+/// ADR-055 §3.2: asynchronous install. The Gateway spools the upload
+/// into its package registry, then issues an `install` command carrying
+/// the registry download URL to the target node and returns `202
+/// Accepted` immediately. The node downloads, verifies, and installs the
+/// package, then publishes a retained `installed` inventory entry — the
+/// Gateway aggregates that (installed table + cron triggers) on receipt.
+///
+/// The Gateway's own `dev_mode` flag is forwarded to the node to select
+/// signature strictness (ADR-055 §6.20).
 pub async fn install_agent(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
     let mut package_bytes: Option<Vec<u8>> = None;
-    let mut request_dev_mode: Option<bool> = None;
+    let mut node_id: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -1223,9 +1425,12 @@ pub async fn install_agent(
                 })?;
                 package_bytes = Some(bytes.to_vec());
             }
-            "dev_mode" => {
+            // ADR-055 §3.3: optional target node (defaults to `local`).
+            "node_id" => {
                 let text = field.text().await.unwrap_or_default();
-                request_dev_mode = Some(text == "true" || text == "1");
+                if !text.is_empty() {
+                    node_id = Some(text);
+                }
             }
             _ => {}
         }
@@ -1233,76 +1438,182 @@ pub async fn install_agent(
 
     let package_bytes =
         package_bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
-
     if package_bytes.is_empty() {
         return Err(ApiError::bad_request("Package file is empty"));
     }
+    let node_id = node_id.unwrap_or_else(|| acowork_core::node::LOCAL_NODE_ID.to_string());
 
-    let packages_dir = packages_dir_from_state(&state).await;
-    let dev_mode = match request_dev_mode {
-        Some(v) => v,
-        None => gateway_dev_mode(&state).await,
+    // Persist the source into the package registry and build the download
+    // URL the node will use (advertise_host = the address other machines
+    // reach).
+    let (manifest, package_url) = register_package_in_registry(&state, &package_bytes).await?;
+    let agent_id = manifest.agent_id.clone();
+
+    // Dispatch the asynchronous install (fire-and-forget). Completion is
+    // observed via the node's retained installed inventory, not here.
+    let node_control = state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
+    check_node_compatible(&state, &node_id).await?;
+    // The install command is a fire-and-forget MQTT publish (non-retained,
+    // no retry) — a target node that never enrolled would silently drop
+    // it, leaving this 202 Accepted as a false promise. Reject with 503
+    // so the caller retries once the node is online (ADR-055 §3.2).
+    if let Some(registry) = state.node_registry.as_ref()
+        && registry.read().await.get(&node_id).is_none()
+    {
+        return Err(ApiError::service_unavailable(&format!(
+            "Node '{}' has never enrolled (offline) — install requires a connected node",
+            node_id
+        )));
+    }
+    node_control
+        .install_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Install dispatch failed: {}", e)))?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(MessageResponse {
+            message: format!("Install dispatched to node '{}': {}", node_id, agent_id),
+        }),
+    ))
+}
+
+/// Spool package bytes to a temp file, extract the manifest, and persist
+/// the source into the package registry. Returns `(manifest, download_url)`.
+///
+/// Shared by install and upgrade — both persist the uploaded `.agent` to
+/// the Gateway's registry and hand the node a download URL (ADR-055 §3.2).
+async fn register_package_in_registry(
+    state: &AppState,
+    package_bytes: &[u8],
+) -> Result<(AgentManifest, String), (StatusCode, Json<ApiError>)> {
+    let temp_file = std::env::temp_dir().join(format!(
+        "acowork-install-{}-{}.agent",
+        std::process::id(),
+        timestamp_nanos(),
+    ));
+    if let Err(e) = std::fs::write(&temp_file, package_bytes) {
+        return Err(ApiError::internal(&format!(
+            "Failed to write upload to temp file: {}",
+            e
+        )));
+    }
+
+    let manifest = match extract_manifest_from_package(&temp_file) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_file);
+            return Err(ApiError::bad_request(&format!("{}", e)));
+        }
     };
+    let agent_id = manifest.agent_id.clone();
 
-    let install_result = tokio::task::spawn_blocking(move || {
-        let temp_file = std::env::temp_dir().join(format!(
-            "acowork-install-{}-{}.agent",
-            std::process::id(),
-            timestamp_nanos(),
-        ));
-
-        if let Err(e) = std::fs::write(&temp_file, &package_bytes) {
-            return Err(GatewayError::Package(format!(
-                "Failed to write upload to temp file: {}",
+    let (registry_path, package_url) = {
+        let gw = state.gateway_state.read().await;
+        let config = gw
+            .config
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("Gateway config unavailable"))?;
+        let registry_dir = config.package_registry_dir();
+        if let Err(e) = std::fs::create_dir_all(&registry_dir) {
+            return Err(ApiError::internal(&format!(
+                "Failed to create registry dir: {}",
                 e
             )));
         }
-
-        let result = crate::package_manager::install::install_package(
-            &temp_file,
-            &packages_dir,
-            &mut state.gateway_state.blocking_write(),
-            dev_mode,
+        let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+        let url = format!(
+            "http://{}:{}/api/packages/{}/download",
+            gw.advertise_host, config.http.port, agent_id
         );
-
+        (registry_path, url)
+    };
+    if let Err(e) = std::fs::copy(&temp_file, &registry_path) {
         let _ = std::fs::remove_file(&temp_file);
-
-        result
-    })
-    .await;
-
-    install_response(install_result)
-}
-
-async fn packages_dir_from_state(state: &AppState) -> std::path::PathBuf {
-    let gw = state.gateway_state.read().await;
-    gw.config
-        .as_ref()
-        .map(|c| std::path::PathBuf::from(&c.packages_dir))
-        .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-}
-
-async fn gateway_dev_mode(state: &AppState) -> bool {
-    let gw = state.gateway_state.read().await;
-    gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
-}
-
-fn install_response(
-    install_result: Result<
-        Result<crate::gateway::state::AgentInfo, GatewayError>,
-        tokio::task::JoinError,
-    >,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
-    match install_result {
-        Ok(Ok(info)) => Ok((
-            StatusCode::CREATED,
-            Json(MessageResponse {
-                message: format!("Package installed: {}", info.agent_id),
-            }),
-        )),
-        Ok(Err(e)) => Err(ApiError::bad_request(&format!("Install failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Install task failed: {}", e))),
+        return Err(ApiError::internal(&format!(
+            "Failed to store package in registry: {}",
+            e
+        )));
     }
+    let _ = std::fs::remove_file(&temp_file);
+
+    Ok((manifest, package_url))
+}
+
+/// Extract the `manifest.toml` from a `.agent` package ZIP (path-based).
+///
+/// ADR-055 Phase 2b.3: the Gateway no longer installs packages itself —
+/// it extracts the manifest only to route the node install command and to
+/// register cron triggers. The actual extraction/install happens on the
+/// node.
+pub(crate) fn extract_manifest_from_package(
+    package_path: &std::path::Path,
+) -> Result<AgentManifest, GatewayError> {
+    use std::io::Read;
+
+    let data = std::fs::read(package_path).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read package '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
+    let reader = std::io::Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
+        GatewayError::Package(format!(
+            "Failed to read ZIP '{}': {}",
+            package_path.display(),
+            e
+        ))
+    })?;
+    let mut manifest_file = archive.by_name("manifest.toml").map_err(|e| {
+        GatewayError::Package(format!("manifest.toml not found in package: {}", e))
+    })?;
+    let mut manifest_str = String::new();
+    manifest_file
+        .read_to_string(&mut manifest_str)
+        .map_err(|e| GatewayError::Package(format!("Failed to read manifest.toml: {}", e)))?;
+    AgentManifest::from_toml(&manifest_str)
+        .map_err(|e| GatewayError::Package(format!("Invalid manifest.toml: {}", e)))
+}
+
+/// Track a node-hosted running agent in `GatewayState` after a
+/// successful node start (ADR-055 §6.2). `pid` is 0 — the Gateway
+/// observes liveness via MQTT status/ready topics, not the PID.
+async fn track_running_agent(state: &AppState, agent_id: &str, dev_mode: bool) {
+    let mut gw = state.gateway_state.write().await;
+    let workspace = gw
+        .installed_agents
+        .get(agent_id)
+        .map(|i| {
+            std::path::PathBuf::from(&i.install_path)
+                .join("workspace")
+                .to_string_lossy()
+                .to_string()
+        })
+        .unwrap_or_default();
+    gw.add_running(crate::gateway::state::RunningAgentInfo {
+        agent_id: agent_id.to_string(),
+        pid: 0,
+        started_at: chrono::Utc::now(),
+        workspace,
+        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+        connected: false,
+        ready: false,
+        dev_mode,
+        debug_state: if dev_mode {
+            crate::gateway::state::DebugState::Enabled
+        } else {
+            crate::gateway::state::DebugState::Disabled
+        },
+        debug_port: None,
+        workspace_config_json: None,
+        current_embed_dim: None,
+        migration: None,
+    });
 }
 
 fn timestamp_nanos() -> u128 {
@@ -1355,45 +1666,137 @@ pub async fn clone_agent(
         ));
     }
 
-    // Determine packages dir and dev_mode from Gateway config
-    let packages_dir = {
+    // Route to the node hosting the source agent (ADR-055 §6.6 L2-5 —
+    // clone is a node-local operation on the source's node).
+    let node_id = {
         let gw = state.gateway_state.read().await;
-        gw.config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.packages_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
+        gw.installed_agents
+            .get(&agent_id)
+            .map(|i| i.node_id.clone())
+            .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
     };
 
-    let new_agent_id = req.new_agent_id.clone();
+    let mode = match req.mode {
+        CloneModeParam::Skeleton => "skeleton",
+        CloneModeParam::Full => "full",
+    };
 
-    let result = tokio::task::spawn_blocking(move || {
-        let mut gw = state.gateway_state.blocking_write();
-        let clone_mode = match req.mode {
-            CloneModeParam::Skeleton => crate::package_manager::clone::CloneMode::Skeleton,
-            CloneModeParam::Full => crate::package_manager::clone::CloneMode::Full,
-        };
+    let node_control = state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
+    check_node_compatible(&state, &node_id).await?;
+    let event = node_control
+        .clone_agent(&node_id, &agent_id, &req.new_agent_id, mode)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Clone failed: {}", e)))?;
 
-        crate::package_manager::clone::clone_agent(
-            &agent_id,
-            &new_agent_id,
-            clone_mode,
-            &packages_dir,
-            &mut gw,
-        )
-    })
-    .await;
+    // The node reports the new install_path via result_json (JSON).
+    let install_path = event
+        .result_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .and_then(|v| {
+            v.get("install_path")
+                .and_then(|p| p.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_default();
 
-    match result {
-        Ok(Ok(info)) => Ok((
-            StatusCode::CREATED,
-            Json(CloneResponse {
-                agent_id: info.agent_id,
-                install_path: info.install_path,
-            }),
-        )),
-        Ok(Err(e)) => Err(ApiError::bad_request(&format!("Clone failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Clone task failed: {}", e))),
+    Ok((
+        StatusCode::CREATED,
+        Json(CloneResponse {
+            agent_id: req.new_agent_id,
+            install_path,
+        }),
+    ))
+}
+
+/// `POST /api/agents/:id/upgrade` — upgrade an agent to a new package
+///
+/// Multipart body: `package` (the new .agent file, required) + optional
+/// `node_id` (defaults to the node hosting the agent). The Gateway spools
+/// the package to the registry and dispatches an asynchronous upgrade to
+/// the node (ADR-055 §3.2) — completion is observed via the node's
+/// retained installed inventory with the new version.
+pub async fn upgrade_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+    let mut package_bytes: Option<Vec<u8>> = None;
+    let mut node_id: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::bad_request(&format!("Failed to read multipart field: {}", e)))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "package" => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    ApiError::bad_request(&format!("Failed to read package field: {}", e))
+                })?;
+                package_bytes = Some(bytes.to_vec());
+            }
+            "node_id" => {
+                let text = field.text().await.unwrap_or_default();
+                if !text.is_empty() {
+                    node_id = Some(text);
+                }
+            }
+            _ => {}
+        }
     }
+
+    let package_bytes =
+        package_bytes.ok_or_else(|| ApiError::bad_request("Missing required field: 'package'"))?;
+    if package_bytes.is_empty() {
+        return Err(ApiError::bad_request("Package file is empty"));
+    }
+
+    // Upgrade targets an existing agent — default to the node hosting it.
+    let node_id = match node_id {
+        Some(n) => n,
+        None => {
+            let gw = state.gateway_state.read().await;
+            gw.installed_agents
+                .get(&agent_id)
+                .map(|i| i.node_id.clone())
+                .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))?
+        }
+    };
+
+    // Persist the new package into the registry and verify the manifest's
+    // agent_id matches the upgrade target.
+    let (manifest, package_url) = register_package_in_registry(&state, &package_bytes).await?;
+    if manifest.agent_id != agent_id {
+        return Err(ApiError::bad_request(&format!(
+            "Package agent_id '{}' does not match upgrade target '{}'",
+            manifest.agent_id, agent_id
+        )));
+    }
+
+    // Dispatch the asynchronous upgrade (fire-and-forget).
+    let node_control = state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
+    check_node_compatible(&state, &node_id).await?;
+    node_control
+        .upgrade_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Upgrade dispatch failed: {}", e)))?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(MessageResponse {
+            message: format!("Upgrade dispatched to node '{}': {}", node_id, agent_id),
+        }),
+    ))
 }
 
 /// `DELETE /api/agents/:id` — uninstall an agent
@@ -1416,30 +1819,26 @@ pub async fn uninstall_agent(
         }
     }
 
-    // Determine packages dir from Gateway config
-    let packages_dir = {
-        let gw = state.gateway_state.read().await;
-        gw.config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.packages_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-    };
+    // ADR-055 §6.2: delegate uninstall to the local node. The node clears
+    // the retained installed-info entry; the Gateway drops the agent from
+    // installed_agents via the dispatch aggregation path.
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
+    let event = node_control
+        .uninstall_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Uninstall failed: {}", e)))?;
 
-    // Wrap the synchronous uninstall in spawn_blocking
-    let agent_id_display = agent_id.clone();
-    let uninstall_result = tokio::task::spawn_blocking(move || {
-        let mut gw = state.gateway_state.blocking_write();
-        crate::package_manager::uninstall::uninstall_package(&agent_id, &packages_dir, &mut gw)
-    })
-    .await;
+    // Drop the installed entry immediately (the node's retained clear is
+    // the eventual-consistency backstop for a fresh Gateway).
+    state.gateway_state.write().await.remove_installed(&agent_id);
 
-    match uninstall_result {
-        Ok(Ok(_)) => Ok(Json(MessageResponse {
-            message: format!("Agent uninstalled: {}", agent_id_display),
-        })),
-        Ok(Err(e)) => Err(ApiError::internal(&format!("Uninstall failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Uninstall task failed: {}", e))),
-    }
+    Ok(Json(MessageResponse {
+        message: format!("Agent uninstalled: {}", agent_id),
+    }))
 }
 
 /// Start agent request body
@@ -1458,8 +1857,7 @@ pub async fn start_agent(
     Path(agent_id): Path<String>,
     Json(req): Json<StartAgentRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, Json<ApiError>)> {
-    // Pre-flight checks — released before we touch the lifecycle so the
-    // reaper task isn't starved while we read config.
+    // Pre-flight checks — released before we issue the node command.
     {
         let gw = state.gateway_state.read().await;
         if !gw.is_installed(&agent_id) {
@@ -1476,27 +1874,21 @@ pub async fn start_agent(
         }
     }
 
-    // Build lifecycle from current config.
-    let (log_file_size_mb, log_file_count, mqtt_port) = {
-        let gw = state.gateway_state.read().await;
-        (
-            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
-            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
-            gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None }),
-        )
-    };
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        log_file_size_mb,
-        log_file_count,
-        mqtt_port,
-    );
-    // `wire_reaper = true`: this is the long-lived daemon path — the
-    // reaper must clean up `running_agents` if the Runtime exits
-    // (auto-sleep, crash, manual stop).
-    lifecycle
-        .start_agent(&agent_id, &state.gateway_state, req.dev_mode, true)
+    // ADR-055 §6.2: delegate start to the local node via the control
+    // plane instead of spawning the Runtime directly.
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
+    check_node_compatible(&state, acowork_core::node::LOCAL_NODE_ID).await?;
+    let event = node_control
+        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, req.dev_mode)
         .await
         .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Start failed: {}", e)))?;
+
+    // Track the running entry in GatewayState (node-hosted, pid 0).
+    track_running_agent(&state, &agent_id, req.dev_mode).await;
 
     // When starting in debug mode, bump Gateway's log level to DEBUG
     // so the Settings UI reflects the effective log level.
@@ -1547,15 +1939,19 @@ pub async fn stop_agent(
         }
     }
 
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        10,
-        20,
-        None,
-    );
-    lifecycle
-        .stop_agent(&agent_id, &state.gateway_state)
+    // ADR-055 §6.2: delegate stop to the local node.
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
+    let event = node_control
+        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "user")
         .await
         .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Stop failed: {}", e)))?;
+
+    // Pre-emptively drop the running entry (mirrors the old stop path).
+    state.gateway_state.write().await.remove_running(&agent_id);
 
     Ok(Json(MessageResponse {
         message: format!("Agent stopped: {}", agent_id),
@@ -1616,33 +2012,28 @@ pub async fn restart_agent_in_debug(
         }));
     }
 
-    // ADR-033: gRPC removed. Restart-in-debug requires a full stop+start cycle.
-    // Stop the agent first, then restart with dev_mode=true.
-    let (log_file_size_mb, log_file_count, mqtt_port) = {
-        let gw = state.gateway_state.read().await;
-        (
-            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
-            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
-            gw.config.as_ref().and_then(|c| if c.mqtt.enabled { Some(c.mqtt.port) } else { None }),
-        )
-    };
-    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-        log_file_size_mb,
-        log_file_count,
-        mqtt_port,
-    );
+    // ADR-055 §6.2: restart-in-debug = node stop + node start(dev_mode).
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
 
     // Stop current process
-    lifecycle
-        .stop_agent(&agent_id, &state.gateway_state)
+    let stop_event = node_control
+        .stop_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, "debug-restart")
         .await
         .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &stop_event)
+        .map_err(|e| ApiError::internal(&format!("Stop before debug restart failed: {}", e)))?;
+    state.gateway_state.write().await.remove_running(&agent_id);
 
-    // Start with dev_mode=true (wire reaper: long-lived daemon path)
-    lifecycle
-        .start_agent(&agent_id, &state.gateway_state, true, true)
+    // Start with dev_mode=true
+    let start_event = node_control
+        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, true)
         .await
         .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &start_event)
+        .map_err(|e| ApiError::internal(&format!("Debug restart failed: {}", e)))?;
+    track_running_agent(&state, &agent_id, true).await;
 
     // Bump Gateway's log level to DEBUG so the Settings UI reflects it.
     {

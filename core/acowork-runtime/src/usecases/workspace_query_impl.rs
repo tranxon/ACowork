@@ -25,7 +25,7 @@ use ignore::WalkBuilder;
 use regex::Regex;
 
 use crate::usecases::workspace_query::{
-    FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, ReadFileParams,
+    FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, RawFileDto, ReadFileParams,
     SearchFilesParams, SearchMatchDto, SearchResponse, TreeEntryDto, TreeResponse,
     WorkspaceError, WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
 };
@@ -428,6 +428,36 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
+    async fn read_file_raw(
+        &self,
+        params: &ReadFileParams,
+    ) -> Result<RawFileDto, WorkspaceError> {
+        // Same `resolve_within` guard as `read_file` — canonicalise +
+        // containment check (path-traversal defence) before touching disk.
+        let (_root, abs_path, rel_path) =
+            self.resolve_within(params.workspace_id.as_deref(), &params.path)?;
+
+        let meta = std::fs::metadata(&abs_path).map_err(|_| {
+            WorkspaceError::NotFound(format!("failed to read metadata for: {}", rel_path))
+        })?;
+        if !meta.is_file() {
+            return Err(WorkspaceError::NotFound(format!(
+                "not a file: {}",
+                rel_path
+            )));
+        }
+
+        let bytes = std::fs::read(&abs_path).map_err(|_| {
+            WorkspaceError::NotFound(format!("failed to read file: {}", rel_path))
+        })?;
+
+        Ok(RawFileDto {
+            bytes,
+            mime_type: Self::mime_type_for(&rel_path).to_string(),
+            size: meta.len(),
+        })
+    }
+
     async fn find_files(
         &self,
         params: &FindFilesParams,
@@ -816,5 +846,38 @@ mod tests {
             "root should end with the tempdir leaf, got: {} (want suffix: {expected_suffix})",
             resp.root
         );
+    }
+
+    /// `read_file_raw` (ADR-055 L2-7) must return verbatim bytes + MIME
+    /// and reject path traversal, so the Gateway's HTML-preview reverse
+    /// proxy serves sub-resources correctly and never escapes the
+    /// workspace root.
+    #[tokio::test]
+    async fn read_file_raw_returns_bytes_and_blocks_traversal() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("index.html"), "<h1>hi</h1>").expect("write");
+
+        let svc = RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        // Agent home: raw bytes + HTML MIME (not a JSON envelope).
+        let dto = svc
+            .read_file_raw(&ReadFileParams {
+                workspace_id: None,
+                path: "index.html".to_string(),
+            })
+            .await
+            .expect("read_file_raw");
+        assert_eq!(dto.bytes, b"<h1>hi</h1>");
+        assert_eq!(dto.mime_type, "text/html");
+
+        // Path traversal must be rejected by the shared `resolve_within`.
+        let err = svc
+            .read_file_raw(&ReadFileParams {
+                workspace_id: None,
+                path: "../secret.txt".to_string(),
+            })
+            .await
+            .expect_err("traversal must fail");
+        assert_eq!(err.http_status(), 400);
     }
 }

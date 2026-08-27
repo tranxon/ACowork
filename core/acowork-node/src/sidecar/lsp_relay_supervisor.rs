@@ -1,18 +1,22 @@
-//! LSP Relay process supervisor — monitors the LSP Relay child process
-//! via SSE, detects failures, and restarts with exponential backoff.
+//! LSP Relay process supervisor — monitors the node-local LSP Relay
+//! child process via SSE, detects failures, and restarts with
+//! exponential backoff (ADR-055 §6.7 node-local sidecar).
 //!
-//! This is the LSP Relay counterpart of `embed_supervisor.rs`. It follows
-//! the same architecture: connect to the relay's `/events` SSE stream,
-//! watch heartbeats (2s cadence, 10s timeout), and restart on failure
-//! with exponential backoff (5 attempts / 5 min cap).
+//! Migrated from the Gateway's `lifecycle/lsp_relay_supervisor.rs`
+//! (the tested template — SSE heartbeat, crash recovery) with these
+//! changes:
+//! - `SharedState` re-based onto [`crate::state::SharedNodeState`];
+//! - the parent-health probe retargeted from the Gateway `/health` to
+//!   the Node `/health` (the relay CLI arg keeps its historical name);
+//! - every ready/unavailable transition now PUBLISHES the retained
+//!   `acowork/nodes/{node_id}/lsps` (AvailableLsps) + sidecar status
+//!   topic — the Gateway version left this as `TODO(sidecar-mqtt)`.
 //!
-//! See ADR-019 for the full design rationale.
+//! See ADR-019 for the supervisor design rationale.
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use acowork_core::health::supervisor_defaults;
@@ -21,7 +25,7 @@ use acowork_core::supervisor::{
     parse_sse_frame,
 };
 
-use crate::gateway::state::GatewayState;
+use crate::state::SharedNodeState;
 
 use super::lsp_relay::{
     check_lsp_relay_health, kill_lsp_relay, spawn_lsp_relay,
@@ -58,9 +62,6 @@ pub(crate) fn sse_http_client() -> &'static reqwest::Client {
     })
 }
 
-/// Shared gateway state handle.
-pub type SharedState = Arc<RwLock<GatewayState>>;
-
 /// Connect / reconnect backoff bounds. The SSE client itself is
 /// built via `expect` in `sse_http_client`, so this constant is
 /// only referenced by the unit tests below (asserted for sanity).
@@ -68,38 +69,114 @@ pub type SharedState = Arc<RwLock<GatewayState>>;
 #[allow(dead_code)]
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
-/// Configuration for the LSP Relay supervisor.
+/// Configuration for the LSP Relay supervisor (node-local, ADR-055 §6.7).
 #[derive(Clone)]
 pub struct LspRelaySupervisorConfig {
+    /// Node data directory (for the relay log file).
     pub data_dir: std::path::PathBuf,
+    /// Port the relay listens on.
     pub port: u16,
-    pub gateway_health_url: String,
+    /// Node health URL passed to the relay as `--gateway-health-url`
+    /// (self-exit watchdog target — the parent is now the Node).
+    pub health_url: String,
+    /// This node's id — the retained `lsps` topic is per-node.
+    pub node_id: String,
+    /// Advertise host used to build the published endpoint
+    /// (`http://{advertise_host}:{port}` — ADR-055 §6.3, so remote
+    /// Runtimes and the Desktop reach the relay on THIS node).
+    pub advertise_host: String,
 }
 
-/// Spawn the supervisor task. Must be called from an async context,
-/// AFTER the LSP Relay child has been spawned.
-pub fn start_lsp_relay_supervisor(
-    cfg: LspRelaySupervisorConfig,
-    state: SharedState,
-) {
+/// Publish the retained node-local LSP state through the process-wide
+/// dispatcher (ADR-055 §6.7): `acowork/nodes/{node_id}/lsps`
+/// (AvailableLsps) + sidecar status topic. Called on every
+/// ready/unavailable transition. Best-effort — a failed publish is
+/// logged, never fatal (the next transition or node re-bootstrap
+/// re-asserts it).
+async fn publish_lsps_state(cfg: &LspRelaySupervisorConfig, ready: bool) {
+    let _ = crate::control::dispatcher::publish_lsps_state(
+        cfg.node_id.clone(),
+        cfg.advertise_host.clone(),
+        cfg.port,
+        ready,
+    )
+    .await;
+}
+
+/// Full node-local sidecar lifecycle: attach-or-spawn the relay
+/// (migrated from the Gateway's startup block), reap the child, and
+/// supervise via SSE. Runs until the relay is intentionally removed or
+/// the node process exits.
+pub fn start_lsp_relay_supervisor(cfg: LspRelaySupervisorConfig, state: SharedNodeState) {
     let port = cfg.port;
     tokio::spawn(async move {
+        // ── Initial attach-or-spawn (ADR-055 §6.7, §6.11 local node) ──
+        {
+            if let Some(health) = check_lsp_relay_health(port).await {
+                let relay_state = super::lsp_relay::attach_existing_lsp_relay(port, Some(health));
+                let relay_ready = relay_state.ready;
+                tracing::info!(
+                    port = relay_state.port,
+                    ready = relay_ready,
+                    "Reusing existing LSP Relay process"
+                );
+                state.write().await.lsp_relay_process = Some(relay_state);
+                publish_lsps_state(&cfg, relay_ready).await;
+            } else {
+                match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url).await {
+                    Ok((relay_state, child)) => {
+                        let child_pid = relay_state.pid;
+                        tracing::info!(
+                            pid = relay_state.pid,
+                            port = relay_state.port,
+                            "LSP Relay process spawned"
+                        );
+                        state.write().await.lsp_relay_process = Some(relay_state);
+                        let state_for_reaper = state.clone();
+                        // Reaper: clear the state only if the PID is
+                        // still ours (same contract as the Gateway).
+                        tokio::spawn(async move {
+                            let mut child = child;
+                            let exit_status = child.wait().await;
+                            tracing::warn!(
+                                pid = child_pid,
+                                exit_status = ?exit_status,
+                                "LSP Relay process exited"
+                            );
+                            let mut s = state_for_reaper.write().await;
+                            let still_ours = s
+                                .lsp_relay_process
+                                .as_ref()
+                                .map(|eps| eps.pid == child_pid)
+                                .unwrap_or(false);
+                            if still_ours {
+                                s.lsp_relay_process = None;
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to spawn LSP Relay (codebase tooling will be unavailable)"
+                        );
+                        // Clear any stale retained state from a previous
+                        // run so consumers see "unavailable".
+                        publish_lsps_state(&cfg, false).await;
+                    }
+                }
+            }
+        }
         run_supervisor(cfg, state, port).await;
     });
 }
 
-/// Build the (endpoint, spec_json) payload for a LspRelay push, reflecting
-/// the **current** state of `state.lsp_relay_process`.
-///
-/// Returns an empty endpoint when the relay is unavailable (process
-/// absent, or `ready=false`); the runtime reacts by unregistering the
-/// `codebase` tool. When the relay is up and `ready=true`, returns the
 /// Long-running supervisor. Monitors the LSP Relay child via SSE; on
 /// heartbeat timeout or connection failure, restarts the relay with
-/// exponential backoff. Gives up after MAX_RESTART_ATTEMPTS recent failures.
+/// exponential backoff. Gives up after MAX_RESTART_ATTEMPTS recent
+/// failures.
 async fn run_supervisor(
     cfg: LspRelaySupervisorConfig,
-    state: SharedState,
+    state: SharedNodeState,
     port: u16,
 ) {
     let mut history = RestartHistory::new();
@@ -133,7 +210,7 @@ async fn run_supervisor(
     }
 
     loop {
-        let exit_reason = match run_monitor_session(&state, port, &mut in_startup_grace).await {
+        let exit_reason = match run_monitor_session(&cfg, &state, port, &mut in_startup_grace).await {
             MonitorExit::Clean => {
                 tracing::info!("LSP Relay monitor session ended cleanly");
                 return;
@@ -182,21 +259,22 @@ async fn run_supervisor(
         }
 
         {
-            let mut gw = state.write().await;
-            gw.lsp_relay_process = None;
+            let mut s = state.write().await;
+            s.lsp_relay_process = None;
         }
-        // Sidecar endpoint push removed — ResourcePusher was a no-op.
-        // TODO(sidecar-mqtt): MQTT sidecar publishing not yet implemented - tracked in ADR-033 follow-up.
+        // ADR-055 §6.7: the retained per-node lsps topic must reflect
+        // the unavailable state (the Gateway version left this as
+        // TODO(sidecar-mqtt)).
+        publish_lsps_state(&cfg, false).await;
 
         let attempts = history.record(supervisor_defaults::RESTART_WINDOW);
         if attempts as u32 > supervisor_defaults::MAX_RESTART_ATTEMPTS {
-            tracing::error!(attempts, "LSP Relay restart limit exceeded; giving up and clearing gateway LSP Relay state");
+            tracing::error!(attempts, "LSP Relay restart limit exceeded; giving up and clearing node LSP Relay state");
             {
-                let mut gw = state.write().await;
-                gw.lsp_relay_process = None;
+                let mut s = state.write().await;
+                s.lsp_relay_process = None;
             }
-            // Sidecar endpoint push removed — ResourcePusher was a no-op.
-            // TODO(sidecar-mqtt): MQTT sidecar publishing not yet implemented - tracked in ADR-033 follow-up.
+            publish_lsps_state(&cfg, false).await;
             return;
         }
 
@@ -208,36 +286,41 @@ async fn run_supervisor(
         tracing::info!(attempt = attempts, ?backoff, "Restarting LSP Relay process");
         sleep(backoff).await;
 
-        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.gateway_health_url).await {
+        match spawn_lsp_relay(&cfg.data_dir, port, &cfg.health_url).await {
             Ok((new_state, child)) => {
                 tracing::info!(pid = new_state.pid, port = new_state.port, attempt = attempts, "LSP Relay restarted");
                 {
-                    let mut gw = state.write().await;
-                    gw.lsp_relay_process = Some(new_state.clone());
+                    let mut s = state.write().await;
+                    s.lsp_relay_process = Some(new_state.clone());
                 }
-                // Sidecar endpoint push removed — ResourcePusher was a no-op.
-                // TODO(sidecar-mqtt): MQTT sidecar publishing not yet implemented - tracked in ADR-033 follow-up.
+                publish_lsps_state(&cfg, false).await;
                 let new_child_pid = new_state.pid;
                 let state_for_reaper = state.clone();
                 tokio::spawn(async move {
                     let mut child = child;
                     let _ = child.wait().await;
                     tracing::warn!(pid = new_child_pid, "LSP Relay (respawned) exited");
-                    let mut gw = state_for_reaper.write().await;
-                    let still_ours = gw.lsp_relay_process.as_ref().map(|eps| eps.pid == new_child_pid).unwrap_or(false);
+                    let mut s = state_for_reaper.write().await;
+                    let still_ours = s
+                        .lsp_relay_process
+                        .as_ref()
+                        .map(|eps| eps.pid == new_child_pid)
+                        .unwrap_or(false);
                     if still_ours {
-                        gw.lsp_relay_process = None;
+                        s.lsp_relay_process = None;
                     }
                 });
             }
             Err(e) => {
                 if let Some(health) = check_lsp_relay_health(port).await {
                     let attached = super::lsp_relay::attach_existing_lsp_relay(port, Some(health));
-                    tracing::info!(port, ready = attached.ready, "Reusing existing LSP Relay after restart failure");
+                    let attached_ready = attached.ready;
+                    tracing::info!(port, ready = attached_ready, "Reusing existing LSP Relay after restart failure");
                     {
-                        let mut gw = state.write().await;
-                        gw.lsp_relay_process = Some(attached);
+                        let mut s = state.write().await;
+                        s.lsp_relay_process = Some(attached);
                     }
+                    publish_lsps_state(&cfg, attached_ready).await;
                 } else {
                     tracing::error!(error = %e, "Failed to restart LSP Relay process");
                 }
@@ -278,7 +361,8 @@ enum MonitorExit {
 /// Run one SSE session: connect to /events, parse events, update shared
 /// state. Returns when the connection ends or heartbeat times out.
 async fn run_monitor_session(
-    state: &SharedState,
+    cfg: &LspRelaySupervisorConfig,
+    state: &SharedNodeState,
     port: u16,
     in_startup_grace: &mut bool,
 ) -> MonitorExit {
@@ -311,21 +395,24 @@ async fn run_monitor_session(
 
     *in_startup_grace = false;
 
-    // Mark the LSP Relay as ready so Gateway's GET /api/lsp/endpoint returns
-    // available: true. Without this, a freshly spawned relay would remain
-    // permanently "not ready" because spawn_lsp_relay() initializes ready=false
-    // and nothing ever promoted it — see analysis report for details.
+    // Mark the LSP Relay as ready and publish the retained per-node lsps
+    // topic. Without this, a freshly spawned relay would remain
+    // permanently "not ready" because spawn_lsp_relay() initializes
+    // ready=false and nothing ever promoted it (the exact gap the
+    // Gateway's GET /api/lsp/endpoint hit — see the migration notes).
     {
-        let mut gw = state.write().await;
-        if let Some(ref mut eps) = gw.lsp_relay_process
+        let mut s = state.write().await;
+        if let Some(ref mut eps) = s.lsp_relay_process
             && !eps.ready
         {
             eps.ready = true;
             tracing::info!("LSP Relay marked as ready (port: {})", eps.port);
+            drop(s);
+            // ADR-055 §6.7: ready transition → publish AvailableLsps
+            // with the advertise-host endpoint.
+            publish_lsps_state(cfg, true).await;
         }
     }
-    // Sidecar endpoint push removed — ResourcePusher was a no-op.
-    // TODO(sidecar-mqtt): MQTT sidecar publishing not yet implemented - tracked in ADR-033 follow-up.
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
@@ -345,8 +432,8 @@ async fn run_monitor_session(
                         return MonitorExit::HeartbeatTimeout { elapsed_secs };
                     }
                 }
-                let gw = state.read().await;
-                if gw.lsp_relay_process.is_none() {
+                let s = state.read().await;
+                if s.lsp_relay_process.is_none() {
                     return MonitorExit::Clean;
                 }
             }
@@ -386,11 +473,11 @@ async fn run_monitor_session(
 }
 
 /// Check if the LSP Relay process is alive (by PID or health check).
-async fn lsp_relay_alive(state: &SharedState, port: u16) -> bool {
+async fn lsp_relay_alive(state: &SharedNodeState, port: u16) -> bool {
     let pid = state.read().await.lsp_relay_process.as_ref().map(|e| e.pid);
     match pid {
         Some(0) => check_lsp_relay_health(port).await.is_some(),
-        Some(pid) => crate::lifecycle::process::check_health(pid).await,
+        Some(pid) => crate::process::spawn::check_health(pid).await,
         None => false,
     }
 }
@@ -414,16 +501,26 @@ async fn try_connect_events(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::NodeState;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_config() -> LspRelaySupervisorConfig {
+        LspRelaySupervisorConfig {
+            data_dir: std::path::PathBuf::from("/tmp/acowork-node"),
+            port: 19878,
+            health_url: "http://127.0.0.1:19900/health".to_string(),
+            node_id: "local".to_string(),
+            advertise_host: "127.0.0.1".to_string(),
+        }
+    }
 
     #[test]
     fn test_supervisor_config_construction() {
-        let cfg = LspRelaySupervisorConfig {
-            data_dir: std::path::PathBuf::from("/tmp/acowork"),
-            port: 19878,
-            gateway_health_url: "http://127.0.0.1:19876/health".to_string(),
-        };
+        let cfg = test_config();
         assert_eq!(cfg.port, 19878);
-        assert_eq!(cfg.gateway_health_url, "http://127.0.0.1:19876/health");
+        assert_eq!(cfg.health_url, "http://127.0.0.1:19900/health");
+        assert_eq!(cfg.node_id, "local");
     }
 
     #[test]
@@ -431,9 +528,12 @@ mod tests {
         let cfg = LspRelaySupervisorConfig {
             data_dir: std::path::PathBuf::from("/tmp"),
             port: 0,
-            gateway_health_url: "http://127.0.0.1:19876/health".to_string(),
+            health_url: "http://127.0.0.1:19900/health".to_string(),
+            node_id: "gpu-1".to_string(),
+            advertise_host: "192.168.1.10".to_string(),
         };
         assert_eq!(cfg.port, 0);
+        assert_eq!(cfg.advertise_host, "192.168.1.10");
     }
 
     #[test]
@@ -451,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lsp_relay_alive_no_state() {
-        let state: SharedState = Arc::new(RwLock::new(GatewayState::new("/tmp")));
+        let state: SharedNodeState = Arc::new(RwLock::new(NodeState::new(16)));
         let result = lsp_relay_alive(&state, 1).await;
         assert!(!result, "Should be false when no relay process state");
     }

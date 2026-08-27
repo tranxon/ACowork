@@ -613,21 +613,52 @@ async fn wait_for_gateway_ready(base_url: &str) -> Result<(), String> {
 
     let health_url = format!("{}/health", base_url);
 
+    // Track the last error so the final timeout message points at the
+    // real cause (send error / non-2xx / DNS / TLS / etc.) instead of
+    // leaving the operator with a bare "did not respond".
+    let mut last_err: Option<String> = None;
+
     // Poll for up to 10 seconds (34 * 300ms)
     for i in 0..34 {
-        if client.get(&health_url).send().await.is_ok() {
-            tracing::info!("Gateway is ready at {}", base_url);
-            return Ok(());
+        match client.get(&health_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Gateway is ready at {}", base_url);
+                return Ok(());
+            }
+            Ok(resp) => {
+                let msg = format!("HTTP {}", resp.status());
+                last_err = Some(msg.clone());
+                // First failure only — keeps the log readable while
+                // still pinning down the cause.
+                if i == 0 {
+                    tracing::warn!(
+                        "Gateway {} probe returned non-success: {}",
+                        base_url,
+                        msg
+                    );
+                }
+            }
+            Err(e) => {
+                let msg = format!("send error: {e}");
+                last_err = Some(msg.clone());
+                if i == 0 {
+                    tracing::warn!(
+                        "Gateway {} probe send failed: {e:?}",
+                        base_url
+                    );
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
         if i % 5 == 0 {
             tracing::debug!("Waiting for Gateway at {} to be ready...", base_url);
         }
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     Err(format!(
-        "Gateway at {} did not become ready within 10 seconds",
-        base_url
+        "Gateway at {} did not become ready within 10 seconds (last: {})",
+        base_url,
+        last_err.as_deref().unwrap_or("unknown")
     ))
 }
 
@@ -642,9 +673,24 @@ async fn is_gateway_reachable(base_url: &str) -> bool {
         .timeout(Duration::from_millis(300))
         .build();
     let Ok(client) = probe else {
+        tracing::warn!("is_gateway_reachable: failed to build probe client");
         return false;
     };
-    matches!(client.get(&health_url).send().await, Ok(resp) if resp.status().is_success())
+    match client.get(&health_url).send().await {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            tracing::warn!(
+                "is_gateway_reachable: {} returned HTTP {}",
+                base_url,
+                resp.status()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("is_gateway_reachable: {} probe send error: {e:?}", base_url);
+            false
+        }
+    }
 }
 
 /// Check if a child process output indicates it is alive.

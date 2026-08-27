@@ -192,6 +192,7 @@ export function AppLayout() {
                 url: f.url,
                 relPath: f.relPath,
                 loading: f.loading,
+                agentId: f.agentId,
             };
         })()
       : null;

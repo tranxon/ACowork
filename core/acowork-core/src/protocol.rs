@@ -1332,6 +1332,25 @@ pub enum SidecarKind {
     Embed,
 }
 
+/// Deployment scope of a sidecar (ADR-055 §6.7 Sidecar Scope model).
+///
+/// Determines where the sidecar process is hosted and which retained
+/// MQTT topic carries its endpoint:
+/// - `Global` — one instance on the Gateway machine, endpoint distributed
+///   via the `acowork/global/*` retained topics (e.g. embed).
+/// - `NodeLocal` — one instance per Node (it must run on the same machine
+///   as the agent workspace, e.g. `root_uri = file://{workspace_root}`),
+///   endpoint distributed via `acowork/nodes/{node_id}/lsps` retained
+///   (e.g. LSP relay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidecarScope {
+    /// Hosted by the Gateway machine.
+    Global,
+    /// Hosted by each Node machine, one per node.
+    NodeLocal,
+}
+
 impl SidecarKind {
     /// Canonical string identifier used in the proto and over the wire
     /// (the proto enum value). Stable across versions; do not rename.
@@ -1340,6 +1359,18 @@ impl SidecarKind {
             SidecarKind::Unspecified => "unspecified",
             SidecarKind::LspRelay => "lsp_relay",
             SidecarKind::Embed => "embed",
+        }
+    }
+
+    /// Deployment scope of this sidecar (ADR-055 §6.7).
+    ///
+    /// `Unspecified` falls back to `Global` for forward-compat: unknown
+    /// sidecars were historically Gateway-managed.
+    pub fn scope(&self) -> SidecarScope {
+        match self {
+            SidecarKind::Unspecified => SidecarScope::Global,
+            SidecarKind::LspRelay => SidecarScope::NodeLocal,
+            SidecarKind::Embed => SidecarScope::Global,
         }
     }
 }
@@ -1837,6 +1868,16 @@ mod tests {
     fn test_sidecar_kind_unknown_string_is_rejected() {
         let bad: Result<SidecarKind, _> = "code_index".parse();
         assert!(bad.is_err(), "unknown sidecar must be rejected");
+    }
+
+    /// SidecarScope model (ADR-055 §6.7): LSP relay is node-local (one per
+    /// node, must share the machine with the agent workspace); embed stays
+    /// global on the Gateway machine. Unspecified falls back to Global.
+    #[test]
+    fn test_sidecar_kind_scope() {
+        assert_eq!(SidecarKind::LspRelay.scope(), SidecarScope::NodeLocal);
+        assert_eq!(SidecarKind::Embed.scope(), SidecarScope::Global);
+        assert_eq!(SidecarKind::Unspecified.scope(), SidecarScope::Global);
     }
 
     /// `SidecarEndpointUpdate` payload survives JSON roundtrip. The empty

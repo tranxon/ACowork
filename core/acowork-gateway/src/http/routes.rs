@@ -39,8 +39,6 @@ pub struct AppState {
     pub auth: Arc<HttpAuth>,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
-    /// Whether CORS is enabled (allows any origin for remote Desktop connections)
-    pub cors_enabled: bool,
     /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
     pub mqtt_gateway_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
     /// ADR-033: MQTT global resources publisher trigger.
@@ -50,6 +48,13 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
+    /// ADR-055: Node control-plane client (issues agent lifecycle
+    /// commands to Node Agents and correlates the NodeEvent replies).
+    pub node_control: Option<crate::mqtt::node_control::NodeControlClient>,
+    /// ADR-055: Node registry (LWT-driven online state + retained info
+    /// snapshots). Used by handlers that route to node-local HTTP
+    /// services (e.g. `/api/fs/browse?target={node_id}`, L7-1).
+    pub node_registry: Option<crate::mqtt::SharedNodeRegistry>,
 }
 
 impl AppState {
@@ -62,11 +67,12 @@ impl AppState {
             gateway_state,
             auth,
             log_reload_handle: None,
-            cors_enabled: false,
             mqtt_gateway_client: None,
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
+            node_control: None,
+            node_registry: None,
         }
     }
 }
@@ -97,54 +103,29 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
 
 /// Build the HTTP router with all routes
 pub fn build_router(state: AppState) -> Router {
-    // When CORS is enabled (remote Desktop ↔ Gateway scenarios),
-    // allow any origin. Otherwise, restrict to localhost.
-    let cors = if state.cors_enabled {
-        tower_http::cors::CorsLayer::permissive().allow_credentials(true)
-    } else {
-        // Local-only CORS allowlist. Covers two deployment shapes:
-        //   1. Vite dev — page served from a Vite dev server on :3000 / :5173
-        //   2. Packaged Tauri v2 desktop app:
-        //      - Windows / Linux: `https://tauri.localhost`
-        //      - macOS:           `tauri://localhost`
-        //
-        //      Tauri v2 uses HTTPS (not HTTP) for the custom protocol on
-        //      Windows/Linux (v2 migration). Without the exact scheme the
-        //      browser's `Origin` header won't match and CORS silently
-        //      blocks every `fetch()` from the MSI-installed app.
-        tower_http::cors::CorsLayer::new()
-            .allow_origin({
-                let mut origins = vec![
-                    "http://localhost:3000".parse().unwrap(),
-                    "http://localhost:5173".parse().unwrap(),
-                    "http://127.0.0.1:3000".parse().unwrap(),
-                    // Tauri v2 production WebView on Windows / Linux
-                    // (confirmed via request logging: the WebView sends
-                    //  Origin: http://tauri.localhost, not https://)
-                    "http://tauri.localhost".parse().unwrap(),
-                    "https://tauri.localhost".parse().unwrap(),
-                ];
-                // macOS Tauri v2 sends `Origin: tauri://localhost`.
-                // The `http` crate (1.4.x) may reject non-HTTP URI
-                // schemes at runtime. Use a soft parse so the gateway
-                // does not panic on startup — macOS users see a CORS
-                // error instead of a gateway crash.
-                if let Ok(v) = "tauri://localhost".parse() {
-                    origins.push(v);
-                }
-                origins
-            })
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
-    };
+    // CORS — permissive for all deployments.
+    //
+    // `CorsLayer::permissive()` alone — deliberately WITHOUT
+    // `allow_credentials(true)`: permissive() answers `*` for origin /
+    // method / header, and the CORS spec forbids combining `*` with
+    // `Access-Control-Allow-Credentials: true`. tower-http asserts at
+    // layer-build time and panics on that combination (this exact bug
+    // crashed the HTTP server once — see ensure_usable_cors_rules).
+    //
+    // Credentials are not needed: the Gateway never sends `Set-Cookie`
+    // and the desktop frontend fetches with the default
+    // `credentials: 'same-origin'`, so no cross-origin credentials are
+    // ever transmitted. The Gateway binds to loopback by default
+    // (`[http].host = 127.0.0.1`), so any origin that can reach it is
+    // already on the user's machine — 0 risk locally. For remote
+    // deployments (`[http].host = 0.0.0.0` or a LAN address), CSRF is
+    // prevented by the bearer-token middleware, not by CORS.
+    //
+    // Dev mode (Vite on :5173, Tauri custom protocol on macOS/Windows) is
+    // always cross-origin against the Gateway (:19876); a hardcoded
+    // allowlist breaks the moment the WebView resolves `localhost` to a
+    // different IP literal than the one hardcoded.
+    let cors = tower_http::cors::CorsLayer::permissive();
 
     Router::new()
         .route("/health", get(health_check))
@@ -160,13 +141,13 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        .merge(crate::http::nodes_api::nodes_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::proxy::proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
-        .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
         // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
         // override axum's 2 MiB default at the root of the gateway
@@ -342,6 +323,21 @@ pub struct SystemStatusResponse {
     pub agents_installed: usize,
     pub agents_running: usize,
     pub uptime_secs: u64,
+    /// ADR-055 D3 §6.3: MQTT broker port for Desktop discovery.
+    /// Lets the Desktop derive the broker port dynamically instead of
+    /// assuming the default 19875 (L3-6 residual gap — ADR-058 W4 fixed
+    /// the host derivation; this closes the port half).
+    pub mqtt_port: u16,
+    /// ADR-055 Phase 5a: MQTT username for the Desktop's broker
+    /// connection, present only when `mqtt.auth_enabled` is on.
+    /// Informational at this tier — CONNECT identity is keyed by
+    /// client_id (`user:{name}:desktop:{id}`), not username.
+    pub mqtt_username: Option<String>,
+    /// ADR-055 Phase 5a: MQTT password for the Desktop's broker
+    /// connection — the HttpAuth bearer token, the same value the
+    /// broker CONNECT check accepts for `user:*:desktop:*` clients.
+    /// Present only when `mqtt.auth_enabled` is on.
+    pub mqtt_password: Option<String>,
 }
 
 /// `GET /api/status` — system status
@@ -357,42 +353,37 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         gw.running_agents.len()
     };
 
+    // ADR-055 Phase 5a: MQTT credentials for the Desktop
+    // (`connect_mqtt` consumes these when present). Exposed only when
+    // MQTT auth is on; the password is the HttpAuth bearer token — the
+    // same value the broker CONNECT handler accepts for `user:*:desktop:*`.
+    let mqtt_auth_enabled = gw
+        .mqtt_broker_auth
+        .as_ref()
+        .map(|a| a.auth_enabled)
+        .unwrap_or(false);
+    let (mqtt_username, mqtt_password) = if mqtt_auth_enabled {
+        (
+            Some("desktop".to_string()),
+            state.auth.token().map(str::to_string),
+        )
+    } else {
+        (None, None)
+    };
+
     Json(SystemStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents_installed: gw.installed_agents.len(),
         agents_running,
         uptime_secs: 0, // TODO: track actual uptime
+        mqtt_port: gw
+            .config
+            .as_ref()
+            .map(|c| c.mqtt.port)
+            .unwrap_or_else(crate::config::default_mqtt_port),
+        mqtt_username,
+        mqtt_password,
     })
-}
-
-// ── LSP Relay endpoint ────────────────────────────────────────────────
-
-/// Response for `GET /api/lsp/endpoint` — returns the LSP Relay address.
-///
-/// Desktop App and Agent Runtime use this endpoint to discover the LSP Relay,
-/// then connect directly to its WebSocket and JSON-RPC API.
-#[derive(Debug, Serialize)]
-pub struct LspEndpointResponse {
-    pub available: bool,
-    pub host: String,
-    pub port: Option<u16>,
-}
-
-/// `GET /api/lsp/endpoint` — return the LSP Relay's address.
-pub async fn lsp_endpoint(State(state): State<AppState>) -> Json<LspEndpointResponse> {
-    let gw = state.gateway_state.read().await;
-    match &gw.lsp_relay_process {
-        Some(eps) if eps.ready => Json(LspEndpointResponse {
-            available: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(eps.port),
-        }),
-        _ => Json(LspEndpointResponse {
-            available: false,
-            host: "127.0.0.1".to_string(),
-            port: None,
-        }),
-    }
 }
 
 // ── Error response helpers ────────────────────────────────────────────
@@ -507,56 +498,64 @@ mod tests {
         let resp = system_status(State(state)).await;
         assert_eq!(resp.agents_installed, 0);
         assert_eq!(resp.agents_running, 0);
+        // MQTT auth off by default → no credentials are exposed.
+        assert_eq!(resp.mqtt_username, None);
+        assert_eq!(resp.mqtt_password, None);
+    }
+
+    #[tokio::test]
+    async fn test_system_status_exposes_mqtt_credentials_when_auth_enabled() {
+        use std::sync::Mutex;
+
+        // MQTT auth enabled + HttpAuth enabled (the broker CONNECT
+        // check for `user:*:desktop:*` compares against the HttpAuth
+        // bearer token, so the Desktop gets it as its MQTT password).
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-http-status-auth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(true)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        let password = resp.mqtt_password.as_deref().expect("password exposed when auth on");
+        assert_eq!(password.len(), 64, "256-bit hex token");
+
+        // MQTT auth enabled but HttpAuth off → no password to hand out.
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(false)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        assert_eq!(resp.mqtt_password, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_build_router() {
         let state = test_app_state();
         let _router = build_router(state);
-    }
-
-    // ── LSP endpoint tests ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_no_relay() {
-        let state = test_app_state();
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert!(resp.port.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_available_when_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: true,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert_eq!(resp.port, Some(19878));
-    }
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_not_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: false,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert!(resp.port.is_none());
     }
 }
 

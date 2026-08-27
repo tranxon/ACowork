@@ -36,6 +36,7 @@
 //! POST   /workspaces/file                        // NEW: create file
 //! PUT    /workspaces/file                        // NEW: overwrite file
 //! DELETE /workspaces/file                        // NEW: delete file
+//! GET    /workspaces/raw/{path}                  // ADR-055 L2-7: raw bytes (preview iframe)
 //! POST   /workspaces/dir                         // NEW: create dir
 //! DELETE /workspaces/dir                         // NEW: delete dir
 //! POST   /workspaces/copy                        // NEW: copy file/dir tree
@@ -71,7 +72,8 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -350,6 +352,65 @@ impl RuntimeHttpServer {
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
         session_manager_slot: SharedSessionManagerSlot,
     ) -> Result<Self, RuntimeHttpServerError> {
+        // Historical behaviour: random loopback port.
+        Self::start_with_bind_port(
+            0,
+            work_dir,
+            agent_id,
+            session_snapshots,
+            latest_session,
+            dispatch_tx,
+            embed_provider_dim,
+            degraded_reasons,
+            mqtt_client,
+            session_metadata,
+            memory_query,
+            workspace_query,
+            workspace_mutation,
+            agent_tools,
+            agent_config,
+            attachment,
+            session_config,
+            consolidation_timer,
+            rag_provider,
+            debug_service,
+            workspace_resolver,
+            session_manager_slot,
+        )
+        .await
+    }
+
+    /// ADR-055 §6.4: start the HTTP server on an explicit loopback port.
+    ///
+    /// The Node allocates a concrete port (from `NODE_HTTP_PORT_BASE`) and
+    /// passes it via `--http-port` so its reverse proxy has a stable
+    /// `{agent_id} → port` mapping. `bind_port = 0` keeps the historical
+    /// random-port behaviour (`127.0.0.1:0`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_bind_port(
+        bind_port: u16,
+        work_dir: PathBuf,
+        agent_id: String,
+        session_snapshots: SharedSessionSnapshots,
+        latest_session: SharedLatestSession,
+        dispatch_tx: SharedDispatchSender,
+        embed_provider_dim: SharedEmbedDimension,
+        degraded_reasons: SharedDegradation,
+        mqtt_client: SharedMqttClientSlot,
+        session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+        memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+        workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
+        workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+        agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+        attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+        session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+        consolidation_timer: SharedConsolidationTimer,
+        rag_provider: SharedRagProvider,
+        debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+        workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
+        session_manager_slot: SharedSessionManagerSlot,
+    ) -> Result<Self, RuntimeHttpServerError> {
         // ADR-058: the workspace FS watcher set is created here so the
         // HTTP state and the boot context share exactly one Arc. It is
         // exposed on the returned handle for `agent_init` to clone into
@@ -473,6 +534,14 @@ impl RuntimeHttpServer {
                     .put(write_workspace_file)
                     .delete(delete_workspace_file),
             )
+            // ADR-055 L2-7: raw-bytes read for the Gateway's HTML preview
+            // iframe (the Gateway reverse-proxies `/workspace-files/…`
+            // here). Serves verbatim bytes + Content-Type — unlike the
+            // JSON envelope above.
+            .route(
+                "/workspaces/raw/{*path}",
+                get(read_workspace_raw),
+            )
             .route(
                 "/workspaces/dir",
                 post(create_workspace_dir).delete(delete_workspace_dir),
@@ -565,8 +634,14 @@ impl RuntimeHttpServer {
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             .with_state(state);
 
-        // Bind to 127.0.0.1:0 for a random port
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        // Bind to the Node-allocated loopback port (ADR-055 §6.4);
+        // `127.0.0.1:0` = random port (pre-node-topology behaviour).
+        let bind_addr = if bind_port == 0 {
+            "127.0.0.1:0".to_string()
+        } else {
+            format!("127.0.0.1:{}", bind_port)
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .map_err(|e| RuntimeHttpServerError::Bind(format!("Failed to bind: {}", e)))?;
 
@@ -1173,6 +1248,35 @@ async fn read_workspace_file(
         .await
         .map(Json)
         .map_err(workspace_error_to_response)
+}
+
+/// `GET /workspaces/raw/{path}?workspace_id=…` — serve a file's raw bytes
+/// (ADR-055 L2-7). The Gateway reverse-proxies its `/workspace-files/…`
+/// HTML-preview endpoints here instead of reading the workspace
+/// filesystem itself. Returns `Content-Type` + verbatim bytes so the
+/// preview iframe's `<img>` / `<link>` / `<script>` sub-resources resolve.
+async fn read_workspace_raw(
+    State(state): State<HttpState>,
+    Path(file_rel_path): Path<String>,
+    Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.workspace_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let params = crate::usecases::workspace_query::ReadFileParams {
+        workspace_id: q.workspace_id,
+        path: file_rel_path,
+    };
+    let dto = svc
+        .read_file_raw(&params)
+        .await
+        .map_err(workspace_error_to_response)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, dto.mime_type)],
+        dto.bytes,
+    ))
 }
 
 /// `GET /workspaces/find` — fuzzy filename search (Ctrl+P-style palette).

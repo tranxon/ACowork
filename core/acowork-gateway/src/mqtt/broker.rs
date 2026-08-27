@@ -6,12 +6,24 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §1–§2 for the protocol conventions
 //! and architecture overview.
+//!
+//! ADR-055 Phase 5a adds CONNECT-layer authentication via rumqttd's
+//! `ConnectionSettings::set_auth_handler`. The policy is a pure
+//! function ([`check_connect_auth`]) so it can be unit-tested without
+//! a running broker; the broker thread only adapts it to rumqttd's
+//! async handler shape.
 
 use std::net::SocketAddr;
 
 use rumqttd::{Broker, Config};
 
 use acowork_core::defaults;
+use acowork_core::node::NODE_CLIENT_ID_PREFIX;
+
+use super::enrollment::{
+    constant_time_eq, EnrollmentTokenStore, NodeTokenStore, SharedEnrollmentTokenStore,
+    SharedNodeTokenStore, TokenValidation,
+};
 
 /// Error type for MQTT broker operations.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +32,92 @@ pub enum MqttBrokerError {
     Start(String),
     #[error("MQTT broker config error: {0}")]
     Config(String),
+}
+
+/// ADR-055 Phase 5a: broker CONNECT authentication inputs.
+///
+/// Cloned into the broker thread; every credential check is delegated
+/// to the pure decision function [`check_connect_auth`]. The stores
+/// are shared (std Mutex) with the MQTT dispatch and the HTTP
+/// handlers, so tokens issued at runtime are immediately honored.
+#[derive(Clone)]
+pub struct BrokerAuth {
+    /// Master switch — `mqtt.auth_enabled` config.
+    pub auth_enabled: bool,
+    /// One-time enrollment tokens (first node connect).
+    pub enrollment_tokens: SharedEnrollmentTokenStore,
+    /// Long-lived per-node tokens (node reconnect + `agent:{id}`).
+    pub node_tokens: SharedNodeTokenStore,
+    /// Internal publisher credential (generated at Gateway startup).
+    pub publisher_token: String,
+    /// HTTP bearer token (HttpAuth) — Desktop MQTT credential.
+    pub http_token: Option<String>,
+}
+
+/// Reference snapshot of the auth decision inputs — lets
+/// [`check_connect_auth`] stay a pure function over locked store
+/// guards.
+pub struct ConnectAuthContext<'a> {
+    pub auth_enabled: bool,
+    pub enrollment_tokens: &'a EnrollmentTokenStore,
+    pub node_tokens: &'a NodeTokenStore,
+    pub publisher_token: Option<&'a str>,
+    pub http_token: Option<&'a str>,
+}
+
+/// Pure CONNECT authentication decision (ADR-055 §6.8, Phase 5a).
+///
+/// client_id conventions (protocol docs §8.5):
+/// - `node:{node_id}` — Node Agent. Password = the node's long-lived
+///   token, or a valid unconsumed enrollment token (first connect).
+/// - `agent:{agent_id}` — Runtime. Password = ANY registered node
+///   token (Phase 5a simplification: agent→node ownership is NOT
+///   verified — the Node only injects its own token when spawning
+///   Runtimes; strict per-agent ACLs are deferred to Phase 5b).
+/// - `gateway:publisher` — Gateway's internal publisher, password =
+///   the startup-generated publisher token.
+/// - `user:{name}:desktop:{id}` — Desktop, password = the HTTP bearer
+///   token (HttpAuth; available when `http.auth_enabled` is on).
+///
+/// The `username` field is informational at this tier (identity is
+/// keyed by client_id); it is not yet cross-checked against the
+/// client_id. Everything else is rejected when auth is enabled; when
+/// `auth_enabled` is false every connection passes (default).
+pub fn check_connect_auth(
+    client_id: &str,
+    _username: &str,
+    password: &str,
+    ctx: &ConnectAuthContext<'_>,
+) -> bool {
+    if !ctx.auth_enabled {
+        return true;
+    }
+    if let Some(node_id) = client_id.strip_prefix(NODE_CLIENT_ID_PREFIX) {
+        if ctx.node_tokens.node_token_matches(node_id, password) {
+            return true;
+        }
+        // First-connect path: a valid, unconsumed enrollment token
+        // (auth_enabled implies the enrollment store was loaded).
+        return ctx.enrollment_tokens.validate_token(password) == TokenValidation::Valid;
+    }
+    if client_id.starts_with("agent:") {
+        return ctx.node_tokens.any_token_matches(password);
+    }
+    if client_id == "gateway:publisher" {
+        return match ctx.publisher_token {
+            Some(expected) => constant_time_eq(expected.as_bytes(), password.as_bytes()),
+            None => false,
+        };
+    }
+    if let Some(rest) = client_id.strip_prefix("user:")
+        && rest.contains(":desktop:")
+    {
+        return match ctx.http_token {
+            Some(expected) => constant_time_eq(expected.as_bytes(), password.as_bytes()),
+            None => false,
+        };
+    }
+    false
 }
 
 /// Handle to the running MQTT broker.
@@ -102,6 +200,19 @@ listen = "127.0.0.1:0"
 /// This is the ONLY public entry point for starting the broker; there
 /// is intentionally no "direct" (blocking) variant.
 pub fn start_broker(host: &str, port: u16) -> Result<MqttBrokerHandle, MqttBrokerError> {
+    start_broker_with_auth(host, port, None)
+}
+
+/// Start the embedded MQTT broker with an optional CONNECT auth
+/// handler (ADR-055 Phase 5a). `Some(auth)` wires
+/// [`check_connect_auth`] into rumqttd's `set_auth_handler`;
+/// `None` keeps the historical permissive behavior (every connection
+/// passes).
+pub fn start_broker_with_auth(
+    host: &str,
+    port: u16,
+    auth: Option<BrokerAuth>,
+) -> Result<MqttBrokerHandle, MqttBrokerError> {
     let listen_addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .map_err(|e| MqttBrokerError::Config(format!(
@@ -116,7 +227,41 @@ pub fn start_broker(host: &str, port: u16) -> Result<MqttBrokerHandle, MqttBroke
     std::thread::Builder::new()
         .name("mqtt-broker".into())
         .spawn(move || {
-            let config = build_broker_config(&h, port);
+            let mut config = build_broker_config(&h, port);
+            if let Some(auth) = auth {
+                let v4 = config.v4.as_mut().expect("v4 servers configured");
+                let server = v4.get_mut("acowork").expect("server 'acowork' configured");
+                tracing::info!(
+                    auth_enabled = auth.auth_enabled,
+                    "MQTT broker CONNECT auth handler installed (ADR-055 Phase 5a)"
+                );
+                server.connections.set_auth_handler(
+                    move |client_id, username, password| {
+                        // std::sync::Mutex poisoning is unrecoverable
+                        // here — any poisoned lock means a panicked
+                        // holder, so fall back to the inner guard and
+                        // log via the normal decision path.
+                        std::future::ready({
+                            let enrollment = auth
+                                .enrollment_tokens
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let node_tokens = auth
+                                .node_tokens
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            let ctx = ConnectAuthContext {
+                                auth_enabled: auth.auth_enabled,
+                                enrollment_tokens: &enrollment,
+                                node_tokens: &node_tokens,
+                                publisher_token: Some(auth.publisher_token.as_str()),
+                                http_token: auth.http_token.as_deref(),
+                            };
+                            check_connect_auth(&client_id, &username, &password, &ctx)
+                        })
+                    },
+                );
+            }
             let mut broker = Broker::new(config);
 
             tracing::info!(
@@ -255,6 +400,115 @@ mod tests {
         let v4 = config.v4.as_ref().expect("v4 servers must be configured");
         let server = v4.get("acowork").unwrap();
         assert_eq!(server.listen.port(), 32100);
+    }
+
+    use std::path::PathBuf;
+
+    /// Build an auth context with in-memory (unpersisted) stores.
+    fn test_ctx<'a>(
+        auth_enabled: bool,
+        enrollment: &'a EnrollmentTokenStore,
+        node_tokens: &'a NodeTokenStore,
+        publisher_token: Option<&'a str>,
+        http_token: Option<&'a str>,
+    ) -> ConnectAuthContext<'a> {
+        ConnectAuthContext {
+            auth_enabled,
+            enrollment_tokens: enrollment,
+            node_tokens,
+            publisher_token,
+            http_token,
+        }
+    }
+
+    fn empty_enrollment() -> EnrollmentTokenStore {
+        EnrollmentTokenStore::load(&PathBuf::from("/nonexistent"))
+    }
+
+    fn empty_node_tokens() -> NodeTokenStore {
+        NodeTokenStore::load(&PathBuf::from("/nonexistent"))
+    }
+
+    #[test]
+    fn auth_disabled_allows_everything() {
+        let enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let ctx = test_ctx(false, &enrollment, &node_tokens, Some("p"), Some("h"));
+        // Unknown client ids, empty passwords — all pass when disabled.
+        assert!(check_connect_auth("node:local", "", "", &ctx));
+        assert!(check_connect_auth("anything:else", "", "", &ctx));
+        assert!(check_connect_auth("", "", "", &ctx));
+    }
+
+    #[test]
+    fn node_accepts_node_token() {
+        let enrollment = empty_enrollment();
+        let mut node_tokens = empty_node_tokens();
+        let token = node_tokens.upsert("gpu-1", "uid-1");
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        assert!(check_connect_auth("node:gpu-1", "", &token, &ctx));
+        assert!(!check_connect_auth("node:gpu-1", "", "wrong", &ctx));
+        // Unenrolled node — no node token, no enrollment token.
+        assert!(!check_connect_auth("node:other", "", "wrong", &ctx));
+    }
+
+    #[test]
+    fn node_first_connect_accepts_enrollment_token() {
+        let mut enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let tok = enrollment.create_token(std::time::Duration::from_secs(3600));
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        assert!(check_connect_auth("node:gpu-1", "", &tok, &ctx));
+
+        // Consumed token is rejected on a later connect.
+        assert!(enrollment.consume_token(&tok, "gpu-1"));
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        assert!(!check_connect_auth("node:gpu-1", "", &tok, &ctx));
+    }
+
+    #[test]
+    fn agent_accepts_any_registered_node_token() {
+        let enrollment = empty_enrollment();
+        let mut node_tokens = empty_node_tokens();
+        let token = node_tokens.upsert("gpu-1", "uid-1");
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        // Phase 5a simplification: ownership is not verified.
+        assert!(check_connect_auth("agent:com.example", "", &token, &ctx));
+        assert!(!check_connect_auth("agent:com.example", "", "wrong", &ctx));
+    }
+
+    #[test]
+    fn publisher_accepts_internal_token() {
+        let enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("pub-tok"), Some("h"));
+        assert!(check_connect_auth("gateway:publisher", "", "pub-tok", &ctx));
+        assert!(!check_connect_auth("gateway:publisher", "", "wrong", &ctx));
+        // No publisher token configured → reject.
+        let ctx = test_ctx(true, &enrollment, &node_tokens, None, Some("h"));
+        assert!(!check_connect_auth("gateway:publisher", "", "pub-tok", &ctx));
+    }
+
+    #[test]
+    fn desktop_accepts_http_token() {
+        let enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("http-tok"));
+        assert!(check_connect_auth("user:nicholas:desktop:mac-1", "", "http-tok", &ctx));
+        assert!(!check_connect_auth("user:nicholas:desktop:mac-1", "", "wrong", &ctx));
+        // No http token → reject desktop client ids.
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), None);
+        assert!(!check_connect_auth("user:nicholas:desktop:mac-1", "", "http-tok", &ctx));
+    }
+
+    #[test]
+    fn unknown_client_ids_are_rejected() {
+        let enrollment = empty_enrollment();
+        let node_tokens = empty_node_tokens();
+        let ctx = test_ctx(true, &enrollment, &node_tokens, Some("p"), Some("h"));
+        assert!(!check_connect_auth("user:nicholas:web:mac-1", "", "h", &ctx));
+        assert!(!check_connect_auth("random", "", "", &ctx));
+        assert!(!check_connect_auth("node:", "", "", &ctx), "empty node id");
     }
 
     #[tokio::test]

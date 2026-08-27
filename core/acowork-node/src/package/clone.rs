@@ -1,15 +1,17 @@
-//! Agent clone logic
+//! Agent clone logic (migrated from gateway `package_manager/clone.rs`,
+//! ADR-055 §6.20).
 //!
-//! Clones an existing agent to a new agent ID with optional full data copy.
-//! Used for creating agent variants and safe experimentation.
+//! Clones an existing agent to a new agent ID with optional full data
+//! copy. Used for creating agent variants and safe experimentation.
 //!
-//! Skeleton clone (mode=skeleton): copies manifest, prompts, config, tools, resources.
-//! Full clone (mode=full): additionally copies skills, data, conversations, memory.
+//! Skeleton clone (mode=skeleton): copies manifest, prompts, config,
+//! tools, resources. Full clone (mode=full): additionally copies
+//! skills, data, conversations, memory.
 
 use std::path::Path;
 
-use crate::error::GatewayError;
-use crate::gateway::state::{AgentInfo, GatewayState};
+use crate::error::{NodeError, Result};
+use crate::state::{InstalledAgent, NodeState};
 
 /// Clone mode: what to copy from the source agent
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,29 +24,23 @@ pub enum CloneMode {
 
 /// Clone a source agent to a new agent ID.
 ///
-/// Returns the new AgentInfo or an error if the clone fails.
-///
-/// # Constraints
-///
-/// - System agents (`system = true` in manifest) cannot be cloned
-/// - The new agent_id must not already be installed
-/// - Cloned agent always has `dev = true` set in its manifest (for safe experimentation)
+/// Returns the new InstalledAgent or an error if the clone fails.
 pub fn clone_agent(
     source_agent_id: &str,
     new_agent_id: &str,
     mode: CloneMode,
     install_dir: &Path,
-    state: &mut GatewayState,
-) -> Result<AgentInfo, GatewayError> {
+    state: &mut NodeState,
+) -> Result<InstalledAgent> {
     // 1. Validate source exists
     let source_info = state
         .installed_agents
         .get(source_agent_id)
-        .ok_or_else(|| GatewayError::AgentNotFound(source_agent_id.to_string()))?;
+        .ok_or_else(|| NodeError::AgentNotFound(source_agent_id.to_string()))?;
 
     // 2. System agent cannot be cloned
     if source_info.manifest.system {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "System agent '{}' cannot be cloned",
             source_agent_id
         )));
@@ -52,7 +48,7 @@ pub fn clone_agent(
 
     // 3. Check conflict
     if state.is_installed(new_agent_id) {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Agent '{}' is already installed. Uninstall or choose a different ID.",
             new_agent_id
         )));
@@ -60,7 +56,7 @@ pub fn clone_agent(
 
     // 4. Validate new agent_id (reverse-domain format)
     if !is_valid_agent_id(new_agent_id) {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Invalid agent ID '{}': must be reverse-domain format (e.g. com.example.myagent)",
             new_agent_id
         )));
@@ -68,7 +64,7 @@ pub fn clone_agent(
 
     let source_path = Path::new(&source_info.install_path);
     if !source_path.exists() {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Source agent install path does not exist: {}",
             source_path.display()
         )));
@@ -76,7 +72,7 @@ pub fn clone_agent(
 
     let target_path = install_dir.join(new_agent_id);
     std::fs::create_dir_all(&target_path).map_err(|e| {
-        GatewayError::Package(format!(
+        NodeError::Package(format!(
             "Failed to create target directory '{}': {}",
             target_path.display(),
             e
@@ -89,9 +85,9 @@ pub fn clone_agent(
     new_manifest.dev = true;
 
     let manifest_toml = toml::to_string_pretty(&new_manifest)
-        .map_err(|e| GatewayError::Package(format!("Failed to serialize manifest: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("Failed to serialize manifest: {}", e)))?;
     std::fs::write(target_path.join("manifest.toml"), &manifest_toml)
-        .map_err(|e| GatewayError::Package(format!("Failed to write manifest: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("Failed to write manifest: {}", e)))?;
 
     // 6. Copy skeleton directories
     let skeleton_dirs = &["prompts", "config", "tools", "resources"];
@@ -122,23 +118,21 @@ pub fn clone_agent(
         // Copy memory/private.grafeo
         let memory_src = source_path.join("memory");
         if memory_src.exists() {
-            // Only copy the private.grafeo file, not the entire memory dir
-            // (workspace memory might contain runtime state we don't want)
             let private_grafeo = memory_src.join("private.grafeo");
             if private_grafeo.exists() {
                 let target_memory = target_path.join("memory");
                 std::fs::create_dir_all(&target_memory).map_err(|e| {
-                    GatewayError::Package(format!("Failed to create memory dir: {}", e))
+                    NodeError::Package(format!("Failed to create memory dir: {}", e))
                 })?;
                 std::fs::copy(&private_grafeo, target_memory.join("private.grafeo")).map_err(
-                    |e| GatewayError::Package(format!("Failed to copy private.grafeo: {}", e)),
+                    |e| NodeError::Package(format!("Failed to copy private.grafeo: {}", e)),
                 )?;
             }
         }
     }
 
     // 8. Register cloned agent
-    let info = AgentInfo {
+    let info = InstalledAgent {
         agent_id: new_agent_id.to_string(),
         version: new_manifest.version.clone(),
         name: format!("{} (clone)", new_manifest.name),
@@ -158,9 +152,9 @@ pub fn clone_agent(
 }
 
 /// Recursively copy a directory
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), GatewayError> {
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(|e| {
-        GatewayError::Package(format!(
+        NodeError::Package(format!(
             "Failed to create directory '{}': {}",
             dst.display(),
             e
@@ -168,7 +162,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), GatewayError> {
     })?;
 
     let entries = std::fs::read_dir(src).map_err(|e| {
-        GatewayError::Package(format!(
+        NodeError::Package(format!(
             "Failed to read directory '{}': {}",
             src.display(),
             e
@@ -176,8 +170,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), GatewayError> {
     })?;
 
     for entry in entries {
-        let entry =
-            entry.map_err(|e| GatewayError::Package(format!("Failed to read entry: {}", e)))?;
+        let entry = entry.map_err(|e| NodeError::Package(format!("Failed to read entry: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -185,7 +178,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), GatewayError> {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path).map_err(|e| {
-                GatewayError::Package(format!(
+                NodeError::Package(format!(
                     "Failed to copy '{}' to '{}': {}",
                     src_path.display(),
                     dst_path.display(),
@@ -262,14 +255,7 @@ mod tests {
         std::fs::write(memory_dir.join("private.grafeo"), b"grafeo-data").unwrap();
     }
 
-    fn temp_vault_dir(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("acowork-test-clone-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().to_string()
-    }
-
-    fn add_agent_to_state(state: &mut GatewayState, agent_id: &str, install_path: &str) {
+    fn add_agent_to_state(state: &mut NodeState, agent_id: &str, install_path: &str) {
         let manifest = acowork_core::AgentManifest::from_toml(&format!(
             r#"
             agent_id = "{}"
@@ -285,7 +271,7 @@ mod tests {
             agent_id
         ))
         .unwrap();
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -305,13 +291,8 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         setup_test_agent(&source_dir, "com.test.weather", false);
 
-        let vault_dir = temp_vault_dir("clone-sk");
-        let mut state = GatewayState::new(&vault_dir);
-        add_agent_to_state(
-            &mut state,
-            "com.test.weather",
-            &source_dir.to_string_lossy(),
-        );
+        let mut state = NodeState::new(16);
+        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
             "com.test.weather",
@@ -350,13 +331,8 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         setup_test_agent(&source_dir, "com.test.weather", false);
 
-        let vault_dir = temp_vault_dir("clone-full");
-        let mut state = GatewayState::new(&vault_dir);
-        add_agent_to_state(
-            &mut state,
-            "com.test.weather",
-            &source_dir.to_string_lossy(),
-        );
+        let mut state = NodeState::new(16);
+        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
             "com.test.weather",
@@ -397,13 +373,12 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         setup_test_agent(&source_dir, "com.acowork.system", true);
 
-        let vault_dir = temp_vault_dir("clone-sys");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
 
-        // Add with system=true manifest (read from disk)
+        // Add with system=true manifest (read from disk).
         let manifest_toml = std::fs::read_to_string(source_dir.join("manifest.toml")).unwrap();
         let manifest = acowork_core::AgentManifest::from_toml(&manifest_toml).unwrap();
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: "com.acowork.system".to_string(),
             version: "1.0.0".to_string(),
             name: "System Agent".to_string(),
@@ -434,19 +409,13 @@ mod tests {
         let install_dir = temp_dir.join("installed");
         setup_test_agent(&source_dir, "com.test.weather", false);
 
-        let vault_dir = temp_vault_dir("clone-dup");
-        let mut state = GatewayState::new(&vault_dir);
-        // Pre-install the target agent ID
+        let mut state = NodeState::new(16);
         add_agent_to_state(
             &mut state,
             "com.test.weather-clone",
             &source_dir.to_string_lossy(),
         );
-        add_agent_to_state(
-            &mut state,
-            "com.test.weather",
-            &source_dir.to_string_lossy(),
-        );
+        add_agent_to_state(&mut state, "com.test.weather", &source_dir.to_string_lossy());
 
         let result = clone_agent(
             "com.test.weather",
@@ -471,8 +440,7 @@ mod tests {
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let install_dir = temp_dir.join("installed");
-        let vault_dir = temp_vault_dir("clone-nf");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
 
         let result = clone_agent(
             "com.test.nonexistent",

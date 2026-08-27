@@ -246,7 +246,7 @@ interface AgentStoreState {
 
   fetchAgents: () => Promise<void>;
   selectAgent: (id: string | null) => void;
-  installAgent: (packagePath: string) => Promise<void>;
+  installAgent: (packagePath: string, nodeId?: string) => Promise<void>;
   uninstallAgent: (agentId: string) => Promise<void>;
   startAgent: (agentId: string, devMode?: boolean) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
@@ -475,9 +475,9 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }
   },
 
-  installAgent: async (packagePath) => {
+  installAgent: async (packagePath, nodeId) => {
     try {
-      await invoke("install_agent", { packagePath, devMode: true });
+      await invoke("install_agent", { packagePath, devMode: true, nodeId: nodeId ?? null });
       await get().fetchAgents();
     } catch (e) {
       set({ error: String(e) });

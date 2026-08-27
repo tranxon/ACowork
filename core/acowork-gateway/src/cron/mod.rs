@@ -360,17 +360,78 @@ fn parse_field(field: &str, min: u8, max: u8, name: &str) -> Result<Vec<u8>, Str
     Ok(values)
 }
 
+/// Register the cron triggers declared in an agent's manifest (S3.3).
+///
+/// ADR-055 Phase 2b.3: extracted from `package_manager/install.rs` (the
+/// node no longer registers cron — cron is a Gateway global-resource
+/// concern, §6.5). Called by the HTTP install handler after the node
+/// confirms the install.
+pub fn register_agent_cron_triggers(
+    state: &mut crate::gateway::state::GatewayState,
+    agent_id: &str,
+    manifest: &acowork_core::AgentManifest,
+) {
+    let cron_triggers = manifest.cron_triggers();
+    for trigger in cron_triggers {
+        let Some(schedule) = &trigger.schedule else {
+            continue;
+        };
+        let action = trigger.action.as_deref().unwrap_or("cron_trigger");
+        let params = trigger.params.clone().unwrap_or(serde_json::json!({}));
+        match state
+            .cron_scheduler
+            .register(agent_id, schedule, action, params.clone())
+        {
+            Ok(cron_id) => {
+                tracing::info!(
+                    "Registered cron trigger: agent={} cron_id={} schedule={}",
+                    agent_id,
+                    cron_id,
+                    schedule
+                );
+                if let Some(store) = &state.cron_store {
+                    let entry = StoredCronEntry {
+                        id: cron_id.clone(),
+                        agent_id: agent_id.to_string(),
+                        schedule: schedule.clone(),
+                        action: action.to_string(),
+                        params: serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string()),
+                        timezone: None,
+                        retry_count: 0,
+                        retry_interval_secs: 60,
+                        max_runs: None,
+                        run_count: 0,
+                        expires_at: None,
+                    };
+                    if let Err(e) = store.insert(&entry) {
+                        tracing::warn!("Failed to persist cron entry {}: {}", cron_id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Invalid cron schedule in manifest for agent {}: schedule={} error={}",
+                    agent_id,
+                    schedule,
+                    e
+                );
+            }
+        }
+    }
+}
+
 /// Run the cron scheduler loop as a background task.
 ///
 /// Checks every minute for entries that should fire, and publishes
 /// IntentReceived messages to the target Agent via MQTT ControlCommand.
 ///
 /// If the target Agent is not running, attempts to start it first
-/// (via LifecycleManager), then pushes the Intent.
+/// (via the local node control plane), then pushes the Intent.
 pub async fn run_cron_scheduler(
     scheduler: Arc<Mutex<CronScheduler>>,
     mqtt_client: Option<Arc<GatewayMqttClient>>,
     gateway_state: crate::handlers::server::SharedState,
+    node_control: Option<crate::mqtt::node_control::NodeControlClient>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     // Skip the first immediate tick
@@ -407,27 +468,38 @@ pub async fn run_cron_scheduler(
                     gw.is_installed(&agent_id)
                 };
                 if is_installed {
-                    // Start the agent process. Wire the reaper — if the
-                    // cron-spawned agent later exits (auto-sleep, crash)
-                    // we still want running_agents to be cleaned up.
-                    let (log_file_size_mb, log_file_count) = {
-                        let gw = gateway_state.read().await;
-                        (
-                            gw.config.as_ref().map(|c| c.log_file_size_mb).unwrap_or(10),
-                            gw.config.as_ref().map(|c| c.log_file_count).unwrap_or(20),
-                        )
+                    // ADR-055 §6.2: start via the local node control
+                    // plane (the node hosts the Runtime).
+                    let Some(node_control) = &node_control else {
+                        tracing::error!(
+                            "Cron: node control unavailable, cannot start agent {}",
+                            agent_id
+                        );
+                        continue;
                     };
-                    let mut lifecycle = crate::lifecycle::manager::LifecycleManager::new(
-                        log_file_size_mb,
-                        log_file_count,
-                        None,
-                    );
-                    match lifecycle.start_agent(&agent_id, &gateway_state, false, true).await {
-                        Ok(()) => {
-                            tracing::info!(
-                                "Cron: started agent {} for scheduled trigger",
-                                agent_id
-                            );
+                    match node_control
+                        .start_agent(acowork_core::node::LOCAL_NODE_ID, &agent_id, false)
+                        .await
+                    {
+                        Ok(event) => {
+                            match crate::mqtt::node_control::NodeControlClient::check_reply(
+                                &agent_id, &event,
+                            ) {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        "Cron: started agent {} for scheduled trigger",
+                                        agent_id
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Cron: failed to start agent {}: {}",
+                                        agent_id,
+                                        e
+                                    );
+                                    continue;
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!("Cron: failed to start agent {}: {}", agent_id, e);

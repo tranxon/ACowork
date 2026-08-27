@@ -64,6 +64,9 @@
 |------|--------|------|---------|
 | Gateway | `target/release/acowork-gateway` | HTTP `:19876`、MQTT `:19875` | 测试夹具启动；嵌入式 rumqttd 自动随 Gateway 启动 |
 | Agent Runtime | `target/release/acowork-runtime` | localhost HTTP `:随机` | 由 Gateway 在 `POST /api/agents/{id}/start` 时拉起，Runtime 启动后再向 Gateway HTTP 注册并直连 Broker |
+| Node（本地 agent 宿主） | `target/release/acowork-node` | 反代 `:19900` | Gateway spawn（`--name local`）；测试隔离 node home 用 `ACOWORK_NODE_HOME=<home>/node` |
+| Embed 模型运行器 | `target/release/acowork-embed` | `:18080` | Gateway spawn |
+| LSP Relay | `target/release/acowork-lsp-relay` | `:19878` | Node sidecar spawn（ADR-055 §6.7） |
 
 > Gateway 与 Runtime 的启动顺序：先 Gateway 就绪（`/health` 200，Broker `:19875`
 > 已监听），再触发 Agent start。Agent Runtime 不直接被脚本拉起。
@@ -114,9 +117,10 @@ curl -s -F package=@examples/agent-packages/com.acowork.senior-engineer.agent \
 
 ### 3.3 Provider / Model 前置
 
-- 测试若需要可用 provider 模型，fixture 调用 `POST /api/global/providers`
-  添加一条 `id="smoke-<random>"` 的 provider；后续用例按 `1.2` 约束在用例
-  末尾 `DELETE` 清理。
+- 测试若需要可用 provider 模型，fixture 调用 `POST /api/providers`
+  添加一条 `provider="smoke-<random>"` 的 provider（Body：
+  `{"provider": "<id>", "key": "sk-smoke-test", "base_url": "..."}`）；
+  后续用例按 `1.2` 约束在用例末尾 `DELETE` 清理。
 - 若需设置 default provider/model，使用 fixture 记录原值，teardown 时恢复。
 
 ### 3.4 工具启用
@@ -253,11 +257,13 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 
 - **前置**：使用 TC-CHAT-06 创建的 `sid`。
 - **步骤**：
-  1. 记录原 title（从 `meta` retained 读）
-  2. `PUT /api/agents/com.acowork.senior-engineer/sessions/{sid}/title`
-     - Body：`{"title": "smoke-renamed-<random>"}`
-  3. 验证 `meta` retained 中 title 已更新（MQTT 推送）
-- **期望**：响应 `200`；`meta` retained 中 title 字段变更。
+  1. MQTT PUB `acowork/agents/com.acowork.senior-engineer/sessions/control/update_title`
+     - Payload：`{ agent_id, sid, title: "smoke-renamed-<random>" }`
+  2. 轮询 `GET /api/agents/com.acowork.senior-engineer/sessions/{sid}/config`
+     直至 `title` 字段等于新值，超时 10 s
+- **期望**：响应 `200`；config 中 title 字段变更。
+- **注**：ADR-047 后 title 属于 session config（`GET /sessions/{sid}/config`
+  的 `SessionConfigSnapshot.title`），`GET /sessions/{sid}` 的 `meta` 不再携带。
 - **清理**：TC-CHAT-10 删除该 session，无需恢复原 title。
 
 #### TC-CHAT-10 删除会话（清理 TC-CHAT-06 创建的 session）
@@ -407,19 +413,23 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 #### TC-WS-01 列出工作区
 
 - **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces`
-- **期望**：响应 `200`，数组中预置默认 workspace 至少 1 个（**只读**，禁止删除）。
+- **期望**：响应 `200`（**只读**，禁止删除）。新安装 agent 无 workspace 配置时
+  空列表属正常状态；若存在 `additional_dirs` 条目则确认其含 `id` 字段。
 
 #### TC-WS-02 添加测试专用工作区（create）
 
 - **步骤**：`POST /api/agents/com.acowork.senior-engineer/workspaces`
-  - Body：`{"path": "/tmp/acowork-smoke-<random>", "alias": "smoke-<random>"}`
-- **期望**：响应 `200 {workspace_id: "..."}`；记下 `workspace_id` 与目录路径。
+  - Body：`{"path": "/tmp/acowork-smoke-<random>", "access": "read-write",
+    "alias": "smoke-<random>"}`（`path`/`access` 为必填，缺任一返回 400）
+- **期望**：响应 `200`，body 为完整 entry（含 `id` 字段，非 `workspace_id`）；
+  记下 `id` 与目录路径。
 - **副作用**：本次创建的工作区目录与 workspace 注册项，需在 TC-WS-09 删除。
 
 #### TC-WS-03 列出文件树
 
 - **前置**：使用 TC-WS-02 创建的工作区（**勿使用默认工作区**）。
-- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/tree?workspace_id=<ws_id>&path=/`
+- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/tree?workspace_id=<ws_id>`
+  （省略 `path` 即根目录；传 `path=/` 会被 `PathBuf::join` 替换根而误判路径穿越）
 - **期望**：响应 `200 {entries: [...]}`；每项含 `name`、`type`、`path`。
 
 #### TC-WS-04 在测试工作区内创建临时文件（create）
@@ -427,63 +437,68 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 - **前置**：TC-WS-02 创建的工作区。
 - **步骤**：`POST /api/agents/com.acowork.senior-engineer/workspaces/file`
   - Query：`workspace_id=<ws_id>`
-  - Body：`{"path": "/smoke-<random>.txt", "content": "smoke test content"}`
+  - Body：`{"path": "smoke-<random>.txt", "content": "smoke test content"}`
+    （**相对路径**，不带前导 `/`；绝对路径同样触发路径穿越误判）
 - **期望**：响应 `200`；记下文件路径。
 - **清理**：TC-WS-07 删除。
 
 #### TC-WS-05 读取临时文件（use）
 
 - **前置**：TC-WS-04 创建的临时文件。
-- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>&path=/smoke-<random>.txt`
+- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>&path=smoke-<random>.txt`
 - **期望**：响应 `200`，含 `content == "smoke test content"`、`mime`、`size`。
 
 #### TC-WS-06 修改临时文件（modify）
 
 - **前置**：TC-WS-04 创建的临时文件。
-- **步骤**：`PUT /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>`
-  - Body：`{"path": "/smoke-<random>.txt", "content": "updated content"}`
+- **步骤**：`PUT /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>&path=smoke-<random>.txt`
+  - Body：`{"content": "updated content"}`（**path 在 query**，写 handler 不读 body 的 path）
 - **期望**：响应 `200`；重新读取确认内容已更新。
 
 #### TC-WS-07 删除临时文件（delete，仅 TC-WS-04 创建的）
 
 - **前置**：TC-WS-04 创建的临时文件。
-- **步骤**：`DELETE /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>&path=/smoke-<random>.txt`
+- **步骤**：`DELETE /api/agents/com.acowork.senior-engineer/workspaces/file?workspace_id=<ws_id>`
+  - Body：`{"path": "smoke-<random>.txt"}`（DELETE 必须带 JSON body，否则 axum
+    Json extractor 返回 415；handler 只从 query 取 `workspace_id`，path 在 body）
 - **期望**：响应 `200`；文件消失。
 
 #### TC-WS-08 按名查找文件（仅在测试工作区内）
 
 - **前置**：TC-WS-02 创建的工作区；临时文件 TC-WS-04 尚未删除时可作为
   命中样本，否则本用例可降级为"零结果集"。
-- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/find?workspace_id=<ws_id>&pattern=smoke-*.txt`
+- **步骤**：`GET /api/agents/com.acowork.senior-engineer/workspaces/find?workspace_id=<ws_id>&q=smoke`
+  （参数名为 `q`，非 `pattern`）
 - **期望**：响应 `200 {results: [...]}`。
 
 #### TC-WS-09 删除测试工作区（delete，仅 TC-WS-02 创建的）
 
-- **前置**：TC-WS-02 创建的 `workspace_id`；确认该 id 对应的 alias/path 是
+- **前置**：TC-WS-02 创建的 workspace `id`；确认该 id 对应的 alias/path 是
   测试专用（不要误删默认工作区）。
 - **步骤**：
   1. `DELETE /api/agents/com.acowork.senior-engineer/workspaces/{ws_id}`
   2. `rm -rf /tmp/acowork-smoke-<random>`（清理物理目录）
-- **期望**：响应 `200`；`/workspaces` 列表不再含该 workspace；物理目录已清理。
+- **期望**：响应 `200`；`/workspaces` 列表（条目字段为 `id`）不再含该 id；
+  物理目录已清理。
 
 ### 5.7 Harness 视图（全局资源）
 
 #### TC-HARNESS-01 列出全局 Provider
 
-- **步骤**：`GET /api/global/providers`
+- **步骤**：`GET /api/providers`
 - **期望**：响应 `200 {providers: [...]}`；`api_key` 字段为掩码。
 
 #### TC-HARNESS-02 添加测试专用 Provider（create）
 
-- **步骤**：`POST /api/global/providers`
-  - Body：`{"id": "smoke-<random>", "base_url": "https://api.example.com/v1",
-    "api_key": "sk-smoke-test", "protocol": "openai"}`
-- **期望**：响应 `200` 或 `201`；记下 `id`。
+- **步骤**：`POST /api/providers`
+  - Body：`{"provider": "smoke-<random>", "key": "sk-smoke-test",
+    "base_url": "https://api.example.com/v1"}`（`provider`+`key` 必填）
+- **期望**：响应 `200` 或 `201`；记下 provider 名。
 - **清理**：TC-HARNESS-03 删除。
 
 #### TC-HARNESS-03 删除测试 Provider（delete，仅 TC-HARNESS-02 创建的）
 
-- **步骤**：`DELETE /api/global/providers/<smoke-id>`
+- **步骤**：`DELETE /api/providers/<smoke-id>`
 - **期望**：响应 `200` 或 `204`；`/providers` 列表不再含该 id。
 
 #### TC-HARNESS-04 列出模型
@@ -558,8 +573,9 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 
 - **步骤**：`POST /api/users`
   - Body：`{"display_name": "smoke-<random>"}`
-- **期望**：响应 `200 {user_id: "..."}`；记下 `user_id`。
-- **清理**：TC-SETTINGS-07 删除。
+- **期望**：响应 `200 {user: {user_id: "..."}, version: ...}`（嵌套结构）；
+  记下 `user.user_id`。
+- **清理**：TC-SETTINGS-07 更新为已停用状态（无删除端点）。
 
 #### TC-SETTINGS-06 恢复日志级别（teardown）
 
@@ -567,25 +583,28 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 - **步骤**：`PUT /api/config` Body：`{"log_level": "<L0>"}`
 - **期望**：`/config` 中 `log_level` 与测试前一致。
 
-#### TC-SETTINGS-07 删除测试用户档案（delete，仅 TC-SETTINGS-05 创建的）
+#### TC-SETTINGS-07 更新测试用户档案（modify，无 DELETE 端点）
 
-- **步骤**：`DELETE /api/users/{user_id}`
-- **期望**：响应 `200` 或 `204`；`/users` 列表不再含该 user_id。
+- **注**：`users_api` 仅有 GET/POST `/api/users` 与 PUT `/api/users/{user_id}`
+  （无 DELETE），故清理语义改为 PUT 标记停用 + 删除非测试用户不可行时的
+  等价变更（如更新 `display_name` 为 `smoke-disabled-<random>`）。
+- **步骤**：`PUT /api/users/{user_id}` Body：`{"display_name": "smoke-disabled-<random>"}`
+- **期望**：响应 `200`；GET `/api/users` 中该 user 的 `display_name` 已变更。
 
 ### 5.10 文档附件（会话级）
 
 #### TC-DOC-01 上传测试附件到 TC-CHAT-06 创建的 session（create）
 
 - **前置**：TC-CHAT-06 已创建 sid。
-- **步骤**：`POST /api/sessions/{sid}/documents`（multipart，file 字段，
-  content 为测试随机字符串）
-- **期望**：响应 `200 {document_id: "..."}`；记下 `document_id`。
-- **清理**：TC-DOC-04 删除。
+- **步骤**：`POST /api/agents/com.acowork.senior-engineer/sessions/{sid}/files`
+  （multipart，file 字段，content 为测试随机字符串）
+- **期望**：响应 `200 {documentId: "...", sizeBytes: N}`；记下 `documentId`。
+- **清理**：附件随 session 删除（TC-CHAT-10）一并清理。
 
-#### TC-DOC-02 列出附件（use）
+#### TC-DOC-02 读取附件内容（use）
 
-- **步骤**：`GET /api/sessions/{sid}/documents`
-- **期望**：响应 `200`，含 TC-DOC-01 上传的文档。
+- **步骤**：`GET /api/agents/com.acowork.senior-engineer/files/{documentId}`
+- **期望**：响应 `200`，body 字节与 TC-DOC-01 上传一致。
 
 #### TC-DOC-03 引用附件发消息
 
@@ -593,12 +612,14 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
   - Payload：`{ agent_id, sid, message_id: "msg-doc", content: "总结此文件",
     document_ids: ["<doc_id>"] }`
 - **期望**：消息成功发送；agent 回复能引用附件内容。
-- **清理**：附件与 session 随 TC-DOC-04 与 TC-CHAT-10 一起清理。
+- **清理**：附件与 session 随 TC-CHAT-10 一起清理。
 
-#### TC-DOC-04 删除附件（delete，仅 TC-DOC-01 上传的）
+#### TC-DOC-04 附件随 session 清理（teardown）
 
-- **步骤**：`DELETE /api/sessions/{sid}/documents/{doc_id}`
-- **期望**：响应 `200` 或 `204`；`/documents` 列表不再含该 doc_id。
+- **注**：附件无独立删除端点（`/sessions/{sid}/files` 仅 POST、`/files/{id}`
+  仅 GET）；TC-DOC-01 上传的附件在 TC-CHAT-10 删除 session 时一并清理。
+- **验证**：TC-CHAT-10 后 `GET /api/agents/com.acowork.senior-engineer/files/{documentId}`
+  返回 404。
 
 ### 5.11 交互（审批 / 问答）
 
@@ -629,11 +650,14 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 
 #### TC-LSP-01 取 LSP 端点（只读）
 
-- **步骤**：`GET /api/lsp/endpoint`
-- **期望**：响应 `200 {endpoint: "ws://..."}`；非空。
-- **注**：LSP Debug 通道对外仍以 WebSocket 形式暴露（由 LSP Relay 进程提供），
-  与 ADR-033 描述的 Gateway/Runtime 实时事件通道改造无关；本测试仅校验
-  端点字符串，不发起连接。
+- **步骤**：`GET /api/agents/{id}/lsp-endpoint`（`{id}` 取任一已安装 agent，
+  如 `com.acowork.senior-engineer`）
+- **期望**：响应 `200 {agent_id, node_id, endpoint, ready}`；`endpoint` 为 relay
+  HTTP base URL（如 `http://127.0.0.1:19878`）或 `null`（宿主 Node 的 relay
+  尚未发布就绪状态）。
+- **注**：LSP 端点为 node-local relay 发布（ADR-055 §6.7，Phase 4），Gateway
+  按 agent → node 解析；Desktop / Runtime 据此直连 relay 的 WebSocket，本
+  测试仅校验端点解析，不发起连接。
 
 #### TC-DEBUG-01 临时重启为 Debug 模式（modify → restore）
 
@@ -643,6 +667,48 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 - **期望**：响应 `200`；Agent 以 debug 模式重启。
 - **teardown**：手动或用例末调用 `POST /api/agents/{id}/stop` 后再 `start`
   回到正常模式；或由 fixture 兜底。
+
+### 5.13 Phase 5a 鉴权（隔离 auth 实例）
+
+> 本组用例在**独立 Gateway 实例**上运行（`auth_enabled=true`，端口
+> `:19786/:19785`），与主实例隔离，避免污染主实例的 node 凭证与 ACL。
+> 覆盖 ADR-055 Phase 5a：node 注册、enroll 闭环、匿名拒绝、包下载鉴权。
+
+#### TC-AUTH-01 生成一次性 enroll token（create）
+
+- **步骤**：`acowork-gateway nodes token create --ttl 10m`（env `ACOWORK_HOME`
+  指向 auth 实例 home，**daemon 启动前**执行）
+- **期望**：exit 0；stdout 含 64-hex token（输出含 ASCII banner + ANSI 色码，
+  用正则 `[0-9a-f]{64}` 提取）。
+
+#### TC-AUTH-02 node enroll 闭环 + 凭证重连（use）
+
+- **前置**：TC-AUTH-01 的 token；auth Gateway 已启动并安装被测 agent。
+- **步骤**：
+  1. 以 `user:smoke-test:desktop:*`（password = `<home>/data/http_token`）
+     连接 auth broker，订阅 `acowork/nodes/smoke-node/{enroll,enroll_result,status}`
+  2. `acowork-node start --name smoke-node --proxy-port 19781 --token <token>`
+     （独立 node home）
+  3. 等待 `enroll` 请求：DataEnvelope oneof **85**（`node_enroll`），含
+     `node_id`/`machine_uid`（token 在 CONNECT 层消费，不在 payload 中）
+  4. 等待 `enroll_result`：oneof **86**，含新签发 `node_token`；断言
+     `identity.json` 中 node_token 一致
+  5. kill 后用 `--home` 重启**不带 token** → 收到 `status=online`（凭
+     `node:{id}` broker 规则以持久化 node_token 重连）
+- **期望**：上述全部成立；enroll_result `status=ok`。
+
+#### TC-AUTH-03 匿名 CONNECT 被拒（negative）
+
+- **步骤**：无凭证 MQTT CONNECT auth broker
+- **期望**：CONNACK 拒绝（非 0）。
+
+#### TC-AUTH-04 包下载要求 node token（negative + positive）
+
+- **步骤**：
+  1. `GET /api/packages/{agent_id}/download` 无 header → 401/403
+  2. 带错误 `X-ACowork-Node-Token` → 401/403
+  3. 带 TC-AUTH-02 的 `node_token` → 200
+- **期望**：三态分别命中 401/403、401/403、200。
 
 ---
 
@@ -671,8 +737,14 @@ senior-engineer 包通过 manifest `[[tools]]` 声明了 file_read 等（opt-in 
 |---------|---------|---------|
 | `GET /health` 返回 5xx | Gateway 未启动 / 数据目录无权限 | 检查进程 / stderr |
 | Broker `:19875` 连不上 | Gateway 内 rumqttd 未启动 | Gateway 启动日志；`lsof -i :19875` |
-| `start agent` 超时 | Runtime 子进程 crash / 模型未配置 | `agent.log` + `/api/global/providers` |
+| `start agent` 超时 | Runtime 子进程 crash / 模型未配置 | `agent.log` + `/api/providers` |
 | MQTT 收不到 status="online" | Runtime 未注册 / LWT 提前触发 | Gateway stderr；`/api/agents/{id}` |
+| 全部反代请求 403 "invalid node token" | `~/.acowork/acowork-node/identity.json` 残留
+  auth 实例的 node_token（auth off 实例不附加 token 头） | 清理该文件；测试 fixture 用
+  `ACOWORK_NODE_HOME=<home>/node` 隔离 node home |
+| `workspace service not ready` 503 | agent online 早于 Phase B usecase 服务
+  late-bind（毫秒级竞态） | fixture 启动后轮询 `/workspaces` 至 200（`wait_runtime_ready`） |
+| node 日志 `reverse proxy failed to bind :19900` | 上一轮残留 node 进程占端口 | 每轮结束 reap 孤儿 node/embed/lsp-relay 进程 |
 | 无 `messages/tool_call` | `tools.file_read.enabled != true` | TC-SETUP-02 |
 | Memory 接口超时 | 内部 pending request 卡死（历史遗留） | Runtime stderr |
 | `reasoning_content` 字段缺失 | OpenAI 兼容协议未透传 reasoning | Provider 配置 |
@@ -737,11 +809,16 @@ dev/
 ### 8.6 运行入口
 
 ```bash
-# Node 方案
-cd dev/e2e_frontend_smoke && npm test
+# 独立运行（当前实现）——debug 二进制 + 临时 home，全量 90 用例
+cd core && cargo build --bins
+python3 -u ../dev/e2e_frontend_smoke/smoke_test.py
 
-# Python 方案
-cd dev/e2e_frontend_smoke && pytest -v
+# 经 CI 脚本（自动构建 debug 二进制后执行）
+./dev/ci.sh smoke
+
+# 可选参数
+SMOKE_LLM=1 python3 dev/e2e_frontend_smoke/smoke_test.py   # 含 LLM 聊天用例
+python3 dev/e2e_frontend_smoke/smoke_test.py --skip-auth    # 跳过 Phase 5a 鉴权套件
 ```
 
 ---
@@ -749,8 +826,10 @@ cd dev/e2e_frontend_smoke && pytest -v
 ## 9. 与 Cargo 测试的关系
 
 本文档定义的 E2E 测试**不进** `cargo test` 套件（依赖外部 Gateway 进程，
-启动成本高，与模块内部测试隔离）。建议作为独立脚本套件运行，与
-`./dev/ci.sh all` 解耦但可在 CI 中作为可选阶段触发（如 `e2e_frontend_smoke.sh`）。
+启动成本高，与模块内部测试隔离）。当前实现为独立 Python 脚本套件
+（`dev/e2e_frontend_smoke/smoke_test.py`，90 用例：85 passed / 5 skipped，
+LLM 依赖用例无 provider 时 skip），已接入 CI 可选阶段：`./dev/ci.sh smoke`
+（`all` 模式末尾亦会执行）。
 
 ---
 

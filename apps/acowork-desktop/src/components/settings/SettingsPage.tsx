@@ -13,11 +13,12 @@ import { inputReadonly, inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { ProfileTab } from "./ProfileTab";
+import { NodesTab } from "./NodesTab";
 import { TabButton } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 
-type SettingsTab = "gateway" | "appearance" | "general" | "profile";
+type SettingsTab = "gateway" | "appearance" | "general" | "profile" | "nodes";
 
 export function SettingsPage({ initialTab = "profile" }: { initialTab?: SettingsTab }) {
   const { t } = useTranslation();
@@ -28,6 +29,7 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
     { id: "general", label: t("settings.tabGeneral") },
     { id: "appearance", label: t("settings.tabAppearance") },
     { id: "gateway", label: t("settings.tabGateway") },
+    { id: "nodes", label: t("settings.tabNodes") },
   ];
 
   return (
@@ -53,6 +55,7 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
         <div style={{ display: activeTab === "appearance" ? "block" : "none" }}><AppearanceTab /></div>
         <div style={{ display: activeTab === "general" ? "block" : "none" }}><GeneralTab /></div>
         <div style={{ display: activeTab === "profile" ? "block" : "none" }}><ProfileTab /></div>
+        <div style={{ display: activeTab === "nodes" ? "block" : "none" }}><NodesTab /></div>
       </div>
     </div>
   );

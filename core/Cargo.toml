@@ -6,6 +6,7 @@ members = [
     "acowork-mqtt-session",
     "acowork-runtime",
     "acowork-gateway",
+    "acowork-node",
     "acowork-grafeo",
     "acowork-vault",
     "acowork-sign",
@@ -97,6 +98,7 @@ zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] 
 
 # Encoding
 base64 = "0.22"
+urlencoding = "2.1"
 
 # Document parsing
 pdf-extract = "0.12"
@@ -204,6 +206,11 @@ acowork-memory = { path = "acowork-memory" }
 acowork-grafeo = { path = "acowork-grafeo" }
 acowork-runtime = { path = "acowork-runtime" }
 acowork-gateway = { path = "acowork-gateway" }
+# NOTE (ADR-055 §6.20 dependency red line): `acowork-node` must NEVER
+# appear as a dependency of `acowork-gateway`, and `acowork-node` must
+# NEVER depend on `acowork-gateway`. Enforced by tests in both crates
+# (see `acowork-node` `tests/dependency_redline.rs`) and `dev/ci.sh`.
+acowork-node = { path = "acowork-node" }
 acowork-vault = { path = "acowork-vault" }
 acowork-sign = { path = "acowork-sign" }
 acowork-embed = { path = "acowork-embed" }

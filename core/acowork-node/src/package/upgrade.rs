@@ -1,47 +1,44 @@
-//! Package upgrade
+//! Package upgrade (migrated from gateway `package_manager/upgrade.rs`,
+//! ADR-055 §6.20).
 //!
 //! Upgrade flow: verify new package → check signature consistency →
-//! preserve data/ and config/ → replace rest
+//! preserve data/ and config/ → replace rest.
 
 use super::install::install_package;
-use crate::error::GatewayError;
-use crate::gateway::state::GatewayState;
 use std::io::Read;
 use std::path::Path;
+
+use crate::error::{NodeError, Result};
+use crate::state::NodeState;
 
 /// Upgrade a .agent package (signature fingerprint consistency check required)
 pub fn upgrade_package(
     agent_id: &str,
     new_package_path: &Path,
     install_dir: &Path,
-    state: &mut GatewayState,
-) -> Result<(), GatewayError> {
+    state: &mut NodeState,
+    dev_mode: bool,
+) -> Result<()> {
     // Check if agent is currently installed
     let old_info = state
         .installed_agents
         .get(agent_id)
-        .ok_or_else(|| GatewayError::AgentNotFound(agent_id.to_string()))?
+        .ok_or_else(|| NodeError::AgentNotFound(agent_id.to_string()))?
         .clone();
 
     // Check if agent is running
     if state.is_running(agent_id) {
-        return Err(GatewayError::AgentAlreadyRunning(agent_id.to_string()));
+        return Err(NodeError::AgentAlreadyRunning(agent_id.to_string()));
     }
 
     // Parse new manifest to check agent_id consistency
     let new_manifest = parse_manifest_from_zip(new_package_path)?;
     if new_manifest.agent_id != agent_id {
-        return Err(GatewayError::Package(format!(
+        return Err(NodeError::Package(format!(
             "Package agent_id '{}' does not match expected '{}'",
             new_manifest.agent_id, agent_id
         )));
     }
-
-    // TODO: Phase 2 — check signing fingerprint consistency
-    // The new package must be signed by the same developer
-    // if old_info.manifest.signer_fingerprint != new_manifest.signer_fingerprint {
-    //     return Err(GatewayError::SignatureFailed(...));
-    // }
 
     // Preserve data/ and config/ directories
     let old_install_path = Path::new(&old_info.install_path);
@@ -50,7 +47,6 @@ pub fn upgrade_package(
 
     // Remove old install directory (except preserved dirs)
     if old_install_path.exists() {
-        // Move preserved dirs to temp location
         let temp_base =
             std::env::temp_dir().join(format!("acowork-upgrade-{}", agent_id.replace('.', "-")));
         std::fs::create_dir_all(&temp_base).ok();
@@ -64,7 +60,7 @@ pub fn upgrade_package(
 
         // Remove old install dir
         std::fs::remove_dir_all(old_install_path)
-            .map_err(|e| GatewayError::Package(format!("Failed to remove old install: {}", e)))?;
+            .map_err(|e| NodeError::Package(format!("Failed to remove old install: {}", e)))?;
 
         // Re-create and restore preserved dirs
         let new_install_path = install_dir.join(agent_id);
@@ -85,8 +81,7 @@ pub fn upgrade_package(
     state.remove_installed(agent_id);
 
     // Install new package (upgrade inherits dev_mode from caller context)
-    // TODO(Phase 2): verify signing fingerprint consistency with old package
-    let new_info = install_package(new_package_path, install_dir, state, true)?;
+    let new_info = install_package(new_package_path, install_dir, state, dev_mode)?;
 
     tracing::info!(
         "Upgraded agent: {} from v{} to v{}",
@@ -98,31 +93,29 @@ pub fn upgrade_package(
 }
 
 /// Parse manifest from ZIP without full extraction
-fn parse_manifest_from_zip(
-    package_path: &Path,
-) -> Result<acowork_core::AgentManifest, GatewayError> {
+fn parse_manifest_from_zip(package_path: &Path) -> Result<acowork_core::AgentManifest> {
     let file = std::fs::File::open(package_path)
-        .map_err(|e| GatewayError::Package(format!("Failed to open package: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("Failed to open package: {}", e)))?;
     let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| GatewayError::Package(format!("Failed to read ZIP: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("Failed to read ZIP: {}", e)))?;
 
     let mut manifest_file = archive
         .by_name("manifest.toml")
-        .map_err(|e| GatewayError::Package(format!("manifest.toml not found: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("manifest.toml not found: {}", e)))?;
 
     let mut manifest_str = String::new();
     manifest_file
         .read_to_string(&mut manifest_str)
-        .map_err(|e| GatewayError::Package(format!("Failed to read manifest.toml: {}", e)))?;
+        .map_err(|e| NodeError::Package(format!("Failed to read manifest.toml: {}", e)))?;
 
     acowork_core::AgentManifest::from_toml(&manifest_str)
-        .map_err(|e| GatewayError::Package(format!("Invalid manifest.toml: {}", e)))
+        .map_err(|e| NodeError::Package(format!("Invalid manifest.toml: {}", e)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::state::AgentInfo;
+    use crate::state::InstalledAgent;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -153,22 +146,15 @@ mod tests {
         zip_path
     }
 
-    fn temp_vault_dir(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("acowork-test-upgrade-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().to_string()
-    }
-
     #[test]
     fn test_upgrade_not_installed() {
-        let vault_dir = temp_vault_dir("not_installed");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
         let result = upgrade_package(
             "com.test.unknown",
             Path::new("/tmp/nonexistent.agent"),
             Path::new("/tmp/installed"),
             &mut state,
+            true,
         );
         assert!(result.is_err());
     }
@@ -185,8 +171,7 @@ mod tests {
         let zip_path = create_test_zip(&temp_dir, "com.test.other", "2.0.0");
 
         // Add old agent to state
-        let vault_dir = temp_vault_dir("mismatch");
-        let mut state = GatewayState::new(&vault_dir);
+        let mut state = NodeState::new(16);
         let manifest = acowork_core::AgentManifest::from_toml(
             r#"
             agent_id = "com.test.weather"
@@ -201,7 +186,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        state.add_installed(AgentInfo {
+        state.add_installed(InstalledAgent {
             agent_id: "com.test.weather".to_string(),
             version: "1.0.0".to_string(),
             name: "Weather".to_string(),
@@ -218,6 +203,7 @@ mod tests {
             &zip_path,
             &temp_dir.join("installed"),
             &mut state,
+            true,
         );
         assert!(result.is_err());
 

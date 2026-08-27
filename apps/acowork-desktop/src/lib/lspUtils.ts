@@ -258,21 +258,25 @@ export function adaptWebSocket(ws: WebSocket): IWebSocket {
 /**
  * Build the LSP Relay WebSocket URL for a given language.
  *
- * Queries the Gateway for the LSP Relay endpoint (cached), then constructs
- * a direct WebSocket URL to the relay process. The relay's WebSocket
- * handler expects `workspace_root` as a query parameter.
+ * Queries the Gateway for the LSP Relay endpoint of the node hosting
+ * `agentId` (cached), then constructs a direct WebSocket URL to the
+ * relay process. The relay's WebSocket handler expects `workspace_root`
+ * as a query parameter.
  *
- * @throws if the LSP Relay is not available (not running or not ready).
+ * @throws if the LSP Relay is not available (or no agent id was given).
  */
 export async function buildLspWsUrl(
     language: string,
     workspaceRoot?: string,
+    agentId?: string,
 ): Promise<string> {
-    const ep = await getCachedLspRelayEndpoint();
-    if (!ep || ep.port == null) {
+    const relayUrl = agentId ? await getCachedLspRelayEndpoint(agentId) : null;
+    if (!relayUrl) {
         throw new Error("LSP Relay not available");
     }
-    const wsUrl = `ws://${ep.host}:${ep.port}`;
+    // The endpoint is the relay's HTTP base URL (e.g. "http://127.0.0.1:19878");
+    // swap the scheme for the WebSocket transport.
+    const wsUrl = relayUrl.replace(/^http/, "ws");
     let url = `${wsUrl}/lsp/${encodeURIComponent(language)}`;
     const params = new URLSearchParams();
     if (workspaceRoot) params.set("workspace_root", workspaceRoot);
@@ -280,7 +284,7 @@ export async function buildLspWsUrl(
     const result = qs ? `${url}?${qs}` : url;
     log.debug(
         "[LSP] buildLspWsUrl — relay endpoint:",
-        `${ep.host}:${ep.port}`,
+        relayUrl,
         "→ result:",
         result,
     );
