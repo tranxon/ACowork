@@ -1295,6 +1295,18 @@ export interface UserProfileListResponse {
   users: BackendUserProfile[];
 }
 
+/** Response from POST/PUT /api/users — matches UserResponse in acowork-gateway */
+export interface UserProfileMutationResponse {
+  user: BackendUserProfile;
+  version: number;
+}
+
+/** Response from POST /api/users/{user_id}/activate — matches ActivateResponse */
+export interface ActivateUserResponse {
+  active_user_id: string;
+  version: number;
+}
+
 /** Request body for POST /api/users */
 export interface CreateUserRequest {
   display_name: string;

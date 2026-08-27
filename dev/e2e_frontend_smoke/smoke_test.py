@@ -1249,6 +1249,12 @@ def test_tc_settings_05_07_user(http, base):
     NOTE: the product exposes PUT /api/users/{user_id} (update) and
     POST /api/users/{user_id}/activate but NO DELETE endpoint, so the
     write-loop verification is create → update instead of create → delete.
+
+    Also asserts the UserResponse contract { user, version } on both POST
+    and PUT. The Desktop client unwraps `user` and chains further PUTs off
+    the returned user_id — a stale envelope (profile polluted with the
+    wrapper) made the follow-up PUT hit /api/users/undefined → 404 and
+    silently discarded the language/city changes.
     """
     print("\n── TC-SETTINGS-05/07: user create→update ──")
     name = f"smoke-{random_suffix()}"
@@ -1257,16 +1263,55 @@ def test_tc_settings_05_07_user(http, base):
         fail(f"user create: HTTP {r.status_code} {r.text[:200]}")
         return
     data = r.json()
+    if not isinstance(data.get("version"), int):
+        fail(f"create response missing int version: {data}")
+        return
     uid = data.get("user", {}).get("user_id")
     if not uid:
         fail(f"no user.user_id in response: {data}")
         return
     ok(f"user created: {uid}")
+
+    # PUT must return the same UserResponse envelope with the echoed user.
     r = http.put(f"{base}/api/users/{uid}", json={"display_name": f"{name}-renamed"})
     if r.status_code != 200:
         fail(f"user update: HTTP {r.status_code} — FIXUP NEEDED for {uid}")
         return
-    ok("user updated via PUT")
+    data = r.json()
+    if data.get("user", {}).get("user_id") != uid:
+        fail(f"update response user.user_id mismatch: {data}")
+        return
+    if not isinstance(data.get("version"), int):
+        fail(f"update response missing int version: {data}")
+        return
+    ok("user updated via PUT (UserResponse envelope)")
+
+    # Chained field updates — mirrors ProfileTab.saveField: each PUT uses the
+    # user_id from the previous response (regression for the frontend bug
+    # where the envelope leaked into the profile and the follow-up PUT hit
+    # /api/users/undefined → 404 → "save failed").
+    r = http.put(f"{base}/api/users/{uid}", json={"city": "上海"})
+    if r.status_code != 200 or r.json().get("user", {}).get("city") != "上海":
+        fail(f"chained PUT city failed: HTTP {r.status_code} {r.text[:200]}")
+        return
+    r = http.put(f"{base}/api/users/{uid}", json={"language": "zh-CN"})
+    if r.status_code != 200 or r.json().get("user", {}).get("language") != "zh-CN":
+        fail(f"chained PUT language failed: HTTP {r.status_code} {r.text[:200]}")
+        return
+    ok("chained field updates persisted (city + language)")
+
+    # Verify persistence through the list endpoint — what the Desktop reads
+    # when the Settings view re-mounts. Stale values here are what flipped
+    # the UI language back to English after switching views.
+    r = http.get(f"{base}/api/users")
+    if r.status_code != 200:
+        fail(f"users list after update: HTTP {r.status_code}")
+        return
+    saved = next((u for u in r.json().get("users", []) if u.get("user_id") == uid), None)
+    if not saved or saved.get("city") != "上海" or saved.get("language") != "zh-CN":
+        fail(f"updated fields not persisted: {saved}")
+        return
+    ok("updated fields visible via GET /api/users")
 
 
 def test_tc_harness_02_03_provider(http, base):

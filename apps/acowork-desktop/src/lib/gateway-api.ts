@@ -6,6 +6,8 @@ import type {
   ModelInfo,
   BackendUserProfile,
   UserProfileListResponse,
+  UserProfileMutationResponse,
+  ActivateUserResponse,
   CreateUserRequest,
   UpdateUserRequest,
   EmbeddingModelsResponse,
@@ -25,7 +27,6 @@ import type {
   NodeInfo,
 } from "./types";
 import { getGatewayUrl } from "./config";
-import { log } from "./logger";
 
 // ── LSP Relay endpoint cache ───────────────────────────────────────────
 //
@@ -147,7 +148,9 @@ export async function createUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to create user: ${resp.status}`);
   }
-  return resp.json();
+  // Backend responds with UserResponse { user, version } — unwrap the profile.
+  const data = (await resp.json()) as UserProfileMutationResponse;
+  return data.user;
 }
 
 /** Update an existing user profile */
@@ -165,14 +168,16 @@ export async function updateUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to update user: ${resp.status}`);
   }
-  return resp.json();
+  // Backend responds with UserResponse { user, version } — unwrap the profile.
+  const data = (await resp.json()) as UserProfileMutationResponse;
+  return data.user;
 }
 
 /** Activate a user (deactivates all others) */
 export async function activateUser(
   userId: string,
   gatewayUrl = getGatewayUrl(),
-): Promise<BackendUserProfile> {
+): Promise<ActivateUserResponse> {
   const resp = await fetch(`${gatewayUrl}/api/users/${userId}/activate`, {
     method: "POST",
   });
@@ -180,42 +185,14 @@ export async function activateUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to activate user: ${resp.status}`);
   }
+  // Backend responds with ActivateResponse { active_user_id, version }.
   return resp.json();
 }
 
-/** Reset Gateway state (reload models cache from disk or background fetch) */
-export async function resetGateway(
-  gatewayUrl = getGatewayUrl(),
-): Promise<{ status: string; source: string }> {
-  const resp = await fetch(`${gatewayUrl}/api/gateway/reset`, {
-    method: "POST",
-  });
-  if (!resp.ok) throw new Error(`Failed to reset Gateway: ${resp.status}`);
-  return resp.json();
-}
-
-/** Reset onboarding and trigger Gateway models cache reload.
- *
- *  The frontend onboarding flag is always cleared first — the user's
- *  intent is to reset the local wizard. The Gateway-side reset is
- *  best-effort: if the remote Gateway is unreachable (e.g. WSL IP drift,
- *  firewall, Gateway process not running), the wizard still reappears
- *  on reload. A previous version put `removeItem` after `await`, which
- *  silently failed to reset the UI whenever the Gateway call threw.
- */
-export async function resetOnboarding(
-  gatewayUrl = getGatewayUrl(),
-): Promise<{ status: string; source: string }> {
+/** Reset onboarding wizard state. */
+export async function resetOnboarding(): Promise<{ status: string; source: string }> {
   localStorage.removeItem("acowork_onboarding");
-  try {
-    return await resetGateway(gatewayUrl);
-  } catch (e) {
-    log.warn(
-      "Gateway reset failed (frontend onboarding state cleared anyway):",
-      e,
-    );
-    return { status: "frontend_only", source: "local" };
-  }
+  return { status: "frontend_only", source: "local" };
 }
 
 // ── Embedding Model API ──────────────────────────────────────────────────

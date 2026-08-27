@@ -583,10 +583,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         log.error("[WorkspaceStore] setPromptFile failed:", resp.status, resp.statusText, body);
         return false;
       }
-      // Update the local workspace state
-      const updated = await resp.json() as WorkspaceDir;
+      // The Runtime echoes { ok, ws_id } — NOT a full WorkspaceDir. Replacing
+      // the local entry with that response corrupted the workspaces list
+      // (id/path/access became undefined). Patch the field we already sent.
+      await resp.json().catch(() => ({}));
       set((state) => ({
-        workspaces: state.workspaces.map((ws) => (ws.id === workspaceId ? updated : ws)),
+        workspaces: state.workspaces.map((ws) =>
+          ws.id === workspaceId ? { ...ws, prompt_file: promptFile } : ws,
+        ),
       }));
       return true;
     } catch (e) {

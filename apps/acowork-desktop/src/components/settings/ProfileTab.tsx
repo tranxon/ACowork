@@ -94,9 +94,11 @@ export function ProfileTab() {
         setBackendUser(user);
         if (user) {
           setLanguage(user.language);
-          if (user.language) {
-            i18n.changeLanguage(user.language);
-          }
+          // NOTE: do NOT call i18n.changeLanguage here. The global UI language
+          // is a client-side choice (initialized from localStorage/navigator and
+          // updated only by the dropdown's onChange). Silently overriding it
+          // with the backend profile language caused the UI to flip back to
+          // English after switching views when the backend value was stale.
           setTimezone(user.timezone);
           setCity(user.city ?? "");
           setOccupation(user.occupation ?? "");
