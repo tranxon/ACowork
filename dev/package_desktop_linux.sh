@@ -70,5 +70,20 @@ else
     echo -e "${YELLOW}        acowork-lsp-relay binary not found${NC}"
 fi
 
+# Bundle Node Agent binary (sibling of acowork-gateway, ADR-055 §6.11).
+# The Gateway locates it via `current_exe().parent().join("acowork-node")`;
+# without this copy node 'local' never enrolls and agent installs fail with
+# 503 "Node 'local' has never enrolled (offline)".
+NODE_BIN="$WORKSPACE_ROOT/target/release/acowork-node"
+if [ -f "$NODE_BIN" ]; then
+    cp "$NODE_BIN" "$BIN_DIR/acowork-node"
+    echo -e "${GREEN}Bundled Node Agent binary: $NODE_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-node not found at $NODE_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
+    echo -e "${YELLOW}        acowork-node binary not found — node topology disabled${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build

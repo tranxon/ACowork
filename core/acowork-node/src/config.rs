@@ -119,8 +119,8 @@ impl NodeConfig {
 }
 
 /// Default node home directory, resolution order:
-///   `ACOWORK_NODE_HOME` env > `$HOME/.acowork/acowork-node/` >
-///   `./.acowork-node`.
+///   `ACOWORK_NODE_HOME` env > `$HOME/.acowork/acowork-node/`
+///   (Windows: `%USERPROFILE%\.acowork\acowork-node`) > `./.acowork-node`.
 ///
 /// The env override lets multi-instance runs and the ADR-055 node
 /// topology verification isolate node state; the Gateway-spawned local
@@ -130,6 +130,17 @@ pub fn default_node_home() -> PathBuf {
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
+    }
+    // Windows has no `HOME` env var (only `USERPROFILE`); without this
+    // branch the node silently fell back to `./.acowork-node` in the cwd,
+    // scattering node state across whatever directory started the process.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        && !profile.is_empty()
+    {
+        return PathBuf::from(profile)
+            .join(".acowork")
+            .join("acowork-node");
     }
     if let Some(home) = std::env::var_os("HOME")
         && !home.is_empty()
