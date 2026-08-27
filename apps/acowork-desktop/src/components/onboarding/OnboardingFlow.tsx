@@ -649,6 +649,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   const { t } = useTranslation();
   const [installing, setInstalling] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
+  // Fix 2: while the Rust command retries behind the scenes on a node-online
+  // race (HTTP 503 "Node 'local' has never enrolled"), surface a status so
+  // the user knows the install is making progress. Cleared when each
+  // individual agent finishes.
+  const [waitingForNode, setWaitingForNode] = useState(false);
   const [selectedAgents, setSelectedAgents] = useState<string[]>(() => RECOMMENDED_AGENTS.map((agent) => agent.resourceName));
 
   const toggleRecommendedAgent = (resourceName: string) => {
@@ -657,13 +662,37 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       : [...prev, resourceName]);
   };
 
+  /**
+   * Run `invoke` with a small additional retry loop on top of the
+   * Rust-side retry. The Tauri command itself already retries 503s up to
+   * 5 times (see `commands/agent.rs::install_with_retry`); if that still
+   * fails, we want the failure to bubble up as a single error message
+   * instead of leaving the UI stuck. This wrapper detects "node-online
+   * race" errors and shows the "waiting" status, but it does NOT add an
+   * extra retry to avoid stacking waits.
+   */
+  const invokeWithNodeReadiness = async (cmd: string, args: Record<string, unknown>): Promise<void> => {
+    try {
+      await invoke(cmd, args);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("503") || msg.includes("never enrolled")) {
+        setWaitingForNode(true);
+      }
+      // Re-throw to surface a single combined error at the end.
+      throw err;
+    }
+  };
+
   const handleInstallRecommended = async () => {
     setInstallError(null);
     try {
       for (const resourceName of selectedAgents) {
         const agent = RECOMMENDED_AGENTS.find((item) => item.resourceName === resourceName);
         setInstalling(agent?.name ?? resourceName);
-        await invoke("install_bundled_agent", { resourceName, devMode: true });
+        setWaitingForNode(false);
+        await invokeWithNodeReadiness("install_bundled_agent", { resourceName, devMode: true });
+        setWaitingForNode(false);
       }
       // Refresh the agent list so newly installed agents appear.
       // ADR-017: Avatar assignment is now server-side (agent_config.json
@@ -673,6 +702,8 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
     } catch (err) {
       setInstalling(null);
       setInstallError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWaitingForNode(false);
     }
   };
 
@@ -685,7 +716,9 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       if (selected) {
         setInstallError(null);
         setInstalling(selected);
-        await invoke("install_agent", { packagePath: selected });
+        setWaitingForNode(false);
+        await invokeWithNodeReadiness("install_agent", { packagePath: selected });
+        setWaitingForNode(false);
         // Refresh the agent list so the backfill runs for the new agent.
         await useAgentStore.getState().fetchAgents();
         setInstalling(null);
@@ -693,6 +726,8 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
     } catch (err) {
       setInstalling(null);
       setInstallError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWaitingForNode(false);
     }
   };
 
@@ -754,6 +789,13 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
 
         {installing && (
           <p className="text-xs text-zinc-400">{t("onboarding.installAgent.installing", { name: installing })}</p>
+        )}
+        {/* Fix 2: surface the node-online race so the user knows the
+            install is making progress rather than hanging. */}
+        {waitingForNode && (
+          <p className="text-xs text-amber-600 dark:text-amber-400">
+            {t("onboarding.installAgent.waitingForNode")}
+          </p>
         )}
         {installError && (
           <ErrorBox message={installError} />

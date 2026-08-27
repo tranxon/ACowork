@@ -133,6 +133,31 @@ impl WorkspaceResolver {
         self.allowed_dirs.iter().find(|d| d.id == id)
     }
 
+    /// Look up a workspace directory by its ID with a trace-level
+    /// breadcrumb. Returns the same `Option<&WorkspaceDir>` as
+    /// [`Self::find_by_id`] — the only added side-effect is a single
+    /// `tracing::trace!` line recording the lookup, its outcome, and
+    /// the loaded id list. Useful when correlating a "workspace
+    /// disappeared on restart" report with the actual id set the
+    /// resolver had at startup. See
+    /// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+    pub fn find_by_id_with_trace(&self, id: &str) -> Option<&WorkspaceDir> {
+        let result = self.find_by_id(id);
+        let loaded_ids: Vec<&str> = self
+            .allowed_dirs
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        tracing::trace!(
+            queried_id = %id,
+            found = result.is_some(),
+            loaded_count = loaded_ids.len(),
+            loaded_ids = ?loaded_ids,
+            "WorkspaceResolver::find_by_id"
+        );
+        result
+    }
+
     /// All searchable directories (for content_search / glob_search).
     ///
     /// Returns all workspace directories. If no workspaces are configured,

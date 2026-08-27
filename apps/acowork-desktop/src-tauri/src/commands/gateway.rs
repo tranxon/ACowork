@@ -191,6 +191,29 @@ pub async fn ensure_system_agent(
         }
     }
 
+    // ── Fix 2: wait for node 'local' to be enrolled before attempting install
+    // ────────────────────────────────────────────────────────────
+    // The local Node Agent spawn is asynchronous (`acowork-node.exe`) and
+    // typically finishes enrolling within ~3 s. The Gateway's install-agent
+    // path answers HTTP 503 "Node 'local' has never enrolled" until the
+    // node's retained `acowork/nodes/local/status` is online. We poll
+    // `/api/nodes` (the same path `smoke_test.py::wait_node_online` uses)
+    // for up to 30 s and warn loudly on timeout — the InstallAgentStep
+    // retry loop on the frontend still catches install 503s.
+    //
+    // See `desktop-onboarding-bugfix_154b7ff7.md` §Fix 2.
+    match wait_for_node_online(&client, &gateway_url, "local", 30).await {
+        Ok(()) => {
+            tracing::info!("[SYS-AGENT] node 'local' is online, proceeding to install");
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[SYS-AGENT] {} — install call may 503; InstallAgentStep retry loop will recover",
+                e
+            );
+        }
+    }
+
     // Check if System Agent is already installed
     match client
         .get(format!("{}/api/agents/{}", gateway_url, SYSTEM_AGENT_ID))
@@ -226,38 +249,136 @@ pub async fn ensure_system_agent(
         system_agent_package
     );
 
+    // Fix 2: bounded retry loop for the install POST. Most failures during
+    // onboarding are node-online races answered with HTTP 503. We retry up
+    // to 5 times at 1.5 s intervals, so an install that races node enrollment
+    // has a comfortable window to succeed without bothering the user.
+    //
+    // OnboardingFlow's InstallAgentStep performs its own higher-level retry
+    // when this function returns `Err(...)` — this internal loop handles the
+    // common case where the eventual node does come online in time.
     let package_bytes = std::fs::read(&system_agent_package)
         .map_err(|e| format!("Failed to read System Agent package: {}", e))?;
-    let form = reqwest::multipart::Form::new()
-        .part(
-            "package",
-            reqwest::multipart::Part::bytes(package_bytes)
-                .file_name("com.acowork.system.agent")
-                .mime_str("application/octet-stream")
-                .map_err(|e| format!("Invalid package mime: {}", e))?,
-        )
-        .text("dev_mode", "true");
+    const INSTALL_MAX_ATTEMPTS: usize = 5;
+    let mut attempt: usize = 0;
+    loop {
+        attempt += 1;
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "package",
+                reqwest::multipart::Part::bytes(package_bytes.clone())
+                    .file_name("com.acowork.system.agent")
+                    .mime_str("application/octet-stream")
+                    .map_err(|e| format!("Invalid package mime: {}", e))?,
+            )
+            .text("dev_mode", "true");
 
-    match client
-        .post(format!("{}/api/agents/install", gateway_url))
-        .multipart(form)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                tracing::info!("[SYS-AGENT] Auto-install succeeded");
-            } else {
+        match client
+            .post(format!("{}/api/agents/install", gateway_url))
+            .multipart(form)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    tracing::info!(
+                        "[SYS-AGENT] Auto-install succeeded (attempt {}/{})",
+                        attempt,
+                        INSTALL_MAX_ATTEMPTS
+                    );
+                    return Ok(());
+                }
                 let error = resp.text().await.unwrap_or_default();
-                tracing::warn!("[SYS-AGENT] Install failed: {}", error);
+                tracing::warn!(
+                    "[SYS-AGENT] Install HTTP error (attempt {}/{}): {}",
+                    attempt,
+                    INSTALL_MAX_ATTEMPTS,
+                    error
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[SYS-AGENT] Install call failed (attempt {}/{}): {}",
+                    attempt,
+                    INSTALL_MAX_ATTEMPTS,
+                    e
+                );
             }
         }
-        Err(e) => {
-            tracing::warn!("[SYS-AGENT] Install call failed: {}", e);
-        }
-    }
 
-    Ok(())
+        if attempt >= INSTALL_MAX_ATTEMPTS {
+            tracing::warn!(
+                "[SYS-AGENT] Install exhausted {} attempts — returning error so InstallAgentStep can retry",
+                INSTALL_MAX_ATTEMPTS
+            );
+            return Err(format!(
+                "System Agent install did not succeed after {} attempts; \
+                 node 'local' may still be enrolling",
+                INSTALL_MAX_ATTEMPTS
+            ));
+        }
+        sleep(Duration::from_millis(1500)).await;
+    }
+}
+
+/// Wait for the local Node Agent to be enrolled (`online=true` in
+/// `GET /api/nodes`).
+///
+/// Mirrors `dev/e2e_frontend_smoke/smoke_test.py::wait_node_online`.
+/// The response body is serialised with camelCase (serde rename_all),
+/// so we look up `nodeId` / `online` keys.
+///
+/// Returns `Ok(())` on success, `Err(msg)` if the timeout elapses.
+/// Never panics on transport errors — those are treated as "not yet
+/// online" and the loop continues.
+async fn wait_for_node_online(
+    client: &reqwest::Client,
+    gateway_url: &str,
+    node_id: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
+    use tokio::time::{Duration, sleep};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while std::time::Instant::now() < deadline {
+        match client.get(format!("{}/api/nodes", gateway_url)).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<Vec<serde_json::Value>>().await {
+                    Ok(nodes) => {
+                        for n in &nodes {
+                            let matches_node = n
+                                .get("nodeId")
+                                .and_then(|v| v.as_str())
+                                == Some(node_id);
+                            let is_online = n
+                                .get("online")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            if matches_node && is_online {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("[NODE-READY] /api/nodes parse error: {}", e);
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::debug!(
+                    "[NODE-READY] /api/nodes returned HTTP {}",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::debug!("[NODE-READY] /api/nodes request error: {}", e);
+            }
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!(
+        "Node '{}' did not come online within {}s",
+        node_id, timeout_secs
+    ))
 }
 
 /// Start the local Gateway process (used by the Settings page "Start" button).

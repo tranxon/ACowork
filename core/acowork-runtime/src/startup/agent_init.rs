@@ -195,6 +195,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(std::sync::RwLock::new(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
+    // Fix-3 observability: log the on-disk path + allowed_dirs count at
+    // startup so users reporting "workspace disappeared on restart" can
+    // correlate the workspace_resolver state with the work_dir the
+    // runtime was actually using. The number should match the entries
+    // persisted on the previous run (see
+    // `workspace_mutation_impl::save_config`). See
+    // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+    {
+        let guard = workspace_resolver.read().expect("workspace_resolver lock poisoned");
+        tracing::info!(
+            work_dir = %config.work_dir,
+            allowed_dirs = guard.allowed_dirs().len(),
+            "WorkspaceResolver loaded from agent_workspaces.json"
+        );
+    }
 
     // ADR-058: workspace FS watcher set. When the HTTP server starts it
     // creates the set (shared with its state); otherwise a standalone

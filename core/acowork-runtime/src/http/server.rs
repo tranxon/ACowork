@@ -1328,6 +1328,46 @@ async fn create_workspace(
             reload_workspace_resolver(&state);
             // ADR-058: reconcile watcher set with the reloaded resolver.
             sync_workspace_watchers(&state).await;
+            // Fix-3 sanity check: after reload, the newly-created
+            // workspace id MUST be visible via `find_by_id`. A `None`
+            // here indicates a write/read race (e.g. another thread
+            // clobbered `agent_workspaces.json` between `save_config`
+            // and the reload). The Desktop would experience this as
+            // "workspace disappeared" — surface it as 500 so the
+            // abnormal condition is loud rather than silently returning
+            // an entry that downstream `route_workspace_switch` calls
+            // cannot resolve. See `desktop-onboarding-bugfix_154b7ff7.md`
+            // §Fix 3.
+            if let Some(new_id) = r
+                .entry
+                .as_ref()
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                match state.workspace_resolver.read() {
+                    Ok(resolver) => {
+                        if resolver.find_by_id(new_id).is_none() {
+                            tracing::error!(
+                                ws_id = %new_id,
+                                "Workspace mutation: reload succeeded but new id not visible — possible write/read race"
+                            );
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": "Workspace persisted but not visible after reload — possible write/read race",
+                                    "ws_id": new_id,
+                                })),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "create_workspace: resolver lock poisoned during sanity check"
+                        );
+                    }
+                }
+            }
             Ok(Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
         }
         Err(e) => Err(workspace_error_to_response(e)),

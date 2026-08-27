@@ -85,6 +85,7 @@
       "installSelectedInstalling": "正在安裝 {{name}}...",
       "fromFileTitle": "從 .agent 檔案安裝",
       "fromFileSubtitle": "從你的電腦上選擇一個 .agent 安裝包",
+      "waitingForNode": "正在等待本地節點上線...",
       "complete": "完成 →",
       "back": "返回"
     }

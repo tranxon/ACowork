@@ -67,11 +67,25 @@ fn mcp_transport_to_def(t: i32) -> McpTransportDef {
 /// kernel hasn't detected the broken connection). We break to the
 /// soft-restart path to create a fresh `AsyncClient` + `EventLoop`.
 ///
-/// 20 s = 4 × keepalive interval (5 s). Normal connections produce at
-/// least one PINGRESP within every keepalive interval, so 20 s without
-/// any event strongly indicates a stuck socket. Previously 90 s but
-/// the long delay caused poor recovery after OS sleep/wake.
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
+/// 60 s = 2 × keepalive interval (30 s). Normal connections produce at
+/// least one PINGRESP within every keepalive interval, so 60 s without
+/// any event strongly indicates a stuck socket. Previously 20 s with
+/// keepalive=5 s, but the 5 s interval was aggressive enough to trip
+/// during long synchronous HTTP handler work (e.g. `POST /workspaces`
+/// which routinely exceeds 4 s), so we widened both
+/// ([`RUNTIME_KEEPALIVE_INTERVAL`]) and this watchdog to 30/60 s — see
+/// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default `keep_alive` value published to the broker.
+///
+/// 30 s matches the broker-side `(rumqttd)` default idle-detect window
+/// while giving Runtime plenty of slack to handle long HTTP handler
+/// requests (workspaces CRUD can take 4–6 s on slow disks). With this
+/// value, the broker will not see the connection as dead during a
+/// synchronous I/O burst shorter than 30 s — see
+/// `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+const RUNTIME_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Error type for Runtime MQTT client operations.
 #[derive(Debug, thiserror::Error)]
@@ -503,12 +517,15 @@ impl RuntimeMqttClient {
 
         // Configure MQTT options with Last Will.
         let mut options = MqttOptions::new(client_id.clone(), cfg.host, cfg.port);
-        // Match the broker's `connection_timeout_ms` (5 s, see
-        // `core/acowork-gateway/src/mqtt/broker.rs`). The previous 30 s
-        // value caused the broker to disconnect the Runtime after every
-        // OS sleep/wake (broker timed out at 5 s while the client still
-        // thought itself connected until the next PINGREQ 30 s later).
-        options.set_keep_alive(Duration::from_secs(5));
+        // Align the keep-alive interval with [`RUNTIME_KEEPALIVE_INTERVAL`]
+        // (30 s). Previously this was set to 5 s to match the broker's
+        // `connection_timeout_ms` (`core/acowork-gateway/src/mqtt/broker.rs`)
+        // — the value caused the broker to disconnect the Runtime on
+        // OS sleep/wake, and (more commonly) tripped KeepAlive(Elapsed)
+        // during long synchronous HTTP handler work such as
+        // `POST /workspaces`, which can take 4–6 s. See
+        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+        options.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
         options.set_clean_session(true);
 
         // ADR-055 Phase 5a: authenticate when the broker requires it
@@ -911,6 +928,26 @@ impl RuntimeMqttClient {
                             );
                             poll_state_tx.set(SessionState::Reconnecting);
                             break;
+                        }
+
+                        // Fix-3 observability: if the poll loop has been
+                        // idle for `keepalive × 0.8` or more, emit a
+                        // trace-level message so future KeepAlive disconnects
+                        // can be correlated with the agent's idle window
+                        // (e.g. long synchronous HTTP handlers like
+                        // `POST /workspaces`). The trace is enabled only at
+                        // RUST_LOG=trace — it does not spam INFO logs in
+                        // normal operation. See
+                        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+                        _ = tokio::time::sleep(RUNTIME_KEEPALIVE_INTERVAL.mul_f32(0.8)) => {
+                            let idle_s = RUNTIME_KEEPALIVE_INTERVAL.as_secs() as f32 * 0.8;
+                            tracing::trace!(
+                                agent_id = %poll_agent_id,
+                                keepalive_s = RUNTIME_KEEPALIVE_INTERVAL.as_secs(),
+                                idle_s = idle_s,
+                                "Runtime MQTT event loop idle near keepalive boundary — next PINGREQ imminent"
+                            );
+                            continue;
                         }
                     }
                 }
@@ -2109,7 +2146,10 @@ mod tests {
         // Verify status was published as retained by subscribing and receiving it
         use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
         let mut sub_opts = SubOpts::new("test:subscriber", "127.0.0.1", port);
-        sub_opts.set_keep_alive(Duration::from_secs(5));
+        // Mirror production keep-alive so the test broker does not
+        // disconnect the subscriber while we are still collecting
+        // published topics.
+        sub_opts.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_eventloop) = SubClient::new(sub_opts, 10);
         sub_client
             .subscribe("acowork/agents/com.test.agent/#", QoS::AtLeastOnce)
@@ -2219,7 +2259,10 @@ mod tests {
         // Verify retained messages are still present.
         use rumqttc::{AsyncClient as SubClient, MqttOptions as SubOpts};
         let mut sub_opts = SubOpts::new("test:bootstrap:sub", "127.0.0.1", port);
-        sub_opts.set_keep_alive(Duration::from_secs(5));
+        // Mirror production keep-alive so the test broker does not
+        // disconnect the subscriber while we are still collecting
+        // published topics.
+        sub_opts.set_keep_alive(RUNTIME_KEEPALIVE_INTERVAL);
         let (sub_client, mut sub_loop) = SubClient::new(sub_opts, 10);
         sub_client
             .subscribe("acowork/agents/com.test.bootstrap/#", QoS::AtLeastOnce)

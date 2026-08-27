@@ -7,6 +7,70 @@ use crate::gateway_client::{
 };
 use crate::state::AppState;
 
+/// Maximum number of attempts for an `install_agent` POST to the Gateway
+/// before giving up. The Gateway returns HTTP 503 "Node 'local' has never
+/// enrolled" while the Node Agent is still bootstrapping (Fix 2). Most
+/// retries recover within 1–2 iterations; we cap at 5 / 7.5 s to keep
+/// the user-perceived onboarding latency bounded.
+const INSTALL_MAX_ATTEMPTS: usize = 5;
+
+/// Install-backoff base: 1.5 s per attempt. Total worst-case wait
+/// is `(MAX_ATTEMPTS - 1) * 1.5 s = 6 s`.
+const INSTALL_RETRY_DELAY_MS: u64 = 1500;
+
+/// Decide whether an `install_agent` failure looks like a node-online
+/// race (the common case in onboarding) and is worth retrying. Network
+/// errors and HTTP 503s from the Gateway fall in this bucket; package
+/// validation errors do not.
+fn should_retry_install(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("503")
+        || msg.contains("never enrolled")
+        || msg.contains("status code")
+}
+
+/// Shared retry wrapper for the Gateway install POST. Returns the first
+/// non-retryable error or the final result after `INSTALL_MAX_ATTEMPTS`
+/// attempts.
+async fn install_with_retry<F, Fut>(label: &str, mut op: F) -> Result<GenericMessageResponse, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<GenericMessageResponse>>,
+{
+    let mut attempt: usize = 0;
+    loop {
+        attempt += 1;
+        match op().await {
+            Ok(resp) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        "[{}] Install succeeded on attempt {}/{}",
+                        label,
+                        attempt,
+                        INSTALL_MAX_ATTEMPTS
+                    );
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                let retryable = should_retry_install(&e);
+                if !retryable || attempt >= INSTALL_MAX_ATTEMPTS {
+                    return Err(e.to_string());
+                }
+                tracing::warn!(
+                    "[{}] Install attempt {}/{} failed (will retry): {}",
+                    label,
+                    attempt,
+                    INSTALL_MAX_ATTEMPTS,
+                    e
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(INSTALL_RETRY_DELAY_MS))
+                    .await;
+            }
+        }
+    }
+}
+
 /// List all installed agents
 #[tauri::command]
 pub async fn list_agents(state: State<'_, AppState>) -> Result<Vec<AgentListEntry>, String> {
@@ -33,6 +97,10 @@ pub async fn get_agent_detail(
 /// to the Gateway via multipart/form-data. This works across platform boundaries
 /// (e.g. Windows client → WSL Gateway) because the file content is transmitted
 /// over HTTP rather than relying on shared filesystem paths.
+///
+/// Fix 2: the Gateway can answer HTTP 503 "Node 'local' has never enrolled"
+/// while the Node Agent is still bootstrapping. We retry that and similar
+/// transient errors up to `INSTALL_MAX_ATTEMPTS` times with `1.5s` backoff.
 #[tauri::command]
 pub async fn install_agent(
     state: State<'_, AppState>,
@@ -48,12 +116,21 @@ pub async fn install_agent(
         return Err("Package file is empty".to_string());
     }
 
-    // Upload bytes to Gateway via multipart
-    let client = state.gateway.read().await;
-    client
-        .install_agent(&package_bytes, dev_mode.unwrap_or(false), node_id.as_deref())
-        .await
-        .map_err(|e| e.to_string())
+    install_with_retry("INSTALL_AGENT", move || {
+        // Clone the captured Tauri `State` (cheap, it wraps an `&AppState`)
+        // for each attempt so the FnMut closure can be called multiple times.
+        let state = state.clone();
+        let package_bytes = package_bytes.clone();
+        let node_id = node_id.clone();
+        let dev_mode = dev_mode.unwrap_or(false);
+        async move {
+            let client = state.gateway.read().await;
+            client
+                .install_agent(&package_bytes, dev_mode, node_id.as_deref())
+                .await
+        }
+    })
+    .await
 }
 
 #[tauri::command]
@@ -80,11 +157,17 @@ pub async fn install_bundled_agent(
         )
     })?;
 
-    let client = state.gateway.read().await;
-    client
-        .install_agent(&package_bytes, dev_mode.unwrap_or(true), None)
-        .await
-        .map_err(|e| e.to_string())
+    install_with_retry("INSTALL_BUNDLED", move || {
+        // See INSTALL_AGENT — clone the captured Tauri `State` per attempt.
+        let state = state.clone();
+        let package_bytes = package_bytes.clone();
+        let dev_mode = dev_mode.unwrap_or(true);
+        async move {
+            let client = state.gateway.read().await;
+            client.install_agent(&package_bytes, dev_mode, None).await
+        }
+    })
+    .await
 }
 
 fn bundled_agent_package_path(

@@ -85,6 +85,7 @@
       "installSelectedInstalling": "{{name}} をインストール中...",
       "fromFileTitle": ".agent ファイルからインストール",
       "fromFileSubtitle": "コンピューターから .agent パッケージを選択",
+      "waitingForNode": "ローカルノードのオンラインを待機中...",
       "complete": "完了 →",
       "back": "戻る"
     }

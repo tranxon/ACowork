@@ -209,6 +209,15 @@ pub struct GatewayState {
     /// Set once at startup from `Gateway::run` via
     /// [`Self::set_advertise_host`]. Tests default to "127.0.0.1".
     pub advertise_host: String,
+    /// MQTT publisher ready-barrier handle (Fix 1).
+    ///
+    /// The publisher defers its first retained publish until
+    /// [`crate::mqtt::MqttPublisherHandle::mark_ready`] is called via this
+    /// handle. Set once by `Gateway::run` after `start()` spawns the
+    /// publisher loop; read by the vault auto-unlock task and the
+    /// local-node ready task to coordinate the barrier. `None` when
+    /// MQTT is disabled.
+    pub mqtt_publisher_handle: Option<crate::mqtt::MqttPublisherHandle>,
 }
 
 impl GatewayState {
@@ -231,6 +240,7 @@ impl GatewayState {
             mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
             mqtt_broker_auth: None,
             advertise_host: "127.0.0.1".to_string(),
+            mqtt_publisher_handle: None,
         }
     }
 

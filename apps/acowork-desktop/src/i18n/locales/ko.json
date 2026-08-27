@@ -85,6 +85,7 @@
       "installSelectedInstalling": "{{name}} 설치 중...",
       "fromFileTitle": ".agent 파일에서 설치",
       "fromFileSubtitle": "컴퓨터에서 .agent 패키지를 선택하세요",
+      "waitingForNode": "로컬 노드 에이전트가 온라인이 되기를 기다리는 중...",
       "complete": "완료 →",
       "back": "뒤로"
     }

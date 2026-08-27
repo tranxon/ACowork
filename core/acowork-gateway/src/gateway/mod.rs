@@ -737,6 +737,13 @@ impl Gateway {
         // ADR-033: Start MQTT Global Resources Publisher.
         // Publishes providers, models, MCP catalog, searches, embedding models
         // to acowork/global/* Retained topics so Runtime can discover them.
+        //
+        // The publisher defers its first Retained publish until a "ready"
+        // signal is raised — see `desktop-onboarding-bugfix_154b7ff7.md`
+        // §Fix 1. The handle is stored on `shared_state` so that (a) the
+        // dev_mode vault auto-unlock task and (b) the local-node
+        // supervisor completion can independently call `handle.mark_ready()`
+        // once their respective preconditions are satisfied.
         let mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger> = if let Some(ref client) = mqtt_gw_client {
             let publisher = crate::mqtt::MqttGlobalResourcesPublisher::new(
                 client.as_ref().clone(),
@@ -745,17 +752,17 @@ impl Gateway {
             let handle = publisher.start();
             let trigger = handle.create_trigger();
             tracing::info!("MQTT Global Resources Publisher started");
-            // Store the handle to keep the publisher loop alive.
-            // We don't hold it explicitly — it's kept alive by the tokio task.
+            // Store the handle so the ready barrier can be raised by the
+            // vault auto-unlock task and the local-node supervisor.
+            shared_state.write().await.mqtt_publisher_handle = Some(handle);
             Some(trigger)
         } else { None };
 
-        // Keep a handle on the publisher trigger for the dev-mode vault
-        // auto-unlock task (below): the publisher emits its initial
-        // retained snapshot immediately, before the unlock completes, so
-        // every ProviderRef.api_key is empty in that snapshot. The unlock
-        // task republishes once keys become readable. (The original is
-        // moved into the HTTP server task further down.)
+        // Keep a clonable trigger for the dev-mode vault auto-unlock
+        // task (below). The handle's `mark_ready()` is invoked via the
+        // shared state (see GatewayState::mqtt_publisher_handle); this
+        // `unlock_republish_trigger` is kept for backward-compatible
+        // explicit republish on first provider-key visibility.
         let unlock_republish_trigger = mqtt_publisher_trigger.clone();
 
         // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
@@ -842,6 +849,43 @@ impl Gateway {
             } else {
                 None
             };
+
+        // ADR-055 §6.11: Fix 1 follow-up — raise the publisher ready barrier
+        // once the local node has enrolled, regardless of whether the
+        // vault auto-unlock path fired. In non-dev_mode this is the only
+        // signal that releases the publisher loop; in dev_mode it covers
+        // the window between vault-unlock and node-enrollment so we
+        // don't emit a snapshot before the node is ready to talk.
+        if local_node_supervisor.is_some() {
+            let registry_for_ready = node_registry.clone();
+            let ready_state = shared_state.clone();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+                while tokio::time::Instant::now() < deadline {
+                    if registry_for_ready
+                        .read()
+                        .await
+                        .is_online(acowork_core::node::LOCAL_NODE_ID)
+                    {
+                        let st = ready_state.read().await;
+                        if let Some(ref h) = st.mqtt_publisher_handle {
+                            h.mark_ready();
+                        }
+                        tracing::info!(
+                            "Publisher ready barrier raised by local node online event"
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                tracing::warn!(
+                    "Local node did not enroll within 20s; \
+                     publisher ready barrier is left for the vault \
+                     auto-unlock path (or, in non-dev_mode, will not fire \
+                     until the first resource change)"
+                );
+            });
+        }
 
         // ADR-055 §6.2: auto-start the System Agent once the local node is
         // up and its retained installed inventory has been aggregated.
@@ -932,6 +976,7 @@ impl Gateway {
         if self.config.dev_mode {
             let vault_state = self.state.clone();
             let unlock_republish = unlock_republish_trigger;
+            let unlock_state = shared_state.clone();
             tokio::spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     vault_state.blocking_write().vault.unlock("dev-mode-unlock")
@@ -949,6 +994,18 @@ impl Gateway {
                         if let Some(ref trigger) = unlock_republish {
                             trigger.trigger();
                         }
+                        // Raise the publisher ready barrier (Fix 1). The
+                        // loop has been blocked waiting for this ever
+                        // since `start()` was called; setting it now
+                        // releases the initial retained publish with
+                        // populated `api_key` fields. We also nudge the
+                        // loop explicitly so a race (channel already
+                        // observed before the loop entered the wait) is
+                        // still covered.
+                        let state_for_unlock = unlock_state.read().await;
+                        if let Some(ref h) = state_for_unlock.mqtt_publisher_handle {
+                            h.mark_ready();
+                        }
                     }
                     Ok(Err(e)) => {
                         tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e)
@@ -957,7 +1014,11 @@ impl Gateway {
                 }
             });
         } else {
-            // No background unlock in non-dev mode — nothing to follow up.
+            // No background unlock in non-dev mode. The ready barrier can
+            // still be raised by the local-node ready path below; if
+            // neither fires, the publisher loop will wait forever, which
+            // is correct — surfacing "global resources" without an
+            // enrolled node is exactly the onboarding bug we are fixing.
             drop(unlock_republish_trigger);
         }
 
