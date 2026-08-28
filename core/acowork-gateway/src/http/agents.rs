@@ -1485,7 +1485,7 @@ pub async fn install_agent(
             .gateway_state
             .read()
             .await
-            .bootstrap_orchestrator
+            .bootstrap.orchestrator
             .as_ref()
             .map(|o| {
                 let s = o.snapshot();

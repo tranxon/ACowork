@@ -19,6 +19,7 @@ pub mod mqtt;
 pub mod operation_store;
 pub mod rate;
 pub mod resource_cache;
+pub mod util;
 pub mod vault;
 
 /// Type alias for the tracing reload handle used to dynamically change log levels.

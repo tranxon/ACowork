@@ -377,13 +377,13 @@ impl Gateway {
             instance_id,
             bootstrap_registry.clone(),
         );
-        shared_state.write().await.bootstrap_orchestrator =
+        shared_state.write().await.bootstrap.orchestrator =
             Some(bootstrap_orchestrator.clone());
         // ADR-059 Phase 5.4: stash the vault handle on the shared
         // state so the HTTP vault lock/unlock handlers can demote
         // (mark_booting) and restore (mark_ready) vault readiness
         // without holding a registry reference.
-        shared_state.write().await.vault_readiness_handle = Some(vault_handle.clone());
+        shared_state.write().await.bootstrap.vault_readiness_handle = Some(vault_handle.clone());
 
         // System Agent auto-start now happens AFTER the local node is up
         // and its installed inventory has been aggregated (see below).
@@ -772,23 +772,28 @@ impl Gateway {
                 let node_tokens_for_cb = node_tokens_for_dispatch.clone();
                 let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
                 let operation_store_for_cb = operation_store_for_dispatch.clone();
-                tokio::spawn(async move {
+                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
-                    crate::mqtt::dispatch::handle_message(
-                        &topic, &payload,
-                        &reg_for_dispatch,
-                        &agent_reg_for_dispatch,
-                        &node_reg_for_dispatch,
-                        client.as_ref(),
-                        &state_for_dispatch,
-                        node_control.as_ref(),
-                        Some(&enrollment_tokens_for_cb),
-                        Some(&node_tokens_for_cb),
-                        auth_enabled_for_dispatch,
-                        Some(&bootstrap_registry_for_cb),
-                        Some(&operation_store_for_cb),
-                    );
+                    // ADR-059 follow-up: bundle every dispatch dependency
+                    // into one context instead of a growing argument list.
+                    // `client` / `node_control` / the token stores are moved
+                    // in (single-use inside this task); registry Arcs are
+                    // shallow-cloned.
+                    let dispatch_ctx = crate::mqtt::dispatch::DispatchContext {
+                        runtime_http_registry: reg_for_dispatch.clone(),
+                        agent_registry: agent_reg_for_dispatch.clone(),
+                        node_registry: node_reg_for_dispatch.clone(),
+                        mqtt_client: client,
+                        state: state_for_dispatch.clone(),
+                        node_control,
+                        enrollment_tokens: Some(enrollment_tokens_for_cb),
+                        node_tokens: Some(node_tokens_for_cb),
+                        auth_enabled: auth_enabled_for_dispatch,
+                        bootstrap_registry: Some(bootstrap_registry_for_cb),
+                        operation_store: Some(operation_store_for_cb),
+                    };
+                    crate::mqtt::dispatch::handle_message(&topic, &payload, &dispatch_ctx);
                 });
             });
 
@@ -1121,7 +1126,7 @@ impl Gateway {
             let unlock_republish = unlock_republish_trigger;
             tokio::spawn(async move {
                 let vault_boot_handle =
-                    match unlock_state.read().await.vault_readiness_handle.clone() {
+                    match unlock_state.read().await.bootstrap.vault_readiness_handle.clone() {
                         Some(h) => h,
                         None => {
                             tracing::error!(

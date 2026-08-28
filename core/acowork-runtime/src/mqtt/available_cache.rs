@@ -18,6 +18,36 @@ use acowork_core::mqtt_proto::{
     AvailableSearches, AvailableUsers, BootstrapState, DataEnvelope,
 };
 
+/// Global-resource snapshot that carries a monotonic `version` used to
+/// reject stale retained re-delivery (ADR-059 §5.3).
+///
+/// Implemented for every `Available*` proto message that has a `version`
+/// field. The `bootstrap` snapshot is handled separately — its staleness
+/// check also involves `instance_id` (a Gateway generation switch).
+trait Versioned {
+    fn version(&self) -> u64;
+}
+
+macro_rules! impl_versioned {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl Versioned for $ty {
+                fn version(&self) -> u64 { self.version }
+            }
+        )*
+    };
+}
+
+impl_versioned!(
+    AvailableProviders,
+    AvailableMcps,
+    AvailableSearches,
+    AvailableEmbeddingModels,
+    AvailableLsps,
+    AvailableUsers,
+);
+
+
 /// In-memory snapshot of all global resource available states.
 ///
 /// Updated atomically when new Retained messages arrive on `acowork/global/#`.
@@ -47,6 +77,22 @@ impl AvailableResourceCache {
         Self::default()
     }
 
+    /// Whether `incoming` should replace the currently cached snapshot
+    /// for a resource slot.
+    ///
+    /// Returns `true` when no snapshot is cached yet (first delivery)
+    /// or when the incoming `version` has not gone backwards. Returns
+    /// `false` for a stale retained re-delivery — the broker may
+    /// re-deliver an older retained payload after a reconnect, and a
+    /// `version` that went backwards is never a newer snapshot, so the
+    /// caller must keep the cached one.
+    fn is_newer_or_first<T: Versioned>(&self, current: &Option<T>, incoming: &T) -> bool {
+        match current {
+            Some(cur) => incoming.version() >= cur.version(),
+            None => true,
+        }
+    }
+
     /// Update the cache from an incoming MQTT message.
     ///
     /// `topic` should be an `acowork/global/{kind}` topic.
@@ -71,16 +117,12 @@ impl AvailableResourceCache {
 
         match payload {
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(p) => {
-                // ADR-059 Phase 5.3: reject stale retained re-delivery.
-                // The broker may re-deliver an older retained payload
-                // after a reconnect; a `version` that went backwards is
-                // never a newer snapshot, so keep the cached one.
-                if let Some(cur) = &self.providers
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.providers, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.providers.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableProviders retained re-delivery"
                     );
                     return;
@@ -93,12 +135,12 @@ impl AvailableResourceCache {
                 self.providers = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableMcps(p) => {
-                if let Some(cur) = &self.mcps
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.mcps, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.mcps.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableMcps retained re-delivery"
                     );
                     return;
@@ -111,12 +153,12 @@ impl AvailableResourceCache {
                 self.mcps = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableSearches(p) => {
-                if let Some(cur) = &self.searches
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.searches, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.searches.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableSearches retained re-delivery"
                     );
                     return;
@@ -129,12 +171,12 @@ impl AvailableResourceCache {
                 self.searches = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableEmbeddingModels(p) => {
-                if let Some(cur) = &self.embedding_models
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.embedding_models, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.embedding_models.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableEmbeddingModels retained re-delivery"
                     );
                     return;
@@ -148,12 +190,12 @@ impl AvailableResourceCache {
                 self.embedding_models = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableLsps(p) => {
-                if let Some(cur) = &self.lsps
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.lsps, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.lsps.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableLsps retained re-delivery"
                     );
                     return;
@@ -169,12 +211,12 @@ impl AvailableResourceCache {
                 // Note: an empty `active_user` (no user created yet) is a
                 // legitimate newer state, so only `version` regression is
                 // rejected here — never the payload content.
-                if let Some(cur) = &self.user_profile
-                    && p.version < cur.version
-                {
+                // ADR-059 §5.3: reject stale retained re-delivery (see
+                // `is_newer_or_first`).
+                if !self.is_newer_or_first(&self.user_profile, &p) {
                     tracing::warn!(
                         stale_version = p.version,
-                        current_version = cur.version,
+                        current_version = self.user_profile.as_ref().map(|c| c.version).unwrap_or(0),
                         "Rejected stale AvailableUsers retained re-delivery"
                     );
                     return;

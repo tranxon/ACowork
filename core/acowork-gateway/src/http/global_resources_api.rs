@@ -263,7 +263,7 @@ pub async fn get_global_resources(State(state): State<AppState>) -> Response {
     // exist on the owned `Option<BootstrapSnapshot>` we have here).
     let snapshot = {
         let gw = state.gateway_state.read().await;
-        gw.bootstrap_orchestrator
+        gw.bootstrap.orchestrator
             .as_ref()
             .map(|o| o.snapshot())
     };
@@ -423,7 +423,7 @@ mod tests {
             );
             // Async write so we do not need a multi-threaded runtime.
             let mut guard = gw_state.write().await;
-            guard.bootstrap_orchestrator = Some(orchestrator);
+            guard.bootstrap.orchestrator = Some(orchestrator);
         }
         AppState::new(gw_state, Arc::new(HttpAuth::new(false)))
     }

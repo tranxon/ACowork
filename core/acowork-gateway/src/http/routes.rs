@@ -345,7 +345,7 @@ pub async fn check_expected_version(
         .gateway_state
         .read()
         .await
-        .bootstrap_orchestrator
+        .bootstrap.orchestrator
         .as_ref()
         .map(|o| o.snapshot().version)
         .unwrap_or(0);

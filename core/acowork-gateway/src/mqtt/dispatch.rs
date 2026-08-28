@@ -36,56 +36,75 @@ use crate::mqtt::node_control::NodeControlClient;
 use crate::mqtt::node_registry::SharedNodeRegistry;
 use crate::operation_store::SharedOperationStore;
 
+/// Bundled dependencies for the MQTT dispatch layer.
+///
+/// Groups every optional dependency the dispatch handlers need so the
+/// entry points stay narrow (`topic`, `payload`, `ctx`) and new
+/// subsystems do not keep growing the argument list. All fields are
+/// cheaply clonable (`Arc` / `Option<Arc>`), so a single context can
+/// be shared across every message without ownership fights.
+///
+/// Constructed once by `Gateway::run` (see `gateway/mod.rs`) and cloned
+/// per message into each dispatch task; tests build it via `Default`
+/// and override only the fields they exercise.
+#[derive(Clone)]
+pub struct DispatchContext {
+    /// Runtime HTTP port registry for the reverse proxy (ADR-033).
+    pub runtime_http_registry: SharedRuntimeHttpRegistry,
+    /// Agent online/offline registry (ADR-033).
+    pub agent_registry: SharedAgentRegistry,
+    /// Node registry — LWT-driven online state + retained info
+    /// snapshots (ADR-055 §6.2).
+    pub node_registry: SharedNodeRegistry,
+    /// Gateway MQTT client for re-publishing plain-text statuses as
+    /// protobuf envelopes. `None` in tests without a broker.
+    pub mqtt_client: Option<Arc<GatewayMqttClient>>,
+    /// Shared Gateway state.
+    pub state: SharedState,
+    /// Node control-plane client for correlating NodeEvent replies
+    /// (ADR-055 §6.2).
+    pub node_control: Option<NodeControlClient>,
+    /// Enrollment token store (ADR-055 Phase 5a).
+    pub enrollment_tokens: Option<SharedEnrollmentTokenStore>,
+    /// Node token store (ADR-055 Phase 5a).
+    pub node_tokens: Option<SharedNodeTokenStore>,
+    /// Whether enrollment-token validation is enforced (ADR-055 Phase 5a).
+    pub auth_enabled: bool,
+    /// Subsystem readiness registry — receives `node.{id}` readiness
+    /// transitions from `acowork/nodes/+/ready` (ADR-059 §7.2).
+    pub bootstrap_registry: Option<SharedSubsystemReadinessRegistry>,
+    /// Operation store — correlates NodeEvent replies to tracked
+    /// mutation operations (ADR-059 §6).
+    pub operation_store: Option<SharedOperationStore>,
+}
+
+impl Default for DispatchContext {
+    fn default() -> Self {
+        Self {
+            runtime_http_registry: crate::http::proxy::new_shared_registry(),
+            agent_registry: crate::mqtt::agent_registry::new_shared_registry(),
+            node_registry: crate::mqtt::node_registry::new_shared_registry(),
+            mqtt_client: None,
+            state: Arc::new(tokio::sync::RwLock::new(
+                crate::gateway::state::GatewayState::new("/tmp/acowork-dispatch-default"),
+            )),
+            node_control: None,
+            enrollment_tokens: None,
+            node_tokens: None,
+            auth_enabled: false,
+            bootstrap_registry: None,
+            operation_store: None,
+        }
+    }
+}
+
 /// Unified MQTT message handler — called from the Gateway's MQTT callback.
 ///
-/// `mqtt_client` is used to re-publish plain-text status messages as
-/// protobuf `DataEnvelope` (see module docs). Pass `None` in tests that
-/// don't have a real broker. `node_control` correlates NodeEvent
-/// results against in-flight node commands (ADR-055 §6.2).
-///
-/// ADR-055 Phase 5a: `enrollment_tokens` / `node_tokens` are the
-/// credential stores backing the enrollment handshake; `auth_enabled`
-/// gates enrollment-token validation (when false, enrollments are
-/// accepted without a token, preserving the pre-5a default path).
-///
-/// ADR-059 §7.2: `bootstrap_registry` receives `node.{id}` readiness
-/// transitions from the `acowork/nodes/+/ready` topic. `None` in tests
-/// that do not wire a registry.
-///
-/// ADR-059 §6: `operation_store` correlates NodeEvent replies (whose
-/// `request_id` equals the tracked mutation's `operation_id`) to their
-/// terminal state. `None` in tests that do not wire a store.
-#[allow(clippy::too_many_arguments)]
-pub fn handle_message(
-    topic: &str,
-    payload: &[u8],
-    runtime_http_registry: &SharedRuntimeHttpRegistry,
-    agent_registry: &SharedAgentRegistry,
-    node_registry: &SharedNodeRegistry,
-    mqtt_client: Option<&Arc<GatewayMqttClient>>,
-    state: &SharedState,
-    node_control: Option<&NodeControlClient>,
-    enrollment_tokens: Option<&SharedEnrollmentTokenStore>,
-    node_tokens: Option<&SharedNodeTokenStore>,
-    auth_enabled: bool,
-    bootstrap_registry: Option<&SharedSubsystemReadinessRegistry>,
-    operation_store: Option<&SharedOperationStore>,
-) {
-    handle_plaintext_message(
-        topic,
-        payload,
-        runtime_http_registry,
-        agent_registry,
-        node_registry,
-        mqtt_client,
-        state,
-        node_control,
-        enrollment_tokens,
-        node_tokens,
-        auth_enabled,
-        bootstrap_registry,
-        operation_store,
-    );
+/// `ctx` bundles every dependency the dispatch layer needs (see
+/// [`DispatchContext`]); subsystems that a test does not wire are
+/// simply `None` and their topics are logged and skipped.
+pub fn handle_message(topic: &str, payload: &[u8], ctx: &DispatchContext) {
+    handle_plaintext_message(topic, payload, ctx);
 }
 
 /// Topic pattern matcher.
@@ -131,22 +150,7 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 ///   with an `enroll_result` reply on the per-node result topic.
 ///
 /// This replaces the inline callback previously in `gateway/mod.rs`.
-#[allow(clippy::too_many_arguments)]
-pub fn handle_plaintext_message(
-    topic: &str,
-    payload: &[u8],
-    runtime_http_registry: &SharedRuntimeHttpRegistry,
-    agent_registry: &SharedAgentRegistry,
-    node_registry: &SharedNodeRegistry,
-    mqtt_client: Option<&Arc<GatewayMqttClient>>,
-    state: &SharedState,
-    node_control: Option<&NodeControlClient>,
-    enrollment_tokens: Option<&SharedEnrollmentTokenStore>,
-    node_tokens: Option<&SharedNodeTokenStore>,
-    auth_enabled: bool,
-    bootstrap_registry: Option<&SharedSubsystemReadinessRegistry>,
-    operation_store: Option<&SharedOperationStore>,
-) {
+pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchContext) {
     if topic_matches("acowork/agents/+/http_endpoint", topic) {
         let agent_id = topic
             .strip_prefix("acowork/agents/")
@@ -180,7 +184,7 @@ pub fn handle_plaintext_message(
             );
             return;
         }
-        let reg = runtime_http_registry.clone();
+        let reg = ctx.runtime_http_registry.clone();
         let aid = agent_id.to_string();
         let aid_for_log = aid.clone();
         let endpoint_for_log = endpoint.clone();
@@ -189,15 +193,15 @@ pub fn handle_plaintext_message(
         });
         tracing::info!(agent_id = %aid_for_log, endpoint = %endpoint_for_log, "Registered Runtime HTTP endpoint via MQTT");
     } else if topic_matches("acowork/agents/+/status", topic) {
-        let reg = agent_registry.clone();
+        let reg = ctx.agent_registry.clone();
         let topic_owned = topic.to_string();
         let payload_owned = payload.to_vec();
-        let state_for_status = state.clone();
+        let state_for_status = ctx.state.clone();
         // Clone the (optional) GatewayMqttClient for the spawned
         // re-publish task. None means the Gateway is running without
         // an embedded broker (e.g. tests); in that case we skip
         // re-publishing but still update the AgentRegistry.
-        let mqtt_client_for_republish = mqtt_client.cloned();
+        let mqtt_client_for_republish = ctx.mqtt_client.clone();
         tokio::spawn(async move {
             // 1) Update internal registry (sleeping_at stamping, etc.)
             reg.write().await.update_from_mqtt(&topic_owned, &payload_owned);
@@ -318,7 +322,7 @@ pub fn handle_plaintext_message(
                 return;
             }
         };
-        let state_for_ready = state.clone();
+        let state_for_ready = ctx.state.clone();
         let agent_id_for_log = agent_id.clone();
         tokio::spawn(async move {
             let mut gw = state_for_ready.write().await;
@@ -334,7 +338,7 @@ pub fn handle_plaintext_message(
         // same shape as the agent status topic). Feeds the
         // NodeRegistry — the local-node supervisor and (Phase 2b)
         // the lifecycle control plane read it.
-        let reg = node_registry.clone();
+        let reg = ctx.node_registry.clone();
         let topic_owned = topic.to_string();
         let payload_owned = payload.to_vec();
         tokio::spawn(async move {
@@ -348,7 +352,7 @@ pub fn handle_plaintext_message(
         // that path open.
         if let Some(node_id) = extract_node_id_from_status_topic(topic)
             && String::from_utf8_lossy(payload).trim() == "offline"
-            && let Some(registry) = bootstrap_registry
+            && let Some(registry) = ctx.bootstrap_registry.as_ref()
         {
             let subsystem = SubsystemId(format!("node.{}", node_id));
             // Only demote when currently ready — a node that never
@@ -371,7 +375,7 @@ pub fn handle_plaintext_message(
             tracing::warn!(topic, "ready topic matched but node_id extraction failed");
             return;
         };
-        let Some(registry) = bootstrap_registry else {
+        let Some(registry) = ctx.bootstrap_registry.as_ref() else {
             tracing::debug!(topic, "NodeReady received but no bootstrap registry wired — dropping");
             return;
         };
@@ -433,7 +437,7 @@ pub fn handle_plaintext_message(
     } else if topic_matches("acowork/nodes/+/info", topic) {
         // ADR-055 §6.2: node metadata snapshot (protobuf
         // DataEnvelope<NodeInfo>, retained). Feeds the NodeRegistry.
-        let reg = node_registry.clone();
+        let reg = ctx.node_registry.clone();
         let topic_owned = topic.to_string();
         let payload_owned = payload.to_vec();
         tokio::spawn(async move {
@@ -445,7 +449,7 @@ pub fn handle_plaintext_message(
         // the deprecated `acowork/global/lsps`). Feeds the
         // NodeRegistry's `lsp_endpoint` slot, served via
         // `GET /api/agents/{id}/lsp-endpoint`.
-        let reg = node_registry.clone();
+        let reg = ctx.node_registry.clone();
         let topic_owned = topic.to_string();
         let payload_owned = payload.to_vec();
         tokio::spawn(async move {
@@ -461,10 +465,13 @@ pub fn handle_plaintext_message(
             tracing::warn!(topic, "enroll topic matched but node_id extraction failed");
             return;
         };
-        let reg = node_registry.clone();
-        let mqtt_for_reply = mqtt_client.cloned();
-        let enroll_store = enrollment_tokens.cloned();
-        let node_store = node_tokens.cloned();
+        let reg = ctx.node_registry.clone();
+        let mqtt_for_reply = ctx.mqtt_client.clone();
+        let enroll_store = ctx.enrollment_tokens.clone();
+        let node_store = ctx.node_tokens.clone();
+        // `auth_enabled` is a Copy bool — hoist it out of the context
+        // before the `'static` spawn so the task does not borrow `ctx`.
+        let auth_enabled = ctx.auth_enabled;
         let payload_owned = payload.to_vec();
         tokio::spawn(async move {
             process_enroll_message(
@@ -481,13 +488,13 @@ pub fn handle_plaintext_message(
     } else if topic_matches("acowork/nodes/+/agents/+/events", topic) {
         // ADR-055 §6.2: per-agent NodeEvent result (protobuf envelope,
         // QoS 1). Correlate against in-flight node commands.
-        let Some(control) = node_control.cloned() else {
+        let Some(control) = ctx.node_control.clone() else {
             tracing::debug!(topic, "Node agent event received but no NodeControlClient wired — dropping");
             return;
         };
         let payload_owned = payload.to_vec();
         let topic_owned = topic.to_string();
-        let op_store = operation_store.cloned();
+        let op_store = ctx.operation_store.clone();
         tokio::spawn(async move {
             match DataEnvelope::decode(payload_owned.as_slice()) {
                 Ok(envelope) => {
@@ -560,10 +567,10 @@ pub fn handle_plaintext_message(
             tracing::warn!(topic, "installed topic matched but id extraction failed");
             return;
         };
-        let state_for_installed = state.clone();
+        let state_for_installed = ctx.state.clone();
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
-        let bootstrap_registry_for_installed = bootstrap_registry.cloned();
+        let bootstrap_registry_for_installed = ctx.bootstrap_registry.clone();
         tokio::spawn(async move {
             let mut gw = state_for_installed.write().await;
             if payload_owned.is_empty() {
@@ -999,17 +1006,13 @@ mod tests {
         handle_plaintext_message(
             "acowork/nodes/local/status",
             b"online",
-            &http_reg,
-            &agent_reg,
-            &node_reg,
-            None,
-            &state,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state,
+                ..Default::default()
+            },
         );
         // handle_plaintext_message spawns a tokio task; wait for it.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1045,17 +1048,13 @@ mod tests {
         handle_plaintext_message(
             "acowork/nodes/gpu-1/info",
             &payload,
-            &http_reg,
-            &agent_reg,
-            &node_reg,
-            None,
-            &state,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state,
+                ..Default::default()
+            },
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let reg = node_reg.read().await;
@@ -1086,17 +1085,13 @@ mod tests {
         handle_plaintext_message(
             "acowork/nodes/gpu-1/lsps",
             &payload,
-            &http_reg,
-            &agent_reg,
-            &node_reg,
-            None,
-            &state,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
+            &DispatchContext {
+                runtime_http_registry: http_reg.clone(),
+                agent_registry: agent_reg.clone(),
+                node_registry: node_reg.clone(),
+                state,
+                ..Default::default()
+            },
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let reg = node_reg.read().await;
@@ -1398,17 +1393,17 @@ mod tests {
                 crate::mqtt::dispatch::handle_plaintext_message(
                     &topic,
                     &payload,
-                    &crate::http::proxy::new_shared_registry(),
-                    &crate::mqtt::agent_registry::new_shared_registry(),
-                    &reg,
-                    client.as_ref(),
-                    &state,
-                    None,
-                    Some(&es),
-                    Some(&ns),
-                    true,
-                    None,
-                    None,
+                    &DispatchContext {
+                        runtime_http_registry: crate::http::proxy::new_shared_registry(),
+                        agent_registry: crate::mqtt::agent_registry::new_shared_registry(),
+                        node_registry: reg.clone(),
+                        mqtt_client: client,
+                        state,
+                        enrollment_tokens: Some(es),
+                        node_tokens: Some(ns),
+                        auth_enabled: true,
+                        ..Default::default()
+                    },
                 );
             });
         });

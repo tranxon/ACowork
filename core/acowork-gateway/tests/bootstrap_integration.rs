@@ -40,7 +40,7 @@ use prost::Message as _;
 use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
 use tokio::sync::RwLock;
 
-use acowork_core::mqtt_proto::{data_envelope, DataEnvelope};
+use acowork_core::mqtt_proto::{data_envelope, BootstrapState, DataEnvelope};
 use acowork_core::node::{
     node_agent_events_topic, node_agent_installed_topic, node_ready_topic, node_status_topic,
 };
@@ -169,6 +169,38 @@ async fn collect_first_publish_payload(
     None
 }
 
+/// Drive `sub_eventloop` until a `Publish` arrives on `target_topic`
+/// whose decoded [`BootstrapState`] satisfies `pred`, or the deadline
+/// elapses. Returns the first matching state.
+///
+/// Unlike [`collect_first_publish_payload`] this skips intermediate
+/// publishes: the retained topic is change-driven, so a `BOOTING`
+/// republish can race a subsequent `READY` flip and land in the
+/// subscriber queue first. The contract under test is "the retained
+/// topic converges to the target phase", not "the next single publish
+/// is the target phase".
+async fn collect_bootstrap_until(
+    sub_eventloop: &mut rumqttc::EventLoop,
+    target_topic: &str,
+    deadline: Duration,
+    pred: impl Fn(&BootstrapState) -> bool,
+) -> Option<BootstrapState> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        match poll_one_event(sub_eventloop, remaining.min(Duration::from_millis(100))).await {
+            Some(Event::Incoming(Incoming::Publish(p))) if p.topic == target_topic => {
+                let bs = decode_bootstrap_state(&p.payload);
+                if pred(&bs) {
+                    return Some(bs);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Drive `sub_eventloop` for `window` and assert that NO publish
 /// arrives on `target_topic`.
 async fn assert_no_publish_in_window(
@@ -276,7 +308,7 @@ async fn build_surface(port: u16, instance_id: &str) -> TestSurface {
     config.vault_dir = vault_dir.to_string_lossy().to_string();
     gw_state.config = Some(config);
     let gw_state: SharedHttpState = Arc::new(RwLock::new(gw_state));
-    gw_state.write().await.bootstrap_orchestrator = Some(orchestrator.clone());
+    gw_state.write().await.bootstrap.orchestrator = Some(orchestrator.clone());
 
     let runtime_http_registry = acowork_gateway::http::proxy::new_shared_registry();
     let agent_registry = acowork_gateway::mqtt::agent_registry::new_shared_registry();
@@ -308,17 +340,17 @@ async fn build_surface(port: u16, instance_id: &str) -> TestSurface {
             dispatch::handle_plaintext_message(
                 &topic,
                 &payload,
-                &http_reg,
-                &agent_reg,
-                &node_reg,
-                client.as_ref(),
-                &state,
-                node_control.as_ref(),
-                None,
-                None,
-                false,
-                Some(&reg),
-                Some(&op_store),
+                &dispatch::DispatchContext {
+                    runtime_http_registry: http_reg,
+                    agent_registry: agent_reg,
+                    node_registry: node_reg,
+                    mqtt_client: client,
+                    state,
+                    node_control,
+                    bootstrap_registry: Some(reg),
+                    operation_store: Some(op_store),
+                    ..Default::default()
+                },
             );
         });
     });
@@ -720,25 +752,29 @@ async fn system_agent_delay_keeps_bootstrap_booting() {
     let bs = decode_bootstrap_state(&payload);
     assert_eq!(bs.phase, 1, "must stay BOOTING while system_agent is booting");
 
-    // System Agent ready → retained flips to READY with a higher version.
+    // System Agent ready → retained converges to READY with a higher
+    // version. Poll until the retained publish carries the READY phase:
+    // the publisher is change-driven, so an intermediate BOOTING
+    // republish can race the READY flip and must be skipped.
     system_agent.mark_ready(None);
+    let bs_version = bs.version;
     let orch = surface.orchestrator.clone();
     let ready = wait_until(Duration::from_secs(5), move || {
         let snap = orch.snapshot();
-        snap.phase == BootstrapPhase::Ready && snap.version > bs.version
+        snap.phase == BootstrapPhase::Ready && snap.version > bs_version
     })
     .await;
     assert!(ready, "phase must reach READY after system_agent ready");
-    let payload = collect_first_publish_payload(
+    let bs2 = collect_bootstrap_until(
         &mut sub_eventloop,
         TOPIC_BOOTSTRAP,
         Duration::from_secs(5),
+        |bs: &BootstrapState| bs.phase == 2 && bs.version > bs_version,
     )
     .await
-    .expect("bootstrap retained after READY");
-    let bs2 = decode_bootstrap_state(&payload);
+    .expect("retained bootstrap state converges to READY after system_agent ready");
     assert_eq!(bs2.phase, 2, "phase READY (proto enum 2)");
-    assert!(bs2.version > bs.version, "version must be monotonic");
+    assert!(bs2.version > bs_version, "version must be monotonic");
 
     drop(sub_client);
     drop(_bp);

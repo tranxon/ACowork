@@ -13,6 +13,7 @@
 //! The `get_key` method handles both formats transparently.
 
 use crate::error::GatewayError;
+use crate::util::preview_key;
 use acowork_core::providers::vault_key_candidates;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -63,23 +64,6 @@ pub struct VaultFacade {
     provider_names: Vec<String>,
     /// Directory path where the vault is stored
     vault_dir: String,
-}
-
-/// Diagnostic helper: produce a `first_4...last_4` preview consistent with
-/// `runtime::providers::openai::send_streaming_request`. Lets us correlate
-/// the post-store, post-decrypt, post-publish, and runtime-seen byte
-/// ranges by eye (or by `grep` on the log files).
-///
-/// Short keys return `<N>` (matches the runtime's short-key branch).
-/// The preview NEVER leaks the full key — only the very first and very
-/// last 4 bytes of the input are reflected.
-fn preview_key(k: &str) -> String {
-    let len = k.len();
-    if len <= 8 {
-        format!("<{}>", len)
-    } else {
-        format!("{}...{}", &k[..4], &k[len - 4..])
-    }
 }
 
 impl VaultFacade {

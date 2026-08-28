@@ -72,7 +72,7 @@ async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttCli
     let gw_state: SharedHttpState = Arc::new(RwLock::new(GatewayState::new(
         "/tmp/acowork-node-ready-test-vault",
     )));
-    gw_state.write().await.bootstrap_orchestrator = Some(orchestrator.clone());
+    gw_state.write().await.bootstrap.orchestrator = Some(orchestrator.clone());
 
     let runtime_http_registry = acowork_gateway::http::proxy::new_shared_registry();
     let agent_registry = acowork_gateway::mqtt::agent_registry::new_shared_registry();
@@ -100,17 +100,16 @@ async fn build_surface(port: u16) -> (Arc<BootstrapOrchestrator>, GatewayMqttCli
             dispatch::handle_plaintext_message(
                 &topic,
                 &payload,
-                &http_reg,
-                &agent_reg,
-                &node_reg,
-                client.as_ref(),
-                &state,
-                None,
-                None,
-                None,
-                false,
-                Some(&reg),
-                Some(&op_store),
+                &dispatch::DispatchContext {
+                    runtime_http_registry: http_reg,
+                    agent_registry: agent_reg,
+                    node_registry: node_reg,
+                    mqtt_client: client,
+                    state,
+                    bootstrap_registry: Some(reg),
+                    operation_store: Some(op_store),
+                    ..Default::default()
+                },
             );
         });
     });

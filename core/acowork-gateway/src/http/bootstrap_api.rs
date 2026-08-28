@@ -68,7 +68,7 @@ pub async fn get_bootstrap(
     State(state): State<AppState>,
 ) -> Result<Json<BootstrapStateView>, (StatusCode, Json<ApiError>)> {
     let gw = state.gateway_state.read().await;
-    let Some(orchestrator) = gw.bootstrap_orchestrator.clone() else {
+    let Some(orchestrator) = gw.bootstrap.orchestrator.clone() else {
         return Err(ApiError::service_unavailable(
             "bootstrap orchestrator not initialised",
         ));
@@ -112,7 +112,7 @@ mod tests {
         );
         {
             let mut gw = gw_state.write().await;
-            gw.bootstrap_orchestrator = Some(orch.clone());
+            gw.bootstrap.orchestrator = Some(orch.clone());
         }
         let state = AppState::new(gw_state, Arc::new(HttpAuth::new(false)));
         (state, registry)

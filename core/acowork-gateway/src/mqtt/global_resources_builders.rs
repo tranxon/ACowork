@@ -23,6 +23,7 @@ use acowork_core::mqtt_proto::{
 use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
 use crate::gateway::state::GatewayState;
+use crate::util::preview_key;
 
 /// Build `AvailableProviders` from the GatewayState resource cache.
 ///
@@ -286,18 +287,6 @@ pub(crate) fn map_mcp_transport(t: &McpTransportDef) -> acowork_core::mqtt_proto
     }
 }
 
-/// First-4 / last-4 preview used in diagnostic logs (same format as the
-/// runtime side's `build_provider_for` preview — see
-/// `core/acowork-runtime/src/agent/session_core.rs`).
-pub(crate) fn preview_key(k: &str) -> String {
-    let len = k.len();
-    if len <= 8 {
-        format!("<{}>", len)
-    } else {
-        format!("{}...{}", &k[..4], &k[len - 4..])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,12 +317,5 @@ mod tests {
         let payload = build_available_providers(&gw);
         assert_eq!(payload.version, 0);
         assert!(payload.providers.is_empty());
-    }
-
-    #[test]
-    fn test_preview_key() {
-        assert_eq!(preview_key(""), "<0>");
-        assert_eq!(preview_key("short"), "<5>");
-        assert_eq!(preview_key("sk-c1234567890abcdefUiAI"), "sk-c...UiAI");
     }
 }

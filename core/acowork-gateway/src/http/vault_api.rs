@@ -61,7 +61,7 @@ pub async fn lock_vault(
         return Err(ApiError::bad_request("Vault is already locked"));
     }
     gw.vault.lock();
-    if let Some(ref h) = gw.vault_readiness_handle {
+    if let Some(ref h) = gw.bootstrap.vault_readiness_handle {
         h.mark_booting(Some("vault locked by user".to_string()));
     } else {
         tracing::warn!("Vault readiness handle not registered; lock without readiness demotion");
@@ -95,7 +95,7 @@ pub async fn unlock_vault(
     }
     let handle = {
         let gw = gateway_state.read().await;
-        gw.vault_readiness_handle.clone()
+        gw.bootstrap.vault_readiness_handle.clone()
     };
     let Some(handle) = handle else {
         return Err(ApiError::internal(
@@ -130,7 +130,7 @@ mod tests {
         let registry = SubsystemReadinessRegistry::new_shared();
         let handle = registry.register("vault", crate::bootstrap::ReadinessKind::Required);
         // Runtime registration happens in `Gateway::run`; mirror it here.
-        gateway_state.blocking_write().vault_readiness_handle = Some(handle);
+        gateway_state.blocking_write().bootstrap.vault_readiness_handle = Some(handle);
         AppState::new(gateway_state, Arc::new(crate::http::auth::HttpAuth::new(false)))
     }
 

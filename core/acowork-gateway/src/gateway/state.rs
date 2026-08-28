@@ -156,6 +156,42 @@ pub struct AgentMigrationState {
     pub error: Option<String>,
 }
 
+/// ADR-059: Gateway bootstrap runtime state.
+///
+/// Aggregates every bootstrap-specific concern that lives on the shared
+/// `GatewayState`:
+/// - the [`BootstrapOrchestrator`] that aggregates subsystem readiness
+///   into the bootstrap snapshot consumed by MQTT + HTTP,
+/// - per-subsystem readiness handles (e.g. `vault`) that HTTP handlers
+///   use to demote / restore readiness without touching the registry.
+///
+/// Kept separate from `GatewayState`'s stable fields so ADR-059 phases
+/// can extend bootstrap state without widening the general contract.
+///
+/// NOTE: distinct from the wire-level
+/// `acowork_core::mqtt_proto::BootstrapState` (the serialisable
+/// snapshot). This struct is pure in-process state.
+#[derive(Default)]
+pub struct BootstrapState {
+    /// The bootstrap orchestrator (Phase 1.2 wires this in).
+    ///
+    /// `None` during very early construction; set once during
+    /// `Gateway::run` after the subsystem registry is built. Read by
+    /// the MQTT BootstrapPublisher (Phase 1.1) and the HTTP
+    /// `/api/bootstrap` handler (Phase 1.3) to expose the aggregated
+    /// readiness snapshot.
+    pub orchestrator: Option<std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>>,
+    /// Readiness handle for the `vault` subsystem (Phase 5.4).
+    ///
+    /// Registered during `Gateway::run` alongside the other bootstrap
+    /// subsystems; stored here so the HTTP vault lock/unlock handlers
+    /// can demote (`mark_booting` on user lock) and restore
+    /// (`mark_ready` on unlock) the vault's readiness without holding
+    /// a reference to the bootstrap registry itself. `None` before
+    /// registration.
+    pub vault_readiness_handle: Option<crate::bootstrap::SubsystemHandle>,
+}
+
 /// Shared permission store type (same as gRPC server)
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
@@ -231,24 +267,11 @@ pub struct GatewayState {
     /// overwritten by [`Self::set_instance_id`] during `Gateway::new`
     /// before the state is wrapped in a `SharedState`.
     pub instance_id: String,
-    /// ADR-059: bootstrap orchestrator (Phase 1.2 wires this in).
-    ///
-    /// `None` during very early construction; set once during
-    /// `Gateway::run` after the subsystem registry is built. Read by
-    /// the MQTT BootstrapPublisher (Phase 1.1) and the HTTP
-    /// `/api/bootstrap` handler (Phase 1.3) to expose the aggregated
-    /// readiness snapshot.
-    pub bootstrap_orchestrator:
-        Option<std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>>,
-    /// ADR-059 Phase 5.4: readiness handle for the `vault` subsystem.
-    ///
-    /// Registered during `Gateway::run` alongside the other bootstrap
-    /// subsystems; stored here so the HTTP vault lock/unlock handlers
-    /// can demote (`mark_booting` on user lock) and restore
-    /// (`mark_ready` on unlock) the vault's readiness without holding
-    /// a reference to the bootstrap registry itself. `None` before
-    /// registration.
-    pub vault_readiness_handle: Option<crate::bootstrap::SubsystemHandle>,
+    /// ADR-059: Gateway bootstrap phase state — orchestrator + the
+    /// subsystem handles it coordinates. Grouped in one struct so
+    /// `GatewayState` stays a stable contract while this concern grows
+    /// with each ADR-059 phase.
+    pub bootstrap: BootstrapState,
 }
 
 impl GatewayState {
@@ -273,8 +296,7 @@ impl GatewayState {
             advertise_host: "127.0.0.1".to_string(),
             mqtt_publisher_handle: None,
             instance_id: String::new(),
-            bootstrap_orchestrator: None,
-            vault_readiness_handle: None,
+            bootstrap: BootstrapState::default(),
         }
     }
 
@@ -308,7 +330,7 @@ impl GatewayState {
         &mut self,
         orchestrator: std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>,
     ) {
-        self.bootstrap_orchestrator = Some(orchestrator);
+        self.bootstrap.orchestrator = Some(orchestrator);
     }
 
     /// Check if an agent is installed
