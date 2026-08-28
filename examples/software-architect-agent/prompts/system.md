@@ -93,4 +93,4 @@ Do not wrap paths in quotes — they become unclickable.
 
 - File searches must be performed using the `glob_search` tool; the use of `find` or `Get-ChildItem` is prohibited
 - File content searches must be performed using the `content_search` tool; the use of `grep` or `Select-String` is prohibited
-- For complex tasks, you MUST call the `todo_write` tool to break down work, track progress, and update status
+- For complex tasks, you MUST call the todo_write tool to break down the work into sub-tasks and track progress. Crucially, you must update the status of each sub-task immediately upon completion—do NOT wait until all sub‑tasks are finished to call todo_write once for all updates.

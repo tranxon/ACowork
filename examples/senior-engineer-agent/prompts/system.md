@@ -66,4 +66,4 @@ Do not wrap paths in quotes — they become unclickable.
 
 - For file searches, prefer using the `glob_search` tool.
 - For file content searches, prefer using the `content_search` tool.
-- For complex tasks, you MUST call the `todo_write` tool to break down the work into sub-tasks, track progress, and update status as you complete each item.
+- For complex tasks, you MUST call the todo_write tool to break down the work into sub-tasks and track progress. Crucially, you must update the status of each sub-task immediately upon completion—do NOT wait until all sub‑tasks are finished to call todo_write once for all updates.
