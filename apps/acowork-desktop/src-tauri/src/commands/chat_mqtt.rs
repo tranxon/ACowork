@@ -239,6 +239,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
 
             // ── Session config (ADR-043: user-configurable fields only) ──
             data_envelope::Payload::SessionConfig(config) => {
+                tracing::info!(
+                    target: "llm_avail_diag",
+                    session_id = %config.session_id,
+                    llm_availability_raw = config.llm_availability as i32,
+                    "DIAG: DESKTOP received session_config with llm_availability"
+                );
                 let event = serde_json::json!({
                     "type": "session_config",
                     "agent_id": config.agent_id,
@@ -249,6 +255,10 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "reasoning_effort": config.reasoning_effort,
                     "temperature": config.temperature,
                     "workspace_id": config.workspace_id,
+                    // Three-state LLM availability (ADR-XXX). prost enums
+                    // don't derive serde, so serialize the wire tag
+                    // explicitly; the frontend maps i32 → its projection.
+                    "llm_availability": config.llm_availability as i32,
                 });
                 tracing::info!(
                     agent_id = %config.agent_id,
@@ -1313,32 +1323,42 @@ fn extract_agent_id_from_topic(topic: &str) -> Option<String> {
 ///
 /// Returns:
 /// - `Some(...)` when the topic matches the status shape and the
-///   payload is one of the known status values.
+///   payload is one of the known status values (`online` / `sleeping` /
+///   `offline`).
 /// - `None` when the topic is not a status topic (caller should fall
 ///   through to the protobuf decoder). When the topic *is* a status
-///   topic but the payload is unknown, this function logs a warning and
-///   still returns `None` — callers should drop the message to avoid
-///   spurious protobuf decode attempts.
+///   topic but the payload is non-UTF-8 binary (the Gateway's
+///   `DataEnvelope` re-publish — see `dispatch.rs`), this function
+///   returns `None` **silently**: the binary shape is the documented
+///   authoritative format on this topic, not garbage. Only a UTF-8
+///   payload that doesn't match a known status string is logged.
 fn parse_plaintext_agent_status(topic: &str, payload: &[u8]) -> Option<ParsedAgentStatus> {
     if !topic.starts_with("acowork/agents/") || !topic.ends_with("/status") {
         return None;
     }
     let agent_id = extract_agent_id_from_topic(topic)?;
-    let payload_str = String::from_utf8_lossy(payload);
-    let parsed = match payload_str.trim() {
-        "online" => ParsedAgentStatus { agent_id, online: true, sleeping: false },
-        "sleeping" => ParsedAgentStatus { agent_id, online: true, sleeping: true },
-        "offline" => ParsedAgentStatus { agent_id, online: false, sleeping: false },
+    // Distinguish "binary payload from the Gateway's DataEnvelope
+    // re-publish" (silent fall-through) from "UTF-8 payload with an
+    // unknown status string" (warn — likely a protocol drift). Using
+    // `from_utf8` (not `from_utf8_lossy`) avoids spurious warnings when
+    // the payload happens to start with ASCII bytes (most protobuf
+    // field tags do).
+    let Ok(payload_str) = std::str::from_utf8(payload) else {
+        return None;
+    };
+    match payload_str.trim() {
+        "online" => Some(ParsedAgentStatus { agent_id, online: true, sleeping: false }),
+        "sleeping" => Some(ParsedAgentStatus { agent_id, online: true, sleeping: true }),
+        "offline" => Some(ParsedAgentStatus { agent_id, online: false, sleeping: false }),
         unknown => {
             tracing::warn!(
                 topic = %topic,
                 payload = %unknown,
                 "unknown agent status payload — ignoring"
             );
-            return None;
+            None
         }
-    };
-    Some(parsed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1436,6 +1456,48 @@ mod tests {
             b"online",
         )
         .is_none());
+    }
+
+    /// Regression test: the Gateway `dispatch.rs` re-publishes the
+    /// status as a `DataEnvelope` (protobuf bytes) on the same
+    /// `acowork/agents/{id}/status` topic right after the Runtime's
+    /// plain-text publish. Before this fix, `parse_plaintext_agent_status`
+    /// used `from_utf8_lossy`, which coerced the binary into a string
+    /// of replacement characters and emitted a spurious "unknown agent
+    /// status payload" warning for every reconnect. We must now
+    /// silently fall through.
+    #[test]
+    fn parse_plaintext_binary_payload_silent_fallthrough() {
+        // Non-UTF-8 byte sequence — typical protobuf wire format.
+        let binary = [0x08, 0x01, 0x12, 0x05, b'h', b'e', b'l', b'l', b'o', 0xff, 0xfe];
+        assert!(
+            parse_plaintext_agent_status("acowork/agents/com.acowork.x/status", &binary)
+                .is_none(),
+            "binary payload must fall through silently so the protobuf decoder can pick it up"
+        );
+    }
+
+    #[test]
+    fn parse_plaintext_protobuf_silently_falls_through() {
+        // Encode a real `acowork_core::mqtt_proto::DataEnvelope` with an
+        // `AgentStatus` payload — exactly what the Gateway publishes.
+        use acowork_core::mqtt_proto::{AgentStatus, DataEnvelope};
+        use acowork_core::mqtt_proto::data_envelope::Payload;
+
+        let env = DataEnvelope {
+            version: 1,
+            payload: Some(Payload::AgentStatus(AgentStatus {
+                agent_id: "com.acowork.x".to_string(),
+                online: true,
+                sleeping: false,
+            })),
+        };
+        let bytes = prost::Message::encode_to_vec(&env);
+        assert!(
+            parse_plaintext_agent_status("acowork/agents/com.acowork.x/status", &bytes)
+                .is_none(),
+            "Gateway-re-published protobuf must NOT match the plaintext parser"
+        );
     }
 }
 

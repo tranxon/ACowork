@@ -627,7 +627,10 @@ impl ConversationSession {
     ///   NaN lets the client distinguish "missing" from "0.0")
     /// - dropping disk-only fields (version, created_at, last_compaction_offset,
     ///   corrupted)
-    pub fn build_session_config_snapshot(&self) -> acowork_core::mqtt_proto::SessionConfig {
+    pub fn build_session_config_snapshot(
+        &self,
+        llm_availability: acowork_core::mqtt_proto::LlmAvailability,
+    ) -> acowork_core::mqtt_proto::SessionConfig {
         let full = self.build_meta();
         acowork_core::mqtt_proto::SessionConfig {
             agent_id: full.agent_id,
@@ -638,6 +641,7 @@ impl ConversationSession {
             reasoning_effort: full.reasoning_effort.unwrap_or_default(),
             temperature: full.temperature.unwrap_or(f32::NAN),
             workspace_id: full.workspace_id.unwrap_or_default(),
+            llm_availability: llm_availability as i32,
         }
     }
 
@@ -707,7 +711,9 @@ impl ConversationSession {
         let _ = self
             .config_change_tx
             .send(ConfigChange {
-                snapshot: self.build_session_config_snapshot(),
+                snapshot: self.build_session_config_snapshot(
+                    acowork_core::mqtt_proto::LlmAvailability::Unspecified,
+                ),
             });
     }
 

@@ -477,26 +477,29 @@ export function AppLayout() {
   const startWidthFile = useRef(DEFAULT_FILE_WIDTH);
   const currentWidthRefFile = useRef(DEFAULT_FILE_WIDTH);
 
-  // Periodically check Gateway health to detect disconnections.
-  // Gateway is spawned by Rust at exe startup — no need to start it here.
+  // ADR-052: one-shot health probe on mount - NOT a poll.
+  // SplashScreen is the startup orchestrator: it calls `checkHealth()`
+  // inside `finish()` before invoking `onReady()`, so by the time this
+  // effect runs `status` should already be `connected`. This single probe
+  // is only a safety net for edge cases (remote-gateway mode, an older
+  // Rust binary that skipped the probe, store state reset) and cannot
+  // flicker the banner - <GatewayBanner /> only renders for `error`.
   useEffect(() => {
     checkHealth();
-    const interval = setInterval(() => {
-      if (useGatewayStore.getState().status !== "connected") {
-        checkHealth();
-      }
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [checkHealth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Update status bar on gateway status changes
+  // ADR-052: AppLayout is mounted only AFTER SplashScreen confirms the
+  // Gateway has booted, so by the time this effect runs `status` should be
+  // `connected`. If we ever see `error` here, it is a *real* post-boot drop.
+  // Any other transient state (`connecting` / `disconnected`) is owned by
+  // SplashScreen and must not surface in the bottom bar - that bar is
+  // dedicated to post-startup liveness signals.
   useEffect(() => {
-    if (gatewayStatus === "connected") {
-      clearStatus();
-    } else if (gatewayStatus === "error") {
+    if (gatewayStatus === "error") {
       setStatus("Gateway connection failed", "error", "gateway");
     } else {
-      setStatus("Connecting to Gateway...", "warning", "gateway");
+      clearStatus();
     }
   }, [gatewayStatus, setStatus, clearStatus]);
 
@@ -803,8 +806,13 @@ export function AppLayout() {
           disabled in Rust setup() so this is the only title bar. */}
       <TitleBar />
 
-      {/* Gateway disconnected banner */}
-      {gatewayStatus !== "connected" && <GatewayBanner />}
+      {/* ADR-052: GatewayBanner only renders for *steady-state* drops.
+          AppLayout is gated by `gatewayReady` in App.tsx, so by the time we
+          get here SplashScreen has already pushed `status` to `connected`.
+          Showing the banner for any state other than `error` would re-introduce
+          the pre-SplashScreen-era flicker where the banner appeared during the
+          boot window despite SplashScreen orchestrating the startup correctly. */}
+      {gatewayStatus === "error" && <GatewayBanner />}
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">

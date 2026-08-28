@@ -17,6 +17,8 @@ import { with503Retry } from "../lib/httpRetry";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
+import type { LlmAvailability } from "../lib/llmAvailability";
+import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 
 // ---------------------------------------------------------------------------
 // ADR-050 C2: the per-session active stream tracker, throttle timestamps,
@@ -456,6 +458,17 @@ interface ChatStore {
    */
   lastMqttError: string | null;
   availableModels: ModelEntry[];
+  /**
+   * LLM availability for the current session, mirrored from the
+   * `SessionConfig.llm_availability` retained MQTT topic. Drives the
+   * three-state banner in `ChatPanel`.
+   *
+   * - `unspecified`  — runtime hasn't published yet, render nothing
+   * - `loading`      — bootstrap not READY / vault not populated, render placeholder
+   * - `configured`   — vault has at least one usable provider, render nothing
+   * - `missing`      — vault empty or every provider unusable, render red banner
+   */
+  llmAvailability: LlmAvailability;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
@@ -839,6 +852,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   mqttConnected: false,
   lastMqttError: null,
   availableModels: [],
+  llmAvailability: "unspecified",
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -2854,6 +2868,21 @@ export function handleMessageEvent(
       if (Object.keys(patch).length > 0) {
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
+      }
+      // LLM availability is a global-runtime signal; store at the top
+      // level (not per-session) since every session of the same agent
+      // sees the same value. `data.llm_availability` is the protobuf
+      // wire field (i32 / enum string from JSON conversion).
+      const nextAvail = llmAvailabilityFromWire(data.llm_availability);
+      // `unspecified` means "this message carries no availability info"
+      // (old runtime without the field, or a per-session config
+      // re-publish that wasn't tagged). Never downgrade a known state
+      // back to unspecified — that would hide the banner until the next
+      // availability transition fires.
+      if (nextAvail !== "unspecified" || get().llmAvailability === "unspecified") {
+        if (nextAvail !== get().llmAvailability) {
+          set({ llmAvailability: nextAvail });
+        }
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof data.workspace_id === "string" && data.workspace_id) {

@@ -166,6 +166,7 @@
     "startAgent": "啟動 Agent",
     "startingAgent": "正在啟動 {{name}}…",
     "llmNotConfigured": "未設定 LLM 服務商。請在 Harness → 模型服務商 中新增 API 金鑰。",
+    "llmSyncing": "正在同步 LLM 設定…",
     "thinking": "正在思考...",
     "replying": "正在回覆...",
     "working": "正在處理...",
@@ -887,8 +888,8 @@
       "done": "已記憶"
     },
     "http_request": {
-      "running": "請求中",
-      "done": "已請求"
+      "running": "請求http中",
+      "done": "已請求http"
     },
     "web_fetch": {
       "running": "取得網頁",
@@ -919,8 +920,8 @@
       "done": "已匹配檔案"
     },
     "content_search": {
-      "running": "搜尋內容",
-      "done": "已搜尋內容"
+      "running": "搜尋檔案內容",
+      "done": "已搜尋檔案內容"
     },
     "intent_send": {
       "running": "發送意圖",
@@ -951,16 +952,16 @@
       "done": "已搜尋程式碼"
     },
     "bash": {
-      "running": "在 Git Bash 中執行",
-      "done": "已在 Git Bash 中執行"
+      "running": "在GitBash中執行",
+      "done": "已在GitBash中執行"
     },
     "powershell": {
-      "running": "在 PowerShell 中執行",
-      "done": "已在 PowerShell 中執行"
+      "running": "在PowerShell中執行",
+      "done": "已在PowerShell中執行"
     },
     "shell": {
-      "running": "執行命令",
-      "done": "已執行命令"
+      "running": "執行Shell命令",
+      "done": "已執行Shell命令"
     }
   },
   "askQuestionCard": {
@@ -1035,7 +1036,9 @@
     "labelLastAccessed": "最後存取",
     "statusStable": "穩定",
     "statusDecaying": "衰退中",
-    "statusCritical": "關鍵"
+    "statusCritical": "關鍵",
+    "contextMenuCopyNodeJson": "複製節點 (JSON)",
+    "contextMenuCopyFormatted": "複製格式化文字"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "關閉",

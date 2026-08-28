@@ -167,6 +167,7 @@
     "startAgent": "Start Agent",
     "startingAgent": "{{name}} を起動しています…",
     "llmNotConfigured": "LLM プロバイダーが設定されていません。Harness → Providers で API キーを追加してください。",
+    "llmSyncing": "LLM 構成を同期中…",
     "thinking": "思考中...",
     "replying": "返信中...",
     "working": "処理中...",
@@ -1036,7 +1037,9 @@
     "labelLastAccessed": "最終アクセス",
     "statusStable": "安定",
     "statusDecaying": "衰退中",
-    "statusCritical": "クリティカル"
+    "statusCritical": "クリティカル",
+    "contextMenuCopyNodeJson": "ノードをコピー (JSON)",
+    "contextMenuCopyFormatted": "整形してコピー"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "閉じる",

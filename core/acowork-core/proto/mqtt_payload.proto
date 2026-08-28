@@ -420,6 +420,46 @@ message SessionDeleted {
 /// races where Hot meta updates (triggered by message_count changes during
 /// LLM streaming) carried outdated config field values and reverted
 /// frontend optimistic updates.
+/// Current availability of the LLM resources required for this session to
+/// run a chat turn (vault / default provider / default model).
+///
+/// Retained together with SessionConfig on `sessions/{sid}/config`; Runtime
+/// re-PUBLISHes the full SessionConfig snapshot whenever this value
+/// transitions, so reconnecting clients converge on the latest.
+///
+/// Why a separate enum (not `bool has_llm`):
+///   - `UNSPECIFIED`/`LOADING` are transient and must NOT be treated as
+///     "not configured" — the previous boolean check caused the Desktop
+///     to flash an LLM-misconfigured banner for ~50 ms on every startup
+///     (vault had not been queried yet).
+///   - `MISSING` is the steady-state "user has no provider configured yet"
+///     signal — the Desktop MUST render the warning here.
+///   - `CONFIGURED` is the steady-state "the vault has at least one usable
+///     (provider, key/base_url) pair". NOTE: this is a **global-runtime**
+///     signal (same value for every session of an agent); it does NOT
+///     verify the session's own default (provider, model) resolves.
+enum LlmAvailability {
+  /// (0) proto3 default. Treated by the Desktop as "not yet synchronised"
+  /// — render a neutral placeholder, never an error banner.
+  LLM_AVAILABILITY_UNSPECIFIED = 0;
+
+  /// Runtime is still resolving global resources (bootstrap not READY, or
+  /// the vault has not produced its first AvailableProviders snapshot).
+  /// Render a neutral loading strip; do NOT render the misconfigured banner.
+  LLM_AVAILABILITY_LOADING = 1;
+
+  /// Vault has at least one provider with a non-empty api_key (or a local
+  /// base URL) that the Runtime could call. Global-runtime signal — shared
+  /// across all sessions of an agent; does NOT check the session's default
+  /// (provider, model). Frontend can offer chat normally.
+  LLM_AVAILABILITY_CONFIGURED = 2;
+
+  /// Vault is empty, or every provider lacks a usable api_key/base_url.
+  /// The Runtime cannot run a chat turn; the Desktop MUST render the
+  /// misconfigured banner and surface a "configure provider" call-to-action.
+  LLM_AVAILABILITY_MISSING = 3;
+}
+
 message SessionConfig {
   string agent_id = 1;
   string session_id = 2;
@@ -429,6 +469,9 @@ message SessionConfig {
   string reasoning_effort = 6;  // "" = no override
   float  temperature = 7;       // NaN = no override (prost encodes float without Option)
   string workspace_id = 8;
+  // Session-level LLM resource availability — see LlmAvailability enum docs.
+  // Field number 9 is reserved for this enum and will not be reused.
+  LlmAvailability llm_availability = 9;
 }
 
 /// Session runtime state (always latest complete value).

@@ -58,6 +58,8 @@ ref-repo/
 # Rust test build artifacts
 target-test/
 core/target-test/
+# Rust verification build dir (used by build verification scripts)
+target-build-test/
 
 # Python
 __pycache__/

@@ -2122,6 +2122,22 @@ After installation, ask the user to re-enable the MCP server.",
         self.sessions.keys().cloned().collect()
     }
 
+    /// Snapshot every active session's `(session_id, conversation)` pair.
+    ///
+    /// Returns owned tuples so callers can release the [`SessionManager`]
+    /// lock before calling into [`ConversationSession`]
+    /// (e.g. `build_session_config_snapshot`, which is not lock-safe).
+    /// Used by the chunk_relay's LLM-availability watcher to re-publish
+    /// every active session's `SessionConfig` after a state transition.
+    pub fn snapshot_active_conversations(
+        &self,
+    ) -> Vec<(String, std::sync::Arc<crate::conversation::ConversationSession>)> {
+        self.sessions
+            .iter()
+            .filter_map(|(sid, h)| h.conversation.as_ref().map(|c| (sid.clone(), c.clone())))
+            .collect()
+    }
+
     /// Store the latest session info determined during the startup scan.
     ///
     /// Called from `session_init` after the background session scan completes.

@@ -1,8 +1,15 @@
+import React, { useCallback, useMemo } from "react";
 import type { MemoryNodeResponse } from "../../lib/types";
 import { cn } from "../../lib/utils";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { ArrowLeft, Copy, FileJson, FileText, Trash2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
+import { copySelectionOrFallback, copyText } from "../../lib/clipboard";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -45,6 +52,105 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
     return t("memoryNodeDetail.statusCritical");
   })();
 
+  // ── Right-click context menu ──────────────────────────────────────────
+  // Three copy variants mirror the panel's three audiences for the same
+  // underlying record:
+  //
+  //   - Copy                — selection-at-open, falls back to `node.content`.
+  //                           Same UX as MessageBubble's Copy: if the user
+  //                           drag-selected some text on the panel, that wins;
+  //                           otherwise the whole content body is copied.
+  //   - Copy Node (JSON)    — the literal "整条记忆存储信息": the entire
+  //                           MemoryNodeResponse payload, pretty-printed. This
+  //                           is what the backend actually stores — useful for
+  //                           filing bugs, piping into a diff tool, etc.
+  //   - Copy Formatted      — a human-readable snapshot of every field the
+  //                           panel renders on screen (content + metadata +
+  //                           decay tier + localisable labels), which is the
+  //                           easiest to paste into a chat or a note.
+  //
+  // All three go through the shared `lib/clipboard` helpers so the
+  // WKWebView-aware fallback (navigator.clipboard + execCommand textarea)
+  // applies uniformly. The selection snapshot is captured at right-click
+  // time inside `useContextMenu.openAt` — reading `window.getSelection()`
+  // at button-click time would be unreliable because the menu's own
+  // `<button>` focus clears the page selection in WKWebView (the same bug
+  // MessageBubble hit before its rewrite).
+  const menu = useContextMenu();
+
+  // Resolve the localised type/sub-type strings once per render. Captured
+  // here (not in `useMemo`'s deps) so the items array only rebuilds when
+  // the resolved strings themselves change — not when the i18n closure
+  // identity churns.
+  const typeLabelStr = labelOf(node.node_type);
+  const subTypeLabelStr = node.sub_type ? subLabelOf(node.node_type, node.sub_type) : null;
+
+  const handleCopySelection = useCallback((selectionAtOpen: string) => {
+    // `selectionAtOpen` is the snapshot captured at right-click time inside
+    // useContextMenu — it's the source of truth, because the menu's own
+    // <button> focus will have cleared window.getSelection() by the time
+    // this onClick fires (WKWebView quirk). `copySelectionOrFallback`
+    // internally re-reads the (now-empty) selection and falls back to the
+    // string we hand it, which is exactly what we want.
+    void copySelectionOrFallback(selectionAtOpen || (node.content ?? ""));
+  }, [node.content]);
+
+  const handleCopyJson = useCallback(() => {
+    void copyText(JSON.stringify(node, null, 2));
+  }, [node]);
+
+  const handleCopyFormatted = useCallback(() => {
+    const tier = getDecayTier(node.decay_score);
+    const tierLabel =
+      tier === "Stable" ? t("memoryNodeDetail.statusStable")
+      : tier === "Decaying" ? t("memoryNodeDetail.statusDecaying")
+      : t("memoryNodeDetail.statusCritical");
+    const lines = [
+      `Memory Node #${node.node_id}`,
+      `${t("memoryNodeDetail.labelStatus")}: ${node.status}`,
+      `${t("memoryNodeDetail.labelConfidence")}: ${(node.confidence * 100).toFixed(1)}%`,
+      `Type: ${typeLabelStr}${node.sub_type ? ` (${subTypeLabelStr ?? node.sub_type})` : ""}`,
+      `${t("memoryNodeDetail.labelCreated")}: ${formatDate(node.created_at)}`,
+      `${t("memoryNodeDetail.labelLastAccessed")}: ${formatDate(node.last_accessed_at)}`,
+      `${t("memoryNodeDetail.labelAccessCount")}: ${node.access_count}`,
+      `Decay: ${node.decay_score.toFixed(3)} (${tierLabel})`,
+      "",
+      "---",
+      "",
+      node.content,
+    ];
+    void copyText(lines.join("\n"));
+  }, [node, t, typeLabelStr, subTypeLabelStr]);
+
+  const items = useMemo<ContextMenuItem[]>(() => {
+    return [
+      {
+        key: "copy",
+        icon: <Copy size={14} />,
+        label: t("common.copy"),
+        onClick: ({ selectionAtOpen }) => handleCopySelection(selectionAtOpen),
+      },
+      {
+        key: "copy-node-json",
+        icon: <FileJson size={14} />,
+        label: t("memoryNodeDetail.contextMenuCopyNodeJson"),
+        onClick: () => handleCopyJson(),
+        dividerBefore: true,
+      },
+      {
+        key: "copy-formatted",
+        icon: <FileText size={14} />,
+        label: t("memoryNodeDetail.contextMenuCopyFormatted"),
+        onClick: () => handleCopyFormatted(),
+      },
+    ];
+  }, [t, handleCopySelection, handleCopyJson, handleCopyFormatted]);
+
+  const onContextMenu = useCallback(
+    (e: React.MouseEvent) => menu.openAt(e),
+    [menu],
+  );
+
   const handleDelete = () => {
     if (confirm(`Delete node #${node.node_id}? This action cannot be undone.`)) {
       onDelete(node.node_id);
@@ -53,7 +159,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
   };
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden bg-chat-area">
+    <div className="flex flex-1 flex-col overflow-hidden bg-chat-area" onContextMenu={onContextMenu}>
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button
@@ -140,6 +246,16 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
           Delete Node
         </button>
       </div>
+
+      <ContextMenu
+        isOpen={menu.isOpen}
+        menuProps={menu.menuProps}
+        items={items}
+        payload={undefined}
+        selectionAtOpen={menu.selectionAtOpen}
+        onClose={menu.close}
+        compact
+      />
     </div>
   );
 }

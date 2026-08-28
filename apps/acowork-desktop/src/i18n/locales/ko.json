@@ -166,6 +166,7 @@
     "startAgent": "Agent 시작",
     "startingAgent": "{{name}} 시작 중…",
     "llmNotConfigured": "LLM 공급자가 설정되지 않았습니다. Harness → Providers에서 API 키를 추가하세요.",
+    "llmSyncing": "LLM 구성 동기화 중…",
     "thinking": "생각 중...",
     "replying": "답장 중...",
     "working": "처리 중...",
@@ -1037,7 +1038,9 @@
     "labelLastAccessed": "마지막 접근",
     "statusStable": "안정",
     "statusDecaying": "쇠퇴 중",
-    "statusCritical": "중요"
+    "statusCritical": "중요",
+    "contextMenuCopyNodeJson": "노드 복사 (JSON)",
+    "contextMenuCopyFormatted": "서식 복사"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "닫기",

@@ -17,6 +17,7 @@ import { AddProviderFlow } from "../harness/AddProviderFlow";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
+import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
 import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
@@ -487,6 +488,10 @@ export function ChatPanel() {
   // Global state and actions — selectors to avoid full-store re-render
   const mqttConnected = useChatStore((s) => s.mqttConnected);
   const availableModels = useChatStore((s) => s.availableModels);
+  // Mirrored from `SessionConfig.llm_availability` retained MQTT topic.
+  // Drives the three-state banner; the previous boolean check caused a
+  // visible flash on every startup (vault race).
+  const llmAvailability = useChatStore((s) => s.llmAvailability);
   // Stable function refs
   const {
     sendMessage,
@@ -608,8 +613,6 @@ export function ChatPanel() {
   // adapterRef/sessionRef no longer needed - handleScroll and pagination
   // timer are owned by useScrollController, which has direct access to
   // adapter and containerRef.
-
-  const [hasLlmConfig, setHasLlmConfig] = useState<boolean | null>(null); // null = checking
 
   // Auto-collapse todo list when all tasks are completed
   useEffect(() => {
@@ -747,7 +750,6 @@ export function ChatPanel() {
         (m, i, arr) => arr.findIndex(x => x.name === m.name && x.provider === m.provider) === i
       );
       setAvailableModels(uniqueModels);
-      setHasLlmConfig(keys.length > 0);
     } catch {
       // Gateway may not be running
     }
@@ -1715,13 +1717,20 @@ export function ChatPanel() {
         className="flex flex-1 min-w-[288px] flex-col overflow-hidden"
       >
         {/* LLM config warning */}
-        {hasLlmConfig === false && (
-          <div className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 rounded-t-lg dark:border-amber-900 dark:bg-amber-950">
+        {llmAvailability === "missing" && (
+          <div
+            className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 rounded-t-lg dark:border-amber-900 dark:bg-amber-950"
+            role="alert"
+            data-testid="llm-availability-missing"
+          >
             <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
             <span className="text-xs text-amber-700 dark:text-amber-300">
               {t("chatPanel.llmNotConfigured")}
             </span>
           </div>
+        )}
+        {llmAvailability === "loading" && (
+          <PlaceholderBar text={t("chatPanel.llmSyncing")} />
         )}
         {/* ADR-015: Session tab bar */}
         {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}

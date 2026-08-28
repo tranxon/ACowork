@@ -14,6 +14,25 @@ use crate::http::SharedAgentCore;
 use crate::startup::context::{AgentBootContext, SessionBootContext};
 use acowork_core::mqtt_proto::StreamLine;
 
+/// Re-export the wire enum under the runtime alias to avoid a name
+/// collision with [`crate::agent::LlmAvailability`] (the runtime-side
+/// view) in this module.
+use crate::agent::llm_availability::WireAvailability;
+
+/// Future that resolves when the LLM availability watch channel fires.
+///
+/// When there is no registry (standalone mode without
+/// `available_cache`) the branch pends forever, keeping the
+/// availability fan-out disabled.
+async fn llm_changed(
+    rx: &mut Option<tokio::sync::watch::Receiver<crate::agent::LlmAvailability>>,
+) -> bool {
+    match rx.as_mut() {
+        Some(r) => r.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
 /// Resources produced by Phase C, needed by Phase D.
 pub(crate) struct SubsystemHandles {
     /// chunk_relay task join handle (Gateway mode only).
@@ -34,12 +53,24 @@ pub(crate) struct SubsystemHandles {
 /// - MCP auto-connect is progressing in the background
 pub(crate) async fn phase_c_spawn_subsystems(
     ctx: &mut AgentBootContext,
-    _session_ctx: &mut SessionBootContext,
+    session_ctx: &mut SessionBootContext,
     config: &RuntimeConfig,
 ) -> Result<SubsystemHandles> {
     let _span = tracing::info_span!("startup_phase_c").entered();
 
     let work_dir_path = std::path::Path::new(&config.work_dir);
+
+    // ── LLM availability registry ───────────────────────────────────
+    // Polls SharedAvailableCache for bootstrap phase + AvailableProviders
+    // transitions and re-publishes every active session's config snapshot
+    // when the value changes. Created only when the MQTT path is wired
+    // (the chunk_relay task below is the only consumer).
+    let llm_availability = ctx
+        .available_cache
+        .as_ref()
+        .map(|cache| std::sync::Arc::new(crate::agent::llm_availability::LlmAvailabilityRegistry::new(
+            cache.clone(),
+        )));
 
     // ── Spawn chunk relay task first ─────────────────────────────────
     // This must run before AgentReady is sent so the chunk channel is
@@ -49,23 +80,107 @@ pub(crate) async fn phase_c_spawn_subsystems(
     // available. All chunk events are published to the MQTT broker as
     // `DataEnvelope { payload: SessionMessage }` protobuf on session
     // message topics. Desktop subscribes directly to the broker.
+    //
+    // The relay also listens for LLM availability transitions: when the
+    // Registry fires, every active session's `SessionConfig` snapshot is
+    // re-published with the current `llm_availability` tag.
     let agent_id_for_relay = ctx.agent_id.clone();
     let chunk_relay = if ctx.chunk_rx.is_some() {
         if let Some(ref mqtt_client) = ctx.mqtt_client {
             // MQTT chunk relay — publish all events via MQTT broker.
             let chunk_rx = ctx.chunk_rx.take().unwrap();
             let chunk_publisher = crate::mqtt::MqttChunkPublisher::from_runtime_client(mqtt_client);
+            let session_manager_arc = std::sync::Arc::clone(&session_ctx.session_manager);
+            let llm_rx = llm_availability.as_ref().map(|r| r.subscribe());
+            let llm_registry_arc = llm_availability.clone();
             Some(tokio::spawn(async move {
                 tracing::info!("MQTT chunk relay started");
                 let mut chunk_rx = chunk_rx;
-                while let Some(session_event) = chunk_rx.recv().await {
-                    relay_chunk_event_mqtt(
-                        &chunk_publisher,
-                        &agent_id_for_relay,
-                        &session_event.session_id,
-                        session_event.event,
-                    )
-                    .await;
+                // `biased` keeps chunk events strictly ahead of LLM
+                // availability re-publishes so streaming output is never
+                // queued behind a per-session config fan-out. When
+                // llm_rx is `None` (no available_cache, e.g. standalone
+                // mode), the branch is permanently disabled.
+                let mut llm_rx = llm_rx;
+                loop {
+                    tokio::select! {
+                        biased;
+                        evt = chunk_rx.recv() => {
+                            match evt {
+                                Some(mut session_event) => {
+                                    // Stamp the authoritative availability level on
+                                    // every SessionConfigChanged publish, not just the
+                                    // transition fan-out below.
+                                    // `build_session_config_snapshot` defaults the field
+                                    // to Unspecified; this single choke point keeps all
+                                    // per-session config re-publishes level-correct
+                                    // without threading the registry through
+                                    // ConversationSession or the config-change relay.
+                                    if let crate::agent::loop_::ChunkEvent::SessionConfigChanged { config } =
+                                        &mut session_event.event
+                                        && let Some(reg) = llm_registry_arc.as_ref()
+                                    {
+                                        let stamped = reg.current().as_i32();
+                                        tracing::info!(
+                                            target: "llm_avail_diag",
+                                            session_id = %session_event.session_id,
+                                            stamped_value = stamped,
+                                            before = config.llm_availability,
+                                            "DIAG: stamping llm_availability"
+                                        );
+                                        config.llm_availability = stamped;
+                                    } else if let crate::agent::loop_::ChunkEvent::SessionConfigChanged { config: _ } =
+                                        &mut session_event.event
+                                    {
+                                        tracing::info!(
+                                            target: "llm_avail_diag",
+                                            session_id = %session_event.session_id,
+                                            registry_available = false,
+                                            "DIAG: NOT stamping llm_availability — registry is None"
+                                        );
+                                    }
+                                    relay_chunk_event_mqtt(
+                                        &chunk_publisher,
+                                        &agent_id_for_relay,
+                                        &session_event.session_id,
+                                        session_event.event,
+                                    )
+                                    .await;
+                                }
+                                None => break,
+                            }
+                        }
+                        changed = llm_changed(&mut llm_rx) => {
+                            if !changed {
+                                continue;
+                            }
+                            // Borrow the latest value, mark it seen.
+                            let next = match llm_rx.as_mut() {
+                                Some(rx) => *rx.borrow_and_update(),
+                                None => continue,
+                            };
+                            // Fan out: snapshot every active session
+                            // (lock is held only for the HashMap iteration)
+                            // and re-publish each config with the new tag.
+                            let snapshot = {
+                                let guard = session_manager_arc.lock().await;
+                                guard.snapshot_active_conversations()
+                            };
+                            let wire: WireAvailability = next.as_wire();
+                            for (sid, conv) in snapshot {
+                                // Build the fresh snapshot with the new
+                                // llm_availability tag. The reasoning_effort
+                                // already stored on the ConversationSession
+                                // is reused — the per-config-change relay
+                                // (spawn_config_change_relay) is the only
+                                // path that re-resolves effective effort,
+                                // because model/provider changes are the
+                                // trigger that needs re-resolution.
+                                let cfg = conv.build_session_config_snapshot(wire);
+                                chunk_publisher.publish_session_config(&sid, &cfg).await;
+                            }
+                        }
+                    }
                 }
                 tracing::debug!("MQTT chunk relay task ended");
             }))
@@ -75,6 +190,13 @@ pub(crate) async fn phase_c_spawn_subsystems(
     } else {
         None
     };
+
+    // Spawn the registry poller now that the relay is ready to consume.
+    // The poller task holds an Arc<Self>, so no external handle is
+    // required — it terminates with the runtime process.
+    if let Some(reg) = llm_availability.as_ref() {
+        let _poller = std::sync::Arc::clone(reg).spawn_poller();
+    }
 
     // ── DevMode: register Debug HTTP routes + spawn events publisher ──
     if config.dev_mode {
@@ -459,10 +581,16 @@ pub(crate) fn spawn_config_change_relay(
         while let Some(change) = config_rx.recv().await {
             // Drop sentinel: empty session_id means the ConversationSession
             // is being dropped. Fall back to the relay's own clone.
+            // llm_availability is left as Unspecified here — the dedicated
+            // availability watcher in the chunk_relay task publishes the
+            // authoritative value independently, so per-config-change
+            // re-publishes don't risk carrying a stale tag.
             let mut config = if change.snapshot.session_id.is_empty()
                 && change.snapshot.agent_id.is_empty()
             {
-                conv.build_session_config_snapshot()
+                conv.build_session_config_snapshot(
+                    acowork_core::mqtt_proto::LlmAvailability::Unspecified,
+                )
             } else {
                 change.snapshot
             };

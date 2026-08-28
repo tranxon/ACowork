@@ -136,8 +136,16 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         return false;
     };
 
-    const finish = () => {
+    const finish = async () => {
         if (!mountedRef.current) return;
+        // ADR-052: /api/bootstrap READY does NOT imply `checkHealth()` has
+        // run. The local-gateway boot path (`bootGateway` -> Rust
+        // `init_local_gateway`) returns READY directly and never touches the
+        // health probe, so `status` may still be `disconnected` here. Ensure
+        // the store reflects a connected Gateway BEFORE we hand off to
+        // AppLayout - otherwise the chat input stays disabled ("Gateway not
+        // connected") even though the Gateway booted fine.
+        await checkHealth();
         const elapsed = Date.now() - startTimeRef.current;
         const remaining = Math.max(0, MIN_SPLASH_MS - elapsed);
         setStatusText(t("splashScreen.ready"));

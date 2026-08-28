@@ -73,6 +73,7 @@
     "startAgent": "Start Agent",
     "startingAgent": "Starting {{name}}…",
     "llmNotConfigured": "No LLM provider configured. Please add an API key in Harness → Providers.",
+    "llmSyncing": "Syncing LLM configuration…",
     "thinking": "Thinking...",
     "replying": "Replying...",
     "working": "working ...",
@@ -359,7 +360,9 @@
     "labelLastAccessed": "Last Accessed",
     "statusStable": "Stable",
     "statusDecaying": "Decaying",
-    "statusCritical": "Critical"
+    "statusCritical": "Critical",
+    "contextMenuCopyNodeJson": "Copy Node (JSON)",
+    "contextMenuCopyFormatted": "Copy Formatted"
   },
   "skillsPanel": {
     "selectSkill": "Select skill",
@@ -942,76 +945,76 @@
   },
   "tools": {
     "memory_recall": {
-      "running": "Recalling",
-      "done": "Recalled"
+      "running": "Recalling memory",
+      "done": "Recalled memory"
     },
     "context_recall": {
       "running": "Recalling context",
-      "done": "Context recalled"
+      "done": "Recalled context"
     },
     "memory_store": {
-      "running": "Storing",
-      "done": "Stored"
+      "running": "Storing memory",
+      "done": "Stored memory"
     },
     "http_request": {
-      "running": "Requesting",
-      "done": "Requested"
+      "running": "Http Requesting",
+      "done": "Http Requested"
     },
     "web_fetch": {
-      "running": "Fetching",
-      "done": "Fetched"
+      "running": "Web Fetching",
+      "done": "Web Fetched"
     },
     "web_search": {
-      "running": "Searching",
-      "done": "Searched"
+      "running": "Web Searching",
+      "done": "Web Searched"
     },
     "file_read": {
-      "running": "Reading",
-      "done": "Read"
+      "running": "Reading file",
+      "done": "Read file"
     },
     "file_write": {
-      "running": "Writing",
-      "done": "Written"
+      "running": "Writing file",
+      "done": "Written file"
     },
     "file_edit": {
-      "running": "Editing",
-      "done": "Edited"
+      "running": "Editing file",
+      "done": "Edited file"
     },
     "doc_reader": {
-      "running": "Reading document",
-      "done": "Read document"
+      "running": "Reading doc",
+      "done": "Read doc"
     },
     "glob_search": {
-      "running": "Globbing",
-      "done": "Globbed"
+      "running": "Glob searching",
+      "done": "Glob searched"
     },
     "content_search": {
-      "running": "Searching",
-      "done": "Searched"
+      "running": "Searching content",
+      "done": "Searched content"
     },
     "intent_send": {
       "running": "Sending intent",
       "done": "Sent intent"
     },
     "ask_user_question": {
-      "running": "Asking",
-      "done": "Asked"
+      "running": "Asking user",
+      "done": "Asked user"
     },
     "todo_write": {
       "running": "Updating todos",
       "done": "Updated todos"
     },
     "mcp_install": {
-      "running": "Installing",
-      "done": "Installed"
+      "running": "Installing MCP",
+      "done": "Installed MCP"
     },
     "mcp_uninstall": {
-      "running": "Uninstalling",
-      "done": "Uninstalled"
+      "running": "Uninstalling MCP",
+      "done": "Uninstalled MCP"
     },
     "rag_query": {
-      "running": "Querying",
-      "done": "Queried"
+      "running": "Querying RAG",
+      "done": "Queried RAG"
     },
     "codebase": {
       "running": "Searching code",

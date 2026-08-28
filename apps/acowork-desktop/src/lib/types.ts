@@ -298,8 +298,24 @@ export interface SendMessageResponse {
   status: string;
 }
 
-/** Gateway connection status */
-export type GatewayStatus = "connected" | "disconnected" | "error";
+/**
+ * Gateway connection status.
+ *
+ * State machine:
+ *   `connecting` → `connected` (success)
+ *   `connecting` → `connected` → `error` (steady-state drop)
+ *   `connecting` → `connecting` (startup probe failure; transient)
+ *
+ * Note: `disconnected` is preserved for external callers that explicitly
+ * tear the gateway down (e.g. `stopLocalGateway`). During normal startup
+ * we never sit in `disconnected` — the desktop immediately starts probing
+ * `/health`, so the first observed state is `connecting`.
+ */
+export type GatewayStatus =
+  | "connected"
+  | "connecting"
+  | "disconnected"
+  | "error";
 
 /** Todo item status from backend */
 export type TodoStatus = "pending" | "in_progress" | "completed";
