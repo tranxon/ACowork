@@ -64,6 +64,13 @@ impl Gateway {
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
+        // ADR-059 §5.1: assign a fresh instance id at every Gateway
+        // process start. This is the single value consumers use to
+        // distinguish the current Gateway from a retained snapshot
+        // emitted by a previous one. NOT persisted across restarts:
+        // "重启后换发" is the entire point.
+        state.set_instance_id(uuid::Uuid::new_v4().to_string());
+
         // ADR-055 §6.5: installed agents are no longer restored by an
         // on-disk packages scan (L2-9). The local node publishes its
         // installed-package inventory (retained InstalledAgentInfo) after
@@ -320,6 +327,64 @@ impl Gateway {
         // available for the occasional self-state mutation.
         let shared_state: SharedState = self.state.clone();
 
+        // ADR-059 Phase 1.2: build the bootstrap readiness picture
+        // before anything else can observe Gateway state. Subsystems
+        // register themselves against this registry as they come
+        // online; the orchestrator aggregates their state into a
+        // BootstrapState snapshot that the MQTT publisher (Phase 1.1)
+        // and the HTTP `/api/bootstrap` handler (Phase 1.3) expose.
+        //
+        // Subsystem IDs are intentionally stable strings (not enum
+        // variants) so the registry accepts arbitrary subsystems
+        // without changing its API — see ADR-059 §5.4 OCP boundary.
+        let bootstrap_registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        // Required: vault, mqtt broker + client, gateway publisher.
+        // Optional: embed (a remote fallback exists).
+        // `node.local` is marked ready by the NodeReady topic handler
+        // and `system_agent` by the local node's retained installed
+        // inventory (both in mqtt/dispatch.rs); the handles are local
+        // to this function, hence the `_` prefix.
+        let vault_handle = bootstrap_registry.register(
+            "vault",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let mqtt_handle = bootstrap_registry.register(
+            "mqtt",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let publisher_handle = bootstrap_registry.register(
+            "publisher",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let _local_node_handle = bootstrap_registry.register(
+            "node.local",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let _system_agent_handle = bootstrap_registry.register(
+            "system_agent",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let embed_handle = bootstrap_registry.register(
+            "embedding",
+            crate::bootstrap::ReadinessKind::Optional,
+        );
+
+        // Construct the orchestrator with the same instance_id as the
+        // Gateway so the snapshot's `instance_id` field stays consistent
+        // across the Gateway's lifetime.
+        let instance_id = shared_state.read().await.instance_id.clone();
+        let bootstrap_orchestrator = crate::bootstrap::BootstrapOrchestrator::new(
+            instance_id,
+            bootstrap_registry.clone(),
+        );
+        shared_state.write().await.bootstrap_orchestrator =
+            Some(bootstrap_orchestrator.clone());
+        // ADR-059 Phase 5.4: stash the vault handle on the shared
+        // state so the HTTP vault lock/unlock handlers can demote
+        // (mark_booting) and restore (mark_ready) vault readiness
+        // without holding a registry reference.
+        shared_state.write().await.vault_readiness_handle = Some(vault_handle.clone());
+
         // System Agent auto-start now happens AFTER the local node is up
         // and its installed inventory has been aggregated (see below).
 
@@ -351,6 +416,11 @@ impl Gateway {
                     "Reusing existing embedding service"
                 );
                 self.state.write().await.embed_process = Some(embed_state);
+                // ADR-059 Phase 1.2: a healthy pre-existing embed counts
+                // as ready for the bootstrap aggregation (optional
+                // subsystem — it never blocks READY, only demotes to
+                // DEGRADED if it later fails).
+                embed_handle.mark_ready(Some("existing embed process attached".to_string()));
                 embed_supervisor_cfg =
                     Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                         data_dir,
@@ -379,6 +449,12 @@ impl Gateway {
                         );
                         self.state.write().await.embed_process = Some(embed_state);
                         embed_child = Some(child);
+                        // ADR-059 Phase 1.2: the embed process is up
+                        // (process-level readiness; model loading is
+                        // tracked by the supervisor, not the bootstrap
+                        // registry).
+                        embed_handle
+                            .mark_ready(Some("embed process spawned".to_string()));
                         embed_supervisor_cfg =
                             Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                                 data_dir,
@@ -394,6 +470,14 @@ impl Gateway {
                             error = %e,
                             "Failed to spawn embedding service (local ONNX embedding unavailable, will use remote fallback)"
                         );
+                        // ADR-059 Phase 1.2: embed is optional and its
+                        // absence is a designed-in state (remote
+                        // fallback). Mark it skipped so the aggregated
+                        // phase can reach READY without treating the
+                        // missing binary as a failure.
+                        embed_handle.mark_skipped(Some(
+                            "local embed unavailable; remote fallback".to_string(),
+                        ));
                     }
                 }
             }
@@ -631,6 +715,13 @@ impl Gateway {
             tokio::sync::Mutex<Option<crate::mqtt::node_control::NodeControlClient>>,
         > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
+        // ADR-059 §6.2: the operation store is shared between the HTTP
+        // handlers (open records) and the MQTT dispatch layer (transition
+        // them on NodeEvent correlation). Created here so the MQTT
+        // callback registered below can capture it before the HTTP
+        // server starts.
+        let operation_store_shared = crate::operation_store::OperationStore::new_shared();
+
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
@@ -661,6 +752,12 @@ impl Gateway {
             let enrollment_tokens_for_dispatch = enrollment_tokens.clone();
             let node_tokens_for_dispatch = node_tokens.clone();
             let auth_enabled_for_dispatch = mqtt_config.auth_enabled;
+            // ADR-059 §7.2: NodeReady dispatch drives `node.{id}`
+            // readiness on the bootstrap registry.
+            let bootstrap_registry_for_dispatch = bootstrap_registry.clone();
+            // Clone before the move-closure; the original stays
+            // available for the HTTP server below.
+            let operation_store_for_dispatch = operation_store_shared.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
@@ -673,6 +770,8 @@ impl Gateway {
                 let state_for_dispatch = state_for_dispatch.clone();
                 let enrollment_tokens_for_cb = enrollment_tokens_for_dispatch.clone();
                 let node_tokens_for_cb = node_tokens_for_dispatch.clone();
+                let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
+                let operation_store_for_cb = operation_store_for_dispatch.clone();
                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
                     let node_control = node_control_slot.lock().await.clone();
@@ -687,6 +786,8 @@ impl Gateway {
                         Some(&enrollment_tokens_for_cb),
                         Some(&node_tokens_for_cb),
                         auth_enabled_for_dispatch,
+                        Some(&bootstrap_registry_for_cb),
+                        Some(&operation_store_for_cb),
                     );
                 });
             });
@@ -728,6 +829,11 @@ impl Gateway {
                     *node_control_slot.lock().await = Some(
                         crate::mqtt::node_control::NodeControlClient::new(client.clone()),
                     );
+                    // ADR-059 Phase 1.2: the MQTT broker + Gateway client
+                    // are required subsystems; mark them ready as soon as
+                    // the client connected. Phase transitions are
+                    // idempotent, so re-entry is safe.
+                    mqtt_handle.mark_ready(Some("client connected".to_string()));
                     Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
@@ -755,6 +861,13 @@ impl Gateway {
             // Store the handle so the ready barrier can be raised by the
             // vault auto-unlock task and the local-node supervisor.
             shared_state.write().await.mqtt_publisher_handle = Some(handle);
+            // ADR-059 Phase 1.2: the publisher is a required subsystem.
+            // Marking it ready here is intentionally conservative: the
+            // publisher's own deferred-publish loop only emits the FIRST
+            // retained snapshot once `mark_ready(true)` is raised, so
+            // the bootstrap snapshot can transition to READY before any
+            // provider payload has been released.
+            publisher_handle.mark_ready(Some("publisher started".to_string()));
             Some(trigger)
         } else { None };
 
@@ -764,6 +877,27 @@ impl Gateway {
         // `unlock_republish_trigger` is kept for backward-compatible
         // explicit republish on first provider-key visibility.
         let unlock_republish_trigger = mqtt_publisher_trigger.clone();
+
+        // ADR-059 Phase 1.2: start the bootstrap snapshot publisher
+        // once the MQTT client exists. It seeds the retained
+        // `acowork/global/bootstrap` topic immediately (BOOTING) and
+        // republishes on every orchestrator change (READY / DEGRADED /
+        // FAILED / SHUTTING_DOWN). The handle is bound for the rest of
+        // `run()`: dropping it would abort the publish loop.
+        let _bootstrap_publisher_handle: Option<
+            crate::mqtt::BootstrapPublisherHandle,
+        > = if let Some(ref client) = mqtt_gw_client {
+            let handle = crate::mqtt::BootstrapPublisher::start(
+                crate::mqtt::BootstrapPublisherOptions {
+                    client: client.as_ref(),
+                    orchestrator: bootstrap_orchestrator.clone(),
+                },
+            );
+            tracing::info!("MQTT Bootstrap publisher started (acowork/global/bootstrap)");
+            Some(handle)
+        } else {
+            None
+        };
 
         // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
         // Must be started AFTER MQTT client is available.
@@ -789,6 +923,13 @@ impl Gateway {
         // ready at this point.
         let node_control = node_control_slot.lock().await.clone();
         let http_node_registry = node_registry.clone();
+        // ADR-059 §2.3: hand the readiness registry to the HTTP layer
+        // so mutation handlers gate on Node control-plane readiness.
+        let http_bootstrap_registry = bootstrap_registry.clone();
+        // ADR-059 §6.2: the operation store is shared between the HTTP
+        // handlers (open records) and the MQTT dispatch layer
+        // (transition them on NodeEvent correlation).
+        let http_operation_store = operation_store_shared.clone();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -801,6 +942,8 @@ impl Gateway {
                 Some(agent_registry),
                 node_control,
                 Some(http_node_registry),
+                Some(http_bootstrap_registry),
+                Some(http_operation_store),
                 http_auth,
             )
             .await
@@ -974,43 +1117,39 @@ impl Gateway {
         // the 1 s unlock at most). This is intentionally insecure —
         // dev_mode is for local development only.
         if self.config.dev_mode {
-            let vault_state = self.state.clone();
-            let unlock_republish = unlock_republish_trigger;
             let unlock_state = shared_state.clone();
+            let unlock_republish = unlock_republish_trigger;
             tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    vault_state.blocking_write().vault.unlock("dev-mode-unlock")
-                })
-                .await;
-                match result {
-                    Ok(Ok(())) => {
-                        tracing::info!("Vault auto-unlocked (dev_mode)");
-                        // The initial retained acowork/global/providers
-                        // snapshot predates this unlock, so every api_key
-                        // field was empty (get_provider fails while the
-                        // vault is locked) and nothing else triggers a
-                        // republish until a provider changes. Republish
-                        // now so Runtimes receive the decrypted keys.
-                        if let Some(ref trigger) = unlock_republish {
-                            trigger.trigger();
+                let vault_boot_handle =
+                    match unlock_state.read().await.vault_readiness_handle.clone() {
+                        Some(h) => h,
+                        None => {
+                            tracing::error!(
+                                "Vault readiness handle not registered; dev-mode auto-unlock skipped"
+                            );
+                            return;
                         }
-                        // Raise the publisher ready barrier (Fix 1). The
-                        // loop has been blocked waiting for this ever
-                        // since `start()` was called; setting it now
-                        // releases the initial retained publish with
-                        // populated `api_key` fields. We also nudge the
-                        // loop explicitly so a race (channel already
-                        // observed before the loop entered the wait) is
-                        // still covered.
-                        let state_for_unlock = unlock_state.read().await;
-                        if let Some(ref h) = state_for_unlock.mqtt_publisher_handle {
-                            h.mark_ready();
-                        }
+                    };
+                match crate::vault::unlock_vault_and_mark_ready(
+                    unlock_state,
+                    vault_boot_handle.clone(),
+                    unlock_republish,
+                    "dev-mode-unlock".to_string(),
+                    "vault unlocked (dev_mode)".to_string(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e);
+                        // A failed unlock means the vault cannot serve
+                        // provider credentials — a required subsystem
+                        // in Failed drops the aggregated phase to
+                        // FAILED.
+                        vault_boot_handle.mark_failed(Some(format!(
+                            "vault auto-unlock failed: {e}"
+                        )));
                     }
-                    Ok(Err(e)) => {
-                        tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e)
-                    }
-                    Err(e) => tracing::warn!("Vault auto-unlock task panicked: {}", e),
                 }
             });
         } else {
@@ -1032,6 +1171,12 @@ impl Gateway {
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received shutdown signal, cleaning up...");
+
+                // ADR-059 Phase 1.2: publish the SHUTTING_DOWN snapshot
+                // BEFORE tearing down subsystems, so consumers observing
+                // the retained `acowork/global/bootstrap` topic see a
+                // graceful transition instead of a silent disappearance.
+                bootstrap_orchestrator.mark_shutting_down();
 
                 // ADR-055 §6.2: Runtime processes are hosted by the node —
                 // the Gateway no longer kills them directly. The local node

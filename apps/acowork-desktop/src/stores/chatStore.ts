@@ -13,6 +13,7 @@ import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
+import { with503Retry } from "../lib/httpRetry";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
@@ -1573,9 +1574,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       // ADR-035 Phase 3: no HTTP incremental endpoint
 
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
-        { signal: controller.signal },
+      // Bug B v3 fix: chat endpoints proxy through the Runtime and 503
+      // during the boot window between Gateway discovery and Runtime
+      // HTTP port registration. `with503Retry` honours the Gateway's
+      // Retry-After header so a transient 503 at session-load time
+      // recovers transparently instead of flashing an error to the user.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
+          { signal: controller.signal },
+        ),
+        {
+          tag: `ChatStore.loadSessionMessages(${agentId}/${sessionId})`,
+          logger: log,
+          signal: controller.signal,
+        },
       );
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
@@ -1915,8 +1928,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Errors are non-fatal - warns and returns without blocking startup.
   fetchSessionState: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
+      // Bug B v3 fix: see `loadSessionMessages` for the rationale.
+      // We pass the AbortSignal through `with503Retry` so the chat
+      // panel can cancel the boot-window retry loop when the user
+      // switches sessions or closes the panel.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
+        ),
+        { tag: `ChatStore.fetchSessionState(${agentId}/${sessionId})`, logger: log },
       );
       if (!resp.ok) {
         log.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
@@ -1976,8 +1996,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // fetchSessionState does NOT apply config fields; this function does.
   fetchSessionConfig: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`,
+      // Bug B v3 fix: same 503 retry rationale as fetchSessionState.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`,
+        ),
+        { tag: `ChatStore.fetchSessionConfig(${agentId}/${sessionId})`, logger: log },
       );
       if (!resp.ok) {
         log.warn(`[ChatStore] fetchSessionConfig HTTP ${resp.status} for session ${sessionId}`);

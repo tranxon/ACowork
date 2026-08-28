@@ -33,8 +33,8 @@ use acowork_core::mqtt_proto::{
 };
 use acowork_core::node::{
     node_agent_events_topic, node_agent_installed_topic, node_enroll_topic, node_events_topic,
-    node_info_topic, node_lsps_topic, node_sidecar_status_topic, node_status_topic,
-    NODE_PROTOCOL_VERSION,
+    node_info_topic, node_lsps_topic, node_ready_topic, node_sidecar_status_topic,
+    node_status_topic, NODE_PROTOCOL_VERSION,
 };
 
 use crate::config::{system_hostname, NodeConfig};
@@ -802,6 +802,36 @@ impl NodeControlPlane {
                     }
                 }
 
+                // ADR-059 §7.2: NodeReady — the control-plane readiness
+                // signal. Published AFTER CONNECT + every control
+                // subscription is submitted (rumqttc queues in order, so
+                // the broker sees the SUBSCRIBEs before this PUBLISH).
+                // Retained so a Gateway (re)start converges without
+                // polling; re-published on every (re)connect. Only the
+                // two protocol fields travel — no generation counters
+                // (ADR-059 §7.2 OCP boundary).
+                let ready_topic = acowork_core::node::node_ready_topic(&node_id);
+                let ready_envelope = DataEnvelope {
+                    version: 1,
+                    payload: Some(data_envelope::Payload::NodeReady(
+                        acowork_core::mqtt_proto::NodeReady {
+                            node_id: node_id.clone(),
+                            protocol_version: 1,
+                        },
+                    )),
+                };
+                if let Err(e) = client
+                    .publish(
+                        ready_topic,
+                        QoS::AtLeastOnce,
+                        true,
+                        prost::Message::encode_to_vec(&ready_envelope),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "Failed to publish NodeReady (retained)");
+                }
+
                 // Mark enrolled (idempotent) + persist.
                 {
                     let mut id = identity.write().await;
@@ -898,6 +928,10 @@ impl NodeControlPlane {
             config.gateway_mqtt_port,
             &node_id,
             mqtt_credentials,
+            // ADR-059 §7.2: poll-task disconnect clears this retained
+            // snapshot (daemon only — the one-shot enrollment path
+            // below passes None: it never announced NodeReady).
+            Some(node_ready_topic(&node_id)),
             bootstrap,
             Some(message_callback),
         )
@@ -1071,6 +1105,17 @@ impl NodeControlPlane {
         {
             tracing::warn!(error = %e, "Failed to publish status=offline on shutdown");
         }
+        // ADR-059 §7.2: clear the retained NodeReady snapshot so the
+        // Gateway (and any other consumer) stops treating this node as
+        // control-plane-ready. Empty retained payload = deleted message.
+        let ready_topic = node_ready_topic(&self.identity.node_id);
+        if let Err(e) = self
+            .client
+            .publish_raw(&ready_topic, Vec::new(), QoS::AtLeastOnce, true)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to clear retained NodeReady on shutdown");
+        }
         {
             let mut s = self.state.write().await;
             s.set_connected(false, None);
@@ -1204,6 +1249,9 @@ impl NodeControlPlane {
             config.gateway_mqtt_port,
             &node_id,
             mqtt_credentials,
+            // One-shot enrollment never announced NodeReady; nothing to
+            // clear on disconnect.
+            None,
             bootstrap,
             Some(message_callback),
         )
@@ -1283,6 +1331,8 @@ impl NodeControlPlane {
             // ADR-055 Phase 5a: present the long-lived node token so
             // rename works against an auth-enabled broker.
             Arc::new(Mutex::new(identity.node_token.clone())),
+            // One-shot rename does not announce NodeReady.
+            None,
             bootstrap,
             None,
         )
@@ -1342,6 +1392,8 @@ impl NodeControlPlane {
             // ADR-055 Phase 5a: present the long-lived node token so
             // leave works against an auth-enabled broker.
             Arc::new(Mutex::new(identity.node_token.clone())),
+            // One-shot leave does not announce NodeReady.
+            None,
             bootstrap,
             None,
         )

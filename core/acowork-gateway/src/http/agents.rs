@@ -23,9 +23,11 @@ use crate::error::GatewayError;
 use crate::http::agent_config::{
     self, AvatarAssetEntry, AvatarAssetsResponse, AvatarConfigResponse, UpdateAvatarConfigRequest,
 };
-use crate::http::routes::{ApiError, AppState};
+use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::lifecycle::process::is_process_alive;
 use crate::gateway::state::SYSTEM_AGENT_ID;
+use acowork_core::error_codes::StructuredErrorBody;
+use acowork_core::operation::OperationRecord;
 use acowork_core::AgentManifest;
 
 /// Build the agent management router
@@ -1259,6 +1261,7 @@ pub async fn download_package(
                 Json(ApiError {
                     error: "Invalid node token".to_string(),
                     code: 403,
+                    structured: None,
                 }),
             ));
         }
@@ -1408,9 +1411,12 @@ pub async fn get_agent_lsp_endpoint(
 pub async fn install_agent(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
+    // ADR-059 §7.3: optional optimistic-concurrency precondition — the
+    // BootstrapState `version` the client read before submitting.
+    let mut expected_version: Option<u64> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -1432,6 +1438,12 @@ pub async fn install_agent(
                     node_id = Some(text);
                 }
             }
+            "expected_version" => {
+                let text = field.text().await.unwrap_or_default();
+                if !text.is_empty() {
+                    expected_version = text.trim().parse::<u64>().ok();
+                }
+            }
             _ => {}
         }
     }
@@ -1446,7 +1458,8 @@ pub async fn install_agent(
     // Persist the source into the package registry and build the download
     // URL the node will use (advertise_host = the address other machines
     // reach).
-    let (manifest, package_url) = register_package_in_registry(&state, &package_bytes).await?;
+    let (manifest, package_url) =
+        register_package_in_registry(&state, &package_bytes, &node_id).await?;
     let agent_id = manifest.agent_id.clone();
 
     // Dispatch the asynchronous install (fire-and-forget). Completion is
@@ -1456,29 +1469,65 @@ pub async fn install_agent(
         .clone()
         .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
     check_node_compatible(&state, &node_id).await?;
-    // The install command is a fire-and-forget MQTT publish (non-retained,
-    // no retry) — a target node that never enrolled would silently drop
-    // it, leaving this 202 Accepted as a false promise. Reject with 503
-    // so the caller retries once the node is online (ADR-055 §3.2).
-    if let Some(registry) = state.node_registry.as_ref()
-        && registry.read().await.get(&node_id).is_none()
+    // ADR-059 §2.3: the install command is a fire-and-forget MQTT
+    // publish — if the target Node's control plane has not announced
+    // `NodeReady`, the command would be silently dropped. Reject with
+    // 409 `dependency_not_ready` (structured error, Phase 3.2) so the
+    // caller retries once `GET /api/bootstrap` reaches READY. This
+    // covers BOTH "never enrolled" and "enrolled but not ready": the
+    // node publishes its enroll request before NodeReady (bootstrap
+    // order, ADR-059 §7.2), so `node.{id}` cannot be ready while the
+    // node is unknown to the registry.
+    if let Some(registry) = state.bootstrap_registry.as_ref()
+        && !registry.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", node_id)))
     {
-        return Err(ApiError::service_unavailable(&format!(
-            "Node '{}' has never enrolled (offline) — install requires a connected node",
-            node_id
-        )));
+        let (phase, phase_detail) = state
+            .gateway_state
+            .read()
+            .await
+            .bootstrap_orchestrator
+            .as_ref()
+            .map(|o| {
+                let s = o.snapshot();
+                // SCREAMING_SNAKE_CASE serde name — the same string the
+                // HTTP projection uses (`BOOTING`, `READY`, …).
+                let phase = serde_json::to_string(&s.phase)
+                    .map(|p| p.trim_matches('"').to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                (phase, s.phase_detail)
+            })
+            .unwrap_or_else(|| ("unknown".to_string(), "orchestrator unavailable".to_string()));
+        return Err(ApiError::conflict_structured(
+            StructuredErrorBody::dependency_not_ready(
+                Some(phase),
+                Some(phase_detail),
+                500,
+            ),
+        ));
     }
+    // ADR-059 §6: open an Accepted operation BEFORE dispatch — the node's
+    // NodeEvent reply (same `request_id`) transitions it to
+    // Completed/Failed. The ack carries the operation_id so the client
+    // can correlate the async outcome.
+    let record = OperationRecord::new(expected_version.unwrap_or(0));
+    let ack = OperationAck::from_record(&record);
+    let operation_id = record.operation_id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
     node_control
-        .install_agent_by_url(&node_id, &agent_id, &package_url, gateway_dev_mode(&state).await)
+        .install_agent_by_url(
+            &node_id,
+            &agent_id,
+            &package_url,
+            gateway_dev_mode(&state).await,
+            operation_id.as_str(),
+        )
         .await
         .map_err(|e| ApiError::internal(&format!("Install dispatch failed: {}", e)))?;
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(MessageResponse {
-            message: format!("Install dispatched to node '{}': {}", node_id, agent_id),
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(ack)))
 }
 
 /// Spool package bytes to a temp file, extract the manifest, and persist
@@ -1489,6 +1538,7 @@ pub async fn install_agent(
 async fn register_package_in_registry(
     state: &AppState,
     package_bytes: &[u8],
+    node_id: &str,
 ) -> Result<(AgentManifest, String), (StatusCode, Json<ApiError>)> {
     let temp_file = std::env::temp_dir().join(format!(
         "acowork-install-{}-{}.agent",
@@ -1525,9 +1575,25 @@ async fn register_package_in_registry(
             )));
         }
         let registry_path = registry_dir.join(format!("{}.agent", agent_id));
+        // The download URL must be reachable from the target node. The
+        // local node is loopback-bound, so it must dial the HTTP bind
+        // host — auto-detecting a LAN advertise host (ADR-055 D3) would
+        // make the download fail with connection refused whenever the
+        // listener is 127.0.0.1-only. Remote nodes get the advertise
+        // host, which is what they can actually route to.
+        let url_host = if node_id == acowork_core::node::LOCAL_NODE_ID {
+            // A wildcard bind must still be dialed via loopback.
+            if config.http.host == "0.0.0.0" || config.http.host == "::" {
+                "127.0.0.1"
+            } else {
+                config.http.host.as_str()
+            }
+        } else {
+            gw.advertise_host.as_str()
+        };
         let url = format!(
             "http://{}:{}/api/packages/{}/download",
-            gw.advertise_host, config.http.port, agent_id
+            url_host, config.http.port, agent_id
         );
         (registry_path, url)
     };
@@ -1772,7 +1838,8 @@ pub async fn upgrade_agent(
 
     // Persist the new package into the registry and verify the manifest's
     // agent_id matches the upgrade target.
-    let (manifest, package_url) = register_package_in_registry(&state, &package_bytes).await?;
+    let (manifest, package_url) =
+        register_package_in_registry(&state, &package_bytes, &node_id).await?;
     if manifest.agent_id != agent_id {
         return Err(ApiError::bad_request(&format!(
             "Package agent_id '{}' does not match upgrade target '{}'",

@@ -205,7 +205,13 @@
       "installSelectedInstalling": "Installing {{name}}...",
       "fromFileTitle": "Install from .agent file",
       "fromFileSubtitle": "Select a .agent package from your computer",
-      "waitingForNode": "Waiting for local node agent to come online...",
+      "preparing": "Preparing services: {{detail}}...",
+      "waitingReady": "Waiting for services to be ready...",
+      "opPending": "Pending",
+      "opSubmitted": "Submitted (op {{opId}})",
+      "opCompleted": "Installed",
+      "opFailed": "Failed",
+      "installProgress": "Install progress {{done}}/{{total}}",
       "complete": "Complete →",
       "back": "Back"
     }

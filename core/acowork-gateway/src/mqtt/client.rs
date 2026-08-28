@@ -120,6 +120,12 @@ const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     // ADR-055 Phase 5a: node enrollment handshake (QoS 1, non-retained
     // — the Node publishes once on bootstrap).
     ("acowork/nodes/+/enroll", QoS::AtLeastOnce),
+    // ADR-059 §7.2: Node control-plane readiness (DataEnvelope<NodeReady>,
+    // QoS 1 retained). The Node publishes after CONNECT + control
+    // subscriptions; the Gateway re-marks `node.{id}` ready in the
+    // SubsystemReadinessRegistry on receipt, and demotes it on an empty
+    // retained payload (Node shutdown / LWT / disconnect clear).
+    ("acowork/nodes/+/ready", QoS::AtLeastOnce),
 ];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).

@@ -748,6 +748,39 @@ Tcomplete
 - Gateway 重启时新 generation 未 ready 期间，旧实例的 retained `READY` 不得被当前 Desktop 使用。
 - pending operation 丢失时必须可查询或明确过期，不能返回成功。
 
+### 10.4 全局资源拉取的 503 语义（Bug B fix v3 补充）
+
+`GET /api/global-resources` 是 Runtime 启动期（phase_a）主动拉取全局资源的
+唯一 HTTP 入口（协议见 `docs/zh/protocols/http.md` §4.13）。早期版本端点
+**始终返回 200**——未就绪时返回空 `topics`，Runtime 把“还没有”误缓存为
+“就是没有”，这正是 Bug B 的另一半根因。v3 明确该端点按 Gateway
+`BootstrapPhase` 分级返回：
+
+| Gateway 阶段 | HTTP | `Retry-After` | Runtime 行为 |
+|---|---|---|---|
+| `Booting` / `Unspecified` | `503` | `2`s | 睡 2s 后重试 |
+| `Failed` | `503` | `10`s | 睡 10s 后重试 |
+| `ShuttingDown` | `503` | `-1`（哨兵） | 放弃拉取，仅依赖 MQTT retained |
+| `Ready` / `Degraded` | `200` | N/A | 应用快照 |
+
+决策要点：
+
+1. **`503` 与 `200 + 空数据` 语义严格分离**：未就绪只允许 `503`；`200`
+   一定是权威快照（`topics` 为空是合法的“资源为 0”状态）。
+2. **`Retry-After: -1` 哨兵**：`ShuttingDown` 场景下任何重试都无意义，
+   Runtime 收到即放弃，避免在 Gateway 退出期间空转 30s。
+3. **never-poison**：Runtime 在 `503` 时不写本地 `AvailableResourceCache`，
+   已由 MQTT retained 送达的相干快照不会被“未就绪”数据覆盖。
+4. **总预算**：`PULL_MAX_DURATION = 30s`，超时放弃且不阻塞 Phase A；
+   MQTT retained 始终是兜底通道。
+5. **header/body 双通道冗余**：`Retry-After` header 与 body
+   `retry_after_seconds` 同值，Runtime 取两者较大值，客户端任取其一。
+6. **前端统一消费模式**：Desktop 所有 store 级 fetcher（workspaces / file
+tree / memory / chat / tools / latest-session）统一包装共享的
+`with503Retry`（`apps/acowork-desktop/src/lib/httpRetry.ts`），不再以
+MQTT retained `meta.ready` 作为 UI 渲染门控（retained 是异步推送，作为
+gate 会 latch false 导致死等）。
+
 ---
 
 ## 11. 迁移方案

@@ -8,8 +8,8 @@ import { useAgentStore } from "../../stores/agentStore";
 import { cn } from "../../lib/utils";
 import { needsApiKey, keyPlaceholder } from "../../lib/providers";
 import { fetchProviderModels, fetchProviders, createUser } from "../../lib/gateway-api";
-import { DEFAULT_GATEWAY_URL } from "../../lib/config";
-import type { GatewayMode, ModelInfo } from "../../lib/types";
+import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
+import type { GatewayMode, ModelInfo, BootstrapStateView, OperationAck } from "../../lib/types";
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
@@ -94,6 +94,16 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
   const completeOnboarding = useCallback(() => {
     // Persist user identity to Gateway if name was provided in Step 4.
     // Fire-and-forget — don't block onboarding completion on API result.
+    //
+    // ADR-059 §7.3: `createUser` now returns an `OperationAck`
+    // (operation_id / state / resource_version / terminal_error) instead
+    // of the legacy `{ user, version }` envelope. We intentionally
+    // ignore the ack — the onboarding flow only needs the user profile
+    // to be persisted server-side; ProfileTab will re-fetch the active
+    // user list when it mounts, which picks up the just-created
+    // profile. Any non-2xx HTTP status throws and is logged here; a
+    // `terminal_error` inside the ack is silently swallowed because the
+    // fire-and-forget shape predates ADR-059.
     if (state.name.trim()) {
       createUser({
         display_name: state.name.trim(),
@@ -440,6 +450,14 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
+    // Missing key for a remote provider: do not save an empty key into
+    // the vault — surface the same hint AddProviderFlow shows instead of
+    // silently allowing it (the save button must stay enabled for this
+    // to fire).
+    if (needsApiKey(provider) && !apiKey.trim()) {
+      alert(t("harness.pleaseEnterApiKey"));
+      return;
+    }
     setSaving(true);
     try {
       await invoke("add_key", {
@@ -447,8 +465,17 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
         key: apiKey,
         baseUrl: baseUrl || undefined,
         defaultModel: selectedModels.length > 0 ? selectedModels[0] : undefined,
+        // Persist the FULL model selection — not just the default. The
+        // chat input's model switcher only renders when >1 model is
+        // configured (availableModels.length > 1 in ChatPanel), so saving
+        // only `defaultModel` silently dropped the user's multi-select
+        // and left the switcher missing after onboarding.
+        models: selectedModels.length > 0 ? selectedModels : undefined,
       });
       setSaved(true);
+      // Same shared "keys saved" signal Harness dispatches — ChatPanel
+      // listens for it and reloads its model list immediately.
+      window.dispatchEvent(new CustomEvent("models-added"));
     } catch {
       // Continue anyway
     } finally {
@@ -457,7 +484,6 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   };
 
   const needsKey = needsApiKey(provider);
-  const canSave = needsKey ? apiKey.trim().length > 0 : true;
 
   return (
     <div>
@@ -517,7 +543,11 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
 
           <button
             onClick={handleSave}
-            disabled={!canSave || saving}
+            // Keep the button enabled on a missing API key: a greyed-out
+            // button with no feedback made users believe selecting a
+            // provider was enough (nothing was ever saved). handleSave
+            // guards the key and alerts the user.
+            disabled={saving}
             className="mt-2 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             {saving ? t("onboarding.apiKey.saving") : saved ? t("onboarding.apiKey.saved") : t("onboarding.apiKey.save")}
@@ -644,17 +674,79 @@ function IdentityStep({
   );
 }
 
+/**
+ * Run `worker` over `items` with at most `limit` concurrent executions.
+ *
+ * ADR-059 §5.2: the onboarding flow submits install operations with a
+ * bounded concurrency of 3 (the node control plane installs packages in
+ * parallel, but unbounded fan-out would overload a cold start).
+ */
+async function runBounded<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let idx = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const item = items[idx++];
+      await worker(item);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/** Map a bundled agent resource name to its canonical agent id (ADR-059 §6).
+ *
+ * The id is the `agent_id` inside each package's manifest.toml — NOT the
+ * `.agent` filename. The Gateway inventory and the node's retained
+ * installed entry both key on the manifest id (e.g.
+ * `com.acowork.software-architect`), so `wait_agent_installed` must poll
+ * exactly that id: polling the filename (`… .agent`) 404s forever and the
+ * onboarding step shows "waiting" even after a successful install. */
+function bundledAgentId(resourceName: string): string {
+  switch (resourceName) {
+    case "system-agent": return "com.acowork.system";
+    case "software-architect-agent": return "com.acowork.software-architect";
+    case "senior-engineer-agent": return "com.acowork.senior-engineer";
+    case "quality-assurance-agent": return "com.acowork.quality-assurance";
+    case "project-manager-agent": return "com.acowork.project-manager";
+    case "product-manager-agent": return "com.acowork.product-manager";
+    case "document-manager-agent": return "com.acowork.document-manager";
+    default: return resourceName;
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /** Step 5: Install first Agent */
 function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPrev: () => void }) {
   const { t } = useTranslation();
   const [installing, setInstalling] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
-  // Fix 2: while the Rust command retries behind the scenes on a node-online
-  // race (HTTP 503 "Node 'local' has never enrolled"), surface a status so
-  // the user knows the install is making progress. Cleared when each
-  // individual agent finishes.
-  const [waitingForNode, setWaitingForNode] = useState(false);
+  // ADR-059 §5.2: live bootstrap snapshot while installs are running —
+  // surfaces the Gateway's own phase_detail ("3/5 required ready" etc.)
+  // instead of a generic "waiting for node" message.
+  const [bootstrap, setBootstrap] = useState<BootstrapStateView | null>(null);
   const [selectedAgents, setSelectedAgents] = useState<string[]>(() => RECOMMENDED_AGENTS.map((agent) => agent.resourceName));
+
+  interface InstallOp {
+    resourceName: string;
+    name: string;
+    agentId: string;
+    state: "pending" | "submitted" | "completed" | "failed";
+    operationId?: string;
+    error?: string;
+  }
+
+  const [ops, setOps] = useState<Record<string, InstallOp>>({});
+
+  const updateOp = (resourceName: string, patch: Partial<InstallOp>) => {
+    setOps((prev) => ({
+      ...prev,
+      [resourceName]: { ...prev[resourceName], ...patch },
+    }));
+  };
 
   const toggleRecommendedAgent = (resourceName: string) => {
     setSelectedAgents((prev) => prev.includes(resourceName)
@@ -663,47 +755,106 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   };
 
   /**
-   * Run `invoke` with a small additional retry loop on top of the
-   * Rust-side retry. The Tauri command itself already retries 503s up to
-   * 5 times (see `commands/agent.rs::install_with_retry`); if that still
-   * fails, we want the failure to bubble up as a single error message
-   * instead of leaving the UI stuck. This wrapper detects "node-online
-   * race" errors and shows the "waiting" status, but it does NOT add an
-   * extra retry to avoid stacking waits.
+   * ADR-059 §5.1: wait for the Gateway bootstrap phase to reach READY.
+   * Polls `GET /api/bootstrap` directly (same channel SplashScreen uses)
+   * and streams `phase_detail` into the UI. The Tauri `get_bootstrap`
+   * command (MQTT retained snapshot cache) can serve a stale/none
+   * snapshot while the MQTT subscribe loop is still settling, which
+   * used to burn the whole 30 s window with every agent stuck at
+   * "pending" — the direct HTTP poll is authoritative and race-free.
+   * Replaces the old "503 / never enrolled" text-match retry loop — the
+   * Gateway now answers installs with structured `dependency_not_ready`
+   * until its subsystems (vault / mqtt / node.local / system_agent /
+   * publisher) are all up.
    */
-  const invokeWithNodeReadiness = async (cmd: string, args: Record<string, unknown>): Promise<void> => {
-    try {
-      await invoke(cmd, args);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("503") || msg.includes("never enrolled")) {
-        setWaitingForNode(true);
+  const waitBootstrapReady = async (): Promise<BootstrapStateView> => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      let view: BootstrapStateView | null = null;
+      try {
+        const resp = await fetch(`${getGatewayUrl()}/api/bootstrap`);
+        if (resp.ok) {
+          view = (await resp.json()) as BootstrapStateView;
+        }
+      } catch {
+        view = null;
       }
-      // Re-throw to surface a single combined error at the end.
-      throw err;
+      if (view) {
+        setBootstrap(view);
+        if (view.phase === "READY" || view.phase === "DEGRADED") return view;
+        if (view.phase === "FAILED" || view.phase === "SHUTTING_DOWN") {
+          throw new Error(`Gateway ${view.phase}: ${view.phase_detail}`);
+        }
+      }
+      await sleep(400);
     }
+    throw new Error("Bootstrap did not reach READY in time");
   };
 
   const handleInstallRecommended = async () => {
     setInstallError(null);
+    setInstalling("");
+    const items: InstallOp[] = selectedAgents.map((resourceName) => {
+      const agent = RECOMMENDED_AGENTS.find((item) => item.resourceName === resourceName);
+      return {
+        resourceName,
+        name: agent?.name ?? resourceName,
+        agentId: bundledAgentId(resourceName),
+        state: "pending",
+      };
+    });
+    setOps(Object.fromEntries(items.map((op) => [op.resourceName, op])));
+    // Failures are collected per-operation (workers never reject, so all
+    // concurrent installs run to completion and every op gets a final
+    // state) and surfaced as a combined error at the end.
+    const failedOps: string[] = [];
     try {
-      for (const resourceName of selectedAgents) {
-        const agent = RECOMMENDED_AGENTS.find((item) => item.resourceName === resourceName);
-        setInstalling(agent?.name ?? resourceName);
-        setWaitingForNode(false);
-        await invokeWithNodeReadiness("install_bundled_agent", { resourceName, devMode: true });
-        setWaitingForNode(false);
+      // 1) Wait for bootstrap READY — installs are rejected with the
+      // structured `dependency_not_ready` code before that.
+      await waitBootstrapReady();
+      // 2) Submit install operations with bounded concurrency (3 in
+      // flight). Each ack carries an operation_id; completion is
+      // correlated by polling the Gateway inventory for the agent id.
+      await runBounded(items, 3, async (op) => {
+        try {
+          const ack = await invoke<OperationAck>("install_bundled_agent", {
+            resourceName: op.resourceName,
+            devMode: true,
+          });
+          updateOp(op.resourceName, {
+            state: "submitted",
+            operationId: ack.operation_id,
+          });
+          await invoke("wait_agent_installed", {
+            agentId: op.agentId,
+            timeoutSecs: 120,
+          });
+          updateOp(op.resourceName, { state: "completed" });
+        } catch (err) {
+          failedOps.push(op.resourceName);
+          updateOp(op.resourceName, {
+            state: "failed",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
+      if (failedOps.length > 0) {
+        const names = items.filter((op) => failedOps.includes(op.resourceName)).map((op) => op.name);
+        setInstallError(
+          `${failedOps.length}/${items.length} agent(s) failed to install: ${names.join(", ")}`,
+        );
+        return;
       }
-      // Refresh the agent list so newly installed agents appear.
-      // ADR-017: Avatar assignment is now server-side (agent_config.json
-      // seeded from manifest on first start). No frontend backfill needed.
+      // All installs completed — refresh the agent list so newly
+      // installed agents appear. ADR-017: Avatar assignment is now
+      // server-side (agent_config.json seeded from manifest on first
+      // start). No frontend backfill needed.
       await useAgentStore.getState().fetchAgents();
-      setInstalling(null);
     } catch (err) {
-      setInstalling(null);
+      // waitBootstrapReady failed (bootstrap FAILED / timeout).
       setInstallError(err instanceof Error ? err.message : String(err));
     } finally {
-      setWaitingForNode(false);
+      setInstalling(null);
     }
   };
 
@@ -716,9 +867,10 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       if (selected) {
         setInstallError(null);
         setInstalling(selected);
-        setWaitingForNode(false);
-        await invokeWithNodeReadiness("install_agent", { packagePath: selected });
-        setWaitingForNode(false);
+        // Wait for bootstrap READY first: the Gateway rejects installs
+        // with `dependency_not_ready` until its subsystems are up.
+        await waitBootstrapReady();
+        await invoke("install_agent", { packagePath: selected });
         // Refresh the agent list so the backfill runs for the new agent.
         await useAgentStore.getState().fetchAgents();
         setInstalling(null);
@@ -726,10 +878,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
     } catch (err) {
       setInstalling(null);
       setInstallError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setWaitingForNode(false);
     }
   };
+
+  const completedCount = Object.values(ops).filter((op) => op.state === "completed").length;
+  const totalCount = Object.keys(ops).length;
 
   return (
     <div>
@@ -737,6 +890,13 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       <p className="mt-1 text-sm text-zinc-500">{t("onboarding.installAgent.subtitle")}</p>
 
       <div className="mt-6 space-y-3">
+        {/* Bootstrap readiness status (ADR-059 §5.2) */}
+        {installing !== null && bootstrap && bootstrap.phase !== "READY" && bootstrap.phase !== "DEGRADED" && (
+          <p className="text-xs text-zinc-400">
+            {t("onboarding.installAgent.preparing", { detail: bootstrap.phase_detail })}
+          </p>
+        )}
+
         <div className="rounded-md border border-zinc-200 p-4 dark:border-zinc-700">
           <div className="mb-3 flex items-center justify-between">
             <div>
@@ -751,30 +911,55 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
             </button>
           </div>
           <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-            {RECOMMENDED_AGENTS.map((agent) => (
-              <label
-                key={agent.resourceName}
-                className="flex cursor-pointer gap-3 rounded-md border border-zinc-100 p-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedAgents.includes(agent.resourceName)}
-                  onChange={() => toggleRecommendedAgent(agent.resourceName)}
-                  className="mt-0.5 h-4 w-4 rounded border-zinc-300"
-                />
-                <span>
-                  <span className="block text-sm font-medium">{agent.name} · {agent.role}</span>
-                  <span className="mt-0.5 block text-xs text-zinc-400">{agent.description}</span>
-                </span>
-              </label>
-            ))}
+            {RECOMMENDED_AGENTS.map((agent) => {
+              const op = ops[agent.resourceName];
+              return (
+                <label
+                  key={agent.resourceName}
+                  className="flex cursor-pointer gap-3 rounded-md border border-zinc-100 p-3 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedAgents.includes(agent.resourceName)}
+                    onChange={() => toggleRecommendedAgent(agent.resourceName)}
+                    disabled={!!installing}
+                    className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                  />
+                  <span className="flex-1">
+                    <span className="block text-sm font-medium">{agent.name} · {agent.role}</span>
+                    <span className="mt-0.5 block text-xs text-zinc-400">{agent.description}</span>
+                  </span>
+                  {/* Per-operation status badge (ADR-059 §6: operation_id tracking) */}
+                  {op && (
+                    <span className="self-center text-xs">
+                      {op.state === "pending" && <span className="text-zinc-400">{t("onboarding.installAgent.opPending")}</span>}
+                      {op.state === "submitted" && op.operationId && (
+                        <span className="text-blue-600 dark:text-blue-400">
+                          {t("onboarding.installAgent.opSubmitted", { opId: op.operationId.slice(0, 8) })}
+                        </span>
+                      )}
+                      {op.state === "completed" && <span className="text-green-600 dark:text-green-400">{t("onboarding.installAgent.opCompleted")}</span>}
+                      {op.state === "failed" && <span className="text-red-600 dark:text-red-400">{t("onboarding.installAgent.opFailed")}</span>}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
           </div>
           <button
             onClick={handleInstallRecommended}
-            disabled={!!installing || selectedAgents.length === 0}
+            // `installing` is set to "" while the recommended-install run
+            // is in flight ("" = busy, not a specific file), so `!!installing`
+            // is false there and the button would stay clickable — a
+            // double-click re-submits the whole batch. Test against null.
+            disabled={installing !== null || selectedAgents.length === 0}
             className="mt-4 w-full rounded btn-solid py-2 text-xs font-medium disabled:opacity-50"
           >
-            {installing ? t("onboarding.installAgent.installSelectedInstalling", { name: installing }) : t("onboarding.installAgent.installSelected", { count: selectedAgents.length })}
+            {installing
+              ? totalCount > 0 && completedCount > 0
+                ? t("onboarding.installAgent.installProgress", { done: completedCount, total: totalCount })
+                : t("onboarding.installAgent.waitingReady")
+              : t("onboarding.installAgent.installSelected", { count: selectedAgents.length })}
           </button>
         </div>
 
@@ -787,15 +972,8 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           <p className="mt-1 text-xs text-zinc-400">{t("onboarding.installAgent.fromFileSubtitle")}</p>
         </button>
 
-        {installing && (
-          <p className="text-xs text-zinc-400">{t("onboarding.installAgent.installing", { name: installing })}</p>
-        )}
-        {/* Fix 2: surface the node-online race so the user knows the
-            install is making progress rather than hanging. */}
-        {waitingForNode && (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            {t("onboarding.installAgent.waitingForNode")}
-          </p>
+        {installing && !bootstrap && (
+          <p className="text-xs text-zinc-400">{t("onboarding.installAgent.waitingReady")}</p>
         )}
         {installError && (
           <ErrorBox message={installError} />

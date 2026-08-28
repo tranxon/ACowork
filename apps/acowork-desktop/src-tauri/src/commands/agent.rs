@@ -3,54 +3,109 @@
 use tauri::{Manager, State};
 
 use crate::gateway_client::{
-    AgentDetailResponse, AgentListEntry, CloneResponse, GenericMessageResponse,
+    AgentDetailResponse, AgentListEntry, CloneResponse, GatewayApiError, GenericMessageResponse,
+    OperationAck,
 };
-use crate::state::AppState;
+use crate::state::{AppState, BootstrapStateView};
 
 /// Maximum number of attempts for an `install_agent` POST to the Gateway
-/// before giving up. The Gateway returns HTTP 503 "Node 'local' has never
-/// enrolled" while the Node Agent is still bootstrapping (Fix 2). Most
-/// retries recover within 1–2 iterations; we cap at 5 / 7.5 s to keep
-/// the user-perceived onboarding latency bounded.
+/// before giving up. The Gateway returns HTTP 409 with the structured
+/// `dependency_not_ready` code while the Node control plane is still
+/// bootstrapping (ADR-059 §6.3). Most retries recover within 1–2
+/// iterations; we cap at 5 to keep the user-perceived onboarding
+/// latency bounded.
 const INSTALL_MAX_ATTEMPTS: usize = 5;
 
-/// Install-backoff base: 1.5 s per attempt. Total worst-case wait
-/// is `(MAX_ATTEMPTS - 1) * 1.5 s = 6 s`.
-const INSTALL_RETRY_DELAY_MS: u64 = 1500;
+/// Time budget for waiting on the bootstrap phase to reach READY
+/// between install retries (ADR-059 §5.1).
+const INSTALL_BOOTSTRAP_WAIT_SECS: u64 = 30;
 
-/// Decide whether an `install_agent` failure looks like a node-online
-/// race (the common case in onboarding) and is worth retrying. Network
-/// errors and HTTP 503s from the Gateway fall in this bucket; package
-/// validation errors do not.
+/// Decide whether an `install_agent` failure is retryable.
+///
+/// ADR-059 §6.3: only the structured `dependency_not_ready` code is
+/// retried — the node control plane has not announced readiness yet, so
+/// we wait for bootstrap phase READY and resubmit. The old
+/// "503 / never enrolled" text matching is gone (Phase 5.5).
 fn should_retry_install(err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("503")
-        || msg.contains("never enrolled")
-        || msg.contains("status code")
+    err.downcast_ref::<GatewayApiError>()
+        .map(|e| e.is_dependency_not_ready())
+        .unwrap_or(false)
+}
+
+/// Poll `GET /api/bootstrap` until the aggregated phase is READY
+/// (ADR-059 §5.1). The Gateway folds every required subsystem (vault /
+/// mqtt / node.local / system_agent / publisher) into the phase, so a
+/// single wait covers the whole dependency set — no per-subsystem
+/// guessing. Returns the phase detail on terminal phases.
+async fn wait_bootstrap_ready(
+    state: &AppState,
+    timeout_secs: u64,
+) -> Result<BootstrapStateView, String> {
+    let base_url = state.gateway.read().await.base_url().to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last_detail = String::new();
+    while std::time::Instant::now() < deadline {
+        match client
+            .get(format!("{}/api/bootstrap", base_url))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(view) = resp.json::<BootstrapStateView>().await {
+                    match view.phase.as_str() {
+                        "READY" => return Ok(view),
+                        "FAILED" | "SHUTTING_DOWN" => {
+                            return Err(format!(
+                                "Gateway {}: {}",
+                                view.phase, view.phase_detail
+                            ));
+                        }
+                        _ => last_detail = view.phase_detail.clone(),
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    Err(format!(
+        "bootstrap did not reach READY within {}s ({})",
+        timeout_secs, last_detail
+    ))
 }
 
 /// Shared retry wrapper for the Gateway install POST. Returns the first
 /// non-retryable error or the final result after `INSTALL_MAX_ATTEMPTS`
-/// attempts.
-async fn install_with_retry<F, Fut>(label: &str, mut op: F) -> Result<GenericMessageResponse, String>
+/// attempts. On `dependency_not_ready` the retry waits for bootstrap
+/// phase READY first (ADR-059 §6.3) instead of a blind sleep.
+async fn install_with_retry<F, Fut>(
+    state: &AppState,
+    label: &str,
+    mut op: F,
+) -> Result<OperationAck, String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<GenericMessageResponse>>,
+    Fut: std::future::Future<Output = anyhow::Result<OperationAck>>,
 {
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
         match op().await {
-            Ok(resp) => {
+            Ok(ack) => {
                 if attempt > 1 {
                     tracing::info!(
-                        "[{}] Install succeeded on attempt {}/{}",
+                        "[{}] Install accepted on attempt {}/{}",
                         label,
                         attempt,
                         INSTALL_MAX_ATTEMPTS
                     );
                 }
-                return Ok(resp);
+                return Ok(ack);
             }
             Err(e) => {
                 let retryable = should_retry_install(&e);
@@ -58,14 +113,14 @@ where
                     return Err(e.to_string());
                 }
                 tracing::warn!(
-                    "[{}] Install attempt {}/{} failed (will retry): {}",
+                    "[{}] Install attempt {}/{} rejected (dependency_not_ready, \
+                     waiting for bootstrap READY): {}",
                     label,
                     attempt,
                     INSTALL_MAX_ATTEMPTS,
                     e
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(INSTALL_RETRY_DELAY_MS))
-                    .await;
+                wait_bootstrap_ready(state, INSTALL_BOOTSTRAP_WAIT_SECS).await?;
             }
         }
     }
@@ -98,16 +153,19 @@ pub async fn get_agent_detail(
 /// (e.g. Windows client → WSL Gateway) because the file content is transmitted
 /// over HTTP rather than relying on shared filesystem paths.
 ///
-/// Fix 2: the Gateway can answer HTTP 503 "Node 'local' has never enrolled"
-/// while the Node Agent is still bootstrapping. We retry that and similar
-/// transient errors up to `INSTALL_MAX_ATTEMPTS` times with `1.5s` backoff.
+/// ADR-059 §6: the Gateway answers HTTP 202 with an [`OperationAck`]; the
+/// actual install runs asynchronously on the node (completion is correlated
+/// via the ack's `operation_id`). While the node control plane is still
+/// bootstrapping it answers HTTP 409 `dependency_not_ready` instead — we
+/// wait for bootstrap phase READY and resubmit up to `INSTALL_MAX_ATTEMPTS`
+/// times.
 #[tauri::command]
 pub async fn install_agent(
     state: State<'_, AppState>,
     package_path: String,
     dev_mode: Option<bool>,
     node_id: Option<String>,
-) -> Result<GenericMessageResponse, String> {
+) -> Result<OperationAck, String> {
     // Read the .agent file into memory on the Desktop App side
     let package_bytes = std::fs::read(&package_path)
         .map_err(|e| format!("Failed to read package file '{}': {}", package_path, e))?;
@@ -116,10 +174,11 @@ pub async fn install_agent(
         return Err("Package file is empty".to_string());
     }
 
-    install_with_retry("INSTALL_AGENT", move || {
-        // Clone the captured Tauri `State` (cheap, it wraps an `&AppState`)
-        // for each attempt so the FnMut closure can be called multiple times.
-        let state = state.clone();
+    // Clone the captured Tauri `State` outside the closure so the retry
+    // wrapper can borrow `state` while the `move` closure owns its copy.
+    let state_for_op = state.clone();
+    install_with_retry(&state, "INSTALL_AGENT", move || {
+        let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let node_id = node_id.clone();
         let dev_mode = dev_mode.unwrap_or(false);
@@ -139,7 +198,7 @@ pub async fn install_bundled_agent(
     app_handle: tauri::AppHandle,
     resource_name: String,
     dev_mode: Option<bool>,
-) -> Result<GenericMessageResponse, String> {
+) -> Result<OperationAck, String> {
     if resource_name.contains('/') || resource_name.contains('\\') || resource_name.contains("..") {
         return Err("Invalid bundled agent name".to_string());
     }
@@ -149,6 +208,11 @@ pub async fn install_bundled_agent(
         .resource_dir()
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
     let package_file = bundled_agent_package_path(&resource_dir, &resource_name);
+    tracing::info!(
+        "[INSTALL_BUNDLED] Reading bundled package for {} from {:?}",
+        resource_name,
+        package_file
+    );
     let package_bytes = std::fs::read(&package_file).map_err(|e| {
         format!(
             "Failed to read bundled agent package '{}': {}",
@@ -156,10 +220,17 @@ pub async fn install_bundled_agent(
             e
         )
     })?;
+    tracing::info!(
+        "[INSTALL_BUNDLED] Read {} bytes for {}, submitting install",
+        package_bytes.len(),
+        resource_name
+    );
 
-    install_with_retry("INSTALL_BUNDLED", move || {
-        // See INSTALL_AGENT — clone the captured Tauri `State` per attempt.
-        let state = state.clone();
+    let state_for_op = state.clone();
+    install_with_retry(&state, "INSTALL_BUNDLED", move || {
+        // See INSTALL_AGENT — the retry wrapper borrows `state` while this
+        // closure owns its pre-cloned copy.
+        let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let dev_mode = dev_mode.unwrap_or(true);
         async move {
@@ -168,6 +239,29 @@ pub async fn install_bundled_agent(
         }
     })
     .await
+}
+
+/// Wait until the agent appears in the Gateway inventory.
+///
+/// ADR-059 §6: install is asynchronous — `install_bundled_agent`
+/// returns the [`OperationAck`] immediately (HTTP 202) and the node
+/// installs in the background; the Gateway aggregates the node's
+/// retained `InstalledAgentInfo` into the inventory on completion. This
+/// command polls `GET /api/agents/{id}` until the agent is visible —
+/// the authoritative completion signal (no fixed sleeps, no phase
+/// guessing).
+#[tauri::command]
+pub async fn wait_agent_installed(
+    state: State<'_, AppState>,
+    agent_id: String,
+    timeout_secs: Option<u64>,
+) -> Result<AgentDetailResponse, String> {
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(120));
+    let client = state.gateway.read().await;
+    client
+        .wait_for_agent_installed(&agent_id, timeout)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn bundled_agent_package_path(

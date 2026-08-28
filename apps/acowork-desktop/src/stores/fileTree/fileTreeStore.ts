@@ -15,10 +15,15 @@
  *   - `invalidate(agentId)` is called from WS reconnect (full sync)
  *     and from `workspaceFsEvents.refreshTreesForChanges` callers that
  *     want to drop all tree state for an agent.
- *   - `abortAll()` is called from `agentStore.selectAgent` so an old
- *     agent's in-flight fetches can't race the new selection (keys are
- *     per-agent so there's no cache contamination — this is purely a
- *     bandwidth / freshness optimization).
+ *   - `abortAll(agentId)` is called from `agentStore.selectAgent` so an
+ *     old agent's in-flight fetches can't race the new selection (keys
+ *     are per-agent so there's no cache contamination — this is purely
+ *     a bandwidth / freshness optimization). The newly-selected agent's
+ *     own in-flight fetches are KEPT alive: aborting them would leave
+ *     its tree stuck on `idle` with no re-fetch scheduled (the FileTree
+ *     mount effect re-fetches idle roots, but only on state change —
+ *     an abort mid-flight after mount would strand the UI on
+ *     "Loading…" forever).
  *
  * Why two layers: keeping the cache framework-free means we can unit
  * test dedup/abort/SWR with zero React/Zustand mocks; the Zustand
@@ -73,8 +78,9 @@ interface FileTreeState {
   invalidate: (agentId: string) => void;
   /** Drop everything. Use on logout / hard reset. */
   clear: () => void;
-  /** Cancel all in-flight fetches without dropping cache (agent switch). */
-  abortAll: () => void;
+  /** Cancel all in-flight fetches without dropping cache (agent switch).
+   *  Pass the newly-selected agent so ITS tree keeps loading. */
+  abortAll: (exceptAgentId?: string) => void;
   /** Read the current node for a key. Useful from non-React callers. */
   getNode: (key: TreeCacheKey) => TreeNode;
 }
@@ -131,8 +137,8 @@ export const useFileTreeStore = create<FileTreeState>((set) => ({
     set({ nodes: {} });
   },
 
-  abortAll() {
-    cache.abortAll();
+  abortAll(exceptAgentId?: string) {
+    cache.abortAll(exceptAgentId);
   },
 
   getNode(key) {

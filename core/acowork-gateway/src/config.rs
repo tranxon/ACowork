@@ -255,7 +255,9 @@ fn default_http_enabled() -> bool {
 fn default_http_host() -> String {
     defaults::GATEWAY_HTTP_HOST.to_string()
 }
-fn default_http_port() -> u16 {
+/// Default HTTP listen port; `pub(crate)` so the liveness handler
+/// (`/health`) can fall back to it when no config snapshot exists.
+pub(crate) fn default_http_port() -> u16 {
     defaults::GATEWAY_HTTP_PORT
 }
 fn default_http_port_max() -> u16 {

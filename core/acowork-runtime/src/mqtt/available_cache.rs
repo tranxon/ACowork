@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use acowork_core::mqtt_proto::{
     AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, AvailableUsers, DataEnvelope,
+    AvailableSearches, AvailableUsers, BootstrapState, DataEnvelope,
 };
 
 /// In-memory snapshot of all global resource available states.
@@ -32,6 +32,13 @@ pub struct AvailableResourceCache {
     /// the first `acowork/global/user_profile` retained is received, or
     /// when no user has been created yet.
     pub user_profile: Option<AvailableUsers>,
+    /// ADR-059 Phase 5.3: latest accepted Gateway bootstrap snapshot
+    /// (`acowork/global/bootstrap` retained). None until the first
+    /// snapshot arrives. Stale retained re-delivery (same `instance_id`
+    /// with a lower `version`) is rejected in [`Self::update_from_mqtt`];
+    /// a different `instance_id` switches the Gateway generation and
+    /// drops every old-generation resource snapshot above.
+    pub bootstrap: Option<BootstrapState>,
 }
 
 impl AvailableResourceCache {
@@ -64,6 +71,20 @@ impl AvailableResourceCache {
 
         match payload {
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(p) => {
+                // ADR-059 Phase 5.3: reject stale retained re-delivery.
+                // The broker may re-deliver an older retained payload
+                // after a reconnect; a `version` that went backwards is
+                // never a newer snapshot, so keep the cached one.
+                if let Some(cur) = &self.providers
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableProviders retained re-delivery"
+                    );
+                    return;
+                }
                 tracing::debug!(
                     version = p.version,
                     count = p.providers.len(),
@@ -72,6 +93,16 @@ impl AvailableResourceCache {
                 self.providers = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableMcps(p) => {
+                if let Some(cur) = &self.mcps
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableMcps retained re-delivery"
+                    );
+                    return;
+                }
                 tracing::debug!(
                     version = p.version,
                     count = p.servers.len(),
@@ -80,6 +111,16 @@ impl AvailableResourceCache {
                 self.mcps = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableSearches(p) => {
+                if let Some(cur) = &self.searches
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableSearches retained re-delivery"
+                    );
+                    return;
+                }
                 tracing::debug!(
                     version = p.version,
                     count = p.providers.len(),
@@ -88,6 +129,16 @@ impl AvailableResourceCache {
                 self.searches = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableEmbeddingModels(p) => {
+                if let Some(cur) = &self.embedding_models
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableEmbeddingModels retained re-delivery"
+                    );
+                    return;
+                }
                 tracing::debug!(
                     version = p.version,
                     count = p.models.len(),
@@ -97,6 +148,16 @@ impl AvailableResourceCache {
                 self.embedding_models = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableLsps(p) => {
+                if let Some(cur) = &self.lsps
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableLsps retained re-delivery"
+                    );
+                    return;
+                }
                 tracing::debug!(
                     ready = p.ready,
                     endpoint = %p.endpoint,
@@ -105,6 +166,19 @@ impl AvailableResourceCache {
                 self.lsps = Some(p);
             }
             acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(p) => {
+                // Note: an empty `active_user` (no user created yet) is a
+                // legitimate newer state, so only `version` regression is
+                // rejected here — never the payload content.
+                if let Some(cur) = &self.user_profile
+                    && p.version < cur.version
+                {
+                    tracing::warn!(
+                        stale_version = p.version,
+                        current_version = cur.version,
+                        "Rejected stale AvailableUsers retained re-delivery"
+                    );
+                    return;
+                }
                 let active = p
                     .active_user
                     .as_ref()
@@ -116,6 +190,58 @@ impl AvailableResourceCache {
                     "Cached AvailableUsers"
                 );
                 self.user_profile = Some(p);
+            }
+            acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(bs) => {
+                // ADR-059 §5.3 / Phase 5.3: single-snapshot atomicity.
+                // Reject stale retained re-delivery by `instance_id` +
+                // `version`, and treat a different `instance_id` as a
+                // Gateway generation switch: the old generation's
+                // resource snapshots may still linger on the broker, so
+                // they must NOT keep being used as if they belonged to
+                // the current instance.
+                if bs.instance_id.is_empty() {
+                    tracing::warn!(
+                        "Rejected BootstrapState with empty instance_id (protocol violation)"
+                    );
+                    return;
+                }
+                if let Some(cur) = &self.bootstrap {
+                    if cur.instance_id == bs.instance_id {
+                        if bs.version < cur.version {
+                            tracing::warn!(
+                                instance_id = %bs.instance_id,
+                                stale_version = bs.version,
+                                current_version = cur.version,
+                                "Rejected stale BootstrapState retained re-delivery (version went backwards)"
+                            );
+                            return;
+                        }
+                    } else {
+                        // New Gateway generation — drop every resource
+                        // snapshot cached from the previous instance so
+                        // nothing downstream uses old-generation keys /
+                        // catalogs (cold start, hot restart and reconnect
+                        // share this single path).
+                        tracing::info!(
+                            old_instance_id = %cur.instance_id,
+                            new_instance_id = %bs.instance_id,
+                            "BootstrapState generation switch - cleared old-generation resource snapshots"
+                        );
+                        self.providers = None;
+                        self.mcps = None;
+                        self.searches = None;
+                        self.embedding_models = None;
+                        self.lsps = None;
+                        self.user_profile = None;
+                    }
+                }
+                tracing::info!(
+                    instance_id = %bs.instance_id,
+                    version = bs.version,
+                    phase = ?acowork_core::mqtt_proto::BootstrapPhase::try_from(bs.phase).ok(),
+                    "Cached BootstrapState (Gateway generation)"
+                );
+                self.bootstrap = Some(bs);
             }
             _ => {
                 // Not a global resource payload — ignore
@@ -167,6 +293,29 @@ impl AvailableResourceCache {
             .as_ref()
             .filter(|l| l.ready && !l.endpoint.is_empty())
             .map(|l| l.endpoint.clone())
+    }
+
+    /// ADR-059 Phase 5.3: the latest accepted Gateway bootstrap
+    /// snapshot, or `None` before the first `acowork/global/bootstrap`
+    /// retained arrives.
+    pub fn bootstrap_snapshot(&self) -> Option<&BootstrapState> {
+        self.bootstrap.as_ref()
+    }
+
+    /// ADR-059 Phase 5.3: `true` when the current Gateway instance
+    /// reports the aggregated `READY` phase.
+    pub fn is_bootstrap_ready(&self) -> bool {
+        self.bootstrap
+            .as_ref()
+            .map(|b| b.phase == acowork_core::mqtt_proto::BootstrapPhase::Ready as i32)
+            .unwrap_or(false)
+    }
+
+    /// ADR-059 Phase 5.3: `instance_id` of the latest accepted
+    /// snapshot — the Gateway generation currently considered
+    /// authoritative. `None` before the first snapshot arrives.
+    pub fn bootstrap_instance_id(&self) -> Option<&str> {
+        self.bootstrap.as_ref().map(|b| b.instance_id.as_str())
     }
 
     /// ADR-042: Get the active user profile as the full
@@ -486,5 +635,263 @@ mod tests {
         );
         let profile = cache.active_user_profile().expect("should still return Some");
         assert!(profile.custom.is_empty());
+    }
+
+    // ── ADR-059 Phase 5.3: bootstrap snapshot + stale rejection ──────
+
+    /// Encode a BootstrapState fixture into a DataEnvelope payload.
+    fn bootstrap_envelope(instance_id: &str, version: u64, phase: i32) -> Vec<u8> {
+        prost::Message::encode_to_vec(&DataEnvelope {
+            version: 1,
+            payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::BootstrapState(
+                BootstrapState {
+                    protocol_version: 1,
+                    instance_id: instance_id.to_string(),
+                    version,
+                    phase,
+                    phase_detail: "test".to_string(),
+                    issued_at_ms: 0,
+                },
+            )),
+        })
+    }
+
+    #[test]
+    fn test_bootstrap_first_snapshot_accepted() {
+        let mut cache = AvailableResourceCache::new();
+        assert!(cache.bootstrap_snapshot().is_none());
+        assert!(!cache.is_bootstrap_ready());
+
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+        );
+
+        let bs = cache.bootstrap_snapshot().expect("first snapshot accepted");
+        assert_eq!(bs.instance_id, "gen-A");
+        assert_eq!(bs.version, 1);
+        assert_eq!(cache.bootstrap_instance_id(), Some("gen-A"));
+        assert!(!cache.is_bootstrap_ready());
+    }
+
+    #[test]
+    fn test_bootstrap_ready_phase() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 2, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        assert!(cache.is_bootstrap_ready());
+    }
+
+    #[test]
+    fn test_bootstrap_same_instance_version_monotonic() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 3, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+        );
+        // Newer version, same instance → accepted.
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 4, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        let bs = cache.bootstrap_snapshot().unwrap();
+        assert_eq!(bs.version, 4);
+        assert!(cache.is_bootstrap_ready());
+        // Identical version (retained re-delivery) → idempotent accept.
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 4, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        assert_eq!(cache.bootstrap_snapshot().unwrap().version, 4);
+    }
+
+    #[test]
+    fn test_bootstrap_stale_version_rejected() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 5, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        // Older version, same instance → rejected, current snapshot kept.
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 3, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+        );
+        let bs = cache.bootstrap_snapshot().unwrap();
+        assert_eq!(bs.version, 5);
+        assert!(cache.is_bootstrap_ready());
+    }
+
+    #[test]
+    fn test_bootstrap_generation_switch_clears_old_resources() {
+        let mut cache = AvailableResourceCache::new();
+        // Seed old-generation resources + READY snapshot.
+        cache.update_from_mqtt(
+            "acowork/global/providers",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version: 9,
+                        default_compact_model: None,
+                        providers: vec![acowork_core::mqtt_proto::ProviderRef {
+                            id: "openai".to_string(),
+                            base_url: "https://api.openai.com/v1".to_string(),
+                            protocol_type: acowork_core::mqtt_proto::LlmProtocol::Openai as i32,
+                            models: vec![],
+                            compact_model: String::new(),
+                            custom: false,
+                            api_key: "sk-old-generation".to_string(),
+                        }],
+                    },
+                )),
+            }),
+        );
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers {
+                        version: 4,
+                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                            user_id: "u-old".into(),
+                            display_name: "Old".into(),
+                            language: "en".into(),
+                            timezone: "UTC".into(),
+                            city: None,
+                            country: None,
+                            occupation: None,
+                            communication_style: None,
+                            custom_json: "{}".into(),
+                        }),
+                    },
+                )),
+            }),
+        );
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-A", 6, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        assert!(cache.providers.is_some());
+        assert!(cache.user_profile.is_some());
+
+        // New generation BOOTING snapshot → accepted; old resources cleared.
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-B", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+        );
+        assert_eq!(cache.bootstrap_instance_id(), Some("gen-B"));
+        assert!(cache.providers.is_none(), "old-generation providers must be cleared");
+        assert!(cache.user_profile.is_none(), "old-generation user profile must be cleared");
+        assert!(!cache.is_bootstrap_ready());
+
+        // New generation reaches READY.
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-B", 2, acowork_core::mqtt_proto::BootstrapPhase::Ready as i32),
+        );
+        assert!(cache.is_bootstrap_ready());
+        // A further generation switch (another Gateway restart) follows
+        // the same rule: accept the new instance_id and drop every
+        // resource snapshot cached from the previous generation. A
+        // stale same-topic re-delivery cannot resurrect the old
+        // generation because the broker keeps only the latest retained
+        // payload per topic (old snapshots are overwritten, not
+        // re-delivered alongside the new one).
+        cache.update_from_mqtt(
+            "acowork/global/bootstrap",
+            &bootstrap_envelope("gen-C", 1, acowork_core::mqtt_proto::BootstrapPhase::Booting as i32),
+        );
+        assert_eq!(cache.bootstrap_instance_id(), Some("gen-C"));
+        assert!(
+            cache.providers.is_none() && cache.user_profile.is_none(),
+            "generation switch must clear previous-generation resources"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_empty_instance_id_rejected() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt("acowork/global/bootstrap", &bootstrap_envelope("", 1, 0));
+        assert!(cache.bootstrap_snapshot().is_none(), "empty instance_id must be rejected");
+    }
+
+    #[test]
+    fn test_bootstrap_invalid_payload_ignored() {
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt("acowork/global/bootstrap", b"not protobuf");
+        assert!(cache.bootstrap_snapshot().is_none());
+    }
+
+    #[test]
+    fn test_providers_stale_version_rejected() {
+        let mut cache = AvailableResourceCache::new();
+        let providers = |version: u64| {
+            prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableProviders(
+                    AvailableProviders {
+                        version,
+                        default_compact_model: None,
+                        providers: vec![],
+                    },
+                )),
+            })
+        };
+        cache.update_from_mqtt("acowork/global/providers", &providers(7));
+        assert_eq!(cache.providers.as_ref().unwrap().version, 7);
+        // Version went backwards → stale re-delivery, keep version 7.
+        cache.update_from_mqtt("acowork/global/providers", &providers(5));
+        assert_eq!(cache.providers.as_ref().unwrap().version, 7);
+        // Identical version (re-delivery) → idempotent accept.
+        cache.update_from_mqtt("acowork/global/providers", &providers(7));
+        assert_eq!(cache.providers.as_ref().unwrap().version, 7);
+        // Newer version → accepted.
+        cache.update_from_mqtt("acowork/global/providers", &providers(8));
+        assert_eq!(cache.providers.as_ref().unwrap().version, 8);
+    }
+
+    #[test]
+    fn test_users_empty_active_user_newer_version_accepted() {
+        // An empty active_user with a NEWER version is a legitimate state
+        // (user deleted / not created yet) and must not be rejected.
+        let mut cache = AvailableResourceCache::new();
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers {
+                        version: 2,
+                        active_user: Some(acowork_core::mqtt_proto::UserProfileRef {
+                            user_id: "u-1".into(),
+                            display_name: "Test".into(),
+                            language: "en-US".into(),
+                            timezone: "UTC".into(),
+                            city: None,
+                            country: None,
+                            occupation: None,
+                            communication_style: None,
+                            custom_json: "{}".into(),
+                        }),
+                    },
+                )),
+            }),
+        );
+        cache.update_from_mqtt(
+            "acowork/global/user_profile",
+            &prost::Message::encode_to_vec(&DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AvailableUsers(
+                    AvailableUsers { version: 3, active_user: None },
+                )),
+            }),
+        );
+        assert!(cache.user_profile.is_some());
+        assert_eq!(cache.user_profile.as_ref().unwrap().version, 3);
+        assert!(cache.active_user_profile().is_none());
     }
 }

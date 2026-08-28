@@ -1,11 +1,10 @@
 /**
  * User profile API client tests.
  *
- * Regression coverage for the backend response contract mismatch:
- * POST/PUT /api/users return `UserResponse { user, version }`, NOT a bare
- * profile. The client used to return the raw envelope, so callers stored
- * `{ user, version }` as the profile — `user_id` became undefined and every
- * subsequent PUT hit `/api/users/undefined` (404) → "save failed".
+ * Regression coverage for the backend response contract:
+ * - `POST /api/users` answers with an `OperationAck` (ADR-059 §7.3)
+ * - `PUT  /api/users/{user_id}` answers with `UserResponse { user, version }`
+ * - `POST /api/users/{user_id}/activate` answers with `ActivateResponse`
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -101,16 +100,25 @@ describe("chained update after a previous save (ProfileTab saveField pattern)", 
     });
 });
 
-describe("createUser response unwrapping", () => {
-    it("unwraps { user, version } and returns the created profile", async () => {
-        mockFetchOnce(ENVELOPE);
+describe("createUser response shape (ADR-059 §7.3)", () => {
+    it("returns OperationAck as-is — not the unwrapped profile", async () => {
+        const ack = {
+            operation_id: "op-1234",
+            state: "committed",
+            resource_version: 42,
+        };
+        mockFetchOnce(ack);
 
         const result = await createUser(
             { display_name: "大鱼", language: "zh-CN", timezone: "Asia/Shanghai" },
             "http://gw",
         );
 
-        expect(result).toEqual(PROFILE);
+        // OperationAck must be returned verbatim, with no unwrapping.
+        expect(result).toEqual(ack);
+        expect(result.operation_id).toBe("op-1234");
+        expect(result.state).toBe("committed");
+        expect((result as unknown as { user?: unknown }).user).toBeUndefined();
         expect(calls[0].url).toBe("http://gw/api/users");
         expect(calls[0].init?.method).toBe("POST");
     });

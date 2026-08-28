@@ -17,6 +17,7 @@ pub mod crlf;
 pub mod defaults;
 pub mod embedding;
 pub mod error;
+pub mod error_codes;
 pub mod event_bus;
 pub mod health;
 pub mod intent;
@@ -24,6 +25,7 @@ pub mod logging;
 pub mod manifest;
 pub mod memory;
 pub mod node;
+pub mod operation;
 pub mod packaging;
 pub mod path_utils;
 pub mod permission;
@@ -49,7 +51,9 @@ pub use protocol::{
 pub use budget::{Budget, UsageReport};
 pub use embedding::{EmbeddingError, EmbeddingProvider};
 pub use error::AcoworkError;
+pub use error_codes::{RetryHint, StructuredErrorBody, StructuredErrorCode};
 pub use intent::Intent;
+pub use operation::{OperationId, OperationRecord, OperationState};
 pub use packaging::{
     PACKAGE_ALWAYS_EXCLUDE_DIRS, PACKAGE_DEFAULT_EXCLUDE_DIRS, PACKAGE_EXCLUDE_PATTERNS,
     PackageOptions, should_exclude_path,

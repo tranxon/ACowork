@@ -122,15 +122,22 @@ export function AgentList({ width }: AgentListProps) {
   //      the user happens to click the agent.
   //
   // We key the effect on the *set* of agents that still need a fetch
-  // (running && ready && sessionTitle === undefined), so unrelated store
+  // (running && sessionTitle === undefined), so unrelated store
   // churn (sessions list updates, profile edits, MQTT online flips) does
   // not re-fire the requests.
+  // Bug B v3 fix: only gate on `running` (the user-driven start
+  // transition), not on `ready`. `ready` is pushed via MQTT retained
+  // and arrives asynchronously to Runtime HTTP readiness. Previously,
+  // if the sidebar list re-rendered with `ready=false`, we never
+  // fetched the title even after the Runtime came up — the gate had
+  // latched false. The fetcher `fetchLatestSession` now owns the 503
+  // retry loop via `with503Retry`, so a transient 503 during the boot
+  // window recovers transparently.
   const agentsNeedingTitle = useMemo(() => {
     const ids: string[] = [];
     for (const [id, storage] of Object.entries(agentsMap)) {
       if (
         storage.meta.running &&
-        storage.meta.ready &&
         storage.sessionTitle === undefined
       ) {
         ids.push(id);

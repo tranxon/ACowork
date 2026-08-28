@@ -7,7 +7,6 @@ import { useFileTreeStore, treeKey, isReadyNode, isLoading, type TreeEntry, type
 import { useChatStore } from "../../../stores/chatStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useSettingsStore } from "../../../stores/settingsStore";
-import { useAgentStore } from "../../../stores/agentStore";
 import { FileTreeNode } from "./FileTreeNode";
 import { useTranslation } from "../../../i18n/useTranslation";
 import {
@@ -232,19 +231,32 @@ export function FileTree({
 
     // Selection is owned by WorkspaceExplorer now; nothing to reset locally.
 
-    // Fetch root when agent or workspace changes — but only if agent is ready.
-    // Guard against race condition: Runtime HTTP port may not be registered yet
-    // during startup, causing 503 errors until the Gateway discovers it via MQTT.
-    const agentReady = useAgentStore((s) => {
-        if (!agentId) return false;
-        return s.agents[agentId]?.meta?.ready ?? false;
-    });
-
+    // Fetch root when agent or workspace changes. We deliberately do
+    // NOT gate on `meta.ready` here — Bug B v3 fix. The ready flag is
+    // pushed via MQTT retained and arrives asynchronously to Runtime
+    // HTTP readiness; gating on it caused the right pane to flash
+    // "Loading…" forever when the user opened the workspace tab during
+    // the first second after agent start. The fetcher in `treeClient`
+    // now owns the 503 retry loop (see `lib/httpRetry.ts`) so transient
+    // 503s recover transparently.
+    //
+    // Self-healing: the effect ALSO re-fetches when the root node
+    // transitions back to `idle` (e.g. an in-flight fetch was aborted
+    // by a concurrent `abortAll` from a re-select of the same agent).
+    // Without this, the UI would sit on "Loading…" forever — the
+    // `[agentId, workspaceId, fetchTree]` deps never change, so the
+    // mount-time fetch was the ONLY chance to populate the tree.
+    const rootNodeKind = rootNode?.kind;
     useEffect(() => {
-        if (agentId && agentReady) {
-            fetchTree(agentId, workspaceId, "");
-        }
-    }, [agentId, workspaceId, fetchTree, agentReady]);
+        if (!agentId || !workspaceId) return;
+        if (rootNodeKind && rootNodeKind !== "idle") return;
+        // `undefined` (never fetched) and `idle` (aborted) both start
+        // a foreground fetch. `loading` / `ready` / `stale` / `error`
+        // are deliberately left alone: loading is already in flight,
+        // ready/stale have data, and error must not hot-loop (the
+        // error branch renders a manual retry button instead).
+        fetchTree(agentId, workspaceId, "");
+    }, [agentId, workspaceId, fetchTree, rootNodeKind]);
 
     // ── Locate-in-tree: expand ancestors, lazy-load, select, scroll ───
     // The FileEditorPanel's "locate" button publishes a request via
@@ -415,6 +427,36 @@ export function FileTree({
         const rootNode = treeNodes[treeKey(agentId, workspaceId, "")];
         const rootEntries = isReadyNode(rootNode) ? rootNode.entries : undefined;
         if (!rootEntries) {
+            // Distinguish failure from progress: an `error` node renders
+            // the cause + a manual retry (auto-retry would hot-loop when
+            // the Gateway/Runtime is genuinely down), while `loading` /
+            // `idle` show the spinner. Previously every non-ready state
+            // rendered "Loading…", so a failed fetch looked like a
+            // permanent spinner with no way to recover.
+            if (rootNode?.kind === "error") {
+                const err = rootNode.error;
+                const detail =
+                    err.cause === "http"
+                        ? `${err.status}${err.statusText ? ` ${err.statusText}` : ""}`
+                        : err.cause === "network"
+                          ? err.message
+                          : "request aborted";
+                return (
+                    <div
+                        className="flex flex-col items-center justify-center gap-2 py-8 text-zinc-400"
+                        style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                    >
+                        <span>{t("workspace.treeLoadFailed") ?? `Failed to load workspace (${detail})`}</span>
+                        <button
+                            type="button"
+                            className="rounded border border-zinc-300 px-3 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800"
+                            onClick={() => void fetchTree(agentId, workspaceId, "")}
+                        >
+                            {t("workspace.retry") ?? "Retry"}
+                        </button>
+                    </div>
+                );
+            }
             return (
                 <div className="flex items-center justify-center py-8 text-zinc-400" style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                     Loading...

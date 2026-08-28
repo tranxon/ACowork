@@ -85,7 +85,13 @@
       "installSelectedInstalling": "{{name}} をインストール中...",
       "fromFileTitle": ".agent ファイルからインストール",
       "fromFileSubtitle": "コンピューターから .agent パッケージを選択",
-      "waitingForNode": "ローカルノードのオンラインを待機中...",
+      "preparing": "Preparing services: {{detail}}...",
+      "waitingReady": "Waiting for services to be ready...",
+      "opPending": "Pending",
+      "opSubmitted": "Submitted (op {{opId}})",
+      "opCompleted": "Installed",
+      "opFailed": "Failed",
+      "installProgress": "Install progress {{done}}/{{total}}",
       "complete": "完了 →",
       "back": "戻る"
     }

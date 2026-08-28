@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
     routing::{any, get, post, put, delete},
 };
@@ -1353,7 +1353,7 @@ pub(crate) async fn proxy_to_runtime_with_method(
     let registry = match &state.runtime_http_registry {
         Some(r) => r.clone(),
         None => {
-            return (
+            let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
                     "error": "Runtime HTTP proxy registry not initialized",
@@ -1361,6 +1361,14 @@ pub(crate) async fn proxy_to_runtime_with_method(
                 })),
             )
                 .into_response();
+            // Same Retry-After contract as /api/global-resources
+            // (http.md §4.13): the desktop `with503Retry` helper honours
+            // this header before its exponential backoff, keeping the
+            // boot-window retry cadence uniform across Gateway 503s.
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+            return response;
         }
     };
 
@@ -1372,7 +1380,7 @@ pub(crate) async fn proxy_to_runtime_with_method(
     let endpoint = match endpoint {
         Some(ep) => ep,
         None => {
-            return (
+            let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
                     "error": "Runtime HTTP endpoint not registered",
@@ -1381,6 +1389,10 @@ pub(crate) async fn proxy_to_runtime_with_method(
                 })),
             )
                 .into_response();
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+            return response;
         }
     };
 

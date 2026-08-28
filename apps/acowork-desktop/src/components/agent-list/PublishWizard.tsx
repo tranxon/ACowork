@@ -350,10 +350,10 @@ export function PublishWizard({
                     <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   )}
                   <div>
-                    <span className="font-medium">{item.field}</span>
-                    {item.message && (
+                    <span className="font-medium">{item.name}</span>
+                    {item.detail && (
                       <span className="ml-1 text-zinc-500 dark:text-zinc-400">
-                        — {item.message}
+                        — {item.detail}
                       </span>
                     )}
                   </div>

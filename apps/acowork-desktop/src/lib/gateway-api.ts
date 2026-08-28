@@ -10,6 +10,7 @@ import type {
   ActivateUserResponse,
   CreateUserRequest,
   UpdateUserRequest,
+  OperationAck,
   EmbeddingModelsResponse,
   EmbeddingModelActionResponse,
   EmbeddingModelStatusResponse,
@@ -134,11 +135,27 @@ export async function fetchActiveUser(
   return data.users.find((u) => u.is_active) ?? null;
 }
 
-/** Create a new user profile */
+/**
+ * Create a new user profile.
+ *
+ * ADR-059 §7.3: the Gateway now answers `POST /api/users` with an
+ * [`OperationAck`] (operation_id / state / resource_version /
+ * terminal_error) — *not* the legacy `{ user, version }` envelope.
+ * Older Desktop builds cast the response to `UserProfileMutationResponse`
+ * and returned `data.user`, which was always `undefined` since
+ * `OperationAck` has no `user` field; the call then silently
+ * succeeded with the user profile never being threaded back to the
+ * caller. OnboardingFlow treats this as fire-and-forget so the bug
+ * never surfaced in the UI, but the contract was wrong.
+ *
+ * `updateUser` and `activateUser` still answer with their original
+ * envelopes (`UserResponse` / `ActivateResponse`) — only the *create*
+ * path is in the ADR-059 §7.3 set.
+ */
 export async function createUser(
   profile: CreateUserRequest,
   gatewayUrl = getGatewayUrl(),
-): Promise<BackendUserProfile> {
+): Promise<OperationAck> {
   const resp = await fetch(`${gatewayUrl}/api/users`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -148,9 +165,8 @@ export async function createUser(
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error((err as { error?: string }).error ?? `Failed to create user: ${resp.status}`);
   }
-  // Backend responds with UserResponse { user, version } — unwrap the profile.
-  const data = (await resp.json()) as UserProfileMutationResponse;
-  return data.user;
+  // Backend now responds with an OperationAck envelope — surface it as-is.
+  return (await resp.json()) as OperationAck;
 }
 
 /** Update an existing user profile */
@@ -585,4 +601,108 @@ export async function fetchNodes(gatewayUrl = getGatewayUrl()): Promise<NodeInfo
   }
   return (await resp.json()) as NodeInfo[];
 }
+
+// ── Structured error codes (ADR-059 §6.3) ──────────────────────────────
+//
+// The Gateway's mutation APIs fail with `{ error, code, structured? }`
+// where `structured.code` is one of the 5 closed protocol codes below.
+// Clients MUST branch on the machine-readable code — never on
+// human-readable text (the old "503 / never enrolled" matching is
+// gone, Phase 5.5).
+
+export const STRUCTURED_ERROR_CODES = {
+  dependencyNotReady: "dependency_not_ready",
+  operationUncertain: "operation_uncertain",
+  operationExpired: "operation_expired",
+  resourceVersionConflict: "resource_version_conflict",
+  handshakeTimeout: "handshake_timeout",
+} as const;
+
+/** Parsed structured Gateway error (ADR-059 §6.3). */
+export interface StructuredGatewayError {
+  status: number;
+  /** Human-readable message (diagnostics only — never branch on it). */
+  error: string;
+  /** Machine-readable protocol code, when the body carried one. */
+  code?: string;
+  /** Aggregated bootstrap phase at failure time (SCREAMING_SNAKE_CASE). */
+  current_phase?: string;
+  /** Subsystem-level diagnostic (e.g. "node.local not ready"). */
+  phase_detail?: string;
+  /** Operation id of the failed mutation (operation_uncertain). */
+  operation_id?: string;
+  /** Current resource version (resource_version_conflict). */
+  current_version?: number;
+  /** The version the client expected (resource_version_conflict). */
+  client_expected_version?: number;
+}
+
+/**
+ * Parse a Gateway error response into a [`StructuredGatewayError`].
+ *
+ * Returns `null` when the body is not a Gateway API error (e.g. an
+ * HTML error page from a proxy) — callers then fall back to a plain
+ * status-based message.
+ */
+export async function parseStructuredError(
+  resp: Response,
+): Promise<StructuredGatewayError | null> {
+  const data = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
+  if (typeof data.error !== "string") return null;
+  const structured = (data.structured ?? {}) as Record<string, unknown>;
+  const code = typeof structured.code === "string" ? structured.code : undefined;
+  return {
+    status: resp.status,
+    error: data.error,
+    code,
+    current_phase: typeof structured.current_phase === "string" ? structured.current_phase : undefined,
+    phase_detail: typeof structured.phase_detail === "string" ? structured.phase_detail : undefined,
+    operation_id: typeof structured.operation_id === "string" ? structured.operation_id : undefined,
+    current_version: typeof structured.current_version === "number" ? structured.current_version : undefined,
+    client_expected_version: typeof structured.client_expected_version === "number" ? structured.client_expected_version : undefined,
+  };
+}
+
+/** True when the error carries the `dependency_not_ready` code. */
+export function isDependencyNotReady(err: StructuredGatewayError | null): boolean {
+  return err?.code === STRUCTURED_ERROR_CODES.dependencyNotReady;
+}
+
+/** True when the error carries the `operation_uncertain` code. */
+export function isOperationUncertain(err: StructuredGatewayError | null): boolean {
+  return err?.code === STRUCTURED_ERROR_CODES.operationUncertain;
+}
+
+/** True when the error carries the `operation_expired` code. */
+export function isOperationExpired(err: StructuredGatewayError | null): boolean {
+  return err?.code === STRUCTURED_ERROR_CODES.operationExpired;
+}
+
+/** True when the error carries the `resource_version_conflict` code. */
+export function isResourceVersionConflict(err: StructuredGatewayError | null): boolean {
+  return err?.code === STRUCTURED_ERROR_CODES.resourceVersionConflict;
+}
+
+/** True when the error carries the `handshake_timeout` code. */
+export function isHandshakeTimeout(err: StructuredGatewayError | null): boolean {
+  return err?.code === STRUCTURED_ERROR_CODES.handshakeTimeout;
+}
+
+/**
+ * Client handling strategy per code (ADR-059 §6.3):
+ *
+ * - `dependency_not_ready` — retry once the bootstrap phase is READY:
+ *   poll `get_bootstrap` (Tauri) or `GET /api/bootstrap`, then resubmit.
+ * - `operation_uncertain` — the mutation may or may not have applied
+ *   (MQTT dropped / Gateway restarted). NEVER blindly retry: surface
+ *   the `operation_id` and let the user re-check later.
+ * - `operation_expired` — the operation's lease expired; re-submit as
+ *   a fresh operation.
+ * - `resource_version_conflict` — the client's `expected_version` is
+ *   stale (typically a Gateway restart). Re-fetch the bootstrap
+ *   snapshot for the new `version` and let the user confirm re-submit.
+ * - `handshake_timeout` — a readiness probe timed out; retry the
+ *   handshake.
+ */
+
 

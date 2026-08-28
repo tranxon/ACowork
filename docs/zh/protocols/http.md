@@ -27,6 +27,7 @@
   - [4.10 技能](#410-技能)
   - [4.11 调试与开发工具](#411-调试与开发工具)
   - [4.12 远程文件系统浏览](#412-远程文件系统浏览)
+  - [4.13 全局资源快照（Runtime 主动拉取入口）](#413-全局资源快照runtime-主动拉取入口)
 - [5. Gateway → Runtime 反向代理（需 Runtime 在线）](#5-gateway--runtime-反向代理需-runtime-在线)
   - [5.1 Agent 运行时配置](#51-agent-运行时配置)
   - [5.2 会话只读查询](#52-会话只读查询)
@@ -56,6 +57,11 @@
 - **命令 / 写入通道（MQTT）**：用户发起的会话控制（发消息、激活、重命名、删除、关闭、
   继续）以及审批 / 问答的人机交互，也都改走 MQTT 主题
   `acowork/agents/{id}/sessions/control/{cmd}`，不再走 HTTP（详见 [§7](#7-已迁移到-mqtt-的交互http-端点已删除)）。
+- **全局资源主动拉取（HTTP）**：Runtime 在 mqtt client + available_cache 就绪后（phase_a）
+  会主动 `GET /api/global-resources` 并执行 **503 重试循环**（30s 总预算），作为 MQTT retained 推送**免受 
+  retained-delivery 竞态的兜底**。与 retained 推送共用同一个 
+  `AvailableResourceCache::update_from_mqtt` 处理路径，503 语义详见 
+  [§4.13](#413-全局资源快照runtime-主动拉取入口)。
 
 ---
 
@@ -96,6 +102,7 @@ sequenceDiagram
 | Gateway → Runtime 反代 | Gateway 透传到 Runtime localhost HTTP | **是**（503 if offline） |
 | 静态文件 | Gateway 直接读盘返回字节流 | **否**（仅要求文件存在） |
 | MQTT 命令 / 流 | rumqttd Broker 中转 | 是（Runtime 通过 MQTT 订阅响应） |
+| 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
 Gateway **不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据存于
 Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照或透传请求，
@@ -116,7 +123,7 @@ Runtime 本地文件 / Grafeo；Gateway 通过 HTTP 反向代理拉取快照或�
 
 | 大类 | Gateway 实现模块 |
 |---|---|
-| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs) |
+| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs) |
 | B | [`proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)（ADR-033 Phase 2 + ADR-034 Phase 3） |
 | C | [`workspaces.rs`](../../../core/acowork-gateway/src/http/workspaces.rs)（仅静态资源部分） |
 
@@ -284,6 +291,160 @@ Cron 由 Gateway 自管（持久化于 SQLite）。
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/api/fs/browse` | 远程浏览服务器文件系统（仅目录列表，禁止内容读取） |
+
+### 4.13 全局资源快照（Runtime 主动拉取入口）
+
+> **实现**：[`core/acowork-gateway/src/http/global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs)
+> **构建器**：[`core/acowork-gateway/src/mqtt/global_resources_builders.rs`](../../../core/acowork-gateway/src/mqtt/global_resources_builders.rs)
+> （HTTP 与 MQTT retained 共用同一套 `build_available_*` 函数，零字段映射样板）
+> **Runtime 侧消费**：[`core/acowork-runtime/src/startup/global_resources_pull.rs`](../../../core/acowork-runtime/src/startup/global_resources_pull.rs)
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/global-resources` | 一次性拉取 6 个全局资源 topic 的最新快照；Runtime 在 phase_a 主动调用一次 |
+
+**为什么需要这个端点（修复 Bug B）**
+
+Bug B：清除 `.acowork` 重新走引导后，第一次与 system agent 聊天报
+“unexpected error”，后续聊天正常。根因：
+
+1. Gateway 在 vault 刚解锁但 provider 还未添加时，立刻 publish 空
+   `AvailableProviders`（`provider_count=0, api_key_lengths=[]`）。
+2. system agent ~150 ms 后启动，订阅 `acowork/global/providers`，接收
+   retained → cached 空快照。
+3. Desktop ~19s 后才完成 onboarding、新增 provider，Gateway 重新 publish
+   带 key 的快照。
+4. 但 rumqttd 的 retained delivery **只对未见过旧值的订阅者投递新值**
+   ——已经 cached 空快照的 Runtime 收不到更新，session 里的 provider=空
+   已定型，必须用户手动 model_switch 才能修复。
+
+**修复方案**：Runtime 在 mqtt client + available_cache 就绪后（phase_a），
+**主动** `GET /api/global-resources` 一次，把响应里每个 topic 的 base64
+字节解码后直接喂给 [`AvailableResourceCache::update_from_mqtt`](../../../core/acowork-runtime/src/mqtt/available_cache.rs)
+——与 MQTT retained 推送**完全相同的处理路径**。version 校验、stale 
+retained 拒绝、ADR-059 §5.3 generation switch 逻辑全部复用，Gateway 
+端不需要为 HTTP 维护第二条更新管线。
+
+**为什么不依赖 Runtime 在线**
+
+Gateway 本身就是全局资源的权威所有者（Vault + resource_cache + 
+embed_process + BootstrapOrchestrator），该端点不依赖 Runtime 在线。
+但 Gateway 自身的 bootstrap 阶段（Vault 解锁 / provider onboarding 未
+完成）意味着全局资源**尚未定型**——此时返回 `503 + Retry-After`（详见
+下文错误码），而不是 `200 + 空数据`：**“资源未准备好”和“资源为 0”
+是两种完全不同的语义**，空快照会让 Runtime 把“还没有”误缓存为“就
+是没有”，后续 session 永远以空 provider 列表启动。Gateway 级整体
+bootstrap 状态另见 `GET /api/bootstrap`。
+
+**两通道协议分工**
+
+| 通道 | 角色 | 备注 |
+|---|---|---|
+| **MQTT retained**（`acowork/global/*`） | **primary** — 实时增量推送 | 已连接 Runtime 自动接收；`Notify` 触发 republish |
+| **`GET /api/global-resources`**（本端点） | **active pull** — 启动期免受 retained-delivery 竞态 | 每次启动调一次，不依赖 retained 推送时序 |
+
+两通道共用同一个 `update_from_mqtt` 处理路径（[`AvailableResourceCache::update_from_mqtt`](../../../core/acowork-runtime/src/mqtt/available_cache.rs)），
+Runtime 端零特殊处理。
+
+**响应**
+
+```json
+{
+  "instance_id": "instance-abc-123",
+  "topics": {
+    "acowork/global/providers":        "CgcKBXNrLXYx...",
+    "acowork/global/mcps":             "CggKBmFkbWlu...",
+    "acowork/global/searches":         "CggK...",
+    "acowork/global/embedding_models": "CggK...",
+    "acowork/global/user_profile":     "CggK...",
+    "acowork/global/bootstrap":        "CggK..."
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `instance_id` | `string` | ADR-059 §5.3 Gateway generation id，与 `acowork/global/bootstrap` retained 和 `GET /api/bootstrap` 同源 |
+| `topics` | `BTreeMap<string, string>` | sorted map（保证响应 deterministic、便于测试 diff）；value 是 base64-encoded `DataEnvelope` protobuf bytes，与同名 MQTT retained topic payload **完全等价** |
+
+`topics` 覆盖 6 个全局资源 topic：
+
+| JSON key | MQTT topic | protobuf payload |
+|---|---|---|
+| `acowork/global/providers` | `acowork/global/providers` | `AvailableProviders` |
+| `acowork/global/mcps` | `acowork/global/mcps` | `AvailableMcps` |
+| `acowork/global/searches` | `acowork/global/searches` | `AvailableSearches` |
+| `acowork/global/embedding_models` | `acowork/global/embedding_models` | `AvailableEmbeddingModels` |
+| `acowork/global/user_profile` | `acowork/global/user_profile` | `AvailableUsers`（ADR-042） |
+| `acowork/global/bootstrap` | `acowork/global/bootstrap` | `BootstrapState`（ADR-059） |
+
+**Runtime 端消费**
+
+1. base64-decode 每个 `topics[k]` → bytes。
+2. 调 `cache.update_from_mqtt(topic, &bytes)`（`k` 已含完整 topic 名，
+   直接走 MQTT retained 的同一份反序列化 + version 校验 + generation 
+   switch 逻辑）。
+3. 比较 `instance_id` 与本地 `cache.bootstrap_instance_id()`：
+   - 相等 → 无动作。
+   - 不等 → 先清空本地所有旧 snapshot（providers / mcps / searches / 
+     embedding_models / lsps / user_profile / bootstrap），再 apply 新
+     快照。`bootstrap_state` 的 update_from_mqtt 也会触发其自带的 
+     generation switch 逻辑（双重保险）。
+
+**重试循环（Bug B fix v3）**
+
+Runtime 对 `503` 执行重试循环（[`pull_global_resources_from_gateway`](../../../core/acowork-runtime/src/startup/global_resources_pull.rs)）：
+
+| Gateway 阶段 | HTTP | `Retry-After` | Runtime 行为 |
+|---|---|---|---|
+| `Booting` / `Unspecified` | `503` | `2`s | 睡 2s 后重试 |
+| `Failed` | `503` | `10`s | 睡 10s 后重试 |
+| `ShuttingDown` | `503` | `-1`（哨兵） | **放弃拉取**，仅依赖 MQTT retained |
+| `Ready` / `Degraded` | `200` | N/A | 应用快照，循环结束 |
+
+循环边界（[`global_resources_pull.rs`](../../../core/acowork-runtime/src/startup/global_resources_pull.rs)）：
+
+- 总预算 `PULL_MAX_DURATION = 30s`：超时放弃，Phase A 不阻塞（仍以 MQTT
+  retained 已送达内容为准）。
+- **`503` 绝不写 cache**（never-poison）：已有快照（如 MQTT retained 刚送达）
+  不会被“未就绪”数据覆盖——这是关键正确性不变量。
+- 无 hint / 连接错误 / 5xx（非 503）→ 线性退避（500ms 起，封顶 5s）。
+- 4xx（非 503）/ JSON 解析失败 → Fatal，立即放弃（重试不会好转）。
+
+**为什么不把 6 个 protobuf 结构展开为内嵌 JSON**
+
+prost 生成的类型默认**不带** `serde::Serialize/Deserialize` derive。
+展开成内嵌 JSON 需要：
+
+1. 给 `mqtt_payload.proto` 所有 message 加 `#[derive(serde::Serialize, 
+   Deserialize)]`；
+2. 解决 `oneof payload { ... }` 在 serde 中的 `#[serde(flatten)]` / 
+   `tag` 赯手细节；
+3. 在 Gateway 端写一堆 `AvailableProviders → ProviderEntry` 转换代码。
+
+代价高、错误面广，且会让两通道（HTTP/MQTT）wire 格式**不一致**：将来
+protobuf 加字段，HTTP 接口契约不变、Runtime 端需要双套解析代码。
+
+base64 编码 protobuf bytes 让两通道 **wire 格式完全一致**，Runtime 端零
+特殊处理。典型快照总量 < 5 KB，base64 膨胀可忽略。
+
+**错误码**
+
+| 状态 | 条件 | `Retry-After` | 说明 |
+|---|---|---|---|
+| `200` | `BootstrapPhase::Ready` / `Degraded` | N/A | 完整 `GlobalResourcesView`；`topics` 可为空 map（**资源为 0 是合法状态**） |
+| `503` | `Booting` / `Unspecified`（orchestrator 未 attach） | `2`s | 资源未定型，稍后重试 |
+| `503` | `Failed` | `10`s | 引导失败，长退避后重试 |
+| `503` | `ShuttingDown` | `-1`（哨兵） | **不要重试**，放弃拉取 |
+| `401` | Bearer token 缺失或错误 | N/A | 当 `[http].auth_enabled = true` |
+
+`503` body 统一为 `NotReadyView`：`{instance_id, phase, phase_detail, 
+retry_after_seconds, error}`（`retry_after_seconds` 与 header 同值，
+body/header 双通道冗余，客户端任取其一）。
+
+Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退避重
+试；`200` 一定是权威快照（`instance_id` 为空 / `topics` 为空都按正常快
+照处理——空资源是合法状态，不是未就绪）。
 
 ---
 
@@ -769,6 +930,45 @@ Authorization: Bearer <token>
 <img src="http://127.0.0.1:19876/ws-files/com.acowork.senior-engineer/assets/avatar.png">
 ```
 
+### 9.10 拉取全局资源快照（Runtime 启动期主动拉取）
+
+```http
+GET /api/global-resources HTTP/1.1
+Authorization: Bearer <token>
+```
+
+响应（示例，示明结构不代表真实长度）：
+
+```json
+{
+  "instance_id": "instance-7f3a9b2e-1c4d-4e8f-9a5b-2d6f8e0c1234",
+  "topics": {
+    "acowork/global/providers":        "CgcKBXNrLXYxGgIIUg==",
+    "acowork/global/mcps":             "CggKBmFkbWluGgIIUg==",
+    "acowork/global/searches":         "CggK...",
+    "acowork/global/embedding_models": "CggK...",
+    "acowork/global/user_profile":     "CggK...",
+    "acowork/global/bootstrap":        "CggK..."
+  }
+}
+```
+
+每个 `topics[k]` value 是 base64 编码的 `DataEnvelope` protobuf 字节，
+与同名 MQTT retained topic payload **完全等价**。Runtime 端处理：
+
+```rust
+// 伪代码（实际实现见 core/acowork-runtime/src/startup/global_resources_pull.rs）
+for (topic, b64) in &body["topics"].as_object().unwrap() {
+    let bytes = base64::decode(b64.as_str().unwrap()).unwrap();
+    cache.update_from_mqtt(topic, &bytes);   // 与 MQTT retained 同入口
+}
+if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
+    cache.providers = None;   // ADR-059 §5.3 generation switch
+    cache.mcps = None;
+    // ... 应用新快照
+}
+```
+
 ---
 
 ## 10. 注意事项
@@ -792,5 +992,10 @@ Authorization: Bearer <token>
 5. **静态文件服务**：`/workspace-files`、`/ws-files` 路径由 Axum router 直接返回文件流，
    供前端 `<img>` / 视频等直接引用（命名保留历史，不变更）。
 6. **会话的写操作均已迁移到 MQTT**（见 §7）：不要尝试通过 HTTP POST `/message` /
-   `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。，通过 HTTP POST `/message` /
    `/activate` / `/continue` 等 — 这些路径在 Gateway HTTP 层**不存在**，调用将返回 404。
+7. **Runtime 启动期主动拉取全局资源**：每次 Runtime 启动，会在 phase_a（mqtt client + 
+   available_cache 就绪后）主动 `GET /api/global-resources` 一次。这是 MQTT retained 推送
+   之外的**免受 retained-delivery 竞态的兜底**，用来修复 Bug B（清除 `.acowork` 后首次
+   chat 报 “unexpected error”）。HTTP 端点不依赖 Runtime 在线，归在 §4 Gateway 原生端点下；
+   Runtime 端处理逻辑复用 MQTT retained 推送的同一个 `update_from_mqtt` 入口，
+   version 校验与 ADR-059 §5.3 generation switch 逻辑零分叉。详见 [§4.13](#413-全局资源快照runtime-主动拉取入口)。

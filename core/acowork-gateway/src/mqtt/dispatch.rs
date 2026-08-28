@@ -19,9 +19,12 @@ use std::sync::Arc;
 use acowork_core::mqtt_proto::{
     data_envelope, AgentStatus as AgentStatusProto, DataEnvelope, NodeEnrollResult,
 };
+use acowork_core::operation::{OperationId, OperationState};
+use acowork_core::{StructuredErrorBody, StructuredErrorCode};
 use prost::Message as _;
 
 use crate::handlers::server::SharedState;
+use crate::bootstrap::{SharedSubsystemReadinessRegistry, SubsystemId};
 use crate::http::proxy::SharedRuntimeHttpRegistry;
 use crate::mqtt::agent_registry::SharedAgentRegistry;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
@@ -31,6 +34,7 @@ use crate::mqtt::enrollment::{
 };
 use crate::mqtt::node_control::NodeControlClient;
 use crate::mqtt::node_registry::SharedNodeRegistry;
+use crate::operation_store::SharedOperationStore;
 
 /// Unified MQTT message handler — called from the Gateway's MQTT callback.
 ///
@@ -43,6 +47,14 @@ use crate::mqtt::node_registry::SharedNodeRegistry;
 /// credential stores backing the enrollment handshake; `auth_enabled`
 /// gates enrollment-token validation (when false, enrollments are
 /// accepted without a token, preserving the pre-5a default path).
+///
+/// ADR-059 §7.2: `bootstrap_registry` receives `node.{id}` readiness
+/// transitions from the `acowork/nodes/+/ready` topic. `None` in tests
+/// that do not wire a registry.
+///
+/// ADR-059 §6: `operation_store` correlates NodeEvent replies (whose
+/// `request_id` equals the tracked mutation's `operation_id`) to their
+/// terminal state. `None` in tests that do not wire a store.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_message(
     topic: &str,
@@ -56,6 +68,8 @@ pub fn handle_message(
     enrollment_tokens: Option<&SharedEnrollmentTokenStore>,
     node_tokens: Option<&SharedNodeTokenStore>,
     auth_enabled: bool,
+    bootstrap_registry: Option<&SharedSubsystemReadinessRegistry>,
+    operation_store: Option<&SharedOperationStore>,
 ) {
     handle_plaintext_message(
         topic,
@@ -69,6 +83,8 @@ pub fn handle_message(
         enrollment_tokens,
         node_tokens,
         auth_enabled,
+        bootstrap_registry,
+        operation_store,
     );
 }
 
@@ -128,6 +144,8 @@ pub fn handle_plaintext_message(
     enrollment_tokens: Option<&SharedEnrollmentTokenStore>,
     node_tokens: Option<&SharedNodeTokenStore>,
     auth_enabled: bool,
+    bootstrap_registry: Option<&SharedSubsystemReadinessRegistry>,
+    operation_store: Option<&SharedOperationStore>,
 ) {
     if topic_matches("acowork/agents/+/http_endpoint", topic) {
         let agent_id = topic
@@ -322,6 +340,96 @@ pub fn handle_plaintext_message(
         tokio::spawn(async move {
             reg.write().await.update_status_from_mqtt(&topic_owned, &payload_owned);
         });
+        // ADR-059 §7.2: an offline status (LWT or graceful shutdown)
+        // means the node's control channel is gone — demote its
+        // readiness so the aggregated phase drops out of READY. The
+        // node re-announces `NodeReady` on its next (re)connect, which
+        // re-marks it ready; `mark_booting` (not `mark_failed`) keeps
+        // that path open.
+        if let Some(node_id) = extract_node_id_from_status_topic(topic)
+            && String::from_utf8_lossy(payload).trim() == "offline"
+            && let Some(registry) = bootstrap_registry
+        {
+            let subsystem = SubsystemId(format!("node.{}", node_id));
+            // Only demote when currently ready — a node that never
+            // announced NodeReady stays booting already.
+            if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
+                let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+                handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
+                tracing::info!(
+                    node_id,
+                    "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
+                );
+            }
+        }
+    } else if topic_matches("acowork/nodes/+/ready", topic) {
+        // ADR-059 §7.2: Node control-plane readiness. The Node
+        // publishes a retained DataEnvelope<NodeReady> after CONNECT +
+        // control subscriptions; an empty retained payload means the
+        // snapshot was cleared (Node shutdown / disconnect).
+        let Some(node_id) = extract_node_id_from_ready_topic(topic) else {
+            tracing::warn!(topic, "ready topic matched but node_id extraction failed");
+            return;
+        };
+        let Some(registry) = bootstrap_registry else {
+            tracing::debug!(topic, "NodeReady received but no bootstrap registry wired — dropping");
+            return;
+        };
+        let subsystem = SubsystemId(format!("node.{}", node_id));
+        let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Required);
+        if payload.is_empty() {
+            // Retained snapshot cleared (graceful shutdown or poll-task
+            // disconnect clear). Demote to booting; NOT terminal — the
+            // Node re-announces NodeReady on reconnect.
+            handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
+            tracing::info!(
+                node_id,
+                "NodeReady retained cleared — demoted node.{node_id} to booting (ADR-059 §7.2)"
+            );
+            return;
+        }
+        let payload_owned = payload.to_vec();
+        let node_id_owned = node_id.clone();
+        tokio::spawn(async move {
+            let envelope = match DataEnvelope::decode(payload_owned.as_slice()) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        node_id = %node_id_owned,
+                        error = %e,
+                        "Bad NodeReady envelope on node ready topic"
+                    );
+                    return;
+                }
+            };
+            match envelope.payload {
+                Some(data_envelope::Payload::NodeReady(ready)) => {
+                    // Only the announcing node may mark ITS subsystem.
+                    if ready.node_id != node_id_owned {
+                        tracing::warn!(
+                            announced = %ready.node_id,
+                            topic_node = %node_id_owned,
+                            "NodeReady node_id mismatch — ignoring"
+                        );
+                        return;
+                    }
+                    handle.mark_ready(Some(format!(
+                        "node '{node_id_owned}' NodeReady (control plane up)"
+                    )));
+                    tracing::info!(
+                        node_id = %node_id_owned,
+                        protocol_version = ready.protocol_version,
+                        "Node control plane ready (ADR-059 §7.2)"
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        node_id = %node_id_owned,
+                        "Non-NodeReady envelope on node ready topic — ignoring"
+                    );
+                }
+            }
+        });
     } else if topic_matches("acowork/nodes/+/info", topic) {
         // ADR-055 §6.2: node metadata snapshot (protobuf
         // DataEnvelope<NodeInfo>, retained). Feeds the NodeRegistry.
@@ -379,10 +487,62 @@ pub fn handle_plaintext_message(
         };
         let payload_owned = payload.to_vec();
         let topic_owned = topic.to_string();
+        let op_store = operation_store.cloned();
         tokio::spawn(async move {
             match DataEnvelope::decode(payload_owned.as_slice()) {
                 Ok(envelope) => {
                     if let Some(data_envelope::Payload::NodeEvent(event)) = envelope.payload {
+                        // ADR-059 §6: correlate the reply back to the
+                        // tracked mutation operation — install dispatch
+                        // carries `operation_id` as the command's
+                        // `request_id`. "ok" → Completed; "error" →
+                        // Failed (uncertain: the client must re-check by
+                        // operation id, never blindly retry);
+                        // "in_progress" → Running.
+                        if let Some(store) = op_store.as_ref() {
+                            let op_id = OperationId::from(event.request_id.clone());
+                            match event.status.as_str() {
+                                "ok" => {
+                                    store.transition(&op_id, OperationState::Completed, None, None);
+                                }
+                                "error" => {
+                                    // Log the failure at WARN so a
+                                    // failing install/upgrade is visible
+                                    // in the Gateway log without needing
+                                    // to correlate operation store state.
+                                    tracing::warn!(
+                                        node_id = %event.node_id,
+                                        operation_id = %op_id,
+                                        message = %event.message,
+                                        "Node operation failed"
+                                    );
+                                    store.fail(
+                                        &op_id,
+                                        StructuredErrorBody {
+                                            code: StructuredErrorCode::OperationUncertain,
+                                            current_phase: None,
+                                            phase_detail: if event.message.is_empty() {
+                                                None
+                                            } else {
+                                                Some(event.message.clone())
+                                            },
+                                            retry_hint: None,
+                                            operation_id: Some(op_id.clone()),
+                                            last_known_phase: None,
+                                            current_version: None,
+                                            client_expected_version: None,
+                                            lease_deadline_ms: None,
+                                            endpoint: None,
+                                            deadline_ms: None,
+                                        },
+                                    );
+                                }
+                                "in_progress" => {
+                                    store.transition(&op_id, OperationState::Running, None, None);
+                                }
+                                _ => {}
+                            }
+                        }
                         control.handle_event(event).await;
                     }
                 }
@@ -403,6 +563,7 @@ pub fn handle_plaintext_message(
         let state_for_installed = state.clone();
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
+        let bootstrap_registry_for_installed = bootstrap_registry.cloned();
         tokio::spawn(async move {
             let mut gw = state_for_installed.write().await;
             if payload_owned.is_empty() {
@@ -450,6 +611,27 @@ pub fn handle_plaintext_message(
                         }
 
                         tracing::info!(node_id = %node_id_owned, agent_id = %aid, "Aggregated installed agent from node");
+
+                        // ADR-059 Phase 1.2: the System Agent's readiness
+                        // is signalled by the local node's retained
+                        // installed inventory — once com.acowork.system
+                        // is aggregated, the bootstrap can reach READY.
+                        // Idempotent: the node re-publishes retained
+                        // inventory on every (re)connect.
+                        if aid == crate::gateway::state::SYSTEM_AGENT_ID
+                            && let Some(registry) = bootstrap_registry_for_installed.as_ref()
+                        {
+                            let handle = registry.register(
+                                "system_agent",
+                                crate::bootstrap::ReadinessKind::Required,
+                            );
+                            handle.mark_ready(Some(
+                                "system agent installed inventory aggregated".to_string(),
+                            ));
+                            tracing::info!(
+                                "System Agent ready — bootstrap can reach READY (ADR-059)"
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -483,6 +665,38 @@ fn extract_installed_topic_ids(topic: &str) -> Option<(String, String)> {
 fn extract_enroll_topic_node_id(topic: &str) -> Option<String> {
     let parts: Vec<&str> = topic.split('/').collect();
     if parts.len() == 4 && parts[0] == "acowork" && parts[1] == "nodes" && parts[3] == "enroll" {
+        let node_id = parts[2];
+        if !node_id.is_empty() {
+            return Some(node_id.to_string());
+        }
+    }
+    None
+}
+
+/// Extract `node_id` from `acowork/nodes/{node_id}/status`.
+fn extract_node_id_from_status_topic(topic: &str) -> Option<String> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    if parts.len() == 4
+        && parts[0] == "acowork"
+        && parts[1] == "nodes"
+        && parts[3] == "status"
+    {
+        let node_id = parts[2];
+        if !node_id.is_empty() {
+            return Some(node_id.to_string());
+        }
+    }
+    None
+}
+
+/// Extract `node_id` from `acowork/nodes/{node_id}/ready` (ADR-059 §7.2).
+fn extract_node_id_from_ready_topic(topic: &str) -> Option<String> {
+    let parts: Vec<&str> = topic.split('/').collect();
+    if parts.len() == 4
+        && parts[0] == "acowork"
+        && parts[1] == "nodes"
+        && parts[3] == "ready"
+    {
         let node_id = parts[2];
         if !node_id.is_empty() {
             return Some(node_id.to_string());
@@ -794,6 +1008,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         );
         // handle_plaintext_message spawns a tokio task; wait for it.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -838,6 +1054,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let reg = node_reg.read().await;
@@ -877,6 +1095,8 @@ mod tests {
             None,
             None,
             false,
+            None,
+            None,
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let reg = node_reg.read().await;
@@ -1187,6 +1407,8 @@ mod tests {
                     Some(&es),
                     Some(&ns),
                     true,
+                    None,
+                    None,
                 );
             });
         });

@@ -10,11 +10,11 @@ import { useTranslation } from "../../i18n/useTranslation";
 import pkg from "../../../package.json";
 import brandMark from "../../../../../assets/brand-mark.svg";
 import { log } from "../../lib/logger";
+import type { BootstrapStateView } from "../../lib/types";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
-const MAX_WAIT_MS = 20_000;
-const SYSTEM_AGENT_ID = "com.acowork.system";
+const MAX_WAIT_MS = 30_000;
 
 /**
  * Push the persisted settings into Rust and (for local mode) spawn the
@@ -110,17 +110,20 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         requestAnimationFrame(() => setFadeIn(true));
     }, []);
 
-    /** Check if System Agent is ready via GET /api/agents */
-    const checkAgentReady = async (): Promise<boolean> => {
-        if (!mountedRef.current) return false;
+    /**
+     * Check bootstrap readiness via `GET /api/bootstrap` (ADR-059 §5.1)
+     * — the aggregated phase replaces the old "find system agent in
+     * /api/agents" heuristic, which guessed at readiness from an
+     * unrelated inventory snapshot.
+     */
+    const checkBootstrapReady = async (): Promise<BootstrapStateView | null> => {
+        if (!mountedRef.current) return null;
         try {
-            const resp = await fetch(`${getGatewayUrl()}/api/agents`);
-            if (!resp.ok) return false;
-            const agents = (await resp.json()) as Array<{ agent_id: string; ready: boolean; running: boolean }>;
-            const sys = agents?.find((a) => a.agent_id === SYSTEM_AGENT_ID);
-            return !!(sys && sys.ready);
+            const resp = await fetch(`${getGatewayUrl()}/api/bootstrap`);
+            if (!resp.ok) return null;
+            return (await resp.json()) as BootstrapStateView;
         } catch {
-            return false;
+            return null;
         }
     };
 
@@ -161,15 +164,28 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         };
 
         const pollAgentReady = () => {
-            setStatusText("Waiting for Agent Runtime...");
+            // Phase not READY yet: surface the Gateway's own diagnostic
+            // (subsystem-level phase detail) instead of a fixed message.
+            setStatusText("Waiting for services...");
+            const onSnapshot = (view: BootstrapStateView | null) => {
+                if (!view) return false;
+                if (view.phase === "READY" || view.phase === "DEGRADED") return true;
+                if (view.phase === "FAILED" || view.phase === "SHUTTING_DOWN") {
+                    setTimedOut(true);
+                    return true;
+                }
+                setStatusText(`Preparing: ${view.phase_detail}`);
+                return false;
+            };
             // Try immediately first
-            checkAgentReady().then((ready) => {
-                if (ready) { finish(); return; }
+            checkBootstrapReady().then((view) => {
+                if (!mountedRef.current) return;
+                if (onSnapshot(view)) { finish(); return; }
                 // Then poll
                 pollTimer = setInterval(async () => {
                     if (!mountedRef.current) { clearInterval(pollTimer); return; }
-                    const ready = await checkAgentReady();
-                    if (ready) {
+                    const view = await checkBootstrapReady();
+                    if (onSnapshot(view)) {
                         clearInterval(pollTimer);
                         finish();
                     }
@@ -196,8 +212,12 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 // reachable from a previous run.
             }
 
-            const gDone = await doCheck();
-            if (gDone) {
+            // ADR-059 §5.1: readiness is the /api/bootstrap phase, not a
+            // /health ping. `init_local_gateway` already waited for READY
+            // (Rust side); this poll only covers the remote-gateway path
+            // and the window before the MQTT snapshot arrives.
+            const view = await checkBootstrapReady();
+            if (view && (view.phase === "READY" || view.phase === "DEGRADED")) {
                 pollAgentReady();
                 return;
             }
@@ -238,16 +258,18 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
             try { await initMqttListener(); } catch {}
             // ADR-058: workspace fs listener on retry
             try { await initWorkspaceFsListener(); } catch {}
-            // Poll for agent readiness
-            const ready = await checkAgentReady();
-            if (ready) {
+            // ADR-059 §5.1: wait for bootstrap phase READY (replaces the
+            // old agent-inventory readiness guess).
+            const view = await checkBootstrapReady();
+            if (view && (view.phase === "READY" || view.phase === "DEGRADED")) {
                 finish();
             } else {
                 // Quick poll a few times
                 for (let i = 0; i < 20; i++) {
                     if (!mountedRef.current) break;
                     await new Promise((r) => setTimeout(r, 500));
-                    if (await checkAgentReady()) { finish(); break; }
+                    const v = await checkBootstrapReady();
+                    if (v && (v.phase === "READY" || v.phase === "DEGRADED")) { finish(); break; }
                 }
                 if (mountedRef.current && !useGatewayStore.getState().status) setTimedOut(true);
             }

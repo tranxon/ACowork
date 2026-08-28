@@ -203,6 +203,11 @@ const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     ("acowork/agents/+/config", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/created", MqttQoS::AtLeastOnce),
     ("acowork/agents/+/sessions/deleted", MqttQoS::AtLeastOnce),
+    // ── ADR-059: Gateway bootstrap snapshot ──
+    // Retained `BootstrapState` proto (QoS 1). Re-delivered on every
+    // (re)connect so the Desktop always converges on the current
+    // instance_id / version / phase even after a Gateway restart.
+    ("acowork/global/bootstrap", MqttQoS::AtLeastOnce),
     // ADR-043: Retained per-session config + state. Runtime publishes
     // config (title/model/provider/workspace/reasoning_effort/temperature)
     // and state (status/message_count/tokens/ratio/context_usage) on

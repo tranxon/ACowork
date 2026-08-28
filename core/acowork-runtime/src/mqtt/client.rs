@@ -650,7 +650,29 @@ impl RuntimeMqttClient {
                                         let mut cache_write = poll_cache.write().await;
                                         cache_write.update_from_mqtt(topic, &publish.payload);
 
-                                        if topic == "acowork/global/user_profile" {
+                                        if topic == "acowork/global/bootstrap" {
+                                            // ADR-059 Phase 5.3: the cache
+                                            // layer above already rejected
+                                            // stale retained re-delivery by
+                                            // `instance_id` + `version` and
+                                            // cleared old-generation resource
+                                            // snapshots on a generation switch
+                                            // (cold start, hot restart and
+                                            // reconnect share this one path).
+                                            // Log the currently authoritative
+                                            // snapshot for reconnect / restart
+                                            // diagnostics.
+                                            let snapshot = cache_write.bootstrap_snapshot().cloned();
+                                            drop(cache_write);
+                                            if let Some(bs) = snapshot {
+                                                tracing::info!(
+                                                    instance_id = %bs.instance_id,
+                                                    version = bs.version,
+                                                    phase = ?acowork_core::mqtt_proto::BootstrapPhase::try_from(bs.phase).ok(),
+                                                    "acowork/global/bootstrap retained received (authoritative Gateway generation)"
+                                                );
+                                            }
+                                        } else if topic == "acowork/global/user_profile" {
                                             let profile = cache_write.active_user_profile();
                                             tracing::debug!(
                                                 has_profile = profile.is_some(),

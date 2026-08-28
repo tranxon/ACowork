@@ -15,13 +15,18 @@ import { subTypeOptions } from "./nodeTypeI18n";
 export function MemoryPanel() {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
-  // Gate data fetching on agent readiness — memory endpoints proxy through
-  // the Runtime and 503 against an unregistered one.  Stopped agents are a
-  // legitimate UI state; the user picks the Start button to bring them up,
-  // and once `running && ready` flips to true this selector re-runs the
-  // load effects below.
-  const isAgentReady = useAgentStore((s) =>
-    selectedAgentId ? !!(s.agents[selectedAgentId]?.meta.running && s.agents[selectedAgentId]?.meta.ready) : false
+  // We intentionally do NOT gate data fetching on `meta.ready`. The
+  // ready flag is pushed via MQTT retained and arrives asynchronously
+  // to Runtime HTTP readiness — gating on it caused the MemoryPanel
+  // to flash "Loading…" forever when the user opened it during the
+  // first second after agent start. The store fetchers
+  // (`memoryStore.fetchNodes` / `fetchStats`) now own the 503 retry
+  // loop via `with503Retry`, so a transient 503 recovers
+  // transparently.
+  // Stopped agents (`meta.running === false`) are still skipped —
+  // their Runtime process is not even alive, so retrying buys nothing.
+  const isAgentRunning = useAgentStore((s) =>
+    selectedAgentId ? !!s.agents[selectedAgentId]?.meta.running : false
   );
   const {
     nodes,
@@ -65,27 +70,27 @@ export function MemoryPanel() {
 
   // Load data when agent changes (or transitions from stopped → running).
   useEffect(() => {
-    if (!selectedAgentId || !isAgentReady) return;
+    if (!selectedAgentId || !isAgentRunning) return;
     clearMemory();
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [selectedAgentId, isAgentReady, clearMemory, fetchNodes, fetchStats]);
+  }, [selectedAgentId, isAgentRunning, clearMemory, fetchNodes, fetchStats]);
 
   // Re-fetch when filters or pagination change
   useEffect(() => {
-    if (!selectedAgentId || !isAgentReady) return;
+    if (!selectedAgentId || !isAgentRunning) return;
     void fetchNodes(selectedAgentId);
-  }, [filters, page, pageSize, selectedAgentId, isAgentReady, fetchNodes]);
+  }, [filters, page, pageSize, selectedAgentId, isAgentRunning, fetchNodes]);
 
   // Re-fetch when the memory tab becomes visible (e.g. agent was started
   // while another tab was active, so data was never loaded for the running agent)
   const activePanelTab = useLayoutStore((s) => s.activePanelTab);
   useEffect(() => {
-    if (!selectedAgentId || !isAgentReady) return;
+    if (!selectedAgentId || !isAgentRunning) return;
     if (activePanelTab !== "memory") return;
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
-  }, [activePanelTab, selectedAgentId, isAgentReady, fetchNodes, fetchStats]);
+  }, [activePanelTab, selectedAgentId, isAgentRunning, fetchNodes, fetchStats]);
 
   // Auto-dismiss consolidate message after 6 seconds
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);

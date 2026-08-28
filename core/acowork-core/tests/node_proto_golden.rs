@@ -315,6 +315,70 @@ fn node_event_result_json_round_trip() {
 }
 
 #[test]
+fn golden_node_ready_envelope() {
+    // ADR-059 §7.2: control-plane readiness — the Node publishes a
+    // retained DataEnvelope<NodeReady> after CONNECT + control
+    // subscriptions. The message carries EXACTLY two protocol fields
+    // (node_id + protocol_version) per the OCP boundary; the golden
+    // bytes pin that shape so an accidental third field or a
+    // renumbering breaks the build instead of silently drifting the
+    // Gateway ↔ Node readiness contract.
+    let envelope = envelope_with(data_envelope::Payload::NodeReady(
+        acowork_core::mqtt_proto::NodeReady {
+            node_id: "local".to_string(),
+            protocol_version: 1,
+        },
+    ));
+    let bytes = envelope.encode_to_vec();
+    let expected = "08 01 ba 05 09 0a 05 6c 6f 63 61 6c 10 01";
+    assert_eq!(hex(&bytes), expected.replace(' ', ""));
+
+    // Round-trip contract: the golden bytes must decode back to the
+    // same logical payload — and the payload must contain only the
+    // two protocol fields (re-encoding must reproduce the golden
+    // bytes exactly).
+    let decoded = decode_envelope(&bytes);
+    let data_envelope::Payload::NodeReady(ready) = decoded.payload.expect("payload") else {
+        panic!("expected NodeReady payload");
+    };
+    assert_eq!(ready.node_id, "local");
+    assert_eq!(ready.protocol_version, 1);
+    assert_eq!(
+        hex(&envelope_with(data_envelope::Payload::NodeReady(ready)).encode_to_vec()),
+        expected.replace(' ', "")
+    );
+}
+
+#[test]
+fn golden_bootstrap_state_envelope() {
+    // ADR-059 §5.3: retained bootstrap snapshot published on
+    // `acowork/global/bootstrap` (DataEnvelope oneof field 16). Pins
+    // the field numbers so consumers (Desktop / runtime) cannot
+    // silently drift from the Gateway's published shape.
+    let envelope = envelope_with(data_envelope::Payload::BootstrapState(
+        acowork_core::mqtt_proto::BootstrapState {
+            protocol_version: 1,
+            instance_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            version: 3,
+            phase: 2, // READY
+            phase_detail: "all subsystems ready".to_string(),
+            issued_at_ms: 1_700_000_000_000,
+        },
+    ));
+    let bytes = envelope.encode_to_vec();
+    let decoded = decode_envelope(&bytes);
+    let data_envelope::Payload::BootstrapState(state) = decoded.payload.expect("payload") else {
+        panic!("expected BootstrapState payload");
+    };
+    assert_eq!(state.protocol_version, 1);
+    assert_eq!(state.instance_id, "00000000-0000-4000-8000-000000000001");
+    assert_eq!(state.version, 3);
+    assert_eq!(state.phase, 2);
+    assert_eq!(state.phase_detail, "all subsystems ready");
+    assert_eq!(state.issued_at_ms, 1_700_000_000_000);
+}
+
+#[test]
 fn golden_node_enroll_envelope() {
     // Phase 5a enrollment handshake — pins NodeEnroll field numbers so
     // a renumbering breaks the build instead of silently drifting the

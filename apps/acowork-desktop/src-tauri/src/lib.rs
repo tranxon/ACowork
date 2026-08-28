@@ -557,6 +557,7 @@ pub fn run() {
             commands::agent::get_agent_detail,
             commands::agent::install_agent,
             commands::agent::install_bundled_agent,
+            commands::agent::wait_agent_installed,
             commands::agent::uninstall_agent,
             commands::agent::start_agent,
             commands::agent::stop_agent,
@@ -585,6 +586,9 @@ pub fn run() {
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
             commands::gateway::ensure_system_agent,
+            // ADR-059: latest Gateway bootstrap snapshot (MQTT cache + HTTP
+            // fallback).
+            commands::gateway::get_bootstrap,
             commands::effects::set_window_effect,
             // ADR-048 D6: Debug Protocol RPC relay (HTTP via Gateway)
             commands::debug::debug_rpc,

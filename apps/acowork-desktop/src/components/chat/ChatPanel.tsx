@@ -199,7 +199,7 @@ export function ChatPanel() {
   // Why ref callback instead of useEffect?
   //
   // ModelMenu and ReasoningEffortMenu are conditionally rendered:
-  //   - ModelMenu:     `availableModels.length > 1 && selectedAgent?.running`
+  //   - ModelMenu:     `availableModels.length > 0 && selectedAgent?.running`
   //   - ReasoningMenu: `selectedAgent?.running && currentReasoningEffort != null`
   //
   // On cold start the toolbar div itself may render before its
@@ -756,6 +756,16 @@ export function ChatPanel() {
   useEffect(() => {
     loadModels();
   }, [gatewayStatus, loadModels]);
+
+  // Vault keys changed elsewhere (Harness providers tab, onboarding,
+  // the inline model picker below) — `models-added` is the shared
+  // "keys saved" signal. Refresh the model list so newly added
+  // providers/models show up immediately without a remount.
+  useEffect(() => {
+    const handler = () => void loadModels();
+    window.addEventListener("models-added", handler);
+    return () => window.removeEventListener("models-added", handler);
+  }, [loadModels]);
 
 
   // Persist scroll state across top-level navigation.  AppLayout unmounts the
@@ -1653,31 +1663,24 @@ export function ChatPanel() {
     );
   }
 
-  // ── Agent not yet ready ──
-  // The Gateway only flips `ready=true` after the Runtime publishes
-  // `acowork/agents/{id}/ready = "true"` (see `mqtt/dispatch.rs`). Until
-  // then, every HTTP call to `/sessions/{sid}/messages` and friends 503s
-  // because the Runtime's HTTP server slots (session_metadata /
-  // session_config / memory_query / workspace_query) are still `None`.
-  // We render a spinner here so the user sees a clear "starting agent…
-  // please wait" instead of a confusing "Session 加载失败" flash that
-  // races the eventual retry. The wait is typically ~2–3s on first
-  // launch (Phase A→B→C) and is the cost of *not* sending requests
-  // before the runtime is ready.
-  if (selectedAgent.running && !selectedAgent.ready) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
-          <p className="mt-3 text-xs text-zinc-400 dark:text-zinc-500">
-            {t("chatPanel.startingAgent", { name: agentDisplayName })}
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   // ── Initializing session ──
+  // Bug B v3 fix: the previous "agent not yet ready" gate (rendering
+  // a "starting agent" spinner when `running && !ready`) has been
+  // removed. The `meta.ready` flag is pushed via MQTT retained and
+  // arrives asynchronously to Runtime HTTP readiness — gating the
+  // chat view on it caused the right pane to flash "starting…" for
+  // 2-3 seconds on every agent switch, with no progress signal. Now:
+  //   1. `selectAgent` (agentStore) drops the `ready` clause so it
+  //      fires `fetchLatestSession` + `openSession` regardless of
+  //      MQTT-retained readiness.
+  //   2. Every fetcher underneath the chat view (latest-session,
+  //      loadSession, memory, workspace list, file tree, …) now
+  //      routes through `with503Retry`, so a transient 503 during
+  //      the boot window recovers transparently.
+  //   3. The remaining "no session" gate below correctly shows a
+  //      spinner only when the session is genuinely not yet open —
+  //      not conflated with Runtime boot state.
+  //
   // The window between MQTT pushing `running` → true and `startAgentAndSyncUI`
   // finishing its atomic initSessionForAgent chain (fetchLatestSession +
   // fetchSessions + openSession (ADR-038: was `activateSession`, now
@@ -2310,8 +2313,12 @@ export function ChatPanel() {
           >
             {/* Left: feature buttons */}
             <div className="flex items-center gap-1 min-w-0 overflow-visible">
-              {/* Model switcher — only enabled when agent is running */}
-              {availableModels.length > 1 && selectedAgent?.running && (
+             {/* Model switcher — shown for any configured model(s); the
+                  button doubles as the current-model indicator (ADR:
+                  single-model setups still need to SEE which model is in
+                  use), plus the "Add Models" entry point. Only enabled
+                  when agent is running. */}
+              {availableModels.length > 0 && selectedAgent?.running && (
                 <ModelMenu
                   wrapperRef={modelBtnRef}
                   textHidden={textHidden.model}

@@ -65,6 +65,23 @@ pub struct VaultFacade {
     vault_dir: String,
 }
 
+/// Diagnostic helper: produce a `first_4...last_4` preview consistent with
+/// `runtime::providers::openai::send_streaming_request`. Lets us correlate
+/// the post-store, post-decrypt, post-publish, and runtime-seen byte
+/// ranges by eye (or by `grep` on the log files).
+///
+/// Short keys return `<N>` (matches the runtime's short-key branch).
+/// The preview NEVER leaks the full key — only the very first and very
+/// last 4 bytes of the input are reflected.
+fn preview_key(k: &str) -> String {
+    let len = k.len();
+    if len <= 8 {
+        format!("<{}>", len)
+    } else {
+        format!("{}...{}", &k[..4], &k[len - 4..])
+    }
+}
+
 impl VaultFacade {
     /// Create a new vault facade pointing at the given directory
     ///
@@ -98,6 +115,17 @@ impl VaultFacade {
         self.vault.is_unlocked()
     }
 
+    /// Lock the vault: zeroize the derived master key and drop the
+    /// in-memory provider-name cache.
+    ///
+    /// On-disk encrypted blobs are untouched — a later `unlock()` with
+    /// the same password restores access to everything previously
+    /// stored. Idempotent: locking an already-locked vault is a no-op.
+    pub fn lock(&mut self) {
+        self.vault.lock();
+        self.provider_names.clear();
+    }
+
     /// Get the vault directory path
     pub fn dir(&self) -> &std::path::Path {
         std::path::Path::new(&self.vault_dir)
@@ -108,6 +136,16 @@ impl VaultFacade {
     /// Stores only the API key. Provider configuration (base_url, models, etc.)
     /// is managed separately via provider_list.json.
     pub fn store_key(&mut self, provider: &str, api_key: &str) -> Result<(), GatewayError> {
+        // DIAG: log the post-serialisation byte range that is about to be
+        // encrypted and persisted. If this preview already looks wrong, the
+        // bug is upstream of the vault (HTTP handler, onboarding TS, etc.).
+        let in_preview = preview_key(api_key);
+        tracing::info!(
+            provider = %provider,
+            api_key_len = api_key.len(),
+            api_key_prefix = %in_preview,
+            "vault.store_key: serialising ProviderEntry before encryption"
+        );
         let entry = ProviderEntry {
             api_key: api_key.to_string(),
         };
@@ -137,11 +175,36 @@ impl VaultFacade {
             match self.vault.retrieve(candidate) {
                 Ok(secret) => {
                     let raw = secret.expose_secret();
+                    // DIAG: log the just-decrypted raw bytes BEFORE we try
+                    // to parse them. If this preview already looks wrong,
+                    // the bug is in the on-disk encryption / master-key
+                    // derivation (Argon2id salt, wrong password, etc.).
+                    tracing::info!(
+                        provider = %provider,
+                        candidate = %candidate,
+                        raw_len = raw.len(),
+                        raw_preview = %preview_key(raw),
+                        "vault.get_provider: decrypted raw bytes"
+                    );
                     // Try JSON format first (current)
                     if let Ok(entry) = serde_json::from_str::<ProviderEntry>(raw) {
+                        tracing::info!(
+                            provider = %provider,
+                            candidate = %candidate,
+                            api_key_len = entry.api_key.len(),
+                            api_key_prefix = %preview_key(&entry.api_key),
+                            "vault.get_provider: returning JSON-encoded entry"
+                        );
                         return Ok(entry);
                     }
                     // Legacy format: plain text API key
+                    tracing::warn!(
+                        provider = %provider,
+                        candidate = %candidate,
+                        raw_len = raw.len(),
+                        raw_preview = %preview_key(raw),
+                        "vault.get_provider: legacy plaintext fallback (non-JSON payload)"
+                    );
                     return Ok(ProviderEntry {
                         api_key: raw.to_string(),
                     });
@@ -301,6 +364,62 @@ impl VaultFacade {
     }
 }
 
+/// Unlock the vault and raise every readiness signal that depends on it.
+///
+/// ADR-059 Phase 5.4: this is the ONE implementation of the
+/// "unlock → mark vault ready → republish" sequence. The dev-mode
+/// auto-unlock task (cold start) and the HTTP `POST /api/vault/unlock`
+/// handler (post-relock recovery) both call it — the plan requires the
+/// relock path to reuse the cold-start code rather than duplicate it.
+///
+/// The Argon2id KDF is deliberately slow (~1 s), so the unlock itself
+/// runs on the blocking pool via `blocking_write`; the readiness
+/// transitions happen on the async side afterwards. On success the
+/// vault subsystem is marked Ready, a global-resources republish is
+/// triggered so Runtimes receive the now-decrypted keys, and the
+/// publisher ready barrier (cold-start only) is raised if still
+/// pending. On failure an `Err` is returned — callers decide whether
+/// to mark the subsystem Failed (dev-mode auto-unlock) or surface an
+/// HTTP error (lock/unlock API).
+pub async fn unlock_vault_and_mark_ready(
+    state: std::sync::Arc<tokio::sync::RwLock<crate::gateway::state::GatewayState>>,
+    handle: crate::bootstrap::SubsystemHandle,
+    trigger: Option<crate::mqtt::MqttPublisherTrigger>,
+    password: String,
+    detail: String,
+) -> Result<(), String> {
+    let state_for_kdf = state.clone();
+    let password_for_kdf = password.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        state_for_kdf
+            .blocking_write()
+            .vault
+            .unlock(&password_for_kdf)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            tracing::info!("Vault unlocked");
+            handle.mark_ready(Some(detail));
+            if let Some(ref t) = trigger {
+                t.trigger();
+            }
+            // Cold-start only: the publisher loop may still be waiting
+            // on its ready barrier; raising it now releases the first
+            // retained publish with populated `api_key` fields. On a
+            // later unlock (relock cycle) the handle is already ready
+            // and this is a no-op.
+            let gw = state.read().await;
+            if let Some(ref h) = gw.mqtt_publisher_handle {
+                h.mark_ready();
+            }
+            Ok(())
+        }
+        Ok(Err(e)) => Err(format!("Failed to unlock vault: {e}")),
+        Err(e) => Err(format!("Vault unlock task panicked: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +445,40 @@ mod tests {
         let mut vault = VaultFacade::new(&dir);
         vault.unlock("password123").unwrap();
         assert!(vault.is_unlocked());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_lock_clears_access_but_keeps_data() {
+        let dir = temp_vault_dir("lock_clear");
+        let mut vault = VaultFacade::new(&dir);
+        vault.unlock("password123").unwrap();
+        vault.store_key("openai", "sk-lock-key").unwrap();
+        assert!(vault.is_unlocked());
+
+        // Lock: master key zeroized, provider-name cache dropped.
+        vault.lock();
+        assert!(!vault.is_unlocked());
+        assert!(vault.get_key("openai").is_err());
+        assert!(vault.list_providers().is_empty());
+
+        // The same password restores access to the stored data.
+        vault.unlock("password123").unwrap();
+        assert!(vault.is_unlocked());
+        assert_eq!(vault.get_key("openai").unwrap(), "sk-lock-key");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vault_lock_is_idempotent() {
+        let dir = temp_vault_dir("lock_idem");
+        let mut vault = VaultFacade::new(&dir);
+        // Locking an already-locked (freshly constructed) vault is a
+        // no-op — the relock path must never panic on double lock.
+        vault.lock();
+        assert!(!vault.is_unlocked());
+        vault.lock();
+        assert!(!vault.is_unlocked());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

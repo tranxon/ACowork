@@ -38,6 +38,12 @@ message DataEnvelope {
     // this to populate `identity_context` for the compact model's
     // language hint and for general per-user preferences.
     AvailableUsers           available_users           = 15;
+    // ADR-059: Bootstrap capability-readiness snapshot. Single retained
+    // topic (`acowork/global/bootstrap`, QoS 1) that aggregates Gateway's
+    // internal subsystem readiness into a `phase` enum + `instance_id`
+    // + monotonic `version`. Field number 16 is occupied and will never
+    // be reused; subsequent global-snapshot messages start at 17.
+    BootstrapState           bootstrap_state           = 16;
 
     // ── Agent lifecycle (Runtime → subscribers, Retained) ──
     AgentStatus              agent_status              = 20;
@@ -97,6 +103,13 @@ message DataEnvelope {
     // QoS 1 non-retained.
     NodeEnroll               node_enroll               = 85;
     NodeEnrollResult         node_enroll_result        = 86;
+    // ADR-059: Node control-plane readiness (Node → Gateway, Retained).
+    // Topic: acowork/nodes/{node_id}/ready (QoS 1, retained). Node
+    // publishes it AFTER MQTT CONNECT succeeds AND every control
+    // subscription is confirmed; Gateway re-marks `node.{id}` as
+    // ready in the SubsystemReadinessRegistry on receipt. Field 87
+    // is occupied and will never be reused.
+    NodeReady                node_ready                = 87;
   }
 }
 
@@ -1346,4 +1359,99 @@ message NodeEnrollResult {
   /// Human-readable detail ("enrolled", "token consumed", conflict
   /// explanation, etc.).
   string message = 5;
+}
+
+// ── ADR-059: Bootstrap capability-readiness snapshot ─────────────────────
+
+/// Lifecycle phase of the Gateway's bootstrap, exposed via the single
+/// retained snapshot on `acowork/global/bootstrap`. Aggregates the
+/// readiness of every internal subsystem (vault, providers, MCPs,
+/// embedding, runtime, sidecars, etc.) into one observable value.
+///
+/// OCP boundary — every addition is a new phase value + a `phase_detail`
+/// string. Consumers MUST treat any unknown enum value as a transient
+/// `DEGRADED` and refuse to act on it.
+enum BootstrapPhase {
+  BOOTSTRAP_PHASE_UNSPECIFIED = 0;
+  /// Gateway is initialising subsystems; not yet accepting work.
+  BOOTSTRAP_PHASE_BOOTING = 1;
+  /// Every registered subsystem is ready. This is the steady state.
+  BOOTSTRAP_PHASE_READY = 2;
+  /// At least one subsystem is unhealthy but the Gateway can still
+  /// serve a reduced feature surface (e.g. vault locked but vault-less
+  /// requests still flow). Consumers should warn but proceed.
+  BOOTSTRAP_PHASE_DEGRADED = 3;
+  /// One or more critical subsystems have failed irrecoverably; the
+  /// Gateway is shutting itself down. Consumers MUST surface this and
+  /// refuse to queue work that depends on the Gateway.
+  BOOTSTRAP_PHASE_FAILED = 4;
+  /// Gateway is in graceful shutdown (SIGINT/SIGTERM received). The
+  /// retained snapshot is cleared on exit; transient consumers will
+  /// see `BOOTSTRAP_PHASE_UNSPECIFIED` once it disappears.
+  BOOTSTRAP_PHASE_SHUTTING_DOWN = 5;
+}
+
+/// Single retained snapshot of Gateway bootstrap state.
+///
+/// Topic: acowork/global/bootstrap (QoS 1, retained).
+///
+/// OCP boundary — `protocol_version`, `instance_id`, `version`, `phase`,
+/// `phase_detail`, and `issued_at_ms` are the ONLY fields on the wire.
+/// The registry deliberately does NOT carry per-subsystem detail; the
+/// Gateway exposes that through a separate, non-retained
+/// `GET /api/bootstrap/subsystems` endpoint so that schema growth there
+/// cannot break retained-snapshot consumers.
+///
+/// `version` is monotonically increasing per `instance_id`; a consumer
+/// that sees the same `instance_id` with a lower `version` MUST treat
+/// the older payload as stale. A consumer that sees a different
+/// `instance_id` MUST treat the previous one as a different Gateway
+/// (e.g. restart with retained-broker reset, second instance, etc.).
+message BootstrapState {
+  /// Protocol version of this BootstrapState envelope. Currently `1`.
+  /// Bump on incompatible wire-format changes.
+  uint32 protocol_version = 1;
+  /// Stable identifier of the Gateway instance that emitted this
+  /// snapshot (UUID v4 in lowercase hex). Generated fresh on every
+  /// Gateway process start so a retained re-delivery from a previous
+  /// instance is visibly distinct from a current one. Lets consumers
+  /// distinguish a fresh Gateway from a retained re-delivery of a
+  /// previous instance.
+  string instance_id = 2;
+  /// Monotonic counter, increments on every re-publish while the same
+  /// `instance_id` is alive. Consumers use it for stale-snapshot
+  /// detection.
+  uint64 version = 3;
+  /// Current lifecycle phase. See [`BootstrapPhase`].
+  BootstrapPhase phase = 4;
+  /// Free-form human-readable detail (e.g. "vault ready, 2/3 sidecars
+  /// up, embedding warming up"). Always present; empty string when
+  /// there is nothing to add. NOT for machine parsing.
+  string phase_detail = 5;
+  /// Wall-clock instant when this snapshot was emitted, in
+  /// milliseconds since the Unix epoch. Consumers use it together with
+  /// `version` to reject obviously stale retained re-deliveries.
+  uint64 issued_at_ms = 6;
+}
+
+// ── ADR-059: Node control-plane readiness (Node → Gateway) ───────────────
+
+/// Per-node control-plane readiness ack, published by a Node AFTER it
+/// (a) successfully connects to the Gateway MQTT broker AND
+/// (b) confirms every subscription it relies on for control-plane
+/// traffic. Retained at QoS 1 on `acowork/nodes/{node_id}/ready`.
+///
+/// The Gateway re-marks `node.{id}` as ready in the
+/// `SubsystemReadinessRegistry` on receipt. Until then, mutations
+/// routed to that node fail with `dependency_not_ready`.
+///
+/// OCP boundary — only `node_id` and `protocol_version` are carried.
+/// `control_gen` / generation counters belong on the per-command
+/// envelope (`NodeControlCommand`), not here.
+message NodeReady {
+  /// Stable Node identifier (matches `NodeInfo.node_id`).
+  string node_id = 1;
+  /// Protocol version of the Node control plane (mirrors
+  /// `NodeInfo.protocol_version`). Currently `1`.
+  uint32 protocol_version = 2;
 }

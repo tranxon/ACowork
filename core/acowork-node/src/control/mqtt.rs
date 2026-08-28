@@ -132,6 +132,7 @@ impl NodeMqttClient {
         port: u16,
         node_id: &str,
         credentials: SharedNodeMqttCredentials,
+        ready_topic: Option<String>,
         bootstrap: NodeMqttBootstrapCallback,
         message_callback: Option<NodeMqttMessageCallback>,
     ) -> Result<Self, NodeMqttClientError> {
@@ -164,6 +165,14 @@ impl NodeMqttClient {
         let task_credentials = Arc::clone(&credentials);
         let task_bootstrap = bootstrap;
         let task_callback = message_callback;
+        // ADR-059 §7.2: on any observed disconnect the poll task clears
+        // the retained NodeReady snapshot (empty payload = deleted) so
+        // the Gateway demotes this node back to not-ready even when the
+        // LWT misses (e.g. broker restart without the LWT firing).
+        // Best-effort: a hard network drop may queue the clear until
+        // the reconnect, where the bootstrap's fresh NodeReady publish
+        // follows in order — the Gateway converges on the newest state.
+        let task_ready_topic = ready_topic;
 
         let poll_task = tokio::spawn(async move {
             loop {
@@ -193,6 +202,13 @@ impl NodeMqttClient {
                                 }
                                 Ok(Event::Incoming(Incoming::Disconnect)) => {
                                     poll_state_tx.set(SessionState::Reconnecting);
+                                    if let Some(ref topic) = task_ready_topic {
+                                        let _ = task_shared_client
+                                            .lock()
+                                            .await
+                                            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+                                            .await;
+                                    }
                                 }
                                 Ok(_) => continue,
                                 Err(e) => {
@@ -205,6 +221,16 @@ impl NodeMqttClient {
                                         consecutive_failures,
                                         "Node MQTT event loop error"
                                     );
+
+                                    // ADR-059 §7.2: connection-level failure
+                                    // also clears the retained NodeReady.
+                                    if let Some(ref topic) = task_ready_topic {
+                                        let _ = task_shared_client
+                                            .lock()
+                                            .await
+                                            .publish(topic, QoS::AtLeastOnce, true, Vec::new())
+                                            .await;
+                                    }
 
                                     if class.is_fatal() {
                                         fatal_streak += 1;

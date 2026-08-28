@@ -22,14 +22,15 @@ use tokio::sync::{watch, Notify};
 
 use acowork_core::mqtt_proto::{
     self, AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableSearches,
-    AvailableUsers, DataEnvelope, EmbeddingModelRef, McpRef, ProviderModelRef, ProviderRef,
-    SearchRef, UserProfileRef,
+    AvailableUsers, DataEnvelope,
 };
-use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
-use crate::gateway::state::GatewayState;
 use crate::http::routes::SharedHttpState;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
+use crate::mqtt::global_resources_builders::{
+    build_available_embedding_models, build_available_mcps, build_available_providers,
+    build_available_searches, build_available_users,
+};
 
 /// MQTT topic constants for global resources (§3.1.1).
 mod topics {
@@ -334,296 +335,19 @@ impl LoopHelper {
     }
 }
 
-// ── Payload builders ───────────────────────────────────────────────────
-
-/// Build `AvailableProviders` from the GatewayState resource cache.
-///
-/// In Phase 1, "available" = all providers in the cache (the cache is
-/// rebuilt by HTTP handlers when providers change). In Phase 2+, the
-/// health-check loop will filter to only ready providers.
-fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
-    let cache = &gw.resource_cache.provider_list;
-    let providers: Vec<ProviderRef> = cache
-        .providers
-        .iter()
-        .map(|p| {
-            // Decrypt the provider's API key from the Gateway's Vault.
-            // Empty string when no key is configured (e.g. local Ollama).
-            // MQTT broker is localhost-only so it's safe to publish the
-            // decrypted key in the retained payload — see mqtt.md §3.1.1.
-            let api_key = gw
-                .vault
-                .get_provider(&p.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            ProviderRef {
-                id: p.id.clone(),
-                base_url: p.base_url.clone(),
-                protocol_type: map_protocol_type(&p.protocol_type).into(),
-                models: p
-                    .models
-                    .iter()
-                    .map(|m| {
-                        let (input_modalities, output_modalities) = m
-                            .capabilities
-                            .modalities
-                            .as_ref()
-                            .map(|moda| (moda.input.clone(), moda.output.clone()))
-                            .unwrap_or_default();
-                        ProviderModelRef {
-                            id: m.id.clone(),
-                            capabilities: Some(mqtt_proto::ModelCapabilities {
-                                context_window: m.capabilities.context_window,
-                                max_output_tokens: m.capabilities.max_output_tokens,
-                                input_modalities,
-                                output_modalities,
-                                supports_reasoning: m.capabilities.supports_reasoning,
-                                default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
-                            }),
-                            max_output_tokens_limit: m.max_output_tokens_limit,
-                        }
-                    })
-                    .collect(),
-                compact_model: p.compact_model.clone().unwrap_or_default(),
-                custom: p.custom,
-                api_key,
-            }
-        })
-        .collect();
-
-    AvailableProviders {
-        version: cache.version,
-        providers,
-        // ADR-056: forward the global default compact model so Runtime can
-        // resolve the distillation fallback chain without an extra round-trip.
-        // `None` (i.e. not set in `provider_list.json`) means "no global
-        // override" — Runtime falls back to provider.compact_model and chat.
-        default_compact_model: cache.default_compact_model.clone().map(|r| {
-            mqtt_proto::CompactModelRef {
-                provider_id: r.provider_id,
-                model_id: r.model_id,
-            }
-        }),
-    }
-}
-
-/// Build `AvailableMcps` from the GatewayState resource cache.
-///
-/// The `auth_token` is extracted from env vars and headers via
-/// `extract_api_key_from_mcp_config` — same logic that builds
-/// `mcp_key_vault` for gRPC AgentHello. Empty when no auth required.
-fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
-    let cache = &gw.resource_cache.mcp_list;
-    // MCP catalog is the source of truth for env/headers, not the
-    // resource_cache (which only stores server lists). Load it here.
-    let data_dir = gw
-        .config
-        .as_ref()
-        .map(|c| std::path::PathBuf::from(&c.data_dir))
-        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-    let catalog: Vec<acowork_core::protocol::McpServerConfigDef> = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir)
-        .ok()
-        .unwrap_or_default();
-    let servers: Vec<McpRef> = cache
-        .servers
-        .iter()
-        .map(|s| {
-            // Look up the catalog entry to extract env/headers for the token.
-            let auth_token = catalog
-                .iter()
-                .find(|c| c.name == s.id)
-                .and_then(crate::resource_cache::extract_api_key_from_mcp_config)
-                .unwrap_or_default();
-            McpRef {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                transport: map_mcp_transport(&s.transport).into(),
-                url: s.url.clone().unwrap_or_default(),
-                command: s.command.clone(),
-                args: s.args.clone(),
-                env: s.env.clone(),
-                headers: s.headers.clone(),
-                tool_timeout_secs: s.tool_timeout_secs.unwrap_or(0),
-                auth_token,
-            }
-        })
-        .collect();
-
-    AvailableMcps {
-        version: cache.version,
-        servers,
-    }
-}
-
-/// Build `AvailableSearches` from the GatewayState resource cache.
-///
-/// `api_key` is decrypted from the Gateway's Vault at PUBLISH time,
-/// mirroring the logic in `build_search_key_vault` for gRPC AgentHello.
-/// Empty when the search provider has no key configured.
-fn build_available_searches(gw: &GatewayState) -> AvailableSearches {
-    let cache = &gw.resource_cache.search_list;
-    let providers: Vec<SearchRef> = cache
-        .providers
-        .iter()
-        .map(|s| {
-            let api_key = gw
-                .vault
-                .get_search_key(&s.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            SearchRef {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                description: s.description.clone(),
-                requires_api_key: s.requires_api_key,
-                base_url: s.base_url.clone(),
-                api_key,
-            }
-        })
-        .collect();
-
-    AvailableSearches {
-        version: cache.version,
-        providers,
-    }
-}
-
-/// Build `AvailableEmbeddingModels` from the GatewayState resource cache
-/// + embed process state.
-fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingModels {
-    let cache = &gw.resource_cache.embedding_models;
-    let models: Vec<EmbeddingModelRef> = cache
-        .models
-        .iter()
-        .map(|m| EmbeddingModelRef {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            description: m.description.clone().unwrap_or_default(),
-            dimension: m.dimension as u32,
-            max_tokens: m.max_tokens as u32,
-            size_mb: m.size_mb,
-            languages: m.languages.clone(),
-            hf_repo: m.hf_repo.clone(),
-            onnx_file: m.onnx_file.clone(),
-            tokenizer_file: m.tokenizer_file.clone(),
-            bundled: m.bundled,
-            recommended: m.recommended,
-        })
-        .collect();
-
-    // Active model info from embed process state.
-    let (active_model_id, active_dimension, endpoint) = match &gw.embed_process {
-        Some(eps) if eps.ready => (
-            eps.active_model_id.clone().unwrap_or_default(),
-            eps.active_dimension.unwrap_or(0) as u32,
-            // ADR-055 D3: advertise host instead of hard-coded 127.0.0.1.
-            format!("http://{}:{}/v1", gw.advertise_host, eps.port),
-        ),
-        _ => (String::new(), 0, String::new()),
-    };
-
-    AvailableEmbeddingModels {
-        version: cache.version,
-        models,
-        active_model_id,
-        active_dimension,
-        endpoint,
-    }
-}
-
-/// ADR-042: Build `AvailableUsers` from the GatewayState user profile list.
-///
-/// Finds the user with `is_active == true` and serialises it into
-/// `UserProfileRef`. UI-only fields (avatar / builtin_avatar /
-/// created_at / updated_at / is_active) are omitted — Runtime never
-/// renders user profile UI. `custom` HashMap is serialised to JSON.
-fn build_available_users(gw: &GatewayState) -> AvailableUsers {
-    let list = &gw.resource_cache.user_profile_list;
-    let active = list.users.iter().find(|u| u.is_active).map(|u| {
-        let custom_json = serde_json::to_string(&u.custom).unwrap_or_else(|e| {
-            tracing::warn!(
-                user_id = %u.user_id,
-                error = %e,
-                "Failed to serialise UserProfile.custom to JSON; sending empty"
-            );
-            "{}".to_string()
-        });
-        UserProfileRef {
-            user_id: u.user_id.clone(),
-            display_name: u.display_name.clone(),
-            language: u.language.clone(),
-            timezone: u.timezone.clone(),
-            city: u.city.clone(),
-            country: u.country.clone(),
-            occupation: u.occupation.clone(),
-            communication_style: u.communication_style.clone(),
-            custom_json,
-        }
-    });
-
-    AvailableUsers {
-        version: list.version,
-        active_user: active,
-    }
-}
-
-// ── Enum mappers ───────────────────────────────────────────────────────
-
-fn map_protocol_type(pt: &ProtocolType) -> mqtt_proto::LlmProtocol {
-    match pt {
-        ProtocolType::OpenAI => mqtt_proto::LlmProtocol::Openai,
-        ProtocolType::Anthropic => mqtt_proto::LlmProtocol::Anthropic,
-        ProtocolType::Google => mqtt_proto::LlmProtocol::Google,
-        ProtocolType::Ollama => mqtt_proto::LlmProtocol::Ollama,
-    }
-}
-
-fn map_mcp_transport(t: &McpTransportDef) -> mqtt_proto::McpTransport {
-    match t {
-        McpTransportDef::Stdio => mqtt_proto::McpTransport::Stdio,
-        McpTransportDef::Http => mqtt_proto::McpTransport::Http,
-        McpTransportDef::Sse => mqtt_proto::McpTransport::Sse,
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────
+//
+// Payload builders (`build_available_*`) and enum mappers live in
+// `mqtt::global_resources_builders` and are tested there. Tests below
+// focus on the publisher's own wiring (broker, retained delivery, ready
+// barrier).
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_map_protocol_type() {
-        assert_eq!(
-            map_protocol_type(&ProtocolType::OpenAI),
-            mqtt_proto::LlmProtocol::Openai
-        );
-        assert_eq!(
-            map_protocol_type(&ProtocolType::Anthropic),
-            mqtt_proto::LlmProtocol::Anthropic
-        );
-    }
-
-    #[test]
-    fn test_map_mcp_transport() {
-        assert_eq!(
-            map_mcp_transport(&McpTransportDef::Stdio),
-            mqtt_proto::McpTransport::Stdio
-        );
-        assert_eq!(
-            map_mcp_transport(&McpTransportDef::Http),
-            mqtt_proto::McpTransport::Http
-        );
-    }
-
-    #[test]
-    fn test_build_available_providers_empty() {
-        let gw = GatewayState::new("/tmp/test-vault");
-        let payload = build_available_providers(&gw);
-        assert_eq!(payload.version, 0);
-        assert!(payload.providers.is_empty());
-    }
-
     #[tokio::test]
     async fn test_publisher_publishes_retained_snapshot() {
+        use crate::gateway::state::GatewayState;
         use crate::http::routes::SharedHttpState;
         use std::sync::Arc;
         use tokio::sync::RwLock;

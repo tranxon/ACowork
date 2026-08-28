@@ -85,7 +85,13 @@
       "installSelectedInstalling": "正在安装 {{name}}...",
       "fromFileTitle": "从 .agent 文件安装",
       "fromFileSubtitle": "从你的电脑上选择一个 .agent 安装包",
-      "waitingForNode": "正在等待本地节点上线...",
+      "preparing": "正在准备系统服务：{{detail}}...",
+      "waitingReady": "正在等待系统服务就绪...",
+      "opPending": "等待中",
+      "opSubmitted": "已提交 (op {{opId}})",
+      "opCompleted": "已完成",
+      "opFailed": "失败",
+      "installProgress": "安装进度 {{done}}/{{total}}",
       "complete": "完成 →",
       "back": "返回"
     }

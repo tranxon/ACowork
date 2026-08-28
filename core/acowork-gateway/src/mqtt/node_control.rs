@@ -188,16 +188,21 @@ impl NodeControlClient {
     /// the Gateway observes completion via the retained `installed`
     /// inventory entry (the command's NodeEvent reply still carries the
     /// `request_id` for diagnostics, but nothing blocks on it here).
+    ///
+    /// ADR-059 §6: `operation_id` is carried as the command's
+    /// `request_id` so the node's NodeEvent reply (same id) can be
+    /// correlated back to the tracked operation.
     pub async fn install_agent_by_url(
         &self,
         node_id: &str,
         agent_id: &str,
         package_url: &str,
         dev_mode: bool,
+        operation_id: &str,
     ) -> Result<(), NodeControlError> {
         let command = NodeControlCommand {
             node_id: node_id.to_string(),
-            request_id: Uuid::new_v4().to_string(),
+            request_id: operation_id.to_string(),
             command: Some(node_control_command::Command::Install(
                 acowork_core::mqtt_proto::NodeInstall {
                     agent_id: agent_id.to_string(),

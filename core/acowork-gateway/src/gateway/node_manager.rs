@@ -676,6 +676,7 @@ pub struct CliPackageDispatch<'a> {
     pub node_id: &'a str,
     pub registry_dir: &'a std::path::Path,
     pub advertise_host: &'a str,
+    pub http_host: &'a str,
     pub http_port: u16,
     pub dev_mode: bool,
 }
@@ -698,14 +699,35 @@ pub async fn install_agent_via_mqtt(
     let registry_path = dispatch.registry_dir.join(format!("{agent_id}.agent"));
     std::fs::copy(package_path, &registry_path).map_err(crate::error::GatewayError::Io)?;
 
+    // The download URL must be reachable from the target node: the
+    // loopback-bound local node dials the HTTP bind host, remote nodes
+    // the advertise host (ADR-055 D3).
+    let url_host = if dispatch.node_id == acowork_core::node::LOCAL_NODE_ID {
+        if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
+            "127.0.0.1"
+        } else {
+            dispatch.http_host
+        }
+    } else {
+        dispatch.advertise_host
+    };
     let url = format!(
-        "http://{}:{}/api/packages/{agent_id}/download",
-        dispatch.advertise_host, dispatch.http_port
+        "http://{url_host}:{}/api/packages/{agent_id}/download",
+        dispatch.http_port
     );
 
     let control = cli_control_client(dispatch.mqtt_host, dispatch.mqtt_port).await?;
+    // ADR-059 §6: the CLI dispatch has no operation store; a fresh
+    // operation id still gives the NodeEvent reply a correlation id.
+    let operation_id = acowork_core::operation::OperationId::new();
     control
-        .install_agent_by_url(dispatch.node_id, &agent_id, &url, dispatch.dev_mode)
+        .install_agent_by_url(
+            dispatch.node_id,
+            &agent_id,
+            &url,
+            dispatch.dev_mode,
+            operation_id.as_str(),
+        )
         .await
         .map_err(|e| crate::error::GatewayError::Lifecycle(e.to_string()))?;
 
@@ -732,9 +754,20 @@ pub async fn upgrade_agent_via_mqtt(
     let registry_path = dispatch.registry_dir.join(format!("{agent_id}.agent"));
     std::fs::copy(package_path, &registry_path).map_err(crate::error::GatewayError::Io)?;
 
+    // Same host selection as install: the local node dials the bind
+    // host, remote nodes the advertise host (ADR-055 D3).
+    let url_host = if dispatch.node_id == acowork_core::node::LOCAL_NODE_ID {
+        if dispatch.http_host == "0.0.0.0" || dispatch.http_host == "::" {
+            "127.0.0.1"
+        } else {
+            dispatch.http_host
+        }
+    } else {
+        dispatch.advertise_host
+    };
     let url = format!(
-        "http://{}:{}/api/packages/{agent_id}/download",
-        dispatch.advertise_host, dispatch.http_port
+        "http://{url_host}:{}/api/packages/{agent_id}/download",
+        dispatch.http_port
     );
 
     let control = cli_control_client(dispatch.mqtt_host, dispatch.mqtt_port).await?;

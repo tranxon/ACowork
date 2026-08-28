@@ -54,6 +54,18 @@ pub fn node_status_topic(node_id: &str) -> String {
     format!("acowork/nodes/{node_id}/status")
 }
 
+/// Topic: `acowork/nodes/{node_id}/ready` (DataEnvelope<NodeReady>,
+/// QoS 1 Retained — ADR-059 §7.2 Node control-plane readiness).
+///
+/// The Node publishes this AFTER MQTT CONNECT succeeds and every
+/// control subscription is confirmed; the Gateway re-marks
+/// `node.{node_id}` ready in its SubsystemReadinessRegistry on
+/// receipt. An empty retained payload clears the snapshot (Node
+/// shutdown / disconnect).
+pub fn node_ready_topic(node_id: &str) -> String {
+    format!("acowork/nodes/{node_id}/ready")
+}
+
 /// Topic: `acowork/nodes/{node_id}/info` (NodeInfo envelope, Retained).
 pub fn node_info_topic(node_id: &str) -> String {
     format!("acowork/nodes/{node_id}/info")

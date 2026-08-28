@@ -249,14 +249,29 @@ export interface CloneResponse {
 
 // ── Publish types ─────────────────────────────────────────────────────
 
-/** A single check item from publish prepare */
+/**
+ * A single check item from `POST /api/agents/{id}/publish/prepare`.
+ *
+ * Wire shape mirrors `acowork_node::package::publish::CheckItem` (Node
+ * is the source of truth — Gateway forwards the Node's `PrepareResult`
+ * JSON verbatim). Field names MUST stay in sync with the Node side:
+ * `name` and `detail` — not `field` / `message`. The earlier `field` /
+ * `message` shape was stale from a pre-ADR-055 revision where the
+ * Gateway itself implemented the checks; PublishWizard then read
+ * `item.field` / `item.message` and silently got `undefined`, painting
+ * every check item with the "error" red `XCircle` regardless of real
+ * status.
+ */
 export interface CheckItem {
-  field: string;
+  name: string;
   status: string;
-  message?: string;
+  detail?: string;
 }
 
-/** Publish prepare response */
+/**
+ * Response from `POST /api/agents/{id}/publish/prepare`. Mirrors the
+ * Node's `PrepareResult` shape forwarded by the Gateway.
+ */
 export interface PreparePublishResponse {
   checks: CheckItem[];
   warnings: string[];
@@ -1712,5 +1727,37 @@ export interface AvatarAssetEntry {
 export interface AvatarAssetsResponse {
   agent_id: string;
   assets: AvatarAssetEntry[];
+}
+
+/**
+ * ADR-059 §5.1 — Gateway bootstrap snapshot (`GET /api/bootstrap` and
+ * the retained `acowork/global/bootstrap` MQTT topic).
+ *
+ * `phase` is SCREAMING_SNAKE_CASE (`BOOTING` / `READY` / `DEGRADED` /
+ * `FAILED` / `SHUTTING_DOWN`). `version` is the resource version
+ * clients echo back via `expected_version` on mutation APIs.
+ */
+export interface BootstrapStateView {
+  protocol_version: number;
+  /** Fresh per Gateway process — changes on every restart. */
+  instance_id: string;
+  /** Resource version, increments on every readiness transition. */
+  version: number;
+  phase: string;
+  /** Human-readable subsystem-level diagnostic (e.g. "3/5 required ready"). */
+  phase_detail: string;
+  issued_at_ms: number;
+}
+
+/** ADR-059 §6 — install operation ack (`POST /api/agents/install`, HTTP 202). */
+export interface OperationAck {
+  operation_id: string;
+  /** snake_case: accepted / committed / running / completed / failed */
+  state: string;
+  resource_version?: number;
+  terminal_error?: {
+    code: string;
+    [key: string]: unknown;
+  };
 }
 

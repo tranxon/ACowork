@@ -37,8 +37,13 @@ import paho.mqtt.client as mqtt
 
 # ── Config ──────────────────────────────────────────────────────────────
 
-DEFAULT_HTTP_PORT = 19876
-DEFAULT_MQTT_PORT = 19875
+# Main instance ports. The defaults match the production gateway
+# (:19876 HTTP / :19875 MQTT) for `--no-start` reuse; when a real
+# gateway is already running on this machine, override via env so the
+# spawned test instance does not collide:
+#   SMOKE_HTTP_PORT=19832 SMOKE_MQTT_PORT=19831 python3 smoke_test.py
+DEFAULT_HTTP_PORT = int(os.environ.get("SMOKE_HTTP_PORT", "19876"))
+DEFAULT_MQTT_PORT = int(os.environ.get("SMOKE_MQTT_PORT", "19875"))
 # Auth suite instance: HTTP port must stay <= GATEWAY_HTTP_PORT_MAX (19878)
 # or the Gateway's find_available_port() range probe fails outright.
 AUTH_HTTP_PORT = 19786
@@ -354,12 +359,18 @@ class Gateway:
         env = {**os.environ, "ACOWORK_HOME": str(self.home),
                "ACOWORK_NODE_HOME": str(node_home)}
         started = time.monotonic()
+        # stderr=PIPE would deadlock the gateway: it emits ~MBs of logs in
+        # the first seconds, and with no reader the pipe buffer (64 KB)
+        # fills and blocks the logger, stalling the HTTP server and
+        # blowing the desktop 10s probe window. Redirect to a file so the
+        # gateway can start without backpressure (and we keep the log
+        # for debugging).
+        self.err_log = open(self.home / "gateway.err.log", "w", encoding="utf-8", errors="replace")
         self.proc = subprocess.Popen(
             [str(self.bin), "--daemon", "--log-level", "info", "--home", str(self.home)],
             env=env,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
+            stderr=self.err_log,
         )
         # TC-BOOT-01 contract: the Desktop probes /health every 300 ms for
         # ~10 s (wait_for_gateway_ready, 34 × 300ms) and then gives up with
@@ -389,6 +400,9 @@ class Gateway:
                 self.proc.kill()
             log("INFO", "Gateway stopped")
         self.proc = None
+        if getattr(self, "err_log", None):
+            self.err_log.close()
+            self.err_log = None
         # Reap orphaned children the gateway spawned (local node agent /
         # embed model runner). Gateway SIGTERM does not kill them, and a
         # stale node keeps holding the 19900 proxy port — the next run's
@@ -398,7 +412,7 @@ class Gateway:
             try:
                 out = subprocess.run(
                     ["pgrep", "-f", rf"{pat} .*{home_str}"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 ).stdout
             except Exception:
                 continue
@@ -416,7 +430,7 @@ class Gateway:
         try:
             out = subprocess.run(
                 ["pgrep", "-f", rf"acowork-lsp-relay .*--port {self.lsp_relay_port}"],
-                capture_output=True, text=True, timeout=5).stdout
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5).stdout
         except Exception:
             out = ""
         for pid in out.split():
@@ -431,7 +445,7 @@ class Gateway:
         return subprocess.run(
             [str(self.bin), *args],
             env={**os.environ, "ACOWORK_HOME": str(self.home)},
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
 
     @property
@@ -527,35 +541,31 @@ def wait_http_ok(base, timeout=TIMEOUT):
     return False
 
 
-def wait_node_online(http, base, node_id="local", timeout=TIMEOUT):
-    """Wait until the target node has enrolled (registry entry + online)."""
+def wait_bootstrap_ready(http, base, timeout=TIMEOUT):
+    """Readiness source of truth (ADR-059 §5.1): poll `GET /api/bootstrap`
+    until phase == READY. Replaces the old node-online + fixed-sleep
+    cold-start race (the install handler now answers 409
+    `dependency_not_ready` until `node.local` announces readiness)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            r = http.get(f"{base}/api/nodes")
-            if r.status_code == 200:
-                for n in r.json():
-                    # /api/nodes serializes with camelCase (serde rename_all).
-                    if n.get("nodeId") == node_id and n.get("online"):
-                        return True
+            r = http.get(f"{base}/api/bootstrap")
+            if r.status_code == 200 and r.json().get("phase") == "READY":
+                return True
         except Exception:
             pass
-        time.sleep(0.5)
+        time.sleep(0.3)
     return False
 
 
 def ensure_agent_installed(http, base):
     """Install the smoke agent package if not already present (async install)."""
-    # The install command is a fire-and-forget MQTT publish — a target node
-    # that has not enrolled yet would silently drop it (the Gateway answers
-    # 503 until the node registers, ADR-055 §3.2). Wait for the node first,
-    # then give the control-topic subscription a beat to settle: the node
-    # publishes its retained info BEFORE subscribing to the control filters
-    # (bootstrap order), so "online" alone can still miss the window.
-    if not wait_node_online(http, base):
-        fail(f"node 'local' never came online — install would be dropped")
+    # ADR-059: the install handler answers 409 `dependency_not_ready`
+    # until node.local announces readiness — wait on /api/bootstrap (the
+    # readiness source of truth) instead of the old node-online race.
+    if not wait_bootstrap_ready(http, base):
+        fail(f"bootstrap never reached READY — install would answer 409")
         return False
-    time.sleep(1)
     r = http.get(f"{base}/api/agents")
     if r.status_code == 200 and any(a.get("agent_id") == AGENT_ID for a in r.json()):
         ok(f"agent already installed: {AGENT_ID}")
@@ -566,6 +576,20 @@ def ensure_agent_installed(http, base):
     with open(AGENT_PACKAGE, "rb") as f:
         r = http.post(f"{base}/api/agents/install",
                       files={"package": (AGENT_PACKAGE.name, f, "application/octet-stream")})
+    if r.status_code == 409:
+        # dependency_not_ready — a retry-aware client backs off and
+        # retries until phase = READY (ADR-059 §6.3 retry_hint).
+        deadline = time.time() + TIMEOUT
+        while time.time() < deadline:
+            time.sleep(0.5)
+            with open(AGENT_PACKAGE, "rb") as f:
+                r = http.post(f"{base}/api/agents/install",
+                              files={"package": (AGENT_PACKAGE.name, f, "application/octet-stream")})
+            if r.status_code != 409:
+                break
+        if r.status_code == 409:
+            fail(f"agent install: dependency_not_ready persisted for {TIMEOUT}s")
+            return False
     if r.status_code not in (200, 201, 202):
         fail(f"agent install: HTTP {r.status_code} {r.text[:300]}")
         return False
@@ -1263,14 +1287,25 @@ def test_tc_settings_05_07_user(http, base):
         fail(f"user create: HTTP {r.status_code} {r.text[:200]}")
         return
     data = r.json()
-    if not isinstance(data.get("version"), int):
-        fail(f"create response missing int version: {data}")
+    # ADR-059 §6: POST /api/users returns an OperationAck
+    # {operation_id, state, resource_version} — no user envelope. The
+    # new user's id is resolved from the list endpoint instead.
+    if not isinstance(data.get("resource_version"), int):
+        fail(f"create response missing int resource_version: {data}")
         return
-    uid = data.get("user", {}).get("user_id")
+    r = http.get(f"{base}/api/users")
+    if r.status_code != 200:
+        fail(f"user list after create: HTTP {r.status_code} {r.text[:200]}")
+        return
+    uid = next(
+        (u.get("user_id") for u in r.json().get("users", [])
+         if u.get("display_name") == name),
+        None,
+    )
     if not uid:
-        fail(f"no user.user_id in response: {data}")
+        fail(f"created user {name!r} not found in list: {r.text[:300]}")
         return
-    ok(f"user created: {uid}")
+    ok(f"user created: {uid} (resource_version={data['resource_version']})")
 
     # PUT must return the same UserResponse envelope with the echoed user.
     r = http.put(f"{base}/api/users/{uid}", json={"display_name": f"{name}-renamed"})
@@ -1587,8 +1622,8 @@ def test_tc_auth_01_create_token(gw_bin, auth_home):
     print("\n── TC-AUTH-01: nodes token create ──")
     r = subprocess.run(
         [str(gw_bin), "nodes", "token", "create", "--ttl", "10m"],
-        env={**os.environ, "ACOWORK_HOME": auth_home},
-        capture_output=True, text=True, timeout=15,
+        env={**os.environ, "ACOWORK_HOME": str(auth_home)},
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
     )
     if r.returncode != 0:
         fail(f"nodes token create failed: {r.stderr[:300]}")
@@ -1727,6 +1762,7 @@ def run_auth_suite(gw_bin, node_bin, http):
         return
     agw = Gateway(gw_bin, auth_home, AUTH_HTTP_PORT, AUTH_MQTT_PORT, auth_enabled=True)
     if not agw.start():
+        agw.stop()
         return
     try:
         if not ensure_agent_installed(http, agw.base):
@@ -1770,6 +1806,7 @@ def run_recovery_suite(gw_bin, node_bin, http):
         "created_at": "2026-08-01T00:00:00Z",
     }))
     if not gw.start():
+        gw.stop()
         return
     try:
         # 1. The gateway store must converge with the node identity.
@@ -1850,6 +1887,9 @@ def main():
     if not args.no_start:
         gw = Gateway(gw_bin, home, DEFAULT_HTTP_PORT, DEFAULT_MQTT_PORT, auth_enabled=False)
         if not gw.start():
+            # Don't leave the half-started gateway behind — it would hold
+            # the test ports and break the next run.
+            gw.stop()
             sys.exit(1)
     else:
         log("INFO", "Using running Gateway instance (default ports)")

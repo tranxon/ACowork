@@ -17,6 +17,8 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
+use acowork_core::operation::{OperationId, OperationRecord, OperationState};
+use acowork_core::StructuredErrorBody;
 
 /// Global body-size cap applied at the root of the Gateway's
 /// merged router. See [`api_router`] for why we override axum's 2 MiB
@@ -55,6 +57,14 @@ pub struct AppState {
     /// snapshots). Used by handlers that route to node-local HTTP
     /// services (e.g. `/api/fs/browse?target={node_id}`, L7-1).
     pub node_registry: Option<crate::mqtt::SharedNodeRegistry>,
+    /// ADR-059 §7.2: subsystem readiness registry. Mutation handlers
+    /// that depend on a Node's control plane (e.g. `/api/agents/install`)
+    /// check `is_ready("node.{node_id}")` before dispatching.
+    pub bootstrap_registry: Option<crate::bootstrap::SharedSubsystemReadinessRegistry>,
+    /// ADR-059 §6.2: operation store — tracks every accepted mutation
+    /// (install / provider write / identity write) from `Accepted` to
+    /// a terminal state, keyed by `operation_id`.
+    pub operation_store: Option<crate::operation_store::SharedOperationStore>,
 }
 
 impl AppState {
@@ -73,6 +83,8 @@ impl AppState {
             agent_registry: None,
             node_control: None,
             node_registry: None,
+            bootstrap_registry: None,
+            operation_store: None,
         }
     }
 }
@@ -130,6 +142,15 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/api/status", get(system_status))
+        // ADR-059 Phase 1.3: readiness projection (liveness lives at
+        // `/health`). `GET /api/bootstrap` exposes the same aggregated
+        // snapshot as the retained MQTT topic `acowork/global/bootstrap`.
+        .merge(crate::http::bootstrap_api::bootstrap_routes())
+        // ADR-059 Phase 5.4: vault lock/unlock — the relock path must
+        // demote the vault subsystem (phase drops below READY) and the
+        // unlock path must restore it, reusing the cold-start unlock
+        // sequence (see vault_api.rs).
+        .merge(crate::http::vault_api::vault_routes())
         .merge(crate::http::agents::agent_routes())
         .merge(crate::http::chat::chat_routes())
         .merge(crate::http::provider_api::provider_routes())
@@ -145,6 +166,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
+        .merge(crate::http::global_resources_api::global_resources_routes())
         .merge(crate::http::proxy::proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
@@ -163,154 +185,36 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
 }
 
-// ── Health check ──────────────────────────────────────────────────────
+// ── Health check (liveness-only) ─────────────────────────────────────
 
-/// Overall health status
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HealthStatus {
-    /// All checks passed
-    Ok,
-    /// Some checks failed (system still functional)
-    Degraded,
-}
-
-/// Individual check result
+/// `GET /health` — liveness probe (no auth required).
+///
+/// ADR-059 Phase 1.3: this endpoint is STRICTLY liveness — it answers
+/// as soon as the HTTP server is up and says nothing about subsystem
+/// readiness (no checks, no ready flags). Consumers that need to know
+/// whether the Gateway is ready to accept dependent work must use
+/// `GET /api/bootstrap` and wait for `phase = READY`.
 #[derive(Debug, Serialize)]
-pub struct CheckResult {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// Health check response with dependency checks
-#[derive(Debug, Serialize)]
-pub struct HealthResponse {
+pub struct LivenessResponse {
     pub status: String,
     pub version: String,
-    pub checks: std::collections::HashMap<String, CheckResult>,
+    /// HTTP port this server listens on — the process identity half of
+    /// the liveness contract.
+    pub port: u16,
 }
 
-/// Minimum disk space for healthy operation (100 MB)
-const MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
-
-/// `GET /health` — health check (no auth required)
-///
-/// Checks critical dependencies and returns an aggregated status:
-/// - `"ok"` — all checks passed
-/// - `"degraded"` — some checks failed (gRPC unavailable, disk low)
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let mut checks = std::collections::HashMap::new();
-    let mut has_degraded = false;
-
-    // 1. IPC check — ADR-033: MQTT-based, always ok
-    checks.insert(
-        "ipc".to_string(),
-        CheckResult {
-            status: "ok".to_string(),
-            detail: Some("MQTT" .to_string()),
-        },
-    );
-
-    // 2. CronStore database check
-    {
-        let gw = state.gateway_state.read().await;
-        match &gw.cron_store {
-            Some(store) => {
-                match store.health_check() {
-                    Ok(()) => {
-                        checks.insert(
-                            "cron_store".to_string(),
-                            CheckResult {
-                                status: "ok".to_string(),
-                                detail: None,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        has_degraded = true; // Cron is non-critical
-                        checks.insert(
-                            "cron_store".to_string(),
-                            CheckResult {
-                                status: "unhealthy".to_string(),
-                                detail: Some(format!("Database error: {}", e)),
-                            },
-                        );
-                    }
-                }
-            }
-            None => {
-                has_degraded = true;
-                checks.insert(
-                    "cron_store".to_string(),
-                    CheckResult {
-                        status: "degraded".to_string(),
-                        detail: Some("CronStore not initialized".to_string()),
-                    },
-                );
-            }
-        }
-    }
-
-    // 4. Disk space check on data directory
-    {
-        let gw = state.gateway_state.read().await;
-        // Use the data directory for disk space check
-        let data_dir = gw
-            .config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.data_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-        match fs2::available_space(&data_dir) {
-            Ok(available) => {
-                if available < MIN_DISK_SPACE_BYTES {
-                    has_degraded = true;
-                    checks.insert(
-                        "disk".to_string(),
-                        CheckResult {
-                            status: "degraded".to_string(),
-                            detail: Some(format!(
-                                "Low disk space: {} MB available",
-                                available / (1024 * 1024)
-                            )),
-                        },
-                    );
-                } else {
-                    checks.insert(
-                        "disk".to_string(),
-                        CheckResult {
-                            status: "ok".to_string(),
-                            detail: Some(format!("{} MB available", available / (1024 * 1024))),
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                has_degraded = true;
-                checks.insert(
-                    "disk".to_string(),
-                    CheckResult {
-                        status: "degraded".to_string(),
-                        detail: Some(format!("Cannot check disk space: {}", e)),
-                    },
-                );
-            }
-        }
-    }
-
-    let overall = if has_degraded {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Ok
-    };
-
-    Json(HealthResponse {
-        status: match overall {
-            HealthStatus::Ok => "ok".to_string(),
-            HealthStatus::Degraded => "degraded".to_string(),
-        },
+/// `GET /health` — liveness check (no auth required)
+pub async fn health_check(State(state): State<AppState>) -> Json<LivenessResponse> {
+    let gw = state.gateway_state.read().await;
+    let port = gw
+        .config
+        .as_ref()
+        .map(|c| c.http.port)
+        .unwrap_or_else(crate::config::default_http_port);
+    Json(LivenessResponse {
+        status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        checks,
+        port,
     })
 }
 
@@ -388,11 +292,83 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
 
 // ── Error response helpers ────────────────────────────────────────────
 
+/// ADR-059 §7.3/§7.4 — unified mutation ack returned by every
+/// operation-bearing write API (`POST /api/providers`, `POST
+/// /api/users`, `POST /api/agents/install`, `POST /api/mcp-catalog`).
+///
+/// The ack only carries protocol-level fields (OCP §5.4.4): the
+/// operation id, its current state, the post-commit resource version,
+/// and the structured terminal error when the operation failed. No
+/// capability names / subsystem generations / process ids.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationAck {
+    pub operation_id: OperationId,
+    pub state: OperationState,
+    pub resource_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<StructuredErrorBody>,
+}
+
+impl OperationAck {
+    /// Build an ack from a tracked record (state + resource version
+    /// + terminal error mirrored from the record).
+    pub fn from_record(record: &OperationRecord) -> Self {
+        Self {
+            operation_id: record.operation_id.clone(),
+            state: record.state,
+            resource_version: record.resource_version,
+            terminal_error: record.terminal_error.clone(),
+        }
+    }
+}
+
+/// ADR-059 §7.3 — validate the mutation's `expected_version` against
+/// the Gateway's CURRENT bootstrap snapshot version.
+///
+/// The client reads `GET /api/bootstrap` before writing and echoes the
+/// snapshot's `version` back; a mismatch means the client's view is
+/// stale (typically a Gateway restart — the new instance's version
+/// counter restarts at 1, so any old-instance `expected_version` is
+/// rejected instead of being accepted against a fresh process).
+///
+/// Returns `Ok(())` on match, or a structured `409
+/// resource_version_conflict` carrying both version numbers.
+pub async fn check_expected_version(
+    state: &AppState,
+    expected_version: Option<u64>,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(expected) = expected_version else {
+        // No precondition — the mutation proceeds optimistically.
+        return Ok(());
+    };
+    let current = state
+        .gateway_state
+        .read()
+        .await
+        .bootstrap_orchestrator
+        .as_ref()
+        .map(|o| o.snapshot().version)
+        .unwrap_or(0);
+    if current != expected {
+        return Err(ApiError::conflict_structured(
+            StructuredErrorBody::resource_version_conflict(current, expected),
+        ));
+    }
+    Ok(())
+}
+
 /// Standard API error response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
     pub code: u16,
+    /// ADR-059 §6.3: structured protocol error body for mutation
+    /// APIs. Absent for plain HTTP-layer errors (existing clients are
+    /// unaffected); present for `dependency_not_ready` /
+    /// `resource_version_conflict` etc. so clients can retry without
+    /// parsing human-readable text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured: Option<StructuredErrorBody>,
 }
 
 impl ApiError {
@@ -402,6 +378,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 404,
+                structured: None,
             }),
         )
     }
@@ -412,6 +389,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 400,
+                structured: None,
             }),
         )
     }
@@ -426,6 +404,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 422,
+                structured: None,
             }),
         )
     }
@@ -436,6 +415,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 500,
+                structured: None,
             }),
         )
     }
@@ -446,6 +426,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 401,
+                structured: None,
             }),
         )
     }
@@ -456,6 +437,36 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 503,
+                structured: None,
+            }),
+        )
+    }
+
+    /// ADR-059 §2.3: conflict — the request depends on a resource that
+    /// is not ready yet (e.g. installing onto a Node whose control
+    /// plane has not announced `NodeReady`). The client should retry
+    /// once `GET /api/bootstrap` reports `phase = READY`.
+    pub fn conflict(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::CONFLICT,
+            Json(Self {
+                error: msg.to_string(),
+                code: 409,
+                structured: None,
+            }),
+        )
+    }
+
+    /// ADR-059 §6.3: structured conflict — HTTP 409 whose body carries
+    /// a protocol-level [`StructuredErrorBody`] (e.g.
+    /// `resource_version_conflict` with both version numbers).
+    pub fn conflict_structured(body: StructuredErrorBody) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::CONFLICT,
+            Json(Self {
+                error: format!("{:?}", body.code),
+                code: 409,
+                structured: Some(body),
             }),
         )
     }
@@ -487,9 +498,11 @@ mod tests {
     async fn test_health_check() {
         let state = test_app_state();
         let resp = health_check(State(state)).await;
-        assert_eq!(resp.status, "degraded"); // degraded because no session_mgr/stores
+        // Liveness-only contract (ADR-059 Phase 1.3): always "ok", no
+        // checks map, no readiness claims.
+        assert_eq!(resp.status, "ok");
         assert!(!resp.version.is_empty());
-        assert!(!resp.checks.is_empty());
+        assert!(resp.port > 0);
     }
 
     #[tokio::test]
@@ -555,6 +568,48 @@ mod tests {
     #[test]
     fn test_build_router() {
         let state = test_app_state();
+        let _router = build_router(state);
+    }
+
+    /// ADR-059 §6: the mutation ack carries exactly the protocol
+    /// fields (`operation_id` / `state` / `resource_version` /
+    /// `terminal_error`) — never internal capability names, subsystem
+    /// generations or process ids (OCP boundary, §5.4.4).
+    #[test]
+    fn operation_ack_carries_only_protocol_fields() {
+        let mut record = OperationRecord::new(3);
+        record.state = OperationState::Committed;
+        record.resource_version = Some(8);
+
+        let json = serde_json::to_value(OperationAck::from_record(&record)).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 3, "terminal_error omitted when None: {obj:?}");
+        assert_eq!(obj["state"], "committed");
+        assert_eq!(obj["resource_version"], 8);
+        assert_eq!(obj["operation_id"], record.operation_id.as_str());
+
+        // A failed ack carries the structured terminal error instead.
+        let mut failed = OperationRecord::new(3);
+        failed.state = OperationState::Failed;
+        failed.terminal_error = Some(StructuredErrorBody::dependency_not_ready(
+            Some("BOOTING".to_string()),
+            None,
+            500,
+        ));
+        let json = serde_json::to_value(OperationAck::from_record(&failed)).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj["state"], "failed");
+        assert_eq!(obj["terminal_error"]["code"], "dependency_not_ready");
+        assert_eq!(obj["terminal_error"]["current_phase"], "BOOTING");
+        // OCP: no internal fields leak into the ack's terminal_error.
+        assert!(obj["terminal_error"].get("operation_id").is_none());
+        assert!(obj["terminal_error"].get("current_version").is_none());
+    }
+
+    #[test]
+    fn test_build_router_with_operation_store() {
+        let mut state = test_app_state();
+        state.operation_store = Some(crate::operation_store::OperationStore::new_shared());
         let _router = build_router(state);
     }
 }

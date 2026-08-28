@@ -17,8 +17,13 @@ pub(crate) mod agent_init;
 pub(crate) mod context;
 pub(crate) mod debug_enable;
 pub(crate) mod gateway_loop;
+pub(crate) mod global_resources_pull;
 pub(crate) mod session_init;
 pub(crate) mod subsystems;
+
+// Re-export the active-pull helper so Phase A can call it without
+// importing the full sub-module path.
+pub(crate) use global_resources_pull::pull_global_resources_from_gateway;
 
 // Re-export the phase entry points for convenience.
 pub(crate) use agent_init::phase_a_init_agent;

@@ -16,11 +16,11 @@ use prost::Message;
 use tauri::Emitter;
 
 use acowork_core::mqtt_proto::{
-    self, ControlCommand, DataEnvelope,
+    self, BootstrapState, ControlCommand, DataEnvelope,
     control_command, data_envelope, session_message,
 };
 use crate::mqtt_client::{DesktopMqttClient, MqttMessage, MqttStatus};
-use crate::state::AppState;
+use crate::state::{AppState, BootstrapStateView};
 use acowork_core::defaults;
 
 /// Connect to the MQTT broker and start receiving events.
@@ -77,6 +77,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
     // structured flat-JSON events to the React frontend.
     // Also emits raw "mqtt-event" for debugging.
     let app_handle = app.clone();
+    // ADR-059: the bootstrap snapshot cache lives in AppState; the
+    // callback is synchronous (Fn(MqttMessage)), so updates go through
+    // `try_write` — a lost write is harmless because the retained
+    // snapshot is re-delivered on every (re)connect and on each
+    // orchestrator version bump.
+    let bootstrap_state = state.bootstrap_state.clone();
     let on_message = move |msg: MqttMessage| {
         // Always emit raw event for debugging
         let raw_payload = serde_json::json!({
@@ -111,6 +117,41 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 let _ = app_handle.emit("agent-event", event);
                 return;
             }
+        }
+
+        // ── ADR-059: Gateway bootstrap snapshot ──
+        //
+        // The Gateway publishes its aggregated `BootstrapState` (proto,
+        // NOT a DataEnvelope) as a retained QoS-1 message on
+        // `acowork/global/bootstrap`. Every push — including retained
+        // re-delivery after a (re)connect — replaces the cached snapshot
+        // in AppState so `get_bootstrap()` returns the freshest data
+        // without an HTTP roundtrip. Also re-emitted on the
+        // `bootstrap-state` Tauri channel for real-time UI updates.
+        if msg.topic == "acowork/global/bootstrap" {
+            match BootstrapState::decode(&msg.payload[..]) {
+                Ok(state_proto) => {
+                    let view = BootstrapStateView::from_proto(&state_proto);
+                    tracing::debug!(
+                        "[MQTT] bootstrap snapshot received phase={} version={} instance_id={}",
+                        view.phase,
+                        view.version,
+                        view.instance_id
+                    );
+                    if let Ok(mut cache) = bootstrap_state.try_write() {
+                        *cache = Some(view.clone());
+                    }
+                    let _ = app_handle.emit("bootstrap-state", view);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[MQTT] bootstrap payload decode failed ({} bytes): {}",
+                        msg.payload.len(),
+                        e
+                    );
+                }
+            }
+            return; // Not a DataEnvelope; do not fall through
         }
 
         // Try to decode as DataEnvelope protobuf

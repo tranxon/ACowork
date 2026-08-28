@@ -235,6 +235,7 @@ impl Cli {
         // URL (all before config moves into Gateway::new).
         let registry_dir = config.package_registry_dir();
         let advertise_host = crate::config::resolve_advertise_host(&config);
+        let http_host = config.http.host.clone();
         let http_port = config.http.port;
         let dev_mode = config.dev_mode;
         // ADR-055 Phase 5a: data dir is needed by `nodes token create`
@@ -254,6 +255,7 @@ impl Cli {
                     node_id: &node,
                     registry_dir: &registry_dir,
                     advertise_host: &advertise_host,
+                    http_host: &http_host,
                     http_port,
                     dev_mode,
                 };
@@ -285,6 +287,7 @@ impl Cli {
                     node_id: &node,
                     registry_dir: &registry_dir,
                     advertise_host: &advertise_host,
+                    http_host: &http_host,
                     http_port,
                     dev_mode,
                 };

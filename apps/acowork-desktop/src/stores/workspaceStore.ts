@@ -4,6 +4,7 @@ import { useSettingsStore } from "./settingsStore";
 import { useChatStore } from "./chatStore";
 import { DEFAULT_GATEWAY_URL, isGatewayLocal } from "../lib/config";
 import { log } from "../lib/logger";
+import { with503Retry } from "../lib/httpRetry";
 import { useFileTreeStore } from "./fileTree/fileTreeStore";
 import { treeKey, isReadyNode } from "./fileTree/types";
 
@@ -165,31 +166,59 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   loading: false,
   locateRequest: null,
 
-  fetchWorkspaces: async (agentId: string) => {
-    const seq = ++requestSeq;
-    set({ loading: true });
-    try {
-      const baseUrl = getGatewayUrl();
-      const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces`);
-      if (!resp.ok) {
-        log.error("[WorkspaceStore] fetchWorkspaces failed:", resp.status, resp.statusText);
-        set({ loading: false });
-        return;
-      }
-      const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
-      const workspaces = data.workspaces || [];
-      // Discard stale response if a newer request has been issued
-      if (seq !== requestSeq) return;
-      set({
-        workspaces,
-        loading: false,
-      });
-    } catch (e) {
-      log.error("[WorkspaceStore] fetchWorkspaces error:", e);
-      if (seq !== requestSeq) return;
+  /**
+ * Fetch the workspace list for an agent. 503 retries (honouring the
+ * Gateway's `Retry-After` header) are handled by `with503Retry` —
+ * see `lib/httpRetry.ts` for the policy and §4.13 of
+ * docs/zh/protocols/http.md for the wire contract.
+ *
+ * The store owns the retry loop so any UI element invoking
+ * `fetchWorkspaces(agentId)` benefits — see `WorkspaceSelector` and
+ * the empty-state render path.
+ *
+ * Why a background loop rather than a caller-level retry: the caller
+ * is a React effect with a finite mount lifetime; the store outlives
+ * any individual component, so a 503 during the first paint can be
+ * recovered even after the caller has unmounted (e.g. user closes the
+ * selector dropdown while the fetch is in flight).
+ */
+fetchWorkspaces: async (agentId: string) => {
+  const seq = ++requestSeq;
+  set({ loading: true });
+  try {
+    const baseUrl = getGatewayUrl();
+    const resp = await with503Retry(
+      () => fetch(`${baseUrl}/api/agents/${agentId}/workspaces`),
+      { tag: `WorkspaceStore.fetchWorkspaces(${agentId})`, logger: log },
+    );
+    // A newer request may have superseded us while we waited on the
+    // retry loop — drop the result so the winner's data wins.
+    if (seq !== requestSeq) return;
+    if (resp.status === 503) {
+      // All retries exhausted; with503Retry returned the last 503.
+      log.error(`[WorkspaceStore] fetchWorkspaces(${agentId}) still 503 after retries`);
       set({ loading: false });
+      return;
     }
-  },
+    if (!resp.ok) {
+      log.error(`[WorkspaceStore] fetchWorkspaces failed:`, resp.status, resp.statusText);
+      set({ loading: false });
+      return;
+    }
+    const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
+    const workspaces = data.workspaces || [];
+    // Discard stale response if a newer request has been issued
+    if (seq !== requestSeq) return;
+    set({
+      workspaces,
+      loading: false,
+    });
+  } catch (e) {
+    log.error(`[WorkspaceStore] fetchWorkspaces error:`, e);
+    if (seq !== requestSeq) return;
+    set({ loading: false });
+  }
+},
 
   setSessionWorkspace: async (agentId: string, sessionId: string, workspaceId: string) => {
     log.debug("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });

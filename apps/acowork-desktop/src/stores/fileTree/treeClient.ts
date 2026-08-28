@@ -12,6 +12,8 @@
  */
 
 import type { TreeResponse } from "./types";
+import { with503Retry } from "../../lib/httpRetry";
+import { log } from "../../lib/logger";
 
 /**
  * Injected by the consumer. In production this is `globalThis.fetch`;
@@ -38,6 +40,14 @@ export interface TreeClientOptions {
  * NOT bound once at construction time. This matters for tests that use
  * `vi.stubGlobal("fetch", ...)` after the client was created — a
  * one-time bind would permanently lose the stub.
+ *
+ * The fetcher is wrapped in `with503Retry` so transient 503 responses
+ * (Runtime port not yet registered in Gateway's reverse proxy) recover
+ * transparently. The cache layer stays transport-agnostic — this is
+ * the right boundary because:
+ *   - SWR / dedup / abort semantics live in treeCache (no retry)
+ *   - Retry-After / SHUTTING_DOWN / budget exhaustion live in
+ *     httpRetry.with503Retry (no cache concerns)
  */
 export function createTreeClient(opts: TreeClientOptions): (a: string, w: string, p: string) => (signal: AbortSignal) => Promise<TreeResponse> {
   return (agentId, workspaceId, relPath) => async (signal) => {
@@ -50,10 +60,15 @@ export function createTreeClient(opts: TreeClientOptions): (a: string, w: string
     const url = `${opts.gatewayUrl()}/api/agents/${agentId}/workspaces/tree${qs ? `?${qs}` : ""}`;
 
     const f = opts.fetch ?? globalThis.fetch;
-    const resp = await f(url, { signal });
+    const resp = await with503Retry(
+      (sig) => f(url, { signal: sig ?? signal }),
+      { tag: `TreeClient.fetchTree(${agentId})`, logger: log, signal },
+    );
     if (!resp.ok) {
       // Throw an Error carrying `status` so treeCache.classifyError
-      // can map it into our `TreeError` union.
+      // can map it into our `TreeError` union. Even after all retries
+      // a 503 is surfaced as `http:503` so the UI can distinguish it
+      // from "no workspaces configured" (an empty entries array).
       const err = new Error(`fetchTree ${resp.status} ${resp.statusText}`) as Error & {
         status: number;
         statusText: string;

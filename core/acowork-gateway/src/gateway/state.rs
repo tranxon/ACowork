@@ -218,6 +218,37 @@ pub struct GatewayState {
     /// local-node ready task to coordinate the barrier. `None` when
     /// MQTT is disabled.
     pub mqtt_publisher_handle: Option<crate::mqtt::MqttPublisherHandle>,
+    /// ADR-059: stable identifier of this Gateway instance.
+    ///
+    /// UUID v4 lowercase hex, generated fresh on every Gateway process
+    /// start (NOT persisted across restarts — see ADR-059 §5.1:
+    /// "重启后换发"). Published as `BootstrapState.instance_id` (and
+    /// surfaced via `GET /api/bootstrap`) so clients can distinguish
+    /// a fresh Gateway from a retained re-delivery of a previous
+    /// instance.
+    ///
+    /// Initialised to `String::new()` by [`GatewayState::new`] and
+    /// overwritten by [`Self::set_instance_id`] during `Gateway::new`
+    /// before the state is wrapped in a `SharedState`.
+    pub instance_id: String,
+    /// ADR-059: bootstrap orchestrator (Phase 1.2 wires this in).
+    ///
+    /// `None` during very early construction; set once during
+    /// `Gateway::run` after the subsystem registry is built. Read by
+    /// the MQTT BootstrapPublisher (Phase 1.1) and the HTTP
+    /// `/api/bootstrap` handler (Phase 1.3) to expose the aggregated
+    /// readiness snapshot.
+    pub bootstrap_orchestrator:
+        Option<std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>>,
+    /// ADR-059 Phase 5.4: readiness handle for the `vault` subsystem.
+    ///
+    /// Registered during `Gateway::run` alongside the other bootstrap
+    /// subsystems; stored here so the HTTP vault lock/unlock handlers
+    /// can demote (`mark_booting` on user lock) and restore
+    /// (`mark_ready` on unlock) the vault's readiness without holding
+    /// a reference to the bootstrap registry itself. `None` before
+    /// registration.
+    pub vault_readiness_handle: Option<crate::bootstrap::SubsystemHandle>,
 }
 
 impl GatewayState {
@@ -241,7 +272,43 @@ impl GatewayState {
             mqtt_broker_auth: None,
             advertise_host: "127.0.0.1".to_string(),
             mqtt_publisher_handle: None,
+            instance_id: String::new(),
+            bootstrap_orchestrator: None,
+            vault_readiness_handle: None,
         }
+    }
+
+    /// ADR-059: assign the Gateway's stable instance id.
+    ///
+    /// Called once during `Gateway::new` after the instance id is
+    /// loaded (or freshly generated) from the data dir. The id is then
+    /// used by the bootstrap orchestrator and by the MQTT/HTTP
+    /// projections. Idempotent: a second call logs a warning and does
+    /// NOT overwrite the existing id (mutating it mid-run would
+    /// invalidate every already-published snapshot's `instance_id`).
+    pub fn set_instance_id(&mut self, id: String) {
+        if self.instance_id.is_empty() {
+            self.instance_id = id;
+        } else {
+            tracing::warn!(
+                current = %self.instance_id,
+                ignored = %id,
+                "GatewayState::set_instance_id called twice — keeping the first id"
+            );
+        }
+    }
+
+    /// ADR-059: attach the bootstrap orchestrator (Phase 1.2).
+    ///
+    /// Called once after the subsystem registry is built and the
+    /// orchestrator is constructed. Subsequent calls replace the
+    /// orchestrator; in normal Gateway operation this should only
+    /// happen at construction time.
+    pub fn set_bootstrap_orchestrator(
+        &mut self,
+        orchestrator: std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>,
+    ) {
+        self.bootstrap_orchestrator = Some(orchestrator);
     }
 
     /// Check if an agent is installed
@@ -484,6 +551,36 @@ mod tests {
 
         state.remove_running("com.example.weather");
         assert!(!state.is_running("com.example.weather"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_instance_id_default_is_empty() {
+        let dir = temp_vault_dir("instance-id-default");
+        let state = GatewayState::new(&dir);
+        assert!(state.instance_id.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_instance_id_assigns() {
+        let dir = temp_vault_dir("instance-id-set");
+        let mut state = GatewayState::new(&dir);
+        state.set_instance_id("instance-A".to_string());
+        assert_eq!(state.instance_id, "instance-A");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_instance_id_is_idempotent() {
+        let dir = temp_vault_dir("instance-id-idempotent");
+        let mut state = GatewayState::new(&dir);
+        state.set_instance_id("instance-A".to_string());
+        // Second call must NOT overwrite — mutating the id mid-run
+        // would invalidate every already-published snapshot's
+        // instance_id.
+        state.set_instance_id("instance-B".to_string());
+        assert_eq!(state.instance_id, "instance-A");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

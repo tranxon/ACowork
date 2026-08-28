@@ -18,6 +18,7 @@ use acowork_core::protocol::ProtocolType;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::AgentBootContext;
+use crate::startup::pull_global_resources_from_gateway;
 
 /// Phase A: initialize all per-agent (cross-session) resources.
 ///
@@ -380,6 +381,48 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 search_update_rx = Some(search_update_chan_rx);
                 lsps_update_rx = Some(lsps_update_chan_rx);
 
+                // Bug B fix (active pull, v3): after the MQTT client
+                // has connected and the AvailableResourceCache has been
+                // wired into the event loop, actively request the
+                // Gateway's current global-resource snapshot via
+                // `GET /api/global-resources`. This recovers from the
+                // retained-delivery race where the Gateway published an
+                // empty snapshot before vault unlock, and the corrected
+                // snapshot is therefore never re-delivered to an
+                // already-subscribed Runtime.
+                //
+                // The pull function BLOCKS until either (a) success,
+                // (b) the Gateway returns a SHUTTING_DOWN sentinel, or
+                // (c) the PULL_MAX_DURATION wall-clock deadline elapses.
+                // Phase A therefore cannot publish `ready=true` until
+                // the pull loop has finished — the session_task that
+                // runs in Phase B will then find a fully-populated
+                // `AvailableResourceCache` (or, on deadline, fall back
+                // to whatever MQTT retained has delivered). See
+                // `startup/global_resources_pull.rs` for the full
+                // retry semantics and the "never poisons the cache"
+                // guarantee on 503.
+                let pull_ok = pull_global_resources_from_gateway(
+                    config,
+                    available_cache
+                        .as_ref()
+                        .expect("available_cache initialised above"),
+                )
+                .await;
+                if pull_ok {
+                    tracing::info!(
+                        agent_id = %loaded.manifest.agent_id,
+                        "Active pull of /api/global-resources completed; \
+                         session_init will see a populated AvailableResourceCache"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent_id = %loaded.manifest.agent_id,
+                        "Active pull of /api/global-resources did not complete before deadline; \
+                         session_init will fall back to whatever the MQTT retained path delivered"
+                    );
+                }
+
                 // Publish `ready=true` as soon as Phase A completes — HTTP server
                 // is listening and `http_port` is already announced, so the
                 // Gateway can proxy `/workspaces`, `/workspaces/tree` and the
@@ -704,8 +747,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // construct an `HttpRagProvider` from the manifest `RagToolConfig`
     // and register the `rag_query` tool. The LLM invokes this tool
     // on-demand when it decides external knowledge is needed (tool-based
-    // RAG, not automatic pre-retrieval merge - see ADR-051 §4.1.4 H
-    // design变更).
+    // RAG, not automatic pre-retrieval merge — see ADR-051 §4.1.4 H).
     //
     // Auth resolution: the manifest `auth_ref` (e.g., "vault:rag_key")
     // is resolved from the `provider_key_vault` populated by the MQTT

@@ -505,7 +505,12 @@ export function AddProviderFlow({
             {step === "add" && (
               <button
                 onClick={handleAdd}
-                disabled={(needsApiKey(selectedProvider) ? !newKey.trim() : false) || testing}
+                // Do NOT disable on a missing API key: a greyed-out button
+                // with no feedback made users believe selecting a provider
+                // was enough (model never saved). handleAdd already guards
+                // the key and surfaces `pleaseEnterApiKey` inline — keep
+                // the button enabled so that hint can fire.
+                disabled={testing}
                 className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-zinc-800 hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
               >
                 {testing ? t("harness.saving") : t("harness.save")}

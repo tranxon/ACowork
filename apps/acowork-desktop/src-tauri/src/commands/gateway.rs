@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use crate::state::{AppState, GatewayMode};
+use crate::state::{AppState, BootstrapStateView, GatewayMode};
 use acowork_core::defaults;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -115,37 +115,101 @@ pub async fn get_gateway_config(
     })
 }
 
-/// Spawn the local Gateway process and wait for it to become ready.
+/// Spawn the local Gateway process and wait for bootstrap READY.
 ///
 /// This is the ONLY place local Gateway is spawned. It is called from the
 /// frontend (SplashScreen init) after `set_gateway_config`, so we know:
 ///   - The mode is `local` (otherwise this is an error)
 ///   - The `GatewayClient.base_url` points at the local default
 ///
-/// Returns once `/health` responds on the configured base URL (max ~10s).
+/// ADR-059: returns once the Gateway's bootstrap snapshot reaches
+/// `phase=READY` (max ~30s) — one wait covers liveness AND subsystem
+/// readiness (vault / mqtt / node.local / system_agent / publisher).
+/// On timeout a structured `dependency_not_ready` is returned; the old
+/// `/health` poll is gone (liveness-only endpoint, §1.3).
 #[tauri::command]
 pub async fn init_local_gateway(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<String, String> {
+) -> Result<String, DependencyNotReady> {
     {
         let m = state.gateway_mode.read().await;
         if *m != GatewayMode::Local {
-            return Err(format!(
+            return Err(DependencyNotReady::install_failed(format!(
                 "init_local_gateway called in {:?} mode; refusing to spawn local process",
                 *m
-            ));
+            )));
         }
     }
 
-    spawn_gateway(&state, &app_handle).await?;
+    spawn_gateway(&state, &app_handle)
+        .await
+        .map_err(DependencyNotReady::install_failed)?;
 
     // Determine the URL to poll. In local mode this is always the
     // shared default constant, but we still read it from the client to
     // honour any future override.
     let base_url = state.gateway.read().await.base_url().to_string();
-    wait_for_gateway_ready(&base_url).await?;
+    let client = bootstrap_probe_client()?;
+    wait_for_bootstrap_ready(&client, &base_url, BOOTSTRAP_TIMEOUT_SECS).await?;
     Ok(base_url)
+}
+
+/// Time budget for waiting on the Gateway bootstrap phase (seconds).
+/// Shared by every command that gates on bootstrap READY.
+const BOOTSTRAP_TIMEOUT_SECS: u64 = 30;
+
+/// HTTP client used to poll `/api/bootstrap` (short per-request timeout;
+/// the poll loop in [`wait_for_bootstrap_ready`] retries every 500 ms).
+fn bootstrap_probe_client() -> Result<reqwest::Client, DependencyNotReady> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| {
+            DependencyNotReady::install_failed(format!("Failed to build HTTP client: {}", e))
+        })
+}
+
+/// Structured error: a prerequisite of `ensure_system_agent` (or another
+/// bootstrap-dependent command) was not satisfied.
+///
+/// Serialised as-is into the Tauri `Err` payload, so the frontend can
+/// branch on `error_code` instead of string-matching (ADR-059 §7).
+#[derive(Debug, Serialize)]
+pub struct DependencyNotReady {
+    /// `"dependency_not_ready"` (bootstrap never reached READY) or
+    /// `"install_failed"` (internal install error, kept for parity).
+    pub error_code: String,
+    /// What was not ready, e.g. `"gateway.bootstrap"`, `"com.acowork.system"`.
+    pub dependency: String,
+    /// Bootstrap phase observed at failure time (empty for install errors).
+    pub phase: String,
+    /// Human-readable detail for the log / diagnostics.
+    pub detail: String,
+    /// Timeout budget that elapsed (seconds).
+    pub timeout_secs: u64,
+}
+
+impl DependencyNotReady {
+    fn not_ready(dependency: &str, phase: &str, detail: String, timeout_secs: u64) -> Self {
+        Self {
+            error_code: "dependency_not_ready".to_string(),
+            dependency: dependency.to_string(),
+            phase: phase.to_string(),
+            detail,
+            timeout_secs,
+        }
+    }
+
+    fn install_failed(detail: String) -> Self {
+        Self {
+            error_code: "install_failed".to_string(),
+            dependency: SYSTEM_AGENT_ID.to_string(),
+            phase: String::new(),
+            detail,
+            timeout_secs: 0,
+        }
+    }
 }
 
 /// System Agent ID — always bundled with Desktop App.
@@ -157,11 +221,16 @@ pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
 /// directly after `set_gateway_config` (remote mode, where the Gateway
 /// is presumed already running). Uses `state.gateway.base_url` so it
 /// targets whichever Gateway the user has configured.
+///
+/// ADR-059: the old "poll /health then sleep" heuristic is replaced by
+/// waiting for the bootstrap phase `READY` (readiness source of truth).
+/// `node.local` readiness is part of the bootstrap snapshot (Phase 2),
+/// so the separate `wait_for_node_online` step is gone.
 #[tauri::command]
 pub async fn ensure_system_agent(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<(), DependencyNotReady> {
     use tokio::time::{Duration, sleep};
 
     // Resolve URL from AppState (single source of truth)
@@ -170,48 +239,22 @@ pub async fn ensure_system_agent(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        .map_err(|e| {
+            DependencyNotReady::install_failed(format!("Failed to build HTTP client: {}", e))
+        })?;
 
-    // Wait for Gateway to be reachable (max ~15s)
-    for i in 0..30 {
-        if client
-            .get(format!("{}/health", gateway_url))
-            .send()
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        sleep(Duration::from_millis(500)).await;
-        if i % 6 == 0 {
-            tracing::debug!(
-                "[SYS-AGENT] Waiting for Gateway at {} to be ready...",
-                gateway_url
-            );
-        }
-    }
-
-    // ── Fix 2: wait for node 'local' to be enrolled before attempting install
-    // ────────────────────────────────────────────────────────────
-    // The local Node Agent spawn is asynchronous (`acowork-node.exe`) and
-    // typically finishes enrolling within ~3 s. The Gateway's install-agent
-    // path answers HTTP 503 "Node 'local' has never enrolled" until the
-    // node's retained `acowork/nodes/local/status` is online. We poll
-    // `/api/nodes` (the same path `smoke_test.py::wait_node_online` uses)
-    // for up to 30 s and warn loudly on timeout — the InstallAgentStep
-    // retry loop on the frontend still catches install 503s.
-    //
-    // See `desktop-onboarding-bugfix_154b7ff7.md` §Fix 2.
-    match wait_for_node_online(&client, &gateway_url, "local", 30).await {
-        Ok(()) => {
-            tracing::info!("[SYS-AGENT] node 'local' is online, proceeding to install");
-        }
-        Err(e) => {
-            tracing::warn!(
-                "[SYS-AGENT] {} — install call may 503; InstallAgentStep retry loop will recover",
-                e
-            );
-        }
+    // ADR-059: wait for the Gateway's bootstrap phase to reach READY
+    // (30 s, configurable). Covers both process startup (liveness) and
+    // subsystem readiness (vault / mqtt / node.local / system_agent /
+    // publisher) in one bounded wait. DEGRADED is tolerated with a
+    // warning (optional subsystem failure, e.g. local embed); FAILED /
+    // SHUTTING_DOWN fail fast.
+    if let Err(e) = wait_for_bootstrap_ready(&client, &gateway_url, BOOTSTRAP_TIMEOUT_SECS).await {
+        tracing::warn!(
+            "[SYS-AGENT] bootstrap not ready: {:?} — install deferred",
+            e
+        );
+        return Err(e);
     }
 
     // Check if System Agent is already installed
@@ -231,7 +274,7 @@ pub async fn ensure_system_agent(
     let resource_dir = app_handle
         .path()
         .resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+        .map_err(|e| DependencyNotReady::install_failed(format!("Failed to get resource dir: {}", e)))?;
     let system_agent_package = resource_dir
         .join("agent-packages")
         .join("com.acowork.system.agent");
@@ -249,16 +292,17 @@ pub async fn ensure_system_agent(
         system_agent_package
     );
 
-    // Fix 2: bounded retry loop for the install POST. Most failures during
-    // onboarding are node-online races answered with HTTP 503. We retry up
-    // to 5 times at 1.5 s intervals, so an install that races node enrollment
-    // has a comfortable window to succeed without bothering the user.
+    // Bounded retry loop for the install POST. Most failures during
+    // onboarding are races that answer non-2xx; we retry up to 5 times
+    // at 1.5 s intervals so a transient failure has a comfortable window
+    // to succeed without bothering the user.
     //
-    // OnboardingFlow's InstallAgentStep performs its own higher-level retry
-    // when this function returns `Err(...)` — this internal loop handles the
-    // common case where the eventual node does come online in time.
+    // OnboardingFlow's InstallAgentStep performs its own higher-level
+    // retry when this function returns `Err(...)` — this internal loop
+    // handles the common case where the eventual node does come online
+    // in time.
     let package_bytes = std::fs::read(&system_agent_package)
-        .map_err(|e| format!("Failed to read System Agent package: {}", e))?;
+        .map_err(|e| DependencyNotReady::install_failed(format!("Failed to read System Agent package: {}", e)))?;
     const INSTALL_MAX_ATTEMPTS: usize = 5;
     let mut attempt: usize = 0;
     loop {
@@ -269,7 +313,7 @@ pub async fn ensure_system_agent(
                 reqwest::multipart::Part::bytes(package_bytes.clone())
                     .file_name("com.acowork.system.agent")
                     .mime_str("application/octet-stream")
-                    .map_err(|e| format!("Invalid package mime: {}", e))?,
+                    .map_err(|e| DependencyNotReady::install_failed(format!("Invalid package mime: {}", e)))?,
             )
             .text("dev_mode", "true");
 
@@ -311,73 +355,147 @@ pub async fn ensure_system_agent(
                 "[SYS-AGENT] Install exhausted {} attempts — returning error so InstallAgentStep can retry",
                 INSTALL_MAX_ATTEMPTS
             );
-            return Err(format!(
-                "System Agent install did not succeed after {} attempts; \
-                 node 'local' may still be enrolling",
+            return Err(DependencyNotReady::install_failed(format!(
+                "System Agent install did not succeed after {} attempts",
                 INSTALL_MAX_ATTEMPTS
-            ));
+            )));
         }
         sleep(Duration::from_millis(1500)).await;
     }
 }
 
-/// Wait for the local Node Agent to be enrolled (`online=true` in
-/// `GET /api/nodes`).
+/// Return the latest Gateway bootstrap snapshot.
 ///
-/// Mirrors `dev/e2e_frontend_smoke/smoke_test.py::wait_node_online`.
-/// The response body is serialised with camelCase (serde rename_all),
-/// so we look up `nodeId` / `online` keys.
+/// Priority:
+/// 1. `AppState.bootstrap_state` — kept fresh by the MQTT bootstrap
+///    handler (`acowork/global/bootstrap` retained topic, ADR-059);
+/// 2. one-shot `GET /api/bootstrap` when the cache is empty (MQTT not
+///    connected yet) — result is cached for subsequent calls.
+#[tauri::command]
+pub async fn get_bootstrap(
+    state: tauri::State<'_, AppState>,
+) -> Result<BootstrapStateView, String> {
+    // Cache hit: MQTT retained re-delivery already gave us the snapshot.
+    if let Some(view) = state.bootstrap_state.read().await.clone() {
+        tracing::debug!(
+            "[BOOTSTRAP] get_bootstrap cache hit phase={} version={}",
+            view.phase,
+            view.version
+        );
+        return Ok(view);
+    }
+
+    // Cache miss: pull once over HTTP and cache the result.
+    let base_url = state.gateway.read().await.base_url().to_string();
+    tracing::debug!("[BOOTSTRAP] get_bootstrap cache miss — HTTP fallback to {}", base_url);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+    let resp = client
+        .get(format!("{}/api/bootstrap", base_url))
+        .send()
+        .await
+        .map_err(|e| format!("GET /api/bootstrap failed: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GET /api/bootstrap returned HTTP {}",
+            resp.status()
+        ));
+    }
+    let view: BootstrapStateView = resp
+        .json()
+        .await
+        .map_err(|e| format!("GET /api/bootstrap parse error: {}", e))?;
+    tracing::debug!(
+        "[BOOTSTRAP] get_bootstrap HTTP fallback OK phase={} version={}",
+        view.phase,
+        view.version
+    );
+    *state.bootstrap_state.write().await = Some(view.clone());
+    Ok(view)
+}
+
+/// Wait for the Gateway's bootstrap phase to reach `READY`.
 ///
-/// Returns `Ok(())` on success, `Err(msg)` if the timeout elapses.
-/// Never panics on transport errors — those are treated as "not yet
-/// online" and the loop continues.
-async fn wait_for_node_online(
+/// Polls `GET /api/bootstrap` — the readiness source of truth
+/// (ADR-059 §5.1) — every 500 ms until:
+/// - `READY` → `Ok(snapshot)` — every required subsystem is up;
+/// - `DEGRADED` → `Ok(snapshot)` with a warning — optional subsystems
+///   failed but the Gateway still serves its feature surface;
+/// - `FAILED` / `SHUTTING_DOWN` → immediate `Err` — do not burn the
+///   remaining timeout on a dead Gateway;
+/// - the timeout elapses → `Err(DependencyNotReady)`.
+///
+/// Replaces the old "poll /health + fixed sleep" + `wait_for_node_online`
+/// steps: subsystem readiness (vault / mqtt / node.local / system_agent /
+/// publisher) is aggregated into the phase, so one wait covers what the
+/// two heuristics approximated.
+async fn wait_for_bootstrap_ready(
     client: &reqwest::Client,
     gateway_url: &str,
-    node_id: &str,
     timeout_secs: u64,
-) -> Result<(), String> {
-    use tokio::time::{Duration, sleep};
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+) -> Result<BootstrapStateView, DependencyNotReady> {
+    use tokio::time::{sleep, Duration};
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last: Option<BootstrapStateView> = None;
     while std::time::Instant::now() < deadline {
-        match client.get(format!("{}/api/nodes", gateway_url)).send().await {
+        match client
+            .get(format!("{}/api/bootstrap", gateway_url))
+            .send()
+            .await
+        {
             Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Vec<serde_json::Value>>().await {
-                    Ok(nodes) => {
-                        for n in &nodes {
-                            let matches_node = n
-                                .get("nodeId")
-                                .and_then(|v| v.as_str())
-                                == Some(node_id);
-                            let is_online = n
-                                .get("online")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-                            if matches_node && is_online {
-                                return Ok(());
-                            }
+                match resp.json::<BootstrapStateView>().await {
+                    Ok(view) => match view.phase.as_str() {
+                        "READY" => {
+                            tracing::info!("[BOOTSTRAP] Gateway READY (v{})", view.version);
+                            return Ok(view);
                         }
-                    }
+                        "DEGRADED" => {
+                            tracing::warn!(
+                                "[BOOTSTRAP] Gateway DEGRADED ({}), proceeding",
+                                view.phase_detail
+                            );
+                            return Ok(view);
+                        }
+                        "FAILED" | "SHUTTING_DOWN" => {
+                            return Err(DependencyNotReady::not_ready(
+                                "gateway.bootstrap",
+                                &view.phase,
+                                format!("Gateway {}: {}", view.phase, view.phase_detail),
+                                timeout_secs,
+                            ));
+                        }
+                        _ => {
+                            last = Some(view);
+                        }
+                    },
                     Err(e) => {
-                        tracing::debug!("[NODE-READY] /api/nodes parse error: {}", e);
+                        tracing::debug!("[BOOTSTRAP] /api/bootstrap parse error: {}", e);
                     }
                 }
             }
             Ok(resp) => {
+                // 404: pre-ADR-059 Gateway without /api/bootstrap — keep
+                // polling until the timeout so the error message below is
+                // accurate about what happened.
                 tracing::debug!(
-                    "[NODE-READY] /api/nodes returned HTTP {}",
+                    "[BOOTSTRAP] /api/bootstrap returned HTTP {}",
                     resp.status()
                 );
             }
             Err(e) => {
-                tracing::debug!("[NODE-READY] /api/nodes request error: {}", e);
+                tracing::debug!("[BOOTSTRAP] /api/bootstrap request error: {}", e);
             }
         }
         sleep(Duration::from_millis(500)).await;
     }
-    Err(format!(
-        "Node '{}' did not come online within {}s",
-        node_id, timeout_secs
+    Err(DependencyNotReady::not_ready(
+        "gateway.bootstrap",
+        last.as_ref().map(|v| v.phase.as_str()).unwrap_or("unknown"),
+        format!("Gateway did not reach phase READY within {}s", timeout_secs),
+        timeout_secs,
     ))
 }
 
@@ -385,23 +503,30 @@ async fn wait_for_node_online(
 ///
 /// Refuses in remote mode. Use [`init_local_gateway`] on first launch
 /// instead — this entry point is only for manual restart.
+///
+/// ADR-059: waits for bootstrap `phase=READY` (same wait as
+/// [`init_local_gateway`]); never polls `/health` for readiness.
 #[tauri::command]
 pub async fn start_local_gateway(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<(), DependencyNotReady> {
     {
         let m = state.gateway_mode.read().await;
         if *m != GatewayMode::Local {
-            return Err(format!(
+            return Err(DependencyNotReady::install_failed(format!(
                 "start_local_gateway called in {:?} mode; refusing to spawn",
                 *m
-            ));
+            )));
         }
     }
-    spawn_gateway(&state, &app_handle).await?;
+    spawn_gateway(&state, &app_handle)
+        .await
+        .map_err(DependencyNotReady::install_failed)?;
     let base_url = state.gateway.read().await.base_url().to_string();
-    wait_for_gateway_ready(&base_url).await
+    let client = bootstrap_probe_client()?;
+    wait_for_bootstrap_ready(&client, &base_url, BOOTSTRAP_TIMEOUT_SECS).await?;
+    Ok(())
 }
 
 /// Spawn the Gateway process without waiting for readiness.
@@ -479,7 +604,18 @@ pub async fn spawn_gateway(state: &AppState, app_handle: &tauri::AppHandle) -> R
         .env(
             "ACOWORK_LSP_CONFIG_DIR",
             resource_dir.to_string_lossy().to_string(),
-        );
+        )
+        // Pin the advertise host to loopback (ADR-055 D3). The Gateway's
+        // HTTP API listens only on `config.http.host` (127.0.0.1 by
+        // default), and the local node downloads .agent packages from
+        // `http://{advertise_host}:{port}/api/packages/...`. When
+        // advertise_host is left unset the Gateway auto-detects a LAN IP
+        // (resolve_advertise_host), which a loopback-only listener cannot
+        // serve — every install then fails with connection refused and
+        // onboarding stalls on "waiting" states. Remote nodes are
+        // unaffected: they keep using the gateway's own resolved
+        // advertise host when configured.
+        .env("ACOWORK_GATEWAY_ADVERTISE_HOST", "127.0.0.1");
     // Suppress the pop-up Windows Terminal / conhost window. The Gateway
     // is a console-subsystem binary, so when spawned from a non-console
     // parent (the Tauri WebView2 host), Windows otherwise allocates a new
@@ -722,67 +858,6 @@ pub fn find_gateway_binary(app_handle: tauri::AppHandle) -> Result<std::path::Pa
     ))
 }
 
-/// Wait for Gateway health endpoint to become ready.
-///
-/// `base_url` must come from `AppState.gateway.base_url` so it matches
-/// what HTTP commands will use (local default or remote URL).
-async fn wait_for_gateway_ready(base_url: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
-
-    let health_url = format!("{}/health", base_url);
-
-    // Track the last error so the final timeout message points at the
-    // real cause (send error / non-2xx / DNS / TLS / etc.) instead of
-    // leaving the operator with a bare "did not respond".
-    let mut last_err: Option<String> = None;
-
-    // Poll for up to 10 seconds (34 * 300ms)
-    for i in 0..34 {
-        match client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("Gateway is ready at {}", base_url);
-                return Ok(());
-            }
-            Ok(resp) => {
-                let msg = format!("HTTP {}", resp.status());
-                last_err = Some(msg.clone());
-                // First failure only — keeps the log readable while
-                // still pinning down the cause.
-                if i == 0 {
-                    tracing::warn!(
-                        "Gateway {} probe returned non-success: {}",
-                        base_url,
-                        msg
-                    );
-                }
-            }
-            Err(e) => {
-                let msg = format!("send error: {e}");
-                last_err = Some(msg.clone());
-                if i == 0 {
-                    tracing::warn!(
-                        "Gateway {} probe send failed: {e:?}",
-                        base_url
-                    );
-                }
-            }
-        }
-        if i % 5 == 0 {
-            tracing::debug!("Waiting for Gateway at {} to be ready...", base_url);
-        }
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
-
-    Err(format!(
-        "Gateway at {} did not become ready within 10 seconds (last: {})",
-        base_url,
-        last_err.as_deref().unwrap_or("unknown")
-    ))
-}
-
 /// One-shot health probe used inside `spawn_gateway` to detect a Gateway
 /// already listening on the default port (e.g. orphaned by a previous
 /// crash). Returns `true` as soon as `/health` responds once; returns
@@ -823,6 +898,26 @@ fn child_output_is_alive(child: &std::process::Child) -> bool {
     child.id() > 0
 }
 
+/// Resolve the PIDs of processes listening on a TCP port (Windows
+/// `netstat -ano`, the only built-in way to map port → PID).
+#[cfg(target_os = "windows")]
+fn pids_listening_on(port: u16) -> Vec<u32> {
+    let Ok(output) = std::process::Command::new("netstat").args(["-ano"]).output() else {
+        tracing::warn!("netstat failed — cannot resolve PID for port {}", port);
+        return Vec::new();
+    };
+    let needle = format!(":{} ", port);
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            if !line.contains("LISTENING") || !line.contains(&needle) {
+                return None;
+            }
+            line.split_whitespace().last()?.parse().ok()
+        })
+        .collect()
+}
+
 /// Kill any stale local Gateway process left from a previous Desktop App run.
 ///
 /// This is only safe to call when we KNOW we're in local mode (and therefore
@@ -833,19 +928,31 @@ fn child_output_is_alive(child: &std::process::Child) -> bool {
 fn kill_stale_gateway_process() {
     #[cfg(target_os = "windows")]
     {
-        // Use `taskkill` to find and kill acowork-gateway processes.
-        // /FI "PID ne <ours>" is not reliable here since we don't track
-        // the old PID. Instead, just kill all acowork-gateway processes
-        // — our own child won't exist yet at this point in the flow.
-        let output = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", "acowork-gateway.exe"])
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
-                tracing::info!("Killed stale Gateway process from previous run");
-            }
-            _ => {
-                // No stale process found — this is the normal case
+        // Kill only the process(es) actually holding the Gateway HTTP
+        // port — never `taskkill /IM acowork-gateway.exe`, which would
+        // also kill a healthy Gateway started outside Tauri that we are
+        // about to reuse (the reachability probe already returned false,
+        // so anything on the port here is genuinely stale).
+        let stale_pids = pids_listening_on(defaults::GATEWAY_HTTP_PORT);
+        if stale_pids.is_empty() {
+            return;
+        }
+        tracing::info!(
+            pids = ?stale_pids,
+            "Killing stale Gateway process(es) holding port {}",
+            defaults::GATEWAY_HTTP_PORT
+        );
+        for pid in stale_pids {
+            let output = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("Killed stale Gateway process (pid {}) from previous run", pid);
+                }
+                _ => {
+                    tracing::warn!("Failed to kill stale Gateway process (pid {})", pid);
+                }
             }
         }
     }

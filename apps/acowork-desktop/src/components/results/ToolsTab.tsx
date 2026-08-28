@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useMcpStore } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
+import { with503Retry } from "../../lib/httpRetry";
+import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { Switch } from "../common/Switch";
@@ -47,9 +49,17 @@ export function ToolsTab() {
 
     // Tools, MCP servers, search providers — fetch once from merged /tools endpoint.
     // ADR-034 Phase 5: Replaces 3 separate calls (config, mcp-servers, search-providers).
+    // Bug B v3 fix: the merged `/tools` endpoint proxies through the
+    // Runtime and 503s during the boot window. `with503Retry` rides out
+    // the transient 503 so the Results/Tools panel does not have to
+    // gate on `meta.ready` — same root-cause as `fetchWorkspaces` /
+    // `fetchTree` / `fetchNodes` / `fetchLatestSession`.
     (async () => {
       try {
-        const resp = await fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/tools`);
+        const resp = await with503Retry(
+          () => fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/tools`),
+          { tag: `ToolsTab.fetchTools(${selectedAgentId})`, logger: log },
+        );
         if (resp.ok && !cancelled) {
           const data = await resp.json();
           // tools — builtin tools list

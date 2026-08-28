@@ -113,6 +113,12 @@ pub(crate) async fn start_http_server(
     agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
     node_control: Option<crate::mqtt::node_control::NodeControlClient>,
     node_registry: Option<crate::mqtt::SharedNodeRegistry>,
+    // ADR-059 §2.3: subsystem readiness registry — mutation handlers
+    // gate on Node readiness before dispatching install commands.
+    bootstrap_registry: Option<crate::bootstrap::SharedSubsystemReadinessRegistry>,
+    // ADR-059 §6.2: operation store — mutation handlers open records
+    // here and the dispatch layer transitions them.
+    operation_store: Option<crate::operation_store::SharedOperationStore>,
     // ADR-055 Phase 5a: HttpAuth is created by the caller so the MQTT
     // broker CONNECT handler can share the same token (Desktop MQTT
     // password). Its `enabled` flag may be `http.auth_enabled ||
@@ -140,6 +146,8 @@ pub(crate) async fn start_http_server(
     app_state.agent_registry = agent_registry;
     app_state.node_control = node_control;
     app_state.node_registry = node_registry;
+    app_state.bootstrap_registry = bootstrap_registry;
+    app_state.operation_store = operation_store;
 
     // Clean up stale pidfile from a previous run (if any). This is purely
     // for housekeeping — mutual exclusion is handled by port probing below.

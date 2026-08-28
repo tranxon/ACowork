@@ -9,6 +9,7 @@ import { useChatStore } from "./chatStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
 import { log } from "../lib/logger";
+import { with503Retry } from "../lib/httpRetry";
 
 /** System Agent ID — always auto-started by Gateway */
 export const SYSTEM_AGENT_ID = "com.acowork.system";
@@ -434,24 +435,39 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // the fileTreeStore doc comment promised ("called on workspace
     // switch"); the session/workspace switch paths route through
     // selectAgent as well, so a single abort here covers them.
-    useFileTreeStore.getState().abortAll();
+    //
+    // `abortAll(id)` KEEPS the newly-selected agent's own in-flight
+    // fetches alive — a blanket abort would cancel the tree fetch the
+    // UI is currently showing, dropping the node back to `idle` with
+    // no re-fetch scheduled (agent home stuck on "Loading…" forever
+    // after the first fetchAgents completes and re-selects the same
+    // agent, which fires on every 30s list poll).
+    useFileTreeStore.getState().abortAll(id);
 
     // Guard: business endpoints (fetchLatestSession → openSession →
     // fetchSessionState) all 503 against an unregistered Runtime.
     // Unstarted agents are a legitimate UI state — the user picks the
     // Start button (or double-clicks the list item) to launch them, and
     // `startAgentAndSyncUI` atomically bootstraps the session there.
-    // Probing here would only produce a 503 + console error for an
-    // expected, user-driven transition.
+    //
+    // Bug B v3 fix: the ready flag is intentionally NOT part of this
+    // gate. It is pushed via MQTT retained and arrives asynchronously
+    // to Runtime HTTP readiness. Previously, a selectAgent that landed
+    // before the MQTT event could never re-fire even after the Runtime
+    // port was up — the gate had latched false. Now we gate only on
+    // `running` (the user-driven start transition) and let
+    // `fetchLatestSession`/`openSession` ride out transient 503s via
+    // `with503Retry` (see lib/httpRetry.ts).
     //
     // ADR-038: `switchSession` was removed; UI-bound session activation
     // now flows through `chatStore.openSession`, which sends the
     // `open_session` MQTT command and reloads messages atomically.
     //
-    // Same gate used by ChatPanel's mount effect ("if (!running || !ready)
-    // return") so the two paths can never drift out of sync.
+    // Same gate used by ChatPanel's mount effect ("if (!running) return")
+    // — ready is no longer required because the with503Retry loop in
+    // the data fetchers handles transient 503s during the boot window.
     const meta = get().agents[id]?.meta;
-    if (!meta?.running || !meta?.ready) return;
+    if (!meta?.running) return;
 
     // 原子化：选 agent 时加载 latest session 并激活。
     // openSession 内部会调后端 open_session (拉起 Closed 状态到 Active)、
@@ -689,8 +705,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
    *  or the agent is not connected. */
   fetchLatestSession: async (agentId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/latest-session`,
+      // Bug B v3 fix: this endpoint proxies through the Runtime and
+      // 503s during the window between Gateway discovering the agent
+      // and the Runtime HTTP port being registered in the reverse
+      // proxy. `with503Retry` honours the Gateway's Retry-After
+      // header so a transient 503 at session-switch time recovers
+      // transparently without the UI having to retry manually.
+      const resp = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/latest-session`),
+        { tag: `AgentStore.fetchLatestSession(${agentId})`, logger: log },
       );
       if (!resp.ok) return null;
       const data = (await resp.json()) as {
@@ -705,7 +728,8 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // `null` → sleep animation). Only running agents reach this branch.
       set((state) => patchAgent(state, agentId, { sessionTitle: title ?? "" }));
       return { session_id: data.session_id, title };
-    } catch {
+    } catch (e) {
+      log.error(`[AgentStore] fetchLatestSession(${agentId}) failed:`, e);
       return null;
     }
   },

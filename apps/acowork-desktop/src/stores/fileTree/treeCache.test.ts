@@ -79,16 +79,22 @@ function scriptedFetcher() {
     signal: AbortSignal;
   }> = [];
   const fetcher = vi.fn((signal: AbortSignal) => {
-    let resolveFn: ((r: TreeResponse) => void) | null = null;
-    let rejectFn: ((e: unknown) => void) | null = null;
     const p = new Promise<TreeResponse>((resolve, reject) => {
-      resolveFn = resolve;
-      rejectFn = reject;
-    });
-    calls.push({
-      resolve: (r) => resolveFn?.(r),
-      reject: (e) => rejectFn?.(e),
-      signal,
+      // Mimic real fetch: an aborted signal rejects the in-flight
+      // request. Without this, `abortAll` tests would hang on the
+      // deferred promise.
+      if (signal.aborted) {
+        reject(new DOMException("aborted", "AbortError"));
+        return;
+      }
+      signal.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      });
+      calls.push({
+        resolve: (r) => resolve(r),
+        reject: (e) => reject(e),
+        signal,
+      });
     });
     return p;
   });
@@ -182,6 +188,42 @@ describe("createTreeCache — cancellation", () => {
     expect(node.kind).toBe("idle");
     // The previously cached entry is NOT touched.
     expect(cache.get(k()).kind).toBe("ready");
+  });
+
+  it("abortAll(exceptAgentId) keeps the named agent's in-flight fetches alive", async () => {
+    const cache = createTreeCache();
+    const { fetcher: fetcherA, calls: callsA } = scriptedFetcher();
+    const { fetcher: fetcherB, calls: callsB } = scriptedFetcher();
+    const pendingA = cache.fetch(k("agent-a", "w1"), fetcherA);
+    const pendingB = cache.fetch(k("agent-b", "w1"), fetcherB);
+
+    cache.abortAll("agent-a");
+
+    // agent-b was cancelled: its signal is aborted and the node
+    // reverts to `idle` (NOT `error`).
+    expect(callsB[0].signal.aborted).toBe(true);
+    expect((await pendingB).kind).toBe("idle");
+
+    // agent-a survived: its signal is NOT aborted; resolve the fetcher
+    // and the fetch completes to `ready`.
+    expect(callsA[0].signal.aborted).toBe(false);
+    callsA[0].resolve(fakeResp([{ name: "x", type: "file" }]));
+    expect((await pendingA).kind).toBe("ready");
+    expect(cache.get(k("agent-a", "w1")).kind).toBe("ready");
+    expect(cache.get(k("agent-b", "w1")).kind).toBe("idle");
+  });
+
+  it("abortAll(exceptAgentId) never matches a different agent's keys (\\u0000 seal)", async () => {
+    const cache = createTreeCache();
+    const { fetcher, calls } = scriptedFetcher();
+    const pending = cache.fetch(k("agent-aa", "w1"), fetcher);
+
+    // The except-prefix is sealed by `\u0000`, so `agent-a` can never
+    // protect `agent-aa`'s keys — a bare prefix check would.
+    cache.abortAll("agent-a");
+
+    expect(calls[0].signal.aborted).toBe(true);
+    expect((await pending).kind).toBe("idle");
   });
 });
 

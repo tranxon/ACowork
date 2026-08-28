@@ -70,8 +70,16 @@ export interface TreeCache {
   /** Drop all entries (e.g. logout). Aborts everything in flight. */
   clear(): void;
 
-  /** Abort every in-flight fetch without dropping entries. Useful on workspace switch. */
-  abortAll(): void;
+  /**
+   * Abort in-flight fetches without dropping cached entries.
+   *
+   * Pass `exceptAgentId` to keep that agent's in-flight fetches alive
+   * (agent-switch path: the newly-selected agent's tree must keep
+   * loading while every other agent's requests are cancelled — a
+   * blanket abort would leave the visible tree stuck on `idle` with
+   * no component re-fetching it, see the FileTree mount-effect fix).
+   */
+  abortAll(exceptAgentId?: string): void;
 
   /** Subscribe to node transitions. Returned fn unsubscribes. */
   subscribe(listener: Listener): () => void;
@@ -310,11 +318,15 @@ export function createTreeCache(opts?: {
     }
   };
 
-  const abortAll = (): void => {
-    for (const { abort } of Array.from(inflight.values())) {
+  const abortAll = (exceptAgentId?: string): void => {
+    // Keys are sealed with `\u0000` (see treeKey), so a string prefix
+    // is an exact agent filter — no false matches across agents.
+    const keepPrefix = exceptAgentId ? `${exceptAgentId}\u0000` : null;
+    for (const [key, { abort }] of Array.from(inflight.entries())) {
+      if (keepPrefix && key.startsWith(keepPrefix)) continue;
       abort.abort();
+      inflight.delete(key);
     }
-    inflight.clear();
   };
 
   return {
