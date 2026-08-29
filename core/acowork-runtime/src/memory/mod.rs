@@ -12,7 +12,7 @@ pub mod session_handle;
 
 // Re-export MemoryManager and types from acowork-memory.
 pub use acowork_memory::{
-    ConversationRecord, InjectedMemory, MemoryManager, MemoryManagerConfig,
+    InjectedMemory, MemoryManager, MemoryManagerConfig,
     RetrieveAndInjectResult, RetrievalResult, RetrievedMemory,
 };
 

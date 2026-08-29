@@ -769,7 +769,7 @@ impl AgentLoop {
                     self.session.is_compacted = true;
 
                     // ADR-051 P3: Run all post-compaction maintenance tasks
-                    // (generalization + self-eval + relationship + history compression)
+                    // (generalization + history compression + relationship)
                     // via a single MemoryManager high-level method.
                     self.run_post_compaction_memory_tasks().await;
 

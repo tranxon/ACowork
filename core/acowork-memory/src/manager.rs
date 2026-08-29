@@ -2,7 +2,11 @@
 //!
 //! 1. Retrieve - search relevant memories before LLM generation
 //! 2. Inject  - format and inject memories into the system prompt
-//! 3. Record  - asynchronously record the conversation episode
+//! 3. Record  - persist distilled episodes (via `record_distilled`)
+//!
+//! Conversation turns are NOT automatically recorded as episodic memory
+//! (the former `record_turn` / `ConversationRecord` channel was removed —
+//! dead code, see docs/memory-write-entrypoints.md).
 //!
 //! ADR-051 P2: Moved from acowork-runtime to acowork-memory.
 //! Error type changed from RuntimeError::Tool to AcoworkError::Memory.
@@ -13,10 +17,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::{
-    labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
+    labels, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
 use crate::consolidation::{EmbeddingFn, GeneralizationConfig};
-use chrono::{DateTime, Utc};
 
 use acowork_core::EmbeddingProvider;
 use crate::types::DistilledEpisode;
@@ -203,27 +206,10 @@ pub struct RetrieveAndInjectResult {
     pub injected: InjectedMemory,
     /// Retrieval metrics for monitoring.
     pub metrics: RetrievalMetrics,
-    /// Node IDs of retrieved memories (for traceability in record_turn).
+    /// Node IDs of retrieved memories (for traceability/debugging).
     pub memory_ids: Vec<String>,
     /// Pending ambiguous conflict hint, if any.
     pub ambiguous_hint: Option<String>,
-}
-
-/// Record of a conversation turn for episodic storage.
-#[derive(Debug)]
-pub struct ConversationRecord {
-    /// Session identifier.
-    pub session_id: String,
-    /// Turn index within the session.
-    pub turn_index: u32,
-    /// User message text.
-    pub user_message: String,
-    /// Assistant response text.
-    pub assistant_response: String,
-    /// IDs of memories used in this turn.
-    pub retrieved_memory_ids: Vec<String>,
-    /// Timestamp of the turn.
-    pub timestamp: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -664,53 +650,6 @@ impl MemoryManager {
         injected
     }
 
-    /// Record a conversation turn as an episode.
-    ///
-    /// In production this runs asynchronously; for now synchronous.
-    pub fn record(
-        &self,
-        provider: &dyn MemoryProvider,
-        record: &ConversationRecord,
-    ) -> Result<()> {
-        let content = format!(
-            "User: {}\nAssistant: {}",
-            record.user_message, record.assistant_response
-        );
-
-        let mut metadata = HashMap::new();
-        if !record.retrieved_memory_ids.is_empty() {
-            metadata.insert(
-                "retrieved_memory_ids".to_string(),
-                serde_json::to_value(&record.retrieved_memory_ids)
-                    .map_err(AcoworkError::Serialization)?,
-            );
-        }
-
-        let episode = Episode {
-            session_id: record.session_id.clone(),
-            turn_index: record.turn_index,
-            role: "conversation".to_string(),
-            content,
-            embedding: None,
-            timestamp: record.timestamp,
-            consolidated: false,
-            metadata,
-            importance: 0.5,
-        };
-
-        provider
-            .store_episode(&episode)
-            .map_err(|e| AcoworkError::Memory(format!("Failed to record episode: {e}")))?;
-
-        tracing::info!(
-            session_id = %record.session_id,
-            turn_index = record.turn_index,
-            "MemoryManager: recorded episode"
-        );
-
-        Ok(())
-    }
-
     /// Record a distilled/compacted episode into Grafeo.
     ///
     /// ADR-057 P0: This is now a thin wrapper around
@@ -742,105 +681,6 @@ impl MemoryManager {
             knowledge_landed = result.knowledge_ids.len(),
             conflicts_detected = result.conflicts_detected,
             "Recorded distilled episode via ingest_distilled_triples"
-        );
-
-        Ok(())
-    }
-
-    /// Record a ProceduralNode from a tool execution failure (Path B).
-    ///
-    /// When a skill/tool execution fails, this creates a low-confidence
-    /// ProceduralNode that captures the failure pattern so the agent
-    /// can avoid repeating the same mistake.
-    ///
-    /// The node is created with:
-    /// - `learned_from = "execution_failure"`
-    /// - `confidence = 0.6` (low — failure evidence is noisy)
-    /// - `source_skill = Some(tool_name)`
-    ///
-    /// If a similar procedure already exists (dedup via
-    /// `find_procedural_by_trigger`), the existing node's
-    /// `fail_count` is incremented instead.
-    ///
-    /// The optional `embedding_fn` is used to compute the procedural
-    /// embedding up front (ADR-057 P0: "ProceduralNode embedding 必填").
-    /// When `embedding_fn` is `None`, a deterministic hash-based fallback
-    /// (`procedural_embedding_fallback`) is used so the stored node is
-    /// still immediately vector-searchable from the moment it is persisted.
-    pub fn record_procedural_from_failure(
-        &self,
-        provider: &dyn MemoryProvider,
-        tool_name: &str,
-        error_message: &str,
-        embedding_fn: Option<&EmbeddingFn>,
-    ) -> Result<()> {
-        use crate::{NodeStatus, ProceduralNode};
-
-        // Check for an existing procedure with the same trigger.
-        let trigger = format!("使用 {} 工具时", tool_name);
-        let existing = provider
-            .find_procedural_by_trigger(&trigger, 1)
-            .map_err(|e| AcoworkError::Memory(format!("Failed to find procedure: {e}")))?;
-
-        if let Some(mut node) = existing.into_iter().next() {
-            // Reinforce existing: increment fail count.
-            node.fail_count += 1;
-            node.updated_at = chrono::Utc::now();
-            provider
-                .update_procedural(&node)
-                .map_err(|e| AcoworkError::Memory(format!("Failed to update procedure: {e}")))?;
-
-            tracing::info!(
-                tool_name,
-                fail_count = node.fail_count,
-                "Path B: reinforced existing ProceduralNode on failure"
-            );
-            return Ok(());
-        }
-
-        // Create a new ProceduralNode from the failure.
-        // Extract a brief error pattern from the message (first line, max 80 chars).
-        let error_pattern = error_message
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(80)
-            .collect::<String>();
-
-        let action = format!("避免 {}；替代方案: 检查输入或重试", error_pattern);
-
-        // ADR-057 P0: ProceduralNode embedding 必填 — compute at write time so
-        // the node is vector-searchable from the moment it is persisted.
-        // Use the real EmbeddingFn when available, otherwise the deterministic
-        // hash fallback (see `procedural_embedding_for`).
-        let procedural_text = format!("{} {}", trigger, action);
-        let embedding = procedural_embedding_for(&procedural_text, embedding_fn);
-
-        let node = ProceduralNode {
-            id: None,
-            name: format!("avoid_{}", tool_name),
-            trigger_condition: trigger,
-            action_pattern: action,
-            success_count: 0,
-            fail_count: 1,
-            confidence: 0.6, // Low confidence — failure evidence is noisy
-            activation_count: 0,
-            source_skill: Some(tool_name.to_string()),
-            learned_from: "execution_failure".to_string(),
-            embedding,
-            status: NodeStatus::Pending, // Low confidence → Pending
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        };
-
-        provider
-            .store_procedural(&node)
-            .map_err(|e| AcoworkError::Memory(format!("Failed to store procedure: {e}")))?;
-        tracing::info!(
-            tool_name,
-            "Path B: created ProceduralNode from execution failure"
         );
 
         Ok(())
@@ -919,51 +759,12 @@ impl MemoryManager {
         })
     }
 
-    /// Record a conversation turn as an episodic memory.
-    ///
-    /// ADR-051 P3: Wraps `record()` with a more descriptive name.
-    /// The caller provides the conversation record; this method handles
-    /// episode creation and storage.
-    pub fn record_turn(
-        &self,
-        provider: &dyn MemoryProvider,
-        record: &ConversationRecord,
-    ) -> Result<()> {
-        self.record(provider, record)
-    }
-
-    /// Record tool execution failures as ProceduralNodes (Path B).
-    ///
-    /// For each (tool_name, error_message) pair, creates or reinforces a
-    /// low-confidence ProceduralNode via `record_procedural_from_failure`.
-    ///
-    /// ADR-051 P3: Replaces the inline loop in loop_memory.rs.
-    pub fn record_tool_failures(
-        &self,
-        provider: &dyn MemoryProvider,
-        failures: &[(&str, &str)],
-        embedding_fn: Option<&EmbeddingFn>,
-    ) {
-        for (tool_name, error_message) in failures {
-            if let Err(e) =
-                self.record_procedural_from_failure(provider, tool_name, error_message, embedding_fn)
-            {
-                tracing::debug!(
-                    tool_name,
-                    error = %e,
-                    "Failed to record ProceduralNode from tool failure (non-fatal)"
-                );
-            }
-        }
-    }
-
     /// Run all post-compaction maintenance tasks.
     ///
     /// Executes in sequence:
     /// 1. Experience generalization (Path C) - extract behavior patterns
     /// 2. History compression - mark old History nodes as Dormant
-    /// 3. Self-evaluation - create Limitation nodes for low-performing skills
-    /// 4. Relationship auto-generation - track collaboration span
+    /// 3. Relationship auto-generation - track collaboration span
     ///
     /// Each step is best-effort: failures are logged but do not block
     /// subsequent steps.
@@ -982,10 +783,7 @@ impl MemoryManager {
         // Step 2: History compression.
         self.run_history_compression(provider);
 
-        // Step 3: Self-evaluation (Limitation nodes).
-        self.run_self_evaluation(provider);
-
-        // Step 4: Relationship auto-generation.
+        // Step 3: Relationship auto-generation.
         self.run_relationship_generation(provider);
     }
 
@@ -993,7 +791,8 @@ impl MemoryManager {
     ///
     /// For each retrieved memory with label "Procedural", increments the
     /// `activation_count`. This tracks how often a procedure is actually
-    /// used, feeding into self-evaluation and confidence boosting.
+    /// used, feeding into confidence boosting (ADR-057 P1) and future
+    /// activation-based retrieval ranking.
     fn activate_procedural_nodes(
         &self,
         provider: &dyn MemoryProvider,
@@ -1071,92 +870,7 @@ impl MemoryManager {
         }
     }
 
-    /// Step 3: Self-evaluate skill performance and create Limitation nodes.
-    ///
-    /// Scans all ProceduralNodes, groups by `source_skill`, and calculates
-    /// success rate. If below 60% with >= 5 observations, creates/updates
-    /// a Limitation autobiographical node.
-    fn run_self_evaluation(&self, provider: &dyn MemoryProvider) {
-        use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
-
-        let nodes = match provider.get_all_procedural_nodes() {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to get procedural nodes for self-evaluation");
-                return;
-            }
-        };
-
-        let mut skill_stats: HashMap<String, (u32, u32)> = HashMap::new();
-        for node in &nodes {
-            if let Some(ref skill) = node.source_skill {
-                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
-                entry.0 += node.success_count;
-                entry.1 += node.fail_count;
-            }
-        }
-
-        let min_observations: u32 = 5;
-        let max_success_rate: f32 = 0.60;
-
-        for (skill, (success, fail)) in skill_stats {
-            let total = success + fail;
-            if total < min_observations {
-                continue;
-            }
-
-            let success_rate = success as f32 / total as f32;
-            if success_rate >= max_success_rate {
-                continue;
-            }
-
-            let key = format!("skill_{}", skill.to_lowercase());
-            let value = format!(
-                "{} 成功率仅 {:.0}%（{} 次成功 / {} 次失败）",
-                skill,
-                success_rate * 100.0,
-                success,
-                fail
-            );
-
-            match provider.find_autobiographical_by_key(&key) {
-                Ok(Some(mut existing)) => {
-                    existing.value = value;
-                    existing.updated_at = chrono::Utc::now();
-                    if let Err(e) = provider.update_autobiographical(&existing) {
-                        tracing::debug!(key = %key, error = %e, "Failed to update Limitation node (non-fatal)");
-                    } else {
-                        tracing::info!(skill = %skill, success_rate, "Updated existing Limitation node for skill");
-                    }
-                }
-                Ok(None) => {
-                    let node = AutobiographicalNode {
-                        id: None,
-                        category: AutobioCategory::Limitation,
-                        key,
-                        value,
-                        confidence: 0.8,
-                        source_episode_id: None,
-                        embedding: None,
-                        status: NodeStatus::Active,
-                        created_at: chrono::Utc::now(),
-                        updated_at: chrono::Utc::now(),
-                        metadata: HashMap::new(),
-                    };
-                    if let Err(e) = provider.store_autobiographical(&node) {
-                        tracing::debug!(skill = %skill, error = %e, "Failed to store Limitation node (non-fatal)");
-                    } else {
-                        tracing::info!(skill = %skill, success_rate, observations = total, "Created Limitation node for low-performing skill");
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!(key = %key, error = %e, "Failed to query Limitation node (non-fatal)");
-                }
-            }
-        }
-    }
-
-    /// Step 4: Auto-generate Relationship nodes at session-end.
+    /// Step 3: Auto-generate Relationship nodes at session-end.
     ///
     /// Checks if the earliest episode is > 30 days old. If so, creates or
     /// updates an AutobiographicalNode with category: Relationship.
@@ -1644,11 +1358,12 @@ mod tests {
         );
     }
 
-    // ── ADR-057 P0: ProceduralNode embedding 必填 (Path B) ────────────────
+    // ── ADR-057 P0: ProceduralNode embedding 必填 ─────────────────────────
     //
-    // Verifies that `record_procedural_from_failure` always persists a
-    // non-None embedding, even when no EmbeddingFn is supplied (the manager
-    // falls back to the deterministic hash embedding).
+    // Verifies that the procedural embedding fallback is deterministic and
+    // dimension-compatible with HNSW, and that `procedural_embedding_for`
+    // prefers a real `EmbeddingFn` when supplied. These are used by all
+    // ProceduralNode creation paths (distill, generalization, manual).
 
     #[test]
     fn procedural_fallback_embedding_is_deterministic_and_dim_384() {

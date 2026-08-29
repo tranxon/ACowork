@@ -8,7 +8,7 @@
 
 // Re-export for backward compatibility.
 pub use acowork_memory::{
-    ConversationRecord, InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult,
+    InjectedMemory, MemoryManager, MemoryManagerConfig, RetrievalResult,
     RetrievedMemory,
 };
 
@@ -19,7 +19,6 @@ mod tests {
     use acowork_grafeo::grafeo::GrafeoStore as TestStore;
     use acowork_grafeo::types::DEFAULT_EMBEDDING_DIM;
     use acowork_memory::{labels, HintType, MemoryProvider, MemoryQuery};
-    use chrono::Utc;
     use grafeo_common::types::{NodeId, Value};
 
     /// Helper: create an in-memory TestStore for testing.
@@ -194,32 +193,6 @@ mod tests {
         assert!(!result.memories.is_empty());
     }
 
-    #[test]
-    fn test_record_conversation() {
-        let store = test_store();
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-
-        let record = ConversationRecord {
-            session_id: "sess-1".to_string(),
-            turn_index: 0,
-            user_message: "Hello".to_string(),
-            assistant_response: "Hi there!".to_string(),
-            retrieved_memory_ids: vec!["mem-1".to_string()],
-            timestamp: Utc::now(),
-        };
-
-        manager.record(&store as &dyn MemoryProvider, &record).unwrap();
-
-        // Verify the episode was stored by searching.
-        let text_results = store
-            .text_search_with_filter(labels::EPISODIC, "content", "Hello", 5, None)
-            .unwrap();
-        assert!(
-            !text_results.is_empty(),
-            "expected recorded episode to be found"
-        );
-    }
-
     #[tokio::test]
     async fn test_process_turn() {
         let store = test_store();
@@ -353,47 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn test_record_procedural_from_failure() {
-        let store = test_store();
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-
-        // Record a failure from a tool.
-        manager
-            .record_procedural_from_failure(&store, "bash", "Error: command not found", None)
-            .unwrap();
-
-        // Verify the ProceduralNode was created.
-        let found = store.find_procedural_by_trigger("bash", 5).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].learned_from, "execution_failure");
-        assert_eq!(found[0].source_skill, Some("bash".to_string()));
-        assert_eq!(found[0].fail_count, 1);
-        assert!(found[0].confidence <= 0.7); // Low confidence
-        assert_eq!(found[0].status, acowork_grafeo::types::NodeStatus::Pending);
-    }
-
-    #[test]
-    fn test_record_procedural_from_failure_reinforce() {
-        let store = test_store();
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-
-        // First failure.
-        manager
-            .record_procedural_from_failure(&store, "bash", "Error: timeout", None)
-            .unwrap();
-
-        // Second failure for the same tool.
-        manager
-            .record_procedural_from_failure(&store, "bash", "Error: permission denied", None)
-            .unwrap();
-
-        // Should have only one node (reinforced, not duplicated).
-        let found = store.find_procedural_by_trigger("bash", 5).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].fail_count, 2, "fail_count should be incremented");
-    }
-
-    #[test]
     fn test_extract_node_content_procedural() {
         let store = test_store();
 
@@ -437,132 +369,6 @@ mod tests {
             content.contains("reply in 3 sentences max"),
             "Should contain action_pattern"
         );
-    }
-
-    #[test]
-    fn test_self_evaluate_creates_limitation_node() {
-        use acowork_grafeo::types::{
-            AutobioCategory, AutobiographicalNode, NodeStatus, ProceduralNode,
-        };
-
-        let store = test_store();
-
-        // Create ProceduralNodes with low success rate for skill "bash".
-        // success=1, fail=4 → rate=20% < 60%, observations=5 ≥ 5.
-        let node = ProceduralNode {
-            id: None,
-            name: "avoid_bash".to_string(),
-            trigger_condition: "使用 bash 工具时".to_string(),
-            action_pattern: "避免 bash".to_string(),
-            success_count: 1,
-            fail_count: 4,
-            confidence: 0.6,
-            activation_count: 0,
-            source_skill: Some("bash".to_string()),
-            learned_from: "execution_failure".to_string(),
-            embedding: None,
-            status: NodeStatus::Pending,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        };
-        store.store_procedural(&node).unwrap();
-
-        // Manually run the self-evaluation logic (normally in AgentLoop,
-        // but we test the core logic here).
-        let nodes = store.get_all_procedural_nodes().unwrap();
-        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> =
-            std::collections::HashMap::new();
-        for n in &nodes {
-            if let Some(ref skill) = n.source_skill {
-                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
-                entry.0 += n.success_count;
-                entry.1 += n.fail_count;
-            }
-        }
-
-        // Verify skill stats computation.
-        assert_eq!(skill_stats.get("bash"), Some(&(1, 4)));
-
-        // Simulate the Limitation node creation.
-        let key = "skill_bash".to_string();
-        let value = "bash 成功率仅 20%（1 次成功 / 4 次失败）".to_string();
-        let limitation = AutobiographicalNode {
-            id: None,
-            category: AutobioCategory::Limitation,
-            key: key.clone(),
-            value,
-            confidence: 0.8,
-            source_episode_id: None,
-            embedding: None,
-            status: NodeStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        };
-        store.store_autobiographical(&limitation).unwrap();
-
-        // Verify the Limitation node was stored.
-        let found = store.find_autobiographical_by_key(&key).unwrap();
-        assert!(found.is_some());
-        let found = found.unwrap();
-        assert_eq!(found.category, AutobioCategory::Limitation);
-        assert!(found.value.contains("20%"));
-    }
-
-    #[test]
-    fn test_self_evaluate_no_limitation_for_high_success() {
-        use acowork_grafeo::types::{NodeStatus, ProceduralNode};
-
-        let store = test_store();
-
-        // Create ProceduralNodes with high success rate.
-        // success=8, fail=2 → rate=80% > 60%, should NOT create Limitation.
-        let node = ProceduralNode {
-            id: None,
-            name: "good_skill".to_string(),
-            trigger_condition: "使用 python 工具时".to_string(),
-            action_pattern: "使用 python".to_string(),
-            success_count: 8,
-            fail_count: 2,
-            confidence: 0.9,
-            activation_count: 0,
-            source_skill: Some("python".to_string()),
-            learned_from: "user_feedback".to_string(),
-            embedding: None,
-            status: NodeStatus::Active,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: std::collections::HashMap::new(),
-        };
-        store.store_procedural(&node).unwrap();
-
-        // Compute stats.
-        let nodes = store.get_all_procedural_nodes().unwrap();
-        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> =
-            std::collections::HashMap::new();
-        for n in &nodes {
-            if let Some(ref skill) = n.source_skill {
-                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
-                entry.0 += n.success_count;
-                entry.1 += n.fail_count;
-            }
-        }
-
-        let (success, fail) = skill_stats.get("python").unwrap();
-        let total = success + fail;
-        let rate = *success as f32 / total as f32;
-
-        // Rate should be 80%, above the 60% threshold.
-        assert!(
-            rate > 0.60,
-            "python skill success rate should be > 60%, got {}",
-            rate
-        );
-
-        // No Limitation node should exist for python.
-        let found = store.find_autobiographical_by_key("skill_python").unwrap();
-        assert!(found.is_none());
     }
 
     #[test]

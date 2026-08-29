@@ -33,7 +33,7 @@ pub use store::MemoryStore;
 
 // Re-exports: MemoryManager + associated types (ADR-051 P2, moved from runtime)
 pub use manager::{
-    ConversationRecord, InjectedMemory, MemoryManager, MemoryManagerConfig,
+    InjectedMemory, MemoryManager, MemoryManagerConfig,
     RetrieveAndInjectResult, RetrievalResult, RetrievedMemory,
 };
 
