@@ -151,9 +151,10 @@ const markdownComponents = {
   },
   /** Wrap <table> in a horizontally-scrollable container so an
    *  oversized column (URL / hash / path) doesn't squeeze the
-   *  title column mid-word. Visual chrome (border / radius) lives
-   *  on the wrapper via .prose-table-scroll (see globals.css);
-   *  the <th> cells stay nowrap so headers never break. */
+   *  title column mid-word. The wrapper is a pure scroll viewport —
+   *  visual chrome (border / rounded corners) lives on the <table>
+   *  itself in globals.css; the <th> cells stay nowrap so headers
+   *  never break. */
   table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
     <div className="prose-table-scroll">
       <table {...rest}>{children}</table>
