@@ -18,7 +18,9 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use regex::Regex;
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
@@ -72,6 +74,9 @@ pub struct CompactOutput {
 /// is treated as the summary (backwards-compatible with pre-block format).
 pub fn parse_compact_output(raw: &str) -> CompactOutput {
     let summary = extract_block(raw, "summary").unwrap_or_else(|| raw.trim().to_string());
+    // Sanitize so role labels / tool echoes that the LLM failed to filter do
+    // not land in the episodic memory (see `sanitize_summary_text`).
+    let summary = sanitize_summary_text(&summary);
     let triples_str = extract_block(raw, "triples").unwrap_or_default();
 
     let triples: Vec<Triple> = triples_str
@@ -154,7 +159,63 @@ pub fn strip_metadata_blocks(raw: &str) -> String {
             let end = start + end + "</triples>".len();
             text.replace_range(start..end, "");
         }
-    text.trim().to_string()
+    sanitize_summary_text(&text)
+}
+
+/// Lazily-compiled regex for **tool-role marker lines**.
+///
+/// Matches a line that echoes a tool call / result back into the summary,
+/// e.g. `[Tool(bash)]: ...`, `[Tool]:`, `[tool_call]: ...`, `[tool_result]: ...`.
+/// Such lines are raw tool interleavings, never knowledge — the whole line is
+/// dropped when sanitizing.
+fn tool_marker_line_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*\[(?:tool(?:\([^\[\]]*\))?|thought|tool_call|tool_result)\]:")
+            .expect("tool marker regex is valid")
+    })
+}
+
+/// Lazily-compiled regex for **conversation-role markers** at line start.
+///
+/// Matches `[User]:`, `[Assistant]:`, `[System]:`, `[CompactionSummary]:` and
+/// their lowercase JSONL variants (`[user]:`, `[assistant]:`, ...). The label
+/// itself is stripped but any following text on the line is preserved.
+fn role_marker_prefix_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*\[(?:user|assistant|system|compaction_summary|compactionsummary)\]:\s*")
+            .expect("role marker regex is valid")
+    })
+}
+
+/// Remove formatting artifacts from a compaction/distillation summary so the
+/// text that lands in memory (Grafeo episodic) and in-memory context is clean
+/// prose, never a verbatim echo of the conversation's role labels or tool
+/// interleavings.
+///
+/// Two-stage cleanup:
+/// 1. **Drop tool-echo lines entirely** — `[Tool(bash)]: <command>` etc. are
+///    raw tool interleavings and are never knowledge worth remembering.
+/// 2. **Strip conversation-role labels** (`[User]:`, `[Assistant]:`, ...) but
+///    keep any following text on the line, so short-session raw-text fallback
+///    (which stores the raw JSONL content as the summary) keeps the actual
+///    dialogue without the labels.
+///
+/// The `[Tool result compressed...]` placeholder body is left untouched — it
+/// is opaque tool *content* (handled by the prompt's acknowledgement rule),
+/// not a role marker.
+pub fn sanitize_summary_text(summary: &str) -> String {
+    let tool_line = tool_marker_line_regex();
+    let role_prefix = role_marker_prefix_regex();
+    let mut out = Vec::with_capacity(summary.lines().count());
+    for line in summary.lines() {
+        if tool_line.is_match(line) {
+            continue;
+        }
+        out.push(role_prefix.replace(line, "").to_string());
+    }
+    out.join("\n").trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +351,9 @@ impl EpisodeDistiller {
                 threshold = min_distill_chars,
                 "Session content is short — using raw text as summary, skipping LLM"
             );
-            (messages_text, UsageInfo::default())
+            // Raw JSONL fallback: still sanitize so tool-call/result echoes and
+            // role labels don't become "knowledge" in the episodic memory.
+            (sanitize_summary_text(&messages_text), UsageInfo::default())
         } else {
             let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
             compact_with_llm(
@@ -1058,5 +1121,84 @@ mod tests {
         let stripped = strip_metadata_blocks(raw);
         assert!(stripped.contains("summary text"));
         assert!(!stripped.contains("<triples>"));
+    }
+
+    #[test]
+    fn sanitize_drops_tool_echo_lines() {
+        // Tool-call/result echoes must be dropped whole — they are raw tool
+        // interleavings, never knowledge. This mirrors the garbage observed in
+        // real episodic memories (see the "[Tool(bash)]:" sample).
+        let raw = "用户要求查找 running 和 retry 相关的 UI 元素。\n\
+                   [Tool(bash)]: === \"running\" 出现在哪里 ===\n\
+                   grep -rn \"running\" apps/acowork-desktop/src/components/chat/\n\
+                   [Tool(file_read)]: 420: const sessionState = ...\n\
+                   最终定位到 RetryWaitBanner 组件。";
+        let cleaned = sanitize_summary_text(raw);
+        assert!(!cleaned.contains("[Tool(bash)]"), "tool echo must be dropped, got:\n{cleaned}");
+        assert!(!cleaned.contains("[Tool(file_read)]"), "tool echo must be dropped, got:\n{cleaned}");
+        assert!(cleaned.contains("用户要求查找 running"), "real prose must survive");
+        assert!(cleaned.contains("RetryWaitBanner"), "real prose must survive");
+    }
+
+    #[test]
+    fn sanitize_drops_thought_and_lowercase_tool_roles() {
+        // JSONL raw fallback path uses lowercase roles (tool_call / tool_result
+        // / thought) — those must be dropped too.
+        let raw = "[user]: 你好\n\
+                   [assistant]: 我来看一下\n\
+                   [thought]: 需要搜索代码\n\
+                   [tool_call]: {\"tool\":\"glob_search\"}\n\
+                   [tool_result]: 找到 3 个文件\n\
+                   [assistant]: 已经找到。";
+        let cleaned = sanitize_summary_text(raw);
+        assert!(!cleaned.contains("[tool_call]"), "tool_call line must be dropped");
+        assert!(!cleaned.contains("[tool_result]"), "tool_result line must be dropped");
+        assert!(!cleaned.contains("[thought]"), "thought line must be dropped");
+        assert!(cleaned.contains("你好"), "dialogue content must survive");
+        assert!(cleaned.contains("我来看一下"), "dialogue content must survive");
+        assert!(cleaned.contains("已经找到"), "dialogue content must survive");
+    }
+
+    #[test]
+    fn sanitize_strips_conversation_role_labels_keeps_text() {
+        // Conversation-role labels ([User]: / [Assistant]:) are stripped but
+        // the following text on the line is preserved.
+        let raw = "[User]: 请重构 Settings 页面\n\
+                   [Assistant]: 好的，我准备开始重构\n\
+                   [CompactionSummary]: 此前已定位到 ChatPanel 的问题";
+        let cleaned = sanitize_summary_text(raw);
+        assert!(!cleaned.contains("[User]"), "label must be stripped");
+        assert!(!cleaned.contains("[Assistant]"), "label must be stripped");
+        assert!(!cleaned.contains("[CompactionSummary]"), "label must be stripped");
+        assert!(cleaned.contains("请重构 Settings 页面"));
+        assert!(cleaned.contains("好的，我准备开始重构"));
+        assert!(cleaned.contains("ChatPanel"));
+    }
+
+    #[test]
+    fn sanitize_preserves_placeholder_body_and_normal_prose() {
+        // The "[Tool result compressed...]" placeholder body is opaque tool
+        // content (not a role marker) — it must survive. Normal prose with
+        // bracketed terms must not be mangled either.
+        let raw = "此前工具结果被压缩。\n\
+                   [Tool result compressed. Call context_retrieve(id=\"toolu_abc\") to retrieve the full content.]\n\
+                   [重要] 下一步需要验证。";
+        let cleaned = sanitize_summary_text(raw);
+        assert!(cleaned.contains("Tool result compressed"), "placeholder body must survive");
+        assert!(cleaned.contains("此前工具结果被压缩"));
+        assert!(cleaned.contains("[重要] 下一步需要验证"), "unrelated bracketed text must survive");
+    }
+
+    #[test]
+    fn parse_compact_output_sanitizes_summary_block() {
+        // The episodic-memory path (parse_compact_output → record_distilled)
+        // must not land tool echoes into the stored summary.
+        let raw = "<summary>用户要求查找 UI 元素。\n[Tool(bash)]: grep ...\n定位到 Banner。</summary>\n\
+                   <triples>\nUser | requested | UI 查找 | 0.9 | Fact\n</triples>";
+        let parsed = parse_compact_output(raw);
+        assert!(!parsed.summary.contains("[Tool(bash)]"), "episodic summary must be clean");
+        assert!(parsed.summary.contains("用户要求查找 UI 元素"));
+        assert!(parsed.summary.contains("Banner"));
+        assert_eq!(parsed.triples.len(), 1);
     }
 }
