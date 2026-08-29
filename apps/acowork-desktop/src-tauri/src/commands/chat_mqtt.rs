@@ -181,6 +181,12 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "title": created.title,
                     "created_at": created.created_at,
                 });
+                tracing::info!(
+                    agent_id = %created.agent_id,
+                    session_id = %created.session_id,
+                    title = %created.title,
+                    "DESKTOP: emitting session_created agent-event"
+                );
                 let _ = app_handle.emit("agent-event", event);
             }
             data_envelope::Payload::SessionDeleted(deleted) => {
@@ -190,6 +196,11 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                     "session_id": deleted.session_id,
                     "deleted_at": deleted.deleted_at,
                 });
+                tracing::info!(
+                    agent_id = %deleted.agent_id,
+                    session_id = %deleted.session_id,
+                    "DESKTOP: emitting session_deleted agent-event"
+                );
                 let _ = app_handle.emit("agent-event", event);
             }
 

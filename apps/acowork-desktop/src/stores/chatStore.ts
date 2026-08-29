@@ -388,6 +388,45 @@ function updateSessionState(
   };
 }
 
+/**
+ * ADR-050 C5 reconciliation: replace optimistic entries once the backend
+ * persists a send.
+ *
+ * `sendMessage` inserts the user message + attachment system entries into
+ * `messages[]` with `_isOptimistic: true` before the backend has persisted
+ * them. The ONLY mechanism that drops `_isOptimistic` is
+ * `mergeMessageWindow` id-dedupe during an HTTP refresh — the server copy
+ * (same id, no flag) wins. Nothing scheduled that refresh after a send, so
+ * a message with attachments kept its "waiting for server confirmation"
+ * spinner until the session was reopened.
+ *
+ * This schedules a short bounded tail-refresh (`loadSessionMessages`). Each
+ * landing replaces whatever optimistic entries the server has echoed back;
+ * we stop as soon as none remain. The bounded retries cover the backend's
+ * asynchronous JSONL writer flush (`Conversation::append_message_with_id`
+ * is non-blocking) and the publish → process → persist pipeline.
+ */
+const SEND_RECONCILE_DELAYS_MS = [300, 800, 1600];
+
+export function scheduleSendReconciliation(agentId: string, sessionId: string, attempt = 0): void {
+  if (attempt >= SEND_RECONCILE_DELAYS_MS.length) return;
+  globalThis.setTimeout(() => {
+    const store = useChatStore.getState();
+    const ss = store.getSessionState(agentId, sessionId);
+    // Session evicted or every optimistic entry already confirmed — done.
+    if (!ss || !ss.messages.some((m) => m._isOptimistic)) return;
+    store.loadSessionMessages(agentId, sessionId).then(
+      () => {
+        const after = useChatStore.getState().getSessionState(agentId, sessionId);
+        if (after?.messages.some((m) => m._isOptimistic)) {
+          scheduleSendReconciliation(agentId, sessionId, attempt + 1);
+        }
+      },
+      () => scheduleSendReconciliation(agentId, sessionId, attempt + 1),
+    );
+  }, SEND_RECONCILE_DELAYS_MS[attempt]);
+}
+
 /** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS.
 // NOTE: kept as a reference implementation for future eviction needs;
 // currently dead because (a) caches are agent-scoped and capped at
@@ -1340,6 +1379,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (items.length > 0) params.attached_items = toWireAttachedItems(items);
     const paramsJson = Object.keys(params).length > 0 ? JSON.stringify(params) : "";
 
+    // Ids of the optimistic entries inserted above — used to roll them back
+    // if the MQTT publish fails (the backend never accepted the message).
+    const optimisticIds = new Set([userMsgId, ...items.map((i) => i.clientId ?? "")]);
+
     try {
       await invoke("mqtt_publish_control", {
         agentId,
@@ -1353,8 +1396,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         },
       });
       log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
+      // ADR-050 C5: reconcile the optimistic user message + attachment
+      // entries with the server once the backend has persisted them. See
+      // `scheduleSendReconciliation` — without this the attachment chips
+      // kept their "waiting for server confirmation" spinner until the
+      // session was reopened.
+      if (sessionId) scheduleSendReconciliation(agentId, sessionId);
     } catch (error) {
       log.error("[ChatStore] MQTT message send failed:", error);
+      // The backend never accepted this send — drop the optimistic entries
+      // we just inserted so the user does not see a phantom message with a
+      // perpetual spinner.
+      if (sessionId) {
+        set((state) => {
+          const ss = getSessionState(state, agentId, sessionId!);
+          const removed = ss.messages.filter(
+            (m) => optimisticIds.has(m.id) && m._isOptimistic,
+          ).length;
+          if (removed === 0) return {};
+          return updateSessionState(state, agentId, sessionId!, {
+            messages: ss.messages.filter(
+              (m) => !(optimisticIds.has(m.id) && m._isOptimistic),
+            ),
+            messageTotal: Math.max(0, ss.messageTotal - removed),
+            messageLimit: Math.max(0, ss.messageLimit - removed),
+          });
+        });
+      }
       // Transient client-side error - show a toast, don't pollute the
       // messages array (sliding window over JSONL).
       showToast({
@@ -2724,6 +2792,12 @@ export function handleMessageEvent(
     case "session_created": {
       const newSessionId = data.session_id as string | undefined;
       if (!newSessionId) break;
+      const beforeActive = getAgentState(get(), agentId).activeSessionId;
+      log.info("[ChatStore] session_created received", {
+        newSessionId,
+        beforeActive,
+        beforeOpenSessionIds: getAgentState(get(), agentId).openSessionIds,
+      });
       const agentStore = useAgentStore.getState();
       // Refresh the list first so the new entry is rendered.
       agentStore.fetchSessions(agentId).catch((e) => {
@@ -2738,6 +2812,17 @@ export function handleMessageEvent(
       // guaranteed to be in `openSessionIds` and Active by the time
       // this event lands.
       agentStore.activateNewlyCreatedSession(newSessionId, agentId);
+      // Diagnostic: log AFTER state so we can verify the activation ran.
+      // setTimeout(0) ensures the synchronous set() inside openSession
+      // has settled before we read state.
+      setTimeout(() => {
+        const after = getAgentState(useChatStore.getState(), agentId);
+        log.info('[ChatStore] session_created handled', {
+          newSessionId,
+          afterActive: after.activeSessionId,
+          afterOpenSessionIds: after.openSessionIds,
+        });
+      }, 0);
       break;
     }
 
