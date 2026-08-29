@@ -1,8 +1,13 @@
 ﻿# ACowork 平台需求定义
 
-> 版本：v1.6 | 更新日期：2026-04-25
+> 版本：v1.6 | 更新日期：2026-08-15
 >
-> 本文档从设计文档（01~14）和设计对话中反向提取需求，作为平台功能的权威需求来源。设计文档描述"怎么做"，本文档描述"做什么"和"为什么"。
+> 本文档从设计文档（01~19）和设计对话中反向提取需求，作为平台功能的权威需求来源。设计文档描述"怎么做"，本文档描述"做什么"和"为什么"。
+>
+> **v1.6 变更说明**：
+> 1. 与当前代码实现对齐（工具清单、Crate 数量、GUI 实际结构、通信协议实际形式）
+> 2. 第 7 章 ADR 段迁出至独立 [`docs/adr/zh/`](../../adr/zh/) 目录
+> 3. 新增附录 A「待实现需求」——本章列出本 PRD 中已记录但当前代码尚未实现的需求
 
 ---
 
@@ -19,7 +24,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 声明式包格式（manifest.toml + prompts + skills + 工具声明，不含可执行文件）是双定位的技术基础——对开发者，它足够表达复杂能力；对终端用户，它足够安全（Gateway 安装时强制签名验证）。
 
-开发者工具链完整覆盖：acowork-keygen / acowork-sign / acowork-verify 签名工具链 → Desktop App DevMode（单步调试、断点、录制回放）→ SKILL.md 热加载 → 发布向导 → 远程仓库分发。
+开发者工具链完整覆盖：`acowork-sign`（含 `keygen / sign / verify` 子命令）签名工具链 → Desktop App DevMode（单步调试、断点；**录制回放**待 Phase 6）→ 发布向导 → **远程仓库分发待 Phase 6**（PKG-08/08a/09）。SKILL.md **热加载未实现**（DEV-06），修改 SKILL.md 需重启 Agent。
 
 **目标用户**：个人用户和小团队，以及企业用户。核心差异在于企业用户可以在 Agent 中接入自己部署的 RAG 知识库，实现企业级知识增强。
 
@@ -31,7 +36,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 - **仿生记忆**——Agent 拥有分层记忆系统，能记住、能遗忘、能学习
 - **跨 Agent 协作**——通过 Intent 机制实现 Agent 间通信
 - **隐私安全分享**——Agent 可自由分享给他人，Personal/Sensitive 数据自动剥离，只带走"Agent 能力"而非"用户记忆"
-- **跨平台**——同一 .agent 包在桌面和移动端运行
+- **跨平台**——同一 .agent 包在 Windows / Linux / macOS 三端桌面运行（移动端 PLT-03 / PLT-05 待 Phase 7）
 - **企业级扩展**——通过标准 RAG 接口接入企业知识库，无需平台托管数据
 
 ---
@@ -47,24 +52,24 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | PKG-03 | 支持两类签名身份：Developer（自签名）和 Platform（平台签发） | P0 | Phase 1 最小签名模型 |
 | PKG-04 | 系统 Agent 必须由 Platform Key 签名 | P0 | 防止伪装系统 Agent |
 | PKG-05 | Agent 升级时签名证书指纹必须与已安装版本一致 | P0 | 防止恶意包覆盖 |
-| PKG-06 | 提供 `acowork-keygen` / `acowork-sign` / `acowork-verify` 签名工具链 | P1 | 开发者自签流程 |
+| PKG-06 | 提供签名工具链（`acowork-sign` 含 `keygen / sign / verify` 子命令） | P1 | 开发者自签流程 |
 | PKG-07 | 提供 Debug 签名模式（本地开发自动签名） | P1 | 降低开发门槛 |
-| PKG-08 | 支持远程仓库（多 HTTP 源、定期检查更新） | P2 | 生态分发 |
-| PKG-08a | 仓库上架安全扫描：六维度自动化扫描（Manifest/Prompt/Skill/WASM/Grafeo/结构），判定 Pass/Warn/Reject | P2 | 发布侧安全关卡 |
-| PKG-09 | 支持双密钥模型（Upload Key + Distribution Key） | P3 | 商店分发阶段 |
-| PKG-10 | 支持密钥轮换（Proof-of-Rotation） | P3 | 长期运维 |
-| PKG-11 | 支持证书吊销列表（CRL） | P3 | 安全事件响应 |
+| PKG-08 | 支持远程仓库（多 HTTP 源、定期检查更新） | P2 | 生态分发——**未实现**，Phase 6 计划 |
+| PKG-08a | 仓库上架安全扫描：六维度自动化扫描（Manifest/Prompt/Skill/WASM/Grafeo/结构），判定 Pass/Warn/Reject | P2 | 发布侧安全关卡——**未实现**，依赖 PKG-08 |
+| PKG-09 | 支持双密钥模型（Upload Key + Distribution Key） | P3 | 商店分发阶段——**未实现**，Phase 6+ |
+| PKG-10 | 支持密钥轮换（Proof-of-Rotation） | P3 | 长期运维——**未实现**，Phase 6+ |
+| PKG-11 | 支持证书吊销列表（CRL） | P3 | 安全事件响应——**未实现**，Phase 6+ |
 
 ### 1.2 Agent 包格式
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
 | FMT-01 | manifest.toml 用纯 TOML 格式（机器配置文件） | P0 | Rust 生态友好 |
-| FMT-02 | SKILL.md 用 YAML frontmatter + Markdown body，兼容 agentskills.io 标准 | P0 | 复用社区技能生态 |
+| FMT-02 | SKILL.md 用 YAML frontmatter + Markdown body；解析器已实现（`core/acowork-runtime/src/skills/parser.rs`）；完整 agentskills.io 字段兼容（SKL-02）待 Phase 3 | P0 | 复用社区技能生态 |
 | FMT-03 | manifest 中声明权限、LLM 配置、工具、能力、触发器 | P0 | 声明式包的核心 |
 | FMT-04 | manifest 中声明平台兼容性（target_platforms），支持 required/optional 模式 | P1 | 跨平台降级 |
 | FMT-05 | manifest 中声明 identity_deps，启动时由 Gateway 注入身份信息 | P1 | 跨 Agent 身份一致 |
-| FMT-06 | 包大小上限 50 MB | P1 | 防止安装问题 |
+| FMT-06 | 包大小上限 50 MB | P1 | Gateway HTTP 多部分请求有 64 MiB 全局上限（`routes::GLOBAL_BODY_LIMIT`）；**安装时的 .agent 包 50 MB 硬性上限当前未在代码中强制**，依赖人工校验 |
 | FMT-07 | skills/references/ 仅允许不可执行的数据文件 | P1 | 安全约束 |
 
 ### 1.3 Agent Runtime（统一执行引擎）
@@ -99,8 +104,8 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | MEM-06 | 自传体记忆：六维度自我认知，从 manifest 自动派生，注入 System Prompt | P1 | Agent 自我认知 |
 | MEM-07 | 程序记忆：跨 Skill 的通用行为模式 | P2 | 自学习能力 |
 | MEM-08 | 隐私分级：PrivacyLevel（Public/Personal/Sensitive），LLM 自动判断。控制的是"数据打包分享时是否包含该节点"——Personal/Sensitive 节点在 Agent 分享导出时剥离，Public 节点保留。LLM 上下文中的数据无法从技术上访问控制，只能通过 prompt 约定约束 | P1 | 打包边界隐私保护 |
-| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——延期至 Phase 3 |
-| MEM-10 | Grafeo 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅作为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步 |
+| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——`acowork-grafeo/src/consolidation/`（`offline.rs` / `scheduler.rs` / `generalization.rs` / `triple_extraction.rs`）已有骨架与调度框架；Runtime 侧 `memory/consolidation_bg.rs` 提供 `ConsolidationBgTask` 接入点。完整 LLM 驱动的离线巩固仍待 Phase 6 激活 |
+| MEM-10 | Grafeo 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅作为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步——MemoryStore 当前仅本地（Grafeo 文件位于 `{agent_home}/data/grafeo/`），**云端同步尚未实现**。Cloud Sync 与企业级 MemStore 计划 Phase 6 一并实现 |
 | MEM-11 | 内容分类压缩：工件性内容（代码/文件/命令输出）仅存摘要 + ArtifactRef 引用 | P1 | 防 Grafeo 膨胀 |
 | MEM-12 | Embedding 生成：Ollama local（`/api/embed`）→ Remote API（`/embeddings`）降级链，`MemoryManager.retrieve()` 内部 200ms 超时自动生成 | P1 | 向量检索前提 |
 
@@ -108,16 +113,47 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| TOL-01 | 内置 15 个工具：memory×2 / network×2 / web×2 / shell / file×4 / intent×1 / search×1 / identity_store×1 / identity_observe×1（系统 Agent 专用） | P0 | Agent 感知和操作世界的基本能力 |
-| TOL-02 | 支持 WASM 自定义工具（Wasmtime 沙箱执行） | P2 | 可扩展性——Phase 1 内置 15 工具覆盖 MVP，WASM 是 Phase 3 扩展机制 |
-| TOL-03 | WASM 工具资源限制（max_memory_mb, max_execution_time_ms, Fuel metering） | P2 | 安全隔离——随 WASM 工具一起在 Phase 3 交付 |
-| TOL-04 | API Key 对 WASM 工具不可见（secrecy::SecretString） | P2 | 安全底线——随 WASM 工具一起在 Phase 3 交付 |
+| TOL-01 | 内置工具集（**16 个核心工具 + 4 个条件工具**，实际数随配置变化 16~22） | P0 | Agent 感知和操作世界的基本能力。实际清单见下表 |
+| TOL-02 | 支持 WASM 自定义工具（Wasmtime 沙箱执行） | P2 | 可扩展性——WASM 模块代码已落地但仅 feature-gated（`wasm-tools` feature），**未注册到任何 Agent 内置工具列表**；Phase 6 之前默认不启用 |
+| TOL-03 | WASM 工具资源限制（max_memory_mb, max_execution_time_ms, Fuel metering） | P2 | 安全隔离——随 WASM 工具一起在 Phase 6 交付 |
+| TOL-04 | API Key 对 WASM 工具不可见（secrecy::SecretString） | P2 | 安全底线——随 WASM 工具一起在 Phase 6 交付 |
 | TOL-05 | 工具权限校验：所有工具调用需匹配 manifest 声明的权限 | P0 | 安全底线 |
 | TOL-06 | 平台支持矩阵：shell 仅桌面端，文件操作移动端受限 | P1 | 跨平台适配 |
 | TOL-07 | Skill 级联降级：依赖的 tool 不可用时 skill 自动降级 | P2 | 优雅降级 |
 | TOL-08 | WASM 运行时选型：Wasmtime（桌面端），Wasmi（移动端/iOS 禁 JIT） | P2 | 跨平台——随 WASM 工具一起在 Phase 3 交付 |
 | TOL-09 | WASI Preview 2（目录级沙箱 + 能力安全） | P2 | 安全沙箱——随 WASM 工具一起在 Phase 3 交付 |
 | TOL-10 | 内置工具范围仅限平台基础设施级，SaaS 集成由独立 Agent 提供 | P1 | 架构边界 |
+
+#### 1.5.1 实际内置工具清单
+
+| # | 工具 | 类型 | 权限 | 说明 |
+|---|------|------|------|------|
+| 1 | `memory_recall` | core | `memory:read` | 检索记忆 |
+| 2 | `memory_store` | core | `memory:write` | 写入记忆 |
+| 3 | `http_request` | core | `network:<url>` | HTTP 请求 |
+| 4 | `web_fetch` | core | `network:<url>` | URL → 文本（带超时） |
+| 5 | `web_search` | conditional | `search:web` | 仅当至少配置一个搜索 Provider 时注册 |
+| 6 | `shell` | core × N | `filesystem:exec` | 按平台检测的 shell 工具集（Windows: bash + PowerShell，Unix: system shell） |
+| 7 | `file_read` | core | `filesystem:read:<path>` | 读文件 |
+| 8 | `file_write` | core | `filesystem:write:<path>` | 写文件 |
+| 9 | `file_edit` | core | `filesystem:write:<path>` | 编辑文件 |
+| 10 | `doc_reader` | core | `filesystem:read:<path>` | PDF / DOCX / XLSX / PPTX 文本提取 |
+| 11 | `glob_search` | core | `filesystem:read:<path>` | glob 文件查找 |
+| 12 | `content_search` | core | `filesystem:read:<path>` | ripgrep 文本搜索 |
+| 13 | `intent_send` | core | `intent:send:<target>` | 跨 Agent Intent（MQTT 通道） |
+| 14 | `ask_user_question` | core | （无） | LLM 主动询问用户（不受权限校验） |
+| 15 | `todo_write` | core | （无） | 结构化 TODO 列表维护 |
+| 16 | `mcp_install` / `mcp_uninstall` | core | （受 manifest 声明） | MCP Server 动态挂载（ADR-029） |
+| 17 | `rag_query` | conditional | `rag:query + network:<rag_url>` | 企业 RAG 接入，仅当 manifest 声明 `[[tools]] type = "rag"` 时注册（ADR-051 / Phase 4） |
+| 18 | `context_retrieve` | conditional | `context:read` | 平台受保护，按 `tool_compression_enabled` 配置注册（ADR-052） |
+| 19 | `context_abandon` | conditional | `context:write` | 平台受保护，同上 |
+| 20 | `codebase` | conditional | `filesystem:read:<path>` | LSP 索引查询，仅当 LSP Relay 可达时注册 |
+
+**要点**：
+
+- 身份管理不暴露为独立工具 API：身份查询由 Gateway 的 `UserProfile`（`/api/users`）承载，`acowork-system` 通过普通 `memory_recall` / `memory_store` 暴露。
+- 实际工具数随配置变化：核心 16 + `web_search` + `rag_query` + `context_retrieve`/`context_abandon` + `codebase` = 16 ~ 22。
+- WASM 工具不在此清单：模块代码已实现（`core/acowork-runtime/src/tools/wasm/`），但 `wasm-tools` feature 默认未开启，**没有任何 Agent 使用 WASM 工具**——TOL-02~04 / TOL-08~09 在 Phase 6 之前实际不可用。
 
 ### 1.6 Skill 系统
 
@@ -140,8 +176,8 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | GTW-05 | Key Vault：加密存储 API Key，一次性分发，不通过环境变量 | P0 | 安全底线 |
 | GTW-06 | 预算追踪：接收 Agent 上报，超限信号 | P1 | 成本控制 |
 | GTW-07 | 速率限制：令牌分配，跨 Agent 共享资源协调 | P1 | API 调用公平性 |
-| GTW-08 | HTTP API（Axum，端口 19876）：供 Desktop App / CLI 使用 | P2 | 管理面接口——延期至 Phase 3，保留接口预留 |
-| GTW-10 | 定时触发器（cron 解析） | P3 | 定时任务——延期至 Phase 3 |
+| GTW-08 | HTTP API（Axum，端口 19876）：供 Desktop App / CLI 使用 | P0 | 管理面接口——含 agents / vault / config / skills / users / nodes / publish / memory / embedding / mcp / cron / fs / workspaces / global-resources / proxy / debug-mqtt / settings 等子路由 |
+| GTW-10 | 定时触发器（cron 解析） | P0 | 定时任务——5 字段 cron + 时区 + 重试 + max_runs + expires_at，HTTP 路径 `/api/agents/{id}/cron` |
 | GTW-11 | Gateway CLI 二进制：命令行管理 Agent | P1 | 无 GUI 场景 |
 | GTW-12 | 冷启动身份注入：启动 Agent 前向系统 Agent 查询 identity_deps 并注入 | P1 | 身份一致性——Phase 2 已实现 |
 
@@ -150,21 +186,123 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
 | SYS-01 | 系统 Agent 随 Gateway 分发，不可卸载，自动启动 | P0 | 系统级服务 |
-| SYS-02 | 承担身份管理 ContentProvider 角色，其他 Agent 通过 Intent 查询 | P0 | 跨 Agent 身份一致 |
-| SYS-03 | 接收身份提报，用 LLM 做二次判断（替代用户确认弹窗） | P3 | 自动化决策——延期至 Phase 3 |
+| SYS-02 | 身份信息由 Gateway 的 `UserProfile` HTTP API（`/api/users`）统一管理；`acowork-system` 仅作为启动时的入口 Agent | P0 | 跨 Agent 身份一致——不暴露 `identity:query` / `identity:observe` Intent 接口（已从 system-agent manifest 删除） |
+| SYS-03 | 接收身份提报，用 LLM 做二次判断（替代用户确认弹窗） | P3 | 自动化决策——当前身份确认直接由 Gateway `createUser` / `updateUser` 同步落库，**无 LLM 二次判断**，待 Phase 6 |
 | SYS-04 | 默认交互入口——无第三方 Agent 时的唯一界面 | P1 | 首次使用体验 |
-| SYS-05 | observe 通知机制——身份变更时通知订阅 Agent | P2 | 实时一致性 |
+| SYS-05 | observe 通知机制——身份变更时通知订阅 Agent | P2 | **未实现**——身份变更通过 HTTP 落库后未主动推送订阅方，需要订阅方轮询 UserProfile |
 | SYS-06 | 必须 Platform 签名，享有系统特权 | P0 | 安全底线 |
 
 ### 1.9 通信协议
 
-| 编号 | 需求 | 优先级 | 说明 |
+#### 1.9.1 协议栈总览
+
+平台使用 **HTTP REST + MQTT** 两套传输协议，跨三类链路（Desktop ↔ Gateway ↔ Local Runtime，Gateway ↔ Remote Node）。
+
+```mermaid
+graph TB
+    subgraph CP["客户端"]
+        D1["Desktop App<br/>(Tauri + Rust)"]
+        D2["CLI / 第三方工具"]
+        RN["Remote Node"]
+    end
+
+    subgraph GW["Gateway 进程"]
+        HTTPA["HTTP REST<br/>(Axum)"]
+        BROKER["MQTT Broker<br/>(rumqttd embedded)"]
+        PROXY["HTTP 反向代理<br/>→ Runtime localhost"]
+        DISPATCH["MQTT Dispatcher"]
+    end
+
+    subgraph RP["Runtime 进程（每 Agent 一个）"]
+        HTTPR["HTTP Server<br/>(Axum, localhost:<br/>动态端口)"]
+        MQTTR["MQTT Client<br/>(acowork-mqtt-session)"]
+    end
+
+    D1 -->|"HTTP REST"| HTTPA
+    D1 -->|"MQTT (acowork-mqtt-session)"| BROKER
+    D2 -->|"HTTP REST"| HTTPA
+    RN -->|"MQTT-over-WSS"| BROKER
+
+    BROKER --> DISPATCH
+    DISPATCH -->|"MQTT 控制命令"| MQTTR
+    MQTTR -->|"MQTT 事件 / 状态"| BROKER
+
+    HTTPA --> PROXY
+    PROXY -->|"HTTP"| HTTPR
+
+    classDef plane fill:#eef,stroke:#446
+    classDef gw fill:#efe,stroke:#464
+    classDef rt fill:#fee,stroke:#644
+    class CP plane
+    class GW gw
+    class RP rt
+```
+
+**三平面 + 三段链路**：
+
+| 平面 | 传输 | 用途 |
+|------|------|------|
+| **控制面 / Control** | MQTT 主题（QoS 1） | 用户操作触发的状态变更、实时双向控制命令 |
+| **数据面 / Data** | HTTP REST（含 Gateway 反向代理） | 启动期全量加载、批量读、文件操作、大体积数据 |
+| **事件面 / Event** | MQTT 主题（QoS 0~1） | 流式 chunk、状态变更推送、异步通知 |
+
+| 段 | 链路 | 协议 |
+|----|------|------|
+| **L1** | Desktop / CLI ↔ Gateway | HTTP REST + MQTT |
+| **L2** | Gateway ↔ Local Runtime | MQTT（主）+ HTTP 反代到 Runtime 自绑 localhost 端口 |
+| **L3** | Gateway ↔ Remote Node | MQTT-over-WSS + HTTP REST 反代 |
+
+> 传输归属判定遵循 ADR-034 三条规则：同一语义只用一条传输；用户操作触发的状态变更一律走 MQTT；Gateway 不直接访问 Runtime 本地文件，统一通过 HTTP 反代。
+
+#### 1.9.2 协议需求矩阵
+
+| 编号 | 需求 | 优先级 | 落地 |
 |------|------|--------|------|
-| COM-01 | Gateway Service API 合同层平台无关，实现层各平台自选 | P0 | 跨平台兼容 |
-| COM-02 | Socket API（Unix Socket / Named Pipe）给 Agent Runtime 用 | P0 | IPC 通道 |
-| COM-03 | HTTP API（REST + WebSocket）给 Desktop App / CLI 用 | P1 | 管理面通道 |
-| COM-04 | Debug Protocol（JSON-RPC 2.0 over WebSocket）给 DevMode 用 | P2 | 调试通道 |
-| COM-05 | 敏感数据（API Key、身份信息）走 Socket，不暴露在进程命令行 | P0 | 安全底线 |
+| COM-01 | 协议栈统一为 HTTP REST + MQTT；不使用 WebSocket、gRPC、Socket IPC | P0 | 架构一致性（历史背景见 ADR-031 / ADR-033） |
+| COM-02 | 控制面走 MQTT 主题 `acowork/agents/{id}/sessions/control/{cmd}`（cmd 集合：`chat_message` / `stop` / `model_switch` / `open_session` / `enable_notify` / `disable_notify` / `close_session` / `compress_action` / `workspace_switch` / `approval_decision` / `question_answer` / `continue_execution` / `update_session_title` / `intent`） | P0 | Desktop → Runtime 经 Gateway broker |
+| COM-03 | 事件面走 MQTT 主题 `acowork/agents/{id}/sessions/{sid}/messages/{event_type}`（event_type 集合：`stream_delta` / `tool_call` / `tool_result` / `stream_end` / `error` / `state`）+ Agent 级 `/status` / `/ready` / `/meta` / `/config` / `/http_endpoint` | P0 | Runtime → Desktop 经 Gateway broker |
+| COM-04 | 数据面走 HTTP REST：启动期加载、批量读、文件上传、大体积数据；Gateway 通过 HTTP 反向代理把 `/api/agents/{id}/sessions[/{sid}[/messages|/documents]]` 等路径透传到 Runtime 自绑的 localhost HTTP server | P0 | Gateway HTTP 反代 + Runtime HTTP server |
+| COM-05 | Gateway ↔ Remote Node：MQTT-over-WSS + HTTP REST 反代（`/api/fs/browse?target={node_id}` 等） | P1 | 远程节点拓扑 |
+| COM-06 | Debug Protocol：MQTT 订阅 `acowork/agents/{id}/debug/events` 拿事件流；HTTP RPC `POST /api/agents/{id}/debug-rpc` 调命令（body: `{method, params}`，Gateway 反代到 Runtime `/debug/rpc`）；已实现 10 个 handler（resume / pause / step / stop / getState / getContextSnapshot / getSection / rewind / patchContext / reExecute） | P2 | DevMode 调试 |
+| COM-07 | 全局资源：启动期 `GET /api/bootstrap` + `GET /api/global-resources` 全量加载；增量变更走 MQTT `acowork/global/resources` retained 主题 | P1 | 启动期 + 增量订阅 |
+| COM-08 | 协议 ACL 与多用户隔离：rumqttd CONNECT 层认证 + 主题级 ACL（`{user_id}/{active_user_id}` 前缀）+ TLS（远程节点场景） | P0 | 安全底线 |
+| COM-09 | 协议版本协商：MQTT CONNECT packet `properties.protocol_version`；HTTP 端点保留 `/api/v{N}/` 升级路径（当前 `/api/`，Phase 7 启用 `/api/v2/`） | P2 | 演进兼容 |
+| COM-10 | 敏感数据（API Key、Vault Secret、PII）禁止走 MQTT，仅在 localhost HTTP（127.0.0.1）传递；MQTT 主题 payload 仅含业务元数据 | P0 | 安全底线 |
+
+#### 1.9.3 实际部署的 MQTT 主题清单
+
+| 主题 | 方向 | QoS | 说明 |
+|------|------|-----|------|
+| `acowork/agents/{id}/sessions/control/{cmd}` | Desktop → Runtime | 1 | 控制命令（COM-02 完整 cmd 集合） |
+| `acowork/agents/{id}/sessions/{sid}/messages/{event_type}` | Runtime → Desktop | 0~1 | 流式事件（COM-03） |
+| `acowork/agents/{id}/status` | Runtime → Gateway | 1 (retained) | 在线状态（online/offline/busy） |
+| `acowork/agents/{id}/ready` | Runtime → Gateway | 1 | 启动就绪信号 |
+| `acowork/agents/{id}/http_endpoint` | Runtime → Gateway | 1 (retained) | 注册 localhost HTTP 端口（反代目标） |
+| `acowork/agents/{id}/config` | Gateway → Runtime | 1 (retained) | 配置变更（Provider / Vault Key 切换） |
+| `acowork/agents/{id}/meta` | Runtime → Gateway | 1 (retained) | Agent 元数据快照 |
+| `acowork/agents/{id}/workspaces/{wid}/fs-changed` | Runtime → Desktop | 1 | 工作区文件变更 |
+| `acowork/agents/{id}/debug/events` | Runtime → Desktop | 1 | Debug 事件流 |
+| `acowork/global/resources` | Gateway → Desktop | 1 (retained) | 全局资源快照（Provider / Search / MCP） |
+| `acowork/intent/{target}` | Runtime → Runtime | 1 | 跨 Agent Intent 消息 |
+
+完整主题矩阵参见 [ADR-034 §11.2](docs/adr/zh/ADR-034-mqtt-http-boundary.md)、[ADR-048](docs/adr/zh/ADR-048-debug-protocol-mqtt-http.md)、[ADR-055](docs/adr/zh/ADR-055-remote-runtime-node-topology.md)。
+
+#### 1.9.4 实际部署的 HTTP 端点类别
+
+| 类别 | 路径模式 | 说明 |
+|------|---------|------|
+| 健康 / 状态 | `GET /health`, `GET /api/status`, `GET /api/bootstrap` | 启动期 |
+| Agent 管理 | `GET/POST/DELETE /api/agents[/{id}[/start\|/stop\|/clone\|/upgrade\|/install\|/manifest]]` | Agent 生命周期 |
+| 数据面（反代） | `GET /api/agents/{id}/sessions`, `GET /api/agents/{id}/sessions/{sid}/messages`, `POST /api/agents/{id}/sessions/{sid}/documents` | Gateway 反代到 Runtime localhost |
+| 调试 | `POST /api/agents/{id}/debug-rpc` | Debug RPC（COM-06） |
+| 配置 / Vault / Provider / Skills / Cron / Users / Nodes | `/api/config`, `/api/vault/*`, `/api/providers`, `/api/agents/{id}/skills`, `/api/agents/{id}/cron`, `/api/users`, `/api/nodes` | 配置面 |
+| 全局资源 | `GET /api/global-resources` | 启动期全量 |
+| 远程节点 | `GET /api/fs/browse?target={node_id}&path=...` | 反代到远程节点 |
+| MQTT 调试 | `POST /api/debug/mqtt/{start,shutdown}` | 运维 |
+
+完整端点矩阵参见 [ADR-034 §11.1](docs/adr/zh/ADR-034-mqtt-http-boundary.md)。
+
+> **维护约定**：协议新增（无论是 MQTT 新控制命令还是 HTTP 新端点）须同步更新 ADR-034 / ADR-048 / ADR-055 协议矩阵 + `prd.md` §1.9 + `prd-ui-ux.md` §11，避免三处文档脱节。
 
 ### 1.10 安全
 
@@ -174,7 +312,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | SEC-02 | 文件系统隔离——Agent 只能写入自己的工作区和授权目录 | P0 | 数据安全 |
 | SEC-03 | 网络隔离——默认禁止网络，仅按 manifest 授权白名单 | P1 | 最小权限 |
 | SEC-04 | 权限声明——manifest 必须声明所有权限，未声明不可用 | P0 | 最小权限原则 |
-| SEC-05 | WASM 工具沙箱——无法访问宿主内存、文件系统、网络 | P0 | 自定义代码隔离 |
+| SEC-05 | WASM 工具沙箱——无法访问宿主内存、文件系统、网络 | P0 | 自定义代码隔离——Wasmtime + WASI Preview 2 模块代码已实现（`wasm-tools` feature-gated），但**未启用到任何 Agent 内置工具列表**（参见 §1.5.1），TOL-02~04/08~09 在 Phase 6 之前实际不可用 |
 | SEC-06 | 沙箱强化——Linux 使用 bubblewrap + seccomp-bpf | P2 | 深度隔离——延后至 Phase 7（ADR-007） |
 | SEC-07 | API Key 不通过环境变量分发，通过 Socket 一次性传输 | P0 | 防 ps/procfs 泄露 |
 | SEC-08 | Shell 命令风险分级 + 文件来源追踪（FileProvenance）+ 审计日志 | P3 | Runtime 层 Shell 安全防线——延期至 Phase 3 |
@@ -184,14 +322,14 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
-| DSK-01 | Desktop App 与 Gateway 独立进程，通过 Gateway HTTP API 通信 | P1 | 架构一致性 |
-| DSK-02 | 对话界面：消息收发、流式输出、工具调用展示 | P1 | 核心交互 |
-| DSK-03 | Agent 管理界面：安装、卸载、启停、列表 | P1 | Agent 生命周期管理 |
-| DSK-04 | 设置页面：Gateway 连接配置、Provider 管理、Vault API Key 管理（脱敏预览） | P1 | 配置管理 |
-| DSK-05 | 系统托盘：关闭窗口隐藏到托盘不退出，显示 Gateway 连接状态 | P2 | 桌面体验 |
-| DSK-06 | 开发者模式：通过 Developer Mode toggle 切换，提供调试面板、断点、录制回放 | P2 | 开发调试 |
-| DSK-07 | Skill 编辑器、Manifest 编辑器、发布向导 | P3 | 开发工具链 |
-| DSK-08 | 首次启动引导流程 | P2 | 用户引导 |
+| DSK-01 | Desktop App 与 Gateway 独立进程，通过 Gateway HTTP REST + MQTT 通信 | P1 | 架构一致性 |
+| DSK-02 | 对话界面：消息收发、流式输出、工具调用展示 | P1 | 核心交互——详见 `apps/acowork-desktop/src/components/chat/ChatPanel.tsx` |
+| DSK-03 | Agent 管理界面：安装、卸载、启停、列表、克隆、创建（含 Create Wizard / Clone Dialog / AgentDetailDialog） | P1 | Agent 生命周期管理 |
+| DSK-04 | 设置页面（5 Tab：profile / general / appearance / gateway / nodes）；Provider 与 Vault 在 Harness 视图管理 | P1 | 配置管理 |
+| DSK-05 | 系统托盘：关闭窗口隐藏到托盘不退出，显示 Gateway 连接状态（5 种状态：Connected / Agents Running / Working / Disconnected / Error） | P2 | 桌面体验——`apps/acowork-desktop/src-tauri/src/tray.rs` |
+| DSK-06 | 开发者模式：Developer Mode toggle 切换；调试面板 + 断点（`enable_agent_debug` / `disable_agent_debug` Tauri 命令）；**录制回放**待 Phase 6 | P2 | 开发调试——Debug 面板位于右侧 nav `debug` Tab |
+| DSK-07 | 发布向导（PublishWizard）、克隆（CloneDialog）、创建向导（CreateWizard）；Skill / Manifest 无独立编辑器，需通过 Workspace 文件树 + `file_edit` 工具 + 文件级元数据面板编辑 | P3 | 开发工具链 |
+| DSK-08 | 首次启动引导流程 | P2 | 用户引导——5 步：欢迎 → Gateway 连接 → Provider 配置 → 身份信息 → 推荐 Agent 安装 |
 
 ### 1.12 跨平台
 
@@ -287,7 +425,7 @@ Agent 检索记忆时并行执行两条通道，检索结果按来源标记后�
 
 | 编号 | 需求 | 目标 |
 |------|------|------|
-| MNT-01 | Rust workspace 模块化（7 crate 结构） | acowork-core / memory / runtime / gateway / grafeo / vault / sign |
+| MNT-01 | Rust workspace 模块化（**13 crate**） | acowork-core / acowork-embed / acowork-gateway / acowork-grafeo / acowork-lsp-relay / acowork-mcp / acowork-memory / acowork-mqtt-session / acowork-node / acowork-runtime / acowork-sign / acowork-tool-sdk / acowork-vault |
 | MNT-02 | 配置驱动——Agent 行为由 manifest + prompt 定义，无需改代码 | 声明式架构保障 |
 | MNT-03 | ADR 记录所有重大技术决策 | 每个设计文档内含决策记录表 |
 
@@ -381,17 +519,19 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 
 ## 5. 核心用户场景
 
+> §5 描述的是平台能力所支撑的典型场景（示意），不要求与 `examples/` 中实际打包的 Agent 一一对应。当前 `examples/` 下的示例 Agent 偏企业研发协作：Architect / SSE / QA / PM / Product / Docs / Document Manager 等。天气 / 日历类个人 Agent 未打包，但平台能力已具备——用户或开发者可自行打包并安装。
+
 ### 5.1 个人用户日常场景
 
-用户安装天气 Agent 和日历 Agent。每天早上 7 点，天气 Agent 自动获取天气，通过 Intent 让日历 Agent 创建提醒（如"带伞"）。天气 Agent 从私有 Grafeo 记住用户城市，无需每次询问。
+用户安装天气 Agent 和日历 Agent（或自行打包）。每天早上 7 点，天气 Agent 通过 cron 自动获取天气，发送 Intent 给日历 Agent 创建提醒（如"带伞"）。天气 Agent 从私有 Grafeo 记住用户城市，无需每次询问。
 
 ### 5.2 开发者创建 Agent 场景
 
-开发者编写 manifest.toml + system prompt + SKILL.md，使用 `acowork-sign` 签名，通过 Gateway CLI 安装到本地。在 Desktop App 开发者模式下单步调试、试运行 Skill，确认无误后发布到仓库。
+开发者编写 manifest.toml + system prompt + SKILL.md，使用 `acowork-sign` 签名，通过 Gateway CLI 安装到本地。在 Desktop App DevMode 下单步调试、试运行 Skill，确认无误后通过发布向导导出 .agent 包。
 
 ### 5.3 跨 Agent 协作场景
 
-用户对天气 Agent 说"我搬到上海了"，天气 Agent 向系统 Agent 提报身份变更，系统 Agent 用 LLM 确认语义后更新用户城市，通知所有订阅了 city 变更的 Agent。
+用户对天气 Agent 说"我搬到上海了"。天气 Agent 直接通过 Gateway `POST /api/users` 同步落库用户城市字段。订阅方（如日历 Agent）通过轮询 UserProfile 拿到最新城市值；observe 推送（SYS-05）与 LLM 二次判断（SYS-03）尚未实现。
 
 ### 5.4 移动端降级场景
 
@@ -431,201 +571,117 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 ---
 
 ## 7. 架构决策记录（ADR）
-### ADR-001：企业 RAG 定位
 
-**状态**：已接受
+平台所有架构决策记录（ADR）已从本 PRD 抽出，按专题独立存放在 [`docs/adr/zh/`](../../adr/zh/) 目录下。共 **49+ 篇 ADR**，覆盖 RAG 定位、PrivacyLevel 边界、Memory 生命周期、跨平台 IPC、WASM 沙箱、MQTT 替换 gRPC/WebSocket、远程 Runtime Node 拓扑、Debug Protocol 实现形式等关键设计选择。
 
-**上下文**：
-从个人和小团队扩展到企业用户场景时，需要回答两个问题：（1）企业 RAG 与本地 Grafeo 是同一层还是不同通道？（2）ACowork 是否要自己托管 RAG 服务？
+**查阅指引**：
 
-**决策**：
+- 按编号浏览：`docs/adr/zh/ADR-NNN-slug.md`
+- 当前状态索引见 [`docs/AGENTS.md`](../../AGENTS.md) 的 "Where to Look" 表
+- 新增 ADR 时须同步更新该索引
 
-1. 采用双通道检索模型（Mode A）：本地 Grafeo 和企业 RAG 是两条独立的检索通道，结果拼接后送入 LLM 上下文。两者不整合进统一的记忆抽象层。
-2. ACowork 不托管 RAG 服务（Option 1）：企业自建或采购 RAG 系统，ACowork 在 manifest 中声明 RAG 接入点（URL + 认证），运行时作为标准工具调用。ACowork 云端零状态。
-3. 企业 RAG 定位为"企业级 Agent 开发范式"，不属于 ACowork 核心平台功能承诺。
+> PRD 描述"做什么"和"为什么"，ADR 描述"怎么做"和"为何这么做"。
 
-**权衡**：
+---
 
-- 得：架构侵入最小，隐私边界清晰，企业自主可控，云端压力仅来自接入管理（轻量）
-- 失：RAG 查询结果与本地记忆检索质量依赖 Agent 自己拼接，无统一排序；企业需自建/采购 RAG，有一定接入门槛
+## 附录 A：待实现需求
 
-**前提**：若未来出现大量中小企业无法自建 RAG 的场景，可叠加"托管 RAG 服务"作为增值选项，与纯对接模式并存。
+> 本附录列出 PRD 中已记录、但当前代码实现**尚未交付**的需求条目。
+> 用于研发路线图对齐、新人 on boarding、季度评审盘点。**状态以代码实现为准**，PRD 优先级仅供参考。
 
-### ADR-002：PrivacyLevel 边界与 Cloud Sync 模型
+### A.1 打包与分发（§1.1）
 
-**状态**：已接受
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| PKG-08 | P2 | ❌ 未实现 | Phase 6 | 远程仓库（多 HTTP 源、定期更新）尚未实现。当前 Agent 仅支持本地 .agent 包安装 |
+| PKG-08a | P2 | ❌ 未实现 | Phase 6 | 仓库上架安全扫描（Manifest/Prompt/Skill/WASM/Grafeo/结构六维度） |
+| PKG-09 | P3 | ❌ 未实现 | Phase 6+ | 双密钥模型（Upload Key + Distribution Key） |
+| PKG-10 | P3 | ❌ 未实现 | Phase 6+ | 密钥轮换（Proof-of-Rotation） |
+| PKG-11 | P3 | ❌ 未实现 | Phase 6+ | 证书吊销列表（CRL） |
 
-**上下文**：
-讨论 Grafeo 云端同步时出现两个问题：（1）Sensitive 数据不上云导致跨设备不一致，是否影响功能？（2）"enterprise Zone"与"企业 RAG"命名重叠，是否造成混淆？
+### A.2 工具系统（§1.5）
 
-**决策**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| TOL-02 | P2 | ⚠️ 部分 | Phase 3 | WASM 工具模块代码已实现（`core/acowork-runtime/src/tools/wasm/`），但 `wasm-tools` feature 默认未开启，**没有任何 Agent 内置工具列表注册 WASM 工具**——实质不可用 |
+| TOL-03 | P2 | ⚠️ 部分 | Phase 3 | 同上，资源限制（memory / fuel / time）随 TOL-02 一并实现 |
+| TOL-04 | P2 | ⚠️ 部分 | Phase 3 | 同上，`secrecy::SecretString` 隔离随 TOL-02 一并实现 |
+| TOL-08 | P2 | ⚠️ 部分 | Phase 3 | Wasmtime / Wasmi 运行时选型随 TOL-02 一并实现 |
+| TOL-09 | P2 | ⚠️ 部分 | Phase 3 | WASI Preview 2 随 TOL-02 一并实现 |
 
-1. Grafeo Cloud Sync 全部 Zone 明文同步，平台托管。遵循主流互联网平台实践（Google/iCloud/Notion 均明文存储），同设备体验一致，风险与主流平台同量级。
-2. PrivacyLevel 作用域限定为**打包边界控制**：Personal/Sensitive 节点在 Agent 分享导出时剥离，Public 节点保留。网络边界和跨 Agent 边界暂不考虑。
-3. "enterprise Zone"改名为"work Zone"：原指个人工作相关记忆，与企业 RAG 完全无关。改名消除歧义。
-4. PrivacyLevel 与 Cloud Sync 策略完全解耦：PrivacyLevel 控制打包时"带不带"，Cloud Sync 控制"同步到哪里"。LLM 上下文中的数据无技术访问控制手段，靠 prompt 约定约束。
+### A.3 Skill 系统（§1.6）
 
-**打包边界语义**（PrivacyLevel 的实际意义）：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| SKL-02 | P2 | ⚠️ 部分 | Phase 3 | SKILL.md YAML frontmatter + Markdown body 已解析（`core/acowork-runtime/src/skills/parser.rs`），但**完整 agentskills.io 标准兼容**延期至 Phase 3 |
+| SKL-03 | P2 | ❌ 未实现 | Phase 6 | Skill 调试流程（Grafeo 草稿 → Debug 模式 → SKILL.md 提交）。Debug Panel 已交付，但闭环未接通 |
+| SKL-04 | P2 | ❌ 未实现 | Phase 6+ | 自学习闭环（SkillExperience 阈值 → 提示更新 SKILL.md） |
+| SKL-05 | P2 | ❌ 未实现 | Phase 6+ | SkillExecution 模型兼容性（按模型聚合经验、自动注入适配指令） |
 
-| 节点类型 | Personal/Sensitive 剥离后剩余 |
-|---------|-----------------------------|
-| Personal 节点（用户偏好、历史） | 不打包 |
-| Sensitive 节点（私密信息） | 不打包 |
-| Agent 自学的 SkillIteration / SkillExperience | 保留——这是 Agent 能力的体现 |
-| Agent 的 ProceduralNode | 保留——跨次学会的通用行为 |
-| AutobiographicalNode（关于 Agent 自身） | 保留行事风格、擅长领域；剥离关于用户的认知 |
-| ArtifactRef | 保留引用，剥离原始内容（工件性内容已在写入时分类压缩） |
+### A.4 Gateway（§1.7）
 
-**权衡**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| GTW-08 | P2 | ✅ 已实现 | Phase 4 | HTTP API 完整交付，但 PRD 优先级未及时更新 |
 
-- 得：边界清晰、实现简单、多设备体验完整、打包分享隐私安全
-- 失：平台明文存储用户全部记忆，依赖平台信任和隐私承诺（与主流平台同等风险）
+### A.5 系统 Agent（§1.8）
 
-### ADR-003：记忆生命周期架构与 Runtime 可扩展性准则
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| SYS-03 | P3 | ❌ 未实现 | Phase 3+ | 身份提报用 LLM 二次判断。当前身份确认直接同步落库 |
+| SYS-05 | P2 | ❌ 未实现 | Phase 2 延期 | observe 通知机制。身份变更未主动推送订阅方，需要订阅方轮询 |
 
-**状态**：已接受
+### A.6 安全（§1.10）
 
-**上下文**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| SEC-05 | P0 | ⚠️ 部分 | Phase 3 激活 | WASM 沙箱代码已实现，但**未启用**——P0 需求实质降级为待激活状态 |
+| SEC-06 | P2 | ❌ 未实现 | Phase 7 | 沙箱强化（Linux bwrap + seccomp-bpf / macOS Seatbelt / Windows AppContainer） |
+| SEC-08 | P3 | ❌ 未实现 | Phase 3 | Shell 命令风险分级 + FileProvenance + 审计日志增强。当前 shell 工具执行无运行时风险评级 |
+| SEC-09 | P2 | ❌ 未实现 | Phase 6 | 仓库上架安全扫描（依赖 PKG-08a） |
 
-记忆系统是 ACowork 的核心差异化能力（推理靠 LLM、操作靠 Tools，只有记忆是自主掌控的），必然经历大量迭代。当时存在三个紧耦合风险：
-1. 记忆触发点硬编码在 Runtime 主循环，每次记忆迭代都要改 Runtime
-2. Grafeo 与 rusqlite 紧耦合，无法替换存储后端
-3. 记忆管线缺乏中间件机制，无法在不改源码的情况下扩展记忆行为
+### A.7 Desktop App（§1.11）
 
-**决策**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| DSK-06 | P2 | ⚠️ 部分 | Phase 6 | 调试面板 + 断点已交付，**录制回放**引擎（S3）待 Phase 6 |
+| DSK-07 | P3 | ⚠️ 部分 | Phase 6 | Publish Wizard / Create Wizard / Clone Dialog 已交付；独立 Skill / Manifest **编辑器未提供**（依赖 Workspace 文件树 + file_edit 工具） |
 
-1. 引入 **Memory Lifecycle** 标准化接口，定义 6 个生命周期阶段（Retrieve/Inject/Record/Consolidate/Decay/Compact），Runtime 在固定位置触发阶段，Memory 系统通过 handler 响应
-2. 定义 **MemoryStore trait** 作为存储后端抽象（独立 `acowork-memory` crate），Grafeo 作为 trait 的第一个实现（GrafeoStore），未来可替换
-3. 引入 **MemoryManager** 中间层，管理生命周期阶段调度、中间件链、配置注入
-4. 定义 **MemoryMiddleware trait**，支持在记忆管线中插入自定义逻辑（Phase 2），采用洋葱模型（Tower 风格）
-5. 确立 **Runtime 可扩展性设计准则**（RXT-01~06），作为所有 Runtime 模块的架构约束
-6. 对 Runtime 全模块执行**紧耦合审计**，高风险项立即修复，中低风险项纳入 Phase 路线图
+### A.8 跨平台（§1.12）
 
-**权衡**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| PLT-03 | P3 | ❌ 未实现 | Phase 7 | 移动端（Android/iOS）SingleProcess 模式、Local TCP 传输、wasmi 引擎 |
+| PLT-05 | P2 | ❌ 未实现 | Phase 7 | 移动端能力降级（shell 不可用、文件路径收窄、Skill 级联降级） |
 
-- 得：Runtime 稳定性大幅提升（记忆迭代不影响 Runtime）、存储可替换、可测试性增强（InMemoryStore mock）、扩展通过中间件而非改源码
-- 失：引入一层间接调用（trait dispatch，但 Rust monomorphization 零成本）、概念增加（MemoryManager / MemoryStore / MemoryMiddleware）
-- Phase 1 额外成本：低——trait 定义 + GrafeoStore 实现即可，中间件管线推迟到 Phase 2
+### A.9 记忆系统（§1.4）
 
-### ADR-004：硬件传感器访问架构（远期规划）
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| MEM-09 | P3 | ⚠️ 部分 | Phase 3+ | 离线巩固骨架已就绪（`acowork-grafeo/src/consolidation/` + Runtime `consolidation_bg.rs`），**完整 LLM 驱动的离线巩固**未激活 |
+| MEM-10 | P1 | ❌ 未实现 | Phase 6 | Grafeo Cloud Sync。当前 MemoryStore 仅本地（Grafeo 文件位于 `{agent_home}/data/grafeo/`），无云端同步。Phase 6 与 RemoteMemoryStore（企业级记忆升级）一起实现 |
 
-**状态**：提议（Phase 5+）
+### A.10 开发者体验（§2.6）
 
-**上下文**：
+| 编号 | 优先级 | 当前状态 | 计划阶段 | 说明 |
+|------|--------|---------|---------|------|
+| DEV-06 | P2 | ❌ 未实现 | Phase 6 | Skill 热加载（修改 SKILL.md 无需重启 Agent）。当前修改 SKILL.md 必须重启 Agent 进程才生效 |
 
-ACowork 的长期愿景包括支持基于硬件传感器的 Agent（如机器人、IoT 设备）。当前 Tool 系统基于 WASM 沙箱，天然隔离硬件访问，无法满足硬件传感器的适配需求。传感器访问的延迟需求横跨多个数量级（GPS 0.1Hz → IMU 1000Hz+），单一机制无法覆盖。
+### A.11 §3 约束 / §5 场景层面的"未实现"提示
 
-**决策**：采用分层混合模型，按传感器频率和延迟需求选择不同路径：
-
-1. **低频传感器**（GPS/温度/气压，<1Hz）：**Driver Agent + Intent** 模式。为每类硬件开发专属 Driver Agent，普通 Agent 通过 Intent 请求硬件数据。复用现有 Intent 机制，零新概念。
-
-2. **中频传感器**（摄像头/麦克风，15~60Hz）：**Gateway Hardware Service + IPC** 模式。传感器不是 Agent 自己去读，而是通过 Gateway（可信二进制）作为硬件服务代理。Gateway 管的是"谁能访问"（资源管理），不是"怎么用"（业务逻辑），与 Key Vault 管理 API Key 访问是同一类职责。
-
-3. **高频传感器/执行器**（IMU/电机控制，100Hz+）：**Direct Channel + Shared Memory** 模式。Gateway 只负责授权，授权通过后 Agent Runtime 与硬件建立共享内存通道，后续数据流不经过 Gateway，零 IPC 开销。借鉴 Android Camera2 BufferQueue 和 Audio FAST_TRACK 的零拷贝直通设计。
-
-**manifest 声明扩展**：
-
-```toml
-[hardware]
-requires = [
-    { sensor = "gps", freq = "low" },            # → Intent 模式
-    { sensor = "camera", freq = "mid" },          # → IPC 模式
-    { sensor = "imu", freq = "high", hz = 200 },  # → Direct Channel
-    { actuator = "motor", latency = "realtime" }  # → Direct Channel
-]
-```
-
-**安全机制**：
-
-- 新增签名身份：**Hardware Driver**（Phase 5+），比 Developer 更高权限，Gateway 只允许 Hardware Driver 签名的 Agent 声明 `requires_hardware`
-- Direct Channel 建立前 Gateway 授权，通道建立后 Gateway 不再介入
-- Agent 崩溃时通道由操作系统自动回收（fd 关闭 / shared memory unmap）
-- Agent 行为异常时 Gateway 可主动断开通道
-
-**渐进策略**：
-
-- Phase 1~3：不涉及硬件，当前 WASM 沙箱 + 15 内置工具足够
-- Phase 4：引入 Gateway Hardware Service + 低频 Driver Agent（GPS/蓝牙等）
-- Phase 5+：引入 Direct Channel + Hardware Driver 签名身份 + 高频传感器/执行器
-
-**权衡**：
-
-- 得：统一框架覆盖从纯软件 Agent 到机器人 Agent 的全频谱；分层设计让每层复杂度可控；Gateway 保留资源管理权不失控
-- 失：架构复杂度显著增加（三层硬件访问路径）；Hardware Driver 签名身份引入新的信任链管理；Direct Channel 打破了 Gateway 介入所有交互的一致性
-- 替代方案否决：纯 WASM 扩展（WASI 无法满足实时性）、Native Plugin（打破"无可执行代码"核心原则 + 跨平台噩梦）、纯 Intent 模式（两跳 IPC 延迟不可接受）
-
-### ADR-005：Shell 安全与文件来源追踪
-
-**状态**：已接受
-
-**上下文**：
-
-当前文件系统隔离是策略级的——Runtime 检查 file_read/file_write 的路径参数是否在工作区内。但 shell 工具启动的子进程继承用户进程的全部 OS 权限，可以读写工作区外的任意文件。典型攻击路径：Agent 通过 network_fetch 下载恶意脚本 → file_write 保存到工作区 → shell 执行该脚本 → 脚本越权读取 ~/.ssh/id_rsa 并上传。OS 级沙箱（bwrap / Seatbelt / AppContainer）可以从内核层阻止，但跨平台覆盖需要时间（Phase 7，ADR-007），Phase 3 需要在 Runtime 层建立可检测、可拦截的安全防线。
-
-**决策**：
-
-Phase 1 在 Runtime 层实施三层防御：
-
-1. **文件来源追踪（FileProvenance）**：Runtime 维护工作区内每个文件的来源记录（CreatedByTool / Downloaded / PreExisting / Unknown）。当 shell 命令试图执行 Downloaded 或 Unknown 来源的文件时，自动升级为高风险。
-
-2. **Shell 命令风险分级**：将 shell 命令分为 Low / Medium / High / Blocked 四级。基础文件操作命令直接执行；可能下载/执行代码的命令需 approval gate；执行下载文件为 High（强制用户确认）；破坏性操作直接拒绝。
-
-3. **工作区文件系统监控**：使用 inotify / FSEvents / ReadDirectoryChangesW 监控工作区文件变化，检测异常模式（新可执行文件出现、权限变更、符号链接指向工作区外）。
-
-**分阶段策略**（2026-04-25 更新：SEC-08 延期至 Phase 3；SEC-06 进程沙箱延后至 Phase 7，ADR-007）：
-
-- Phase 1：approval gate + 审计日志（基础可检测能力）✅
-- Phase 3：Shell 风险分级 + 文件来源追踪（FileProvenance）+ Approval Gate 完善 + 审计日志增强
-- Phase 7：Linux bwrap + macOS Seatbelt + Windows AppContainer（内核级强制，ADR-007）
-- 远期：独立用户 / 容器（嵌入式/企业场景）
-
-**权衡**：
-
-- 得：Phase 1 无需 OS 特定 API，纯 Rust 逻辑，覆盖 80% 的攻击场景；为 Phase 2+ OS 沙箱提供审计基线
-- 失：Phase 1 不能阻止所有攻击——复杂 shell 管道 / 变量替换 / base64 编码的 payload 可能绕过命令风险评级；子进程链追踪困难（子进程再启动子进程）
-- 替代方案否决：Phase 1 直接上 OS 沙箱（跨平台覆盖不够）、禁止 shell 工具（丧失核心能力）、仅靠 approval gate 无来源追踪（无法区分"执行自己写的脚本"和"执行下载的脚本"）
-
-### ADR-006：跨平台 IPC 传输层提前实现（Phase 2）
-
-**状态**：已接受
-
-**上下文**：
-
-当前 Gateway IPC 通信层仅支持 Unix Socket（Linux/macOS），Windows 平台的 Named Pipe 传输是空壳（`listen()` 返回 Ok 但 `accept()` 直接 Err）。`server.rs` 中 9 个函数 + 整个测试模块被 `#[cfg(unix)]` 标记，参数类型硬编码为 `tokio::net::UnixStream`/`unix::OwnedReadHalf`，导致 Windows 上全部编译期剔除。开发者在 Windows 环境无法运行端到端 IPC 测试，只能用蹩脚方式绕过。
-
-原计划跨平台适配在 Phase 7 执行，但当前阶段（Phase 2）的 IPC 代码量尚小（server.rs ~930 行），重构成本低。若延后，`#[cfg(unix)]` 污染会随功能增加而扩散，重构代价指数增长。
-
-**决策**：
-
-1. **引入平台无关的 `AsyncTransport` trait**（定义在 `acowork-core`，被 Gateway 和 Runtime 共享）：将 `recv_frame`/`send_frame` 从传输实现中提升为 trait 方法，消除 server.rs 对 `tokio::net::UnixStream` 的直接依赖。
-
-2. **传输层实现按平台条件编译**：`#[cfg(unix)]` 只出现在 `UnixTransport` 实现内部；`#[cfg(windows)]` 只出现在 `NamedPipeTransport` 实现内部。server.rs 和 client.rs 完全不含平台条件编译。
-
-3. **Server 端抽象**：新增 `AsyncTransportServer` trait（listen/accept 返回 `Box<dyn AsyncTransportConnection>`），`IpcServer::listen()` 内部通过工厂函数选择实现。
-
-4. **Runtime 端补全**：当前 `UnixSocketTransport` 的 `send_frame`/`recv_frame` 是 placeholder（connect 后不存 stream），需补全为真正的读写；`WindowsNamedPipeTransport` 从 stub 升级为完整实现。
-
-5. **Config 平台感知**：默认 socket_path 在 Windows 上为 `\\.\pipe\acowork-gateway`，在 Linux/macOS 上为 `{config_dir}/gateway.sock`。
-
-6. **Local TCP 不在本次范围**：移动端（Android/iOS）的 Local TCP 传输仍留在 Phase 7。
-
-**改动范围**：
-
-| 文件 | 改动类型 | 说明 |
-|------|---------|------|
-| `acowork-core/src/transport.rs` | 新增 | `AsyncTransportConnection` + `AsyncTransportServer` trait |
-| `acowork-gateway/src/ipc/transport.rs` | 重写 | Unix/NamedPipe 双实现 + 工厂函数 |
-| `acowork-gateway/src/ipc/server.rs` | 重构 | 去除全部 `#[cfg(unix)]`，参数改为 `Box<dyn AsyncTransportConnection>` |
-| `acowork-runtime/src/ipc/transport.rs` | 重写 | Unix 真正实现 + Named Pipe 完整实现 |
-| `acowork-runtime/src/ipc/client.rs` | 小改 | 适配新 trait |
-| `acowork-gateway/src/config.rs` | 小改 | 平台感知默认 socket_path |
-| `acowork-core/src/lib.rs` | 小改 | 增加 transport 模块导出 |
-
-**权衡**：
-
-- 得：Windows 开发环境可直接跑通端到端测试；`#[cfg(unix)]` 污染彻底消除；后续新增传输（Local TCP）只需添加实现，无需改 server/client；代码量小时重构成本低
-- 失：占用 Phase 2 约 4-5 天工时；trait 抽象引入少量间接调用开销（可忽略）；Windows Named Pipe 的 `connect` 语义与 Unix Socket 略有差异（需在 accept 侧处理 `CreateInstance` + `Connect` 的两步模式）
-- 替代方案否决：
-  - 仅在 Windows 上用 Local TCP（127.0.0.1）绕过——违反"统一合同层"设计原则，且引入端口占用和防火墙问题
-  - 全平台统一用 Local TCP——性能差（内核态 vs 用户态拷贝），且移动端场景才需要
-  - 保持现状靠 WSL 开发——每天付"蹩脚绕过"的税，且无法在 Windows CI 上跑测试
+| 场景 / 约束 | 当前状态 | 说明 |
+|------------|---------|------|
+| 跨平台移动端运行 | ❌ 未实现 | §0 / §5.4 描述"同一 .agent 包在桌面和移动端运行"——PLT-03/05 待 Phase 7 |
+| 远程仓库生态分发 | ❌ 未实现 | §0 "可分发生态" + §5.2 "发布到仓库"——PKG-08 待 Phase 6 |
+| 录制回放调试 | ❌ 未实现 | §0 / §2.6 提到——DSK-06 子项待 Phase 6 |
+| SKILL.md 热加载 | ❌ 未实现 | §0 / §2.6 / §3 提到——DEV-06 待 Phase 6 |
+
+### A.12 路线图摘要
+
+| 阶段 | 预计交付（与 PRD §A.1~A.11 对齐） |
+|------|----------------------------------|
+| Phase 5 S5（进行中） | P2 残留技术债 + 集成验证（plan-overview.md §S5） |
+| Phase 6 | PKG-08/08a/09/10/11、SEC-09、MEM-09 激活、MEM-10 Cloud Sync、SKL-03/04/05、DSK-06 录制回放、DSK-07 编辑器、DEV-06 热加载、TOL-02~09 激活 |
+| Phase 7 | PLT-03/05 移动端、SEC-06 OS 沙箱、ADR-007 全平台进程级沙箱 |
+
+> **维护约定**：当某需求从本附录中删除（已实现并交付）时，须同步更新主文档中对应条目的当前状态描述，并在 commit message 中引用对应 ADR 或 PR。
