@@ -41,8 +41,8 @@ message DataEnvelope {
     // ADR-059: Bootstrap capability-readiness snapshot. Single retained
     // topic (`acowork/global/bootstrap`, QoS 1) that aggregates Gateway's
     // internal subsystem readiness into a `phase` enum + `instance_id`
-    // + monotonic `version`. Field number 16 is occupied and will never
-    // be reused; subsequent global-snapshot messages start at 17.
+    // and monotonic `version`. Field number 16 is occupied and will
+    // never be reused; subsequent global-snapshot messages start at 17.
     BootstrapState           bootstrap_state           = 16;
 
     // ── Agent lifecycle (Runtime → subscribers, Retained) ──

@@ -16,8 +16,7 @@ use std::path::PathBuf;
 
 use crate::error::{NodeError, Result};
 use crate::process::spawn::{
-    check_health, find_available_debug_port, find_available_http_port, kill_agent_process,
-    spawn_agent_process,
+    check_health, kill_agent_process, spawn_agent_process, PortAllocator,
 };
 use crate::state::{AgentSlot, InstalledAgent, SharedNodeState};
 
@@ -98,23 +97,29 @@ impl ProcessManager {
         // Determine workspace directory
         let workspace = PathBuf::from(&info.install_path).join("workspace");
 
+        // ADR-055 §6.4: the Node allocates a concrete loopback HTTP
+        // port so its reverse proxy has a stable `{id} → port` mapping.
+        // Allocation goes through the shared PortAllocator (probe +
+        // reserve under one lock), so two concurrent `start` commands
+        // can never receive the same port — the loser used to crash
+        // with "Address already in use" and stay HTTP-less.
+        let port_allocator: std::sync::Arc<PortAllocator> =
+            state.read().await.port_allocator.clone();
+
         // Assign a per-agent debug port when running in dev mode
         let debug_port = if dev_mode {
-            Some(find_available_debug_port(19878))
+            Some(port_allocator.allocate(19878))
         } else {
             None
         };
-
-        // ADR-055 §6.4: the Node allocates a concrete loopback HTTP
-        // port so its reverse proxy has a stable `{id} → port` mapping.
-        let http_port = find_available_http_port();
+        let http_port = port_allocator.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
 
         let reaper_state = if wire_reaper {
             Some(state.clone())
         } else {
             None
         };
-        let child = spawn_agent_process(
+        let child = match spawn_agent_process(
             agent_id,
             &info.install_path,
             &workspace,
@@ -130,7 +135,20 @@ impl ProcessManager {
             self.node_token.as_deref(),
             reaper_state,
         )
-        .await?;
+        .await
+        {
+            Ok(child) => child,
+            Err(e) => {
+                // Free the reservations on spawn failure so a retry can
+                // reuse the ports immediately (otherwise they leak
+                // until the node exits).
+                port_allocator.release(http_port);
+                if let Some(dp) = debug_port {
+                    port_allocator.release(dp);
+                }
+                return Err(e);
+            }
+        };
 
         let pid = child.id();
 
@@ -171,6 +189,15 @@ impl ProcessManager {
         // (e.g. PID already gone via idle auto-sleep) does NOT leave a
         // stale record. The reaper will find nothing and quietly exit.
         state.write().await.remove_agent(agent_id);
+
+        // Release the reserved ports so later starts can reuse them.
+        // If the process survives a failed kill, the bind probe in
+        // `PortAllocator::allocate` still skips the occupied port.
+        let port_allocator = state.read().await.port_allocator.clone();
+        port_allocator.release(running.http_port);
+        if let Some(dp) = running.debug_port {
+            port_allocator.release(dp);
+        }
 
         if let Err(e) = kill_agent_process(running.pid).await {
             tracing::warn!(

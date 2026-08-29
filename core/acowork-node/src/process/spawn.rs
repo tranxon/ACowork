@@ -191,6 +191,12 @@ pub async fn spawn_agent_process(
         if let Some(state) = shared_state {
             match state.write().await.remove_agent(&agent_id_owned) {
                 Some(removed) => {
+                    // Release the ports reserved at spawn time so they
+                    // become reusable (TOCTOU fix, see PortAllocator).
+                    state.read().await.port_allocator.release(removed.http_port);
+                    if let Some(dp) = removed.debug_port {
+                        state.read().await.port_allocator.release(dp);
+                    }
                     tracing::info!(
                         agent_id = %agent_id_owned,
                         pid = removed.pid,
@@ -268,26 +274,63 @@ pub async fn kill_agent_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// Find an available TCP port starting from `base_port`.
-pub fn find_available_debug_port(base_port: u16) -> u16 {
-    let mut port = base_port;
-    loop {
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        if std::net::TcpListener::bind(addr).is_ok() {
-            tracing::info!(port, "Found available debug port");
-            return port;
-        }
-        tracing::debug!(port, "Debug port in use, trying next");
-        port += 1;
-    }
+/// Process-local registry of allocated Runtime loopback ports.
+///
+/// ADR-055 §6.4: the Node allocates a concrete HTTP port per Runtime
+/// (rather than `--http-port 0`) so its reverse proxy has a stable
+/// `{agent_id} → port` mapping. The original probe-and-return helper
+/// released its probe listener immediately, which raced when two
+/// `start` commands ran concurrently (e.g. the Desktop booting the
+/// system agent and a user agent at once): both probes saw the same
+/// free port, both Runtimes were launched with it, the first bind
+/// won and the second crashed with "Address already in use"
+/// (os error 48) — leaving its HTTP server down, its `http_endpoint`
+/// unpublished, and the Gateway reverse-proxy returning 503s.
+///
+/// `allocate` probes and reserves under one mutex, so within this
+/// process two allocations can never collide; cross-process leftovers
+/// (orphans, other node instances) are still rejected by the bind
+/// probe. Reservations must be released on stop / exit / spawn
+/// failure so ports stay reusable.
+#[derive(Debug, Default)]
+pub struct PortAllocator {
+    used: std::sync::Mutex<std::collections::HashSet<u16>>,
 }
 
-/// Find an available loopback HTTP port for a Runtime, starting from
-/// [`acowork_core::node::NODE_HTTP_PORT_BASE`] (ADR-055 §6.4). The Node
-/// allocates a concrete port (rather than `--http-port 0`) so its
-/// reverse proxy has a stable `{agent_id} → port` mapping.
-pub fn find_available_http_port() -> u16 {
-    find_available_debug_port(acowork_core::node::NODE_HTTP_PORT_BASE)
+impl PortAllocator {
+    /// Create an empty allocator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve the first port `>= base` that is neither reserved in
+    /// this allocator nor bound by any process. The reservation is
+    /// held until [`Self::release`] is called.
+    pub fn allocate(&self, base: u16) -> u16 {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        let mut port = base;
+        loop {
+            if !used.contains(&port) {
+                let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                if std::net::TcpListener::bind(addr).is_ok() {
+                    used.insert(port);
+                    tracing::info!(port, "Allocated Runtime loopback port");
+                    return port;
+                }
+            }
+            tracing::debug!(port, "Port in use or reserved, trying next");
+            port += 1;
+        }
+    }
+
+    /// Release a previously allocated port so it can be re-used by a
+    /// later allocation.
+    pub fn release(&self, port: u16) {
+        self.used
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&port);
+    }
 }
 
 /// Check if a process with the given PID is still running (async).
@@ -346,6 +389,37 @@ mod tests {
     fn test_agent_child_id() {
         let child = AgentChild { pid: 12345 };
         assert_eq!(child.id(), 12345);
+    }
+
+    #[test]
+    fn port_allocator_concurrent_allocations_are_disjoint() {
+        // Two allocations from the same base must never collide: the
+        // first reservation is held until released (the TOCTOU fix).
+        let alloc = PortAllocator::new();
+        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        let second = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn port_allocator_released_port_is_reusable() {
+        let alloc = PortAllocator::new();
+        let first = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        alloc.release(first);
+        let again = alloc.allocate(acowork_core::node::NODE_HTTP_PORT_BASE);
+        assert_eq!(again, first);
+    }
+
+    #[test]
+    fn port_allocator_skips_externally_bound_port() {
+        // A port held by another process must be skipped even if it is
+        // not reserved in this allocator (cross-process guard).
+        let alloc = PortAllocator::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied = listener.local_addr().unwrap().port();
+        let got = alloc.allocate(occupied);
+        assert_ne!(got, occupied);
+        alloc.release(got);
     }
 
     #[tokio::test]

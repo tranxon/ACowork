@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 
 use crate::error::Result;
 use crate::identity::NodeIdentity;
+use crate::process::spawn::PortAllocator;
 
 /// A Runtime process slot in the node's process table.
 ///
@@ -103,6 +104,11 @@ pub struct NodeState {
     /// Managed by `sidecar::lsp_relay_supervisor` — the Node now hosts
     /// the relay instead of the Gateway. `None` while stopped.
     pub lsp_relay_process: Option<crate::sidecar::lsp_relay::LspRelayProcessState>,
+    /// Shared Runtime loopback port registry (ADR-055 §6.4). Every
+    /// `start` command allocates from here (probe + reserve under one
+    /// lock) so concurrent starts can never receive the same port; the
+    /// reservation is released on stop / process exit / spawn failure.
+    pub port_allocator: std::sync::Arc<PortAllocator>,
     snapshot: NodeRuntimeSnapshot,
 }
 
@@ -113,6 +119,7 @@ impl NodeState {
             agents: HashMap::new(),
             installed_agents: HashMap::new(),
             lsp_relay_process: None,
+            port_allocator: std::sync::Arc::new(PortAllocator::new()),
             snapshot: NodeRuntimeSnapshot::default(),
         }
     }
