@@ -2,7 +2,7 @@
 
 > 版本：v1.0 | 日期：2026-04-27
 > 关联设计文档：`docs/design/14-desktop-app.md`
-> 关联实施计划：`docs/plan/plan-p5.md`（S1 用户模式）
+> 关联实施计划：S1 用户模式任务定义（归档于 `docs/_internal/archive/plan/zh/plan-p5.md`，本地查阅）
 
 ---
 
@@ -997,4 +997,4 @@ interface OnboardingStore {
 | `docs/design/14-desktop-app.md` | 架构、技术选型、窗口管理 — 本文档在其基础上细化交互 |
 | `docs/design/10-debug-protocol.md` | 开发者模式协议 — 本文档不覆盖，S2 阶段补充 |
 | `docs/design/13-skill-system.md` | Skill 编辑器 — 本文档不覆盖，S3 阶段补充 |
-| `docs/plan/plan-p5.md` | S1 任务定义 — 本文档是 S1 前端开发的实现依据 |
+| `docs/_internal/archive/plan/zh/plan-p5.md` | S1 任务定义（归档于 `_internal/`，本地查阅）— 本文档是 S1 前端开发的实现依据 |

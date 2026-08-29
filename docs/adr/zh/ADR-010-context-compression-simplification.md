@@ -107,8 +107,8 @@
 | `docs/design/03-agent-runtime.md` | §3.1 上下文优先级、§Token 预算分配——移除内容折叠 Phase 1，简化为三阶段 |
 | `docs/design/05-memory.md` | §1 瞬态层 Token 管理——移除三阶段渐进裁剪和 8 级检索优先级 |
 | `docs/design/15-conversation-persistence.md` | §1.8 Token 预算——简化 per-session 配额描述 |
-| `docs/review/16-adr-context-threshold-dynamic.md` | 阈值 70%/90% 保留，移除程序化折叠步骤描述 |
-| `docs/review/04-p2-s2-design-review.md` | 三阶段渐进裁剪决策标记为"已废弃" |
+| `docs/_internal/archive/review/zh/16-adr-context-threshold-dynamic.md` | 阈值 70%/90% 保留，移除程序化折叠步骤描述 |
+| `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` | 三阶段渐进裁剪决策标记为"已废弃" |
 
 ## 后果
 

@@ -230,7 +230,6 @@ tools = ["web_search", "read_file", "write_file"]
 - 架构设计：[`docs/design/zh/`](./docs/design/zh/)
 - 模块级设计：[`docs/module-design/zh/`](./docs/module-design/zh/)
 - 架构决策记录（ADR）：[`docs/adr/zh/`](./docs/adr/zh/)（ADR-009 → ADR-058+）
-- 代码评审与实现笔记：[`docs/review/zh/`](./docs/review/zh/)
 - 开发者约定：[`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -252,7 +251,6 @@ ACowork.AI 的设计深受以下开源项目启发：
 
 项目处于 **Alpha 实现期**。欢迎提交代码、设计反馈与评审意见：
 
-- 浏览 [`docs/review/zh/`](./docs/review/zh/) 下的设计 / 代码评审报告
 - 通过 issue 提交 bug 报告、提案或设计反馈
 - 提 PR 前请先阅读 [`AGENTS.md`](./AGENTS.md) 了解项目约定
 

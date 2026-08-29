@@ -1090,7 +1090,7 @@ agent_tools.json 、agent_mcp.json 、agent_search.json 是三种不同主语语
 ### Phase 10：28 review 剩余 P0/P1 收尾（2026-07-14）
 
 > Phase 1-9 完成 ADR-034 协议迁移与架构一致性收尾。基于 2026-07-13 的
-> `docs/review/zh/28-adr-033-mqtt-refactor-code-review.md` 评审与代码实际状态
+> `docs/_internal/archive/review/zh/28-adr-033-mqtt-refactor-code-review.md` 评审与代码实际状态
 > 核查，Phase 10 集中处理 6 项已确认问题。
 
 #### P0 必修 3 项
@@ -1103,7 +1103,7 @@ agent_tools.json 、agent_mcp.json 、agent_search.json 是三种不同主语语
 
 - [ ] **#4 Desktop per-session 订阅切换**：`mqtt_client.rs:169` `subscribe_agent_sessions` 全量订阅仍 `#[deprecated]` 但存在,`subscribe_agent_session` 是 `#[allow(dead_code)]` 没人用。前端 session 切换时调用 `subscribe_agent_session` / `unsubscribe_agent_session`
 - [ ] **#5 Router/Dispatch 收尾**：`core/acowork-gateway/src/mqtt/router.rs:62-95` 全部 `RouteResult::Unimplemented`,`dispatch.rs` 注释声称被 `handle_plaintext_message()` 调用。审计实际使用,要么实现,要么删除 dead scaffolding
-- [x] **#6 agentcore Bug 1 确认**：`docs/review/agentcore-session-fields-analysis.md` 报 `SessionManager::total_lines()` 永远返回 0。代码核查发现该方法已不存在,需确认 `cli.rs` 是否仍有旧调用。**核查结论**:`fn total_lines` 在整个 runtime 已不存在;`cli.rs:3093` 现用 `session_manager.committed_lines_for(&session_id)`（正确替代）。Bug 1 已修,无需进一步动作。
+- [x] **#6 agentcore Bug 1 确认**：`docs/_internal/archive/review/agentcore-session-fields-analysis.md` 报 `SessionManager::total_lines()` 永远返回 0。代码核查发现该方法已不存在,需确认 `cli.rs` 是否仍有旧调用。**核查结论**:`fn total_lines` 在整个 runtime 已不存在;`cli.rs:3093` 现用 `session_manager.committed_lines_for(&session_id)`（正确替代）。Bug 1 已修,无需进一步动作。
 
 #### 验收
 

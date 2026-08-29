@@ -235,7 +235,6 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 - Architecture design: [`docs/design/zh/`](./docs/design/zh/)
 - Module-level design: [`docs/module-design/zh/`](./docs/module-design/zh/)
 - Architecture Decision Records: [`docs/adr/zh/`](./docs/adr/zh/) (ADR-009 → ADR-058+)
-- Code review & implementation notes: [`docs/review/zh/`](./docs/review/zh/)
 - Developer conventions: [`AGENTS.md`](./AGENTS.md)
 
 ---
@@ -257,7 +256,6 @@ ACowork.AI's design draws inspiration from:
 
 The project is in **active implementation (Alpha)**. Code, design feedback, and reviews are all welcome:
 
-- Browse existing design & code-review reports in [`docs/review/zh/`](./docs/review/zh/)
 - Open issues for bug reports, proposals, or design feedback
 - Read [`AGENTS.md`](./AGENTS.md) for project conventions before opening a PR
 

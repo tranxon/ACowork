@@ -40,7 +40,7 @@
 - `liveBuffer` 从 4 字段缩为 2 字段（`thinkingStream` + `assistantStream`）
 - Trailing virtual item 废弃，assistant 流式预览改为 `adapter.blocks` 中 `isLive: true` block 路由
 
-**修订要点**（详见 `docs/review/zh/29-adr-049-vs-adr-050-post-c5-alignment.md`）：
+**修订要点**（详见 `docs/_internal/archive/review/zh/29-adr-049-vs-adr-050-post-c5-alignment.md`）：
 
 1. §前置：增 ADR-050 §3.3 + §16 交叉引用
 2. §影响范围：增 `chatAdapterStore.ts` / `chatListAdapter.ts` / `paginationUtils.ts`；`VirtualMessageList.tsx` / `ExploreBlock.tsx` 标注 post-C5 路由变更

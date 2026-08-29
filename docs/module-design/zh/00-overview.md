@@ -31,9 +31,9 @@ acowork-ai/
 ├── apps/
 │   └── acowork-desktop/         # Tauri v2 桌面应用（Phase 5）
 │       ├── src-tauri/            # Rust backend (Gateway/Debug 客户端 + 托盘)
-│       └── web/                  # React 前端 (四栏布局 UI)
-├── docs/                         # 设计文档
-├── docs/review/                  # Review 报告（design review + code review，按编号区分）
+│   └── web/                  # React 前端 (四栏布局 UI)
+├── docs/                         # 设计文档（公开）
+├── docs/_internal/               # 本地归档（gitignored：plan / review / reference / 内部诊断）
 ├── tests/                        # 集成测试
 └── examples/                     # 示例 Agent 包
 ```

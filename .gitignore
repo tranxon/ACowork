@@ -64,3 +64,6 @@ target-build-test/
 # Python
 __pycache__/
 *.pyc
+
+# Local-only docs archive (process docs, reviews, internal diagnostics)
+docs/_internal/

@@ -68,17 +68,17 @@ When debugging, consult the latest log file to rapidly identify the root cause
 ├── apps/                    # Application layer (executables)
 │   ├── cli/                 # Gateway CLI (planned)
 │   └── acowork-desktop/     # Tauri v2 Desktop App (frontend + thin Rust backend with system tray / MQTT client)
-├── docs/                    # Architecture design docs (Chinese, v3.x)
-│   ├── design/              # architecture design docs (Chinese under design/zh/, English under design/en/ — pending)
-│   ├── module-design/       # Detailed module specs (crate structure)
-│   ├── plan/                # Planning docs
-│   ├── review/              # Design & code review reports (numbered, under review/zh/)
-│   ├── adr/                 # Architecture decision records (35+, under adr/zh/)
-│   ├── zh/                  # PRD, RAG protocol guide, session diagnostic, protocols/
+├── docs/                    # Public architecture docs (open-source friendly)
+│   ├── AGENTS.md            # guide of design docs (this sibling index)
+│   ├── design/zh/           # 19 architecture design docs (Chinese, v3.x)
+│   ├── module-design/zh/    # Rust crate specifications (8 docs)
+│   ├── adr/{zh,en}/         # Architecture decision records (50+)
+│   ├── zh/                  # PRD, RAG protocol guide, protocols/
 │   │   └── protocols/       # API protocol reference (HTTP + MQTT, see §Architecture below)
-│   └── reference/           # Reference materials (ZeroClaw, Grafeo, memory research)
+│   ├── en/                  # English docs (currently MCP server research)
+│   └── reference/en/        # English placeholder index
+│   └── _internal/           # ⚠️ gitignored — local-only archive (plans, reviews, references, diagnostics)
 ├── examples/                # Example .agent packages
-├── ref-repo/                # Reference implementation ONLY (not source of truth)
 └── dev/                     # Build/Package/CI/CD scripts
 ```
 
@@ -134,7 +134,6 @@ Agent Runtime (universal binary — Rust)
 
 ## Rules (Do NOT)
 
-- Do NOT edit `ref-repo/` — it is a separate reference project, not source of truth
 - Do NOT commit in Chinese
 - Do NOT act before the user confirms your plan
 - Do NOT kill gateway or runtime process when testing, you are running in it

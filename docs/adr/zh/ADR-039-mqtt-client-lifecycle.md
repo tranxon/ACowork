@@ -86,7 +86,7 @@
 | --- | --- | --- | --- |
 | **R-1** | Runtime 发的 stream_delta 包超过 broker 限制 | Runtime `connect()` 没调 `options.set_max_packet_size(...)`，沿用 rumqttc **默认 `10 * 1024` = 10 KB**；broker 端 `max_payload_size = 10 * 1024 * 1024` = 10 MB；LLM 一次产出 21056 字符 `thought` → protobuf 21304 字节 → 超过 10 KB → 触发 `OutgoingPacketTooLarge` 错误 → broker 主动 close | `core/acowork-runtime/src/mqtt/client.rs:158` (set_clean_session 后未调 set_max_packet_size); `core/acowork-gateway/src/mqtt/broker.rs:56` (`max_payload_size = {max_pkt}`); rumqttc `lib.rs:503` (`max_outgoing_packet_size: 10 * 1024`) |
 | **R-2** | reconnect 后 Runtime 失去 `control/#` 订阅 | `set_clean_session(true)` → broker 不持久化订阅；事件循环 `Ok(_) => continue` 吞掉 `ConnAck`；publish status/meta/config + subscribe 只在 `connect()` 末尾执行一次 | `core/acowork-runtime/src/mqtt/client.rs:158`; 同文件 line 192 事件循环 |
-| **R-3** | 用户层"丢消息"无提示 | R-2 衍生 — Desktop publish 全部进了 broker commitlog（broker 视角一切正常），Runtime 因没订阅收不到任何消息，整个链路对此 0 报错、0 重试、0 提示 | `apps/acowork-desktop/src-tauri/src/mqtt_control.rs` 等调用方；`docs/review/loop-detection-error-report.md` 已识别同类问题 |
+| **R-3** | 用户层"丢消息"无提示 | R-2 衍生 — Desktop publish 全部进了 broker commitlog（broker 视角一切正常），Runtime 因没订阅收不到任何消息，整个链路对此 0 报错、0 重试、0 提示 | `apps/acowork-desktop/src-tauri/src/mqtt_control.rs` 等调用方；`docs/_internal/archive/review/loop-detection-error-report.md` 已识别同类问题 |
 | **R-4** | 任何 `Err(e)` 都被当成 E1 处理 | Runtime 事件循环 `Err(e) => sleep(1s).await`，没有 `ErrClass` 分类器；E2/E3/E4 也按网络抖动退避，下一次必然重复失败 | `core/acowork-runtime/src/mqtt/client.rs:193-196` |
 | **R-5** | Desktop 端订阅分散 + 重连后无保证 | Desktop 把 `subscribe_*` 当作普通方法调用，没在 `MqttStatus::Connected` 时统一重新订阅；当前依赖外部业务（ChatStore / AgentList）按需订阅，但缺少一个对称的 bootstrap 合约 | `apps/acowork-desktop/src-tauri/src/mqtt_client.rs:188-206`; 外部业务调用方 |
 

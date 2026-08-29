@@ -720,7 +720,7 @@ case 'ask_answer':
 - `docs/08-security.md` §11.3 Approval Gate
 - `docs/module-design/03-gateway.md` §WS 消息格式
 - `docs/06-communication.md` §IPC 消息协议
-- `docs/review/ask-user-question-patterns-comparison.md` 全量调研对比
+- `docs/_internal/archive/review/zh/ask-user-question-patterns-comparison.md` 全量调研对比（本地归档）
 - Claude Code `AskUserQuestion` tool 设计（platform.claude.com）
 
 ---
