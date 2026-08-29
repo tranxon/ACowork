@@ -70,13 +70,12 @@ When debugging, consult the latest log file to rapidly identify the root cause
 │   └── acowork-desktop/     # Tauri v2 Desktop App (frontend + thin Rust backend with system tray / MQTT client)
 ├── docs/                    # Public architecture docs (open-source friendly)
 │   ├── AGENTS.md            # guide of design docs (this sibling index)
-│   ├── design/zh/           # 19 architecture design docs (Chinese, v3.x)
-│   ├── module-design/zh/    # Rust crate specifications (8 docs)
+│   ├── design/{zh,en}/      # 19 architecture design docs (Chinese, v3.x; en: TBD)
+│   ├── module-design/{zh,en}/   # Rust crate specifications (8 zh + en placeholder)
 │   ├── adr/{zh,en}/         # Architecture decision records (50+)
-│   ├── zh/                  # PRD, RAG protocol guide, protocols/
-│   │   └── protocols/       # API protocol reference (HTTP + MQTT, see §Architecture below)
-│   ├── en/                  # English docs (currently MCP server research)
-│   └── reference/en/        # English placeholder index
+│   ├── prd/{zh,en}/         # Platform PRD + Desktop UI/UX PRD
+│   ├── protocols/{zh,en}/   # API protocol reference (HTTP + MQTT + RAG)
+│   ├── mcp-server-research/{zh,en}/   # MCP server integration research
 │   └── _internal/           # ⚠️ gitignored — local-only archive (plans, reviews, references, diagnostics)
 ├── examples/                # Example .agent packages
 └── dev/                     # Build/Package/CI/CD scripts
@@ -123,7 +122,7 @@ Agent Runtime (universal binary — Rust)
 - **HTTP REST**（`http://127.0.0.1:19876`）— Desktop / CLI 触发 + 配置写回 + 大数据查询；Gateway 内部转为对 Runtime localhost HTTP 的反向代理
 - **MQTT**（`localhost:19875`）— 实时事件（chat chunk / tool_call / done）、状态同步（Will + Retained）、设备生命周期
 - **Debug Protocol**（DevMode 专用，复用生产 IPC 通道，ADR-048）— HTTP RPC `/api/agents/{id}/debug/{*rest}`（Gateway 反代 → Runtime）+ MQTT 调试事件 `acowork/agents/{id}/debug/events/{type}`：步进调试、Skill 热加载、录制回放
-- 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/zh/protocols/README.md`
+- 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/protocols/zh/README.md`
 
 ## Conventions
 

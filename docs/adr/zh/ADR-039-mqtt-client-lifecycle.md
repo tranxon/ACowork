@@ -99,7 +99,7 @@
 - `~/.cargo/registry/src/.../rumqttc-0.24.0/src/lib.rs:503` — rumqttc 默认 `max_outgoing_packet_size = 10 * 1024` (10 KB)
 - `~/.cargo/registry/src/.../rumqttc-0.24.0/src/lib.rs:597-601` — `set_max_packet_size()` 入口
 - `~/.cargo/registry/src/.../rumqttc-0.24.0/src/state.rs:33` — `OutgoingPacketTooLarge` 错误变体
-- `docs/zh/protocols/mqtt.md` §5.1 startup sequence — broker 的协议视角（未迁移，Phase 2 完成时一并更新）
+- `docs/protocols/zh/mqtt.md` §5.1 startup sequence — broker 的协议视角（未迁移，Phase 2 完成时一并更新）
 
 ---
 
@@ -293,7 +293,7 @@ options.set_max_packet_size(pkt_size, pkt_size);
 
 - ✅ ErrClass 分类器与退避策略 —— `acowork-mqtt-session` crate 实现，Runtime + Desktop 双方使用。
 - ✅ SessionState 公开化 —— `acowork-mqtt-session` crate 提供 `tokio::sync::watch` 通道。
-- ✅ 文档 `docs/zh/protocols/mqtt.md` §5.1.1 Bootstrap 五步合约 — 已添加。
+- ✅ 文档 `docs/protocols/zh/mqtt.md` §5.1.1 Bootstrap 五步合约 — 已添加。
 - ✅ `BootstrapAction` trait — `acowork-mqtt-session` crate 中定义五步合约 trait，含默认 no-op 实现。
 - ✅ `MqttSession<S>` — 统一 SessionStateTx + ReconnectPolicy 的泛型封装。
 
@@ -380,7 +380,7 @@ Phase 1 是局部的、可逆的：
 - [x] 引入 `ErrClass` 分类器 + 退避策略
 - [x] 引入 `SessionState` 公开观察通道
 - [x] 单元测试覆盖异常分类与 Bootstrap 五步幂等性
-- [x] 更新 `docs/zh/protocols/mqtt.md` §5.1（Bootstrap 五步合约 + Runtime 重连）
+- [x] 更新 `docs/protocols/zh/mqtt.md` §5.1（Bootstrap 五步合约 + Runtime 重连）
 
 > **2026-07-18 Phase 2 落地**：以上全部项目完成。共用 crate 位于 `core/acowork-mqtt-session/`，Runtime 和 Desktop 均已迁移使用。
 
@@ -396,4 +396,4 @@ Phase 1 是局部的、可逆的：
 - rumqttc `MqttOptions::set_max_packet_size` — `lib.rs:597-601`
 - rumqttc `MqttState::check_size` — `state.rs:483-492`，触发 `OutgoingPacketTooLarge { pkt_size, max }`
 - MQTT 3.1.1 §3.1.2.4 (CONNACK reason codes), §3.2 (PUBLISH), §4.1 (CONNECT clean session)
-- docs/zh/protocols/mqtt.md §5.1.1 startup sequence（待 Phase 2 更新）
+- docs/protocols/zh/mqtt.md §5.1.1 startup sequence（待 Phase 2 更新）

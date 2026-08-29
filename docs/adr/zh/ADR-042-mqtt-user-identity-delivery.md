@@ -75,8 +75,8 @@ ADR-040 Phase 1 清理死代码时删除了 gRPC server + `connect_gateway_clien
 
 | 维度 | 状态 | 证据 |
 |------|------|------|
-| mqtt.md §3.1.1 列出 user_profile | ❌ | `docs/zh/protocols/mqtt.md:117-163` 只列 5 种 |
-| mqtt.md §7.4 矩阵有 user_profile 行 | ❌ | `docs/zh/protocols/mqtt.md:717-748` 26 行没有 |
+| mqtt.md §3.1.1 列出 user_profile | ❌ | `docs/protocols/zh/mqtt.md:117-163` 只列 5 种 |
+| mqtt.md §7.4 矩阵有 user_profile 行 | ❌ | `docs/protocols/zh/mqtt.md:717-748` 26 行没有 |
 | mqtt_payload.proto 有 `AvailableUsers` | ❌ | `core/acowork-core/proto/mqtt_payload.proto:67-108` 5 个，无 user |
 | Gateway `MqttGlobalResourcesPublisher` 发 user_profile | ❌ | `topics::USER_PROFILE` 不存在 |
 | Gateway `users_api.rs` 触发 publisher | ❌ | 4 处都调 `state.pusher.push_user_profile()`（no-op stub） |
@@ -175,8 +175,8 @@ session_task.rs:1368 处理：context_builder + session.identity_context 同步
 | 文件 | 改动 |
 |------|------|
 | `core/acowork-core/proto/mqtt_payload.proto` | 新增 `AvailableUsers` / `UserProfileRef` message + `DataEnvelope.payload` 加 `available_users` 字段（field 15，保留 10-14 给现有 5 种）|
-| `docs/zh/protocols/mqtt.md` §3.1.1 | 树状图加 `user_profile` 一行 |
-| `docs/zh/protocols/mqtt.md` §7.4 | 矩阵加一行 |
+| `docs/protocols/zh/mqtt.md` §3.1.1 | 树状图加 `user_profile` 一行 |
+| `docs/protocols/zh/mqtt.md` §7.4 | 矩阵加一行 |
 | `core/acowork-gateway/src/mqtt/global_resources_publisher.rs` | `topics::USER_PROFILE` 常量 + `publish_user_profiles()` + `build_available_users()` + `publish_all()` 调用 |
 | `core/acowork-gateway/src/http/users_api.rs` | 4 处 `state.pusher.push_user_profile()` 改为 `state.mqtt_publisher_trigger.trigger()` |
 | `core/acowork-runtime/src/mqtt/available_cache.rs` | `user_profile: Option<AvailableUsers>` 字段 + `update_from_mqtt` 解析分支 |

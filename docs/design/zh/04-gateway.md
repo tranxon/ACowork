@@ -158,7 +158,7 @@ bwrap \
 
 ## 9. HTTP API（Desktop App / CLI 接入层）
 
-> **当前实现状态**：HTTP API 已基于 Axum 完整实现，提供 REST 接口；流式事件经由 MQTT（详见 §9.1 双协议架构 与 [`docs/zh/protocols/README.md`](../../zh/protocols/README.md)）。以下接口定义反映实际实现，但为保持文档简洁仅列出核心路由。完整路由列表参见代码 `crates/acowork-gateway/src/http/routes.rs`。
+> **当前实现状态**：HTTP API 已基于 Axum 完整实现，提供 REST 接口；流式事件经由 MQTT（详见 §9.1 双协议架构 与 [`docs/protocols/zh/README.md`](../../zh/protocols/README.md)）。以下接口定义反映实际实现，但为保持文档简洁仅列出核心路由。完整路由列表参见代码 `crates/acowork-gateway/src/http/routes.rs`。
 
 Gateway 与 Agent Runtime 之间的 IPC 自 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 **MQTT pub/sub + HTTP 反向代理**：MQTT 承担实时事件推送（chat chunk、tool_call、done、设备状态 Will+Retained），HTTP 反代承担大数据查询与会话历史拉取。HTTP API 作为 Desktop App 和 CLI 的统一接入层，对 Runtime 不可见。
 

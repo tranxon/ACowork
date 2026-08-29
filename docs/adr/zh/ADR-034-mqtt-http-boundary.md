@@ -1775,7 +1775,7 @@ Runtime 现状：17 条 → 调整后：25 条
 ## 附录 C：参考
 
 - ADR-033：[MQTT 替换 gRPC + WebSocket](./ADR-033-mqtt-replace-grpc-websocket.md)
-- 协议参考：[docs/zh/protocols/mqtt.md](../../zh/protocols/mqtt.md)
+- 协议参考：[docs/protocols/zh/mqtt.md](../../zh/protocols/mqtt.md)
 - 数据流分层：[ADR-020](./ADR-020-data-flow-tiering.md)
 - 统一会话元数据：[ADR-024](./ADR-024-session-meta-unify.md)
 - Provider/Model 协议：[ADR-012](./ADR-012-provider-model-spec.md)

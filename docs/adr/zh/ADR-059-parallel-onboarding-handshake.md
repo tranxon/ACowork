@@ -751,7 +751,7 @@ Tcomplete
 ### 10.4 全局资源拉取的 503 语义（Bug B fix v3 补充）
 
 `GET /api/global-resources` 是 Runtime 启动期（phase_a）主动拉取全局资源的
-唯一 HTTP 入口（协议见 `docs/zh/protocols/http.md` §4.13）。早期版本端点
+唯一 HTTP 入口（协议见 `docs/protocols/zh/http.md` §4.13）。早期版本端点
 **始终返回 200**——未就绪时返回空 `topics`，Runtime 把“还没有”误缓存为
 “就是没有”，这正是 Bug B 的另一半根因。v3 明确该端点按 Gateway
 `BootstrapPhase` 分级返回：

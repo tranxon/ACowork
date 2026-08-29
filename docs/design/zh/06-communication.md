@@ -4,7 +4,7 @@
 
 > **v3.7 变更**：§0/§1/§1.5 全面对齐 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) —— Gateway ↔ Runtime IPC 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**。Intent 协议（§2）保持不变，仍是 Agent 间逻辑通信的语义合同（与传输无关）。
 >
-> **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息现在承载在 MQTT 主题 `acowork/sessions/...` 上，由 Gateway 反向代理 Runtime 的 localhost HTTP 处理 Session CRUD / 消息历史查询（见 [`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)、[`docs/zh/protocols/http.md`](../../zh/protocols/http.md)）。
+> **v3.6 变更**：新增 §1.5 Session 管理 IPC 消息 Proto 定义，支持 Session Actor 多会话并发模型。Session 相关 Gateway ↔ Runtime IPC 消息现在承载在 MQTT 主题 `acowork/sessions/...` 上，由 Gateway 反向代理 Runtime 的 localhost HTTP 处理 Session CRUD / 消息历史查询（见 [`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md)、[`docs/protocols/zh/http.md`](../../zh/protocols/http.md)）。
 
 **交叉引用**：
 - Session Actor 架构：`15-conversation-persistence.md` §1.7
@@ -52,8 +52,8 @@
 | **Debug Protocol** | Desktop App (DevMode) | HTTP RPC（Gateway 反代 → Runtime `/api/debug/*`）+ MQTT 调试事件（`acowork/agents/{id}/debug/events/{type}`） | 步进调试、录制回放、Skill 热加载（ADR-048 后与生产 IPC 完全同构）|
 
 **权威参考：**
-- MQTT 主题树与 payload protobuf：[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)
-- HTTP REST：[`docs/zh/protocols/http.md`](../../zh/protocols/http.md)
+- MQTT 主题树与 payload protobuf：[`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md)
+- HTTP REST：[`docs/protocols/zh/http.md`](../../zh/protocols/http.md)
 - Gateway HTTP 反代：[`docs/design/zh/04-gateway.md`](./04-gateway.md) §9
 - Debug Protocol：[`10-debug-protocol.md`](./10-debug-protocol.md)
 
@@ -65,8 +65,8 @@
 
 > **ADR-033（2026-07-11）** 起，§1 描述的 gRPC 双向流 API 整体退役。原 §1.1–1.4 中的所有握手、帧格式、GatewayRequest/Response 枚举由以下两层承担：
 >
-> - **MQTT**（[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)）— 实时事件、状态推送、设备生命周期（Will+Retained）、Key 分发（AgentHello 握手响应）
-> - **HTTP 反向代理**（[`docs/design/zh/04-gateway.md`](./04-gateway.md) §9 + [`docs/zh/protocols/http.md`](../../zh/protocols/http.md)）— 会话历史、消息分页、Intent 触发、配置写回等"等回复"场景
+> - **MQTT**（[`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md)）— 实时事件、状态推送、设备生命周期（Will+Retained）、Key 分发（AgentHello 握手响应）
+> - **HTTP 反向代理**（[`docs/design/zh/04-gateway.md`](./04-gateway.md) §9 + [`docs/protocols/zh/http.md`](../../zh/protocols/http.md)）— 会话历史、消息分页、Intent 触发、配置写回等"等回复"场景
 >
 > 旧合同层的完整记录（`16-ipc-grpc-migration.md`）保留作为历史参考；现有集成方请直接读上述两份现行协议文档。
 >
@@ -85,7 +85,7 @@ Session 相关的 Gateway ↔ Runtime IPC 消息拆为两类传输：
 
 | 类别 | 承载通道 | 触发场景 | 消息类型 |
 |------|---------|---------|---------|
-| **Session 事件流** | MQTT 主题 `acowork/sessions/{sid}/events/#` | Gateway 转发 Runtime 的 chat chunk / tool_call / done 等流式事件 | 见 [`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md) §Session events |
+| **Session 事件流** | MQTT 主题 `acowork/sessions/{sid}/events/#` | Gateway 转发 Runtime 的 chat chunk / tool_call / done 等流式事件 | 见 [`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md) §Session events |
 | **Session 查询/管理** | HTTP 反向代理（Gateway → Runtime localhost server `/sessions/...`） | 列表查询、最新会话、单会话消息分页、CRUD | `SessionList` / `ConversationMessages` / `CreateSessionResponse` / `ActivateSessionResponse` / `DeleteSessionResponse`（proto 定义保留，但承载通道从 gRPC 切到 HTTP 反代）|
 
 #### Proto 定义

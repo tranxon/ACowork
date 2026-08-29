@@ -271,7 +271,7 @@ Envelope `version` 字段从当前值 bump 至 v2。`apps/acowork-desktop` 通�
 | `apps/acowork-desktop/src/services/mqtt/` | 订阅注册按新主题名 |
 | `apps/acowork-desktop/src/hooks/useSessionStream.ts`（如存在） | 同步 |
 | `apps/acowork-desktop/src/stores/workspaceStore.ts` | 移除"被回弹防御"代码——协议层已治 |
-| `docs/zh/protocols/mqtt.md` | 同步主题树/语义/ACL/启动序列/订阅指南 |
+| `docs/protocols/zh/mqtt.md` | 同步主题树/语义/ACL/启动序列/订阅指南 |
 | `docs/adr/en/ADR-043-session-config-state-split.md` | 英文版（与 ADR-009 平行，方便跨团队阅读） |
 | `core/acowork-runtime/CHANGELOG.md` / `core/acowork-gateway/CHANGELOG.md` | 记录 envelope version bump v2 |
 
@@ -371,7 +371,7 @@ backend 内部把 `SessionConfig` / `SessionState` 当成"`SessionMeta` 的视�
 | TODO-1 | 新增 `apps/acowork-desktop/src/services/mqtt/types.ts` 同步生成 protobuf-ts 类型 | P1 |
 | TODO-2 | `apps/acowork-desktop/src/stores/chatStore.ts` 拆 `configSlice + stateSlice` | P1 |
 | TODO-3 | `apps/acowork-desktop/src/services/mqtt/` 订阅迁移 | P1 |
-| TODO-4 | `docs/zh/protocols/mqtt.md` §3.2 §3.5 §5 §7.4 §10.2 同步 | P1 |
+| TODO-4 | `docs/protocols/zh/mqtt.md` §3.2 §3.5 §5 §7.4 §10.2 同步 | P1 |
 | TODO-5 | `core/acowork-gateway/src/mqtt/acl.rs` ACL sync | P1 |
 | TODO-6 | `core/acowork-runtime/tests/session_config_state_race.rs` 新增 | P1 |
 | TODO-7 | 删除 `chunk_event = SessionStateChangedPayload` 相关分支（chatStore、session_core、loop_ 等） | P2 |

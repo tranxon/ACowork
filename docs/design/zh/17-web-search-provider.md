@@ -5,7 +5,7 @@
 **废弃原因**: 本文档设计的 `resource_cache.json` 架构已在 ADR-033 (MQTT 重构) 和后续清理中
 删除。Runtime 侧改用 `agent_provider.json`（由 MQTT `acowork/global/providers` retained 推送持久化），
 不再使用 `resource_cache.json` 文件。`ResourcePusher` gRPC 存根也已删除。
-请参考 `docs/zh/protocols/mqtt.md` 了解当前 MQTT 资源同步方案。
+请参考 `docs/protocols/zh/mqtt.md` 了解当前 MQTT 资源同步方案。
 **创建日期**: 2026-05-26
 
 ## 1. 问题概述

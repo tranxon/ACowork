@@ -8,7 +8,7 @@
 - ADR-027（conversation-meta + token-usage；其中 `streamingContents` Map 方案被本 ADR 取代）
 - ADR-033（MQTT 替换 gRPC + WebSocket）
 - ADR-034（MQTT / HTTP 职责边界 — 事件面 `messages/*` 主题应带数据，本 ADR 使实现回归该契约）
-- [`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md) §3.2（`messages/chunk` 本应带数据）
+- [`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md) §3.2（`messages/chunk` 本应带数据）
 
 **Supersedes / 修订**：
 - ADR-021 的"流式内容走 HTTP Pull + `new_data_available` 通知"模型 → 改为 MQTT 直推带数据

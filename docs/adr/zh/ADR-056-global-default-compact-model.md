@@ -292,7 +292,7 @@ function isRecommended(providerId: string, modelId: string): boolean {
 | **P2: Runtime解析** | `default_compact_model` 字段 + `resolve_distill_model` 三级 fallback + `available_cache::is_provider_available` + token 估算修正 | P1 |
 | **P3: Gateway API** | GET/PUT 端点 + 校验 + 触发 publisher | P1 |
 | **P4: UI** | `GlobalCompactModelCard` + `GlobalModelPicker` + 推荐标识 + i18n | P3 |
-| **P5: 测试 + 文档** | 单测/集成测试 + `docs/zh/protocols/mqtt.md` 字段更新 | P2 + P3 + P4 |
+| **P5: 测试 + 文档** | 单测/集成测试 + `docs/protocols/zh/mqtt.md` 字段更新 | P2 + P3 + P4 |
 
 每 Phase 独立可 review、可合并，避免单一大 diff。
 
