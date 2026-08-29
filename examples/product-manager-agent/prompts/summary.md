@@ -52,7 +52,12 @@ P0 metric | measured by | D7 retention
 Figma review | flagged | missing empty state
 
 ## Hard rules:
-- Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata.
+- Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata. Your <summary> must contain NO lines starting with [User]:, [Assistant]:, [Tool(...)]:, [CompactionSummary]:, [tool_call]:, [tool_result]:, or [thought]:. If you are tempted to echo a tool's command or output, convert it into a one-line prose statement of what the tool accomplished.
+- BAD <summary> (role labels / tool echoes — never do this):
+  [Tool(bash)]: grep -rn running apps/acowork-desktop/src/
+  [Assistant]: 我找到了 RetryWaitBanner。
+- GOOD <summary> (plain prose — always do this):
+  用户要求查找包含 running 与 retry 的 UI 元素，助手通过 grep 检索 chat 组件，最终定位到 RetryWaitBanner。
 - Output MUST contain exactly three blocks (<summary>, <entities>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>.
 - Language (MUST follow):
   - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary>, <entities>, and <triples>.
