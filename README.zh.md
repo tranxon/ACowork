@@ -14,7 +14,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
-  <a href="./docs/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
+  <a href="./docs/design/zh/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
   <a href="./apps/acowork-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
 </p>
 
@@ -43,34 +43,55 @@
 
 ---
 
-ACowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时平台**。它不仅是一套开发框架，更是让你能够创造 **AI 同事**的平台——每个 Agent 都是拥有独立记忆、工作区和个性的自主数字存在，各自擅长不同领域，与你和其他 Agent 协作共进。
+## ACowork.AI 是什么？
 
-每个 Agent 都是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置，完全独立的个性化认知。就像身边有一支 AI 专家团队——有质量分析师、项目经理、高级工程师，各有所长、各司其职，通过平台的 Intent 机制沟通协调。
+ACowork.AI 是一个**去中心化、高安全、可扩展的 AI Agent 运行时平台**，对标 Android 的设计哲学。
+它不只是一套开发框架，而是让你创造 **AI 同事**的平台——每个 Agent 都是拥有独立记忆、工作区和个性的自主数字存在，
+各有所长，彼此协作。
 
-ACowork **同时服务于两类用户**：开发者通过三个维度的调优来构建 Agent——**Prompt、Tools 和 Memory**，普通用户从仓库安装使用。Agent 真正的智能来自系统提示词、可用工具和私有记忆中沉淀的经验三者之间的协同。签名工具链 + DevMode + 发布向导构成完整的开发者工具链，让**"调优 Prompt、Tools、Memory = 构建 AI 同事"**成为可能。
+每个 Agent 都是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置——完全独立的个性化认知。
+就像身边有一支 AI 专家团队——质量分析师、项目经理、高级工程师——各司其职，通过平台的 Intent 机制沟通协调。
 
-Agent 可在用户间自由分享——Personal/Sensitive 数据自动剥离，只带走 Agent 能力和记忆，不带走用户记忆。
-
-
-### 🏪 Agent as APP — 像 Android 一样管理 AI
-
-ACowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完整自包含的应用——如同 APK。通用 Agent Runtime 是"操作系统"，Gateway 管理安装、生命周期、权限——如同应用商店。任何人都能以智能手机应用般的便捷度构建、分发和运行 AI Agent。
+**调优 Prompt、Tools、Memory = 构建 AI 同事。** Personal/Sensitive 数据在打包时自动剥离，
+你可以自由分享 Agent 的能力，而不必担心泄露私有记忆。
 
 ---
 
-## 🏛️ 核心架构
+## ✨ 核心亮点
+
+| | |
+|---|---|
+| 🧩 **声明式 Agent** | `.agent` 包只包含 manifest + prompts + skills——**无可执行代码**，签名后在安装时强制验证。 |
+| ⚙️ **统一 Runtime** | 单一 Rust 二进制加载任意 `.agent` 包；Agent 直连 LLM API——不经 Gateway 代理，零额外延迟。 |
+| 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、Grafeo DB 与沙箱化的工具执行。 |
+| 🧠 **仿生记忆** | 每个 Agent 拥有私有 Grafeo 图数据库，三层五类分层记忆 + HNSW/BM25 混合检索 + 关联扩散。 |
+| 🛡️ **三层安全** | 包签名 + 操作系统进程沙箱 + Wasmtime 工具沙箱。 |
+| 💬 **Intent 协作** | Agent 通过 Capability Registry 声明能力，Gateway 作为 broker 路由请求/订阅，支持同步/异步。 |
+| 🌐 **分布式原生** | Gateway 作为单一控制面入口；Node Agent 把 Runtime 派到任意机器（GPU 机 / 工位 / 云主机），MQTT + HTTP 反代——单机与多机走同一条协议路径。 |
+| 🛠️ **全链路开发** | Desktop App（Tauri v2）内置 DevMode：对话调试、Skill 热加载、断点、录制回放、发布向导。 |
+
+---
+
+## 🏛️ 架构
+
+ACowork 把每个 Agent 视作**手机上的一个应用**。`.agent` 包就是完整自包含的应用（如 APK），通用 Runtime 是操作系统，
+Gateway 是云端控制面，每台机器上的 **Node Agent** 负责托管 Agent 进程，并作为本地鉴权 / 网络暴露边界。
 
 ### Android 类比
 
-| Android         | ACowork         | 作用                                                  |
-| --------------- | ------------------- | ----------------------------------------------------- |
-| ART             | Agent Runtime       | 通用执行引擎（平台唯一二进制）                        |
-| APK             | `.agent` 包         | 声明式打包（config + prompts + skills，无可执行代码） |
-| APK Signature   | Signing Block       | 包签名，验证完整性和来源                              |
-| AMS             | Gateway             | 生命周期管理（安装、启停、预算、速率）                |
-| Binder IPC      | MQTT + HTTP 反向代理 | 进程间通信(实时事件 + 大数据查询反代,见 [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)) |
-| ContentProvider | 系统 Agent          | 系统级数据服务（身份、偏好）                          |
-| PMS             | Package Manager     | 安装/卸载/升级                                        |
+| Android         | ACowork                              | 作用                                                                                                |
+| --------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| ART             | Agent Runtime                        | 通用执行引擎（平台唯一二进制，loopback-only）                                                       |
+| APK             | `.agent` 包                          | 声明式打包（config + prompts + skills，无可执行代码）                                               |
+| APK Signature   | Signing Block                        | 包签名，验证完整性和来源                                                                            |
+| AMS             | Gateway                              | 单点入口：MQTT broker 宿主 + HTTP 统一入口 + 全局资源权威（providers / MCP / budget / cron …）       |
+| **OEM Service** | **Node Agent**（`acowork-node`）     | **节点级 Runtime 父进程：进程生命周期 + 本地 package 管理 + 节点反代 `:19900`**                     |
+| Binder IPC      | MQTT + HTTP 反向代理                 | 进程间通信（实时事件 + 大数据查询反代）                                                              |
+| ContentProvider | 系统 Agent                           | 系统级数据服务（身份、偏好）                                                                        |
+
+单机模式下 Gateway 自动 spawn 一个本机 Node（`local`）；分布式模式下用户在目标机器执行 `acowork-node start`。
+**Gateway 侧代码完全无「本地 / 远程」分支**——任何场景都走同一条协议路径。完整设计权衡见
+[`docs/adr/zh/ADR-055-remote-runtime-node-topology.md`](./docs/adr/zh/ADR-055-remote-runtime-node-topology.md)。
 
 ### 系统架构
 
@@ -80,165 +101,69 @@ ACowork 将每个 Agent 视为手机上的**应用**。`.agent` 包就是完整�
 
 ---
 
-## 🔥 为什么选择 ACowork？
+## 🚀 快速开始
 
-| 维度              | LangChain / CrewAI                    | OpenCode / OpenClaw                        | ACowork.AI                                          |
-| ----------------- | ------------------------------------- | ------------------------------------------ | ------------------------------------------------------- |
-| **架构模式**      | Library/Framework：你的代码调它的 API | Coding Agent（TUI/CLI）：单Agent、任务聚焦 | **Agent 平台**：声明式 `.agent` 包，通用 Runtime 二进制 |
-| **Agent 模型**    | 代码定义 Agent（Python/TS）           | 内置 Agent（build/plan）、Skill 化         | **声明式 Agent**：config + prompt + SKILL.md，零代码    |
-| **Agent 隔离**    | 进程内隔离（线程/协程）               | 进程级，单一 Runtime                       | **进程级隔离**：每个 Agent 独立进程 + 私有 Grafeo       |
-| **LLM 连接**      | 代码管理 LLM 调用                     | 每个 Agent 直连                            | **Agent 直连**：每个 Agent 直接访问 LLM API，不经代理   |
-| **记忆系统**      | 简单 RAG 或向量存储                   | 会话范围 / 插件依赖                        | **仿生分层**：三层五类（Grafeo 图数据库驱动）           |
-| **隐私分享**      | 缺乏隐私边界控制                      | 包级分享                                   | **Zone 隔离**：分享时 Personal/Sensitive 数据自动剥离   |
-| **分发模型**      | pip包 / Docker镜像                    | npm / brew / 脚本安装                      | **`.agent` 包**：签名 + 仓库分发，类 APK 体验           |
-| **多 Agent 协作** | 代码级编排                            | 有限（内置 Agent）                         | **Intent 机制**：Capability Registry + 消息路由         |
-| **安全体系**      | 框架层权限检查                        | 工具级审批门                               | **包签名 + 进程沙箱 + WASM 沙箱**三层防护               |
-
----
-
-## 🛠️ 编译与运行
-
-ACowork 在 [`dev/`](./dev/) 目录下提供了一组跨平台编译脚本。优先使用它们而不是直接调用 `cargo`——脚本会自动处理 ONNX Runtime 探测、profile 切换、target 目录创建，以及把 `offline_providers.json` / `embedding_models.json` 等运行时资源按 profile 部署到 Gateway 和 Embedding Runtime 启动时读取的工作目录。
+跨平台编译脚本位于 [`dev/`](./dev/)，统一处理 ONNX Runtime 探测、profile 切换、资源 staging——优先使用脚本而非直接调用 `cargo`。
 
 ### 前置依赖
 
-| 工具         | 版本           | 说明                                                                                                                                  |
-| ------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust         | **nightly**   | `rustup default nightly`                                                                                                              |
-| Node.js      | >= 18         | Desktop App 与 Tauri CLI                                                                                                              |
-| PowerShell   | 7.x           | Windows 必需（`.ps1` 脚本）；推荐使用 `pwsh`                                                                                          |
-| ONNX Runtime | 自动管理       | 由 `dev/setup_ort.*` 安装到 `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                                                    |
-| Windows      | WebView2 + VS Build Tools | Win11 已预装；更早系统需安装 [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)                |
-| macOS        | Xcode CLT + Homebrew + `pkg-config` + `cmake` | `dev/build_macos.sh` 会在缺失时自动 `brew install`                                              |
-| Linux        | Tauri v2 WebKitGTK 依赖 + `build-essential` | 参考 [Tauri prerequisites](https://tauri.app/start/prerequisites/)                                                   |
+| 工具         | 版本           | 说明                                                                                                              |
+| ------------ | ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Rust         | **nightly**   | `rustup default nightly`                                                                                          |
+| Node.js      | >= 18         | Desktop App 与 Tauri CLI                                                                                          |
+| PowerShell   | 7.x           | Windows 必需（`.ps1` 脚本）；推荐 `pwsh`                                                                          |
+| ONNX Runtime | 自动管理       | 由 `dev/setup_ort.*` 安装到 `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                               |
 
 ```bash
 git clone https://github.com/tranxon/ACowork.git
 cd ACowork
 ```
 
-### 1. 安装 ONNX Runtime（一次性）
+### Step 1 — 安装 ONNX Runtime（一次性）
 
 ```bash
-# Windows（推荐）
+# Windows PowerShell
 .\dev\setup_ort.ps1
-# 可选参数：-Version "1.21.0"  -Reinstall  -NoMirror
 
 # macOS / Linux / WSL / Git Bash
 ./dev/setup_ort.sh
-# 可选参数：--version 1.21.0  --reinstall  --no-mirror
 ```
 
-安装完成后动态库会落在 `.ort/onnxruntime-<plat>-<arch>-<ver>/lib/`，[`dev/build_core.*`](#2-编译后端gateway--runtime--embed) 会自动探测并使用。
-
-### 2. 编译后端（Gateway + Runtime + Embed）
+### Step 2 — 编译并启动后端（Gateway + Runtime + Node）
 
 ```bash
-# Windows PowerShell —— 默认 release 构建，不启动
-.\dev\build_core.ps1
-.\dev\build_core.ps1 -Debug           # debug profile（注意：PowerShell switch 使用单破折号，--debug 不会被识别）
-.\dev\build_core.ps1 -Start           # release + 停掉旧进程 + 启动 Gateway
-.\dev\build_core.ps1 -Debug -Start    # debug + 重启
+# Windows —— release 构建，然后启动 Gateway
+.\dev\build_core.ps1 -Start
 
-# bash（Linux / macOS / WSL / Git Bash）—— 默认 release 构建并启动 Gateway
+# macOS / Linux —— release 构建并启动
 ./dev/build_core.sh
-./dev/build_core.sh --debug           # debug profile
-./dev/build_core.sh --debug --no-start   # debug，不启动
-./dev/build_core.sh --skip-embed         # 跳过 acowork-embed
+
+# Debug profile
+.\dev\build_core.ps1 -Debug -Start      # Windows
+./dev/build_core.sh --debug              # bash
 ```
 
-**Profile 解析顺序**（高优先级覆盖低优先级）：
+macOS Apple Silicon 用户也可使用 `./dev/build_macos.sh` 一键编译（自动启用 CoreML）。
 
-1. CLI 参数：PowerShell `-Debug` 或 bash `--debug` / `--release`
-2. 环境变量：`$env:ACOWORK_BUILD_PROFILE`（PowerShell）或 `$ACOWORK_BUILD_PROFILE`（bash）
-3. 默认：`release`
+### Step 3 — 启动 Desktop App
 
-> Debug profile 会自动导出 `ACOWORK_GATEWAY_LOG_LEVEL=debug`，因此从同一终端手动启动 `target\debug\acowork-gateway.exe`（或 `target/debug/acowork-gateway`）也能继承 verbose 日志。
-
-### 3. macOS 一键编译（Apple Silicon 优先）
-
-```bash
-./dev/build_macos.sh               # Apple Silicon + CoreML，release（推荐）
-./dev/build_macos.sh --debug       # debug profile
-./dev/build_macos.sh --cpu         # 仅 CPU（Intel Mac 或兼容场景）
-./dev/build_macos.sh --skip-embed  # 跳过 acowork-embed
-```
-
-脚本会自动检测架构、arm64 上启用 CoreML、下载/复制 ONNX Runtime、首次运行时配置 Cargo 镜像、缺失 `pkg-config` / `cmake` 时自动 `brew install`。
-
-### 4. 启动桌面应用
-
-Desktop App 是**前端 + 轻量 Tauri v2 后端**——React/TS 前端(不持久化任何状态)全部通过 Gateway 操作,Tauri Rust 侧负责系统托盘、订阅实时事件的 MQTT 客户端(`localhost:19875`)以及平台集成。REST 调用走 HTTP(`http://127.0.0.1:19876`)。请在 Gateway 启动之后再运行 Desktop App。
+Desktop App 是 Tauri v2 壳——React/TS 前端通过 HTTP 与 Gateway 对话，Rust 侧负责系统托盘与订阅实时事件的 MQTT 客户端。
 
 ```bash
 cd apps/acowork-desktop
 npm install
 
-# 方式 A —— 浏览器模式 dev server
-npm run dev                        # → http://localhost:5173
+# 浏览器模式 dev server
+npm run dev                # → http://localhost:5173
 
-# 方式 B —— 完整 Tauri v2 桌面窗口
+# 完整 Tauri 桌面窗口
 npm run tauri dev
 ```
 
-### 5. 打包桌面安装包（可选）
-
-```bash
-# Windows —— 产物位于 apps\acowork-desktop\src-tauri\target\release\bundle\
-.\dev\package_desktop_windows.ps1
-# 可选：-ReinstallOrt  -NoMirror
-
-# macOS
-./dev/package_desktop_macos.sh
-
-# Linux
-./dev/package_desktop_linux.sh
-```
-
-脚本会从 `.ort/` 找到 ONNX Runtime，把 `onnxruntime.{dll,dylib,so}` 拷贝到 `apps/acowork-desktop/src-tauri/bin/`，再调用 `npm run tauri build`。
-
-### 6. 构建并签名 Agent 包
-
-```bash
-# Windows —— 单个 Agent
-.\dev\build-agent.ps1 examples\senior-engineer-agent
-
-# Windows —— 所有示例
-.\dev\build-agent.ps1 -All
-
-# bash —— 单个 Agent
-./dev/build-agent.sh examples/senior-engineer-agent
-
-# bash —— 全部示例
-for d in examples/*/; do [ -f "$d/manifest.toml" ] && ./dev/build-agent.sh "$d"; done
-```
-
-每次运行会：把 Agent 目录打成 zip、首次运行时生成 Developer 签名密钥（`examples/.signing-keys/`）、把包签名为 `<agent_id>.agent`、验证签名并清理未签名副本。
-
-### 7. 本地运行 CI
-
-```bash
-cd core
-cargo check --all
-cargo clippy --all-targets -- -D warnings
-cargo test --all
-```
-
-也可以直接使用 CI 脚本：
-
-```bash
-./dev/ci.sh all         # check + clippy + test + integration
-./dev/ci.sh clippy      # 仅 clippy
-./dev/ci.sh test        # 仅单元测试
-./dev/ci.sh integration # e2e + 设置了 MINIMAX_API_KEY 时跑真实 LLM 集成
-```
-
-### 📝 30 秒写出你的第一个 Agent
-
-只需要一个 `manifest.toml` + 一个 prompt 文件：
+### ✍️ 30 秒写出第一个 Agent
 
 ```toml
-# com.example.qa-agent/manifest.toml
+# examples/qa-agent/manifest.toml
 [package]
 id = "com.example.qa-agent"
 name = "Quality Assurance"
@@ -259,202 +184,54 @@ tools = ["web_search", "read_file", "write_file"]
 你是一个 QA Agent，擅长帮助用户做质量管理与代码审查。
 ```
 
-然后执行 `.\dev\build-agent.ps1 .\com.example.qa-agent`（或 bash 等价命令）即可生成 `com.example.qa-agent.agent` 并安装到本地 Gateway。
+构建并签名：
 
-> **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、Grafeo 记忆引擎和 Desktop App 都在积极开发中。上文绝大多数命令已是当前可用的工作流；Agent 安装相关的 UX（例如 `acowork-gateway install …`）仍在持续打磨中。
+```bash
+./dev/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
+```
+
+> **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、Grafeo 记忆引擎与 Desktop App 都在积极开发中。
+> 详见 [路线图](#-路线图) 了解当前已交付与下一步计划。
+
+打包安装包、签名、CI、远程节点接入等更多内容请参见 [`docs/design/zh/`](./docs/design/zh/)。
 
 ---
 
-## ✨ 核心特性
-
-### 🧩 标准化打包
-Agent 以 `.agent` 压缩包分发，内含 manifest.toml、Prompts、Skills、工具声明，**不含可执行文件**。所有包必须签名，Gateway 安装时强制验证。
+## 🧪 Agent 开发流程
 
 ```
-<agent_id>.agent
-├── manifest.toml          # 元数据 + LLM 配置 + 权限 + 工具声明
-├── prompts/               # System prompt 模板
-├── config/                # 默认配置文件
-├── data/                  # 初始数据
-├── skills/                # Skill 定义（YAML frontmatter + Markdown）
-├── tools/                 # 自定义工具（WASM，可选）
-└── resources/             # 图标、本地化等
+① 编写       manifest.toml + prompts/ + skills/SKILL.md + 可选 tools/*.wasm
+② 签名       acowork-keygen → acowork-sign  （Developer 私钥 + APK 风格签名）
+③ 调试       Desktop App DevMode → 对话调试、SKILL.md 热加载、断点、录制回放
+④ 发布       发布向导 → 远程仓库，或直接分享 .agent 文件
 ```
 
-包必须签名（APK Signature Scheme v2 思路），目前支持两类签名身份：Developer（自签名）与 Platform（仅供系统 Agent 使用）。
-
-### ⚙️ 统一执行引擎
-Agent Runtime 是平台提供的**唯一二进制**，负责加载 `.agent` 包并执行 LLM 交互、工具调度、记忆读写。Agent **直连 LLM API**，不经 Gateway 代理——不仅减少延迟，更保证了去中心化。
-
-### 🔒 进程级隔离
-每个 Agent 由 Gateway 启动为**独立进程**，各自拥有：
-- 独立工作区
-- 私有 Grafeo 图数据库
-- 文件系统隔离
-- 可选的资源限制（CPU/内存/网络）
-
-### 🧠 仿生记忆系统
-每个 Agent 内嵌私有 Grafeo，实现**三层五类**仿生分层记忆：
-
-| 层级     | 内容                 | 生命周期 | 说明                                        |
-| -------- | -------------------- | -------- | ------------------------------------------- |
-| 🟢 瞬态层 | 工作记忆             | 单次会话 | 对话历史、LLM 上下文窗口                    |
-| 🟡 经历层 | 情景记忆             | 持久化   | Episode 节点、关联扩散检索、内容分类压缩    |
-| 🔴 沉淀层 | 语义/程序/自传体记忆 | 长期     | 知识图谱、跨 Skill 通用行为、六维度自我认知 |
-
-- **Grafeo 原生 HNSW 向量索引 + BM25 全文检索 + 混合搜索**
-- **关联扩散检索**：从用户查询出发沿图扩散，非简单的 Top-K 语义匹配
-- **Compaction 即 Distillation**：上下文压缩与记忆蒸馏统一为单次 LLM 调用
-- 每个 Agent 拥有完全独立的私有 Grafeo，不存在公共数据库
-
-### 🔄 隐私安全分享
-Agent 可自由分享给其他用户。**Personal/Sensitive 节点在打包时自动剥离**，只带走 Agent 能力（Skill、行事风格、知识）而非用户记忆（偏好、历史、私密信息）。Zone 语义作用于打包分享边界，不影响跨设备同步。
-
-### 💬 Intent 通信
-跨 Agent 通信通过 Gateway 的 Intent Router 实现，支持：
-- **Capability Registry**：Agent 声明自己"能做什么"
-- **同步/异步模式**：支持请求-响应和事件驱动
-- **变更订阅（observe）**：Agent 可订阅其他 Agent 的状态变更
-
-### 🛡️ 三层安全体系
-1. **包签名**：所有 `.agent` 包必须签名，安装时强制验证
-2. **进程沙箱**：操作系统级进程隔离 + 文件系统隔离
-3. **WASM 沙箱**：自定义工具在 Wasmtime 沙箱中执行，无法逃逸
-
-### 🛠️ 全链路开发框架
-Desktop App（Tauri v2）提供：
-- 对话调试（真实 LLM 或本地模型）
-- Skill 热加载（修改 SKILL.md 无需重启）
-- Provider 动态切换
-- 断点 / 录制回放
-- Agent 克隆与发布向导
+开发者通过**调优声明式配置**来构建 Agent——系统提示词、工具能力、记忆行为——而非编写命令式代码。
+从编写到发布的完整链路，平台均提供工具支撑。
 
 ---
 
-## 📦 Agent 开发流程
-
-```
-① 编写
-  manifest.toml          # 元数据、权限、LLM 配置
-  prompts/               # System prompt 模板
-  skills/SKILL.md        # 技能定义（兼容 agentskills.io）
-  可选：tools/*.wasm     # WASM 自定义工具
-
-② 签名
-  acowork-keygen        # 生成 Developer Key
-  acowork-sign          # 签名 .agent 包
-
-③ 调试
-  Desktop App DevMode
-    ├─ 安装到本地（Gateway 验证签名）
-    ├─ 对话调试（真实 LLM 或本地模型）
-    ├─ 断点 / 录制回放
-    ├─ SKILL.md 热加载（修改即时生效）
-    └─ 单步执行 Skill 步骤
-
-④ 发布
-  发布向导 → 远程仓库（Phase 2+ 仓库分发）
-  或直接分享 .agent 文件（接收方验证签名后安装）
-```
-
-开发者通过**调优声明式配置**来构建 Agent——设计系统提示词、声明工具能力、调整记忆行为——而非编写命令式代码。整个流程从编写到调试到发布，平台提供完整工具支撑。
-
----
-
-## 📈 项目状态与路线图
-
-> 当前状态：**Alpha 阶段**。核心 Gateway、Runtime、Grafeo 记忆引擎、Desktop UI 与基于 MQTT 的 IPC（已替换旧的 gRPC + WebSocket 协议栈，见 [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)）均在积极开发中。架构设计文档位于 [docs/design/zh/](./docs/design/zh/)。
+## 📈 路线图
 
 | 阶段    | 内容                                                                                                       | 状态     |
 | ------- | ---------------------------------------------------------------------------------------------------------- | -------- |
-| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、循环检测、Tool 去重、Rate 分层、Gateway 基础 | ✅ 已完成 |
-| Phase 2 | Memory 分层 + 系统 Agent：Grafeo 仿生分层、即时提取、关联扩散、AutobiographicalNode                        | 🚧 ~30–40% ¹ |
+| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、Gateway 基础                                  | ✅ 已完成 |
+| Phase 2 | Memory 分层 + 系统 Agent：Grafeo 仿生分层、即时提取、关联扩散                                              | 🚧 进行中 |
 | Phase 3 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate                                             | 🚧 部分实现 |
 | Phase 4 | 通信与协调：Intent、Budget Tracker、Rate Limiter、Cron                                                     | 🚧 部分实现 |
 | Phase 5 | Desktop App + 开发框架：Debug Protocol、Skill 热加载、录制回放；MQTT 协议栈重构                            | 🚧 进行中 |
-| Phase 6 | 云端与生态：Memory Sync、远程仓库、Agent 商店                                                              | 🔮 规划中 |
+| Phase 6 | 云端与生态：Memory Sync、远程 `.agent` 仓库、Agent 商店                                                    | 🔮 规划中 |
 | Phase 7 | 跨平台适配：Windows / macOS / Android / iOS                                                                | 🔮 规划中 |
-
-¹ Phase 2 有大量库代码（图扩散、遗忘、即时提取、Generalization），但**多数尚未接入 runtime 实际管线**——详见 [`docs/review/zh/22-memory-phase2-implementation-plan.md`](./docs/review/zh/22-memory-phase2-implementation-plan.md) 的差距分析。当前 runtime 真正可用的 memory_store 接口面显著窄于设计文档声称的范围。
-
-### 核心 Crate 架构
-
-ACowork 采用 **12-crate Rust workspace**，源码根目录 [`core/`](./core/Cargo.toml)。除最初 7 个 crate 外，随范围扩张新增了 5 个：MCP 集成、WASM 工具 SDK、ONNX embedding runtime、LSP relay、MQTT session/event 层：
-
-| Crate                                                  | 职责                                                                | 状态     |
-| ------------------------------------------------------ | ------------------------------------------------------------------- | -------- |
-| [`acowork-core`](./core/acowork-core/)                 | 共享类型、错误、配置、MQTT proto 定义                               | ✅        |
-| [`acowork-runtime`](./core/acowork-runtime/)           | Agent Runtime：主循环、工具调度、Provider                           | ✅        |
-| [`acowork-gateway`](./core/acowork-gateway/)           | Gateway：包管理、生命周期、Intent 路由、HTTP API、内嵌 MQTT broker、HTTP 反向代理 | ✅ |
-| [`acowork-grafeo`](./core/acowork-grafeo/)             | 图数据库引擎：HNSW 索引、BM25 检索、ACID 事务                       | ✅        |
-| [`acowork-memory`](./core/acowork-memory/)             | 记忆管理层：MemoryStore trait、Compaction 调度                      | 🚧 部分实现 |
-| [`acowork-vault`](./core/acowork-vault/)               | 加密密钥值存储                                                      | ✅        |
-| [`acowork-sign`](./core/acowork-sign/)                 | 包签名与验证                                                        | ✅        |
-| [`acowork-mcp`](./core/acowork-mcp/)                   | MCP（Model Context Protocol）客户端/服务端包装                      | 🚧 部分实现 |
-| [`acowork-tool-sdk`](./core/acowork-tool-sdk/)         | 构建 WASM 自定义工具的 SDK（Wasmtime host 侧）                      | ✅        |
-| [`acowork-embed`](./core/acowork-embed/)               | 基于 ONNX Runtime 的 embedding 模型 runner                          | ✅        |
-| [`acowork-lsp-relay`](./core/acowork-lsp-relay/)       | LSP 协议中继（Desktop ↔ 外部语言服务器）                            | ✅        |
-| [`acowork-mqtt-session`](./core/acowork-mqtt-session/) | Gateway ↔ Runtime 子进程之间的 MQTT session/事件复用                | ✅        |
-
-> 唯一真相源：[`core/Cargo.toml`](./core/Cargo.toml) 的 `[workspace] members`。状态反映的是 runtime 实际能调到的部分，而非 crate 声明的 API 表面积。
 
 ---
 
-## 📚 设计文档
+## 📚 文档
 
-> 完整的架构设计文档在 [`docs/design/zh/`](./docs/design/zh/)，模块级设计在 [`docs/module-design/zh/`](./docs/module-design/zh/)。旧版 IPC gRPC 设计（`16-ipc-grpc-migration.md`）保留作为历史参考——当前生产栈使用 MQTT + HTTP 反向代理，见 [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)。
-
-| 文档                                                                                | 内容                                                                              |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| [01-overview.md](./docs/design/zh/01-overview.md)                                 | 平台总纲：背景目标、核心类比、架构总览、与现有方案对比                              |
-| [02-agent-package.md](./docs/design/zh/02-agent-package.md)                       | `.agent` 包格式、签名机制、manifest.toml 架构                                      |
-| [03-agent-runtime.md](./docs/design/zh/03-agent-runtime.md)                       | Agent Runtime 主循环、上下文构建、循环检测、Approval Gate                           |
-| [04-gateway.md](./docs/design/zh/04-gateway.md)                                   | Gateway 组件：PackageManager、Lifecycle、IntentRouter、Vault、Budget、Rate、沙箱    |
-| [05-memory.md](./docs/design/zh/05-memory.md)                                     | Memory 仿生分层：三层五类、Grafeo 知识图谱、遗忘机制、关联扩散检索                  |
-| [06-communication.md](./docs/design/zh/06-communication.md)                       | MQTT pub/sub + HTTP 反向代理 + Intent 通信协议 + Capability Registry               |
-| [07-system-agent.md](./docs/design/zh/07-system-agent.md)                         | 系统 Agent：ContentProvider、冷启动身份注入                                         |
-| [08-security.md](./docs/design/zh/08-security.md)                                 | 安全设计：进程隔离、文件隔离、签名验证、WASM 沙箱                                  |
-| [10-debug-protocol.md](./docs/design/zh/10-debug-protocol.md)                     | Debug Protocol：DevMode、执行控制、断点系统、消息快照与回滚                         |
-| [11-module-design.md](./docs/design/zh/11-module-design.md)                       | 模块设计索引 —— 设计文档到 Rust crate 的映射                                        |
-| [12-tool-system.md](./docs/design/zh/12-tool-system.md)                           | 工具系统：Built-in Tools、WASM 沙箱、Gateway Tools                                  |
-| [13-skill-system.md](./docs/design/zh/13-skill-system.md)                         | 技能系统：SKILL.md 格式、Grafeo 经验层、自学习闭环                                 |
-| [14-desktop-app.md](./docs/design/zh/14-desktop-app.md)                           | Desktop App：Tauri v2、系统托盘、MQTT 客户端、DevMode                              |
-| [15-conversation-persistence.md](./docs/design/zh/15-conversation-persistence.md) | 对话持久化：Session Actor 模型、JSONL、Token 预算                                  |
-| [16-ipc-grpc-migration.md](./docs/design/zh/16-ipc-grpc-migration.md)             | 旧版 gRPC IPC 设计（已被 MQTT 取代，见 ADR-033）                                   |
-| [17-web-search-provider.md](./docs/design/zh/17-web-search-provider.md)           | 可插拔的 Web Search Provider 抽象                                                  |
-| [18-user-identity-simplified.md](./docs/design/zh/18-user-identity-simplified.md) | 简化的用户身份模型                                                                 |
-| [19-lsp-multi-language-project-root.md](./docs/design/zh/19-lsp-multi-language-project-root.md) | LSP 多语言项目根发现与中继                                              |
-
-### 架构决策记录（ADR）
-
-ADR 集合位于 [`docs/adr/zh/`](./docs/adr/zh/)（目前 35+ 篇，ADR-009 → ADR-046）。下表收录基础性 + 最近落地篇目；完整列表请直接浏览目录。
-
-| 文档                                                                                | 决策                                                              |
-| ----------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| [ADR-009 — Gateway workspace isolation](./docs/adr/en/ADR-009-gateway-workspace-isolation.md) | Gateway 进程互不干扰的命名空间隔离                                |
-| [ADR-010 — Context compression simplification](./docs/adr/zh/ADR-010-context-compression-simplification.md) | 上下文压缩策略简化                                                |
-| [ADR-011 — Compaction as Distillation](./docs/adr/zh/ADR-011-compaction-as-distillation.md) | Compaction 即 Distillation                                        |
-| [ADR-020 — Data-flow layering](./docs/adr/zh/)                                       | Gateway / Runtime / Agent 三层数据流分层                          |
-| [ADR-031 — Drop legacy IPC, consolidate on gRPC](./docs/adr/zh/)                    | 旧 IPC 通道清理（已被 ADR-033 进一步取代）                        |
-| [**ADR-033 — MQTT replaces gRPC + WebSocket**](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) | **用 MQTT 统一替代 gRPC + WebSocket**（现行 IPC 架构）             |
-| [ADR-034 — MQTT/HTTP boundary](./docs/adr/zh/)                                      | MQTT 与 HTTP 的职责边界划分                                       |
-| [ADR-035 — MQTT streaming push refactor](./docs/adr/zh/)                           | MQTT 流式推送重构                                                 |
-| [ADR-036 — MQTT status push](./docs/adr/zh/)                                        | MQTT 状态推送（Will + Retained）                                  |
-| [ADR-043 — Session config/state split](./docs/adr/zh/)                              | Session 配置与运行时状态拆分                                      |
-| [ADR-046 — Unified attachment entries](./docs/adr/zh/)                              | 统一附件条目模型                                                  |
-
-### 模块级设计
-
-| 文档                                                                                | 内容                                          |
-| ----------------------------------------------------------------------------------- | --------------------------------------------- |
-| [00-overview.md](./docs/module-design/zh/00-overview.md)                           | 模块概览：12-crate workspace 结构             |
-| [01-core.md](./docs/module-design/zh/01-core.md)                                   | `acowork-core` 设计                           |
-| [02-runtime.md](./docs/module-design/zh/02-runtime.md)                             | `acowork-runtime` 设计                        |
-| [03-gateway.md](./docs/module-design/zh/03-gateway.md)                             | `acowork-gateway` 设计                        |
-| [04-grafeo.md](./docs/module-design/zh/04-grafeo.md)                               | `acowork-grafeo` 设计                         |
-| [05-vault-sign.md](./docs/module-design/zh/05-vault-sign.md)                       | `acowork-vault` / `acowork-sign` 设计         |
-| [06-architecture.md](./docs/module-design/zh/06-architecture.md)                   | 跨 crate 架构与依赖规则                       |
-| [06-ask-user-question-tool.md](./docs/module-design/zh/06-ask-user-question-tool.md) | `ask_user_question` 工具规格                  |
+- 架构设计：[`docs/design/zh/`](./docs/design/zh/)
+- 模块级设计：[`docs/module-design/zh/`](./docs/module-design/zh/)
+- 架构决策记录（ADR）：[`docs/adr/zh/`](./docs/adr/zh/)（ADR-009 → ADR-058+）
+- 代码评审与实现笔记：[`docs/review/zh/`](./docs/review/zh/)
+- 开发者约定：[`AGENTS.md`](./AGENTS.md)
 
 ---
 
@@ -462,32 +239,28 @@ ADR 集合位于 [`docs/adr/zh/`](./docs/adr/zh/)（目前 35+ 篇，ADR-009 →
 
 ACowork.AI 的设计深受以下开源项目启发：
 
-| 项目                                                    | 领域          | 借鉴点                                     |
-| ------------------------------------------------------- | ------------- | ------------------------------------------ |
-| [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) | Agent Runtime | Trait 驱动架构、安全装饰器模式、流式解析器 |
-| [Grafeo](https://github.com/GrafeoDB/grafeo)            | 图数据库      | HNSW 向量索引、BM25 全文检索、混合搜索     |
-| [Mem0](https://github.com/mem0ai/mem0)                  | 记忆层        | 多层级记忆、用户/会话/Agent 状态管理       |
-| [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG)   | 记忆框架      | 神经生物学启发长时记忆、关联扩散检索       |
-| [LightMem](https://github.com/zjunlp/LightMem)          | 记忆框架      | 轻量级记忆压缩、结构化记忆管理             |
-| [OpenCode](https://github.com/anomalyco/opencode)       | Coding Agent  | 多 Agent 协作模式、Provider 无关设计       |
-
-> ZeroClaw 为参考实现（`ref-repo/zeroclaw/`），非 ACowork.AI 设计的 Source of Truth。代码复用遵循 MIT / Apache-2.0 许可证要求。
+- [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) — Trait 驱动运行时、安全装饰器、流式解析
+- [Grafeo](https://github.com/GrafeoDB/grafeo) — HNSW 向量索引、BM25 全文检索、混合搜索
+- [Mem0](https://github.com/mem0ai/mem0) — 多层级记忆、用户/会话/Agent 状态
+- [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) — 神经生物学启发长时记忆、关联扩散
+- [LightMem](https://github.com/zjunlp/LightMem) — 轻量级记忆压缩
+- [OpenCode](https://github.com/anomalyco/opencode) — 多 Agent 协作、Provider 无关设计
 
 ---
 
 ## 🤝 贡献
 
-项目已走出设计阶段，进入 **Alpha 实现期**。欢迎提交代码、设计反馈与评审意见：
+项目处于 **Alpha 实现期**。欢迎提交代码、设计反馈与评审意见：
 
 - 浏览 [`docs/review/zh/`](./docs/review/zh/) 下的设计 / 代码评审报告
 - 通过 issue 提交 bug 报告、提案或设计反馈
-- 提 PR 前请先阅读 [AGENTS.md](./AGENTS.md) 了解项目约定
+- 提 PR 前请先阅读 [`AGENTS.md`](./AGENTS.md) 了解项目约定
 
 ---
 
 ## 📄 License
 
-Apache-2.0 — 详见 [LICENSE](./LICENSE) 文件。
+Apache-2.0 —— 详见 [`LICENSE`](./LICENSE)。
 
 ---
 
