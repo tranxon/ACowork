@@ -695,6 +695,7 @@
     "batchCloseOthersConfirm": "他の {{count}} 個のタブに未保存の変更があります。破棄して閉じますか？",
     "batchCloseAllConfirm": "{{count}} 個のタブに未保存の変更があります。破棄してすべて閉じますか？",
     "save": "保存 (Ctrl+S)",
+    "saveDisabledPreview": "プレビューモードでは保存できません。ソースに切り替えてから保存してください",
     "locateInTree": "ファイルツリーで位置を表示",
     "locateDisabled": {
       "no-file": "ファイルが開かれていません",
@@ -705,6 +706,7 @@
     },
     "copy": "コピー",
     "previewBadge": "プレビュー",
+    "showSource": "ソースを表示",
     "previewLoading": "プレビューを読み込み中...",
     "previewDoubleClickHint": "ダブルクリックでエディタを開く",
     "markdownLinkNotFound": "ワークスペースにファイルが見つかりません:{{href}}",

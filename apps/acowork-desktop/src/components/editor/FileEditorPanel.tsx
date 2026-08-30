@@ -12,7 +12,7 @@ import { useLspClientPool } from "../../hooks/useLspClientPool";
 import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { cn } from "../../lib/utils";
 import { getGatewayUrl } from "../../lib/config";
-import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
+import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -54,6 +54,18 @@ function encodeTextToBase64(text: string): string {
         binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
+}
+
+/**
+ * Files that support BOTH source editing and rendered preview.
+ * Keep in sync with the tab context menu's "Open Preview" gate and the
+ * preview/source toggle button in the tab bar. Raster images
+ * (png/jpg/gif/webp) are intentionally excluded — their "source" is just a
+ * base64 blob, so toggling to a source pane adds no value.
+ */
+const PREVIEW_TOGGLE_RE = /\.(md|html?|svg)$/i;
+function supportsPreviewToggle(file: OpenFile): boolean {
+    return file.kind === "file" && PREVIEW_TOGGLE_RE.test(file.fileName);
 }
 
 export function FileEditorPanel({ width }: { width: number }) {
@@ -1042,6 +1054,20 @@ export function FileEditorPanel({ width }: { width: number }) {
         void openFile(file.agentId, file.workspaceId, file.relPath);
     }, [activeFile, openFile]);
 
+    // Toggle the active tab between preview and source (Monaco) mode.
+    // Both store actions are idempotent and preserve the in-memory content:
+    // openPreview switches an already-open tab to "preview" without refetching,
+    // openFile switches it back to "edit" without refetching.
+    const handleTogglePreview = useCallback(() => {
+        const file = activeFile;
+        if (!file || !supportsPreviewToggle(file)) return;
+        if (file.mode === "preview") {
+            void openFile(file.agentId, file.workspaceId, file.relPath);
+        } else {
+            void openPreview(file.agentId, file.workspaceId, file.relPath);
+        }
+    }, [activeFile, openFile, openPreview]);
+
     // Tab right-click menu items. Built only when the right-clicked file
     // changes or any of the relevant gates (active agent/session, file
     // kind, loading state, mode) flip — so the disabled flags stay
@@ -1068,7 +1094,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         // "source" is just the base64 blob, so a preview pane adds no value.
         const canPreview = showFileActions
             && target.mode === "edit"
-            && /\.(md|html?|svg)$/i.test(target.fileName);
+            && supportsPreviewToggle(target);
 
         const items: ContextMenuItem<{ fileId: string }>[] = [];
 
@@ -1216,7 +1242,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                     })}
                 </ScrollableTabBar>
 
-                {/* Right-side action group: Locate-in-tree + Save.
+                {/* Right-side action group: Locate-in-tree + Preview/source toggle + Save.
                     Wrapped in a single flex container so the two buttons can sit
                     flush next to each other with their own gap, while the whole
                     group keeps a right-edge margin (pr-2) away from the panel edge.
@@ -1251,31 +1277,74 @@ export function FileEditorPanel({ width }: { width: number }) {
                         </Tooltip>
                     )}
 
-                    {/* Save button — only for editable files in edit mode */}
-                    {activeFile && !activeFile.loading && activeFile.mode === "edit" && (
+                    {/* Preview/source toggle — only for files that support both modes
+                        (Markdown / HTML / SVG). Shown in both directions so users can
+                        flip without opening the tab context menu. */}
+                    {activeFile && !activeFile.loading && supportsPreviewToggle(activeFile) && (
+                        <Tooltip
+                            content={
+                                activeFile.mode === "preview"
+                                    ? t("fileEditor.showSource")
+                                    : t("fileEditor.openPreview")
+                            }
+                            variant="plain"
+                        >
+                            <button
+                                aria-label={
+                                    activeFile.mode === "preview"
+                                        ? t("fileEditor.showSource")
+                                        : t("fileEditor.openPreview")
+                                }
+                                onClick={handleTogglePreview}
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-zinc-500 hover:bg-zinc-200 hover:text-[var(--color-accent)] dark:hover:bg-zinc-700"
+                            >
+                                {activeFile.mode === "preview" ? (
+                                    <Code2 className="h-3.5 w-3.5" />
+                                ) : (
+                                    <Eye className="h-3.5 w-3.5" />
+                                )}
+                            </button>
+                        </Tooltip>
+                    )}
+
+                    {/* Save button — always visible for workspace files so the
+                        action group stays a fixed width when toggling preview ↔
+                        source. The button is disabled (greyed out) in three states:
+                          1. not dirty            → no changes to write
+                          2. saving in flight     → spinner takes over
+                          3. preview mode         → read-only view, save N/A
+                        Each disabled reason gets its own tooltip copy so the
+                        greying never feels mysterious. */}
+                    {activeFile && !activeFile.loading && activeFile.kind === "file" && (
                         <Tooltip
                                 content={
                                     activeFile.saveError
                                         ? activeFile.saveError
-                                        : t("fileEditor.save")
+                                        : activeFile.mode === "preview"
+                                          ? t("fileEditor.saveDisabledPreview")
+                                          : t("fileEditor.save")
                                 }
                                 variant="plain"
                             >
                             <button
                                 onClick={() => activeFile.dirty && void saveFile(activeFile.id)}
-                                disabled={!activeFile.dirty || activeFile.saving}
+                                disabled={!activeFile.dirty || activeFile.saving || activeFile.mode === "preview"}
                                 aria-label={
                                     activeFile.saveError
                                         ? `Save failed: ${activeFile.saveError}`
-                                        : t("fileEditor.save")
+                                        : activeFile.mode === "preview"
+                                          ? t("fileEditor.saveDisabledPreview")
+                                          : t("fileEditor.save")
                                 }
                                 className={cn(
                                     "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
-                                    activeFile.saveError
-                                        ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
-                                        : activeFile.dirty
-                                          ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                          : "text-zinc-300 dark:text-zinc-600 cursor-default",
+                                    activeFile.mode === "preview"
+                                        ? "text-zinc-300 dark:text-zinc-600 cursor-not-allowed"
+                                        : activeFile.saveError
+                                          ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
+                                          : activeFile.dirty
+                                            ? "text-[var(--color-accent)] hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                            : "text-zinc-300 dark:text-zinc-600 cursor-default",
                                 )}
                             >
                                 {activeFile.saving ? (
