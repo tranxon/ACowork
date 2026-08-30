@@ -1,7 +1,7 @@
 # ADR-061：上下文压缩机制改造 - 8 级递减策略替代按轮数保留
 
-**状态**：提案
-**日期**：2026-09-14（自 ADR-060 §12 拆分独立，含代码级事实修正）
+**状态**：提案（2026-08-30 定稿修订，见 §19；与正文冲突处以 §19 为准）
+**日期**：2026-09-14（自 ADR-060 §12 拆分独立，含代码级事实修正；2026-08-30 完成定稿修订）
 **决策者**：大鱼
 **前置**：
 - [ADR-010](./ADR-010-context-compression-simplification.md)（程序化压缩废止的历史决策）
@@ -587,3 +587,165 @@ pub enum CompressionOutcome {
 - 8 级策略是"摘要粒度调度器"，不是"丢弃决策器"——被压缩的内容全部进入 LLM summary（§4）。
 - 压缩的 cache miss 是"沉没成本"，后续 token 节约远超代价；真正决定成败的是 summary 是否保留用户意图与关键决策（§3.4）。
 - 压缩失败绝不退化为 FIFO——显式失败 + 用户决策，优于静默 cache 全失效（§11.3）。
+
+---
+
+## 19. 定稿修订（2026-08-30）
+
+> 正文为早期提案表述。本节为基于代码级 Review 与决策讨论的定稿，**与正文冲突处以本节为准**。涉及修订的正文章节：§6.1、§7.1、§7.2、§7.3、§9、§13.1、§13.2、§13.4、§15、§16。
+
+### 19.1 核心流程：先摘要、后 plan（修订 §7）
+
+**决策**：LLM 摘要永远使用**全量历史**作为输入（`compact_via_llm` 语义不变），摘要输出大小 S 在调用后**已知**（受 `SUMMARY_TOKEN_BUDGET` 上限约束，超限先截断）；8 级递减策略在**摘要之后**运行，依据已知的 S 精确计算各级保留窗口——投影从"估算"变为"精确"，不再依赖未知的 summary token。
+
+```
+compact_history_if_needed（80% 触发 / force）
+  → compact_via_llm(全量历史)         # S 已知，≤ SUMMARY_TOKEN_BUDGET；超限先截断
+  → plan_compression(history, S)       # 8 级选择（纯函数，投影精确）
+  → plan.apply(history, summary)       # drain 中间 → 插入 marker + level 元数据 + 保留原文
+```
+
+伪代码（替代 §7.1）：
+
+```rust
+pub fn plan_compression(history: &HistoryState, summary_tokens: u64) -> Result<CompressionPlan> {
+    const MIN_COMPRESSION_RATIO: f64 = 0.10;
+    let original_tokens = history.current_tokens;
+    let budget = history.effective_input_budget;
+
+    // 级 1-7：第一个满足 "压缩比 ≥ 10% 且 压缩后 ≤ budget" 的级（够用即停）
+    for level in 1..=7 {
+        let plan = CompressionPlan::for_level(level, history);
+        let projected = plan.retained_tokens() + summary_tokens;
+        let ratio = 1.0 - (projected as f64 / original_tokens as f64);
+        if ratio >= MIN_COMPRESSION_RATIO && projected <= budget {
+            return Ok(plan);
+        }
+    }
+
+    // 级 8 兜底：唯一允许 ratio > 10% 的级，只校验压缩后 ≤ budget
+    let plan8 = CompressionPlan::for_level(8, history);
+    if plan8.retained_tokens() + summary_tokens <= budget {
+        return Ok(plan8);
+    }
+
+    // 级 8 仍超限（summary 截断后依旧）→ 显式失败，不修改 history
+    Err(CompressError::UnrecoverableOverflow)
+}
+```
+
+**注意**：级 8 的"当前 user message"定义为 history 中最后一条 `MessageRole::User` 消息；Block D（ADR-060 的 `pending_user_message`）由调用方显式传入，不参与 history 内判定。
+
+### 19.2 选择规则与 10% 语义（修订 §6.1/§13.1）
+
+- **10% 是目标达标线**：压缩比 < 10% 说明压得太少（§3.3 盈亏平衡点以下，不值得动 cache），不选中；级 1-7 从最宽松开始，**第一个满足 "r ≥ 10% 且 projected ≤ budget" 的级被选中即停**——更激进的级不会被尝试，故压缩比远超 10% 的级（除级 8 外）不会被选中。
+- **级 8 豁免**：作为唯一兜底，允许压缩比超过 10%（压到最小形态），其验收标准是 `projected ≤ budget` 而非 `r ≥ 10%`。
+- **T > budget 极端场景**：级 1-7 全部"压缩后 > budget"时落级 8 一次到位，**不需要多轮收敛**。
+
+修订 §7.2 `apply` 校验：
+
+```rust
+impl CompressionPlan {
+    pub fn apply(self, history: &mut HistoryState, summary: &str) -> Result<CompressionOutcome> {
+        let original_tokens = history.current_tokens;
+        let projected = self.retained_tokens() + count_summary_tokens(summary);
+        if self.level < 8 {
+            // 级 1-7：双条件校验（达标线 + budget）
+            let ratio = 1.0 - (projected as f64 / original_tokens as f64);
+            if ratio < MIN_COMPRESSION_RATIO || projected > history.effective_input_budget {
+                return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
+            }
+        } else {
+            // 级 8：仅校验 budget（豁免 ratio 达标线）
+            if projected > history.effective_input_budget {
+                return Err(CompressError::InsufficientCompression { projected_ratio: 0.0 });
+            }
+        }
+        history.apply_plan(self, summary)?;
+        Ok(CompressionOutcome::Compacted { /* level / tokens / ratio / 保留统计 */ })
+    }
+}
+```
+
+### 19.3 常量定稿（修订 §13.4/§15 清单 1）
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `SUMMARY_TOKEN_BUDGET` | `4_096` | 摘要输出上限；替代现状 `compact_via_llm` 硬编码 2048（[history.rs:776](core/acowork-runtime/src/agent/history.rs#L776)）。**代码中不存在 8K 摘要定义**（`8_192` 仅出现在 `max_output_tokens_limit` 默认值与测试中），以本值定稿 |
+| `MIN_BUDGET_FOR_AGENT` | `65_536` | 模型拒绝线（替代原 8K）。`effective_input_budget < 64K` 的模型拒绝运行：128K/200K/1M 主流全过（128K − 32K output = 96K ≥ 64K），64K context 以下拒绝。64K 下机制自洽：触发 51.2K → 压掉 ≥10% = 5K+ > 4K summary（summary 不主导）→ 压缩后 ~46K（≈72%）→ 撑约 10 轮再触发 |
+| `MIN_COMPRESSION_RATIO` | `0.10` | 级 1-7 达标线（不变，级 8 豁免） |
+
+### 19.4 marker 语义（修订 §6.2/§9/§13.2）
+
+- **marker 按 user 级信息处理**：`name == "compaction_summary"` 的 marker 与 `MessageRole::User` 消息同权——级 1-7 保留、级 8 才允许舍弃。§13.2 的"级 1-7 保留所有 user 消息"含 marker（二者同为最后才舍弃的对象），不另设排除规则。
+- **多 marker 并存**：第二次压缩时，旧 marker 若落入保留窗口则与 user 同权保留，请求中可并存（均为 User 文本，功能无害；restorer 只认最近一次 compaction，见 restorer.rs:22-25）。§9"只保留最新一次 level"修订为：**元数据以最新 marker 为准，旧 marker 随下次压缩自然被覆盖或并存**。
+- **user_intent fallback**（§8.2/§13.3）：fallback 拼接"原始 user 消息"时**排除** marker 消息（marker 是压缩产物，不是原始用户输入）。
+
+### 19.5 压缩后不超限的保证（修订 §11/§16）
+
+- S 已知 + `SUMMARY_TOKEN_BUDGET` 输出上限（超限先截断 summary）→ 级 8 最小形态 = system + S + user ≈ 7K ≤ 64K budget，**级 8 兜底必然成立**。
+- "压缩后仍超限"只剩一种可能：S 截断后级 8 仍超限——由 19.1 的 `UnrecoverableOverflow` 显式失败处理（§11.3 前端提示路径不变）。
+
+### 19.6 代码事实勘误补充（修订 §2.2/§10.2/§11.2）
+
+| 项 | 正文原引用 | 实际代码 |
+|---|---|---|
+| 摘要 max_tokens | 未提及 | `compact_via_llm` → `compact_with_llm(..., 2048, ...)`（history.rs:776）——**已按 19-1 替换为 `SUMMARY_TOKEN_BUDGET = 4096`** |
+| 队列定义位置 | loop_.rs:383-395 | loop_.rs:383-395 实为 ADR-060 `pending_user_message`（Block D）；`AbandonQueue`/`RetrieveQueue` 定义在 `context_compression.rs`（§15 清单 13 引用正确） |
+| `drain_abandon_queue` | loop_.rs:1722 | loop_.rs:1768 |
+| `trim_history_to_budget` 调用点 | 927/946/1194/1444 | 967/986/1234/1484（4 处一致，偏移 ~40 行） |
+| 配对清理 | 未提及 | `sanitize_messages`（history.rs:630-697）在每次 `build()` 时双向清理：Step 4 移除无对应结果的 tool_calls、Step 5 删空 assistant——8 级策略删除 tool 消息后**无需新增配对机制**；投影与实际请求的 token 偏差（sanitize 再删一层）显式接受 |
+| `CompactionEventMeta.keep_last_rounds` | 未提及 | conversation.rs:98，restorer 用于校验回放窗口——**已按 19-2 迁移为 `level: u8`（restorer 不消费该字段，仅锚定事件位置）** |
+
+### 19.7 改造清单增补（修订 §15）
+
+| 编号 | 增补内容 | 涉及文件 | 优先级 |
+|---|---|---|---|
+| 19-1 | `SUMMARY_TOKEN_BUDGET = 4096` 替换 `compact_via_llm` 硬编码 2048（原清单 1 定义常量但未列替换点） | history.rs | **P0** |
+| 19-2 | `CompactionEventMeta.keep_last_rounds` → `level: u8` 字段迁移，restorer 回放窗口校验同步适配 | conversation.rs + restorer.rs | **P0** |
+| 19-3 | `plan_compression(history, summary_tokens)` 签名与 19.1 先摘要后 plan 时序改造 | loop_context.rs + history.rs | **P0** |
+| 19-4 | 前端 `ContextOverflow` 错误提示文案（§11.3 压缩失败提示；chatStore 已有 error_type 处理基础） | apps/acowork-desktop i18n + chatStore | **P1** |
+| 19-5 | 测试补充：级 8 豁免校验、超限量 >10% 落级 8 的 plan 边界、marker 按 user 级保留的 `assert_user_messages_preserved` 适配 | runtime tests | **P0** |
+
+### 19.8 §7.3 布局图修正
+
+原图"cache hit 3（尾部原文）"标注**错误**：summary marker 插入后，其后的全部内容（含尾部原文）必然 cache miss——OpenAI（128-token hash 链）全量失效；Anthropic（breakpoint 前缀缓存）从插入点起切断，其后重新计算。修正后：
+
+```
+[Block A: system block]                                    ← cache hit 1
+[Block B: 保留的 user/assistant + 保留的工具]              ← cache hit 2（marker 之前）
+[Block B 内: summary marker（User, name=compaction_summary）] ← 插入点
+[Block B: 尾部保留的 user/assistant + 工具]                ← cache miss（suffix 失效）
+[Block C: todo 快照] / [Block D: 当前 user message]        ← 由 ADR-060 负责
+```
+
+### 19.9 实施状态（2026-08-31）
+
+P0 清单已全部落地并随 `cargo test -p acowork-runtime --lib`（1111 passed）+ workspace clippy 验证。§15 清单与 §19.7 增补状态如下：
+
+| 编号 | 状态 | 备注 |
+|---|---|---|
+| §15-1 | ✅ | `compression_constants.rs`：`SUMMARY_TOKEN_BUDGET = 4_096` / `MIN_BUDGET_FOR_AGENT = 65_536` / `MIN_COMPRESSION_RATIO = 0.10`（§19.3 定稿值） |
+| §15-2 | ✅ | `plan_compression(history, summary_tokens)` 8 级策略，级 1-7 达标即停、级 8 豁免 ratio（§19.1） |
+| §15-3 | ✅ | `CompressionPlan::apply` 双条件/单条件校验 + marker 构建（User role + `name=compaction_summary`） |
+| §15-4 | ✅ | `assert_user_messages_preserved` 验收适配（marker 按 user 级处理） |
+| §15-5 | ✅ | `parse_and_validate_summary` + `<user_intent>` fallback（排除 marker） |
+| §15-6 | ✅ | `COMPACTION_SYSTEM_PROMPT` 三章节强制结构（`<summary>` → `<user_intent>` → `<triples>`） |
+| §15-7 | ✅ | LLM 全失败 → `ChunkEvent::Error { error_type: "ContextOverflow", message_id: "compaction-failed" }`，history 不改 |
+| §15-8 | ✅ | budget 校验：session_init.rs:313（boot 拒绝）+ session_manager.rs:1958（model_switch 拒绝） |
+| §15-9 | ✅ | 8 级全不达标 → `NoCompressionNeeded` |
+| §15-10 | ✅ | `trim_fifo`/`emergency_trim` 删除，`trim_history_to_budget` 重写，全部调用点 async 改道 |
+| §15-11 | ✅ | `context_abandon` 不再注册（deprecated 工具代码保留）；`context_retrieve` 固定注册；`PLATFORM_PROTECTED_TOOLS` 保留双名字 |
+| §15-12 | ✅ | `tool_compression_enabled` 全链路移除：agent_config.rs / RuntimeConfigOverrides / `sync_platform_tools_to_registry` / MQTT 协议字段（protocol.rs `RuntimeConfigSnapshot` + `RuntimeConfigUpdate`）/ gateway DTO（agent_config.rs）/ 前端开关与 i18n |
+| §15-13 | ✅ | `AbandonQueue` 删除（`RetrieveQueue` 保留，`ContextAbandonTool` 自建空队列） |
+| §15-14 | ✅ | marker 双块结构 `[compressed: level=N]` 元数据 + `<summary>`/`<user_intent>` |
+| §15-15 | ✅ | `CompressionOutcome` 扩展（level / 保留统计 / summary_tokens） |
+| §15-16 | ✅ | Debug 面板 Compression History 子面板（`CompressionHistoryCard`，纯前端：复用 `GET /sessions/{sid}/messages` 的 `kind="compaction"` 条目，零 runtime 改动） |
+| §15-17 | ✅ | agent setup 界面移除开关 + 6 个示例包 manifest.toml 注释同步 |
+| §15-18 | ✅ | 回归测试：marker 契约 / restorer / round-trip / compaction offset 持久化 / memory_e2e compaction landing |
+| 19-1 | ✅ | `SUMMARY_TOKEN_BUDGET = 4096` 替换硬编码 2048 |
+| 19-2 | ✅ | `CompactionEventMeta.keep_last_rounds` → `level: u8` |
+| 19-3 | ✅ | 先摘要后 plan 时序（`compact_via_llm` 全量输入 → S 已知 → 8 级） |
+| 19-4 | ✅ | 前端 `ContextOverflow` 文案（ChatPanel + 5 语言 i18n） |
+| 19-5 | ✅ | 级 8 豁免 / 超限落级 8 / marker 按 user 级保留测试 |
+

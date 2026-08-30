@@ -3,30 +3,23 @@
 //! These queue types are the **data contract** between the two sides of
 //! the context-compression feature:
 //!
-//! - **Producers** - the `context_abandon` / `context_retrieve` builtin
-//!   tools (`crate::tools::builtin::context_*`). Tools have no access to
-//!   `HistoryManager`; they only push intent (a `tool_call_id`, or a
-//!   `(tool_call_id, original_content)` pair) onto these queues.
-//! - **Consumer** - `AgentLoop` drains both queues at the start of each
-//!   iteration (`drain_abandon_queue` / `drain_retrieve_queue`) and
-//!   performs the actual in-place history mutation via
-//!   `HistoryManager::{abandon,retrieve}_tool_result()`.
-//! - **Owner** - `AgentCore` creates the queues at init and hands `Arc`
-//!   clones to the tools and to every `AgentLoop`.
+//! - **Producer** - the `context_retrieve` builtin tool
+//!   (`crate::tools::builtin::context_retrieve`). Tools have no access to
+//!   `HistoryManager`; they only push intent (a `(tool_call_id,
+//!   original_content)` pair) onto the queue.
+//! - **Consumer** - `AgentLoop` drains the queue at the start of each
+//!   iteration (`drain_retrieve_queue`) and performs the actual in-place
+//!   history mutation via `HistoryManager::retrieve_tool_result()`.
+//! - **Owner** - `AgentCore` creates the queue at init and hands `Arc`
+//!   clones to the tool and to every `AgentLoop`.
 //!
-//! The types deliberately live here - next to their owner/consumer in
-//! the `agent` module - instead of inside the tool implementation files,
-//! so that core agent state (`AgentCore`, `AgentLoop`) never depends on
-//! a specific builtin tool's source file for a type it owns.
+//! ADR-061 §10.2: the `AbandonQueue` contract is **deleted** —
+//! LLM-autonomous tool compression is closed (`context_abandon` is no
+//! longer registered; the deprecated tool keeps an internal queue that
+//! nothing drains). `context_retrieve` remains the manual recall channel.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-
-/// Shared queue for `context_abandon` requests.
-///
-/// The tool writes `tool_call_id` strings here; the agent loop drains
-/// them and calls `HistoryManager::abandon_tool_result()`.
-pub type AbandonQueue = Arc<Mutex<VecDeque<String>>>;
 
 /// Shared queue for `context_retrieve` requests.
 ///
@@ -34,11 +27,6 @@ pub type AbandonQueue = Arc<Mutex<VecDeque<String>>>;
 /// agent loop drains them and restores the original content in-place
 /// (replacing the placeholder).
 pub type RetrieveQueue = Arc<Mutex<VecDeque<(String, String)>>>;
-
-/// Create a fresh empty abandon queue (used at `AgentCore` init).
-pub fn new_abandon_queue() -> AbandonQueue {
-    Arc::new(Mutex::new(VecDeque::new()))
-}
 
 /// Create a fresh empty retrieve queue (used at `AgentCore` init).
 pub fn new_retrieve_queue() -> RetrieveQueue {

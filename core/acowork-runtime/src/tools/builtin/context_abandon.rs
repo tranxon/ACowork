@@ -1,18 +1,19 @@
 //! ADR-052 context_abandon tool - replace a tool result with a placeholder.
 //!
-//! When the LLM determines a tool result is no longer needed for current
-//! reasoning, it calls this tool to replace the in-memory content with a
-//! compact placeholder. The original content is preserved in the JSONL
-//! conversation log and can be retrieved later via `context_retrieve`.
+//! **DEPRECATED (ADR-061 §10.2)**: this tool is no longer registered.
+//! LLM-autonomous tool compression is closed — the 8-level plan schedules
+//! tool retention at runtime, and autonomous in-place replacement would
+//! invalidate the ADR-060 Block B prompt cache. The implementation is kept
+//! for backward compatibility and potential future reuse; nothing drains
+//! its queue, so calls become a no-op that returns a deprecation notice.
 //!
-//! ## Execution model
+//! ## Historical execution model
 //!
-//! This tool does **not** directly modify `HistoryManager` (tools have no
-//! access to it). Instead, it pushes the `tool_call_id` into an
-//! `abandon_queue`. The agent loop drains the queue on the next iteration
-//! and calls `HistoryManager::abandon_tool_result()` to perform the
-//! in-place replacement. This is symmetric with `context_retrieve`'s
-//! `retrieve_queue` design.
+//! This tool did **not** directly modify `HistoryManager` (tools have no
+//! access to it). Instead, it pushed the `tool_call_id` into an
+//! `abandon_queue`; the agent loop drained the queue on the next iteration
+//! and called `HistoryManager::abandon_tool_result()` to perform the
+//! in-place replacement. Symmetric with `context_retrieve`'s `retrieve_queue`.
 //!
 //! ## Parameters
 //!
@@ -20,27 +21,39 @@
 //!   result to abandon. This is the same id that appears in tool results
 //!   and in compressed placeholders.
 
-use crate::agent::context_compression::AbandonQueue;
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use tracing;
 
 /// ADR-052 context_abandon tool for replacing tool results with placeholders.
 ///
-/// The tool pushes the `tool_call_id` into a shared queue. The agent loop
-/// drains the queue and performs the actual in-place replacement via
-/// `HistoryManager::abandon_tool_result()`.
+/// DEPRECATED (ADR-061 §10.2): no longer registered with the LLM. The
+/// queue is internal-only so the type still compiles and behaves
+/// harmlessly if instantiated by legacy code paths.
 pub struct ContextAbandonTool {
-    /// Shared queue for abandon requests.
-    abandon_queue: AbandonQueue,
+    /// Internal queue for abandon requests. Nothing drains it since
+    /// ADR-061 closed LLM-autonomous tool compression.
+    abandon_queue: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl ContextAbandonTool {
-    pub fn new(abandon_queue: AbandonQueue) -> Self {
-        Self { abandon_queue }
+    pub fn new() -> Self {
+        Self {
+            abandon_queue: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
+}
 
+impl Default for ContextAbandonTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContextAbandonTool {
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "context_abandon".to_string(),
@@ -100,18 +113,17 @@ impl Tool for ContextAbandonTool {
             }
         };
 
-        // Push the tool_call_id into the abandon_queue. The agent loop
-        // will drain this on the next iteration and call
-        // `HistoryManager::abandon_tool_result()` to replace the content
-        // in-place with a placeholder.
+        // Push the tool_call_id into the internal queue. Nothing drains it
+        // since ADR-061 closed LLM-autonomous tool compression (§10.2) —
+        // the response below is the deprecation surface.
         self.abandon_queue
             .lock()
             .unwrap()
             .push_back(tool_call_id.clone());
 
-        tracing::info!(
+        tracing::warn!(
             tool_call_id = %tool_call_id,
-            "context_abandon: queued for in-place replacement"
+            "context_abandon: deprecated tool invoked (ADR-061 §10.2) — queued but never drained"
         );
 
         Ok(ToolResult {
@@ -129,16 +141,10 @@ impl Tool for ContextAbandonTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-
-    /// Helper: create an AbandonQueue for testing.
-    fn test_queue() -> AbandonQueue {
-        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()))
-    }
 
     #[test]
     fn test_tool_missing_param() {
-        let tool = ContextAbandonTool::new(test_queue());
+        let tool = ContextAbandonTool::new();
         let params = serde_json::json!({});
         let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
         assert!(!result.ok);
@@ -147,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_tool_empty_param() {
-        let tool = ContextAbandonTool::new(test_queue());
+        let tool = ContextAbandonTool::new();
         let params = serde_json::json!({"tool_call_id": ""});
         let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
         assert!(!result.ok);
@@ -156,8 +162,7 @@ mod tests {
 
     #[test]
     fn test_abandon_queue_pushed() {
-        let queue = test_queue();
-        let tool = ContextAbandonTool::new(queue.clone());
+        let tool = ContextAbandonTool::new();
         let params = serde_json::json!({"tool_call_id": "toolu_abc"});
         let result = futures::executor::block_on(tool.execute(params, None)).unwrap();
 
@@ -165,15 +170,16 @@ mod tests {
         assert!(result.content.contains("toolu_abc"));
         assert!(result.content.contains("placeholder"));
 
-        // Queue should have the entry
-        let q = queue.lock().unwrap();
+        // The internal queue should have the entry (deprecated path —
+        // nothing drains it, but the push keeps the type's contract).
+        let q = tool.abandon_queue.lock().unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!(q[0], "toolu_abc");
     }
 
     #[test]
     fn test_tool_name_and_spec() {
-        let tool = ContextAbandonTool::new(test_queue());
+        let tool = ContextAbandonTool::new();
         let spec = tool.spec();
         assert_eq!(spec.name, "context_abandon");
         assert!(spec.description.contains("placeholder"));

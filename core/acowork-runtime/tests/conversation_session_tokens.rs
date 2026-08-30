@@ -500,7 +500,7 @@ async fn compaction_offset_persists_to_meta_after_append() {
     let compact_meta = CompactionEventMeta {
         compacted_from_id: "msg_a".to_string(),
         compacted_to_id: "msg_b".to_string(),
-        keep_last_rounds: 3,
+        level: 1,
         model: "gpt-4".to_string(),
         before_tokens: 1000,
         after_tokens: 500,
@@ -613,7 +613,7 @@ async fn clone_shares_last_compaction_offset_arc() {
     let compact_meta = CompactionEventMeta {
         compacted_from_id: String::new(),
         compacted_to_id: String::new(),
-        keep_last_rounds: 3,
+        level: 1,
         model: "gpt-4".to_string(),
         before_tokens: 0,
         after_tokens: 0,

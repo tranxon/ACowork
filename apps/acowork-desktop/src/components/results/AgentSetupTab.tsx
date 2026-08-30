@@ -10,7 +10,6 @@ import { getGatewayUrl } from "../../lib/config";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
-import { Switch } from "../common/Switch";
 import { Dropdown } from "../common/Dropdown";
 import {
   clearAgentAvatarCache,
@@ -73,7 +72,6 @@ type WiredField =
   | "contextWindow"
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
-  | "toolCompressionEnabled"
   | "idleTimeoutSecs";
 
 const WIRE_FIELD: Record<WiredField, string> = {
@@ -84,14 +82,12 @@ const WIRE_FIELD: Record<WiredField, string> = {
   contextWindow: "context_window",
   shellApprovalThreshold: "shell_approval_threshold",
   approvalTimeoutSecs: "approval_timeout_secs",
-  toolCompressionEnabled: "tool_compression_enabled",
   idleTimeoutSecs: "idle_timeout_secs",
 };
 
 const FIELD_DEBOUNCE_MS = 500;
 
 const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
-  toolCompressionEnabled: FIELD_DEBOUNCE_MS,
   shellApprovalThreshold: FIELD_DEBOUNCE_MS,
   temperature: FIELD_DEBOUNCE_MS,
   contextWindow: FIELD_DEBOUNCE_MS,
@@ -181,7 +177,6 @@ export function AgentSetupTab() {
           context_window?: number | null;
           shell_approval_threshold?: string | null;
           approval_timeout_secs?: number | null;
-          tool_compression_enabled?: boolean | null;
           idle_timeout_secs?: number | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
@@ -194,7 +189,7 @@ export function AgentSetupTab() {
         // input or clicked on the Switch before this GET returned,
         // dropping their intent before the next Apply could persist
         // it (this is the wider pattern behind the original
-        // tool_compression_enabled bug — see `saveField` below).
+        // switch-clobber bug — see `saveField` below).
         const patch: Partial<typeof profile> = {
           // `global_max_output_tokens` lives on the Gateway
           // AgentConfigResponse (not on Runtime AgentConfig), so the
@@ -224,9 +219,6 @@ export function AgentSetupTab() {
         }
         if (typeof cfg.approval_timeout_secs === "number") {
           patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-        }
-        if (typeof cfg.tool_compression_enabled === "boolean") {
-          patch.toolCompressionEnabled = cfg.tool_compression_enabled;
         }
         if (typeof cfg.idle_timeout_secs === "number") {
           patch.idleTimeoutSecs = cfg.idle_timeout_secs;
@@ -262,7 +254,6 @@ export function AgentSetupTab() {
               context_window?: number | null;
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
-              tool_compression_enabled?: boolean | null;
               idle_timeout_secs?: number | null;
             };
             // Same race-safe merge as the mount effect above. The
@@ -299,9 +290,6 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.approval_timeout_secs === "number") {
               patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-            }
-            if (typeof cfg.tool_compression_enabled === "boolean") {
-              patch.toolCompressionEnabled = cfg.tool_compression_enabled;
             }
             if (typeof cfg.idle_timeout_secs === "number") {
               patch.idleTimeoutSecs = cfg.idle_timeout_secs;
@@ -826,21 +814,6 @@ export function AgentSetupTab() {
         </p>
       </div>
 
-      {/* Tool Compression (ADR-052) */}
-      <div className="mb-3 space-y-1">
-        <Switch
-          checked={profile.toolCompressionEnabled ?? true}
-          onChange={(checked) => saveField("toolCompressionEnabled", checked)}
-          size="sm"
-          label={t("agentSetup.toolCompressionEnabled")}
-          className="text-[10px] font-medium text-zinc-500 dark:text-zinc-400"
-        />
-        <p className="text-[9px] text-zinc-400 dark:text-zinc-500">
-          {t("agentSetup.toolCompressionEnabledDesc")}
-        </p>
-      </div>
-
-
       {/* Approval Timeout */}
       <div className="mb-3 space-y-1">
         <label className="block text-[10px] font-medium text-zinc-500 dark:text-zinc-400">
@@ -1018,7 +991,6 @@ export function AgentSetupTab() {
           //   context_window    → 200K
           //   shell_approval_threshold → manifest default
           //   approval_timeout_secs     → 300
-          //   tool_compression_enabled  → true (agent_init.rs)
           try {
             setSavingFields((prev) => {
               const next = new Set(prev);
@@ -1038,7 +1010,6 @@ export function AgentSetupTab() {
                   context_window: null,
                   shell_approval_threshold: null,
                   approval_timeout_secs: null,
-                  tool_compression_enabled: null,
                   idle_timeout_secs: null,
                 }),
               },

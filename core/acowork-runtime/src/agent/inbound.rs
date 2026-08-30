@@ -75,9 +75,7 @@ pub enum UserOp {
     /// broadcast - the LLM sees the new tool_definitions on the next
     /// `build_chat_request`), and (4) mid-execution AgentLoops via the
     /// inbound fast channel (`AgentLoop::apply_runtime_config` ->
-    /// `core.apply_runtime_config` ->
-    /// `sync_platform_tools_to_registry` for the
-    /// `tool_compression_enabled` flip). ADR-052 §3.5.
+    /// `core.apply_runtime_config`). ADR-052 §3.5.
     UpdateRuntimeConfig(RuntimeConfigOverrides),
 }
 

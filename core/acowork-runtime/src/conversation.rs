@@ -93,9 +93,10 @@ pub struct CompactionEventMeta {
     /// Last entry id covered by the summary (inclusive).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub compacted_to_id: String,
-    /// Number of trailing rounds preserved in memory after compaction.
-    /// Used by the restorer to validate the replay window.
-    pub keep_last_rounds: usize,
+    /// ADR-061: compression level (1-8) applied by this compaction event.
+    /// Diagnostic only; the restorer anchors on the event's *position* in
+    /// the log, not on this value.
+    pub level: u8,
     /// Compaction model used (diagnostic only).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
@@ -3485,7 +3486,7 @@ mod tests {
             metadata: Some(serde_json::json!({
                 "compacted_from_id": "first-id",
                 "compacted_to_id": "last-id",
-                "keep_last_rounds": 3,
+                "level": 1,
                 "model": "test-model",
                 "before_tokens": 1000u64,
                 "after_tokens": 200u64,

@@ -40,9 +40,6 @@ export interface AgentProfileSettings {
   globalMaxTokens?: number;
   activeModel?: string;
   activeProvider?: string;
-  /** ADR-052: Whether context_retrieve + context_abandon tools are registered.
-   *  Undefined = use default (true). Boot-only: takes effect on next session restore. */
-  toolCompressionEnabled?: boolean;
   /** Idle (auto-sleep) timeout in seconds before the Runtime self-terminates.
    *  0 = never sleep. Undefined = use manifest default or system default (1800). */
   idleTimeoutSecs?: number;
@@ -59,7 +56,6 @@ const DEFAULT_PROFILE: AgentProfileSettings = {
   systemPrompt: undefined,
   shellApprovalThreshold: undefined,
   approvalTimeoutSecs: undefined,
-  toolCompressionEnabled: undefined,
   idleTimeoutSecs: undefined,
 };
 
@@ -124,10 +120,6 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
     globalMaxTokens: typeof s.globalMaxTokens === "number" ? s.globalMaxTokens : undefined,
     activeModel: typeof s.activeModel === "string" ? s.activeModel : undefined,
     activeProvider: typeof s.activeProvider === "string" ? s.activeProvider : undefined,
-    toolCompressionEnabled:
-      typeof s.toolCompressionEnabled === "boolean"
-        ? s.toolCompressionEnabled
-        : undefined,
     // idleTimeoutSecs: number >= 0 (0 = never sleep). Undefined = use manifest default.
     idleTimeoutSecs:
       typeof s.idleTimeoutSecs === "number" && s.idleTimeoutSecs >= 0

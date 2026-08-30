@@ -24,6 +24,7 @@ import { ToolsTab } from "./ToolsTab";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
+import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
 import { isGatewayLocal, getGatewayUrl } from "../../lib/config";
 
 interface ResultsPanelProps {
@@ -518,6 +519,12 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                   />
                 ))}
               </div>
+
+              {/* ── Compression History card (ADR-061 §15-16) ─────── */}
+              <CompressionHistoryCard
+                agentId={selectedAgentId}
+                sessionId={activeSessionId}
+              />
             </div>
           )}
         </>

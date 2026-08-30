@@ -87,6 +87,43 @@ pub fn parse_compact_output(raw: &str) -> CompactOutput {
     CompactOutput { summary, triples }
 }
 
+/// ADR-061 §8.2/§8.3/§13.3: validated compaction summary output.
+///
+/// `summary` is the `<summary>` block content (or the whole output when
+/// the tag is missing — backwards compatible with pre-block format);
+/// `user_intent` is the `<user_intent>` block content, falling back to
+/// the caller-supplied raw user messages when the LLM omits the block.
+/// Both are sanitized so role labels / tool echoes do not land in the
+/// marker text (see [`sanitize_summary_text`]).
+#[derive(Debug, Clone)]
+pub struct ValidatedSummary {
+    pub summary: String,
+    pub user_intent: String,
+}
+
+/// Parse and validate the compact model's raw output (ADR-061 §8).
+///
+/// - `<summary>` missing → the entire output is treated as the summary.
+/// - `<user_intent>` missing → `fallback_user_intent` (the raw user
+///   messages joined by the caller, compaction markers excluded) is used;
+///   when that is also absent the block degrades to empty rather than
+///   failing the compaction (the marker structure must always parse).
+pub fn parse_and_validate_summary(
+    raw: &str,
+    fallback_user_intent: Option<&str>,
+) -> ValidatedSummary {
+    let summary =
+        sanitize_summary_text(&extract_block(raw, "summary").unwrap_or_else(|| raw.trim().to_string()));
+    let user_intent = extract_block(raw, "user_intent")
+        .map(|s| sanitize_summary_text(&s))
+        .or_else(|| fallback_user_intent.map(str::to_string))
+        .unwrap_or_default();
+    ValidatedSummary {
+        summary,
+        user_intent,
+    }
+}
+
 /// Parse one `<triples>` line into a `Triple`, accepting 3, 4 or 5 fields.
 ///
 /// Returns `None` for empty lines or lines with fewer than 3 fields. The
@@ -1097,6 +1134,43 @@ mod tests {
         assert!((parsed.triples[0].confidence - 1.0).abs() < f32::EPSILON);
         assert_eq!(parsed.triples[0].sub_type, KnowledgeSubType::Fact);
         assert!(parsed.triples[1].confidence.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_and_validate_summary_extracts_both_blocks() {
+        let raw = "<summary>Work done</summary>\n\
+                   <user_intent>Fix the bug</user_intent>\n\
+                   <triples>A | rel | B</triples>";
+        let parsed = parse_and_validate_summary(raw, None);
+        assert_eq!(parsed.summary, "Work done");
+        assert_eq!(parsed.user_intent, "Fix the bug");
+    }
+
+    #[test]
+    fn parse_and_validate_summary_missing_summary_uses_whole_output() {
+        let raw = "plain prose without tags";
+        let parsed = parse_and_validate_summary(raw, None);
+        assert_eq!(parsed.summary, "plain prose without tags");
+        assert!(parsed.user_intent.is_empty());
+    }
+
+    #[test]
+    fn parse_and_validate_summary_missing_user_intent_falls_back() {
+        let raw = "<summary>Work done</summary>";
+        let parsed = parse_and_validate_summary(raw, Some("user said: do X"));
+        assert_eq!(parsed.summary, "Work done");
+        assert_eq!(parsed.user_intent, "user said: do X");
+    }
+
+    #[test]
+    fn parse_and_validate_summary_sanitizes_both_blocks() {
+        let raw = "<summary>prose\n[User]: echo</summary>\n\
+                   <user_intent>intent\n[Tool(bash)]: ls</user_intent>";
+        let parsed = parse_and_validate_summary(raw, None);
+        assert!(!parsed.summary.contains("[User]:"));
+        assert!(!parsed.user_intent.contains("[Tool(bash)]:"));
+        assert!(parsed.summary.contains("prose"));
+        assert!(parsed.user_intent.contains("intent"));
     }
 
     #[test]

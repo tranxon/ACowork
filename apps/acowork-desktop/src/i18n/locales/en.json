@@ -539,9 +539,7 @@
     "tokens": "tokens",
     "builtinTools": "Builtin Tools",
     "builtinToolsDesc": "Select builtin tools to enable for this agent. Disabled tools are hidden from the LLM.",
-    "noBuiltinTools": "No builtin tools available.",
-    "toolCompressionEnabled": "Tool Compression",
-    "toolCompressionEnabledDesc": "When enabled, the LLM can autonomously compress and retrieve tool results"
+    "noBuiltinTools": "No builtin tools available."
   },
   "agentDetailDialog": {
     "ariaLabelClose": "Close",
@@ -775,7 +773,18 @@
     "statePaused": "Paused",
     "stateStepping": "Stepping",
     "stateIdle": "Idle",
-    "stateStopped": "Stopped"
+    "stateStopped": "Stopped",
+    "compressionHistory": "Compression History ({{count}})",
+    "loadingCompressionHistory": "Loading compression history...",
+    "compressionHistoryError": "Failed to load compression history",
+    "noCompressionEvents": "No compression events yet. Context compactions will appear here.",
+    "buttonRefresh": "Refresh",
+    "compTime": "Time",
+    "compLevel": "Level",
+    "compTokens": "Tokens (before → after)",
+    "compRatio": "Ratio",
+    "compModel": "Model",
+    "compRange": "Covered range"
   },
   "fileEditor": {
     "emptyState": "Double-click a file in the workspace tree to open it",
@@ -1059,8 +1068,11 @@
     "title": "Context summary",
     "empty": "(empty summary)",
     "model": "model: {{model}}",
-    "keepLastRounds": "keep last rounds: {{count}}",
+    "level": "compression level: {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "Context overflow: model capability info is missing, so context usage cannot be computed accurately. Check that the model name matches exactly (case-sensitive)."
   },
   "harnessLsp": {
     "tabLsp": "LSP",

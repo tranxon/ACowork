@@ -420,9 +420,7 @@
     "allChangesSaved": "すべての変更が保存されました",
     "resetToDefaults": "デフォルトに戻す",
     "resetAgentSetup": "Agent設定をリセット",
-    "reset": "リセット",
-    "toolCompressionEnabled": "ツール圧縮",
-    "toolCompressionEnabledDesc": "有効にすると、LLMが自律的にツール結果を圧縮・取得できます"
+    "reset": "リセット"
   },
   "harness": {
     "tabProviders": "プロバイダー",
@@ -637,7 +635,18 @@
     "statePaused": "一時停止中",
     "stateStepping": "ステップ中",
     "stateIdle": "アイドル",
-    "stateStopped": "停止済み"
+    "stateStopped": "停止済み",
+    "compressionHistory": "圧縮履歴（{{count}}）",
+    "loadingCompressionHistory": "圧縮履歴を読み込み中...",
+    "compressionHistoryError": "圧縮履歴の読み込みに失敗しました",
+    "noCompressionEvents": "圧縮イベントはまだありません。コンテキスト圧縮が発生するとここに表示されます。",
+    "buttonRefresh": "更新",
+    "compTime": "時刻",
+    "compLevel": "レベル",
+    "compTokens": "トークン数（前 → 後）",
+    "compRatio": "圧縮率",
+    "compModel": "モデル",
+    "compRange": "対象範囲"
   },
   "workspace": {
     "delete": "削除",
@@ -983,8 +992,11 @@
     "title": "コンテキスト要約",
     "empty": "（空の要約）",
     "model": "モデル: {{model}}",
-    "keepLastRounds": "直近 {{count}} ラウンドを保持",
+    "level": "圧縮レベル {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。"
   },
   "codeBlock": {
     "ariaLabelCopy": "コードをコピー"

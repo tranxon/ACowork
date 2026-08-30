@@ -1039,36 +1039,14 @@ impl SessionTask {
                         max_iterations = ?overrides.max_iterations,
                         temperature = ?overrides.temperature,
                         context_window = ?overrides.context_window,
-                        tool_compression_enabled = ?overrides.tool_compression_enabled,
                         "SessionTask: applying runtime config overrides"
                     );
-                    // Capture before the move; `apply_runtime_config`
-                    // does not take ownership of the overrides.
-                    let tool_compression_toggled = overrides.tool_compression_enabled.is_some();
-                    let tool_compression_new = overrides.tool_compression_enabled;
-
+                    // ADR-061 §10.2: the `tool_compression_enabled`
+                    // branch (platform-tools sync + ContextBuilder
+                    // rebuild) is deleted — `context_retrieve` is
+                    // always registered, so no tool_definitions change
+                    // can originate from runtime-config pushes anymore.
                     agent_loop.apply_runtime_config(&overrides);
-
-                    // ADR-052 hot-reload: when `tool_compression_enabled`
-                    // flipped, `AgentCore.apply_runtime_config` already
-                    // mutated `builtin_tools` and rebuilt `all_tools`
-                    // (the dispatch list). Here we additionally rebuild
-                    // `ContextBuilder.tool_definitions` so the LLM sees
-                    // the new set on the next `build_chat_request` —
-                    // mirroring the `apply_builtin_tools_update` path
-                    // below, which rebuilds both sides atomically.
-                    if tool_compression_toggled {
-                        rebuild_context_tool_definitions(
-                            &agent_loop.core.builtin_tools,
-                            &mut context_builder,
-                        );
-                        tracing::info!(
-                            session_id = %session_id,
-                            new_enabled = ?tool_compression_new,
-                            active_specs = agent_loop.core.builtin_tools.len(),
-                            "SessionTask: platform tools synced to ContextBuilder"
-                        );
-                    }
 
                     // Push updated state to frontend immediately so the
                     // ResultsPanel temperature display reflects the new value

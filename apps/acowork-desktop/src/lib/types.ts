@@ -611,8 +611,8 @@ export interface CompactionEventMeta {
   compacted_from_id?: string;
   /** Last entry id covered by the summary (inclusive) */
   compacted_to_id?: string;
-  /** Number of trailing rounds preserved in memory after compaction */
-  keep_last_rounds: number;
+  /** ADR-061: 8-level compression strategy level selected (1-8, 0 = none) */
+  level: number;
   /** Compaction model used (diagnostic only) */
   model?: string;
   /** History token estimate before compaction (diagnostic only) */

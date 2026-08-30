@@ -405,14 +405,6 @@ pub struct AgentLoop {
     /// not touch this flag.
     pub(crate) memory_retrieved_for_session: bool,
 
-    /// ADR-052: Shared queue for `context_abandon` tool requests.
-    ///
-    /// The tool writes `tool_call_id` strings here; the agent loop drains
-    /// them before the next `build_chat_request` via
-    /// `drain_abandon_queue()`.
-    pub(crate) abandon_queue:
-        crate::agent::context_compression::AbandonQueue,
-
     /// ADR-052: Shared queue for `context_retrieve` tool requests.
     ///
     /// The tool writes `(tool_call_id, original_content)` pairs here; the
@@ -478,7 +470,6 @@ impl AgentLoop {
             Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         );
         let mut loop_ = Self {
-            abandon_queue: core.abandon_queue.clone(),
             retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
@@ -551,7 +542,6 @@ impl AgentLoop {
             mpsc::channel::<(ApprovalRequest, oneshot::Sender<ApprovalDecision>)>(16);
         let approval_handle = ApprovalHandle::new(approval_tx);
         let mut session_loop = Self {
-            abandon_queue: core.abandon_queue.clone(),
             retrieve_queue: core.retrieve_queue.clone(),
             core,
             session_core,
@@ -964,7 +954,7 @@ impl AgentLoop {
                             iteration = 0; // Reset counter
 
                             // Trim history before resuming to avoid context window overflow
-                            self.trim_history_to_budget(&current_model);
+                            self.trim_history_to_budget(&current_model).await;
 
                             break; // Resume main loop
                         }
@@ -983,7 +973,7 @@ impl AgentLoop {
                                     );
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model);
+                                    self.trim_history_to_budget(&current_model).await;
                                     break;
                                 }
                                 crate::agent::inbound::UserOp::StopLoop { reason } => {
@@ -1231,7 +1221,7 @@ impl AgentLoop {
                                     // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
-                                    self.trim_history_to_budget(&current_model);
+                                    self.trim_history_to_budget(&current_model).await;
                                     break; // Resume main loop
                                 }
                                 Some(InboundMessage::Stop { reason }) => {
@@ -1467,12 +1457,10 @@ impl AgentLoop {
         // trigger) and manual mode (where manual commands are the only way).
         self.drain_compress_actions();
 
-        // ADR-052: Drain LLM-initiated abandon/retrieve queues.
-        // These replace the old auto-compress trigger. The LLM calls
-        // context_abandon / context_retrieve tools, which push into these
-        // queues. We drain them here so the in-place modifications are
-        // visible to build_chat_request in the same iteration.
-        self.drain_abandon_queue();
+        // ADR-061 §10.2: only the retrieve queue is drained here —
+        // `context_abandon` is no longer registered, so its queue and
+        // drainer are deleted. The in-place modifications are visible to
+        // build_chat_request in the same iteration.
         self.drain_retrieve_queue();
 
         // ── ② Budget + context build ──
@@ -1481,9 +1469,9 @@ impl AgentLoop {
             .on_phase_enter(crate::debug::protocol::DebugPhase::BudgetCheck)
             .await;
         self.check_budget_and_warn()?;
-        self.trim_history_to_budget(current_model);
+        self.trim_history_to_budget(current_model).await;
         let mut chat_request = self.build_chat_request(context_builder, current_model);
-        if self.check_context_overflow_and_trim(current_model) {
+        if self.check_context_overflow_and_trim(current_model).await {
             chat_request = self.build_chat_request(context_builder, current_model);
         }
         self.core
@@ -1627,7 +1615,7 @@ impl AgentLoop {
 
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
         self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
-        self.pre_trim_for_tool_results(&tool_contents, current_model);
+        self.pre_trim_for_tool_results(&tool_contents, current_model).await;
 
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
@@ -1755,41 +1743,9 @@ impl AgentLoop {
         did_work
     }
 
-    /// ADR-052: Drain the abandon queue, replacing tool results with placeholders.
-    ///
-    /// Called at the start of each iteration (after `drain_compress_actions`,
-    /// before `build_chat_request`). Each entry in the queue is a
-    /// `tool_call_id` that the LLM requested to abandon via the
-    /// `context_abandon` tool. The actual replacement is done in-place by
-    /// `HistoryManager::abandon_tool_result()`.
-    ///
-    /// Returns `true` if any replacements were made (caller may want to
-    /// recalibrate tokens - but this method already does it).
-    pub(crate) fn drain_abandon_queue(&mut self) -> bool {
-        let mut ids = self.abandon_queue.lock().unwrap();
-        if ids.is_empty() {
-            return false;
-        }
-        let mut did_work = false;
-        while let Some(tool_call_id) = ids.pop_front() {
-            let compressed = self.session.history.abandon_tool_result(&tool_call_id);
-            if compressed > 0 {
-                tracing::info!(tool_call_id = %tool_call_id, "context_abandon: replaced with placeholder");
-                did_work = true;
-            } else {
-                tracing::debug!(tool_call_id = %tool_call_id, "context_abandon: no matching tool result (already compressed or not found)");
-            }
-        }
-        drop(ids); // release lock before recalibrate
-        if did_work {
-            self.session.history.recalibrate_tokens();
-        }
-        did_work
-    }
-
     /// ADR-052: Drain the retrieve queue, restoring original tool result content.
     ///
-    /// Called at the start of each iteration (after `drain_abandon_queue`,
+    /// Called at the start of each iteration (after `drain_compress_actions`,
     /// before `build_chat_request`). Each entry is a `(tool_call_id,
     /// original_content)` pair that the LLM requested to retrieve via the
     /// `context_retrieve` tool. The restoration is done in-place by
@@ -3629,7 +3585,7 @@ mod tests {
         );
     }
 
-    // ── ADR-052: drain_abandon_queue / drain_retrieve_queue tests ──────
+    // ── ADR-052: drain_retrieve_queue tests ────────────────────────────
 
     /// Helper: build a minimal AgentLoop for drain tests. We use the standard
     /// `AgentLoop::new()` constructor with default config + mock provider, then
@@ -3654,105 +3610,6 @@ mod tests {
             tool_call_id: Some(tool_call_id.to_string()),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_empty_returns_false() {
-        // ADR-052 §3.3.3: empty queue returns false without recalibrate_tokens
-        let mut agent_loop = make_loop_for_drain_tests();
-        let tokens_before = agent_loop.session.history.token_count();
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(!did_work, "empty queue should return false");
-
-        let tokens_after = agent_loop.session.history.token_count();
-        assert_eq!(
-            tokens_before, tokens_after,
-            "empty drain should not call recalibrate_tokens (no token changes)"
-        );
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_replaces_and_recalibrates() {
-        // ADR-052 §3.3.3: non-empty queue drains, calls abandon_tool_result,
-        // and recalibrate_tokens.
-        let mut agent_loop = make_loop_for_drain_tests();
-        let big = "x".repeat(5000);
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain(&big, "toolu_abc"));
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain(&big, "toolu_def"));
-        let tokens_before = agent_loop.session.history.token_count();
-        assert!(tokens_before > 0);
-
-        // Push two abandon requests
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_abc".to_string());
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_def".to_string());
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(did_work, "non-empty queue should return true");
-
-        // Both messages replaced with placeholders
-        let msgs = agent_loop.session.history.messages();
-        assert!(msgs[0].content.starts_with("[Tool result compressed."));
-        assert!(msgs[1].content.starts_with("[Tool result compressed."));
-
-        // recalibrate_tokens was called - token count should drop significantly
-        let tokens_after = agent_loop.session.history.token_count();
-        assert!(
-            tokens_after < tokens_before,
-            "recalibrate_tokens should reflect new content: before={tokens_before}, after={tokens_after}"
-        );
-
-        // Queue is now empty
-        assert!(agent_loop.abandon_queue.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_drain_abandon_queue_missing_id_returns_false_work_done() {
-        // ADR-052 §3.3.3: if all IDs in the queue are unknown, did_work=false
-        // (no recalibrate triggered).
-        let mut agent_loop = make_loop_for_drain_tests();
-        agent_loop
-            .history_mut()
-            .append(make_tool_message_for_drain("some content", "toolu_known"));
-        let tokens_before = agent_loop.session.history.token_count();
-
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_unknown_1".to_string());
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_unknown_2".to_string());
-
-        let did_work = agent_loop.drain_abandon_queue();
-        assert!(
-            !did_work,
-            "all-unknown IDs should leave did_work=false (no recalibrate)"
-        );
-
-        // Content unchanged
-        let msgs = agent_loop.session.history.messages();
-        assert_eq!(msgs[0].content, "some content");
-        let tokens_after = agent_loop.session.history.token_count();
-        assert_eq!(
-            tokens_before, tokens_after,
-            "no recalibrate should have happened"
-        );
     }
 
     #[test]
@@ -3843,21 +3700,19 @@ mod tests {
     }
 
     #[test]
-    fn test_drain_abandon_then_retrieve_round_trip() {
-        // ADR-052 §3.2.3: the abandon↔retrieve symmetry forms a closed loop.
+    fn test_drain_retrieve_queue_round_trip() {
+        // ADR-061 §10.2: the `context_abandon` tool is no longer
+        // registered, so the queue-driven abandon side of this loop is
+        // gone; the history-level `abandon_tool_result` still produces
+        // the placeholder that `context_retrieve` restores.
         let mut agent_loop = make_loop_for_drain_tests();
         let original = "Round-trip test content".repeat(50);
         agent_loop
             .history_mut()
             .append(make_tool_message_for_drain(&original, "toolu_rt"));
 
-        // Cycle 1: abandon
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_rt".to_string());
-        assert!(agent_loop.drain_abandon_queue());
+        // Cycle 1: abandon (history level)
+        assert_eq!(agent_loop.history_mut().abandon_tool_result("toolu_rt"), 1);
         assert!(agent_loop.session.history.messages()[0]
             .content
             .starts_with("[Tool result compressed."));
@@ -3872,12 +3727,7 @@ mod tests {
         assert_eq!(agent_loop.session.history.messages()[0].content, original);
 
         // Cycle 3: re-abandon (close the loop)
-        agent_loop
-            .abandon_queue
-            .lock()
-            .unwrap()
-            .push_back("toolu_rt".to_string());
-        assert!(agent_loop.drain_abandon_queue());
+        assert_eq!(agent_loop.history_mut().abandon_tool_result("toolu_rt"), 1);
         assert!(agent_loop.session.history.messages()[0]
             .content
             .starts_with("[Tool result compressed."));

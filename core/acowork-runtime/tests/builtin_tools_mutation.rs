@@ -41,10 +41,10 @@ fn put_builtin_tools(work_dir: &std::path::Path, patch: &[AgentToolEntry]) -> Ve
 
 /// ADR-052: PUT /builtin-tools must filter platform-protected tools
 /// out of both the returned list AND the on-disk file — they live
-/// exclusively in the in-memory registry, gated by
-/// `tool_compression_enabled` (ADR-052 §3.5). Persisting them would
-/// resurrect the "user-editable Switch the server silently ignores"
-/// UX bug that ADR-052 was created to eliminate.
+/// exclusively in the in-memory registry (ADR-061 §10.2:
+/// `context_retrieve` always registered, `context_abandon` not).
+/// Persisting them would resurrect the "user-editable Switch the server
+/// silently ignores" UX bug that ADR-052 was created to eliminate.
 #[test]
 fn put_builtin_tools_filters_platform_tools_out_of_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -126,12 +126,12 @@ fn put_builtin_tools_filters_platform_tools_out_of_disk() {
 }
 
 /// ADR-052: even when platform tools appear in the `code` registry
-/// (i.e. `tool_compression_enabled=true` at boot) but are absent from
-/// the persisted file (first start, hand-edited, or running with
-/// compression disabled), the cold-start `merge_tools_config` must
-/// STRIP them — they are in-memory only, never persisted. The user's
-/// per-agent tool toggle layer has no concept of "platform tools"
-/// because it cannot reach them.
+/// (i.e. the in-memory registry — ADR-061 §10.2, `context_retrieve`
+/// always registered) but are absent from
+/// the persisted file (first start or hand-edited), the cold-start
+/// `merge_tools_config` must STRIP them — they are in-memory only,
+/// never persisted. The user's per-agent tool toggle layer has no
+/// concept of "platform tools" because it cannot reach them.
 #[test]
 fn merge_tools_config_filters_platform_tools_when_missing_from_persisted() {
     let dir = tempfile::tempdir().unwrap();
@@ -148,9 +148,10 @@ fn merge_tools_config_filters_platform_tools_when_missing_from_persisted() {
     )
     .unwrap();
 
-    // Cold-start path: code registry includes platform tools (this
-    // boot had tool_compression_enabled=true), but the persisted file
-    // does not. Merge must still exclude them from the output.
+    // Cold-start path: code registry includes platform tools (the
+    // in-memory registry always carries `context_retrieve`, ADR-061
+    // §10.2), but the persisted file does not. Merge must still exclude
+    // them from the output.
     let code = vec![
         "context_retrieve".to_string(),
         "context_abandon".to_string(),
