@@ -694,6 +694,7 @@
     "batchCloseOthersConfirm": "其他 {{count}} 個分頁有未儲存的變更。放棄並關閉？",
     "batchCloseAllConfirm": "{{count}} 個分頁有未儲存的變更。放棄並全部關閉？",
     "save": "儲存 (Ctrl+S)",
+    "saveDisabledPreview": "預覽模式下無法儲存，請切換到原始碼後再儲存",
     "locateInTree": "在檔案樹中定位",
     "locateDisabled": {
       "no-file": "目前未開啟任何檔案",
@@ -704,6 +705,7 @@
     },
     "copy": "複製",
     "previewBadge": "預覽",
+    "showSource": "顯示原始碼",
     "previewLoading": "正在載入預覽...",
     "previewDoubleClickHint": "雙擊切換到編輯器",
     "markdownLinkNotFound": "所有工作區都未找到檔案:{{href}}",

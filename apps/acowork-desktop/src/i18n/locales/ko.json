@@ -696,6 +696,7 @@
     "batchCloseOthersConfirm": "다른 {{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 삭제하고 닫으시겠습니까?",
     "batchCloseAllConfirm": "{{count}}개 탭에 저장되지 않은 변경사항이 있습니다. 모두 삭제하고 닫으시겠습니까?",
     "save": "Save (Ctrl+S)",
+    "saveDisabledPreview": "미리보기 모드에서는 저장할 수 없습니다. 소스 모드로 전환한 후 저장하세요",
     "locateInTree": "파일 트리에서 찾기",
     "locateDisabled": {
       "no-file": "열린 파일이 없습니다",
@@ -706,6 +707,7 @@
     },
     "copy": "Copy",
     "previewBadge": "미리보기",
+    "showSource": "소스 보기",
     "previewLoading": "미리보기 로딩 중...",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",
     "markdownLinkNotFound": "모든 워크스페이스에서 파일을 찾을 수 없음: {{href}}",

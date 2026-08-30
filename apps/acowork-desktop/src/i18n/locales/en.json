@@ -790,6 +790,7 @@
     "batchCloseOthersConfirm": "{{count}} other tab(s) have unsaved changes. Discard and close?",
     "batchCloseAllConfirm": "{{count}} tab(s) have unsaved changes. Discard and close all?",
     "save": "Save (Ctrl+S)",
+    "saveDisabledPreview": "Saving is unavailable in preview mode — switch to source to save",
     "locateInTree": "Locate in file tree",
     "locateDisabled": {
       "no-file": "No file is open",
@@ -801,6 +802,7 @@
     "copy": "Copy",
     "previewBadge": "Preview",
     "openPreview": "Preview",
+    "showSource": "Show source",
     "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",
     "previewDoubleClickHint": "Double-click to open in editor",
