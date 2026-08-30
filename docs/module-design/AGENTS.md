@@ -18,7 +18,7 @@ module-design/
 │   ├── 04-grafeo.md          # acowork-grafeo: graph DB + HNSW + BM25
 │   ├── 05-vault-sign.md      # acowork-vault + acowork-sign: secrets, signing
 │   ├── 06-architecture.md    # Dependency graph, data flows, compilation
-│   └── 06-ask-user-question-tool.md  # AskUserQuestion tool design
+│   └── 07-ask-user-question-tool.md  # AskUserQuestion tool design
 └── en/                       # English agent instructions
     └── AGENTS.md             # This file
 ```
