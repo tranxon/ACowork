@@ -25,9 +25,37 @@ use acowork_mqtt_session::{
     SessionState, SessionStateTx,
 };
 
-/// Watchdog timeout for `eventloop.poll()` (4 × keepalive, matches the
-/// Gateway client).
-const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(20);
+/// Watchdog timeout for `eventloop.poll()`. 5 s matches the desktop
+/// client (28b1aec8): the broker keepalive is 5 s, so a healthy poll
+/// returns at least one event per interval; anything silent for 5 s is
+/// a half-dead socket (e.g. after OS sleep/wake) and must be cut
+/// short immediately. The previous 4 × keepalive (20 s) is why the
+/// node took 20 s to recover after every wake.
+const POLL_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Sleep for `dur` unless a force-restart is requested, in which case
+/// return `true` so the caller can break to the soft-restart path.
+///
+/// The force-restart signal must be able to interrupt a backoff
+/// sleep, not only `poll()`: after a system wake the poll task often
+/// returns a fatal IO error (10053) instead of hanging, and an
+/// uninterruptible 60 s fatal backoff leaves the node offline for the
+/// whole minute (desktop-app wake incident, 2026-08 — recovery took
+/// exactly 60 s because `sleep(60s).await` sat outside any `select!`,
+/// so the wake-triggered force-restart could not break it).
+async fn interruptible_backoff(
+    dur: Duration,
+    force_restart: &tokio::sync::Notify,
+    kind: &str,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(dur) => false,
+        _ = force_restart.notified() => {
+            tracing::info!(kind, "Force-restart requested during backoff");
+            true
+        }
+    }
+}
 
 /// Error type for the node MQTT client.
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +124,15 @@ pub type NodeMqttBootstrapCallback = Arc<dyn Fn(AsyncClient) + Send + Sync>;
 #[derive(Clone)]
 pub struct NodeMqttClient {
     shared_client: Arc<Mutex<AsyncClient>>,
+    /// Signal to force a soft-restart of the MQTT event loop.
+    ///
+    /// When [`NodeMqttClient::force_reconnect`] is called, the poll
+    /// task receives this notification, breaks out of its inner
+    /// polling loop, and recreates the `AsyncClient` + `EventLoop`
+    /// from scratch — exactly the same path as the automatic
+    /// watchdog-triggered soft-restart (e.g. after a system
+    /// sleep/wake the stale TCP connection can stall `poll()`).
+    force_restart: Arc<tokio::sync::Notify>,
     _eventloop_guard: Arc<EventLoopGuard>,
 }
 
@@ -173,6 +210,8 @@ impl NodeMqttClient {
         // the reconnect, where the bootstrap's fresh NodeReady publish
         // follows in order — the Gateway converges on the newest state.
         let task_ready_topic = ready_topic;
+        let task_force_restart = Arc::new(tokio::sync::Notify::new());
+        let force_restart = Arc::clone(&task_force_restart);
 
         let poll_task = tokio::spawn(async move {
             loop {
@@ -181,6 +220,23 @@ impl NodeMqttClient {
 
                 loop {
                     tokio::select! {
+                        biased;
+                        // Mirror desktop (apps/acowork-desktop/src-tauri/src/
+                        // mqtt_client.rs:399): favour the force-restart
+                        // signal so a stored notify permit always wins on
+                        // the very next poll() return, instead of waiting
+                        // for an event-storm iteration order to land.
+                        _ = task_force_restart.notified() => {
+                            // External recovery trigger (system sleep/wake):
+                            // the broker already timed the stale connection
+                            // out while the machine slept, so reconnect now
+                            // instead of waiting for the poll watchdog.
+                            tracing::info!(
+                                "Node MQTT force-restart requested (e.g. system wake)"
+                            );
+                            poll_state_tx.set(SessionState::Reconnecting);
+                            break;
+                        }
                         event_result = eventloop.poll() => {
                             match event_result {
                                 Ok(Event::Incoming(Incoming::Publish(publish))) => {
@@ -242,14 +298,28 @@ impl NodeMqttClient {
                                             );
                                             break;
                                         }
-                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                        if interruptible_backoff(
+                                            Duration::from_secs(60),
+                                            &task_force_restart,
+                                            "fatal",
+                                        )
+                                        .await
+                                        {
+                                            break;
+                                        }
                                     } else {
                                         poll_state_tx.set(SessionState::Reconnecting);
                                         consecutive_failures += 1;
                                         if let Some(backoff) =
                                             reconnect_policy.backoff(class, consecutive_failures - 1)
+                                            && interruptible_backoff(
+                                                backoff.duration,
+                                                &task_force_restart,
+                                                "retryable",
+                                            )
+                                            .await
                                         {
-                                            tokio::time::sleep(backoff.duration).await;
+                                            break;
                                         }
                                     }
                                 }
@@ -286,8 +356,21 @@ impl NodeMqttClient {
 
         Ok(Self {
             shared_client,
+            force_restart,
             _eventloop_guard: Arc::new(EventLoopGuard { _task: poll_task }),
         })
+    }
+
+    /// Force a soft-restart of the MQTT event loop.
+    ///
+    /// Signals the background poll task to drop the current `EventLoop`
+    /// and create a fresh `AsyncClient` + `EventLoop` pair — the same
+    /// recovery path as the automatic watchdog soft-restart, but
+    /// triggered externally (system sleep/wake detection, diagnostics).
+    /// A pending notification is stored if nobody is waiting yet, so a
+    /// call right after a connect is not lost.
+    pub fn force_reconnect(&self) {
+        self.force_restart.notify_one();
     }
 
     /// Publish a protobuf `DataEnvelope` payload.
@@ -336,5 +419,44 @@ impl NodeMqttClient {
     /// go through the CURRENT connection.
     pub fn shared_handle(&self) -> Arc<Mutex<AsyncClient>> {
         Arc::clone(&self.shared_client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interruptible_backoff;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn interruptible_backoff_returns_false_after_duration() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let interrupted =
+            interruptible_backoff(Duration::from_millis(20), &notify, "test").await;
+        assert!(!interrupted, "must not report interrupted when no signal arrived");
+    }
+
+    #[tokio::test]
+    async fn interruptible_backoff_returns_true_on_notify() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let notify2 = Arc::clone(&notify);
+        // Wake the helper while it is still inside the sleep future,
+        // i.e. NOT during a poll() iteration. Regression for the
+        // 2026-08 wake incident where bare `sleep(60s).await` sat
+        // outside any `select!` and the notify could not break it.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify2.notify_one();
+        });
+        let interrupted = interruptible_backoff(
+            Duration::from_secs(60),
+            &notify,
+            "test",
+        )
+        .await;
+        assert!(
+            interrupted,
+            "must return true when notified before duration elapsed"
+        );
     }
 }

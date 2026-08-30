@@ -135,6 +135,30 @@ pub enum MqttStatus {
     Disconnected { reason: String },
 }
 
+/// Sleep for `dur` unless a force-restart is requested, in which case
+/// return `true` so the caller can break to the soft-restart path.
+///
+/// The force-restart signal must be able to interrupt a backoff
+/// sleep, not only `poll()`: after a system wake the poll task often
+/// returns a fatal IO error (10053) instead of hanging, and an
+/// uninterruptible 60 s fatal backoff left the MQTT connection down
+/// for the whole minute (2026-08 wake incident: recovery took exactly
+/// 60 s because `sleep(60s).await` sat outside any `select!`, so the
+/// wake-triggered force-restart could not break it).
+async fn interruptible_backoff(
+    dur: Duration,
+    force_restart: &tokio::sync::Notify,
+    kind: &str,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(dur) => false,
+        _ = force_restart.notified() => {
+            tracing::info!(kind, "Force-restart requested during backoff");
+            true
+        }
+    }
+}
+
 /// Build an [`ErrorDescriptor`] from rumqttc 0.25's `ConnectionError`.
 ///
 /// This is the Desktop-side adapter that bridges the rumqttc 0.25
@@ -450,20 +474,29 @@ impl DesktopMqttClient {
                                     break; // break inner loop -> outer loop recreates
                                 }
 
-                                tokio::time::sleep(Duration::from_secs(60)).await;
+                                if interruptible_backoff(
+                                    Duration::from_secs(60),
+                                    &task_force_restart,
+                                    "fatal",
+                                )
+                                .await
+                                {
+                                    break;
+                                }
                             } else {
                                 // E1/E5: retryable. Apply exponential backoff.
                                 poll_state_tx.set(SessionState::Reconnecting);
                                 consecutive_failures += 1;
                                 if let Some(backoff) =
                                     reconnect_policy.backoff(class, consecutive_failures - 1)
+                                    && interruptible_backoff(
+                                        backoff.duration,
+                                        &task_force_restart,
+                                        "retryable",
+                                    )
+                                    .await
                                 {
-                                    tracing::info!(
-                                        attempt = backoff.attempt,
-                                        sleep_ms = backoff.duration.as_millis(),
-                                        "Desktop backing off before reconnect attempt"
-                                    );
-                                    tokio::time::sleep(backoff.duration).await;
+                                    break;
                                 }
                             }
                         }

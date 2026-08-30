@@ -52,6 +52,11 @@ use mqtt::{NodeMqttClient, NodeMqttMessageCallback, SharedNodeMqttCredentials};
 /// Gateway detect "online but stuck" via timestamp).
 const INFO_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How often the power tick samples the sleep/wake clocks. 5 s bounds
+/// the wake-to-reconnect latency while keeping the sampling cost
+/// negligible (two clock reads per tick).
+const POWER_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The node control plane daemon.
 pub struct NodeControlPlane {
     config: NodeConfig,
@@ -1044,10 +1049,13 @@ impl NodeControlPlane {
         plane.run_loop().await
     }
 
-    /// Main loop: info heartbeat + graceful shutdown.
+    /// Main loop: info heartbeat + sleep/wake recovery + graceful
+    /// shutdown.
     async fn run_loop(mut self) -> Result<(), NodeError> {
         let mut heartbeat = tokio::time::interval(INFO_HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut power_tick = tokio::time::interval(POWER_PROBE_INTERVAL);
+        power_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -1065,6 +1073,21 @@ impl NodeControlPlane {
                         .await
                     {
                         tracing::warn!(error = %e, "Info heartbeat publish failed");
+                    }
+                }
+                _ = power_tick.tick() => {
+                    // System sleep freezes the whole process; after wake
+                    // the MQTT connection is stale (the broker timed it
+                    // out while we slept) and the poll task can stall
+                    // until its 20 s watchdog fires (2026-08 incident:
+                    // 5 sleep/wake cycles, each stalling MQTT + relay
+                    // heartbeats for the full sleep duration). Force a
+                    // fresh client + EventLoop immediately instead.
+                    if crate::power::detect_resume() {
+                        tracing::warn!(
+                            "System sleep/wake detected — force-restarting MQTT client"
+                        );
+                        self.client.force_reconnect();
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
