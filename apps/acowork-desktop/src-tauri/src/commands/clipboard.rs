@@ -27,7 +27,22 @@
 //!
 //! Windows and Linux backends are pure FFI without this constraint, so
 //! they keep the original synchronous call path — no main-thread hop,
-//! no `AppHandle` parameter, no behavioural change.
+//! no behavioural change.
+//!
+//! ## Cross-platform parameter note
+//!
+//! `app: tauri::AppHandle` is **always** present in the signature (never
+//! `#[cfg]`-gated). `#[tauri::command]` generates its wrapper from the
+//! raw source AST *before* `cfg` is resolved, so gating the parameter
+//! itself causes the generated wrapper to call `get_clipboard_file_paths(app)`
+//! on every platform, while on Windows / Linux the user function has zero
+//! parameters after `cfg` processing → `E0061: this function takes 0
+//! arguments but 1 argument was supplied`. Tauri auto-injects
+//! `AppHandle` from its runtime when the parameter type is
+//! `tauri::AppHandle`, so the frontend IPC signature is unchanged either
+//! way (the frontend calls `invoke("get_clipboard_file_paths")` with no
+//! args in both cases). The parameter is simply `_app`-ignored on
+//! non-macOS platforms.
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -45,10 +60,14 @@ mod linux;
 /// text inserted.
 #[tauri::command]
 pub async fn get_clipboard_file_paths(
-    // macOS-only: AppHandle is required to dispatch the ObjC read to
-    // the main thread. On Windows / Linux the parameter is absent so
-    // the IPC signature stays identical to the pre-fix version.
-    #[cfg(target_os = "macos")] app: tauri::AppHandle,
+    // AppHandle is always present in the signature so the
+    // `#[tauri::command]` macro generates a stable wrapper on every
+    // platform (see module-level docs for the cfg-on-parameter pitfall).
+    // Tauri auto-injects it from its runtime; the frontend does not
+    // pass it. On non-macOS the parameter is unused — the
+    // `#[allow(unused_variables)]` keeps the build warning-free.
+    #[allow(unused_variables)]
+    app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
     // 1) Acquire the raw platform-specific paths.
     //
