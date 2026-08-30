@@ -419,9 +419,7 @@
     "allChangesSaved": "所有變更已儲存",
     "resetToDefaults": "恢復預設",
     "resetAgentSetup": "重設 Agent 設定",
-    "reset": "重設",
-    "toolCompressionEnabled": "工具壓縮",
-    "toolCompressionEnabledDesc": "啟用後 LLM 可自主壓縮和取回工具結果"
+    "reset": "重設"
   },
   "harness": {
     "tabProviders": "模型服務提供者",
@@ -636,7 +634,18 @@
     "statePaused": "已暫停",
     "stateStepping": "單步中",
     "stateIdle": "閒置",
-    "stateStopped": "已停止"
+    "stateStopped": "已停止",
+    "compressionHistory": "壓縮歷史（{{count}}）",
+    "loadingCompressionHistory": "載入壓縮歷史中...",
+    "compressionHistoryError": "載入壓縮歷史失敗",
+    "noCompressionEvents": "暫無壓縮事件。上下文壓縮發生後會顯示在這裡。",
+    "buttonRefresh": "重新整理",
+    "compTime": "時間",
+    "compLevel": "級別",
+    "compTokens": "Token 數（壓縮前 → 後）",
+    "compRatio": "壓縮比",
+    "compModel": "模型",
+    "compRange": "覆蓋範圍"
   },
   "workspace": {
     "delete": "刪除",
@@ -982,8 +991,11 @@
     "title": "上下文摘要",
     "empty": "（空摘要）",
     "model": "模型: {{model}}",
-    "keepLastRounds": "保留最近 {{count}} 輪",
+    "level": "壓縮級別 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "上下文溢出：模型能力資訊缺失，無法準確計算上下文用量。請檢查模型名稱是否正確（區分大小寫）。"
   },
   "codeBlock": {
     "ariaLabelCopy": "複製程式碼"

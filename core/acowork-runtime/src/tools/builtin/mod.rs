@@ -51,14 +51,17 @@ use acowork_core::tools::traits::Tool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::agent::context_compression::{AbandonQueue, RetrieveQueue};
+use crate::agent::context_compression::RetrieveQueue;
 use crate::mcp_notify::McpNotifyRef;
 use crate::tools::workspace_resolver::SharedResolver;
 use search_backends::WebSearchEngine;
 
-/// Construct the two platform-protected tools gated by
-/// `tool_compression_enabled` (ADR-052): `context_retrieve` +
-/// `context_abandon`.
+/// Construct the `context_retrieve` platform-protected tool.
+///
+/// ADR-061 §10.2: `context_abandon` is no longer registered — LLM
+/// autonomous tool compression is closed, and its in-place replacement
+/// would invalidate the ADR-060 Block B prompt cache. `context_retrieve`
+/// stays as the manual recall channel for compressed tool results.
 ///
 /// Centralizing the construction here means there is exactly one place
 /// to extend when a new platform tool is added (a single
@@ -67,29 +70,21 @@ use search_backends::WebSearchEngine;
 ///
 /// Reused by:
 /// - [`crate::tools::builtin::all_builtin_tools`] at startup (always
-///   gated by the boot-time `tool_compression_enabled` config)
-/// - [`crate::agent::agent_core::AgentCore::sync_platform_tools_to_registry`]
-///   at runtime, when Gateway pushes
-///   `RuntimeConfigUpdate.tool_compression_enabled` and we need to add
-///   or remove these tools from the live `builtin_tools` Vec.
+///   registered — the `tool_compression_enabled` gate is removed)
 ///
-/// The tools' internal queues (`retrieve_queue`, `abandon_queue`) are
-/// `Arc<Mutex<...>>` clones of the per-`AgentCore` shared queues; the
-/// hot-reload path passes the same `Arc` clones so any agent-loop side
-/// that drains the queues keeps seeing the same backing storage
-/// regardless of how many times the registry rebuilds.
+/// The tool's internal queue (`retrieve_queue`) is an `Arc<Mutex<...>>`
+/// clone of the per-`AgentCore` shared queue; the hot-reload path passes
+/// the same `Arc` clone so any agent-loop side that drains the queue
+/// keeps seeing the same backing storage regardless of how many times
+/// the registry rebuilds.
 pub fn build_platform_protected_tools(
     agent_home: &str,
     retrieve_queue: RetrieveQueue,
-    abandon_queue: AbandonQueue,
 ) -> Vec<Arc<dyn Tool>> {
-    vec![
-        Arc::new(context_retrieve::ContextRetrieveTool::new(
-            agent_home,
-            retrieve_queue,
-        )),
-        Arc::new(context_abandon::ContextAbandonTool::new(abandon_queue)),
-    ]
+    vec![Arc::new(context_retrieve::ContextRetrieveTool::new(
+        agent_home,
+        retrieve_queue,
+    ))]
 }
 
 /// Create the standard built-in tools (without RAG).
@@ -112,12 +107,9 @@ pub fn build_platform_protected_tools(
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
 ///   not per-project. No fallback: must always be set explicitly.
-/// * `abandon_queue` - Shared queue for context_abandon tool (ADR-052). When `tool_compression_enabled`
-///   is true, this queue is injected into the tool and the agent loop.
-/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). When `tool_compression_enabled`
-///   is true, this queue is injected into the tool and the agent loop.
-/// * `tool_compression_enabled` - ADR-052: when true (default), register context_retrieve +
-///   context_abandon tools. When false, neither tool is registered.
+/// * `retrieve_queue` - Shared queue for context_retrieve tool (ADR-052). Injected into the tool
+///   and the agent loop. ADR-061 §10.2: `context_retrieve` is **always** registered (manual recall
+///   channel); the `tool_compression_enabled` gate and `context_abandon` are removed.
 ///
 /// `#[allow(clippy::too_many_arguments)]` follows the project convention
 /// for thin pass-through facades (cf. `AgentCore::new_with_observer`): the
@@ -134,9 +126,7 @@ pub fn all_builtin_tools(
     agent_home: String,
     lsp_relay_endpoint: Option<String>,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
-    abandon_queue: AbandonQueue,
     retrieve_queue: RetrieveQueue,
-    tool_compression_enabled: bool,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -185,20 +175,12 @@ pub fn all_builtin_tools(
         )),
     ];
 
-    // ADR-052: context_retrieve + context_abandon are conditionally registered
-    // based on tool_compression_enabled config (default: true).
-    //
-    // The platform tools are constructed by [`build_platform_protected_tools`]
-    // so the same factory is reusable from the hot-reload path
-    // (`AgentCore::sync_platform_tools_to_registry`) when Gateway pushes
-    // a `RuntimeConfigUpdate.tool_compression_enabled` toggle.
-    if tool_compression_enabled {
-        tools.extend(build_platform_protected_tools(
-            &agent_home,
-            retrieve_queue,
-            abandon_queue,
-        ));
-    }
+    // ADR-061 §10.2: `context_retrieve` is ALWAYS registered (manual
+    // recall channel after compression). `context_abandon` is NOT
+    // registered — LLM autonomous tool compression is closed; the
+    // deprecated tool implementation stays in the crate for backward
+    // compatibility but is never exposed to the LLM.
+    tools.extend(build_platform_protected_tools(&agent_home, retrieve_queue));
 
     // Only register web_search when at least one search provider is configured
     // (checked from the shared provider list). Without providers, the tool
@@ -240,7 +222,8 @@ mod tests {
 
     /// Build a minimal set of dependencies for `all_builtin_tools` testing.
     /// Most dependencies are empty/default so the test focuses on the
-    /// compression-enabled switch.
+    /// platform-tool registration (ADR-061 §10.2: retrieve always,
+    /// abandon never).
     ///
     /// `#[allow(clippy::type_complexity)]`: the returned tuple mirrors
     /// `all_builtin_tools`'s assembly dependencies one-to-one; naming a
@@ -257,7 +240,6 @@ mod tests {
         String,                                          // agent_home
         Option<String>,                                  // lsp_relay_endpoint
         crate::http::server::SharedMqttClientSlot,
-        AbandonQueue,
         RetrieveQueue,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -272,8 +254,6 @@ mod tests {
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
         let mqtt_slot: crate::http::server::SharedMqttClientSlot =
             Arc::new(tokio::sync::Mutex::new(None));
-        let abandon_queue: AbandonQueue =
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let retrieve_queue: RetrieveQueue =
             Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
@@ -288,7 +268,6 @@ mod tests {
             "/tmp/test-agent".to_string(),
             None,
             mqtt_slot,
-            abandon_queue,
             retrieve_queue,
         )
     }
@@ -301,9 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn test_all_builtin_tools_compression_enabled_registers_both() {
-        // ADR-052 §3.5 + §6.4: when tool_compression_enabled = true (default),
-        // both context_retrieve and context_abandon are registered.
+    fn test_all_builtin_tools_registers_context_retrieve_only() {
+        // ADR-061 §10.2: context_retrieve is ALWAYS registered (manual
+        // recall channel); context_abandon is NEVER registered (LLM
+        // autonomous compression closed). The tool_compression_enabled
+        // gate is removed.
         let (
             resolver,
             agent_id,
@@ -315,7 +296,6 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            abandon_q,
             retrieve_q,
         ) = make_test_deps();
 
@@ -330,76 +310,26 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            abandon_q,
             retrieve_q,
-            true, // tool_compression_enabled
         );
 
         let names = tool_names(&tools);
         assert!(
             names.contains(&"context_retrieve".to_string()),
-            "context_retrieve should be registered when tool_compression_enabled=true; got: {:?}",
-            names
-        );
-        assert!(
-            names.contains(&"context_abandon".to_string()),
-            "context_abandon should be registered when tool_compression_enabled=true; got: {:?}",
-            names
-        );
-    }
-
-    #[test]
-    fn test_all_builtin_tools_compression_disabled_excludes_both() {
-        // ADR-052 §3.5 + §6.4: when tool_compression_enabled = false,
-        // neither context_retrieve nor context_abandon are registered.
-        let (
-            resolver,
-            agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
-            abandon_q,
-            retrieve_q,
-        ) = make_test_deps();
-
-        let tools = all_builtin_tools(
-            &resolver,
-            &agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
-            abandon_q,
-            retrieve_q,
-            false, // tool_compression_enabled = false
-        );
-
-        let names = tool_names(&tools);
-        assert!(
-            !names.contains(&"context_retrieve".to_string()),
-            "context_retrieve must NOT be registered when tool_compression_enabled=false; got: {:?}",
+            "context_retrieve should always be registered; got: {:?}",
             names
         );
         assert!(
             !names.contains(&"context_abandon".to_string()),
-            "context_abandon must NOT be registered when tool_compression_enabled=false; got: {:?}",
+            "context_abandon must NOT be registered (ADR-061 §10.2); got: {:?}",
             names
         );
     }
 
     #[test]
     fn test_all_builtin_tools_default_includes_core_tools() {
-        // Regression: the conditional registration only affects the two
-        // compression tools; all other core tools are always present.
+        // Regression: platform-tool changes only affect the compression
+        // tools; all other core tools are always present.
         let (
             resolver,
             agent_id,
@@ -411,7 +341,6 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            abandon_q,
             retrieve_q,
         ) = make_test_deps();
 
@@ -426,9 +355,7 @@ mod tests {
             agent_home,
             lsp,
             mqtt,
-            abandon_q,
             retrieve_q,
-            true,
         );
 
         let names = tool_names(&tools);

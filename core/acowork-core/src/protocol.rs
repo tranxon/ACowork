@@ -862,10 +862,6 @@ pub enum GatewayRequest {
         /// ADR-029: Full builtin tools list with enabled flags (JSON-serialized Vec<AgentToolEntry>).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_all_json: Option<String>,
-        /// ADR-052: Whether context_retrieve + context_abandon tools are
-        /// registered. `None` = not set / use default (true).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_compression_enabled: Option<bool>,
     },
     /// Update workspace config snapshot (Runtime → Gateway).
     ///
@@ -1231,12 +1227,6 @@ pub enum GatewayResponse {
         /// None means don't change.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         builtin_tools_enabled: Option<Vec<String>>,
-        /// ADR-052: Whether context_retrieve + context_abandon tools are
-        /// registered. None means "keep current value" (no change).
-        /// Boot-only: changes take effect at the next session restore
-        /// or process restart.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_compression_enabled: Option<bool>,
     },
     /// Query config request (Gateway → Runtime)
     ///

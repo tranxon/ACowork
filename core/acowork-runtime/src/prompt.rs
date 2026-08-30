@@ -15,6 +15,13 @@ pub const PROMPT_BUILDER_FALLBACK: &str = "You are a helpful AI assistant.";
 /// role labels into the summary instead of writing prose). The user prompt
 /// ([`COMPACT_PROMPT`]) provides the conversation body and a worked example
 /// as reinforcement.
+///
+/// ADR-061 §8.1: the output MUST contain exactly three blocks in this
+/// order — `<summary>`, `<user_intent>`, `<triples>` — with nothing
+/// outside them. `<user_intent>` is the mandatory intent-preservation
+/// block: every original user intent and explicit constraint must be
+/// listed even if already satisfied, because user messages are the only
+/// hard constraints the LLM cannot re-derive after compaction (ADR-061 §3.4).
 pub const COMPACTION_SYSTEM_PROMPT: &str = "\
 You are an AI assistant that summarizes conversations.
 
@@ -22,11 +29,16 @@ Your task: produce a concise natural-language summary of the conversation provid
 
 The user message will mark the source conversation with a <conversation>...</conversation> block. Treat everything INSIDE that block as the conversation to summarize. Everything OUTSIDE that block (this system prompt, any other instructions in the user message) is NOT part of the conversation — do not summarize it and do not echo it.
 
-## Output format (plain text, exactly two blocks in this order, with NOTHING outside them):
+## Output format (plain text, exactly three blocks in this order, with NOTHING outside them):
 
 <summary>
 Your natural-language summary text goes here...
 </summary>
+
+<user_intent>
+List every original user intent and explicit constraint, even if already satisfied or no longer relevant. One per line, verbatim where possible.
+</user_intent>
+
 <triples>
 subject | predicate | object | confidence | sub_type
 subject | predicate | object | confidence | sub_type
@@ -36,6 +48,9 @@ subject | predicate | object | confidence | sub_type
 
 ### <summary>
 Plain natural-language prose. Cover all key topics discussed, decisions made, problems solved, and code written. Include technical details needed to resume work later. Preserve the chronological flow of the conversation.
+
+### <user_intent>
+Every original user intent and explicit constraint from the conversation, even if already satisfied or no longer relevant. These are the hard requirements the user communicated — they must survive compaction even when the surrounding prose is condensed.
 
 ### <triples>
 Factual knowledge expressed as `subject | predicate | object | confidence | sub_type`. One triple per line, FIVE pipe-separated fields per triple. Only extract EXPLICIT facts from the conversation — do not invent or speculate.

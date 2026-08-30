@@ -15,7 +15,6 @@
 //! The trait covers **only the persistence of `agent_config.json`** —
 //! the per-agent **runtime** config (temperature, context_window,
 //! max_iterations, shell_approval_threshold, approval_timeout_secs,
-//! tool_compression_enabled,
 //! max_output_tokens, max_sessions). Notably out of scope:
 //!
 //! - `PUT /agents/{id}/builtin-tools` — lives behind
@@ -109,8 +108,6 @@ pub enum ConfigField {
     ShellApprovalThreshold,
     /// `AgentConfig::approval_timeout_secs` — `Option<u64>`.
     ApprovalTimeoutSecs,
-    /// `AgentConfig::tool_compression_enabled` - `Option<bool>`.
-    ToolCompressionEnabled,
     /// `AgentConfig::idle_timeout_secs` — `Option<u64>`.
     /// `0` means "never sleep" (Runtime runs until manually stopped).
     IdleTimeoutSecs,
@@ -129,7 +126,6 @@ impl ConfigField {
             ConfigField::ContextWindow => "context_window",
             ConfigField::ShellApprovalThreshold => "shell_approval_threshold",
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
-            ConfigField::ToolCompressionEnabled => "tool_compression_enabled",
             ConfigField::IdleTimeoutSecs => "idle_timeout_secs",
         }
     }
@@ -194,7 +190,6 @@ impl PutAgentConfigBody {
         context_window: Option<serde_json::Value>,
         shell_approval_threshold: Option<serde_json::Value>,
         approval_timeout_secs: Option<serde_json::Value>,
-        tool_compression_enabled: Option<serde_json::Value>,
         idle_timeout_secs: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
@@ -237,12 +232,6 @@ impl PutAgentConfigBody {
         if let Some(v) = approval_timeout_secs {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::ApprovalTimeoutSecs,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = tool_compression_enabled {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::ToolCompressionEnabled,
                 op: value_to_patch(&v),
             });
         }

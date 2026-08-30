@@ -2243,7 +2243,7 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
       compactionMeta: {
         compacted_from_id: meta.compacted_from_id as string | undefined,
         compacted_to_id: meta.compacted_to_id as string | undefined,
-        keep_last_rounds: (meta.keep_last_rounds as number) ?? 0,
+        level: (meta.level as number) ?? 0,
         model: meta.model as string | undefined,
         before_tokens: (meta.before_tokens as number) ?? 0,
         after_tokens: (meta.after_tokens as number) ?? 0,

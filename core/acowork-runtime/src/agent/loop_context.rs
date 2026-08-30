@@ -36,15 +36,6 @@ pub(crate) const CONTEXT_COMPACT_PERCENT: f64 = 80.0;
 pub(crate) const CONTEXT_HARD_PERCENT: f64 = 90.0;
 pub(crate) const CONTEXT_CRITICAL_PERCENT: f64 = 95.0;
 
-/// Number of conversational rounds kept at the tail after LLM compaction.
-/// A round begins with a User message, so this preserves the last N User
-/// messages and everything after them. Consumed by both
-/// [`HistoryManager::replace_middle_with_summary`] and the
-/// `CompactionEventMeta` record persisted in the JSONL session log (the
-/// session restorer reads the most recent such event to anchor the replay
-/// window on cold-start resume).
-pub(crate) const KEEP_LAST_ROUNDS: usize = 3;
-
 // ── ADR-056: Distillation resolution types ────────────────────────
 
 /// ADR-056: Resolution tier for a chosen distillation target.
@@ -208,32 +199,32 @@ impl AgentLoop {
     /// No additional margin is applied here — [`compact_history_if_needed`]
     /// provides early warning at 80% usage.
     ///
-    /// **ADR-052**: this budget-fallback path is intentionally a
-    /// **token-only** fallback. It performs FIFO trim + emergency trim only;
-    /// it does NOT call any compression/placeholder logic. Placeholder
-    /// compression is now LLM-initiated via the `context_abandon` tool;
-    /// budget fallback must not be conflated with the tool-compression
-    /// path. (Historically this was a fix for the
-    /// recall → compress → recall loop in ADR-032.)
-    pub(crate) fn trim_history_to_budget(&mut self, model_name: &str) {
+    /// ADR-061 §11.2: ensure history fits the model budget by routing
+    /// through the 8-level compression plan exclusively.
+    ///
+    /// FIFO trim and emergency trim are deleted; when history exceeds the
+    /// budget, [`Self::compact_history_if_needed`] is forced so the
+    /// 8-level plan runs (level 8 is guaranteed to fit once the summary
+    /// size is known — §19.5). Failure is explicit: the compaction path
+    /// emits `ChunkEvent::Error` and leaves history untouched (§11.3)
+    /// instead of silently destroying cache continuity.
+    ///
+    /// When history is already within budget this is a no-op — the
+    /// per-iteration call sites (loop_.rs budget check) only pay a
+    /// token-count comparison.
+    pub(crate) async fn trim_history_to_budget(&mut self, model_name: &str) {
         let budget = self.context_trim_budget(model_name);
 
         // Sync HistoryManager::max_tokens to the actual model budget so
-        // trim_fifo uses the correct threshold. Without this, max_tokens
-        // remains at the static config default (128K) even after model
-        // switch, capabilities update, or max_output_tokens change.
+        // downstream token accounting uses the correct threshold. Without
+        // this, max_tokens remains at the static config default (128K)
+        // even after model switch, capabilities update, or
+        // max_output_tokens change.
         self.session.history.set_max_tokens(budget);
 
-        // Stage 1: FIFO trim oldest non-system messages until within budget
-        self.session.history.trim_fifo();
-
-        // Stage 2: If still over budget after FIFO, use emergency trim as safety net
         if self.session.history.token_count() > budget {
-            self.session.history.emergency_trim();
+            self.compact_history_if_needed(model_name, true).await;
         }
-
-        // NOTE: placeholder compression is intentionally NOT performed here.
-        // See method-level doc above.
     }
 
     /// Resolve the model to use for session distillation or compaction.
@@ -554,8 +545,11 @@ impl AgentLoop {
     /// Check context usage after LLM response and trigger compaction if needed.
     ///
     /// Per [ADR-011], this implements the three-stage compaction strategy:
-    /// - 80% usage → LLM-based compaction (`compact_via_llm` + `replace_middle_with_summary`)
-    /// - `CONTEXT_CRITICAL_PERCENT` usage → emergency trim (safety net)
+    /// - 80% usage → LLM-based compaction (`compact_via_llm` + 8-level plan)
+    ///
+    /// ADR-061: the `CONTEXT_CRITICAL_PERCENT` emergency-trim stage is
+    /// deleted (§11); the 8-level plan (level 8 floor) replaces it, and
+    /// LLM failure emits `ChunkEvent::Error` instead of FIFO trimming (§11.3).
     ///
     /// When `force` is true (manual trigger from user), the 80% threshold is
     /// bypassed and compaction proceeds regardless of current usage percentage.
@@ -701,11 +695,59 @@ impl AgentLoop {
                     // agent-total line in Results Panel updates even if
                     // the session's persisted meta is still on disk.
                     self.core.accumulate_llm_usage(&usage);
-                    let stripped = crate::episode_distill::strip_metadata_blocks(&summary);
-                    let removed = self
+                    let validated = crate::episode_distill::parse_and_validate_summary(
+                        &summary,
+                        Some(&self.session.history.user_intent_fallback_text()),
+                    );
+                    // ADR-061: summary first (input = full history), then
+                    // pick the 8-level plan against the now-known summary
+                    // size, then apply (§19.1). History is untouched when no
+                    // plan fits the budget (§19.5).
+                    //
+                    // The marker text carries both the <summary> and the
+                    // <user_intent> block (§8.2: user_intent stays inside
+                    // the marker, not a separate message) so the next
+                    // compaction's LLM sees the preserved user intents.
+                    let marker_text = format!(
+                        "<summary>{}</summary>\n<user_intent>{}</user_intent>",
+                        validated.summary, validated.user_intent
+                    );
+                    let (level, removed) = match self
                         .session
                         .history
-                        .replace_middle_with_summary(&stripped, KEEP_LAST_ROUNDS);
+                        .plan_compression(&marker_text)
+                    {
+                        Ok(plan) => {
+                            let level = plan.level;
+                            match self.session.history.apply_compression(plan, &marker_text) {
+                                Ok(outcome) => {
+                                    tracing::info!(
+                                        level = outcome.level,
+                                        original_tokens = outcome.original_tokens,
+                                        new_tokens = outcome.new_tokens,
+                                        compression_ratio = ?outcome.compression_ratio,
+                                        removed_messages = outcome.removed_messages,
+                                        "ADR-061: 8-level compression plan applied"
+                                    );
+                                    (level, outcome.removed_messages)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "ADR-061: compression apply rejected, history untouched"
+                                    );
+                                    (level, 0)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "ADR-061: no compression plan fits budget, history untouched"
+                            );
+                            (0, 0)
+                        }
+                    };
 
                     // Recompute usage after compaction (used both for the
                     // JSONL event payload and the stage-3 emergency check).
@@ -742,12 +784,12 @@ impl AgentLoop {
                             // *position* in the log, not the id range.
                             compacted_from_id: String::new(),
                             compacted_to_id: String::new(),
-                            keep_last_rounds: KEEP_LAST_ROUNDS,
+                            level,
                             model: compact_model.clone(),
                             before_tokens: current_tokens,
                             after_tokens: new_tokens,
                         };
-                        conversation.append_compaction_event(&stripped, meta);
+                        conversation.append_compaction_event(&marker_text, meta);
                     }
 
                     // Write compaction summary to Grafeo
@@ -783,30 +825,41 @@ impl AgentLoop {
                         "LLM compaction completed"
                     );
 
-                    // Stage 3: 95% → emergency trim (safety net, even after compaction)
+                    // Stage 3: 95% → the 8-level plan already guarantees
+                    // post-compaction size ≤ budget (apply validates
+                    // projected ≤ budget; level 8 is the floor — §19.5).
+                    // Usage ≥ CRITICAL here simply means the conversation
+                    // is still large after a successful level-1..7 fit;
+                    // emergency trim is deleted (ADR-061 §11) and the next
+                    // 80% trigger will re-compact when needed.
                     if new_usage >= CONTEXT_CRITICAL_PERCENT {
-                        let em_removed = self.session.history.emergency_trim();
                         tracing::warn!(
-                            em_removed,
                             after_usage = ?new_usage,
-                            "Emergency trim performed after compaction (still >= CONTEXT_CRITICAL_PERCENT)"
+                            "Post-compaction usage still >= CONTEXT_CRITICAL_PERCENT (within budget; no emergency trim)"
                         );
                     }
                 }
                 None => {
-                    tracing::warn!(
+                    // ADR-061 §11.3: LLM unavailable → explicit failure.
+                    // History is left untouched; the FIFO + emergency trim
+                    // fallback is deleted. The user decides (new session /
+                    // larger-window model / manual compress) instead of
+                    // silently destroying cache continuity.
+                    tracing::error!(
                         error = %last_err.as_ref().map(|e| e.to_string()).unwrap_or_default(),
                         target_count = targets.len(),
-                        "All distillation targets failed, falling back to FIFO + emergency trim"
+                        "ADR-061: LLM compaction failed — history untouched (no FIFO fallback)"
                     );
-                    self.session.history.trim_fifo();
-                    if self.session.history.token_count() > budget {
-                        self.session.history.emergency_trim();
-                    }
-                    // ADR-032 (revised): placeholder compression is intentionally
-                    // NOT performed here either. The fallback path is token-only,
-                    // matching the behavior of `trim_history_to_budget`. See the
-                    // docstring on that method for the full rationale.
+                    let _ = self.session_core.try_send_chunk(ChunkEvent::Error {
+                        user_message: "Context compaction failed. Please start a new conversation or compress manually."
+                            .to_string(),
+                        detail: last_err
+                            .as_ref()
+                            .map(|e| e.to_string())
+                            .unwrap_or_default(),
+                        error_type: "ContextOverflow".to_string(),
+                        message_id: "compaction-failed".to_string(),
+                    });
                 }
             }
 
@@ -874,15 +927,17 @@ impl AgentLoop {
                 let _ = self.session_core.try_send_chunk(ChunkEvent::ContextUsage(ctx_info));
             }
         } else if usage_percent >= CONTEXT_CRITICAL_PERCENT {
-            // Stage 3: emergency trim without attempting compaction
-            // (when usage jumps directly to >= CONTEXT_CRITICAL_PERCENT)
-            let removed = self.session.history.emergency_trim();
-            tracing::warn!(
-                removed,
+            // NOTE: this branch is unreachable today — CONTEXT_COMPACT_PERCENT
+            // (80) < CONTEXT_CRITICAL_PERCENT (95), so any usage ≥ 95% enters
+            // the compaction branch above first. It is kept as documentation
+            // of the deleted Stage-3 emergency-trim safety net (ADR-061 §11):
+            // the 8-level plan replaces it, and explicit failure (ChunkEvent::Error)
+            // replaces silent FIFO trimming.
+            tracing::error!(
                 usage_percent = ?usage_percent,
                 current_tokens,
                 budget,
-                "Emergency trim performed (usage >= CONTEXT_CRITICAL_PERCENT)"
+                "Unexpected critical usage without compaction — unreachable; no emergency trim (ADR-061)"
             );
         }
     }
@@ -1069,11 +1124,16 @@ impl AgentLoop {
         chat_request
     }
 
-    /// ②.6 Context usage circuit-breaking — emergency trim when context
-    /// exceeds hard threshold (90%), warn when approaching limit (70%).
+    /// ②.6 Context usage circuit-breaking — run the 8-level compression
+    /// plan when context exceeds the hard threshold (90%), warn when
+    /// approaching the limit (70%).
+    ///
+    /// ADR-061 §11.2: the hard-threshold path routes through
+    /// [`Self::compact_history_if_needed`] (force) — `emergency_trim` is
+    /// deleted, and failure is explicit (`ChunkEvent::Error`).
     ///
     /// Returns `true` if the chat_request needs to be rebuilt after trimming.
-    pub(crate) fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
+    pub(crate) async fn check_context_overflow_and_trim(&mut self, current_model: &str) -> bool {
         let usable = self.context_trim_budget(current_model);
         let warn_threshold = (usable as f64 * (CONTEXT_WARN_PERCENT / 100.0)) as u64;
         let hard_threshold = (usable as f64 * (CONTEXT_HARD_PERCENT / 100.0)) as u64;
@@ -1084,11 +1144,10 @@ impl AgentLoop {
                 current_tokens,
                 hard_threshold,
                 usable_context = usable,
-                "Context usage exceeds hard limit, emergency trimming"
+                "Context usage exceeds hard limit, running 8-level compaction"
             );
-            let removed = self.session.history.emergency_trim();
-            tracing::info!(removed, "Emergency trimmed messages for oversized context");
-            removed > 0 // signal that request needs rebuild
+            self.compact_history_if_needed(current_model, true).await;
+            true // signal that request needs rebuild
         } else if current_tokens > warn_threshold {
             tracing::warn!(
                 current_tokens,
@@ -1279,7 +1338,10 @@ impl AgentLoop {
     /// appending tool results, which can be very large.
     ///
     /// Triggers when `current_tokens + estimated_result_tokens > 70% of usable context`.
-    pub(crate) fn pre_trim_for_tool_results(
+    ///
+    /// ADR-061 §11.2: the pre-trim routes through the 8-level plan
+    /// (force) instead of `trim_fifo` (deleted).
+    pub(crate) async fn pre_trim_for_tool_results(
         &mut self,
         tool_results: &[String],
         current_model: &str,
@@ -1299,7 +1361,7 @@ impl AgentLoop {
                 usable_budget,
                 "Pre-trimming history before appending tool results"
             );
-            self.trim_history_to_budget(current_model);
+            self.compact_history_if_needed(current_model, true).await;
         }
     }
 

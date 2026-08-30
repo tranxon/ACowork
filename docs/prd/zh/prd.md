@@ -145,8 +145,8 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 | 15 | `todo_write` | core | （无） | 结构化 TODO 列表维护 |
 | 16 | `mcp_install` / `mcp_uninstall` | core | （受 manifest 声明） | MCP Server 动态挂载（ADR-029） |
 | 17 | `rag_query` | conditional | `rag:query + network:<rag_url>` | 企业 RAG 接入，仅当 manifest 声明 `[[tools]] type = "rag"` 时注册（ADR-051 / Phase 4） |
-| 18 | `context_retrieve` | conditional | `context:read` | 平台受保护，按 `tool_compression_enabled` 配置注册（ADR-052） |
-| 19 | `context_abandon` | conditional | `context:write` | 平台受保护，同上 |
+| 18 | `context_retrieve` | core | `context:read` | 平台受保护，**固定注册**（压缩后手动取回通道，ADR-061 §10.2） |
+| 19 | `context_abandon` | conditional | `context:write` | 平台受保护，**不再注册**（deprecated 保留，ADR-061 §10.2） |
 | 20 | `codebase` | conditional | `filesystem:read:<path>` | LSP 索引查询，仅当 LSP Relay 可达时注册 |
 
 **要点**：

@@ -421,9 +421,7 @@
     "resetToDefaults": "기본값으로 초기화",
     "resetAgentSetup": "Agent 설정 초기화",
     "reset": "초기화",
-    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
-    "toolCompressionEnabled": "도구 압축",
-    "toolCompressionEnabledDesc": "활성화하면 LLM이 자율적으로 도구 결과를 압축하고 검색할 수 있습니다"
+    "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}"
   },
   "harness": {
     "tabProviders": "제공자",
@@ -638,7 +636,18 @@
     "statePaused": "일시정지됨",
     "stateStepping": "단계 진행 중",
     "stateIdle": "유휴",
-    "stateStopped": "중지됨"
+    "stateStopped": "중지됨",
+    "compressionHistory": "압축 기록 ({{count}})",
+    "loadingCompressionHistory": "압축 기록을 불러오는 중...",
+    "compressionHistoryError": "압축 기록을 불러오지 못했습니다",
+    "noCompressionEvents": "아직 압축 이벤트가 없습니다. 컨텍스트 압축이 발생하면 여기에 표시됩니다.",
+    "buttonRefresh": "새로고침",
+    "compTime": "시간",
+    "compLevel": "레벨",
+    "compTokens": "토큰 수 (압축 전 → 후)",
+    "compRatio": "압축률",
+    "compModel": "모델",
+    "compRange": "적용 범위"
   },
   "workspace": {
     "delete": "삭제",
@@ -984,8 +993,11 @@
     "title": "컨텍스트 요약",
     "empty": "（빈 요약）",
     "model": "모델: {{model}}",
-    "keepLastRounds": "최근 {{count}} 라운드 유지",
+    "level": "압축 레벨 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "chatError": {
+    "contextOverflow": "컨텍스트 오버플로우: 모델 기능 정보가 없어 컨텍스트 사용량을 정확히 계산할 수 없습니다. 모델 이름이 정확한지(대소문자 구분) 확인하세요."
   },
   "codeBlock": {
     "ariaLabelCopy": "코드 복사"

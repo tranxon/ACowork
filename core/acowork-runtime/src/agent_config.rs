@@ -196,24 +196,6 @@ pub struct AgentConfig {
     /// manifest default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
-
-    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
-    ///
-    /// `None` falls through to `true` (default enabled). When `true`, the
-    /// LLM can autonomously compress and retrieve tool results. When `false`,
-    /// neither tool is registered and the LLM cannot compress.
-    ///
-    /// Hot-reloadable: a `RuntimeConfigUpdate.tool_compression_enabled`
-    /// push from Gateway flows through
-    /// `SessionManager::apply_runtime_config_override` -> the shared
-    /// `AgentCore` template (so future sessions inherit it) and every
-    /// active SessionTask's `ContextBuilder.tool_definitions` (so the LLM
-    /// sees the new set on the next `build_chat_request`). The boot-time
-    /// path remains as a fallback: `session_init.rs` re-reads this file
-    /// once on startup and seeds the SessionManager override cache before
-    /// the first session is created. ADR-052 §3.5.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_compression_enabled: Option<bool>,
 }
 
 /// Resolve the effective avatar from agent config and manifest fallback.
@@ -339,13 +321,11 @@ pub struct AgentToolsConfig {
 /// **Platform-protected tools** (see
 /// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are NEVER
 /// stored in `agent_tools.json`: they live entirely in
-/// [`crate::tools::builtin::all_builtin_tools`] (gated by the
-/// `tool_compression_enabled` flag, ADR-052) and the registry's
-/// `activate()` step. Every persistence path filters them out at the
-/// boundary — see [`merge_tools_config`], [`init_tools_config_from_manifest`],
-/// and [`apply_builtin_tools_patch`]. This keeps the persistence file
-/// and the per-agent activation toggle UX completely orthogonal to the
-/// hot-reloadable compression switch (ADR-052 §3.5).
+/// [`crate::tools::builtin::all_builtin_tools`] (ADR-061 §10.2:
+/// `context_retrieve` is always registered, `context_abandon` is not)
+/// and the registry's `activate()` step. Every persistence path
+/// filters them out at the boundary — see [`merge_tools_config`],
+/// [`init_tools_config_from_manifest`], and [`apply_builtin_tools_patch`].
 ///
 /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -564,8 +544,8 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 /// - Platform-protected tools (see
 ///   [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are
 ///   **always filtered out of the output**. They live in the in-memory
-///   registry only, gated by the hot-reloadable
-///   `tool_compression_enabled` flag (ADR-052 §3.5); persisting them
+///   registry only (ADR-061 §10.2: `context_retrieve` is always
+///   registered, `context_abandon` is not); persisting them
 ///   would create exactly the "user-editable Switch that the server
 ///   silently ignores" UX bug the platform-protected mechanism exists
 ///   to prevent.
@@ -655,11 +635,11 @@ pub fn apply_builtin_tools_patch(
 ///
 /// Platform-protected tools (see
 /// [`crate::tools::registry::PLATFORM_PROTECTED_TOOLS`]) are gated by
-/// the hot-reloadable `tool_compression_enabled` flag (ADR-052 §3.5)
-/// and never appear in `agent_tools.json`. Every persistence path
-/// filters them out at the boundary so they cannot leak into the file
-/// via any write path (PUT /builtin-tools, MQTT RuntimeConfigUpdate,
-/// manifest seed, etc.).
+/// the in-memory registry (ADR-061 §10.2: `context_retrieve` is always
+/// registered, `context_abandon` is not) and never appear in
+/// `agent_tools.json`. Every persistence path filters them out at the
+/// boundary so they cannot leak into the file via any write path (PUT
+/// /builtin-tools, MQTT RuntimeConfigUpdate, manifest seed, etc.).
 fn is_platform_protected(name: &str) -> bool {
     crate::tools::registry::PLATFORM_PROTECTED_TOOLS.contains(&name)
 }
@@ -1546,10 +1526,10 @@ mod tests {
     //
     // Pin the semantics that platform-protected tools
     // (`context_retrieve`, `context_abandon`) are entirely excluded
-    // from `agent_tools.json`. They live only in the in-memory registry,
-    // gated by the hot-reloadable `tool_compression_enabled` flag
-    // (ADR-052 §3.5). Any change that lets them into the file is by
-    // definition a regression of the 3-layer enable-state architecture.
+    // from `agent_tools.json`. They live only in the in-memory registry
+    // (ADR-061 §10.2: `context_retrieve` always registered,
+    // `context_abandon` not). Any change that lets them into the file is
+    // by definition a regression of the 3-layer enable-state architecture.
 
     #[test]
     fn merge_tools_config_filters_platform_tools_out_of_output() {
@@ -1820,12 +1800,10 @@ mod tests {
     }
 
     /// Boot-time regression for the user report: even when the user
-    /// previously had `tool_compression_enabled=true` (so the registry
-    /// DID include the platform tools and they made it into
-    /// `agent_tools.json`), flipping the toggle to `false` and
-    /// restarting must remove them from the persisted file. The
-    /// cold-start `merge_tools_config` filters platform tools
-    /// unconditionally — see
+    /// previously had compression enabled (so the registry DID include
+    /// the platform tools and they made it into `agent_tools.json`),
+    /// the cold-start merge must remove them from the persisted file.
+    /// `merge_tools_config` filters platform tools unconditionally — see
     /// `merge_tools_config_filters_platform_tools_out_of_output` above.
     #[test]
     fn merge_tools_config_strips_platform_tools_regardless_of_compression() {

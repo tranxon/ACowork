@@ -36,6 +36,9 @@ pub enum RuntimeError {
     #[error("Context overflow: {0}")]
     ContextOverflow(String),
 
+    #[error("Unsupported model: {0}")]
+    UnsupportedModel(String),
+
     #[error("Manifest error: {0}")]
     Manifest(#[from] acowork_core::manifest::ManifestError),
 
@@ -134,6 +137,13 @@ impl RuntimeError {
                     "The agent appears to be stuck in a loop. Try continuing, or send a new message to guide it.".to_string(),
                     msg.clone(),
                     "LoopDetected".to_string(),
+                )
+            }
+            RuntimeError::UnsupportedModel(msg) => {
+                (
+                    "Model does not support agent mode (context window too small).".to_string(),
+                    msg.clone(),
+                    "UnsupportedModel".to_string(),
                 )
             }
             _ => {

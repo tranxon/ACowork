@@ -1945,7 +1945,6 @@ async fn put_agent_config(
         req.context_window,
         req.shell_approval_threshold,
         req.approval_timeout_secs,
-        req.tool_compression_enabled,
         req.idle_timeout_secs,
     );
     let svc = state
@@ -1970,7 +1969,7 @@ async fn put_agent_config(
     })?;
 
     // 2. Live-broadcast the live-editable subset (temperature,
-    //    context_window, max_iterations, tool_compression_enabled, …)
+    //    context_window, max_iterations, …)
     //    through `SessionManager::apply_runtime_config_override` via a
     //    SINGLE system-level message. That pipeline applies the change
     //    to (a) the shared AgentCore template so future sessions
@@ -2035,7 +2034,7 @@ async fn put_agent_config(
 /// Desktop `AgentSetupTab.handleApply` builds from `AgentProfileSettings`.
 /// The handler applies a read-modify-write cycle so partial updates
 /// don't clobber unrelated on-disk values (e.g. touching
-/// `temperature` must not erase an existing `tool_compression_enabled`).
+/// `temperature` must not erase an existing `context_window`).
 ///
 /// Semantics notes:
 ///   - Every field here uses the same `"Some(...)" -> overwrite,
@@ -2094,11 +2093,6 @@ struct UpdateAgentConfigRequest {
     shell_approval_threshold: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval_timeout_secs: Option<serde_json::Value>,
-    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
-    /// Field-absent leaves on-disk value alone (see struct-level note).
-    /// Boot-only: takes effect on next session restore.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_compression_enabled: Option<serde_json::Value>,
     /// Idle (auto-sleep) timeout in seconds before the Runtime
     /// self-terminates. `0` = never sleep. `None` outer = leave the
     /// on-disk value alone (partial PUT).
@@ -2140,8 +2134,7 @@ impl UpdateAgentConfigRequest {
 /// The overrides are produced by `UpdateAgentConfigRequest::project`
 /// above, which already projects the wire shape onto the in-process
 /// struct (and forces boot-only fields to `None` so we never
-/// invalidate in-flight conversation history pointers — see
-/// `RuntimeConfigOverrides::tool_compression_enabled` docs).
+/// invalidate in-flight conversation history pointers).
 ///
 /// The push goes through `dispatch_tx` (per-session `(String,
 /// InboundMessage)` channel), reusing the exact same routing that
@@ -2168,8 +2161,9 @@ impl UpdateAgentConfigRequest {
 ///      (so the LLM sees the new set on the next
 ///      `build_chat_request`), and
 ///   4. mid-execution AgentLoops via the inbound fast channel
-///      (`apply_user_op` → `core.apply_runtime_config` →
-///      `sync_platform_tools_to_registry` for the compression case).
+///      (`apply_user_op` → `core.apply_runtime_config`).
+///      (ADR-061 §10.2: the `tool_compression_enabled` hot-reload
+///      path is deleted — `context_retrieve` is always registered.)
 ///
 /// Pre-ADR-052 the HTTP layer sent one message **per session id** into
 /// the AgentLoop fast channel only. That mutated the live session's

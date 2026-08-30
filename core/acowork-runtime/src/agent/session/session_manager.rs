@@ -142,15 +142,6 @@ pub struct RuntimeConfigOverrides {
     pub system_prompt_override: Option<String>,
     pub shell_approval_threshold: Option<String>,
     pub approval_timeout_secs: Option<u64>,
-    /// ADR-052: Whether context_retrieve + context_abandon tools are registered.
-    /// `None` falls through to `true` (default enabled).
-    /// Hot-reloadable: a `RuntimeConfigUpdate.tool_compression_enabled` push
-    /// from Gateway flows through
-    /// `SessionManager::apply_runtime_config_override` -> the shared
-    /// `AgentCore` template (so future sessions inherit it) and every
-    /// active SessionTask's `ContextBuilder.tool_definitions` (so the LLM
-    /// sees the new set on the next `build_chat_request`). ADR-052 §3.5.
-    pub tool_compression_enabled: Option<bool>,
 }
 
 impl RuntimeConfigOverrides {
@@ -163,7 +154,6 @@ impl RuntimeConfigOverrides {
             && self.system_prompt_override.is_none()
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
-            && self.tool_compression_enabled.is_none()
     }
 
     /// Merge in a newer push. `Some` values replace; `None` preserves the
@@ -189,9 +179,6 @@ impl RuntimeConfigOverrides {
         }
         if other.approval_timeout_secs.is_some() {
             self.approval_timeout_secs = other.approval_timeout_secs;
-        }
-        if other.tool_compression_enabled.is_some() {
-            self.tool_compression_enabled = other.tool_compression_enabled;
         }
     }
 
@@ -227,9 +214,6 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.approval_timeout_secs {
             cfg.approval_timeout_secs = Some(v);
         }
-        if let Some(v) = self.tool_compression_enabled {
-            cfg.tool_compression_enabled = Some(v);
-        }
     }
 }
 
@@ -248,7 +232,6 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             system_prompt_override: cfg.system_prompt_override.clone(),
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
-            tool_compression_enabled: cfg.tool_compression_enabled,
         }
     }
 }
@@ -1412,10 +1395,7 @@ impl SessionManager {
     ///   0. Rewrite the shared `AgentCore` **template** via
     ///      [`crate::agent::agent_core::AgentCore::apply_runtime_config`]
     ///      (clone-on-write; the boot path's cold-start merge stays the
-    ///      only way a new session can clone a stale template). For
-    ///      `tool_compression_enabled` specifically this also
-    ///      sync-gates the platform tools into / out of `builtin_tools`
-    ///      and rebuilds the dispatch list on the template.
+    ///      only way a new session can clone a stale template).
     ///   1. Merge the override into the `runtime_overrides` cache so any
     ///      session created *after* this call also picks it up (fixing the
     ///      bug where a fresh session would clone the untouched
@@ -1442,11 +1422,8 @@ impl SessionManager {
         // each of which carries its own `core_mut` snapshot anyway. The
         // cost is bounded - `RuntimeConfigUpdate` is a rare event (user
         // toggles a setting in the Settings panel).
-        //
-        // For `tool_compression_enabled` this also sync-gates the
-        // platform tools (`sync_platform_tools_to_registry`) and rebuilds
-        // `all_tools` on the template, so the LLM-visible spec list of
-        // every session opened later reflects the toggle.
+        // (ADR-061 §10.2: the platform-tool hot-reload path is deleted;
+        // `context_retrieve` is always registered.)
         Arc::make_mut(&mut self.core).apply_runtime_config(overrides);
 
         // ── Step 1: broadcast to SessionTask inboxes (for tool definitions etc.) ──
@@ -1969,6 +1946,19 @@ After installation, ask the user to re-enable the MCP server.",
             //   3. supports_reasoning -> Auto
             //   4. None (model doesn't support reasoning)
             let caps = self.core.get_model_capabilities(&model);
+            // ADR-061 §13.4: reject model switches to models whose effective
+            // input budget cannot run the 8-level compression loop.
+            if let Some(caps) = caps.as_ref()
+                && let Err(e) = crate::agent::compression_constants::validate_model_budget(caps)
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    model = %model,
+                    error = %e,
+                    "model_switch rejected: context budget below MIN_BUDGET_FOR_AGENT"
+                );
+                return Err(e);
+            }
             let default_effort =
                 crate::agent::session_config::llm_effects::resolve_effective_reasoning_effort(
                     caps.as_ref(),
@@ -3251,257 +3241,6 @@ mod tests {
         assert!(SessionManager::require_session_id(&params).is_err());
     }
 
-    // ── ADR-052 hot-reload regression: new-session sees toggled tools ──
-    //
-    // Bug history: prior to this fix,
-    // `SessionManagerConfig.tool_definitions` was a frozen snapshot
-    // populated at boot. When the Gateway pushed
-    // `tool_compression_enabled=false`, the active sessions updated
-    // (live `UpdateRuntimeConfig` broadcast → SessionTask handler →
-    // `AgentCore.apply_runtime_config` →
-    // `sync_platform_tools_to_registry`), but the snapshot used to
-    // seed NEW sessions stayed stale. Sessions created after the
-    // toggle would advertise `context_retrieve` / `context_abandon`
-    // to the LLM even though the dispatch list could no longer run
-    // them.
-    //
-    // Fix architecture:
-    // 1. `SessionManagerConfig.tool_definitions` field removed
-    //    entirely. There is no longer any pre-baked spec list that
-    //    can drift from `core.builtin_tools`.
-    // 2. `SessionTask::new` no longer takes a `tool_definitions`
-    //    argument. It deep-clones `core.builtin_tools` and applies
-    //    `runtime_overrides` (which `SessionManager` accumulates from
-    //    every Gateway push). The freshly-built per-session core
-    //    therefore reflects the latest `tool_compression_enabled`
-    //    value before the session's first LLM call.
-    // 3. `SessionManager.apply_runtime_config_override` ALSO
-    //    synchronously calls `Arc::make_mut(&mut self.core)
-    //    .apply_runtime_config(overrides)` so the template itself
-    //    stays current — useful for any code paths that read
-    //    `self.core.all_tools` directly without going through
-    //    `SessionTask::new`.
-    // 4. `SessionTask::run` rebuilds the initial
-    //    `ContextBuilder.tool_definitions` from the freshly-built
-    //    `core.builtin_tools` via the existing
-    //    `rebuild_context_tool_definitions` helper (single source of
-    //    derivation logic, same as hot-reload path).
-    //
-    // This test pins the fix end-to-end at the LLM-visible layer: it
-    // mirrors the boot → toggle → new-session lifecycle and asserts
-    // that a session created AFTER the toggle does not see platform
-    // tools in its `ContextBuilder`. Pre-fix this would fail.
-    #[tokio::test]
-    async fn test_new_session_after_compression_toggle_omits_platform_tools() {
-        use crate::agent::agent_core::BuiltinToolEntry;
-        use crate::agent::session::session_task::SessionTask;
-
-        let config = crate::config::RuntimeConfig::default();
-        let manifest = acowork_core::AgentManifest::from_toml(
-            r#"
-            agent_id = "com.test.snap"
-            version = "1.0.0"
-            name = "Test Snap"
-            description = "Snapshot regression test"
-            author = "test"
-            runtime_version = "0.1.0"
-
-            [llm]
-            provider = "mock"
-            model = "test-model"
-            "#,
-        )
-        .unwrap();
-        let provider = Arc::new(
-            acowork_core::providers::mock::MockProvider::single_text("test"),
-        );
-
-        // Build a placeholder AgentCore to obtain queues, then
-        // discard it and build the real one with platform tools
-        // already attached. This mirrors boot-time
-        // `tool_compression_enabled=true`.
-        let probe = Arc::new(AgentCore::new(
-            config.clone(),
-            manifest.clone(),
-            provider.clone(),
-            Vec::<BuiltinToolEntry>::new(),
-        ));
-        let platform_tools = crate::tools::builtin::build_platform_protected_tools(
-            "/tmp",
-            probe.retrieve_queue.clone(),
-            probe.abandon_queue.clone(),
-        );
-        let mut initial_builtins: Vec<BuiltinToolEntry> = Vec::new();
-        for tool in platform_tools {
-            initial_builtins.push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        let core = Arc::new(AgentCore::new(
-            config,
-            manifest,
-            provider,
-            initial_builtins,
-        ));
-
-        // Sanity: at boot with `tool_compression_enabled=true`, the
-        // template's `builtin_tools` list contains the platform
-        // tools.
-        let boot_names: Vec<String> = core
-            .builtin_tools
-            .iter()
-            .map(|e| e.tool.name())
-            .collect();
-        assert!(
-            boot_names.iter().any(|n| n == "context_retrieve"),
-            "boot template must include context_retrieve when compression enabled; got: {:?}",
-            boot_names
-        );
-
-        let mut manager = SessionManager::new(core.clone(), SessionManagerConfig::default());
-
-        // ── Gateway pushes `tool_compression_enabled=false` ────────
-        manager.apply_runtime_config_override(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-
-        // ── User opens a fresh session AFTER the toggle ───────────
-        // Build the per-session AgentCore the same way `SessionTask::new`
-        // does (deep-clone the live template — `manager.core`, which has
-        // already been hot-reloaded — + apply accumulated runtime
-        // overrides + rebuild ContextBuilder tool definitions from
-        // the per-session builtin_tools list).
-        let mut session_core = (*manager.core).clone();
-        let overrides = manager.runtime_overrides.clone();
-        session_core.apply_runtime_config(&overrides);
-
-        // Apply dynamic / MCP injections the same way SessionTask::new does.
-        session_core.mcp_tools = manager.mcp_tools.clone();
-        for entry in &manager.dynamic_builtin_tools {
-            let name = entry.name();
-            if let Some(existing) = session_core
-                .builtin_tools
-                .iter()
-                .position(|e| e.name() == name)
-            {
-                session_core.builtin_tools[existing] = entry.clone();
-            } else {
-                session_core.builtin_tools.push(entry.clone());
-            }
-        }
-        session_core.rebuild_all_tools();
-
-        // Verify the post-toggle template no longer carries the
-        // platform tools. This is what gets propagated into the
-        // per-session clone via deep-clone of `builtin_tools`.
-        //
-        // NB: we assert against `manager.core` (the live template),
-        // not the `core` local. The local is a separate `Arc`
-        // reference; under `Arc::make_mut` clone-on-write semantics,
-        // the template may have been deep-cloned into a fresh
-        // `AgentCore` once `apply_runtime_config_override` mutated
-        // it. The original `core` Arc still points at the pre-toggle
-        // snapshot. The `manager.core` reference is what subsequent
-        // `SessionTask::new` calls would actually clone from.
-        let template_names_after: Vec<String> = manager
-            .core
-            .builtin_tools
-            .iter()
-            .map(|e| e.tool.name())
-            .collect();
-        assert!(
-            !template_names_after.iter().any(|n| n == "context_retrieve"),
-            "template builtin_tools must drop context_retrieve after toggle; got: {:?}",
-            template_names_after
-        );
-        assert!(
-            !template_names_after.iter().any(|n| n == "context_abandon"),
-            "template builtin_tools must drop context_abandon after toggle; got: {:?}",
-            template_names_after
-        );
-
-        // Verify the per-session core (what `SessionTask::new` would
-        // construct) also drops them.
-        let session_names: Vec<String> = session_core
-            .builtin_tools
-            .iter()
-            .map(|e| e.tool.name())
-            .collect();
-        assert!(
-            !session_names.iter().any(|n| n == "context_retrieve"),
-            "new-session builtin_tools must drop context_retrieve after toggle; got: {:?}",
-            session_names
-        );
-        assert!(
-            !session_names.iter().any(|n| n == "context_abandon"),
-            "new-session builtin_tools must drop context_abandon after toggle; got: {:?}",
-            session_names
-        );
-
-        // Verify the LLM-visible spec list (what `ContextBuilder` sees
-        // after `rebuild_context_tool_definitions`) does not contain
-        // them either. This is the actual symptom the user reported.
-        let mut context_builder = crate::agent::context::ContextBuilder::new(String::new());
-        // We can't directly invoke the private
-        // `rebuild_context_tool_definitions` from here without
-        // exposing it, so replicate the derivation inline. It MUST
-        // stay identical to `rebuild_context_tool_definitions` in
-        // session_task.rs — see that function's docstring.
-        let llm_visible: Vec<serde_json::Value> = session_core
-            .builtin_tools
-            .iter()
-            .filter(|e| e.enabled)
-            .map(|e| serde_json::to_value(e.tool.spec()).unwrap_or_default())
-            .collect();
-        context_builder.set_tool_definitions(llm_visible);
-
-        let visible_names: Vec<String> = context_builder
-            .tool_definitions()
-            .map(|t| {
-                t.iter()
-                    .filter_map(|v| {
-                        v.get("name").and_then(|n| n.as_str()).map(String::from)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            !visible_names.iter().any(|n| n == "context_retrieve"),
-            "ContextBuilder.tool_definitions for a NEW session must omit context_retrieve after toggle off; got: {:?}",
-            visible_names
-        );
-        assert!(
-            !visible_names.iter().any(|n| n == "context_abandon"),
-            "ContextBuilder.tool_definitions for a NEW session must omit context_abandon after toggle off; got: {:?}",
-            visible_names
-        );
-
-        // Make sure SessionTask::new signature no longer requires a
-        // tool_definitions argument (compile-time check). The
-        // `_task_builder` closure below only references the type —
-        // we don't actually run it. The fn-pointer type is intentionally
-        // spelled out as a signature contract; allow the complexity lint.
-        #[allow(clippy::type_complexity)]
-        let _check_signature: fn(
-            Arc<AgentCore>,
-            crate::agent::session_state::SessionState,
-            tokio::sync::mpsc::Receiver<crate::agent::session::session_task::SessionMessage>,
-            String,
-            Option<tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>>,
-            String,
-            Option<String>,
-            acowork_core::protocol::ProtocolType,
-            Option<Vec<Arc<dyn acowork_core::tools::traits::Tool>>>,
-            Vec<BuiltinToolEntry>,
-            Option<crate::debug::DebugHandles>,
-            Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,
-            RuntimeConfigOverrides,
-            Arc<std::sync::RwLock<Option<String>>>,
-            Arc<std::sync::atomic::AtomicUsize>,
-            crate::conversation::StreamingStateMap,
-        ) -> (SessionTask, tokio::sync::mpsc::Sender<crate::agent::inbound::InboundMessage>) =
-            SessionTask::new;
-    }
-
     // ── ADR-052 §3.5 hot-reload regression: template drift ────────────
     //
     // Bug history (pre-fix): `apply_builtin_tools_enabled` only
@@ -3552,7 +3291,6 @@ mod tests {
         let platform_tools = crate::tools::builtin::build_platform_protected_tools(
             "/tmp",
             probe.retrieve_queue.clone(),
-            probe.abandon_queue.clone(),
         );
         let mut initial_builtins: Vec<BuiltinToolEntry> = Vec::new();
         for tool in platform_tools {
@@ -3643,13 +3381,17 @@ mod tests {
         // Platform tools must STILL be enabled in the template (the
         // hostile disable request was filtered out by the shared
         // policy). This is the bug-2 regression net at the
-        // SessionManager level.
+        // SessionManager level. Only names actually registered are
+        // checked: `context_abandon` is no longer registered at all
+        // (ADR-061 §10.2), so it is absent rather than disabled.
         for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let entry = future_session_core
+            let Some(entry) = future_session_core
                 .builtin_tools
                 .iter()
                 .find(|e| e.name() == *name)
-                .unwrap_or_else(|| panic!("{name} must still be in the future-session template"));
+            else {
+                continue;
+            };
             assert!(
                 entry.enabled,
                 "{name} must stay enabled in future-session template after PUT (Bug 2 regression net)"

@@ -596,7 +596,7 @@ mod tests {
             CompactionEventMeta {
                 compacted_from_id: String::new(),
                 compacted_to_id: String::new(),
-                keep_last_rounds: 3,
+                level: 1,
                 model: "test-model".into(),
                 before_tokens: 1000,
                 after_tokens: 100,

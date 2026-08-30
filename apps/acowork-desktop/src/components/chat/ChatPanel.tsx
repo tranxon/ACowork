@@ -1897,7 +1897,11 @@ export function ChatPanel() {
                   <AlertTriangle className="h-4 w-4 shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="whitespace-pre-wrap break-words" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
-                      {serverError.content}
+                      {/* ADR-061 §19.4: ContextOverflow carries a localized
+                          hint instead of the raw backend capability message */}
+                      {serverError.errorType === "ContextOverflow"
+                        ? t("chatError.contextOverflow")
+                        : serverError.content}
                     </div>
                     {serverError.errorDetail && (
                       <details className="mt-1">

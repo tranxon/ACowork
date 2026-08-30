@@ -217,21 +217,9 @@ pub struct AgentCore {
     /// agent process. See [`Self::agent_total_input_tokens`] for semantics.
     pub(crate) agent_total_output_tokens: AtomicU64,
 
-    /// ADR-052: Whether context_retrieve and context_abandon tools are registered.
-    /// `None` falls through to `true` (default enabled).
-    /// Hot-reload: when this changes, [`Self::sync_platform_tools_to_registry`]
-    /// mutates `builtin_tools` and triggers the dispatch-list + LLM
-    /// tool_definitions rebuild via `apply_runtime_config` and the
-    /// `SessionTask` handler.
-    pub(crate) tool_compression_enabled_override: Option<bool>,
-
-    /// ADR-052: Shared queue for context_abandon tool. Created in agent_init,
-    /// passed to the tool and stored here for the AgentLoop to drain.
-    pub(crate) abandon_queue:
-        crate::agent::context_compression::AbandonQueue,
-
-    /// ADR-052: Shared queue for context_retrieve tool. Created in agent_init,
-    /// passed to the tool and stored here for the AgentLoop to drain.
+    /// ADR-061 §10.2: Shared queue for the `context_retrieve` tool (the
+    /// manual recall channel after compaction). Created in agent_init
+    /// and passed to the tool at registration time.
     pub(crate) retrieve_queue:
         crate::agent::context_compression::RetrieveQueue,
 }
@@ -316,10 +304,6 @@ impl AgentCore {
             // rebuilds the baseline via `merge_token_totals`.
             agent_total_input_tokens: AtomicU64::new(0),
             agent_total_output_tokens: AtomicU64::new(0),
-            tool_compression_enabled_override: None,
-            abandon_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
             retrieve_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -346,9 +330,8 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    /// - `RuntimeConfigUpdate.tool_compression_enabled` toggle (after
-    ///   [`Self::sync_platform_tools_to_registry`] mutates
-    ///   `builtin_tools`)
+    ///   (ADR-061 §10.2: `context_retrieve` is always registered, so
+    ///   there is no platform-tool hot-reload path anymore)
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
@@ -360,90 +343,6 @@ impl AgentCore {
             merged.extend(mcp.clone());
         }
         self.all_tools = merged;
-    }
-
-    /// Add or remove the platform-protected tools (`context_retrieve`,
-    /// `context_abandon`, ADR-052) from `builtin_tools` according to
-    /// the new `tool_compression_enabled` value, then refresh the
-    /// dispatch list via [`Self::rebuild_all_tools`].
-    ///
-    /// Idempotent: calling twice with the same `enabled` value is a
-    /// no-op (second call finds no names to add/remove).
-    ///
-    /// Important — does NOT touch `ContextBuilder.tool_definitions`
-    /// directly. The LLM-visible tool list lives on `ContextBuilder`,
-    /// not on `AgentCore`. The caller (e.g. the `UpdateRuntimeConfig`
-    /// handler in `session_task.rs`) must additionally invoke
-    /// `rebuild_context_tool_definitions` so the LLM sees the new set
-    /// on the next `build_chat_request`. Keeping the two rebuilds
-    /// separate at this layer preserves the existing
-    /// `apply_builtin_tools_update` invariant ("one refresh site, not
-    /// two concurrent callers").
-    ///
-    /// Triggered by [`Self::apply_runtime_config`] when Gateway pushes
-    /// `RuntimeConfigUpdate.tool_compression_enabled`.
-    pub(crate) fn sync_platform_tools_to_registry(
-        &mut self,
-        enabled: bool,
-    ) -> bool {
-        use crate::tools::builtin::build_platform_protected_tools;
-        use crate::tools::registry::PLATFORM_PROTECTED_TOOLS;
-
-        let before: Vec<String> = self
-            .builtin_tools
-            .iter()
-            .filter(|e| PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str()))
-            .map(|e| e.tool.name())
-            .collect();
-
-        if enabled {
-            // Add the platform tools if any are missing.
-            let existing: std::collections::HashSet<String> = before
-                .iter()
-                .cloned()
-                .collect();
-            let to_add: Vec<Arc<dyn Tool>> = build_platform_protected_tools(
-                &self.config.work_dir,
-                self.retrieve_queue.clone(),
-                self.abandon_queue.clone(),
-            )
-            .into_iter()
-            .filter(|t| !existing.contains(&t.name()))
-            .collect();
-            if to_add.is_empty() {
-                return false;
-            }
-            tracing::info!(
-                adding = ?to_add.iter().map(|t| t.name()).collect::<Vec<_>>(),
-                "sync_platform_tools_to_registry: adding platform tools"
-            );
-            for tool in to_add {
-                // Force-enable: same invariant as the startup path
-                // (PLATFORM_PROTECTED_TOOLS are platform-managed, not
-                // user-toggleable). See
-                // BuiltinToolEntry::with_resolved_enabled for rationale.
-                let entry = BuiltinToolEntry::with_resolved_enabled(false, tool);
-                self.builtin_tools.push(entry);
-            }
-        } else {
-            // Remove every platform tool currently in the registry.
-            let before_len = self.builtin_tools.len();
-            self.builtin_tools
-                .retain(|e| !PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str()));
-            let removed = before_len - self.builtin_tools.len();
-            if removed == 0 {
-                return false;
-            }
-            tracing::info!(
-                removed,
-                "sync_platform_tools_to_registry: removing platform tools"
-            );
-        }
-
-        // Refresh the dispatch list so newly-enabled tools become
-        // callable and newly-removed tools stop being dispatched.
-        self.rebuild_all_tools();
-        true
     }
 
     /// Rewrite `builtin_tools` enabled flags from a desired
@@ -458,7 +357,8 @@ impl AgentCore {
     /// never diverge):
     /// - Platform-protected names ([`PLATFORM_PROTECTED_TOOLS`]) are
     ///   filtered out of the resolution - their enabled flag is
-    ///   platform-managed by [`Self::sync_platform_tools_to_registry`],
+    ///   platform-managed (registered unconditionally by
+    ///   [`crate::tools::builtin::all_builtin_tools`], ADR-061 §10.2),
     ///   never user-toggleable. Their registered slots keep the current
     ///   flag.
     /// - Names not currently registered are dropped (defensive against
@@ -738,29 +638,9 @@ impl AgentCore {
             self.approval_timeout_secs = Some(timeout);
         }
 
-        if let Some(enabled) = overrides.tool_compression_enabled {
-            let old = self.tool_compression_enabled_override;
-            tracing::info!(
-                old = ?old,
-                new = enabled,
-                "runtime config: tool_compression_enabled updated"
-            );
-            self.tool_compression_enabled_override = Some(enabled);
-
-            // Hot-reload: when the toggle actually flips, sync the
-            // platform tools into / out of `builtin_tools` and refresh
-            // the dispatch list. The LLM-visible tool_definitions are
-            // rebuilt by the caller (SessionTask handler) so that the
-            // AgentLoop and ContextBuilder stay locked-step — see the
-            // `apply_builtin_tools_update` comment for the same
-            // invariant. ADR-052 §3.5 was updated from "boot-only" to
-            // "hot-reload via RuntimeConfigUpdate" alongside this change.
-            if old != Some(enabled) {
-                self.sync_platform_tools_to_registry(enabled);
-                // Note: ContextBuilder.tool_definitions rebuild lives in
-                // the SessionTask handler — it owns the &mut to context_builder.
-            }
-        }
+        // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
+        // platform-tools hot-reload are deleted; `context_retrieve` is
+        // always registered and `context_abandon` is never registered.
     }
 
     pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
@@ -1173,8 +1053,6 @@ impl Clone for AgentCore {
             agent_total_output_tokens: AtomicU64::new(
                 self.agent_total_output_tokens.load(Ordering::Acquire),
             ),
-            tool_compression_enabled_override: self.tool_compression_enabled_override,
-            abandon_queue: self.abandon_queue.clone(),
             retrieve_queue: self.retrieve_queue.clone(),
         }
     }
@@ -1534,183 +1412,6 @@ mod tests {
         assert_eq!(budget, 100_000);
     }
 
-
-    // ── apply_runtime_config (ADR-052 tool_compression_enabled) ──────
-
-    #[test]
-    fn apply_runtime_config_persists_tool_compression_enabled() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        assert_eq!(core.tool_compression_enabled_override, None);
-
-        let overrides = RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        };
-        core.apply_runtime_config(&overrides);
-
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-    }
-
-    #[test]
-    fn apply_runtime_config_preserves_tool_compression_enabled_across_none_push() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-
-        // Partial push: only changes an unrelated field.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            max_iterations: Some(50),
-            ..Default::default()
-        });
-
-        // tool_compression_enabled is untouched.
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-    }
-
-
-    // ── sync_platform_tools_to_registry hot-reload (ADR-052 §3.5) ────
-    //
-    // The tests below pin the new contract: when `apply_runtime_config`
-    // observes a *change* in `tool_compression_enabled`, it must
-    // actually mutate `builtin_tools` and rebuild `all_tools`. The
-    // 2026-08-17 user-reported regression was that the override field
-    // was written but the registry stayed stale — these tests fail
-    // loudly if anyone reintroduces the orphan-write.
-
-    fn has_platform_tool(core: &AgentCore, name: &str) -> bool {
-        core.all_tools.iter().any(|t| t.name() == name)
-    }
-
-    fn builtin_has_platform_tool(core: &AgentCore, name: &str) -> bool {
-        core.builtin_tools.iter().any(|e| e.tool.name() == name)
-    }
-
-    /// Pre-populate builtin_tools with the platform tools (mimics an
-    /// agent that booted with `tool_compression_enabled = true`) so the
-    /// toggle-off path has something to remove.
-    fn seed_with_platform_tools(core: &mut AgentCore) {
-        use crate::tools::builtin::build_platform_protected_tools;
-        for tool in build_platform_protected_tools(
-            &core.config.work_dir,
-            core.retrieve_queue.clone(),
-            core.abandon_queue.clone(),
-        ) {
-            core.builtin_tools
-                .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
-        }
-        core.rebuild_all_tools();
-    }
-
-    #[test]
-    fn sync_platform_tools_to_registry_adds_when_enabled_and_missing() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        // Boot with compression OFF → registry has no platform tools.
-        assert!(!builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(!builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(!has_platform_tool(&core, "context_retrieve"));
-
-        let changed = core.sync_platform_tools_to_registry(true);
-        assert!(changed, "first toggle on must report change");
-
-        assert!(builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(has_platform_tool(&core, "context_retrieve"),
-            "dispatch list (all_tools) must include newly-added tool");
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        // Idempotent: second call with the same enabled value must
-        // return false (no-op).
-        let changed_again = core.sync_platform_tools_to_registry(true);
-        assert!(!changed_again, "second toggle on is a no-op");
-        // ...and the count stays the same.
-        assert_eq!(
-            core.builtin_tools
-                .iter()
-                .filter(|e| crate::tools::registry::PLATFORM_PROTECTED_TOOLS
-                    .contains(&e.tool.name().as_str()))
-                .count(),
-            2,
-            "platform tools must appear exactly once after idempotent toggle"
-        );
-    }
-
-    #[test]
-    fn sync_platform_tools_to_registry_removes_when_disabled_and_present() {
-        let mut core = make_core(Some(8192), None, None, 0);
-        seed_with_platform_tools(&mut core);
-        assert!(has_platform_tool(&core, "context_retrieve"));
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        let changed = core.sync_platform_tools_to_registry(false);
-        assert!(changed, "first toggle off must report change");
-
-        assert!(!builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(!builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(!has_platform_tool(&core, "context_retrieve"),
-            "dispatch list must drop newly-removed tool");
-        assert!(!has_platform_tool(&core, "context_abandon"));
-
-        // Idempotent.
-        let changed_again = core.sync_platform_tools_to_registry(false);
-        assert!(!changed_again, "second toggle off is a no-op");
-    }
-
-    /// End-to-end: drive `apply_runtime_config` the same way Gateway
-    /// does (via MQTT `RuntimeConfigUpdate`). The override field used
-    /// to be the only thing that changed; the new contract is that
-    /// builtin_tools + all_tools follow the toggle.
-    #[test]
-    fn apply_runtime_config_hot_reloads_tool_compression_end_to_end() {
-        use crate::tools::registry::PLATFORM_PROTECTED_TOOLS;
-
-        let mut core = make_core(Some(8192), None, None, 0);
-
-        // Push false → registry must lose the platform tools (start
-        // state was "no platform tools", so toggle off is a no-op for
-        // the Vec but the override field must still flip).
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(false));
-        assert!(
-            !core.builtin_tools.iter().any(|e| {
-                PLATFORM_PROTECTED_TOOLS.contains(&e.tool.name().as_str())
-            }),
-            "toggle false → builtin_tools must have no platform tools"
-        );
-
-        // Push true → registry must gain the platform tools. This is
-        // the user-reported regression path that was broken.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(true),
-            ..Default::default()
-        });
-        assert_eq!(core.tool_compression_enabled_override, Some(true));
-        assert!(builtin_has_platform_tool(&core, "context_retrieve"));
-        assert!(builtin_has_platform_tool(&core, "context_abandon"));
-        assert!(has_platform_tool(&core, "context_retrieve"),
-            "LLM dispatch list must include context_retrieve after toggle true");
-        assert!(has_platform_tool(&core, "context_abandon"));
-
-        // Push true again (no-op for Vec), then false → must remove.
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(true),
-            ..Default::default()
-        });
-        core.apply_runtime_config(&RuntimeConfigOverrides {
-            tool_compression_enabled: Some(false),
-            ..Default::default()
-        });
-        assert!(!has_platform_tool(&core, "context_retrieve"),
-            "LLM dispatch list must drop context_retrieve after toggle false");
-        assert!(!has_platform_tool(&core, "context_abandon"));
-    }
-
-
     // ── apply_builtin_enabled_entries (ADR-052 §3.5 shared policy) ────
     //
     // The tests below pin the policy helper that BOTH the per-session
@@ -1724,7 +1425,8 @@ mod tests {
 
     /// Pre-populate `builtin_tools` with a small mixed set so the
     /// enabled-rewrite path has both platform and non-platform entries
-    /// to work with. Mirrors a real boot with compression enabled.
+    /// to work with. Mirrors a real boot where `context_retrieve` is
+    /// always registered (ADR-061 §10.2).
     fn seed_with_mixed_builtins(core: &mut AgentCore) {
         use crate::tools::builtin::build_platform_protected_tools;
         // Add a non-platform tool for the rewrite to land on.
@@ -1761,7 +1463,6 @@ mod tests {
         for tool in build_platform_protected_tools(
             &core.config.work_dir,
             core.retrieve_queue.clone(),
-            core.abandon_queue.clone(),
         ) {
             core.builtin_tools
                 .push(BuiltinToolEntry::with_resolved_enabled(false, tool));
@@ -1800,13 +1501,14 @@ mod tests {
         // Platform tools are filtered OUT of the resolution map, so
         // their registered slots keep whatever enabled flag they had
         // before the call (here, force-enabled by `with_resolved_enabled`
-        // -> true).
+        // -> true). Only names actually registered are checked:
+        // `context_abandon` is no longer registered at all (ADR-061
+        // §10.2), so it is simply absent rather than disabled.
         for name in crate::tools::registry::PLATFORM_PROTECTED_TOOLS {
-            let entry = core
-                .builtin_tools
-                .iter()
-                .find(|e| e.name() == *name)
-                .unwrap_or_else(|| panic!("{name} must still be registered"));
+            let Some(entry) = core.builtin_tools.iter().find(|e| e.name() == *name)
+            else {
+                continue;
+            };
             assert!(
                 entry.enabled,
                 "{name} must keep its prior enabled flag (platform tools are filter-out, not force-disable)"

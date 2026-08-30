@@ -431,22 +431,30 @@ impl AgentLoop {
                         tracing::warn!(
                             error = %e.message,
                             current_tokens = self.session.history.token_count(),
-                            "Context overflow detected in stream, attempting emergency trim"
+                            "Context overflow detected in stream, running 8-level compaction"
                         );
-                        let removed = self.session.history.emergency_trim();
-                        if removed > 0 {
+                        // ADR-061 §11.2: the overflow retry routes through
+                        // the 8-level plan instead of `emergency_trim`
+                        // (deleted). When the compaction LLM is unavailable
+                        // (or the plan fails), the retry is abandoned —
+                        // explicit failure (§11.3) beats retrying a request
+                        // that cannot fit the window.
+                        let model_name = self.resolve_current_model(context_builder);
+                        let before = self.session.history.token_count();
+                        self.compact_history_if_needed(&model_name, true).await;
+                        let after = self.session.history.token_count();
+                        if after < before {
                             tracing::info!(
-                                removed,
-                                remaining_tokens = self.session.history.token_count(),
-                                "Emergency trim completed, retrying with trimmed context"
+                                before,
+                                remaining_tokens = after,
+                                "8-level compaction completed, retrying with trimmed context"
                             );
-                            let model_name = self.resolve_current_model(context_builder);
                             let caps = self.get_model_capabilities(&model_name);
                             let max_output_limit = self.core.max_output_tokens_limit_for_model(&model_name);
                             let mut chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
-                                // ADR-060 §5.5: emergency-trim retry keeps the
+                                // ADR-060 §5.5: compaction retry keeps the
                                 // same staged user message as Block D.
                                 self.pending_user_message.as_ref(),
                                 caps.as_ref(),
@@ -462,6 +470,10 @@ impl AgentLoop {
                                 .call_llm_streaming_no_retry(&chat_request)
                                 .await;
                         } else {
+                            tracing::error!(
+                                error = %e.message,
+                                "Compaction did not shrink history — aborting overflow retry (ADR-061 §11.3)"
+                            );
                             return Err(RuntimeError::StreamError(e));
                         }
                     }
