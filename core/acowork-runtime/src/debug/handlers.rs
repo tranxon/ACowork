@@ -492,7 +492,7 @@ pub async fn handle_patch_context(
                     "environment" => {
                         if let Some(named) = sections.iter_mut().find(|s| s.key == *key) {
                             named.content = super::controller::SectionContent::new(
-                                crate::agent::context::detect_environment_text(),
+                                crate::agent::context::detect_environment_text().to_string(),
                                 model,
                             );
                         }

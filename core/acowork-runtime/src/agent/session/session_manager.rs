@@ -929,6 +929,19 @@ impl SessionManager {
             session_state.set_provider(p.clone());
         }
 
+        // ADR-060 §6.1: restore the persisted todo snapshot from meta so a
+        // session restart keeps the Block C task list (previously lost on
+        // restart). Replace semantics; the mirror back into
+        // `ConversationSession::set_todos` is a no-op when content is equal.
+        if let Some(todos) = session_state.conversation().and_then(|c| c.todos()) {
+            session_state.update_todos(todos, false);
+            tracing::debug!(
+                session_id = %session_state.conversation().map(|c| c.session_id().to_string()).unwrap_or_default(),
+                todo_count = session_state.todos.len(),
+                "Session resume: restored todo list from meta"
+            );
+        }
+
         // Propagate temperature override to the session via the per-agent chain:
         //   runtime_overrides → agent_config.json (Layer 1) → manifest (Layer 2) → DEFAULT_TEMPERATURE (Layer 3).
         // Always set a concrete value so the model actually receives the configured

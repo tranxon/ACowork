@@ -5,7 +5,10 @@
 
 use acowork_core::manifest::AgentManifest;
 use acowork_core::protocol::ModelCapabilitiesInfo;
-use acowork_core::providers::traits::{ChatMessage, ChatRequest, ContentPart, MessageRole, ReasoningEffort};
+use acowork_core::providers::traits::{
+    CacheControl, ChatMessage, ChatRequest, ContentPart, MessageRole, ReasoningEffort,
+};
+use std::sync::OnceLock;
 
 use crate::agent::history::HistoryManager;
 use crate::config::DEFAULT_TEMPERATURE;
@@ -455,17 +458,27 @@ impl ContextBuilder {
         self.skill_instructions.as_deref()
     }
 
-    /// Build the complete ChatRequest for the LLM
+    /// Build the complete ChatRequest for the LLM.
+    ///
+    /// ADR-060: output is reorganized into four cache-friendly blocks:
+    /// - Block A: static system kernel (single SystemMessage + ephemeral breakpoint)
+    /// - Block B: append-only conversation history
+    /// - Block C: dynamic todo snapshot (User role, own breakpoint)
+    /// - Block D: current user message, passed explicitly by the caller
+    ///   (`None` during tool-loop iterations / debug replay — see §5.5).
     pub fn build(
         &self,
         manifest: &AgentManifest,
         history: &HistoryManager,
+        current_user_message: Option<&ChatMessage>,
         gateway_capabilities: Option<&ModelCapabilitiesInfo>,
         max_output_tokens_limit: u64,
     ) -> ChatRequest {
         let mut messages = Vec::new();
 
-        // 1. System prompt (always first, highest priority)
+        // ── Block A: static kernel (ADR-060 §5.2) ──
+        // Byte-stable across iterations: no dynamic block (retrieved_memory,
+        // todo_context, ambiguous_confirmation_hint) is embedded here.
         let mut system_content = self.system_prompt.clone();
 
         // 2. Identity context (if available)
@@ -486,23 +499,9 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Relevant Memories\n{memory}"));
         }
 
-        // 2.5b P3-4: Ambiguous conflict confirmation hint
-        // When ≥ 3 pending ambiguous conflicts exist, inject a hint that
-        // guides the Agent to naturally ask the user for disambiguation.
-        if let Some(ref hint) = self.ambiguous_confirmation_hint {
-            system_content.push_str(&format!(
-                "\n\n## Memory Conflicts Needing Confirmation\n{hint}"
-            ));
-        }
-
         // 2.6 Skill instructions (debug patching or runtime config)
         if let Some(ref skills) = self.skill_instructions {
             system_content.push_str(&format!("\n\n## Skill Instructions\n{skills}"));
-        }
-
-        // 2.7 Todo list (session-level task tracking)
-        if let Some(ref todos) = self.todo_context {
-            system_content.push_str(&format!("\n\n## Active Task List\nUse the `todo_write` tool to manage this list. Current tasks:\n{todos}"));
         }
 
         // 3. Environment platform info
@@ -521,16 +520,24 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Workspace Prompt File\n{prompt_file}"));
         }
 
+        // ADR-060: `todo_context` and `ambiguous_confirmation_hint` moved OUT
+        // of Block A (dynamic content would invalidate the whole stable
+        // prefix). Todo now lives in Block C; the hint is not injected this
+        // round (ADR-060 §5.2).
+
         // 3.5 Tool definitions are passed separately in ChatRequest
 
-        messages.push(ChatMessage::system(system_content));
+        // Block A carries the ephemeral cache breakpoint (ADR-060 §5.1/§5.6).
+        let mut system_msg = ChatMessage::system(system_content);
+        system_msg.cache_control = Some(CacheControl::Ephemeral);
+        messages.push(system_msg);
 
         // Estimate system prompt tokens for observability
         let system_msg = messages.last().unwrap();
         let system_tokens = self.counter.count_message(system_msg, "", None);
         tracing::debug!(system_tokens, "System prompt token estimation");
 
-        // 7. Conversation history
+        // 7. Conversation history — Block B (ADR-060 §5.3)
         // Filter out System messages from history — only the first system message
         // (created above) should exist. Some LLM providers (e.g. MiniMax) reject
         // system messages at non-first positions.
@@ -541,6 +548,30 @@ impl ContextBuilder {
                 .filter(|m| !matches!(m.role, MessageRole::System))
                 .cloned(),
         );
+
+        // ── Block C: dynamic todo snapshot (ADR-060 §5.4) ──
+        // User role: avoids Anthropic system-elevation overwrite and
+        // MiniMax/o1 "system must be first" constraints; consecutive user
+        // messages are auto-merged by Anthropic/OpenAI without semantic loss.
+        if let Some(ref todos) = self.todo_context {
+            messages.push(ChatMessage {
+                role: MessageRole::User,
+                content: format!(
+                    "## Active Task List\nUse the `todo_write` tool to manage this list. Current tasks:\n{todos}"
+                ),
+                cache_control: Some(CacheControl::Ephemeral),
+                ..Default::default()
+            });
+        }
+
+        // ── Block D: current user message (ADR-060 §5.5) ──
+        // Explicitly passed by the caller — never inferred from the history
+        // tail (tool iterations leave Tool messages at the tail). Note the
+        // message is ALSO part of Block B (it is persisted in history); Block
+        // D is its duplicate clone at the end of the request.
+        if let Some(user_msg) = current_user_message {
+            messages.push(user_msg.clone());
+        }
 
         // 7.5 Sanitize messages before sending to LLM
         // This fixes corrupted tool_call data that would cause 400 errors
@@ -802,29 +833,41 @@ pub fn resolve_patch(
     }
 }
 
+/// Cached environment text — computed once per process (ADR-060 §6.4).
+///
+/// Environment info is static within a process lifetime; caching it makes
+/// every `build()` call cheaper and guarantees byte stability across
+/// iterations (a cache-friendly Block A requirement).
+static CACHED_ENV_TEXT: OnceLock<String> = OnceLock::new();
+
 /// Detect and format the environment info text that gets injected into
 /// the system prompt. Used by debug snapshot capture and ContextBuilder::build().
-pub fn detect_environment_text() -> String {
-    let shell_info = crate::platform::detected_shell();
-    let available_shells = crate::platform::detected_shells();
-    let shell_tools_desc: Vec<String> = available_shells
-        .iter()
-        .map(|s| {
-            let primary = if s.is_primary {
-                " (primary)"
-            } else {
-                " (fallback)"
-            };
-            format!("{}{}", s.tool_name, primary)
-        })
-        .collect();
-    format!(
-        "## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}\n- Available Shell Tools: {}",
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        shell_info.display_name,
-        shell_tools_desc.join(", ")
-    )
+///
+/// ADR-060 §6.4: result is memoized in a process-global [`OnceLock`]; the
+/// first call formats the text, subsequent calls return the cached `&str`.
+pub fn detect_environment_text() -> &'static str {
+    CACHED_ENV_TEXT.get_or_init(|| {
+        let shell_info = crate::platform::detected_shell();
+        let available_shells = crate::platform::detected_shells();
+        let shell_tools_desc: Vec<String> = available_shells
+            .iter()
+            .map(|s| {
+                let primary = if s.is_primary {
+                    " (primary)"
+                } else {
+                    " (fallback)"
+                };
+                format!("{}{}", s.tool_name, primary)
+            })
+            .collect();
+        format!(
+            "## Environment\n- Operating System: {}\n- Architecture: {}\n- Shell: {}\n- Available Shell Tools: {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            shell_info.display_name,
+            shell_tools_desc.join(", ")
+        )
+    })
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -858,12 +901,17 @@ mod tests {
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string())
             .with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&manifest, &history, None, None, 32_768);
 
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 2); // system + user
         assert_eq!(request.messages[0].role, MessageRole::System);
         assert_eq!(request.messages[1].role, MessageRole::User);
+        // ADR-060: Block A carries the ephemeral cache breakpoint.
+        assert_eq!(
+            request.messages[0].cache_control,
+            Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+        );
     }
 
     #[test]
@@ -874,7 +922,7 @@ mod tests {
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
 
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&manifest, &history, None, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
     }
 
@@ -892,7 +940,7 @@ mod tests {
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some(identity));
 
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
         assert!(
             system.contains("Language field above"),
@@ -949,7 +997,7 @@ mod tests {
         // build() must omit the cleared sections entirely.
         let manifest = test_manifest();
         let history = HistoryManager::new(10000);
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
         assert!(!system.contains("Active Task List"), "todo omitted");
         assert!(
@@ -957,6 +1005,121 @@ mod tests {
             "ambiguous hint omitted"
         );
         assert!(!system.contains("Workspace Prompt File"), "prompt file omitted");
+        // ADR-060: cleared todo must not appear as a Block C message either.
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.content.contains("Active Task List")),
+            "todo omitted from Block C after clear"
+        );
+    }
+
+    // ── ADR-060: Block A/B/C/D layout ──
+
+    #[test]
+    fn test_build_block_layout_a_b_c_d() {
+        let manifest = test_manifest();
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("First turn"));
+        history.append(ChatMessage::assistant("First reply"));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_todo_context(Some("- task1\n- task2".to_string()));
+
+        // Block D: current user message (explicitly passed).
+        let current = ChatMessage::user("Second turn");
+        let request = builder.build(&manifest, &history, Some(&current), None, 32_768);
+
+        // [0] Block A (System + ephemeral breakpoint)
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert_eq!(
+            request.messages[0].cache_control,
+            Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+        );
+        // Block A must NOT contain dynamic todo content.
+        assert!(!request.messages[0].content.contains("Active Task List"));
+        // Block A must NOT contain the ambiguous hint section.
+        assert!(!request.messages[0].content.contains("Memory Conflicts"));
+
+        // [1..2] Block B: history turns (user + assistant)
+        assert_eq!(request.messages[1].role, MessageRole::User);
+        assert_eq!(request.messages[1].content, "First turn");
+        assert_eq!(request.messages[2].role, MessageRole::Assistant);
+        assert_eq!(request.messages[2].content, "First reply");
+
+        // [3] Block C: todo snapshot — User role (never System), breakpoint set.
+        assert_eq!(request.messages.len(), 5);
+        let block_c = &request.messages[3];
+        assert_eq!(
+            block_c.role, MessageRole::User,
+            "Block C must use User role (ADR-060 §5.4)"
+        );
+        assert!(block_c.content.contains("Active Task List"));
+        assert!(block_c.content.contains("task1"));
+        assert_eq!(
+            block_c.cache_control,
+            Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+        );
+
+        // [4] Block D: exact duplicate of the current user message.
+        let block_d = &request.messages[4];
+        assert_eq!(block_d.role, MessageRole::User);
+        assert_eq!(block_d.content, current.content);
+        assert_eq!(block_d.cache_control, current.cache_control);
+    }
+
+    #[test]
+    fn test_build_block_d_none_in_tool_iteration() {
+        use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+        // Tool-loop iterations pass `None`: request has no Block D.
+        let manifest = test_manifest();
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("Turn"));
+        // A REAL tool_call on the assistant turn keeps the tool result
+        // from being classified as orphaned by sanitize_messages.
+        history.append(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "test_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        history.append(ChatMessage::tool("toolu_1", "ok"));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_todo_context(Some("- t".to_string()));
+
+        let request = builder.build(&manifest, &history, None, None, 32_768);
+        // [0] A, [1..3] B, [4] C — no D.
+        assert_eq!(request.messages.len(), 5);
+        assert_eq!(request.messages[4].role, MessageRole::User);
+        assert!(request.messages[4].content.contains("Active Task List"));
+    }
+
+    #[test]
+    fn test_build_todo_snapshot_byte_stable_across_builds() {
+        // ADR-060 §5.4: unchanged todo content must produce byte-identical
+        // Block C across builds (deterministic format_todos contract).
+        let manifest = test_manifest();
+        let history = HistoryManager::new(10000);
+        let mut builder = ContextBuilder::new("Kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_todo_context(Some("- stable item".to_string()));
+
+        let r1 = builder.build(&manifest, &history, None, None, 32_768);
+        let r2 = builder.build(&manifest, &history, None, None, 32_768);
+        let c1 = r1.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
+        let c2 = r2.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
+        assert_eq!(c1.content, c2.content, "Block C bytes must be deterministic");
+        assert_eq!(r1.messages[0].content, r2.messages[0].content, "Block A bytes must be deterministic");
     }
 
     #[test]

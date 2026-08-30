@@ -984,6 +984,10 @@ impl AgentLoop {
         let mut chat_request = context_builder.build(
             &self.core.manifest,
             &self.session.history,
+            // ADR-060 §5.5: Block D — the current user message staged by
+            // `run_inner`. `None` on the debug-replay path and for direct
+            // loop usages without a staged message.
+            self.pending_user_message.as_ref(),
             caps.as_ref(),
             max_output_limit,
         );
@@ -1428,6 +1432,7 @@ impl AgentLoop {
 mod tests {
     use super::*;
     use crate::agent::agent_core::BuiltinToolEntry;
+    use crate::agent::context::ContextBuilder;
     use crate::config::RuntimeConfig;
     use acowork_core::protocol::{
         ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry,
@@ -1579,6 +1584,136 @@ mod tests {
     }
 
     // ── resolve_distill_model: three-tier fallback ─────────────────────
+
+    #[test]
+    fn build_chat_request_block_layout_b_contains_current_and_d_duplicate() {
+        // ADR-060 §5.5/§7.3: Block B is the full append-only history — it
+        // INCLUDES the current user message — and Block D is a byte-identical
+        // duplicate staged by `run_inner`. Request order: A → B → C → D.
+        let mut loop_ = build_loop();
+        loop_.session.history.append(ChatMessage::user("First turn"));
+        loop_.session.history.append(ChatMessage::assistant("First reply"));
+        let current = ChatMessage::user("Second turn");
+        loop_.session.history.append(current.clone());
+        loop_.pending_user_message = Some(current.clone());
+        // Block C source: session todo snapshot.
+        loop_.session.update_todos(
+            vec![crate::agent::session_state::TodoItem {
+                id: "t1".to_string(),
+                content: "Task 1".to_string(),
+                status: crate::agent::session_state::TodoStatus::Pending,
+            }],
+            false,
+        );
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+
+        // [0] Block A: system kernel.
+        assert_eq!(request.messages[0].role, MessageRole::System);
+        assert!(
+            !request.messages[0].content.contains("Active Task List"),
+            "Block A must not contain the dynamic todo snapshot"
+        );
+
+        // Block B: history turns present, including the current user message.
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::User && m.content == "Second turn"),
+            "Block B must include the current user message"
+        );
+
+        // Block C: User role (never System), todo snapshot, after Block B.
+        let block_c = request
+            .messages
+            .iter()
+            .find(|m| m.content.contains("Active Task List"))
+            .unwrap();
+        assert_eq!(
+            block_c.role, MessageRole::User,
+            "Block C must use User role (ADR-060 §5.4)"
+        );
+
+        // Block D (last): byte-identical duplicate of the staged message.
+        let block_d = request.messages.last().unwrap();
+        assert_eq!(block_d.role, MessageRole::User);
+        assert_eq!(block_d.content, current.content);
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .filter(|m| m.content == "Second turn")
+                .count(),
+            2,
+            "current user message appears exactly twice: Block B copy + Block D duplicate"
+        );
+    }
+
+    #[test]
+    fn build_chat_request_block_d_none_in_tool_iteration() {
+        use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+        // ADR-060 §5.5/§7.3: tool-loop iterations have no staged message
+        // (`run_inner` clears it) — the request ends with the tool result
+        // and the original user turn appears only once (Block B).
+        let mut loop_ = build_loop();
+        loop_.session.history.append(ChatMessage::user("Turn"));
+        // A REAL tool_call on the assistant turn keeps the tool result
+        // from being classified as orphaned by sanitize_messages.
+        loop_.session.history.append(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "test_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        loop_.session.history.append(ChatMessage::tool("toolu_1", "ok"));
+        loop_.pending_user_message = None;
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+
+        let last = request.messages.last().unwrap();
+        assert_eq!(
+            last.role,
+            MessageRole::Tool,
+            "tool iteration: last message must be the tool result, no Block D"
+        );
+        assert_eq!(
+            request.messages.iter().filter(|m| m.content == "Turn").count(),
+            1,
+            "no Block D means the user turn appears exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_inject_does_not_set_flag_without_provider() {
+        // ADR-060 §6.3: `memory_retrieved_for_session` is set only on a
+        // SUCCESSFUL first retrieval. With no memory provider the call
+        // bails early and the flag must stay false — a transient provider
+        // absence must not permanently starve the session.
+        let mut loop_ = build_loop();
+        assert!(loop_.core.memory_provider().is_none());
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        loop_
+            .retrieve_and_inject_memories("hello", &mut builder)
+            .await;
+        assert!(
+            !loop_.memory_retrieved_for_session,
+            "no provider → no retrieval → flag stays false"
+        );
+        // Repeated calls keep retrying (flag still false).
+        loop_
+            .retrieve_and_inject_memories("hello again", &mut builder)
+            .await;
+        assert!(!loop_.memory_retrieved_for_session);
+    }
 
     #[test]
     fn tier1_global_default_is_picked_when_set_and_available() {

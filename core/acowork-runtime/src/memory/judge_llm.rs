@@ -62,6 +62,7 @@ pub async fn evaluate_retrieval_llm(
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            cache_control: None,
         }],
         temperature: Some(0.0), // Deterministic judging
         max_tokens: Some(128),  // Short response

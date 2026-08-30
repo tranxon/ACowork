@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use crate::error::Result;
+use crate::agent::session_state::TodoItem;
 use acowork_core::providers::traits::UsageInfo;
 
 /// Format version for the JSONL conversation file.
@@ -248,6 +249,14 @@ pub struct SessionMeta {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+
+    // ── ADR-060: todo snapshot (Block C source) ──
+    /// Current task list snapshot, persisted so a session restart restores
+    /// the todo list (ADR-060 §6.1). `None` when no task has been written.
+    /// Written only by [`ConversationSession::set_todos`] — the single
+    /// persistence owner; `SessionState` mirrors it in memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todos: Option<Vec<TodoItem>>,
 
     // ── Runtime statistics (updated by AgentLoop) ──
     pub message_count: u64,
@@ -488,6 +497,12 @@ pub struct ConversationSession {
     reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Per-session temperature override, persisted in meta file.
     temperature: std::sync::Mutex<Option<f32>>,
+    /// ADR-060: todo snapshot mirror (Block C source).
+    ///
+    /// The single persistence owner is [`ConversationSession`] — the
+    /// runtime-side `SessionState.todos` mirrors into this via
+    /// [`Self::set_todos`]; no double-writer.
+    todos: std::sync::Mutex<Option<Vec<TodoItem>>>,
     /// ADR-027: snapshot + cumulative token counts (raw Provider values).
     /// `None` means no LLM call has been recorded yet.
     tokens: std::sync::Mutex<Option<SessionTokens>>,
@@ -606,6 +621,7 @@ impl ConversationSession {
             provider: self.provider.lock().ok().and_then(|p| p.clone()),
             reasoning_effort: self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             temperature: self.temperature.lock().ok().and_then(|t| *t),
+            todos: self.todos.lock().ok().and_then(|t| t.clone()),
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
@@ -816,6 +832,7 @@ impl ConversationSession {
             provider: std::sync::Mutex::new(config.provider),
             reasoning_effort: std::sync::Mutex::new(None),
             temperature: std::sync::Mutex::new(None),
+            todos: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             message_count: AtomicU64::new(0),
             last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -908,6 +925,7 @@ impl ConversationSession {
                 provider: std::sync::Mutex::new(meta.provider),
                 reasoning_effort: std::sync::Mutex::new(meta.reasoning_effort),
                 temperature: std::sync::Mutex::new(meta.temperature),
+                todos: std::sync::Mutex::new(meta.todos),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 message_count: AtomicU64::new(meta.message_count),
                 last_meta_write: std::sync::Mutex::new(Instant::now()),
@@ -1235,6 +1253,46 @@ impl ConversationSession {
         );
     }
 
+    /// Return the persisted todo list, if any (ADR-060 §6.1).
+    pub fn todos(&self) -> Option<Vec<TodoItem>> {
+        self.todos.lock().ok().and_then(|t| t.clone())
+    }
+
+    /// Persist the todo snapshot to the meta file (ADR-060 §6.1).
+    ///
+    /// Data flow: `todo_write` tool → `SessionState::update_todos()` →
+    /// this method (sync mirror). `ConversationSession` is the single
+    /// persistence owner; `SessionState` never writes meta directly.
+    ///
+    /// Write policy: content-equal updates skip the write entirely; changed
+    /// updates persist IMMEDIATELY (metadata-mutation semantics, same as
+    /// title/model/provider — `META_WRITE_COOLDOWN_MS` guards only the
+    /// high-frequency `append_message` path). Immediate write guarantees
+    /// the first `todo_write` after session creation survives a kill within
+    /// the cooldown window (ADR-060 §6.1: restart must restore todos).
+    pub fn set_todos(&self, todos: &[TodoItem]) {
+        {
+            let mut slot = self.todos.lock().unwrap_or_else(|e| e.into_inner());
+            // Skip the write when the content is unchanged — a byte-stable
+            // todo list must not touch the meta file (ADR-060 §5.4/§6.1).
+            if slot.as_deref() == Some(todos) {
+                return;
+            }
+            *slot = if todos.is_empty() {
+                None
+            } else {
+                Some(todos.to_vec())
+            };
+        }
+        // Changed content → persist immediately (metadata mutation).
+        self.write_meta();
+        tracing::debug!(
+            session_id = %self.session_id,
+            todo_count = todos.len(),
+            "Todo snapshot persisted to meta file"
+        );
+    }
+
     /// THE single entry point for ALL config changes (ADR-047).
     ///
     /// Synchronous: memory + meta.json + MQTT notification.
@@ -1507,6 +1565,7 @@ impl Clone for ConversationSession {
                 self.reasoning_effort.lock().ok().and_then(|r| r.clone()),
             ),
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
+            todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             message_count: AtomicU64::new(self.message_count.load(Ordering::Relaxed)),
             last_meta_write: std::sync::Mutex::new(
@@ -2500,6 +2559,7 @@ mod tests {
                 provider: None,
                 reasoning_effort: None,
                 temperature: None,
+                todos: None,
                 message_count: 0,
                 last_active_at: ts.clone(),
                 tokens: None,
@@ -2701,6 +2761,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            todos: None,
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
@@ -3129,6 +3190,7 @@ mod tests {
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.7),
+            todos: None,
             message_count: 5,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
             tokens: Some(SessionTokens {
@@ -3164,6 +3226,69 @@ mod tests {
         assert_eq!(meta.tokens, None, "old JSON without tokens field should default to None");
         assert_eq!(meta.model, None);
         assert_eq!(meta.provider, None);
+        assert_eq!(meta.todos, None, "pre-ADR-060 JSON without todos field should default to None");
+    }
+
+    #[test]
+    fn test_todos_persist_across_resume() {
+        // ADR-060 §6.1: the todo snapshot survives a session restart —
+        // `set_todos` writes meta immediately (metadata-mutation policy,
+        // no cooldown swallow even right after `new`), and `resume`
+        // hydrates it back into the session.
+        let temp_dir = TempDir::new().unwrap();
+        let sid = "20260503_090000_todos";
+        let committed = Arc::new(AtomicUsize::new(0));
+
+        let (session, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            sid,
+            SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            committed,
+        )
+        .unwrap();
+
+        let items = vec![
+            TodoItem {
+                id: "t1".to_string(),
+                content: "First task".to_string(),
+                status: crate::agent::session_state::TodoStatus::InProgress,
+            },
+            TodoItem {
+                id: "t2".to_string(),
+                content: "Second task".to_string(),
+                status: crate::agent::session_state::TodoStatus::Pending,
+            },
+        ];
+        session.set_todos(&items);
+
+        // Restart: a fresh session resumes from the persisted meta file.
+        let (resumed, _cfg_rx, _state_rx) = ConversationSession::resume(
+            temp_dir.path(),
+            sid,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        assert_eq!(
+            resumed.todos(),
+            Some(items),
+            "todos must be restored from meta after session restart"
+        );
+
+        // Clearing the list also persists: an emptied todo list resumes as None.
+        resumed.set_todos(&[]);
+        let (resumed2, _cfg_rx, _state_rx) = ConversationSession::resume(
+            temp_dir.path(),
+            sid,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        assert_eq!(resumed2.todos(), None, "emptied todo list must persist as None");
     }
 
     // ── raw-entry pagination tests ───────────────────────────────

@@ -446,6 +446,9 @@ impl AgentLoop {
                             let mut chat_request = context_builder.unwrap().build(
                                 &self.core.manifest,
                                 &self.session.history,
+                                // ADR-060 §5.5: emergency-trim retry keeps the
+                                // same staged user message as Block D.
+                                self.pending_user_message.as_ref(),
                                 caps.as_ref(),
                                 max_output_limit,
                             );

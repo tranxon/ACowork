@@ -45,7 +45,7 @@ impl super::loop_::AgentLoop {
     /// the former return channel fed `record_turn` (removed as dead code,
     /// see the memory write-entrypoint review doc).
     pub(crate) async fn retrieve_and_inject_memories(
-        &self,
+        &mut self,
         user_message: &str,
         context_builder: &mut ContextBuilder,
     ) {
@@ -82,11 +82,20 @@ impl super::loop_::AgentLoop {
         // that can mislead the LLM. The `memory_recall` tool remains
         // available for explicit deep recall.
         //
+        // ADR-060 §6.3: when enabled, trigger at most ONCE per session — on
+        // the first user message. Later turns bail out via
+        // `memory_retrieved_for_session`; explicit `memory_recall` tool
+        // calls use an independent path and never touch that flag.
+        //
         // NOTE: `clear_retrieved_memory()` and `set_session_id()` above
         // still run so stale memory from previous turns never leaks into
         // the next build, and the tool handle stays in sync.
-        if !manager.config().auto_inject_enabled {
-            tracing::debug!("Memory auto-inject disabled (auto_inject_enabled=false)");
+        if !manager.config().auto_inject_enabled || self.memory_retrieved_for_session {
+            tracing::debug!(
+                disabled = !manager.config().auto_inject_enabled,
+                already_retrieved = self.memory_retrieved_for_session,
+                "Memory auto-inject skipped (disabled or already retrieved for this session)"
+            );
             return;
         }
 
@@ -104,6 +113,12 @@ impl super::loop_::AgentLoop {
             .await
         {
             Ok(result) => {
+                // ADR-060 §6.3: first successful retrieval marks the session
+                // as handled — later turns skip auto-inject until the loop
+                // is rebuilt (new session). Failure keeps the flag false so
+                // a transient error does not permanently starve the session.
+                self.memory_retrieved_for_session = true;
+
                 let metrics = result.metrics;
 
                 // Traceability: log the retrieved node IDs (the former
@@ -177,6 +192,13 @@ impl super::loop_::AgentLoop {
                 }
 
                 // P3-4: Inject ambiguous conflict hint into context.
+                //
+                // ADR-060 §5.2: `build()` no longer injects this hint (it
+                // was moved OUT of Block A to keep the static kernel
+                // byte-stable). The setter is kept so the debug panel can
+                // still show the pending hint and the value survives
+                // `build()` calls — re-injection is deferred to ADR-060 §11
+                // follow-up work (Block C-style message or explicit path).
                 if let Some(hint) = result.ambiguous_hint {
                     tracing::info!(
                         "Injecting ambiguous conflict confirmation hint into context"

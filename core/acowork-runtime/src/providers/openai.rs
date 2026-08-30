@@ -1290,6 +1290,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                cache_control: None,
             },
             ChatMessage {
                 role: MessageRole::User,
@@ -1299,6 +1300,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                cache_control: None,
             },
         ];
 
@@ -1306,6 +1308,39 @@ mod tests {
         assert_eq!(native.len(), 2);
         assert_eq!(native[0].role, "system");
         assert_eq!(native[1].role, "user");
+    }
+
+    #[test]
+    fn test_convert_messages_cache_control_implicit() {
+        use acowork_core::providers::traits::CacheControl;
+
+        // ADR-060 regression: OpenAI has NO explicit cache marker — block
+        // position alone determines the 128-token hash chain. A
+        // `cache_control` flag on ChatMessage must be silently ignored
+        // (no wire field), not serialized or rejected.
+        let messages = vec![ChatMessage {
+            role: MessageRole::System,
+            content: "You are helpful.".to_string(),
+            content_parts: None,
+            reasoning_content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            cache_control: Some(CacheControl::Ephemeral),
+        }];
+
+        let native = convert_messages(&messages);
+        let json = serde_json::to_value(&native[0]).unwrap();
+        assert_eq!(json["role"], "system");
+        assert_eq!(json["content"], "You are helpful.");
+        assert!(
+            json.get("cache_control").is_none(),
+            "OpenAI wire format must not carry cache_control"
+        );
+        assert!(
+            json.get("cache_breakpoint").is_none(),
+            "OpenAI wire format must not carry cache_breakpoint"
+        );
     }
 
     #[test]
@@ -1325,6 +1360,7 @@ mod tests {
                     arguments: "{\"city\":\"Shanghai\"}".to_string(),
                 },
             }]),
+            cache_control: None,
         }];
 
         let native = convert_messages(&messages);

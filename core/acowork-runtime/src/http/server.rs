@@ -3233,6 +3233,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            todos: None,
             message_count: 3,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: None,
@@ -3354,6 +3355,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            todos: None,
             message_count: 2,
             last_active_at: "2026-01-01T10:00:01Z".to_string(),
             tokens: Some(crate::conversation::SessionTokens {
@@ -3379,6 +3381,7 @@ mod tests {
             provider: None,
             reasoning_effort: None,
             temperature: None,
+            todos: None,
             message_count: 1,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: Some(crate::conversation::SessionTokens {
@@ -6339,6 +6342,7 @@ mod tests {
             provider: Some("openai".to_string()),
             reasoning_effort: None,
             temperature: Some(0.5),
+            todos: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,

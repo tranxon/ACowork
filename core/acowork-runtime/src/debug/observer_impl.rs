@@ -388,17 +388,12 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             named.push(NamedSection::new("skill_instructions", skills.to_string(), req.model));
         }
 
-        // 2.7 Todo list — NEW in ADR-054 step 3.
-        if let Some(todos) = req.context_builder.todo_context() {
-            named.push(NamedSection::new("todo_context", todos.to_string(), req.model));
-        }
-
         // 3. Environment (override wins, else auto-detect)
         let env_text = req
             .context_builder
             .environment_override()
             .map(|s| s.to_string())
-            .unwrap_or_else(crate::agent::context::detect_environment_text);
+            .unwrap_or_else(|| crate::agent::context::detect_environment_text().to_string());
         named.push(NamedSection::new("environment", env_text, req.model));
 
         // 3.2 Workspace prompt file (CLAUDE.md / AGENTS.md) — NEW standalone
@@ -438,6 +433,18 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             key: "messages".to_string(),
             content: messages_meta,
         });
+
+        // Block C — dynamic todo snapshot (ADR-060 §6.2).
+        //
+        // `todo_context` is no longer a system-prompt sub-item: build()
+        // emits it as an independent User-role message (with an Ephemeral
+        // cache breakpoint) AFTER the history block, so its updates never
+        // invalidate the stable Block A/B cache prefix. Section key and
+        // content are unchanged (patchContext compatibility); only the
+        // grouping/label moved to mirror the new build() layout.
+        if let Some(todos) = req.context_builder.todo_context() {
+            named.push(NamedSection::new("todo_context", todos.to_string(), req.model));
+        }
 
         let sections = ContextSnapshotSections { sections: named };
 
