@@ -877,7 +877,13 @@ impl MemoryManager {
     fn run_relationship_generation(&self, provider: &dyn MemoryProvider) {
         use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
 
-        let episodes = match provider.get_episodes(None, usize::MAX) {
+        // Fetch a generous upper bound (not usize::MAX) so the GQL `LIMIT`
+        // literal stays within int64 range — the GrafeoDB engine rejects
+        // `18446744073709551615` with a syntax error. 10k episodes is far
+        // beyond any realistic collaboration span.
+        const EPISODES_FOR_RELATIONSHIP: usize = 10_000;
+
+        let episodes = match provider.get_episodes(None, EPISODES_FOR_RELATIONSHIP) {
             Ok(eps) => eps,
             Err(e) => {
                 tracing::debug!(error = %e, "Failed to get episodes for relationship tracking");

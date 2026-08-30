@@ -152,6 +152,10 @@ impl GrafeoStore {
     ///
     /// Returns up to `limit` episodes across all sessions.
     pub fn list_all_episodes(&self, limit: usize) -> Result<Vec<Episode>> {
+        // Clamp to the GQL int64 range — a raw usize::MAX literal makes the
+        // engine reject the query with a syntax error (see manager.rs
+        // relationship generation).
+        let limit = limit.min(i64::MAX as usize);
         let session = self.db.session();
         let gql = format!(
             "MATCH (e:Episodic) RETURN e ORDER BY e.timestamp DESC LIMIT {}",
