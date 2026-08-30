@@ -2,144 +2,111 @@
 
 ## Overview
 
-ACowork.AI is a decentralized, high-security, scalable AI Agent runtime platform. Each Agent is a declarative `.agent` package (config + prompts + skills, no binary), loaded by a universal Agent Runtime binary and managed by a lightweight Gateway.
+ACowork.AI is a decentralized, high-security, scalable AI Agent runtime platform. Each Agent is a declarative `.agent` package (config + prompts + skills, no binary), loaded by a universal Runtime binary and managed by a Gateway.
 
 ## Build & Test
 
-### Core (Rust workspace)
+### Core (Rust workspace, 13 crates)
 
 ```bash
 cd core
-cargo build --release          # all 12 crates
+cargo build --release          # all 13 crates
 cargo clippy --all-targets -- -D warnings
 cargo test                     # unit + integration tests
-# From project root:
 # ./dev/ci.sh all              # check + clippy + test + integration
 ```
 
 ### Desktop App (Tauri v2)
 
-Core Rust crates (`acowork-gateway`, `acowork-runtime`, `acowork-embed`) must be built before the Tauri binary can launch them.
-
-**Release build** — `beforeBuildCommand` in `tauri.conf.json` handles this automatically:
-
-```bash
-# From apps/acowork-desktop/
-npm run tauri build
-# Runs: core:build:release → npm run build → tauri bundle
-```
-
-**Dev mode** — Tauri dev does not auto-build core; ensure the debug binaries exist first:
+Required core binaries (built by `core:build:debug|release`):
+`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-lsp-relay`, `acowork-node`.
 
 ```bash
-# Build core debug binaries once
+# Release — beforeBuildCommand auto-runs core:build:release + npm build + tauri bundle
+cd apps/acowork-desktop && npm run tauri build
+
+# Dev — build core debug once, then HMR + Tauri window
+cd apps/acowork-desktop
 npm run core:build:debug
-
-# Then start the desktop app (Vite HMR + Tauri window)
 npm run tauri dev
 ```
 
-## Debug & Log 
+## Logs
 
-When debugging, consult the latest log file to rapidly identify the root cause
-{HOME_DIR} is the current user home folder.
+`{HOME_DIR}` = current user home folder.
 
-* gateway Log: {HOME_DIR}\.acowork\acowork-gateway\data\logs
-* desktop Log: {HOME_DIR}\.acowork\desktop-app\logs
-* runtime Log: {HOME_DIR}\.acowork\acowork-gateway\config\packages\com.acowork.senior-engineer\workspace\logs
+- Gateway: `{HOME_DIR}\.acowork\acowork-gateway\data\logs`
+- Desktop: `{HOME_DIR}\.acowork\desktop-app\logs`
+- Runtime: `{HOME_DIR}\.acowork\acowork-gateway\config\packages\com.acowork.senior-engineer\workspace\logs`
 
 ## Project Structure
 
 ```
-├── core/                    # Rust workspace (12 crates + integration tests)
-│   ├── acowork-core/                # Shared types, errors, config, MQTT proto definitions
-│   ├── acowork-embed/               # ONNX-Runtime-based embedding model runner
-│   ├── acowork-gateway/             # Gateway: HTTP API, embedded MQTT broker, HTTP reverse proxy, lifecycle, package mgr
-│   ├── acowork-grafeo/              # Memory engine (graph-based, layered)
-│   ├── acowork-lsp-relay/           # LSP protocol relay (Desktop ↔ external language servers)
-│   ├── acowork-mcp/                 # MCP (Model Context Protocol) wrapper
-│   ├── acowork-memory/              # Memory manager (trait, middleware)
-│   ├── acowork-mqtt-session/        # MQTT session / event multiplexing between Gateway and Runtime children
-│   ├── acowork-runtime/             # Agent runtime (main loop, tools, providers, sessions, MQTT client, localhost HTTP)
-│   ├── acowork-sign/                # Package signing & verification
-│   ├── acowork-tool-sdk/            # SDK for building WASM custom tools (Wasmtime host side)
-│   ├── acowork-vault/               # Encrypted key/value store
-│   └── tests/                       # Integration tests
-├── apps/                    # Application layer (executables)
-│   ├── cli/                 # Gateway CLI (planned)
-│   └── acowork-desktop/     # Tauri v2 Desktop App (frontend + thin Rust backend with system tray / MQTT client)
-├── docs/                    # Public architecture docs (open-source friendly)
-│   ├── AGENTS.md            # guide of design docs (this sibling index)
-│   ├── design/{zh,en}/      # 19 architecture design docs (Chinese, v3.x; en: TBD)
-│   ├── module-design/{zh,en}/   # Rust crate specifications (8 zh + en placeholder)
-│   ├── adr/{zh,en}/         # Architecture decision records (50+)
-│   ├── prd/{zh,en}/         # Platform PRD + Desktop UI/UX PRD
-│   ├── protocols/{zh,en}/   # API protocol reference (HTTP + MQTT + RAG)
-│   ├── mcp-server-research/{zh,en}/   # MCP server integration research
-│   └── _internal/           # ⚠️ gitignored — local-only archive (plans, reviews, references, diagnostics)
-├── examples/                # Example .agent packages
-└── dev/                     # Build/Package/CI/CD scripts
-```
+core/                  # Rust workspace (13 crates; source of truth: core/Cargo.toml [workspace] members)
+  acowork-core/        # Shared types, errors, config, MQTT proto
+  acowork-embed/       # ONNX-Runtime embedding model runner
+  acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
+  acowork-grafeo/      # Graph-based layered memory engine
+  acowork-lsp-relay/   # LSP protocol relay (Desktop <-> external language servers)
+  acowork-mcp/         # MCP (Model Context Protocol) wrapper
+  acowork-memory/      # Memory manager (trait, middleware)
+  acowork-mqtt-session/# MQTT session / event multiplexing (Gateway <-> Runtime)
+  acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes
+  acowork-runtime/     # Agent runtime (main loop, tools, providers, sessions)
+  acowork-sign/        # Package signing & verification
+  acowork-tool-sdk/    # WASM custom tool SDK (Wasmtime host)
+  acowork-vault/       # Encrypted key/value store
 
-> Workspace members source of truth: [`core/Cargo.toml`](./core/Cargo.toml) `[workspace] members`.
+apps/
+  acowork-desktop/     # Tauri v2 desktop app (frontend + thin Rust backend, system tray)
+  cli/                 # Gateway CLI (planned)
+
+docs/                  # Public architecture docs
+  design/{zh,en}/      # 17 design docs (zh only; en TBD)
+  module-design/{zh,en}/ # Rust crate specs (8 zh + en placeholder)
+  adr/{zh,en}/         # 51 ADRs (en: 1, zh: 50)
+  prd/{zh,en}/         # Platform + Desktop UI/UX PRD
+  protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
+  mcp-server-research/{zh,en}/
+
+examples/              # Example .agent packages
+dev/                   # Build / package / CI scripts
+```
 
 ## Architecture
 
 ```
-Desktop App (apps/acowork-desktop, Tauri v2 — 独立进程)
-├── React/TS UI (no state persistence)
-│   ├── Chat / Agent List / Settings UI
-│   ├── Debug Panel (DevMode)
-│   └── System Tray (Tauri Rust backend)
-├── HTTP Client      ─→ :19876 REST
-└── MQTT Subscriber  ─→ :19875 pub/sub events
-        │
-        ▼
-Gateway (keep alive process — Rust)
-├── HTTP API (Axum, :19876, localhost only)         # Desktop / CLI REST, Gateway → Runtime reverse proxy
-├── MQTT Broker (rumqttd, :19875, embedded)         # Real-time events, status, Will + Retained
-├── HTTP Reverse Proxy → Agent Runtime localhost HTTP  # Bulk queries: session history, config writes
-├── Package Manager — install/upgrade .agent packages
-├── Lifecycle Manager — spawn/kill agent processes
-├── Intent Router — cross-agent messaging (Intent 主题走 MQTT)
-├── Global Resources Publisher — secure API key storage, provider / mcp / embedding model list
-├── Budget Tracker — usage accounting
-├── Rate Limiter — request throttling
-└── Global Resources — secure API key storage, provider list, mcp list, embedding model list
-        │
-        │ MQTT pub/sub (:19875)         ← events, status, Will+Retained
-        │ HTTP Reverse Proxy →          ← bulk queries / session history
-        ▼
-Agent Runtime (universal binary — Rust)
-├── MQTT client (rumqttc) + localhost HTTP server (random port)
-├── System Agent (com.acowork.system) — identity, preferences
-├── User Agents — each has private Grafeo + LLM direct connection
-└── DevMode — Debug Protocol (HTTP RPC + MQTT events, ADR-048; mirrors production IPC stack)
+Desktop App (Tauri v2) — separate process
+  React/TS UI (no state persistence) · system tray · HTTP :19876 · MQTT :19875
+        |
+        v
+Gateway (keep-alive process, Rust)
+  HTTP API :19876 (Axum, localhost) · embedded MQTT broker :19875 (rumqttd)
+  Reverse proxy -> Runtime localhost HTTP · package mgr · lifecycle mgr
+  Intent router · global resources · budget tracker · rate limiter
+        |
+        | MQTT pub/sub :19875
+        v
+Node Agent (acowork-node, ADR-055) — per-machine daemon
+  MQTT control plane (acowork/nodes/#) · process table (spawn/kill/reap Runtime)
+  Local package mgr · identity/enrollment · reverse proxy :19900
+  LSP sidecar supervisor · node-local fs browse
+        |
+        | MQTT pub/sub :19875
+        v
+Agent Runtime (universal binary, Rust)
+  MQTT client + localhost HTTP · system agent · user agents (private Grafeo)
+  DevMode debug protocol (ADR-048)
 ```
-
-**协议分工**（自 [ADR-033](./docs/adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) 起统一为 HTTP + MQTT）：
-
-- **HTTP REST**（`http://127.0.0.1:19876`）— Desktop / CLI 触发 + 配置写回 + 大数据查询；Gateway 内部转为对 Runtime localhost HTTP 的反向代理
-- **MQTT**（`localhost:19875`）— 实时事件（chat chunk / tool_call / done）、状态同步（Will + Retained）、设备生命周期
-- **Debug Protocol**（DevMode 专用，复用生产 IPC 通道，ADR-048）— HTTP RPC `/api/agents/{id}/debug/{*rest}`（Gateway 反代 → Runtime）+ MQTT 调试事件 `acowork/agents/{id}/debug/events/{type}`：步进调试、Skill 热加载、录制回放
-- 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/protocols/zh/README.md`
 
 ## Conventions
 
-- Design docs in both Chinese and English; Rust code comments (`//`, `//!`, `///`) **MUST be in English**
-- Rust implementation follows workspace pattern under `core/` (12 crates, structure defined in `docs/module-design/zh/00-overview.md`; source of truth is `core/Cargo.toml` `[workspace] members`)
-- Code reviews follow `.opencode/style-guide.md`
-- The Desktop App serves solely as a state presentation and interaction interface for the gateway/runtime backend. It neither hosts business logic nor persists any state.
+- Design docs zh + en; Rust code comments (`//`, `//!`, `///`) MUST be English
+- Workspace members source of truth: `core/Cargo.toml [workspace] members`
+- Desktop App = presentation/interaction only — no business logic, no state persistence
 
 ## Rules (Do NOT)
 
 - Do NOT commit in Chinese
 - Do NOT act before the user confirms your plan
-- Do NOT kill gateway or runtime process when testing, you are running in it
-
-## Key Documentation
-
-```
-├── docs/
-│   ├── AGENTS.md            # guide of design docs
-```
+- Do NOT kill gateway or runtime process when testing — you are running inside it
