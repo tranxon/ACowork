@@ -164,9 +164,16 @@ async fn handle_command(
         }
         Some(Command::Uninstall(cmd)) => {
             let install_dir = config.packages_dir();
-            let mut node = state.write().await;
-            match crate::package::uninstall::uninstall_package(&cmd.agent_id, &install_dir, &mut node)
-            {
+            // Scope the write lock to the synchronous mutation: the
+            // retained-inventory clear publishes via the MQTT dispatcher
+            // and must not run under the lock (a blocked publish would
+            // stall every state reader — same class as the 261a8f77
+            // reaper regression).
+            let result = {
+                let mut node = state.write().await;
+                crate::package::uninstall::uninstall_package(&cmd.agent_id, &install_dir, &mut node)
+            };
+            match result {
                 Ok(()) => {
                     // Clear the retained inventory entry (ADR-055 §6.5) so
                     // the Gateway drops the agent from installed_agents.
@@ -239,19 +246,24 @@ async fn handle_command(
                 std::path::PathBuf::from(&cmd.local_path)
             };
 
-            let mut node = state.write().await;
-            // Signature strictness follows the Gateway's dev_mode
-            // (ADR-055 §6.20): `true` allows unsigned packages.
-            let result = crate::package::install::install_package(
-                &source_path,
-                &install_dir,
-                &mut node,
-                cmd.dev_mode,
-            );
-
-            if let Some(tmp) = spooled {
-                let _ = std::fs::remove_file(&tmp);
-            }
+            // Keep the write lock scoped to the synchronous install;
+            // the retained-inventory publish must run outside it (see
+            // Uninstall — same lock-discipline class as 261a8f77).
+            let result = {
+                let mut node = state.write().await;
+                // Signature strictness follows the Gateway's dev_mode
+                // (ADR-055 §6.20): `true` allows unsigned packages.
+                let result = crate::package::install::install_package(
+                    &source_path,
+                    &install_dir,
+                    &mut node,
+                    cmd.dev_mode,
+                );
+                if let Some(tmp) = spooled {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                result
+            };
 
             match result {
                 Ok(info) => {
@@ -281,14 +293,19 @@ async fn handle_command(
                 _ => crate::package::clone::CloneMode::Skeleton,
             };
             let install_dir = config.packages_dir();
-            let mut node = state.write().await;
-            match crate::package::clone::clone_agent(
-                &cmd.agent_id,
-                &cmd.new_agent_id,
-                mode,
-                &install_dir,
-                &mut node,
-            ) {
+            // Scoped write lock: the retained-inventory publish below
+            // must run without the state guard (261a8f77 class).
+            let result = {
+                let mut node = state.write().await;
+                crate::package::clone::clone_agent(
+                    &cmd.agent_id,
+                    &cmd.new_agent_id,
+                    mode,
+                    &install_dir,
+                    &mut node,
+                )
+            };
+            match result {
                 Ok(info) => {
                     // Publish retained inventory so the Gateway aggregates
                     // the new agent into installed_agents (and registers
@@ -345,24 +362,30 @@ async fn handle_command(
                 std::path::PathBuf::from(&cmd.local_path)
             };
 
-            let mut node = state.write().await;
-            let result = crate::package::upgrade::upgrade_package(
-                &cmd.agent_id,
-                &source_path,
-                &install_dir,
-                &mut node,
-                cmd.dev_mode,
-            );
-
-            if let Some(tmp) = spooled {
-                let _ = std::fs::remove_file(&tmp);
-            }
+            // Scoped write lock; the upgraded entry is snapshotted under
+            // the guard and the retained-inventory re-publish runs
+            // outside it (261a8f77 lock-discipline class).
+            let (result, upgraded_info) = {
+                let mut node = state.write().await;
+                let result = crate::package::upgrade::upgrade_package(
+                    &cmd.agent_id,
+                    &source_path,
+                    &install_dir,
+                    &mut node,
+                    cmd.dev_mode,
+                );
+                if let Some(tmp) = spooled {
+                    let _ = std::fs::remove_file(&tmp);
+                }
+                let upgraded_info = node.installed_agents.get(&cmd.agent_id).cloned();
+                (result, upgraded_info)
+            };
 
             match result {
                 Ok(()) => {
                     // Republish retained inventory with the new version so
                     // the Gateway refreshes its installed_agents entry.
-                    if let Some(info) = node.installed_agents.get(&cmd.agent_id).cloned()
+                    if let Some(info) = upgraded_info
                         && let Some(entry) = crate::package::build_installed_info(&info)
                     {
                         let installed_topic =
@@ -788,7 +811,11 @@ impl NodeControlPlane {
                 // holds a token presents it so the Gateway can re-sync
                 // its store (one-shot enrollment would strand a node
                 // with an orphaned token after a Gateway store loss).
-                publish_enroll(&client, &identity.read().await.clone(), &config).await;
+                // Snapshot first: an argument temporary (guard) would
+                // otherwise live across the awaited publish and stall
+                // the identity writer (261a8f77 lock-discipline class).
+                let identity_snapshot = identity.read().await.clone();
+                publish_enroll(&client, &identity_snapshot, &config).await;
 
                 // Control subscriptions: node-level + agent-level.
                 for filter in [
@@ -902,7 +929,12 @@ impl NodeControlPlane {
                 // never re-presents the (now consumed) enrollment
                 // token.
                 if handle_enroll_result(&topic, &payload, &identity, &home).await {
-                    if let Some(token) = identity.read().await.node_token.clone() {
+                    // Snapshot the token before the awaited credential
+                    // swap: a guard held across await (if-let scrutinee
+                    // temporary) would stall the identity writer
+                    // (261a8f77 lock-discipline class).
+                    let token = identity.read().await.node_token.clone();
+                    if let Some(token) = token {
                         *credentials.lock().await = Some(token);
                     }
                     return;
@@ -1302,7 +1334,12 @@ impl NodeControlPlane {
                 // the live CONNECT credential before the one-shot
                 // exits.
                 if handle_enroll_result(&topic, &payload, &identity, &home).await {
-                    if let Some(token) = identity.read().await.node_token.clone() {
+                    // Snapshot the token before the awaited credential
+                    // swap: a guard held across await (if-let scrutinee
+                    // temporary) would stall the identity writer
+                    // (261a8f77 lock-discipline class).
+                    let token = identity.read().await.node_token.clone();
+                    if let Some(token) = token {
                         *credentials.lock().await = Some(token);
                     }
                     return;
@@ -1667,18 +1704,26 @@ async fn handle_incoming(
         None => node_events_topic(own_node_id),
     };
 
-    {
+    // Take the cached reply out of the dedup lock before publishing:
+    // `publish_event` awaits the MQTT dispatcher, so holding the dedup
+    // lock across it would stall every later control command if the
+    // publish ever blocks (same lock-discipline class as the reaper
+    // regression introduced by 261a8f77).
+    let cached = {
         let mut d = dedup.lock().await;
-        if d.contains(&request_id)
-            && let Some(cached) = d.cached_reply(&request_id).cloned()
-        {
-            tracing::debug!(
-                request_id = %request_id,
-                "Duplicate control command — re-sending cached reply"
-            );
-            publish_event(reply_topic, cached).await?;
-            return Ok(());
+        if d.contains(&request_id) {
+            d.cached_reply(&request_id).cloned()
+        } else {
+            None
         }
+    };
+    if let Some(cached) = cached {
+        tracing::debug!(
+            request_id = %request_id,
+            "Duplicate control command — re-sending cached reply"
+        );
+        publish_event(reply_topic, cached).await?;
+        return Ok(());
     }
 
     let node_token = identity.read().await.node_token.clone();
