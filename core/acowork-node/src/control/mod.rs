@@ -1002,6 +1002,12 @@ impl NodeControlPlane {
             crate::sidecar::lsp_relay_supervisor::start_lsp_relay_supervisor(sup_cfg, state.clone());
         }
 
+        // Process-level self-watchdog: probe our own `/health` from a
+        // plain OS thread (independent of the tokio runtime) so a hung
+        // HTTP accept loop still gets detected — see `spawn_http_watchdog`
+        // for the incident background.
+        spawn_http_watchdog(config.proxy_port);
+
         let plane = Self {
             config,
             identity,
@@ -1011,7 +1017,77 @@ impl NodeControlPlane {
 
         plane.run_loop().await
     }
+}
 
+/// Spawn a process-level watchdog thread that probes the node's own
+/// `/health` endpoint with blocking sockets.
+///
+/// Background (2026-08 incident): after a long idle period the axum
+/// accept loop can hang while the kernel still completes TCP
+/// handshakes — connects succeed but no response ever arrives, leaving
+/// every Gateway reverse-proxy request stuck at the 30 s client
+/// timeout. Because the node HTTP server shares one tokio runtime with
+/// the rest of the node, an in-runtime watchdog would hang too; a
+/// plain OS thread with blocking I/O keeps ticking, so the node can
+/// exit and let the Gateway supervisor (`node_manager.rs`) respawn it.
+fn spawn_http_watchdog(proxy_port: u16) {
+    if let Err(e) = std::thread::Builder::new()
+        .name("http-watchdog".to_string())
+        .spawn(move || {
+            const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+            let mut failures: u32 = 0;
+            loop {
+                std::thread::sleep(PROBE_INTERVAL);
+                match probe_health(proxy_port) {
+                    Ok(()) => failures = 0,
+                    Err(e) => {
+                        failures += 1;
+                        tracing::warn!(failures, error = %e, "Node /health probe failed");
+                        if failures >= MAX_CONSECUTIVE_FAILURES {
+                            tracing::error!(
+                                "Node HTTP server unresponsive — exiting so the Gateway respawns the node"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        })
+    {
+        tracing::warn!(error = %e, "Failed to spawn node HTTP watchdog");
+    }
+}
+
+/// Probe `http://127.0.0.1:{port}/health` with a blocking socket.
+///
+/// A successful TCP connect is NOT sufficient — the hang symptom is
+/// connects succeeding with no application-level response — so a probe
+/// only passes when an `HTTP/1.x 200` response line arrives within the
+/// read timeout.
+fn probe_health(port: u16) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(3)))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+    let mut buf = [0u8; 64];
+    let n = stream.read(&mut buf)?;
+    let head = String::from_utf8_lossy(&buf[..n]);
+    if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200") {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("unexpected /health response: {head:?}"),
+        ))
+    }
+}
+
+impl NodeControlPlane {
     /// Main loop: info heartbeat + graceful shutdown.
     async fn run_loop(mut self) -> Result<(), NodeError> {
         let mut heartbeat = tokio::time::interval(INFO_HEARTBEAT_INTERVAL);
@@ -2098,5 +2174,40 @@ mod tests {
             std::path::Path::new("/tmp"),
         )
         .await);
+    }
+
+    #[test]
+    fn probe_health_accepts_200_and_rejects_silent_peer() {
+        use std::io::{Read, Write};
+
+        // A responder that returns a real HTTP 200 line.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let _ = sock.read(&mut buf);
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        assert!(probe_health(port).is_ok());
+        server.join().unwrap();
+
+        // A peer that accepts the connection but never answers must
+        // fail the probe (read timeout) — mirrors the hung-server
+        // symptom where TCP handshakes succeed but no response comes.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let silent_port = silent.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (_sock, _) = silent.accept().unwrap();
+            // Outlives the probe by design; the handle is detached.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+        let t0 = std::time::Instant::now();
+        assert!(probe_health(silent_port).is_err());
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "silent peer must fail via read timeout, not hang"
+        );
     }
 }
