@@ -588,18 +588,28 @@ impl SessionTask {
         // (via SessionManager -> ConversationSession::apply_config),
         // the version will have changed and we apply deferred LLM-side
         // effects before processing the next message.
-        let mut last_config_version = agent_loop
-            .session
-            .conversation
-            .as_ref()
-            .map(|c| c.config_version())
-            .unwrap_or(0);
-        let mut last_config_snapshot = agent_loop
-            .session
-            .conversation
-            .as_ref()
-            .map(|c| c.config_snapshot())
-            .unwrap_or_default();
+        //
+        // Bug B fix: initialise `last_config_version = 0` and
+        // `last_config_snapshot = Default` (instead of reading the
+        // current version) so the FIRST iteration of the main loop
+        // always takes the "version changed" branch and calls
+        // `apply_llm_effects` once at startup. Without this, when the
+        // session was created with `provider = None` (cache empty at
+        // phase_b during onboarding) and Desktop's later
+        // `model_switch` -> `apply_config` already advanced
+        // `config_version` to e.g. 3, the loop's first poll sees
+        // `current_version == last_config_version` and never applies
+        // the LLM-side effects — the agent loop fires its first
+        // `chat_message` against the stale `noop` provider and
+        // surfaces "No LLM provider configured" to the user. The
+        // second chat succeeds because the failed iteration re-enters
+        // the loop, observes the version drift, and finally rebuilds
+        // the LLM provider. Cost of the always-on initial
+        // apply: one extra `build_provider_for` per SessionTask
+        // startup (idempotent, ms-scale).
+        let mut last_config_version: u64 = 0;
+        let mut last_config_snapshot =
+            crate::agent::session_config::SessionConfigSnapshot::default();
 
         loop {
             // ── ADR-047: Check if config was mutated during previous turn ──

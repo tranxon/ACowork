@@ -13,9 +13,12 @@ import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
 import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
+import { with503Retry } from "../lib/httpRetry";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
+import type { LlmAvailability } from "../lib/llmAvailability";
+import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 
 // ---------------------------------------------------------------------------
 // ADR-050 C2: the per-session active stream tracker, throttle timestamps,
@@ -385,6 +388,45 @@ function updateSessionState(
   };
 }
 
+/**
+ * ADR-050 C5 reconciliation: replace optimistic entries once the backend
+ * persists a send.
+ *
+ * `sendMessage` inserts the user message + attachment system entries into
+ * `messages[]` with `_isOptimistic: true` before the backend has persisted
+ * them. The ONLY mechanism that drops `_isOptimistic` is
+ * `mergeMessageWindow` id-dedupe during an HTTP refresh — the server copy
+ * (same id, no flag) wins. Nothing scheduled that refresh after a send, so
+ * a message with attachments kept its "waiting for server confirmation"
+ * spinner until the session was reopened.
+ *
+ * This schedules a short bounded tail-refresh (`loadSessionMessages`). Each
+ * landing replaces whatever optimistic entries the server has echoed back;
+ * we stop as soon as none remain. The bounded retries cover the backend's
+ * asynchronous JSONL writer flush (`Conversation::append_message_with_id`
+ * is non-blocking) and the publish → process → persist pipeline.
+ */
+const SEND_RECONCILE_DELAYS_MS = [300, 800, 1600];
+
+export function scheduleSendReconciliation(agentId: string, sessionId: string, attempt = 0): void {
+  if (attempt >= SEND_RECONCILE_DELAYS_MS.length) return;
+  globalThis.setTimeout(() => {
+    const store = useChatStore.getState();
+    const ss = store.getSessionState(agentId, sessionId);
+    // Session evicted or every optimistic entry already confirmed — done.
+    if (!ss || !ss.messages.some((m) => m._isOptimistic)) return;
+    store.loadSessionMessages(agentId, sessionId).then(
+      () => {
+        const after = useChatStore.getState().getSessionState(agentId, sessionId);
+        if (after?.messages.some((m) => m._isOptimistic)) {
+          scheduleSendReconciliation(agentId, sessionId, attempt + 1);
+        }
+      },
+      () => scheduleSendReconciliation(agentId, sessionId, attempt + 1),
+    );
+  }, SEND_RECONCILE_DELAYS_MS[attempt]);
+}
+
 /** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS.
 // NOTE: kept as a reference implementation for future eviction needs;
 // currently dead because (a) caches are agent-scoped and capped at
@@ -455,6 +497,17 @@ interface ChatStore {
    */
   lastMqttError: string | null;
   availableModels: ModelEntry[];
+  /**
+   * LLM availability for the current session, mirrored from the
+   * `SessionConfig.llm_availability` retained MQTT topic. Drives the
+   * three-state banner in `ChatPanel`.
+   *
+   * - `unspecified`  — runtime hasn't published yet, render nothing
+   * - `loading`      — bootstrap not READY / vault not populated, render placeholder
+   * - `configured`   — vault has at least one usable provider, render nothing
+   * - `missing`      — vault empty or every provider unusable, render red banner
+   */
+  llmAvailability: LlmAvailability;
 
   // ---- Actions ----
   sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
@@ -838,6 +891,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   mqttConnected: false,
   lastMqttError: null,
   availableModels: [],
+  llmAvailability: "unspecified",
 
   getActiveSessionId: (agentId: string) => {
     return getAgentState(get(), agentId).activeSessionId;
@@ -1325,6 +1379,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (items.length > 0) params.attached_items = toWireAttachedItems(items);
     const paramsJson = Object.keys(params).length > 0 ? JSON.stringify(params) : "";
 
+    // Ids of the optimistic entries inserted above — used to roll them back
+    // if the MQTT publish fails (the backend never accepted the message).
+    const optimisticIds = new Set([userMsgId, ...items.map((i) => i.clientId ?? "")]);
+
     try {
       await invoke("mqtt_publish_control", {
         agentId,
@@ -1338,8 +1396,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         },
       });
       log.debug("[ChatStore] Message sent via MQTT:", userMsgId);
+      // ADR-050 C5: reconcile the optimistic user message + attachment
+      // entries with the server once the backend has persisted them. See
+      // `scheduleSendReconciliation` — without this the attachment chips
+      // kept their "waiting for server confirmation" spinner until the
+      // session was reopened.
+      if (sessionId) scheduleSendReconciliation(agentId, sessionId);
     } catch (error) {
       log.error("[ChatStore] MQTT message send failed:", error);
+      // The backend never accepted this send — drop the optimistic entries
+      // we just inserted so the user does not see a phantom message with a
+      // perpetual spinner.
+      if (sessionId) {
+        set((state) => {
+          const ss = getSessionState(state, agentId, sessionId!);
+          const removed = ss.messages.filter(
+            (m) => optimisticIds.has(m.id) && m._isOptimistic,
+          ).length;
+          if (removed === 0) return {};
+          return updateSessionState(state, agentId, sessionId!, {
+            messages: ss.messages.filter(
+              (m) => !(optimisticIds.has(m.id) && m._isOptimistic),
+            ),
+            messageTotal: Math.max(0, ss.messageTotal - removed),
+            messageLimit: Math.max(0, ss.messageLimit - removed),
+          });
+        });
+      }
       // Transient client-side error - show a toast, don't pollute the
       // messages array (sliding window over JSONL).
       showToast({
@@ -1573,9 +1656,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       // ADR-035 Phase 3: no HTTP incremental endpoint
 
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
-        { signal: controller.signal },
+      // Bug B v3 fix: chat endpoints proxy through the Runtime and 503
+      // during the boot window between Gateway discovery and Runtime
+      // HTTP port registration. `with503Retry` honours the Gateway's
+      // Retry-After header so a transient 503 at session-load time
+      // recovers transparently instead of flashing an error to the user.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`,
+          { signal: controller.signal },
+        ),
+        {
+          tag: `ChatStore.loadSessionMessages(${agentId}/${sessionId})`,
+          logger: log,
+          signal: controller.signal,
+        },
       );
 
       if (getSessionState(get(), agentId, sessionId).loadSequence !== seq) {
@@ -1915,8 +2010,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Errors are non-fatal - warns and returns without blocking startup.
   fetchSessionState: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
+      // Bug B v3 fix: see `loadSessionMessages` for the rationale.
+      // We pass the AbortSignal through `with503Retry` so the chat
+      // panel can cancel the boot-window retry loop when the user
+      // switches sessions or closes the panel.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`,
+        ),
+        { tag: `ChatStore.fetchSessionState(${agentId}/${sessionId})`, logger: log },
       );
       if (!resp.ok) {
         log.warn(`[ChatStore] fetchSessionState HTTP ${resp.status} for session ${sessionId}`);
@@ -1976,8 +2078,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // fetchSessionState does NOT apply config fields; this function does.
   fetchSessionConfig: async (agentId: string, sessionId: string) => {
     try {
-      const resp = await fetch(
-        `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`,
+      // Bug B v3 fix: same 503 retry rationale as fetchSessionState.
+      const resp = await with503Retry(
+        () => fetch(
+          `${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}/config`,
+        ),
+        { tag: `ChatStore.fetchSessionConfig(${agentId}/${sessionId})`, logger: log },
       );
       if (!resp.ok) {
         log.warn(`[ChatStore] fetchSessionConfig HTTP ${resp.status} for session ${sessionId}`);
@@ -2686,6 +2792,12 @@ export function handleMessageEvent(
     case "session_created": {
       const newSessionId = data.session_id as string | undefined;
       if (!newSessionId) break;
+      const beforeActive = getAgentState(get(), agentId).activeSessionId;
+      log.info("[ChatStore] session_created received", {
+        newSessionId,
+        beforeActive,
+        beforeOpenSessionIds: getAgentState(get(), agentId).openSessionIds,
+      });
       const agentStore = useAgentStore.getState();
       // Refresh the list first so the new entry is rendered.
       agentStore.fetchSessions(agentId).catch((e) => {
@@ -2700,6 +2812,17 @@ export function handleMessageEvent(
       // guaranteed to be in `openSessionIds` and Active by the time
       // this event lands.
       agentStore.activateNewlyCreatedSession(newSessionId, agentId);
+      // Diagnostic: log AFTER state so we can verify the activation ran.
+      // setTimeout(0) ensures the synchronous set() inside openSession
+      // has settled before we read state.
+      setTimeout(() => {
+        const after = getAgentState(useChatStore.getState(), agentId);
+        log.info('[ChatStore] session_created handled', {
+          newSessionId,
+          afterActive: after.activeSessionId,
+          afterOpenSessionIds: after.openSessionIds,
+        });
+      }, 0);
       break;
     }
 
@@ -2830,6 +2953,21 @@ export function handleMessageEvent(
       if (Object.keys(patch).length > 0) {
         log.debug("[ChatStore:DEBUG] session_config applying patch", { sid, patch });
         set((state) => updateSessionState(state, agentId, sid!, patch));
+      }
+      // LLM availability is a global-runtime signal; store at the top
+      // level (not per-session) since every session of the same agent
+      // sees the same value. `data.llm_availability` is the protobuf
+      // wire field (i32 / enum string from JSON conversion).
+      const nextAvail = llmAvailabilityFromWire(data.llm_availability);
+      // `unspecified` means "this message carries no availability info"
+      // (old runtime without the field, or a per-session config
+      // re-publish that wasn't tagged). Never downgrade a known state
+      // back to unspecified — that would hide the banner until the next
+      // availability transition fires.
+      if (nextAvail !== "unspecified" || get().llmAvailability === "unspecified") {
+        if (nextAvail !== get().llmAvailability) {
+          set({ llmAvailability: nextAvail });
+        }
       }
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof data.workspace_id === "string" && data.workspace_id) {

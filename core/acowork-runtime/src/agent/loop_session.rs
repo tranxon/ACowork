@@ -459,8 +459,6 @@ impl super::loop_::AgentLoop {
             ..ChatMessage::assistant(content.clone())
         });
 
-        self.session.turn_counter += 1;
-
         // Note: the primary "Agent returned text response" log is now
         // emitted above with full diagnostic fields. The legacy log here
         // is kept for backward compatibility with existing log parsers.

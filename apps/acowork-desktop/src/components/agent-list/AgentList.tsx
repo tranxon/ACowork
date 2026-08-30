@@ -14,8 +14,9 @@ import { cn } from "../../lib/utils";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
-import { isProcessing, type CloneResponse } from "../../lib/types";
+import { isProcessing, type CloneResponse, type NodeInfo } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
+import { fetchNodes } from "../../lib/gateway-api";
 import {
   ContextMenu,
   useContextMenu,
@@ -66,6 +67,9 @@ export function AgentList({ width }: AgentListProps) {
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
+  // ADR-055 §6.13.3: when installing with >1 online node, the add-menu
+  // switches to a node picker (`NodeInfo[]`); `null` = default menu.
+  const [installNodes, setInstallNodes] = useState<NodeInfo[] | null>(null);
 
   // Track agents currently waiting for the Runtime to become ready.
   // Reading this Set is the dedup gate for `handleStart` — see guard there.
@@ -118,15 +122,22 @@ export function AgentList({ width }: AgentListProps) {
   //      the user happens to click the agent.
   //
   // We key the effect on the *set* of agents that still need a fetch
-  // (running && ready && sessionTitle === undefined), so unrelated store
+  // (running && sessionTitle === undefined), so unrelated store
   // churn (sessions list updates, profile edits, MQTT online flips) does
   // not re-fire the requests.
+  // Bug B v3 fix: only gate on `running` (the user-driven start
+  // transition), not on `ready`. `ready` is pushed via MQTT retained
+  // and arrives asynchronously to Runtime HTTP readiness. Previously,
+  // if the sidebar list re-rendered with `ready=false`, we never
+  // fetched the title even after the Runtime came up — the gate had
+  // latched false. The fetcher `fetchLatestSession` now owns the 503
+  // retry loop via `with503Retry`, so a transient 503 during the boot
+  // window recovers transparently.
   const agentsNeedingTitle = useMemo(() => {
     const ids: string[] = [];
     for (const [id, storage] of Object.entries(agentsMap)) {
       if (
         storage.meta.running &&
-        storage.meta.ready &&
         storage.sessionTitle === undefined
       ) {
         ids.push(id);
@@ -148,13 +159,15 @@ export function AgentList({ width }: AgentListProps) {
     const handler = (e: MouseEvent) => {
       if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
         setAddMenuOpen(false);
+        setInstallNodes(null);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  const handleInstall = async () => {
+  /** Pick a .agent file and install it (optionally to a specific node). */
+  const doInstall = async (nodeId?: string) => {
     try {
       const selected = await open({
         multiple: false,
@@ -162,7 +175,7 @@ export function AgentList({ width }: AgentListProps) {
       });
       if (selected) {
         setInstalling(true);
-        await useAgentStore.getState().installAgent(selected);
+        await useAgentStore.getState().installAgent(selected, nodeId);
         addToast({ type: "success", message: t("agentList.agentInstalled") });
         // Auto-select the newly installed agent
         await fetchAgents();
@@ -177,6 +190,27 @@ export function AgentList({ width }: AgentListProps) {
     } finally {
       setInstalling(false);
     }
+  };
+
+  /**
+   * "Install Agent" menu action (ADR-055 §6.13.3): resolve the online
+   * nodes first. With >1 online node, switch the menu to a node picker;
+   * otherwise install straight to the sole/default node.
+   */
+  const handleInstall = async () => {
+    let onlineNodes: NodeInfo[] = [];
+    try {
+      onlineNodes = (await fetchNodes()).filter((n) => n.online);
+    } catch {
+      // Gateway unreachable — fall through to the default node; the
+      // install itself will surface the connection error.
+    }
+    if (onlineNodes.length > 1) {
+      setInstallNodes(onlineNodes);
+      return;
+    }
+    setAddMenuOpen(false);
+    await doInstall(onlineNodes.length === 1 ? onlineNodes[0].node_id : undefined);
   };
 
   const handleStart = async (agentId: string) => {
@@ -546,7 +580,10 @@ export function AgentList({ width }: AgentListProps) {
 
       <div ref={addMenuRef} className="relative p-1.5">
         <button
-          onClick={() => setAddMenuOpen(!addMenuOpen)}
+          onClick={() => {
+            setAddMenuOpen(!addMenuOpen);
+            setInstallNodes(null);
+          }}
           className="flex w-full items-center justify-center rounded-md bg-nav-control px-0 py-[var(--ui-btn-py)] text-xs font-medium text-zinc-600 transition-colors hover:bg-nav-control-hover dark:text-zinc-300"
           aria-label={t("agentList.ariaLabelAddAgent")}
         >
@@ -554,27 +591,59 @@ export function AgentList({ width }: AgentListProps) {
         </button>
         {addMenuOpen && (
           <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-zinc-200 bg-modal-surface py-1 shadow-lg dark:border-zinc-700">
-            <button
-              onClick={() => {
-                setAddMenuOpen(false);
-                setShowCreateWizard(true);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-            >
-              <Sparkles className="h-3.5 w-3.5" />
-              {t("agentList.createAgent")}
-            </button>
-            <button
-              onClick={() => {
-                setAddMenuOpen(false);
-                void handleInstall();
-              }}
-              disabled={installing}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              {t("agentList.installAgent")}
-            </button>
+            {installNodes !== null ? (
+              <>
+                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                  {t("agentList.selectNode")}
+                </div>
+                {installNodes.map((node) => (
+                  <button
+                    key={node.node_id}
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setInstallNodes(null);
+                      void doInstall(node.node_id);
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                  >
+                    <span className="h-2 w-2 rounded-full bg-[var(--color-accent)]" />
+                    {node.node_id}
+                    <span className="ml-auto text-zinc-400">
+                      {node.os ?? ""} {node.arch ?? ""}
+                    </span>
+                  </button>
+                ))}
+                <button
+                  onClick={() => setInstallNodes(null)}
+                  className="flex w-full items-center gap-2 border-t border-zinc-100 px-3 py-1.5 text-xs text-zinc-400 transition-colors hover:bg-zinc-50 dark:border-zinc-700/50 dark:text-zinc-500 dark:hover:bg-zinc-700/50"
+                >
+                  {t("agentList.back")}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => {
+                    setAddMenuOpen(false);
+                    setShowCreateWizard(true);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {t("agentList.createAgent")}
+                </button>
+                <button
+                  onClick={() => {
+                    void handleInstall();
+                  }}
+                  disabled={installing}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-700/50"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t("agentList.installAgent")}
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>

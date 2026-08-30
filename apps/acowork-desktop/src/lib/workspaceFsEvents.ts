@@ -5,9 +5,11 @@
  * commands/chat_mqtt.rs from MQTT
  * `acowork/agents/{id}/workspaces/{wid}/fs-changed`) into:
  *
- * 1. workspaceStore — per-parent-path incremental `fetchTree` refresh
+ * 1. fileTreeStore — per-parent-path incremental tree fetch
  *    (only directories already present in the cache are re-fetched, so
- *    expanded state is preserved and no unused dirs are pulled).
+ *    expanded state is preserved and no unused dirs are pulled; bursts
+ *    of events for the same parent are coalesced into one refresh per
+ *    `FS_REFRESH_DEBOUNCE_MS` window — see ADR-058 follow-up).
  * 2. fileEditorStore — external-modification conflict UX:
  *    - clean file modified on disk  → silent `refreshFile` (VSCode-style)
  *    - dirty file modified on disk  → re-check disk `modified`+`size`
@@ -27,7 +29,7 @@
  */
 
 import { listen } from "@tauri-apps/api/event";
-import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useFileTreeStore, treeKey, isReadyNode } from "../stores/fileTree";
 import { useFileEditorStore } from "../stores/fileEditorStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { DEFAULT_GATEWAY_URL } from "./config";
@@ -58,6 +60,72 @@ const ECHO_SUPPRESS_MS = 1500;
 
 /** Minimum spacing between full tree re-syncs (dedupe reconnect storms). */
 const FULL_SYNC_DEDUPE_MS = 2000;
+
+/**
+ * Per-parent debounce window for incremental tree refreshes (ms).
+ *
+ * The Runtime aggregates fs changes into 500ms windows, but a single
+ * user operation that spans multiple windows (bulk paste, `git
+ * checkout`, a build writing N files) still produces several fs-changed
+ * events in quick succession. Refreshing the same parent for each event
+ * = N aborts + N refetches where only the last one matters. We coalesce
+ * per-parent refreshes into one authoritative pull per window.
+ *
+ * Must be >= the Runtime aggregation window so an operation spanning
+ * multiple windows still coalesces; small enough that external changes
+ * still appear promptly (the tree is not the user's active surface for
+ * external edits, so a half-second delay is invisible in practice).
+ */
+export const FS_REFRESH_DEBOUNCE_MS = 600;
+
+/** Debounced per-parent refresh bookkeeping (key = agent\0ws\0parent). */
+interface PendingRefresh {
+    timer: ReturnType<typeof setTimeout>;
+    agentId: string;
+    workspaceId: string;
+    parent: string;
+}
+const _pendingRefreshes = new Map<string, PendingRefresh>();
+
+/** Fire one pending refresh (parent was already checked at schedule time). */
+function fireRefresh(key: string): void {
+    const pending = _pendingRefreshes.get(key);
+    if (!pending) return;
+    _pendingRefreshes.delete(key);
+    const treeStore = useFileTreeStore.getState();
+    // Re-check cache presence at fire time — the parent may have been
+    // evicted / invalidated while we were debouncing.
+    const cacheKey = treeKey(pending.agentId, pending.workspaceId, pending.parent);
+    if (!isReadyNode(treeStore.getNode(cacheKey))) return;
+    treeStore
+        .refresh(pending.agentId, pending.workspaceId, pending.parent)
+        .catch((e: unknown) => log.error("[WorkspaceFsEvents] incremental fetchTree failed:", e));
+}
+
+/** Coalesce burst fs-changed events into one refresh per parent. */
+function refreshParentDebounced(agentId: string, workspaceId: string, parent: string): void {
+    const key = `${agentId}\u0000${workspaceId}\u0000${parent}`;
+    const existing = _pendingRefreshes.get(key);
+    if (existing) {
+        // More changes for the same parent are coming — slide the window.
+        clearTimeout(existing.timer);
+        existing.timer = setTimeout(() => fireRefresh(key), FS_REFRESH_DEBOUNCE_MS);
+        return;
+    }
+    const entry: PendingRefresh = {
+        timer: setTimeout(() => fireRefresh(key), FS_REFRESH_DEBOUNCE_MS),
+        agentId,
+        workspaceId,
+        parent,
+    };
+    _pendingRefreshes.set(key, entry);
+}
+
+/** Cancel pending debounced refreshes (listener re-init / dispose). */
+function clearPendingRefreshes(): void {
+    for (const { timer } of _pendingRefreshes.values()) clearTimeout(timer);
+    _pendingRefreshes.clear();
+}
 
 let _fsUnlisten: (() => void) | null = null;
 let _statusUnlisten: (() => void) | null = null;
@@ -176,6 +244,10 @@ export function disposeWorkspaceFsListener(): void {
     // listener lifecycle (a retained "online" after re-init would
     // otherwise read as "was online" and mask a later wake).
     _prevAgentStatus.clear();
+    // Drop any debounced refreshes scheduled by the old listener —
+    // they were captured with the old stores' closures and would fire
+    // pointlessly after re-init.
+    clearPendingRefreshes();
 }
 
 // ── fs-changed event handling ────────────────────────────────────────────
@@ -201,28 +273,39 @@ export async function handleFsChanged(ev: WorkspaceFsChangeEvent): Promise<void>
  * root. Expanded state is preserved because no other nodes are touched.
  */
 function refreshTreesForChanges(ev: WorkspaceFsChangeEvent): void {
-    const store = useWorkspaceStore.getState();
+    const treeStore = useFileTreeStore.getState();
     const parents = new Set<string>();
     for (const change of ev.changes) {
         const idx = change.path.lastIndexOf("/");
         parents.add(idx >= 0 ? change.path.substring(0, idx) : "");
     }
 
-    let refreshed = 0;
+    let scheduled = 0;
     for (const parent of parents) {
-        const key = `${ev.agent_id}:${ev.workspace_id}:${parent}`;
+        const key = treeKey(ev.agent_id, ev.workspace_id, parent);
         // Skip parents we have never loaded — nothing visible to update.
-        if (!(key in store.treeCache)) continue;
-        // fetchTree dedupes in-flight requests per cache key.
-        store.fetchTree(ev.agent_id, ev.workspace_id, parent).catch((e) =>
-            log.error("[WorkspaceFsEvents] incremental fetchTree failed:", e),
-        );
-        refreshed++;
+        if (!isReadyNode(treeStore.getNode(key))) continue;
+        // Force a fresh fetch — the fs-watcher just told us the
+        // directory's contents changed (create / rename / delete on
+        // disk), so the cached entries are stale by definition. Plain
+        // `fetch()` would short-circuit on a hit inside the SWR fresh
+        // window and the new entry would be invisible until the next
+        // background revalidation. `refresh()` drops the entry first,
+        // guaranteeing an authoritative pull. The same per-key dedup
+        // (via inflight promise sharing) still applies.
+        //
+        // Debounced per parent: a burst of fs-changed events (bulk
+        // paste / git operation spanning multiple Runtime aggregation
+        // windows) would otherwise abort+refetch the same parent N
+        // times; coalescing keeps it to one authoritative pull per
+        // window.
+        refreshParentDebounced(ev.agent_id, ev.workspace_id, parent);
+        scheduled++;
     }
-    if (refreshed > 0) {
+    if (scheduled > 0) {
         log.debug(
-            "[WorkspaceFsEvents] incremental tree refresh",
-            { agent: ev.agent_id, workspace: ev.workspace_id, dirs: refreshed },
+            "[WorkspaceFsEvents] scheduled incremental tree refresh",
+            { agent: ev.agent_id, workspace: ev.workspace_id, dirs: scheduled },
         );
     }
 }
@@ -362,13 +445,19 @@ export function scheduleFullTreeSync(reason: string): void {
     if (now - _lastFullSyncAt < FULL_SYNC_DEDUPE_MS) return;
     _lastFullSyncAt = now;
 
-    const store = useWorkspaceStore.getState();
+    const treeStore = useFileTreeStore.getState();
+    // Collect every (agent, workspace) pair that currently has at
+    // least one cached node. The keys are NUL-delimited (see
+    // fileTree/types.ts), so a safe split is split("\u0000").
     const pairs = new Set<string>();
-    for (const key of Object.keys(store.treeCache)) {
-        // key = `${agentId}:${workspaceId}:${path}` — workspace ids and
-        // paths cannot contain ':' (ids are `ws-<hex>` / `__agent_home__`),
-        // so a greedy first-two-segments split is safe.
-        const [agentId, workspaceId] = key.split(":");
+    for (const key of Object.keys(treeStore.nodes)) {
+        const idx = key.indexOf("\u0000");
+        if (idx < 0) continue;
+        const agentId = key.substring(0, idx);
+        const rest = key.substring(idx + 1);
+        const wsIdx = rest.indexOf("\u0000");
+        if (wsIdx < 0) continue;
+        const workspaceId = rest.substring(0, wsIdx);
         pairs.add(`${agentId}\u0000${workspaceId}`);
     }
     if (pairs.size === 0) return;
@@ -376,8 +465,13 @@ export function scheduleFullTreeSync(reason: string): void {
     log.debug("[WorkspaceFsEvents] full tree re-sync", { reason, pairs: pairs.size });
     for (const pair of pairs) {
         const [agentId, workspaceId] = pair.split("\u0000");
-        store.invalidateTreeCache(agentId);
-        store.fetchTree(agentId, workspaceId, "").catch((e) =>
+        // `invalidate(agentId)` already drops every cached entry for the
+        // agent, so a plain `fetch()` would not hit the SWR fast path.
+        // Use `refresh()` for consistency with the authoritative-refresh
+        // contract (it's effectively the same call here, but keeps the
+        // intent obvious at every fs-event call site).
+        treeStore.invalidate(agentId);
+        treeStore.refresh(agentId, workspaceId, "").catch((e: unknown) =>
             log.error("[WorkspaceFsEvents] full sync fetchTree failed:", e),
         );
     }

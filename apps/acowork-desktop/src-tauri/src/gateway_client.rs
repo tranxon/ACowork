@@ -7,6 +7,7 @@
 //! avoid hardcoded duplication.
 
 use acowork_core::defaults;
+use acowork_core::error_codes::{StructuredErrorBody, StructuredErrorCode};
 use anyhow::Result;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
@@ -40,13 +41,64 @@ struct GatewayErrorResponse {
     error: String,
     #[allow(dead_code)]
     code: u16,
+    /// ADR-059 §6.3: structured protocol error body, present on
+    /// `dependency_not_ready` / `resource_version_conflict` etc.
+    structured: Option<StructuredErrorBody>,
 }
+
+/// Structured Gateway API error (ADR-059 §6.3).
+///
+/// Carries the machine-readable `structured.code` so callers can branch
+/// on protocol codes instead of string-matching the human-readable
+/// `error` text (the old "503 / never enrolled" heuristic).
+#[derive(Debug, Clone)]
+pub struct GatewayApiError {
+    pub status: u16,
+    pub error: String,
+    pub structured: Option<StructuredErrorBody>,
+}
+
+impl GatewayApiError {
+    /// `true` when the error carries the protocol code `dependency_not_ready`
+    /// (bootstrap not READY yet — retry once phase = READY, ADR-059 §6.3).
+    pub fn is_dependency_not_ready(&self) -> bool {
+        matches!(
+            self.structured.as_ref().map(|s| &s.code),
+            Some(StructuredErrorCode::DependencyNotReady)
+        )
+    }
+
+    /// `true` when the client's `expected_version` was stale (Gateway
+    /// restarted since the snapshot was read). Currently unused — the
+    /// Desktop's install path sends no `expected_version` — but kept as
+    /// the symmetric counterpart of `is_dependency_not_ready` for future
+    /// mutation callers (ADR-059 §6.3).
+    #[allow(dead_code)]
+    pub fn is_resource_version_conflict(&self) -> bool {
+        matches!(
+            self.structured.as_ref().map(|s| &s.code),
+            Some(StructuredErrorCode::ResourceVersionConflict)
+        )
+    }
+}
+
+impl std::fmt::Display for GatewayApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.structured {
+            Some(s) => write!(f, "Gateway {}: {} ({:?})", self.status, self.error, s.code),
+            None => write!(f, "Gateway {}: {}", self.status, self.error),
+        }
+    }
+}
+
+impl std::error::Error for GatewayApiError {}
 
 /// Unified response parser for all Gateway API calls.
 ///
 /// - Success (2xx): deserializes the response body into `T`.
-/// - Failure: attempts to extract the `error` field from Gateway's
-///   `ApiError` JSON format for a clear message; falls back to raw text.
+/// - Failure: extracts the Gateway `ApiError` JSON (human-readable
+///   `error` + structured protocol body) into a [`GatewayApiError`];
+///   falls back to raw text when the body is not JSON.
 async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T> {
     let status = resp.status();
     if status.is_success() {
@@ -56,7 +108,11 @@ async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T
     } else {
         let text = resp.text().await.unwrap_or_default();
         match serde_json::from_str::<GatewayErrorResponse>(&text) {
-            Ok(err) => anyhow::bail!("Gateway {}: {}", status, err.error),
+            Ok(err) => Err(anyhow::Error::new(GatewayApiError {
+                status: status.as_u16(),
+                error: err.error,
+                structured: err.structured,
+            })),
             Err(_) => anyhow::bail!("Gateway {}: {}", status, text),
         }
     }
@@ -66,6 +122,24 @@ async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T
 pub struct GatewayClient {
     client: reqwest::Client,
     base_url: String,
+}
+
+/// Minimal mirror of Gateway's `SystemStatusResponse` — only the fields
+/// the Desktop actually consumes (ADR-055 D3 §6.3: `mqtt_port` for
+/// dynamic broker discovery; Phase 5a: MQTT CONNECT credentials when
+/// `mqtt.auth_enabled` is on). Kept local so the Desktop never depends
+/// on the `acowork-gateway` crate.
+#[derive(Debug, Deserialize)]
+pub struct SystemStatusInfo {
+    pub mqtt_port: u16,
+    /// ADR-055 Phase 5a: MQTT CONNECT username — present only when
+    /// the Gateway has `mqtt.auth_enabled` on (None otherwise).
+    #[serde(default)]
+    pub mqtt_username: Option<String>,
+    /// ADR-055 Phase 5a: MQTT CONNECT password (http_token) — present
+    /// only when the Gateway has `mqtt.auth_enabled` on (None otherwise).
+    #[serde(default)]
+    pub mqtt_password: Option<String>,
 }
 
 impl GatewayClient {
@@ -97,6 +171,20 @@ impl GatewayClient {
 
     // ── Agent Management ───────────────────────────────────────────────
 
+    /// `GET /api/status` — system status (ADR-055 D3 §6.3).
+    ///
+    /// Used by `connect_mqtt` to derive the MQTT broker port dynamically
+    /// instead of assuming the default 19875 (L3-6 residual gap —
+    /// ADR-058 W4 fixed the host derivation; this closes the port half).
+    pub async fn system_status(&self) -> Result<SystemStatusInfo> {
+        let resp = self
+            .client
+            .get(format!("{}/api/status", self.base_url))
+            .send()
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
     /// `GET /api/agents`
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
         let resp = self
@@ -118,12 +206,23 @@ impl GatewayClient {
     }
 
     /// `POST /api/agents/install` — upload .agent package via multipart
+    ///
+    /// `node_id` is the target node (ADR-055 §6.13.3); `None` lets the
+    /// Gateway default to `local`.
+    ///
+    /// ADR-059 §6: answers HTTP 202 with an [`OperationAck`]; the actual
+    /// install runs asynchronously on the node and completes with a
+    /// NodeEvent reply whose `request_id` equals the ack's
+    /// `operation_id`. A structured `dependency_not_ready` error is
+    /// returned (HTTP 409) while the node control plane has not
+    /// announced readiness.
     pub async fn install_agent(
         &self,
         package_bytes: &[u8],
         dev_mode: bool,
-    ) -> Result<GenericMessageResponse> {
-        let form = reqwest::multipart::Form::new()
+        node_id: Option<&str>,
+    ) -> Result<OperationAck> {
+        let mut form = reqwest::multipart::Form::new()
             .part(
                 "package",
                 reqwest::multipart::Part::bytes(package_bytes.to_vec())
@@ -132,6 +231,9 @@ impl GatewayClient {
                     .map_err(|e| anyhow::anyhow!("Invalid mime: {}", e))?,
             )
             .text("dev_mode", dev_mode.to_string());
+        if let Some(node) = node_id {
+            form = form.text("node_id", node.to_string());
+        }
 
         let resp = self
             .client
@@ -140,6 +242,40 @@ impl GatewayClient {
             .send()
             .await?;
         parse_gateway_response(resp).await
+    }
+
+    /// ADR-059 §6 — wait until the agent appears in the Gateway
+    /// inventory (`GET /api/agents/{id}` returns 200).
+    ///
+    /// The Gateway aggregates the node's retained `InstalledAgentInfo`
+    /// on install completion, so a 200 here is the authoritative
+    /// "installed" signal — no fixed sleeps, no phase guessing. Used by
+    /// the onboarding flow to wait out the async install operations
+    /// submitted in parallel.
+    pub async fn wait_for_agent_installed(
+        &self,
+        agent_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<AgentDetailResponse> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let resp = self
+                .client
+                .get(format!("{}/api/agents/{}", self.base_url, agent_id))
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                return parse_gateway_response(resp).await;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "Agent '{}' did not appear in the Gateway inventory within {:.0}s",
+                    agent_id,
+                    timeout.as_secs_f64()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
     }
 
     /// `POST /api/agents/:id/manifest/avatar` — write avatar / builtin_avatar
@@ -461,6 +597,19 @@ impl GatewayClient {
             .and_then(|n| n.to_str())
             .unwrap_or("attachment.bin");
 
+        // Final existence pre-check before hitting `tokio::fs::read`.
+        // `get_clipboard_file_paths` already filters non-existent paths,
+        // but a file may be deleted between that call and now (race),
+        // and the desktop dialog (`open`) could in theory hand back a
+        // stale path on some platforms. We surface a clean error
+        // message instead of letting `tokio::fs::read` produce the
+        // raw `os error 53/161` text the user previously saw in the
+        // console.
+        let path = std::path::Path::new(file_path);
+        if !path.exists() {
+            return Err(anyhow::anyhow!("File not found: {}", file_path));
+        }
+
         let file_bytes = tokio::fs::read(file_path).await?;
         let part = reqwest::multipart::Part::bytes(file_bytes)
             .file_name(file_name.to_string())
@@ -505,6 +654,16 @@ impl GatewayClient {
     }
 
     /// `POST /api/providers` (with optional base_url, default_model, models, model_capabilities, and custom flag)
+    ///
+    /// ADR-059 §7.3: the Gateway now answers with an [`OperationAck`]
+    /// (operation_id / state / resource_version / terminal_error) on
+    /// `POST /api/providers` — *not* the legacy `MessageResponse`. Older
+    /// Desktop builds parsed this as `GenericMessageResponse` and the
+    /// `reqwest::json` decoder silently rejected it as
+    /// `"error decoding response body"`, leaving the user with the
+    /// "Failed to parse Gateway response" alert even though the
+    /// provider had been stored successfully. `PUT`/`DELETE`
+    /// `/api/providers/:provider` still answer with `MessageResponse`.
     #[allow(clippy::too_many_arguments)]
     pub async fn add_key(
         &self,
@@ -516,7 +675,7 @@ impl GatewayClient {
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
         custom: bool,
-    ) -> Result<GenericMessageResponse> {
+    ) -> Result<OperationAck> {
         let mut body = serde_json::json!({ "provider": provider, "key": key });
         if custom {
             body["custom"] = serde_json::Value::Bool(true);
@@ -782,6 +941,35 @@ pub struct GenericMessageResponse {
     pub message: String,
 }
 
+/// ADR-059 §7.3 — mirror of the Gateway's `OperationAck`.
+///
+/// The full `acowork_gateway::http::routes::OperationAck` is not
+/// re-exported from `acowork-core` (the Desktop doesn't depend on the
+/// Gateway crate), so the wire shape is mirrored here so `reqwest::json`
+/// can decode the response on `POST /api/providers`. Wire fields must
+/// stay in sync with the Gateway's `OperationAck` (operation_id,
+/// state, resource_version, terminal_error).
+///
+/// ADR-059 §7.3/§7.4 — unified mutation ack returned by the Gateway's
+/// operation-bearing write APIs (`POST /api/agents/install` answers
+/// HTTP 202 with this body). The ack only carries protocol-level fields
+/// (OCP §5.4.4): the operation id, its current state, the post-commit
+/// resource version and the structured terminal error when the
+/// operation failed. The client correlates the asynchronous outcome
+/// via `operation_id` (the node's NodeEvent reply echoes it back as
+/// `request_id`, ADR-059 §6.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationAck {
+    pub operation_id: String,
+    /// Operation state in snake_case (`accepted` / `committed` /
+    /// `running` / `completed` / `failed`).
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<StructuredErrorBody>,
+}
+
 /// Clone response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloneResponse {
@@ -789,16 +977,34 @@ pub struct CloneResponse {
     pub install_path: String,
 }
 
-/// A single check item from publish prepare
+/// A single check item from publish prepare (ADR-055 Phase 3b).
+///
+/// Wire shape mirrors `acowork_node::package::publish::CheckItem`
+/// (Node is the source of truth — Gateway's `PrepareResponse` forwards
+/// the node's result JSON verbatim via `Vec<serde_json::Value>`, then
+/// serde re-parses each element into this struct). Field names MUST
+/// stay in sync with the Node side: `name` and `detail` — not `field`
+/// / `message`. The earlier `field`/`message` shape was stale from a
+/// pre-ADR-055 revision where the Gateway itself implemented the
+/// checks; PublishWizard then read `item.field`/`item.message` and
+/// silently got `undefined`, painting every check item with the
+/// "error" red `XCircle` regardless of real status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckItem {
-    pub field: String,
+    /// Check name (e.g. "manifest.agent_id", "manifest.version").
+    pub name: String,
+    /// "ok" / "warning" / "error" (lowercase, snake_case-ish).
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
+    /// Optional human-readable detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
-/// Publish prepare response
+/// Publish prepare response.
+///
+/// Wire shape mirrors `acowork_gateway::http::publish_api::PrepareResponse`
+/// which itself forwards the Node's `PrepareResult` JSON. Field names
+/// MUST stay in sync with `acowork_node::package::publish::PrepareResult`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreparePublishResponse {
     pub checks: Vec<CheckItem>,
@@ -837,8 +1043,16 @@ pub struct VaultKeyEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<String>,
     /// Per-model capabilities
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub model_capabilities: HashMap<String, ModelCapabilities>,
+    ///
+    /// ADR-059 §7.3 mirror — the Gateway's `ProviderEntryResponse` types
+    /// this field as `Option<HashMap<...>>` (the field is absent on the
+    /// wire until the provider has at least one user-configured model
+    /// capability override; the earlier `HashMap<...>` shape always
+    /// serialized an empty map, which produced spurious `model_capabilities: {}`
+    /// entries on every round-trip). `None` and `Some(empty)` are
+    /// normalised to an empty map on read; both representations show up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_capabilities: Option<HashMap<String, ModelCapabilities>>,
     /// Compact model for LLM summarization (ADR-010). None = use current model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_model: Option<String>,

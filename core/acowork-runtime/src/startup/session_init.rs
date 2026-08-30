@@ -49,6 +49,68 @@ pub(crate) async fn phase_b_init_session(
         .unwrap_or_default()
         .unwrap_or_default();
 
+    // ADR-033 + Bug B fix v4: resolve the initial model/provider from
+    // `available_cache` BEFORE creating a new conversation. Without this
+    // a fresh session persisted `model = None, provider = None`, and the
+    // session_task would later bind a noop provider for the entire
+    // session lifetime (Bug B: first chat after onboarding failed with
+    // "unexpected error").
+    //
+    // The pull loop in `agent_init::phase_a` blocks until either the
+    // Gateway returns 200 + a non-empty `AvailableProviders` snapshot,
+    // or the pull deadline (PULL_MAX_DURATION) elapses. By the time we
+    // reach here the cache should normally contain a usable provider;
+    // the `None` fallback below is only hit on Gateway failure / on the
+    // cold-start race where the Gateway is still booting when the
+    // Runtime spawns (the active pull then keeps retrying and the
+    // next session creation picks up the cache automatically).
+    let cache_initial_provider_model: Option<(String, String)> =
+        if let Some(ref cache) = ctx.available_cache {
+            // Try once with a short grace period — the pull in phase_a
+            // usually already populated the cache, but in pathological
+            // startup races (Runtime spawned before phase_a even
+            // started the pull) we still want to give it a chance.
+            // Bounded so a misbehaving Gateway cannot block Phase B.
+            let cache_grace = std::time::Duration::from_secs(2);
+            let grace_start = std::time::Instant::now();
+            loop {
+                {
+                    let cache_read = cache.read().await;
+                    if let Some(ref available) = cache_read.providers {
+                        if let Some(found) = available.providers.iter().find_map(|p| {
+                            if p.api_key.is_empty() {
+                                None
+                            } else {
+                                p.models
+                                    .first()
+                                    .map(|m| (p.id.clone(), m.id.clone()))
+                            }
+                        }) {
+                            break Some(found);
+                        }
+                    }
+                }
+                if grace_start.elapsed() >= cache_grace {
+                    break None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        } else {
+            None
+        };
+    if let Some((ref pid, ref mid)) = cache_initial_provider_model {
+        tracing::info!(
+            provider_id = %pid,
+            model_id = %mid,
+            "Resolved initial session model/provider from available_cache"
+        );
+    } else {
+        tracing::warn!(
+            "available_cache has no usable provider when session_init runs; \
+             new session will persist model=None, provider=None (legacy fallback)"
+        );
+    }
+
     let conversation_session =
         if let Some(latest_id) = crate::conversation::find_latest_session(&conversations_dir) {
             tracing::info!(session_id = %latest_id, "Resuming latest conversation session");
@@ -99,14 +161,21 @@ pub(crate) async fn phase_b_init_session(
         } else {
             let new_id = crate::conversation::generate_session_id();
             tracing::info!(session_id = %new_id, "Creating new conversation session");
+            // Use the cache-resolved values when present (Bug B fix v4);
+            // fall back to None so the legacy validation / noop path
+            // takes over on Gateway failure.
+            let (initial_model, initial_provider) = match cache_initial_provider_model {
+                Some((pid, mid)) => (Some(mid), Some(pid)),
+                None => (None, None),
+            };
             let (conv, config_rx, state_rx) = crate::conversation::ConversationSession::new(
                 work_dir_path,
                 &new_id,
                 crate::conversation::SessionConfig {
                     agent_id: config.agent_id.clone(),
                     workspace_id: None,
-                    model: None,
-                    provider: None,
+                    model: initial_model,
+                    provider: initial_provider,
                 },
                 agent_cfg.max_sessions.unwrap_or(config.max_sessions),
                 committed_lines.clone(),

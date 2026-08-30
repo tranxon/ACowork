@@ -1,7 +1,7 @@
 # ADR-055：Runtime 远程化部署 - Node Agent 拓扑
 
-**状态**：已定案（待实施）
-**日期**：2026-08-23
+**状态**：已定案（Phase 1–5a 实施完成；Phase 5b 待办）
+**日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差）
 **决策者**：大鱼
 **前置**：
 - [ADR-033](./ADR-033-mqtt-replace-grpc-websocket.md)（MQTT 替换 gRPC + WebSocket）
@@ -30,7 +30,7 @@
 | # | 决策 | 理由 |
 |---|------|------|
 | **D1** | **单一拓扑协议：Gateway 本机也是一个 Node（local node），单机部署与分布式部署走同一套协议** | 消除「本地模式 / 远程模式」双代码路径的架构分叉；本地模式 = Gateway spawn 一个 local Node Agent，远程模式 = 用户在目标机器手动启动 Node Agent，Gateway 侧代码零差异 |
-| **D2** | **Runtime 进程保持 `127.0.0.1`-only，网络暴露职责上移给 Node Agent** | Runtime 的 HTTP server 继续绑定 loopback，Node Agent 作为节点上的反向代理 + 鉴权边界统一对外。Runtime 代码几乎零改动，安全面收敛到一个组件 |
+| **D2** | **Runtime 进程保持 `127.0.0.1`-only，网络暴露职责上移给 Node Agent** | Runtime 的 HTTP server 继续绑定 loopback，Node Agent 作为节点上的反向代理 + 鉴权边界统一对外。Runtime 就网络暴露方式而言零改动（其余触碰点——寻址参数化、配额自治、新端点——见 §9 修改清单），安全面收敛到一个组件 |
 | **D3** | **引入显式 Endpoint 模型（advertise address），替换所有隐式 `127.0.0.1` 拼接** | 分布式拓扑的根基是「网络寻址必须显式声明」。每个服务提供者（Runtime HTTP、embed、LSP relay）注册时上报**可达 endpoint**（`scheme://host:port`），而不是裸端口号 |
 
 ```mermaid
@@ -154,12 +154,13 @@ Gateway 侧直接触碰共享领地的代码点（ADR-034 规则 3「Gateway 不
 |---|---------|-----------|
 | L3-1 | `gateway/http/proxy.rs:1365,1367,1469,1527` | 反向代理目标 `http://127.0.0.1:{http_port}`（4 处）；`RuntimeHttpRegistry` 只存 `u16` 端口号，**没有 host 概念** |
 | L3-2 | `gateway/mqtt/sidecar.rs:10` | embed sidecar endpoint `http://127.0.0.1:{port}/v1` |
-| L3-3 | `gateway/mqtt/global_resources_publisher.rs:396-445` | `acowork/global/embedding_models` 与 `acowork/global/lsps` retained 消息中的 endpoint 均为 `http://127.0.0.1:{port}` |
+| L3-3 | `gateway/mqtt/global_resources_publisher.rs:432,451` | `acowork/global/embedding_models` 与 `acowork/global/lsps` retained 消息中的 endpoint 均为 `http://127.0.0.1:{port}` |
 | L3-4 | `runtime/http/server.rs:505-508` | Runtime HTTP server 绑定 `127.0.0.1:0`（设计上 localhost-only） |
-| L3-5 | `runtime/startup/agent_init.rs:244` | Runtime MQTT 连接 host 硬编码 `"127.0.0.1"`（`MqttConnectConfig.host` 字段已存在，仅调用方硬编码） |
-| L3-6 | `desktop/src-tauri/src/mqtt_client.rs:508-517` | Desktop MQTT `connect_default` 硬编码 `127.0.0.1:19875`——**Desktop 已支持 remote gateway HTTP 模式（`set_gateway_config`），但 MQTT 连不上**，是当前既有的隐藏缺陷 |
+| L3-5 | `runtime/startup/agent_init.rs:264` | Runtime MQTT 连接 host 硬编码 `"127.0.0.1"`（`MqttConnectConfig.host` 字段已存在，仅调用方硬编码） |
+| L3-6 | `desktop/src-tauri/src/mqtt_client.rs:513-528` + `commands/chat_mqtt.rs:45-53` | **已被 ADR-058 W4 部分修复**：`connect_mqtt` 现从 Gateway HTTP base URL 派生 broker host（Remote 隧道场景），`connect_default` 已成 dead code（`#[allow(dead_code)]`，仅测试调用）。**残留缺口**：broker 端口仍取默认 `GATEWAY_MQTT_PORT`（假设隧道转发同端口，`chat_mqtt.rs:48-50` 注释自认此假设），未从 `/api/status` 动态获取 `mqtt_port` |
 | L3-7 | `gateway/config.rs:142` | broker 监听 host 默认 `127.0.0.1`（远程 Runtime 连不进来） |
 | L3-8 | `gateway/lifecycle/process.rs:106-108` + `find_available_debug_port` | debug port 在 Gateway 本机探测分配（ADR-048 后已是纯 hint，影响小） |
+| L3-9 | `gateway/handlers/server.rs:412,427` | **AgentHello 回执内嵌 endpoint 硬编码（embed/LSP endpoint 的第三条下发路径）**：`handle_agent_hello` 构造 `embed_endpoint = http://127.0.0.1:{port}/v1` 与 `lsp_relay_endpoint = http://127.0.0.1:{port}`，经 `GatewayResponse::AgentHelloResult`（:444-462）在 MQTT 握手回执中下发给 Runtime（消费点：`runtime/agent/session/session_task.rs:239`、`runtime/tools/builtin/mod.rs:224`）。与 L3-2/L3-3 并列，遗漏此条则 Phase 1 修完后远程 Runtime 的 bootstrap 仍拿到打不通的 localhost 地址 |
 
 ### L4. Sidecar 拓扑假设（两个 sidecar 都在 Gateway 机器）
 
@@ -199,7 +200,7 @@ Gateway 侧直接触碰共享领地的代码点（ADR-034 规则 3「Gateway 不
 - **数据面反代协议**：`proxy.rs` 的 40+ 条反代路由是纯 HTTP 转发，与 Runtime 位置无关（只需修正目标 URL 构造）；
 - **Runtime HTTP server 端点**：sessions/messages/memory/config/tools/files/debug 全套已在 Runtime 侧（ADR-040 use-case 层），无需搬迁；
 - **idle watcher / auto-sleep**：Runtime 自治超时退出，与父进程无关；
-- **Desktop remote gateway HTTP 模式**：`set_gateway_config` 已存在（只差 MQTT 寻址，L3-6）。
+- **Desktop remote gateway HTTP 模式**：`set_gateway_config` 已存在（MQTT host 派生已由 ADR-058 W4 完成，L3-6 仅剩 mqtt_port 动态化增量）。
 
 ---
 
@@ -241,7 +242,7 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 
 每个可运行 Runtime 的机器部署一个轻量常驻服务 `acowork-node`，是 Gateway 在节点上的「手足延伸」。
 
-- ✅ **复用已验证的模式**：`lifecycle/embed_supervisor.rs` 已解决进程发现、健康检查、崩溃恢复、PID-aware reaper、startup grace window 全部难题（ADR-019 明确说「复用成熟模式」）；`lifecycle/manager.rs` + `package_manager/` 的代码几乎可以整体迁移
+- ✅ **复用已验证的模式**：`lifecycle/embed_supervisor.rs` 已解决进程发现、健康检查、崩溃恢复、PID-aware reaper、startup grace window 全部难题（ADR-019 明确说「复用成熟模式」）；`lifecycle/manager.rs` + `package_manager/` 的**核心逻辑**可整体迁移（注意：两模块现有 15 处 `crate::gateway::state`、9 处 `GatewayError`、3 处 `SharedState` 硬依赖，迁移时须剥离重构为 Node 自有状态与错误类型——依赖红线见 §6.20，该工作量已计入 Phase 2b）
 - ✅ **单一协议拓扑**：Node Agent 与 Gateway 之间继续 MQTT（控制面）+ HTTP（package 拉取），零新传输
 - ✅ **IoT 模型完整闭环**：Node = 边缘网关，Runtime = 设备，Gateway = 云。与 ADR-033 的隐喻完全同构
 - ✅ 功能零退化：start/stop、auto-spawn、package 管理、skills import 全部保留（只是执行位置变了）
@@ -289,7 +290,7 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 | **Gateway** | 机器 A（任意） | ① MQTT broker 宿主；② HTTP 统一入口（Desktop 唯一入口 + Node package 分发源）；③ 全局资源权威（providers/MCP/search/user profile/embedding 模型库）；④ Node 注册与路由（agent_id → node 的映射） |
 | **Node Agent（新）** | 每台 Runtime 机器（含 Gateway 本机） | ① Runtime 进程生命周期（spawn/kill/reap/探活——代码迁移自 `lifecycle/`）；② package 本地管理（install/uninstall/clone/skills/avatar——迁移自 `package_manager/` + `http/skills_api.rs` + `http/agents.rs` 的 manifest 部分）；③ 节点反向代理（对外一个 HTTP 端口 `:19900`，路由 `/agents/{id}/*` 到本机各 Runtime 的 loopback 端口）；④ 节点本地 Sidecar 宿主（LSP relay）；⑤ 节点文件系统浏览（fs_browse 代理）；⑥ 节点状态上报 |
 | **Runtime** | Node 所在机器 | 不变（仍为 loopback-only 进程）。唯一改动：MQTT host 参数化 + HTTP 注册消息升级为 endpoint |
-| **Desktop** | 任意 | MQTT 连接地址从 Gateway 连接配置派生（修 L3-6） |
+| **Desktop** | 任意 | MQTT 连接地址从 Gateway 连接配置派生（host 派生已由 ADR-058 W4 完成，本 ADR 补 `mqtt_port` 动态化，修 L3-6 残留缺口） |
 
 ### 6.2 MQTT Topic 扩展（节点控制面）
 
@@ -298,6 +299,13 @@ Gateway 通过 SSH 连到目标机器执行 spawn/kill/安装。
 ```text
 acowork/nodes/{node_id}/status                      QoS1 Retained   节点上线状态（含 LWT 遗嘱：offline）
 acowork/nodes/{node_id}/info                        QoS1 Retained   节点元数据（hostname、os、arch、runtime_version、能力集）
+acowork/nodes/{node_id}/enroll                     QoS1            Node → Gateway 注册请求（Phase 5a）：
+                                                                   protobuf DataEnvelope<NodeEnroll>
+                                                                   { node_id, machine_uid, os, arch, node_version,
+                                                                     protocol_version, capabilities, enrollment_token }
+acowork/nodes/{node_id}/enroll_result              QoS1            Gateway → Node 注册回执（per-request，不 retained）：
+                                                                   DataEnvelope<NodeEnrollResult>
+                                                                   { node_id, machine_uid, node_token, status, message }
 acowork/nodes/{node_id}/agents/{id}/control/{cmd}   QoS1            Gateway → Node 的 agent 生命周期指令
                                                                     cmd ∈ {install, uninstall, start, stop,
                                                                             start_debug, skills_import,
@@ -314,6 +322,7 @@ acowork/nodes/{node_id}/lsps                        QoS1 Retained   节点本地
 - **安装是异步流程**：`install` 指令 → Node 从 Gateway HTTP `GET /api/packages/{agent_id}/download` 拉取 `.acw` 包（带节点令牌）→ 本机解压 → `events` 上报 `install_completed`。Desktop 通过订阅 events 或轮询 `GET /api/agents/{id}` 观察进度。同步语义的 HTTP `POST /api/agents/install` 改为 `202 Accepted` + 状态机。
 - **LWT**：Node Agent 连接 broker 时注册遗嘱 `acowork/nodes/{node_id}/status = offline`（retained）——Gateway 侧复用现有 `AgentRegistry` 模式（`mqtt/agent_registry.rs`）建 `NodeRegistry`。Runtime 的 LWT（`agents/{id}/status`）已有，不变。
 - **Node Agent 自身也是 MQTT 客户端**，client_id 约定 `node:{node_id}`（对齐 ADR-033 §8.5 现有冒号分隔规约：`agent:{id}` / `gateway:publisher` / `user:{uid}:desktop:{pid}`；协议文档 §8.5 的 Client ID 表新增此行）。`node_id` 的定义、生成与唯一性保障见 §6.12。
+- **指令幂等性（QoS1 at-least-once 的必然要求）**：MQTT QoS1 存在重复投递，控制面必须双保险——① Node 按 `request_id` 去重（近期已处理指令的 LRU 缓存；命中则重发上次结果、不重复执行）；② 指令语义本身幂等：`start` 对已运行 agent 返回成功（携带现有 PID，不二次 spawn）；`stop` 对已退出 agent 返回成功（清理残留状态）；`install` 对已存在目录先卸载再装（原子替换，中间态落临时目录）；`skills_import` / `avatar_update` 重复执行结果一致。对齐 ADR-039 Bootstrap 已确立的幂等纪律。
 
 ### 6.3 Endpoint / Advertise 模型（D3）
 
@@ -325,11 +334,13 @@ acowork/nodes/{node_id}/lsps                        QoS1 Retained   节点本地
 | Gateway 反代目标 | `format!("http://127.0.0.1:{}", port)` × 4 处 | `RuntimeHttpRegistry: HashMap<String /*id*/, String /*endpoint*/>`，直接用注册值 |
 | embed endpoint | `format!("http://127.0.0.1:{}/v1", port)` | `format!("http://{advertise_host}:{port}/v1", ...)`，`advertise_host` 为 Gateway 新配置项 |
 | LSP endpoint | `acowork/global/lsps` 全局广播 `127.0.0.1:{port}` | per-node retained topic（§6.7） |
-| Runtime MQTT 连接 | host 硬编码 `"127.0.0.1"`（`agent_init.rs:244`） | 新 CLI 参数 `--gateway-host`（默认 127.0.0.1） |
-| Desktop MQTT 连接 | `connect_default` 硬编码（L3-6） | 从 Gateway 连接配置派生：`remote` 模式取 `base_url` 的 host + `/api/status` 返回的 `mqtt_port`；`local` 模式保持 127.0.0.1 |
+| Runtime MQTT 连接 | host 硬编码 `"127.0.0.1"`（`agent_init.rs:264`） | 新 CLI 参数 `--gateway-host`（默认 127.0.0.1） |
+| Desktop MQTT 连接 | host 派生已由 ADR-058 W4 完成（`connect_mqtt` 从 base_url 派生）；残留端口假设 | 增量收尾：`/api/status` 返回 `mqtt_port`，`connect_mqtt` 用它替换默认端口假设；删除死代码 `connect_default`（L3-6） |
 | Gateway broker 监听 | `mqtt.host` 默认 127.0.0.1 | 部署文档指引配置为 `0.0.0.0` 或具体网卡 IP（配置项已存在，无需改码） |
 
 `advertise_host` 语义：**「其他机器访问本机服务时应该用的地址」**。与 `host`（bind 地址）分离是分布式系统的标准做法（同 Docker/K8s 的 advertise-addr）。Gateway 启动时若未配置，取本机首个非 loopback IP 并 WARN 提示。
+
+**advertise 注入链路（闭合 D3 的最后一环）**：Runtime 注册的 `http_endpoint` 值为 `http://{node_advertise}:19900/agents/{id}`——其中 `{node_advertise}` 由 **Node spawn Runtime 时经新增 CLI 参数 `--http-advertise-endpoint` 注入**（值为 Node 配置的 `advertise_host` + `:19900`，缺省 `127.0.0.1`；Node 的该配置项与 Gateway 的 `advertise_host` 语义对称：bind 可为 `0.0.0.0`，advertise 必须是其他机器可达地址）。Runtime 只透传拼接、不自知节点拓扑——「Runtime 零感知节点内部结构」（§6.4）与「禁止接收方自行拼接 host」（D3）同时成立。
 
 ### 6.4 Runtime HTTP 访问链路（D2：Node 反代）
 
@@ -391,6 +402,8 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 - Node Agent 复用 `lifecycle/lsp_relay_supervisor.rs` 的 supervisor 模式（进程发现、SSE 心跳、崩溃恢复、gateway 健康探测自退出的目标从 Gateway health 改为 Node health）。
 - Desktop 获取 LSP endpoint 的路径：`GET /api/agents/{id}/lsp-endpoint`（Gateway 按 agent → node 查询，替代现有 `/api/lsp/endpoint` 的全局假设）。
 - **预留演进**：若未来 embed 跨网络延迟不可接受，scope 允许 `node-local` embed（Node 拉模型 + 本机 ONNX），协议不变只换部署——这是 scope 模型的价值。
+- **sidecar 健康状态 topic 随迁**：LSP relay 的状态上报从 `acowork/sidecar/+/status` 迁移到 `acowork/nodes/{node_id}/sidecars/{kind}/status`（retained），Desktop / Gateway 均可订阅感知节点 sidecar 健康；embed（global scope）保持现有全局 sidecar topic 不变。
+- **supervisor 复制母版**：Node 侧 supervisor 代码以 `lifecycle/lsp_relay_supervisor.rs` 为母版（含 5 个单测、SSE 心跳、崩溃恢复）；`embed_supervisor.rs` 仅生产验证、无单测，不作首选母版。
 
 ### 6.8 安全模型（L5 修复）
 
@@ -398,9 +411,11 @@ Gateway 侧触碰共享领地的所有代码点的归宿：
 
 **第一档：可信网络（LAN/VPN/Tailscale）——Phase 5a**
 
-1. **Node 注册令牌（enrollment token）**：Gateway 配置生成一次性/长效 token（`acowork-node --enroll {token} --gateway {addr}`）；Node 首连 MQTT 时在 CONNECT 后的第一条消息里出示 token，Gateway 校验后登记 node_id ↔ token 指纹。**未注册节点的 MQTT 连接被 broker ACL 拒绝**。
-2. **节点令牌（node token）**：注册成功后 Gateway 签发 per-node 长期令牌，用于 ① Node 拉 package 的 HTTP 鉴权（`X-ACowork-Node-Token`）；② Node 反代入口校验（Gateway → Node 的反代请求携带）。
-3. **MQTT ACL 收紧**（`mqtt/acl.rs` 从 permissive 升级）：`node:{node_id}` 可 publish `acowork/nodes/{node_id}/#`、subscribe `acowork/nodes/{node_id}/agents/+/control/#` + `acowork/global/#`；`agent:{agent_id}`（Runtime）限 `acowork/agents/{agent_id}/#`；desktop 限 `acowork/agents/#` + `acowork/nodes/+/lsps`。ACL 规则表按注册清单动态生成（enrollment 通过后按 node_id 生成专属规则，见 §6.12）。
+1. **Node 注册令牌（enrollment token）**：Gateway 配置生成一次性/长效 token（`nodes token create [--ttl]`，明文一次性打印，仅存 sha256 哈希于 `{data_dir}/enrollment_tokens.json`）；Node 首连 MQTT 时在 CONNECT 后的第一条消息里出示 token（`acowork/nodes/{id}/enroll` payload），Gateway 校验后登记 node_id ↔ 令牌。**未注册节点的 MQTT 连接被 broker 拒绝（CONNACK 5）**。
+2. **节点令牌（node token）**：注册成功后 Gateway 签发 per-node 长期令牌（`{data_dir}/node_tokens.json` 持久化），用于 ① Node 拉 package 的 HTTP 鉴权（`X-ACowork-Node-Token`）；② Node 反代入口校验（Gateway → Node 的反代请求携带，Node 侧入站校验）；③ CONNECT 凭据（`node:{id}` 重连）。
+3. **MQTT 鉴权收紧（Phase 5a 已实施为 CONNECT 层动态鉴权）**：rumqttd 0.20 `set_auth_handler`，决策纯函数 `check_connect_auth(client_id, username, password)`——`node:{id}` 凭 node_token 或未消费 enrollment token；`agent:{id}` 凭任一已注册 node_token（第一档简化：不校验 agent→node 归属）；`gateway:publisher` 凭内部 publisher token；`user:*:desktop:*` 凭 `http_token`；其他拒绝。
+
+> **Phase 5a 实施偏差（2026-08-26 记录）**：§6.8 原设计为「rumqttd 内置 ACL 按 topic 动态收紧」，但 **rumqttd 0.20 无 per-topic ACL 能力**，Phase 5a 仅落地 **CONNECT 层动态鉴权**（连接身份认证，不含 topic 级授权）。topic 级 ACL 依赖 broker 能力，**mosquitto 切换评估列入 Phase 5b**（ADR-033 已把「broker 可替换」列为缓解措施，客户端全是标准 MQTT 3.1.1，切换成本可控）。
 
 **第二档：不可信网络（公网）——Phase 5b，本 ADR 定义接口不实施**
 
@@ -449,6 +464,11 @@ pub struct RunningAgentInfo {
 ### 6.11 单机模式 = local node（D1 落地）
 
 - Gateway 启动时若发现本机无 Node Agent 在线（`acowork/nodes/local/status` 无 retained online），spawn 一个 `acowork-node` 子进程（sibling 二进制，复用 L1-1 的定位逻辑），node_id 固定 `local`。
+- **启动时序与竞争避让**：
+  1. **顺序保证**：local node 的 spawn 点位于 MQTT broker 就绪之后（Gateway 启动序列中的显式前置步骤）；即便时序竞争失败，Node 侧 ADR-039 指数退避重连兜底——双保险。
+  2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/local/status`（retained）后等待短窗口（默认 3s）。窗口内收到 `online` → 复用现有 node（覆盖「Gateway 重启、local node 存活」场景）；超时 → 进入 spawn 判定。
+  3. **重复 spawn 避让**：spawn 前探测本机 `:19900`（local node 反代端口）。端口被占用且 health 返回本节点身份 → 判定 node 已在运行但 MQTT 未连（broker 刚重启）→ 不重复 spawn，等其重连；端口空闲 → spawn。spawn 失败记录日志并周期重试（60s）。
+  4. **崩溃自愈**：Gateway 对 local node 子进程挂 reaper（同 Runtime reaper 模式）；退出后回到上述判定窗口重新 spawn。local node 崩溃不杀其 Runtime 子进程（§8「Node 单点」同一语义），Runtime 由 MQTT 重连框架维持，Node 重启后按 §6.19 re-adopt 收养。
 - **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认 `local`。
 - 这保证「单机用户零额外步骤」且「Gateway 代码只有一条路径」——不存在 `if remote { ... } else { ... }` 的协议分叉，只有 `node_id` 路由参数化。
 
@@ -477,14 +497,14 @@ acowork-node enroll --gateway 192.168.1.10:19876 --token <enrollment-token> [--n
  4. PUBLISH  acowork/nodes/{node_id}/enroll (QoS1)
             payload = { machine_uid, os, arch, runtime_version, capabilities }
  5. Gateway 校验：
-    a. enrollment token 有效？（Phase 5a 前免检）
+    a. enrollment token 有效？（Phase 5a 起必检；auth_enabled=false 时免检）
     b. node_id 唯一性：
        - 未占用                        → 注册成功
        - 已被同一 machine_uid 占用      → 视为重新注册，成功（enroll 重跑）
        - 已被不同 machine_uid 占用      → 拒绝：明确报错 "node name 'gpu-server'
                                           already taken by another machine"，
                                           用户换 --name 重跑
- 6. Gateway 签发 node_token（enrollment 回执，events topic）
+ 6. Gateway 签发 node_token（enrollment 回执，`enroll_result` topic）
  7. node_token 追加持久化到 identity.json；发布 status=online + info retained
 ```
 
@@ -580,8 +600,8 @@ Desktop UI 对应：Settings 的「节点管理」页（列节点、生成 token
                     acowork-gateway nodes token create   # → tok_xxx
 
 机器 B（远程节点）: # 分发两个二进制（acowork-node + acowork-runtime，同目录放置，
-                    #  复用 L1-1 sibling 定位逻辑；dev 脚本出 tarball，后续版本
-                    #  经 Gateway 的 upgrade 指令分发）
+                    #  复用 L1-1 sibling 定位逻辑；dev 脚本出 tarball；Node 自身的
+                    #  自动升级机制见 §8「范围声明（Node Agent 自身升级）」）
                     acowork-node start --gateway A_IP:19876 --token tok_xxx --name gpu-server
 
 ── 之后用户全程不需要登录机器 B ────────────────────────────
@@ -611,8 +631,10 @@ Desktop UI：       install agent → 选节点 gpu-server → 进度条 → sta
 - **权威在 Gateway 不变**：`budget`/`rate` 模块留在 Gateway，quota 的持久化与审计只在 Gateway 一处。
 - **Runtime 上报用量**：每次 LLM 调用完成，Runtime 经 MQTT 上报 token 用量（`agents/{id}/usage` 事件，request_id 关联，同 §6.2 指令-结果模型）；Gateway 扣减后回执。
 - **离线估值与校正**：网络分区期间 Runtime 在本地累计用量（内存态），重连后批量上报，Gateway 以「事务完成时间」为准做校正。分区窗口内的超支按「最终一致」处理，不阻塞调用（设备隐喻：不因云端失联停机，§6.10 同哲学）。
-- **本地软上限防失控**：Runtime 启动时从 Gateway 拉取当前剩余 quota，在本地维护「软上限」；接近上限时拒绝发起新调用（返回明确错误），避免长时间离线导致无界超支。
+- **本地软上限防失控**：Runtime 启动时经 AgentHello 回执获取当前剩余 quota 快照（`AgentHelloResult` 增加配额字段，随 Bootstrap 幂等重放刷新），在本地维护「软上限」；接近上限时拒绝发起新调用（返回明确错误），避免长时间离线导致无界超支。
 - **无并发扣减竞争**：单 agent 单进程，agent 内部串行调用；跨 agent 的全局预算在 Gateway 侧串行处理（budget 模块已是单写者）。分布式 quota 的更强一致性（多写者）明确不在本 ADR 范围。
+
+> 本节的用量上报与软上限是 Runtime **新增自治逻辑**（属 §9「修改」范围），与「Runtime 核心业务（agent loop / tools / memory / session 主干）不变」不冲突。
 
 ### 6.15 可观测性（Observability）
 
@@ -656,6 +678,44 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 - **调度策略**（install/start 未显式指定 node 时）：① 用户显式 `--node` 优先；② 单 node 场景自动选该 node；③ 多 node 场景默认选 `local`（保持单机兼容语义），`least-loaded`（按 info 的 agent_count + CPU 加权）列为 Phase 3 后演进项。
 - **agent-affinity**：已安装 agent 固定在安装时的 `node_id`（`installed_agents.node_id`），除非显式 `drain` + 迁移（clone 走 HTTP 导出导入，L2-8）。不做「透明跨节点漂移」——那是共享存储 + 调度器级别的问题，明确不在本 ADR 范围。
 
+### 6.19 Re-adopt：Node 重启后的孤儿 Runtime 收养
+
+Node Agent 重启（崩溃自愈、升级、运维重启）后，其子进程表中没有既有 Runtime 的记录，但进程可能仍在运行（Node 崩溃不杀 Runtime，§6.10）。收养（re-adopt）流程：
+
+1. **信息源**：① broker 侧 `acowork/agents/{id}/status` retained（Runtime 会因 Node 重启经历一次 MQTT 断连重连，重连后 retained 恢复 online）；② 本机进程表扫描。
+2. **进程识别**：Node 扫描本机进程，凡命令行匹配 `acowork-runtime --agent-id {id}` 模式者识别为候选。Unix 读 `/proc/{pid}/cmdline`；Windows 经 `Get-CimInstance Win32_Process` 获取命令行。
+3. **对账规则**：
+   - 进程存在 + MQTT retained online → **收养**：重建 Node 进程表（PID、启动时间、spawn 元数据）——spawn 元数据（package_path、work_dir 等）本就在命令行参数里（L1-2 的参数化此时成为收养依据）；
+   - 进程存在 + retained offline/缺失 → 观察一个 MQTT keepalive 周期（5s×2）仍无 online → 判定 Runtime 与 broker 双断，SIGTERM 优雅回收（避免僵尸进程长期占用节点）；
+   - 进程不存在 + retained online → retained 过期残留的极端窗口，等待 broker 侧 LWT 收敛，Node 仅上报事件、不覆写 retained。
+4. **PID 复用防护**：收养时校验进程启动时间（Unix `/proc/{pid}` stat；Windows `Win32_Process.CreationDate`）晚于记录中的 `started_at`——不匹配视为不同进程，不收养。
+5. **窗口语义**：对账期间（Node 重启 → re-adopt 完成，目标 < 10s）到达的 start/stop 指令进入排队，对账完成后按新进程表裁决（对已收养 running agent 的重复 start = 幂等成功，见 §6.2）。
+6. **与 Gateway 的状态收敛**：re-adopt 不产生新协议消息——Runtime 自身的 MQTT 重连 + retained 天然让 Gateway 侧 `AgentRegistry` / `RuntimeHttpRegistry` 收敛（`http_endpoint` 注册在重连 Bootstrap 时重放，ADR-039 幂等五步）。Node 仅在 `events` 上报一次 `node_readopted`（诊断用）。
+
+> 该机制同时服务于：Node 崩溃自愈（§8「Node 单点」）、Node 零停机升级（Runtime 进程独立存活，§8「零停机升级」）——三者是同一套对账逻辑。
+
+### 6.20 acowork-node crate 结构与依赖红线
+
+**依赖红线（Phase 2 架构验收项）**：`acowork-node` 的 `[dependencies]` **禁止出现 `acowork-gateway`**。Node 可依赖：`acowork-core`（协议类型）、`acowork-mqtt-session`（重连框架）及通用第三方库。理由：Gateway 内部类型（`GatewayState` / `SharedState` / `GatewayError`）携带 13 个全局模块的耦合——迁移代码中的 15 处 `crate::gateway::state`、9 处 `GatewayError`、3 处 `SharedState` 引用**必须在迁移时重构**：`LifecycleManager` 的 `state: &SharedState` 参数改为 Node 自有的 `NodeState`（进程表 + 本地安装表视图，`src/state.rs`）；`GatewayError` 中被迁移的变体（Lifecycle / PackageManager）下沉到 `acowork-core` 或改为 Node 自有 error 类型。违反红线的后果 = 新组件被旧巨石污染、Node 永远无法独立编译分发——方案 D 否决理由（死代码 + 攻击面）将在 Node 身上重演。CI 中对 acowork-node 的 Cargo.toml 加依赖断言防回归。
+
+**内部模块结构（防 grab-bag，迁移代码有唯一落点）**：
+
+```text
+core/acowork-node/
+├── src/
+│   ├── identity/     # identity.json + enrollment 状态机（§6.12）
+│   ├── control/      # MQTT 节点控制面（指令解析 / request_id 去重 / 回执，§6.2）
+│   ├── process/      # Runtime 进程表 + spawn/kill/reap + re-adopt（迁自 lifecycle/，§6.19）
+│   ├── package/      # install/uninstall/clone/skills/avatar 本机操作（迁自 package_manager/）
+│   ├── proxy/        # :19900 节点反代 + node token 鉴权 + hop-by-hop 剥离（§6.4/§6.17）
+│   ├── sidecar/      # LSP relay supervisor（Phase 4 迁入，母版 lsp_relay_supervisor.rs）
+│   ├── fs_browse.rs  # 节点文件系统浏览（L7-1）
+│   ├── state.rs      # NodeState（进程表/安装表/容量）——Gateway 状态的替代物
+│   └── cli.rs        # §6.13.2 命令面（薄壳，仅编排上述模块，不含业务逻辑）
+```
+
+各模块可独立单测；模块边界即迁移落点（`lifecycle/` → `process/`，`package_manager/` → `package/`），后续 LSP 迁入有唯一去处（`sidecar/`）。
+
 ---
 
 ## 7. 分阶段实施计划
@@ -666,9 +726,9 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 | # | 内容 | 修复 |
 |---|------|------|
-| 1.1 | Gateway 配置新增 `advertise_host`；`build_embed_sidecar_payload` / `build_available_embedding_models` 用它构造 endpoint | L3-2/3 |
-| 1.2 | Runtime 新增 `--gateway-host` CLI/env（`MqttConnectConfig.host` 已有字段，接线 `agent_init.rs:244`） | L3-5 |
-| 1.3 | Desktop MQTT host 从 Gateway 连接配置派生（`remote` 模式取 base_url host + `/api/status` 增加 `mqtt_port` 字段）；`connect_default` 仅剩 local 模式调用 | L3-6（顺手修复既有缺陷） |
+| 1.1 | Gateway 配置新增 `advertise_host`；embed/LSP endpoint 的**全部三条构造路径**改用它——`build_embed_sidecar_payload`（L3-2）、`build_available_embedding_models` / lsps payload（L3-3）、`handle_agent_hello` 内嵌的 `embed_endpoint` / `lsp_relay_endpoint`（L3-9，`handlers/server.rs:412,427`） | L3-2/3/9 |
+| 1.2 | Runtime 新增 `--gateway-host` CLI/env（`MqttConnectConfig.host` 已有字段，接线 `agent_init.rs:264`） | L3-5 |
+| 1.3 | Desktop MQTT 寻址**增量收尾**（host 派生已由 ADR-058 W4 完成，见 L3-6 修订说明）：`/api/status` 返回 `mqtt_port` 字段，`connect_mqtt` 用它替换默认端口假设（隧道场景转发端口可不同于 19875）；删除死代码 `connect_default` | L3-6（残留缺口） |
 | 1.4 | Runtime HTTP 注册消息升级：`http_port` → `http_endpoint`（向后兼容：两条 topic 并存一个过渡版本，或直接切换——项目无兼容包袱，直接切换）；`RuntimeHttpRegistry` 存 endpoint；`proxy.rs` 4 处 URL 构造改用注册值 | L3-1 |
 | 1.5 | Gateway broker / HTTP 的 bind 配置文档化（`mqtt.host` 设为 `0.0.0.0` 或网卡 IP） | L3-7 |
 
@@ -676,13 +736,36 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 ### Phase 2：Node Agent 诞生 + Gateway 职责下放
 
+> **体量与拆分说明**：本 Phase 触面约 8,200 LOC（`lifecycle/` + `package_manager/` 整体迁出 4,716 + `http/{agents,skills_api,workspaces}.rs` 部分迁出/改写 3,492）+ acowork-node 全新代码。为保证「每 Phase 独立可交付、可验证、可停留」在本 Phase **内部**同样成立，拆为三个子阶段**严格串行**实施，任一子阶段验证不过不进入下一个。
+
+#### Phase 2a：Node crate 骨架 + local node 常驻（不迁移业务、不触碰既有模块）
+
 | # | 内容 |
 |---|------|
-| 2.1 | 新 crate `core/acowork-node`：MQTT client（复用 `acowork-mqtt-session`）+ 节点控制面 handler + **从 Gateway 迁入** `lifecycle/{manager,process}.rs`、`package_manager/*`、skills/manifest/avatar 本机操作（L1、L2-1~5、L2-9 的代码整体搬迁，含测试）；**identity.json schema 与 enrollment 状态机**（§6.12）|
-| 2.2 | 节点反向代理：Node HTTP server `:19900`，路由 `/agents/{id}/*` → 本机 Runtime loopback（含 hop-by-hop 剥离，移植 `proxy.rs` 的透传语义）；Runtime 注册的 `http_endpoint` 改为指向 Node 反代 |
-| 2.3 | Gateway 侧：`NodeRegistry`（LWT 驱动）、install/start/stop HTTP handler 改为发布节点控制面指令 + events 回执关联（request_id）；`installed_agents` 增加 `node_id`；删除 Gateway 内 `lifecycle/`、`package_manager/`（迁走后） |
-| 2.4 | **acowork-node CLI 骨架**（§6.13.2：start/enroll/status/agents list/logs/rename/leave/service）+ acowork-gateway 现有 Commands 增加 `--node` 参数 + `nodes {list,drain,remove,token create}` 子命令（§6.13.3）|
-| 2.5 | Gateway spawn local node（§6.11）；单机全量回归 |
+| 2a.1 | 新 crate `core/acowork-node`：按 §6.20 模块结构搭骨架；**依赖红线即刻生效**（`[dependencies]` 无 `acowork-gateway`，CI 加断言） |
+| 2a.2 | `identity.json` schema + enrollment 状态机（§6.12）+ CLI 先行命令（start/enroll/status；agents/rename/leave/service 命令面见 §6.13.2 完整清单，2c/Phase 3 补齐），含单测 |
+| 2a.3 | 节点控制面协议落地：`acowork/nodes/#` topic 族 + request_id 去重 + 指令幂等语义（§6.2）+ 版本协商（§6.9）；protobuf 契约 golden 测试（acowork-core） |
+| 2a.4 | Gateway 侧：`NodeRegistry`（LWT 驱动）+ spawn local node + 启动时序/竞争避让（§6.11） |
+
+**验证**：local node 常驻运行、`acowork-gateway nodes list` 可见 local 节点、`acowork-node status` 可用；既有 agent 功能零影响（Node 此时尚不管理任何 Runtime）；全量既有测试 + clippy 门禁通过。
+
+#### Phase 2b：lifecycle + package_manager 迁移（硬切，Gateway 同变更内删除）
+
+| # | 内容 |
+|---|------|
+| 2b.1 | `lifecycle/{manager,process}.rs` 迁入 `node::process`：`SharedState` 参数重构为 `NodeState`（§6.20 依赖红线的核心工作——15 处 `crate::gateway::state`、9 处 `GatewayError`、3 处 `SharedState` 引用全部剥离）；spawn/kill/reaper/探活语义零变化；re-adopt 对账逻辑（§6.19） |
+| 2b.2 | `package_manager/*` + skills/manifest/avatar 本机操作迁入 `node::package`（L1、L2-1~5、L2-9 代码搬迁）；**41 个既有单测随迁**（lifecycle 24 + package_manager 17）并保持全绿 |
+| 2b.3 | Gateway 侧：删除 `lifecycle/`、`package_manager/`（与迁入同一变更完成，无兼容期无双写）；`installed_agents` 增加 `node_id`；install/start/stop HTTP handler 改为节点控制面指令 + events 回执关联（request_id；install 转 202 异步状态机） |
+
+**验证**：随迁 41 单测全绿；单机全量 e2e——所有 agent 生命周期操作实际经「Gateway → local Node → Runtime」链路，行为与迁移前逐项一致（§3 清单 L1/L2 逐条打勾闭环）；Windows 专项：spawn/stop/re-adopt 至少各一条验证。
+
+#### Phase 2c：节点反代 + 双侧 CLI + 收口
+
+| # | 内容 |
+|---|------|
+| 2c.1 | 节点反向代理：Node HTTP server `:19900`，路由 `/agents/{id}/*` → 本机 Runtime loopback（hop-by-hop 剥离 + 两跳反代语义 §6.17）；Runtime 注册的 `http_endpoint` 改指向 Node 反代（advertise 注入链路 §6.3，新增 `--http-advertise-endpoint` 参数） |
+| 2c.2 | acowork-node CLI 补齐 agents list/logs/kill（§6.13.2）+ acowork-gateway 现有 Commands 增加 `--node` 参数 + `nodes {list,drain,remove,token create}` 子命令（§6.13.3；token create 为 Phase 5a 占位） |
+| 2c.3 | 单机全量回归收口：既有 runtime e2e 全绿 + `cargo clippy --all-targets -- -D warnings` |
 
 **验证**：单机模式行为与迁移前完全一致（所有既有测试路径 + e2e），但所有 agent 生命周期操作实际经「Gateway → local Node → Runtime」链路；`acowork-node status` 可见本机所有 agent。
 
@@ -710,10 +793,22 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 ### Phase 5：安全
 
-| # | 内容 |
-|---|------|
-| 5a | Node enrollment token + node token + MQTT ACL 动态化（§6.8 第一档） |
-| 5b | （接口预留）broker TLS / mosquitto 切换评估、api_key payload 加密、全链路 HTTPS |
+| # | 内容 | 状态 |
+|---|------|------|
+| 5a | Node enrollment token + node token + MQTT CONNECT 层动态鉴权（§6.8 第一档；topic ACL 因 rumqttd 无能力，偏差记录于 §6.8，mosquitto 评估移入 5b） | ✅ 已完成（2026-08-26） |
+| 5b | （接口预留）broker TLS / mosquitto 切换评估（含 topic ACL）、api_key payload 加密、全链路 HTTPS | 待办 |
+
+### 7.1 测试策略（贯穿各 Phase 的验收构成）
+
+| 层 | 内容 | 归属 |
+|----|------|------|
+| 随迁单测 | lifecycle 24 + package_manager 17 = **41 个既有单测**随代码迁入 acowork-node 并保持全绿——迁移回归的硬门禁 | 2b |
+| 新协议单测 | 五类纯逻辑必须单测：① request_id 去重与指令幂等（§6.2）；② install 异步状态机（202 → events 进度）；③ enrollment 幂等 / 重名拒绝 / token 签发（§6.12）；④ rename 断点安全（§6.12）；⑤ re-adopt 对账规则（§6.19） | 2a/2b |
+| Contract 测试 | `acowork/nodes/#` topic 族 protobuf payload 的 golden 测试（acowork-core，防契约漂移，对齐 ADR-033 proto 纪律） | 2a |
+| 多节点 e2e harness | **固化为可复用测试夹具入库**：同机模拟 N 节点 = N 个 `--home` data_dir + 同 broker（扩展 `mqtt_e2e_full` 的 fresh_broker_port 模式） | 3 |
+| 三机真机 e2e | Phase 3 验证清单（chat / 远程工具执行 / 文件上传下载 / memory / cron auto-spawn / Intent 跨节点路由） | 3 |
+| 双平台矩阵 | 进程管理（kill / 进程组 / 探活）与 `service install` 是 OS 强相关代码：spawn / stop / re-adopt 在 Windows 上各至少一条专项验证 | 2b/2c |
+| 弱网与重复投递 | 断连重连风暴注入；QoS1 重复投递注入（验证幂等语义，§6.2） | 3 |
 
 ---
 
@@ -721,17 +816,20 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 | 风险 | 严重度 | 缓解 |
 |------|--------|------|
-| **Node Agent 成为节点单点**（挂了节点上所有 Runtime 失管） | 中 | supervisor 模式自身已被 embed/lsp-relay 验证（自愈重启）；Runtime 进程独立于 Node 存活（Node 崩溃不杀 Runtime，重启后 re-adopt：扫 `agents/{id}/status` retained + 本机进程表对账）。与 Gateway 崩溃 Runtime 存活是同一语义 |
+| **Node Agent 成为节点单点**（挂了节点上所有 Runtime 失管） | 中 | supervisor 模式自身已被 embed/lsp-relay 验证（自愈重启）；Runtime 进程独立于 Node 存活（Node 崩溃不杀 Runtime，重启后按 §6.19 re-adopt 对账收养）。与 Gateway 崩溃 Runtime 存活是同一语义 |
 | **异步 install 状态机复杂化**（同步 API 变 202 + 轮询/事件） | 中 | Desktop 已有成熟的 MQTT 事件订阅管道（agentStore 全量状态由 MQTT 驱动），install 进度走同一条管道；HTTP 侧提供 `GET /api/agents/{id}/install-status` 兜底 |
 | **MQTT broker 跨网络的连接稳定性**（NAT 超时、断网重连风暴） | 中 | ADR-039 框架已就绪（keepalive 5s 对齐、ErrClass、指数退避）；broker 配置 `connection_timeout_ms` 已有；真实弱网测试列入 Phase 3 验证 |
 | **Gateway 单点依旧**（broker + HTTP 入口都在 Gateway 机器） | 低 | 本 ADR 不改变这一点（ADR-033 已声明）；但远程化后 Gateway 重启**不再影响**已加载的 Runtime（进程独立 + retained 状态恢复），单点故障半径显著缩小。broker 可外置（mosquitto）作为后续演进 |
 | **rumqttd 生产成熟度**（多节点连接数上升） | 低 | 节点数场景（< 100）远低于 MQTT broker 能力上限；ADR-033 已确立「mosquitto 可随时切换」的逃生通道；客户端全是标准 3.1.1 |
 | **api_key 明文分发范围扩大**（跨网络） | 高（仅公网场景） | Phase 5a 前明确「仅限可信网络」部署约束；5b 的加密方案已定义接口 |
 | **迁移期 Gateway / Node 双写 package** | 中 | Phase 2 是硬切（无兼容包袱）：lifecycle/package_manager 整体迁入 Node，Gateway 删除同模块，不允许双路径并存 |
+| **Phase 2 硬切无回滚灰度**（回滚 = 整体 revert） | 低 | 单用户阶段可接受；2a/2b/2c 各自独立成变更序列（2a 不触碰既有模块、可长期停留；2b 的 Gateway 删除与 Node 迁入同一变更内完成，revert 边界清晰） |
 | **e2e 测试环境复杂化**（需要多机拓扑模拟） | 低 | 全部组件可用不同 loopback 端口在同机模拟（Node 用 `--gateway-host 127.0.0.1` + 不同 data_dir）；现有 mqtt_e2e_full 的 fresh_broker_port 模式可扩展 |
-| **零停机升级**（Node/Runtime 版本滚动升级） | 中 | 升级 Node 时其上 Runtime 进程独立存活，Node 重启后 re-adopt（与「Node 单点」同一机制）；Runtime 升级时进行中的会话按 ADR-038/051 生命周期处理；灰度按 node 分批升级（先升非关键节点）。版本协商（§6.9）保证混合版本期不误触发 |
+| **零停机升级**（Node/Runtime 版本滚动升级） | 中 | 升级 Node 时其上 Runtime 进程独立存活，Node 重启后按 §6.19 re-adopt（与「Node 单点」同一机制）；Runtime 升级时进行中的会话按 ADR-038/051 生命周期处理；灰度按 node 分批升级（先升非关键节点）。版本协商（§6.9）保证混合版本期不误触发 |
 
 > **范围声明（Gateway HA / Federation）**：本 ADR 不改变「Gateway 单点」这一 ADR-033 已声明的现状。Gateway 自身 HA（broker 外置 mosquitto + HTTP 无状态化 + DNS/VIP/负载均衡）与多 Gateway federation（跨地域、broker bridge）是明确的**范围外演进议题**，需要时另立 ADR。本 ADR 的贡献是把 Gateway 单点故障半径从「所有 Runtime 失管」缩小到「控制面暂不可用、执行面继续运行」。
+
+> **范围声明（Node Agent 自身升级）**：本 ADR 仅交付「dev 脚本出 tarball 手动分发 + 版本协商（§6.9）保证混合版本期不误触发」；`acowork-node upgrade`（Gateway 推送二进制、校验、原子替换、升级期间 Runtime 存活性保障）需要时另立 mini-ADR。首次远程升级需登录节点替换二进制，属已知限制。
 
 ---
 
@@ -741,16 +839,18 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 | 模块 | 说明 |
 |------|------|
-| `core/acowork-node/`（新 crate） | Node Agent：MQTT 节点控制面 + 进程管理（迁入）+ package 管理（迁入）+ 反向代理 + LSP 宿主（Phase 4 迁入）+ fs_browse 本机执行 |
+| `core/acowork-node/`（新 crate，内部模块结构与依赖红线见 §6.20） | Node Agent：identity / control / process（迁自 lifecycle）/ package（迁自 package_manager）/ proxy / sidecar（Phase 4 迁入 LSP）/ cli 七模块 |
 | `acowork-node` 二进制 + CLI（§6.13.2） | start/enroll/status/agents{list,logs,kill}/rename/leave/service 命令 |
 | `acowork-gateway` CLI 扩展（§6.13.3） | 既有 Commands 增加 `--node <node_id>`；新增 `nodes {list,drain,remove,token create}` 子命令组 |
 | `{node_data_dir}/identity.json` | §6.12 身份持久化：`{ node_id, machine_uid, node_token, gateway_addr }` |
-| `acowork/nodes/#` topic 族 | 节点状态（LWT）/ 指令 / 事件 / per-node LSP |
+| `acowork/nodes/#` topic 族 | 节点状态（LWT）/ 指令 / 事件 / per-node LSP / per-node sidecar 状态 |
 | Gateway `NodeRegistry` | LWT 驱动的节点在线表 |
 | Runtime `GET /workspaces/raw/{path}` | 原始字节静态端点 |
 | Gateway `GET /api/packages/{agent_id}/download` | package 分发源 |
 | Desktop 节点管理 UI | 节点列表 / token 生成 / 一键复制安装命令行 / install 向导节点选择 |
 | `acowork/agents/{id}/usage` 事件（§6.14） | Runtime → Gateway 的 token 用量上报（quota 扣减回执） |
+| `node_readopted` 事件（§6.19） | Node re-adopt 收养完成的诊断上报（events topic 内） |
+| Node 配置 `advertise_host` + `--http-advertise-endpoint` 注入（§6.3） | Runtime 注册 endpoint 的来源链路（Node → Runtime spawn 参数） |
 | Node `GET /metrics`（§6.15） | Prometheus 文本格式，对齐 Gateway metrics 出口 |
 | Intent payload `target_node_id` 字段（§6.16） | 跨节点 Intent 路由的显式目标节点 |
 | 反代 headers（§6.17） | `X-Trace-Id`（链路追踪透传）、`X-Error-Origin`（错误溯源） |
@@ -758,8 +858,10 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 
 ### 修改（按 Phase）
 
-- **P1**：`gateway/config.rs`（advertise_host）、`mqtt/sidecar.rs`、`mqtt/global_resources_publisher.rs`、`http/proxy.rs`（URL 构造 + Registry 类型）、`runtime/cli.rs` + `startup/agent_init.rs`（--gateway-host）、`runtime/http/server.rs`（http_endpoint 注册）、`desktop mqtt_client.rs` + `commands/gateway.rs`（MQTT 寻址派生）
-- **P2**：`gateway/lifecycle/`（迁出删除）、`gateway/package_manager/`（迁出删除）、`gateway/http/agents.rs`（install/start/stop 改异步指令）、`gateway/state.rs`（node_id 字段）、`gateway/mod.rs`（spawn local node）
+- **P1**：`gateway/config.rs`（advertise_host）、`mqtt/sidecar.rs`、`mqtt/global_resources_publisher.rs`、**`handlers/server.rs`（AgentHello 内嵌 endpoint 改 advertise 构造，L3-9）**、`http/proxy.rs`（URL 构造 + Registry 类型）、`runtime/cli.rs` + `startup/agent_init.rs`（--gateway-host）、`runtime/http/server.rs`（http_endpoint 注册）、`desktop mqtt_client.rs` + `commands/gateway.rs`（MQTT 寻址——host 派生已由 ADR-058 W4 完成，本 ADR 补 mqtt_port 动态化 + 死代码清理）
+- **P2a**：`gateway/mod.rs`（spawn local node + 启动时序 §6.11）、`gateway/mqtt/`（NodeRegistry、节点控制面指令发布）
+- **P2b**：`gateway/lifecycle/`（迁出删除）、`gateway/package_manager/`（迁出删除）、`gateway/http/agents.rs`（install/start/stop 改异步指令）、`gateway/state.rs`（node_id 字段）
+- **P2c**：Node 反代接线（Runtime `http_endpoint` 改指 Node 地址）+ 双 CLI 命令面
 - **P3**：`http/workspaces.rs`（静态预览改反代，模块大幅缩小）、`http/fs_browse.rs`（target 参数）、`package_manager/clone.rs` 语义重写（HTTP 导出导入）
 - **P4**：`gateway/lifecycle/lsp_relay*.rs`（迁出）、`mqtt/global_resources_publisher.rs`（lsps topic 迁移）、desktop Monaco LSP endpoint 获取路径
 - **P5**：`mqtt/acl.rs`（动态 ACL）、`mqtt/broker.rs`（鉴权接入）
@@ -767,7 +869,7 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 ### 不变
 
 - `acowork/agents/{id}/...` 全部 topic 与 payload schema
-- Runtime 业务逻辑（agent loop、tools、memory、session）与 HTTP 端点集
+- Runtime 核心业务逻辑（agent loop、tools、memory、session 主干）与既有 HTTP 端点集（本 ADR 对 Runtime 的明确增量——配额自治 §6.14、寻址参数化、`GET /workspaces/raw/{path}`——见「新增」「修改」清单）
 - Desktop 前端全部交互流程（仅 install 增加可选的节点选择 UI）
 - Gateway 全局资源权威（providers/MCP/search/user profile/embedding 模型库）
 - `acowork-core` protocol / mqtt_proto（仅新增节点控制面 message）
@@ -782,3 +884,4 @@ Gateway → Node → Runtime 两跳 HTTP 反代，需明确以下语义（均移
 | ADR-018 | Runtime 通过断连超时自杀兜底 Gateway 崩溃 | Runtime 的进程兜底责任移交 Node Agent；Runtime 对 Gateway 断连改为纯重连（§6.10） |
 | ADR-034 规则 3 | 「Gateway 不访问 Agent Runtime 本地文件」 | 本 ADR 将其从「规约」升级为「物理事实」：收敛 L2 全部存量违规点（含该 ADR 当时豁免的静态预览场景） |
 | `mqtt.md` §2 架构图 | Desktop/Runtime/Gateway 三方 localhost 星型 | 更新为含 Node 层的拓扑图（随 Phase 2 实施同步更新协议文档） |
+| ADR-058 W4 | Desktop MQTT broker host 从 Gateway base URL 派生（Remote 隧道场景） | 本 ADR 与其衔接：host 派生已完成（L3-6 已部分修复），Phase 1.3 仅补 `mqtt_port` 动态化与死代码清理 |

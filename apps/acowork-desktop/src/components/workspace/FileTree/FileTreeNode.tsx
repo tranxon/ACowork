@@ -13,7 +13,7 @@ import {
   type ContextMenuItem,
 } from "../../common/ContextMenu";
 import { isGatewayLocal } from "../../../lib/config";
-import type { TreeEntry } from "../../../stores/workspaceStore";
+import type { TreeEntry } from "../../../stores/fileTree";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
 let _dialogModule: typeof import("@tauri-apps/plugin-dialog") | null = null;
@@ -329,10 +329,13 @@ export const FileTreeNode = memo(function FileTreeNode({
   const workspace = useWorkspaceStore((s) => s.workspaces.find((ws) => ws.id === workspaceId));
   const isActivePromptFile = workspace?.prompt_file === entry.name;
 
-  // Memoised menu items. Rebuilt only when the flags that gate item
+  // Memoised menu items. Rebuilt when the flags that gate item
   // visibility change (previewable / prompt-file / rename / reveal /
-  // paste availability) — keeps the memoized FileTreeNode from churning
-  // the ContextMenu child on unrelated re-renders.
+  // paste availability) OR when any handler identity changes (they
+  // capture sessionId — e.g. handleAddToChat — so a stale closure here
+  // would route "Add to Chat" to the previously active session). Keeps
+  // the memoized FileTreeNode from churning the ContextMenu child on
+  // unrelated re-renders.
   const ctxMenuItems = useMemo<ContextMenuItem[]>(() => {
     const items: ContextMenuItem[] = [];
 
@@ -420,7 +423,6 @@ export const FileTreeNode = memo(function FileTreeNode({
       onClick: handleDelete,
     });
     return items;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isPreviewable,
     isPromptFile,
@@ -428,6 +430,16 @@ export const FileTreeNode = memo(function FileTreeNode({
     onRename,
     onReveal,
     t,
+    handleAddToChat,
+    handlePreview,
+    handleTogglePromptFile,
+    handleNewFile,
+    handleNewFolder,
+    handleCopy,
+    handlePaste,
+    beginRename,
+    handleReveal,
+    handleDelete,
   ]);
 
   // DnD visibility state — kept as locals because they're pure

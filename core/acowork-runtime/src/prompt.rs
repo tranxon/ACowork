@@ -56,7 +56,12 @@ User | collaborates with | acowork team | 0.85 | Relation
 If no factual triples can be extracted, emit an empty `<triples>` block (with the opening and closing tags and nothing between them).
 
 ## Hard rules:
-- Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata.
+- Write the summary as plain prose. Do NOT copy the input's [User]: / [Assistant]: / [Tool(...)]: / [CompactionSummary]: role labels into your output — those are read-only metadata. Your <summary> must contain NO lines starting with [User]:, [Assistant]:, [Tool(...)]:, [CompactionSummary]:, [tool_call]:, [tool_result]:, or [thought]:. If you are tempted to echo a tool's command or output, convert it into a one-line prose statement of what the tool accomplished.
+- BAD <summary> (role labels / tool echoes — never do this):
+  [Tool(bash)]: grep -rn running apps/acowork-desktop/src/
+  [Assistant]: 我找到了 RetryWaitBanner。
+- GOOD <summary> (plain prose — always do this):
+  用户要求查找包含 running 与 retry 的 UI 元素，助手通过 grep 检索 chat 组件，最终定位到 RetryWaitBanner。
 - The placeholder text \"[Tool result compressed...]\" in tool results is opaque. Acknowledge it with a short phrase like \"(earlier tool results were compressed)\" instead of reproducing it.
 - Output MUST contain exactly two blocks (<summary>, <triples>) with no extra prose before <summary>, between blocks, or after </triples>. The legacy `<entities>` block is no longer emitted (ADR-057 D5 — entities are not modelled as graph nodes in P0).
 - Language (MUST follow):

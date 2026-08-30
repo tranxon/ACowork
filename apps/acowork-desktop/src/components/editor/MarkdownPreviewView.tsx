@@ -9,6 +9,7 @@ import { CodeBlock } from "../chat/CodeBlock";
 import { useAgentStore } from "../../stores/agentStore";
 import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { useFileTreeStore, treeKey } from "../../stores/fileTree";
 import { cn } from "../../lib/utils";
 import {
     PASSTHROUGH_SCHEMES,
@@ -37,8 +38,9 @@ const markdownComponents = {
     /** Wrap <table> in a horizontally-scrollable container so an
      *  oversized column (URL / hash / path) doesn't squeeze the
      *  title column mid-word. Mirrors the same override in
-     *  MessageBubble / CompactionCard; visual chrome (border / radius)
-     *  lives on the wrapper via .prose-table-scroll (see globals.css). */
+     *  MessageBubble / CompactionCard; the wrapper is a pure
+     *  scroll viewport, visual chrome (border / rounded corners)
+     *  lives on the <table> itself in globals.css. */
     table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
         <div className="prose-table-scroll">
             <table {...rest}>{children}</table>
@@ -161,10 +163,13 @@ const ImageWithClick = React.memo(function ImageWithClick({
 export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     const { t } = useTranslation();
     const openFile = useFileEditorStore((s) => s.openFile);
-    // `treeRoots` subscription kept so React re-renders the preview when the
+    // Tree cache subscription kept so React re-renders the preview when the
     // workspace tree finishes loading (the cross-workspace resolver inside
-    // `openResolved` reads `treeRoots` on demand, not through this variable).
-    useWorkspaceStore((s) => s.treeRoots);
+    // `openResolved` reads the tree on demand, not through this variable).
+    // Subscribing only to THIS file's workspace root (instead of the whole
+    // `nodes` map) keeps the re-render scoped: tree transitions in other
+    // agents / workspaces no longer touch the preview.
+    useFileTreeStore((s) => s.nodes[treeKey(file.agentId, file.workspaceId, "")]);
 
     /** Switch the current tab from preview mode back to edit mode. */
     const handleOpenAsEditor = useCallback(() => {

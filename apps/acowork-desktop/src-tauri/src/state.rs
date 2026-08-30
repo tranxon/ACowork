@@ -24,6 +24,10 @@ use std::process::Child;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
+use acowork_core::mqtt_proto::{BootstrapPhase, BootstrapState};
+
 use crate::gateway_client::GatewayClient;
 use crate::mqtt_client::SharedDesktopMqttClient;
 
@@ -57,6 +61,53 @@ impl GatewayMode {
     }
 }
 
+/// Proto-name of a bootstrap phase, e.g. `BOOTING`, `SHUTTING_DOWN`.
+///
+/// Mirrors the Gateway's `/api/bootstrap` projection (`http/bootstrap_api.rs`
+/// `phase_name`): SCREAMING_SNAKE_CASE without the `BOOTSTRAP_PHASE_` prefix
+/// that `BootstrapPhase::as_str_name()` produces.
+fn phase_name(phase: BootstrapPhase) -> &'static str {
+    match phase {
+        BootstrapPhase::Unspecified => "UNSPECIFIED",
+        BootstrapPhase::Booting => "BOOTING",
+        BootstrapPhase::Ready => "READY",
+        BootstrapPhase::Degraded => "DEGRADED",
+        BootstrapPhase::Failed => "FAILED",
+        BootstrapPhase::ShuttingDown => "SHUTTING_DOWN",
+    }
+}
+
+/// Latest bootstrap snapshot, mirrored from the Gateway's retained
+/// `acowork/global/bootstrap` MQTT topic / `GET /api/bootstrap` projection.
+///
+/// Field-for-field the wire-level `BootstrapState` proto (ADR-059 §5.4.4).
+/// `phase` is the SCREAMING_SNAKE_CASE name of the proto enum, matching the
+/// Gateway's HTTP JSON projection exactly so Desktop and Gateway agree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapStateView {
+    pub protocol_version: u32,
+    pub instance_id: String,
+    pub version: u64,
+    pub phase: String,
+    pub phase_detail: String,
+    pub issued_at_ms: u64,
+}
+
+impl BootstrapStateView {
+    /// Convert a decoded `BootstrapState` proto (MQTT retained payload).
+    pub fn from_proto(proto: &BootstrapState) -> Self {
+        Self {
+            protocol_version: proto.protocol_version,
+            instance_id: proto.instance_id.clone(),
+            version: proto.version,
+            phase: phase_name(BootstrapPhase::try_from(proto.phase).unwrap_or(BootstrapPhase::Unspecified))
+                .to_string(),
+            phase_detail: proto.phase_detail.clone(),
+            issued_at_ms: proto.issued_at_ms,
+        }
+    }
+}
+
 /// Shared application state
 pub struct AppState {
     /// Gateway HTTP client. `base_url` reflects the active configuration:
@@ -81,6 +132,15 @@ pub struct AppState {
     /// Connection state lives inside the client (`session_state()`); see
     /// module docs.
     pub mqtt_client: Arc<Mutex<Option<SharedDesktopMqttClient>>>,
+
+    /// ADR-059: latest Gateway bootstrap snapshot.
+    ///
+    /// Updated by the MQTT `bootstrap_handler` on every push of the
+    /// retained `acowork/global/bootstrap` topic (including re-delivery on
+    /// reconnect). `get_bootstrap()` falls back to a one-shot HTTP
+    /// `GET /api/bootstrap` when this is `None` (e.g. MQTT not yet
+    /// connected) and caches the result here.
+    pub bootstrap_state: Arc<tokio::sync::RwLock<Option<BootstrapStateView>>>,
 }
 
 impl AppState {
@@ -97,6 +157,7 @@ impl AppState {
             #[cfg(target_os = "windows")]
             gateway_job: Arc::new(Mutex::new(None)),
             mqtt_client: Arc::new(Mutex::new(None)),
+            bootstrap_state: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 }

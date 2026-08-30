@@ -1763,6 +1763,50 @@ After installation, ask the user to re-enable the MCP server.",
         );
     }
 
+    /// Handle a node LSP relay state change (ADR-055 §6.7, Phase 4).
+    ///
+    /// `Some(endpoint)` → wrap `codebase::CodebaseTool` with the
+    /// standard security decorators and register it in every session;
+    /// `None` → unregister the codebase tool (the relay is down or the
+    /// node cleared its retained state).
+    ///
+    /// Keeps `agent_tools.json` in sync (`ensure_tool_in_config` /
+    /// `remove_tool_from_config`) so the frontend tool panel reflects
+    /// tools that became available after startup.
+    pub fn handle_lsp_relay_update(&mut self, endpoint: Option<String>) {
+        let Some(resolver) = self.resolver.clone() else {
+            tracing::warn!(
+                "SessionManager: no workspace resolver — cannot register codebase tool"
+            );
+            return;
+        };
+
+        match endpoint {
+            Some(endpoint) => {
+                let tool: Arc<dyn Tool> = Arc::new(
+                    crate::tools::builtin::codebase::CodebaseTool::new(endpoint.clone()),
+                );
+                // Matches the startup path rate limit (`ToolRegistry::activate`
+                // in agent_init.rs).
+                self.register_dynamic_tool(tool, resolver, 60, true);
+                crate::agent_config::ensure_tool_in_config(
+                    std::path::Path::new(&self.core.config.work_dir),
+                    "codebase",
+                    true,
+                );
+                tracing::info!(endpoint, "SessionManager: codebase tool registered (node LSP relay ready)");
+            }
+            None => {
+                self.unregister_dynamic_tool("codebase");
+                crate::agent_config::remove_tool_from_config(
+                    std::path::Path::new(&self.core.config.work_dir),
+                    "codebase",
+                );
+                tracing::info!("SessionManager: codebase tool unregistered (node LSP relay unavailable)");
+            }
+        }
+    }
+
     /// Returns `(name, enabled)` pairs for all dynamically registered
     /// builtin tools (via `SidecarEndpointUpdate`).
     ///
@@ -2076,6 +2120,22 @@ After installation, ask the user to re-enable the MCP server.",
     /// Get all active session IDs.
     pub fn active_sessions(&self) -> Vec<String> {
         self.sessions.keys().cloned().collect()
+    }
+
+    /// Snapshot every active session's `(session_id, conversation)` pair.
+    ///
+    /// Returns owned tuples so callers can release the [`SessionManager`]
+    /// lock before calling into [`ConversationSession`]
+    /// (e.g. `build_session_config_snapshot`, which is not lock-safe).
+    /// Used by the chunk_relay's LLM-availability watcher to re-publish
+    /// every active session's `SessionConfig` after a state transition.
+    pub fn snapshot_active_conversations(
+        &self,
+    ) -> Vec<(String, std::sync::Arc<crate::conversation::ConversationSession>)> {
+        self.sessions
+            .iter()
+            .filter_map(|(sid, h)| h.conversation.as_ref().map(|c| (sid.clone(), c.clone())))
+            .collect()
     }
 
     /// Store the latest session info determined during the startup scan.

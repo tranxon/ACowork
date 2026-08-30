@@ -25,7 +25,7 @@ use ignore::WalkBuilder;
 use regex::Regex;
 
 use crate::usecases::workspace_query::{
-    FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, ReadFileParams,
+    FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, RawFileDto, ReadFileParams,
     SearchFilesParams, SearchMatchDto, SearchResponse, TreeEntryDto, TreeResponse,
     WorkspaceError, WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
 };
@@ -38,6 +38,20 @@ const MAX_FILENAME_LIMIT: usize = 200;
 const DEFAULT_MAX_SEARCH_RESULTS: usize = 200;
 const ABSOLUTE_MAX_SEARCH_RESULTS: usize = 1000;
 const SEARCH_BAILOUT_BYTES: u64 = 1_048_576; // 1 MiB per file
+
+/// VSCode's default `files.exclude` — the only dotfiles/dirs hidden from
+/// the workspace tree. Everything else (`.cargo`, `.vscode`, `.gitignore`,
+/// ...) is shown, mirroring the Explorer's default behaviour: hidden
+/// entries are visible unless they are VCS metadata or OS junk files.
+const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[
+    ".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db",
+];
+
+/// True when `name` matches one of VSCode's default `files.exclude`
+/// entries. Applied at every directory level (equivalent to `**/.git`).
+fn is_vscode_default_excluded(name: &str) -> bool {
+    VSCODE_DEFAULT_EXCLUDES.contains(&name)
+}
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "mp3", "mp4", "avi",
     "mov", "wav", "flac", "ogg", "webm", "mkv", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst",
@@ -345,7 +359,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
                 Err(_) => continue,
             };
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if is_vscode_default_excluded(&name) {
                 continue;
             }
             let metadata = entry.metadata().ok();
@@ -357,7 +371,11 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
                     .map(|rd| {
                         rd.filter(|e| {
                             e.as_ref()
-                                .map(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                                .map(|e| {
+                                    let fname = e.file_name();
+                                    let n = fname.to_string_lossy();
+                                    !is_vscode_default_excluded(&n)
+                                })
                                 .unwrap_or(false)
                         })
                         .count()
@@ -425,6 +443,36 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
             is_dir: meta.is_dir(),
             modified: Self::modified_rfc3339(&meta),
             path: rel_path,
+        })
+    }
+
+    async fn read_file_raw(
+        &self,
+        params: &ReadFileParams,
+    ) -> Result<RawFileDto, WorkspaceError> {
+        // Same `resolve_within` guard as `read_file` — canonicalise +
+        // containment check (path-traversal defence) before touching disk.
+        let (_root, abs_path, rel_path) =
+            self.resolve_within(params.workspace_id.as_deref(), &params.path)?;
+
+        let meta = std::fs::metadata(&abs_path).map_err(|_| {
+            WorkspaceError::NotFound(format!("failed to read metadata for: {}", rel_path))
+        })?;
+        if !meta.is_file() {
+            return Err(WorkspaceError::NotFound(format!(
+                "not a file: {}",
+                rel_path
+            )));
+        }
+
+        let bytes = std::fs::read(&abs_path).map_err(|_| {
+            WorkspaceError::NotFound(format!("failed to read file: {}", rel_path))
+        })?;
+
+        Ok(RawFileDto {
+            bytes,
+            mime_type: Self::mime_type_for(&rel_path).to_string(),
+            size: meta.len(),
         })
     }
 
@@ -816,5 +864,102 @@ mod tests {
             "root should end with the tempdir leaf, got: {} (want suffix: {expected_suffix})",
             resp.root
         );
+    }
+
+    /// `list_tree` mirrors VSCode's default `files.exclude`: hidden
+    /// entries are shown unless they are VCS metadata / OS junk
+    /// (`.git`, `.svn`, `.hg`, `CVS`, `.DS_Store`, `Thumbs.db`).
+    /// Regression guard for the old blanket "hide all dotfiles" filter.
+    #[tokio::test]
+    async fn list_tree_shows_hidden_except_vscode_default_excludes() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // Hidden entries that MUST be visible (VSCode shows these).
+        std::fs::create_dir(root.join(".cargo")).expect("mkdir .cargo");
+        std::fs::create_dir(root.join(".vscode")).expect("mkdir .vscode");
+        std::fs::write(root.join(".gitignore"), "target/\n").expect("write .gitignore");
+        std::fs::write(root.join("readme.txt"), "hi").expect("write readme");
+
+        // VSCode-default-excluded entries that MUST stay hidden.
+        std::fs::create_dir(root.join(".git")).expect("mkdir .git");
+        std::fs::create_dir(root.join(".svn")).expect("mkdir .svn");
+        std::fs::create_dir(root.join(".hg")).expect("mkdir .hg");
+        std::fs::create_dir(root.join("CVS")).expect("mkdir CVS");
+        std::fs::write(root.join(".DS_Store"), "junk").expect("write .DS_Store");
+        std::fs::write(root.join("Thumbs.db"), "junk").expect("write Thumbs.db");
+
+        // A hidden dir with a hidden child — children_count must count
+        // `.cargo`'s visible children and skip excluded ones.
+        std::fs::write(root.join(".cargo").join("config.toml"), "x").expect("write config");
+        std::fs::create_dir(root.join(".cargo").join(".git")).expect("mkdir .cargo/.git");
+
+        let svc = RuntimeWorkspaceQueryService::new(root.to_path_buf(), "test-agent".to_string());
+        let resp = svc
+            .list_tree(&ListTreeParams {
+                workspace_id: None,
+                path: Some(String::new()),
+            })
+            .await
+            .expect("list_tree");
+
+        let names: Vec<&str> = resp.entries.iter().map(|e| e.name.as_str()).collect();
+
+        // Visible hidden entries.
+        for expected in [".cargo", ".vscode", ".gitignore", "readme.txt"] {
+            assert!(
+                names.contains(&expected),
+                "tree must include {expected:?}, got: {names:?}"
+            );
+        }
+        // Excluded entries.
+        for excluded in [".git", ".svn", ".hg", "CVS", ".DS_Store", "Thumbs.db"] {
+            assert!(
+                !names.contains(&excluded),
+                "tree must NOT include {excluded:?}, got: {names:?}"
+            );
+        }
+
+        // children_count on `.cargo` counts visible children only
+        // (config.toml = 1; `.git` is excluded).
+        let cargo = resp
+            .entries
+            .iter()
+            .find(|e| e.name == ".cargo")
+            .expect(".cargo entry");
+        assert_eq!(cargo.children_count, Some(1), "children_count must skip excluded entries");
+    }
+
+    /// `read_file_raw` (ADR-055 L2-7) must return verbatim bytes + MIME
+    /// and reject path traversal, so the Gateway's HTML-preview reverse
+    /// proxy serves sub-resources correctly and never escapes the
+    /// workspace root.
+    #[tokio::test]
+    async fn read_file_raw_returns_bytes_and_blocks_traversal() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("index.html"), "<h1>hi</h1>").expect("write");
+
+        let svc = RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        // Agent home: raw bytes + HTML MIME (not a JSON envelope).
+        let dto = svc
+            .read_file_raw(&ReadFileParams {
+                workspace_id: None,
+                path: "index.html".to_string(),
+            })
+            .await
+            .expect("read_file_raw");
+        assert_eq!(dto.bytes, b"<h1>hi</h1>");
+        assert_eq!(dto.mime_type, "text/html");
+
+        // Path traversal must be rejected by the shared `resolve_within`.
+        let err = svc
+            .read_file_raw(&ReadFileParams {
+                workspace_id: None,
+                path: "../secret.txt".to_string(),
+            })
+            .await
+            .expect_err("traversal must fail");
+        assert_eq!(err.http_status(), 400);
     }
 }

@@ -58,6 +58,21 @@ if (Test-Path $LspRelayBin) {
     Write-Host "        acowork-lsp-relay binary not found" -ForegroundColor Yellow
 }
 
+# Bundle Node Agent binary (sibling of acowork-gateway.exe, ADR-055 §6.11).
+# The Gateway locates it via `current_exe().parent().join("acowork-node.exe")`;
+# without this copy node 'local' never enrolls and agent installs fail with
+# 503 "Node 'local' has never enrolled (offline)".
+$NodeBin = Join-Path $WorkspaceRoot "target\release\acowork-node.exe"
+if (Test-Path $NodeBin) {
+    Copy-Item -Path $NodeBin -Destination (Join-Path $BinDir "acowork-node.exe") -Force
+    Write-Host "Bundled Node Agent binary: $NodeBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-node.exe not found at $NodeBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, Gateway startup will fail with:" -ForegroundColor Yellow
+    Write-Host "        acowork-node binary not found — node topology disabled" -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

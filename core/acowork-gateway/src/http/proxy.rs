@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::{
     Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
     routing::{any, get, post, put, delete},
 };
@@ -28,18 +28,34 @@ use tokio::sync::RwLock;
 
 use crate::http::routes::AppState;
 
-/// Registry mapping id -> Runtime HTTP port.
+/// Maximum body size the Gateway will accept for any reverse-proxy
+/// route. The actual layer is installed at the merged-router root
+/// in [`crate::http::routes::api_router`] (see
+/// `GLOBAL_BODY_LIMIT` there for the rationale); this constant is
+/// kept as a reference point and historically used to be applied
+/// here before we lifted it to the shared router.
+///
+/// NOTE: see `crate::http::routes::GLOBAL_BODY_LIMIT` — that is the
+/// source of truth. This shim is no longer wired up but kept as a
+/// breadcrumb.
+#[allow(dead_code)]
+const FILE_UPLOAD_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Registry mapping id -> Runtime HTTP endpoint (ADR-055 D3).
 ///
 /// Populated by [`crate::mqtt::dispatch::handle_plaintext_message`] when the
-/// Gateway receives a **retained** `acowork/agents/{id}/http_port` payload
-/// from a Runtime (ADR-033). The retained flag is critical: if the Gateway
-/// restarts (or starts after the Runtime), the broker replays the last
-/// known port so the Gateway can immediately resume reverse-proxying large
-/// data queries without waiting for the next Runtime-side publish.
+/// Gateway receives a **retained** `acowork/agents/{id}/http_endpoint`
+/// payload from a Runtime. The payload is a full endpoint URL (e.g.
+/// `http://127.0.0.1:54321`) — Phase 1 uses loopback; Phase 2 will publish
+/// a Node reverse-proxy address and the Gateway consumes it opaquely. The
+/// retained flag is critical: if the Gateway restarts (or starts after the
+/// Runtime), the broker replays the last known endpoint so the Gateway can
+/// immediately resume reverse-proxying without waiting for the next
+/// Runtime-side publish.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeHttpRegistry {
-    /// id -> (http_port, registered_at)
-    ports: HashMap<String, u16>,
+    /// id -> endpoint URL (e.g. "http://127.0.0.1:54321")
+    endpoints: HashMap<String, String>,
 }
 
 impl RuntimeHttpRegistry {
@@ -47,36 +63,36 @@ impl RuntimeHttpRegistry {
         Self::default()
     }
 
-    /// Register a Runtime's HTTP port.
-    pub fn register(&mut self, id: &str, http_port: u16) {
+    /// Register a Runtime's HTTP endpoint (ADR-055 D3).
+    pub fn register(&mut self, id: &str, endpoint: &str) {
         tracing::info!(
             id,
-            http_port,
-            "Runtime HTTP port registered for reverse proxy"
+            endpoint,
+            "Runtime HTTP endpoint registered for reverse proxy"
         );
-        self.ports.insert(id.to_string(), http_port);
+        self.endpoints.insert(id.to_string(), endpoint.to_string());
     }
 
     /// Unregister a Runtime (e.g. on disconnect/stop).
     pub fn unregister(&mut self, id: &str) {
-        self.ports.remove(id);
+        self.endpoints.remove(id);
     }
 
-    /// Get the HTTP port for a Runtime.
-    pub fn get_port(&self, id: &str) -> Option<u16> {
-        self.ports.get(id).copied()
+    /// Get the HTTP endpoint URL for a Runtime (ADR-055 D3).
+    pub fn get_endpoint(&self, id: &str) -> Option<String> {
+        self.endpoints.get(id).cloned()
     }
 
     /// Number of registered Runtimes.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
-        self.ports.len()
+        self.endpoints.len()
     }
 
     /// Whether any Runtimes are registered.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.ports.is_empty()
+        self.endpoints.is_empty()
     }
 }
 
@@ -199,6 +215,10 @@ pub fn proxy_routes() -> Router<AppState> {
         // `GET /files/{document_id}` (blob download). The Gateway is a
         // transparent reverse-proxy - multipart bodies and binary
         // responses flow through unchanged.
+        //
+        // Per-route body-limit override is NOT needed: the global
+        // `DefaultBodyLimit::max(GLOBAL_BODY_LIMIT)` layer at the
+        // proxy root covers this `Bytes` extractor.
         .route(
             "/api/agents/{id}/sessions/{sid}/files",
             post(proxy_upload_file),
@@ -306,6 +326,10 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/debug/{*rest}",
             any(proxy_debug_rpc),
         )
+        // NOTE: the global `DefaultBodyLimit` layer is applied at
+        // the merged-router level in `http::routes::api_router` so
+        // every merged sub-router (agents, chat, proxy, …) shares the
+        // same cap. See `GLOBAL_BODY_LIMIT` for the rationale.
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────
@@ -1316,7 +1340,7 @@ async fn proxy_to_runtime(
 ///
 /// `body` is forwarded verbatim as the request payload when set
 /// (POST/PUT/PATCH). Endpoints with no incoming body should pass `None`.
-async fn proxy_to_runtime_with_method(
+pub(crate) async fn proxy_to_runtime_with_method(
     state: &AppState,
     id: &str,
     path: &str,
@@ -1329,7 +1353,7 @@ async fn proxy_to_runtime_with_method(
     let registry = match &state.runtime_http_registry {
         Some(r) => r.clone(),
         None => {
-            return (
+            let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
                     "error": "Runtime HTTP proxy registry not initialized",
@@ -1337,39 +1361,51 @@ async fn proxy_to_runtime_with_method(
                 })),
             )
                 .into_response();
+            // Same Retry-After contract as /api/global-resources
+            // (http.md §4.13): the desktop `with503Retry` helper honours
+            // this header before its exponential backoff, keeping the
+            // boot-window retry cadence uniform across Gateway 503s.
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+            return response;
         }
     };
 
-    let http_port = {
+    let endpoint = {
         let reg = registry.read().await;
-        reg.get_port(id)
+        reg.get_endpoint(id)
     };
 
-    let http_port = match http_port {
-        Some(port) => port,
+    let endpoint = match endpoint {
+        Some(ep) => ep,
         None => {
-            return (
+            let mut response = (
                 StatusCode::SERVICE_UNAVAILABLE,
                 axum::Json(serde_json::json!({
-                    "error": "Runtime HTTP port not registered",
+                    "error": "Runtime HTTP endpoint not registered",
                     "id": id,
-                    "message": "The Gateway has not yet discovered this Runtime's HTTP port. The Runtime should publish a retained message on `acowork/agents/{id}/http_port` at startup (ADR-033). Verify the Runtime is running, has connected to the MQTT broker, and was started with `--http-port 0` so its localhost HTTP server is up."
+                    "message": "The Gateway has not yet discovered this Runtime's HTTP endpoint. The Runtime should publish a retained message on `acowork/agents/{id}/http_endpoint` at startup (ADR-033, ADR-055 D3). Verify the Runtime is running, has connected to the MQTT broker, and was started with `--http-port 0` so its localhost HTTP server is up."
                 })),
             )
                 .into_response();
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("2"));
+            return response;
         }
     };
 
-    // Build the target URL
+    // Build the target URL (endpoint already includes host:port)
     let target_url = if query.is_empty() {
-        format!("http://127.0.0.1:{}{}", http_port, path)
+        format!("{}{}", endpoint, path)
     } else {
-        format!("http://127.0.0.1:{}{}?{}", http_port, path, query)
+        format!("{}{}?{}", endpoint, path, query)
     };
 
     tracing::debug!(
         id,
-        http_port,
+        endpoint,
         target_url = %target_url,
         "Reverse-proxying to Runtime HTTP server"
     );
@@ -1385,6 +1421,15 @@ async fn proxy_to_runtime_with_method(
         if !is_hop_by_hop_header(name) {
             request = request.header(name, value);
         }
+    }
+
+    // ADR-055 Phase 5a: when MQTT auth is enabled, attach the
+    // long-lived token of the node hosting this agent as
+    // `X-ACowork-Node-Token` so the Runtime can authenticate the
+    // proxied request (see `acowork-node` proxy/mod.rs). No-op when
+    // auth is off, the agent is unknown, or its node is not enrolled.
+    if let Some(node_token) = resolve_node_token(state, id).await {
+        request = request.header("X-ACowork-Node-Token", node_token);
     }
 
     if let Some(ref payload) = body {
@@ -1424,6 +1469,32 @@ async fn proxy_to_runtime_with_method(
     }
 }
 
+/// ADR-055 Phase 5a: resolve the long-lived node token for the node
+/// hosting `agent_id` (installed_agents first, running_agents as a
+/// fallback). Returns `None` when the agent is unknown or its node
+/// has not enrolled yet — callers treat that as "no credential to
+/// attach" rather than an error.
+///
+/// Deliberately NOT gated on `mqtt.auth_enabled`: the node enforces
+/// this token on its HTTP proxy whenever IT holds one (acowork-node
+/// proxy/mod.rs), regardless of the broker auth flag, so the Gateway
+/// must attach the token whenever the store has one — otherwise every
+/// reverse-proxied request 403s with "invalid node token" (loading
+/// session stalls on `latest-session`). When auth is off and the node
+/// never enrolled, both sides hold no token and the proxy stays open,
+/// so the two sides remain consistent either way.
+async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> {
+    let gw = state.gateway_state.read().await;
+    let broker_auth = gw.mqtt_broker_auth.as_ref()?;
+    let node_id = gw
+        .installed_agents
+        .get(agent_id)
+        .map(|a| a.node_id.as_str())
+        .or_else(|| gw.running_agents.get(agent_id).map(|a| a.node_id.as_str()))?;
+    let store = broker_auth.node_tokens.lock().ok()?;
+    store.get_token(node_id).map(str::to_string)
+}
+
 /// Fetch JSON from a Runtime HTTP endpoint.
 ///
 /// Looks up the Runtime's HTTP port from the registry, calls `GET {path}`,
@@ -1454,19 +1525,19 @@ pub(crate) async fn send_runtime_json(
         ApiError::service_unavailable("Runtime HTTP proxy registry not initialized")
     })?;
 
-    let http_port = {
+    let endpoint = {
         let reg = registry.read().await;
-        reg.get_port(id)
+        reg.get_endpoint(id)
     };
 
-    let http_port = http_port.ok_or_else(|| {
+    let endpoint = endpoint.ok_or_else(|| {
         ApiError::not_found(&format!(
-            "Agent {} is not running (no Runtime HTTP port registered)",
+            "Agent {} is not running (no Runtime HTTP endpoint registered)",
             id
         ))
     })?;
 
-    let url = format!("http://127.0.0.1:{}{}", http_port, path);
+    let url = format!("{}{}", endpoint, path);
 
     let client = runtime_http_client();
     let mut req = client.request(method, &url);
@@ -1510,21 +1581,21 @@ pub(crate) fn runtime_http_client() -> &'static reqwest::Client {
     })
 }
 
-/// Forward a request to the Runtime's localhost HTTP server.
+/// Forward a request to the Runtime's HTTP endpoint (ADR-055 D3).
 ///
-/// This is used by the proxy handlers when the Runtime's HTTP port
+/// This is used by the proxy handlers when the Runtime's HTTP endpoint
 /// is known but the proxy layer needs to forward the request
 /// out-of-band (e.g. without the AppState registry). The current
 /// reverse-proxy path goes through `proxy_to_runtime_with_method`,
-/// which uses the retained-port registry populated via MQTT.
+/// which uses the retained-endpoint registry populated via MQTT.
 #[allow(dead_code)]
 async fn forward_to_runtime(
-    http_port: u16,
+    endpoint: &str,
     method: reqwest::Method,
     path: &str,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let url = format!("http://127.0.0.1:{}{}", http_port, path);
+    let url = format!("{}{}", endpoint, path);
 
     let client = runtime_http_client();
     let mut req = client.request(method, &url);
@@ -1565,14 +1636,17 @@ mod tests {
         let mut registry = RuntimeHttpRegistry::new();
         assert!(registry.is_empty());
 
-        registry.register("com.test.agent", 12345);
+        registry.register("com.test.agent", "http://127.0.0.1:12345");
         assert_eq!(registry.len(), 1);
-        assert_eq!(registry.get_port("com.test.agent"), Some(12345));
-        assert_eq!(registry.get_port("com.unknown"), None);
+        assert_eq!(
+            registry.get_endpoint("com.test.agent"),
+            Some("http://127.0.0.1:12345".to_string())
+        );
+        assert_eq!(registry.get_endpoint("com.unknown"), None);
 
         registry.unregister("com.test.agent");
         assert!(registry.is_empty());
-        assert_eq!(registry.get_port("com.test.agent"), None);
+        assert_eq!(registry.get_endpoint("com.test.agent"), None);
     }
 
     /// ADR-048 D5: the debug wildcard route must forward method, path
@@ -1625,7 +1699,7 @@ mod tests {
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
         let registry = crate::http::proxy::new_shared_registry();
-        registry.write().await.register("glm-5.3_common", port);
+        registry.write().await.register("glm-5.3_common", &format!("http://127.0.0.1:{}", port));
         state.runtime_http_registry = Some(registry);
 
         let app = super::proxy_routes().with_state(state);
@@ -1751,6 +1825,7 @@ mod tests {
                 pid: 9999,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
+                node_id: "local".to_string(),
                 connected: true,
                 ready: true,
                 dev_mode: false,
@@ -1816,6 +1891,7 @@ mod tests {
                 pid: 9999,
                 started_at: chrono::Utc::now(),
                 workspace: String::new(),
+                node_id: "local".to_string(),
                 connected: true,
                 ready: true,
                 dev_mode: true,

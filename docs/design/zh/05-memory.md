@@ -2,7 +2,7 @@
 
 > 版本：v3.7 | 更新日期：2026-04-22
 
-> 本文档基于 docs/review/07/08-memory review 的设计补充。主要变更：新增 Abstention 拒答机制（§6.5）、冲突检测升级为三层信号模型（§6.4）、新增质量评估框架章节（§11）、即时/离线巩固边界明确化（§4）、检索权重动态调整（§6.6）。
+> 本文档基于 `docs/_internal/archive/review/zh/07-memory-competitive-review.md` 与 `08-memory-benchmark-review.md`（本地归档）的设计补充。主要变更：新增 Abstention 拒答机制（§6.5）、冲突检测升级为三层信号模型（§6.4）、新增质量评估框架章节（§11）、即时/离线巩固边界明确化（§4）、检索权重动态调整（§6.6）。
 
 > **v3.8 变更（2026-05-28）**：上下文压缩策略大幅简化，程序化折叠策略全部放弃——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。核心变更：移除内容折叠（Phase 1）、三阶段渐进裁剪、检索结果 8 级优先级、弹性预算分区。瞬态层压缩简化为：70% 告警 → 80% LLM 摘要（完整上下文） → 95% emergency_trim 安全网。
 
@@ -490,7 +490,7 @@ PendingKnowledgeNode：
 - 三元组提取移至离线巩固阶段（Phase 3），此时 LLM 有完整上下文和充裕时间
 - `autobiographical` 类目是 §3.3 中"用户陈述（即时）"与"重要事件（即时）"两条来源的具体实现——LLM 不再需要等待离线巩固去发现自传体节点，可在 Tool Call 阶段直接写入；保留 Manifest 派生与离线自我评估两条自动路径不变
 
-详见 docs/review/04-p2-s2-design-review.md §6.9
+详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.9
 
 **即时阶段 Prompt 职责（v3.7 明确化）**：
 
@@ -766,7 +766,7 @@ activity_signal = clamp(recency_boost + access_boost, FLOOR, 1.0)
 
 路径 3 — 用户手动（Desktop App Memory 管理面板）
 
-详见 docs/review/04-p2-s2-design-review.md §6.15
+详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.15
 
 **Fact 语义去重（发生在离线巩固阶段）：**
 
@@ -962,7 +962,7 @@ Grafeo GQL 原生图遍历相比旧版 SQL 模拟的优势：
 - 扩散阈值可配置（默认 0.2），在首次运行时可根据实际效果调整
 - 多路径节点获得 Grafeo PageRank 额外权重加成
 
-详见 docs/review/04-p2-s2-design-review.md §6.2、§6.3
+详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.2、§6.3
 
 **Grafeo 图算法增强（基于 grafeo-engine 原生 API）：**
 
@@ -1059,7 +1059,7 @@ PendingKnowledgeNode 写入时：
 
 **设计理由**：冲突分类是语义判断，遵循 LLM 优先原则。即时阶段仅做语义 + 时间的粗筛（两层信号），统一标记 Ambiguous。硬编码关键词匹配（否定词、变化词）已被证明覆盖面和可靠性不足，Phase 3 LLM 有完整上下文，判定质量远超启发式规则。
 
-详见 docs/review/04-p2-s2-design-review.md §6.9
+详见 `docs/_internal/archive/review/zh/04-p2-s2-design-review.md` §6.9
 
 ### 6.5 Abstention（拒答）机制（v3.7 新增）
 

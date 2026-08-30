@@ -459,8 +459,8 @@ Tauri Rust 后端不需要任何改动（command name 是字符串动态分发�
 - 手动测：发起一条 30s+ sleep 命令，观察 UI 有心跳显示，点击取消能停掉进程
 
 ### 7.6 步骤 5：文档与 ADR 归档 ✅
-- [x] `docs/zh/protocols/mqtt.md` §3.2 + §9.3 增补 ToolProgress / cancel_tool
-- [x] `docs/zh/protocols/README.md` §3 sequence + §5 导航同步
+- [x] `docs/protocols/zh/mqtt.md` §3.2 + §9.3 增补 ToolProgress / cancel_tool
+- [x] `docs/protocols/zh/README.md` §3 sequence + §5 导航同步
 - [x] 更新本 ADR 状态为「已实施」
 
 ---

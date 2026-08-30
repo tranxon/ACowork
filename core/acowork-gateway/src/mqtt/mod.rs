@@ -20,14 +20,25 @@
 
 pub mod acl;
 pub mod agent_registry;
+pub mod bootstrap_publisher;
 pub mod broker;
 pub mod client;
 pub mod dispatch;
+pub mod enrollment;
+pub mod global_resources_builders;
 pub mod global_resources_publisher;
+pub mod node_control;
+pub mod node_registry;
 pub mod sidecar;
 
 // Re-export key types
 pub use acl::{AclConfig, AclConfigError, AclPermission, AclRule};
-pub use broker::{start_broker, MqttBrokerError, MqttBrokerHandle};
+pub use bootstrap_publisher::{BootstrapPublisher, BootstrapPublisherHandle, BootstrapPublisherOptions, TOPIC_BOOTSTRAP};
+pub use broker::{start_broker, start_broker_with_auth, BrokerAuth, MqttBrokerError, MqttBrokerHandle};
 pub use client::{GatewayMqttClient, GatewayMqttClientError, MqttMessageCallback, MqttQoS};
 pub use global_resources_publisher::{MqttGlobalResourcesPublisher, MqttPublisherHandle, MqttPublisherTrigger};
+pub use node_registry::{new_shared_registry as new_shared_node_registry, NodeRegistry, SharedNodeRegistry};
+pub use enrollment::{
+    new_shared_enrollment_store, new_shared_node_token_store, EnrollmentTokenStore, NodeTokenStore,
+    SharedEnrollmentTokenStore, SharedNodeTokenStore, TokenValidation,
+};

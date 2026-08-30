@@ -47,7 +47,14 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 # objc2 (not objc 0.2): objc 0.2's sel!/msg_send! macros reference the
 # non-exported `sel_impl` macro and fail to expand under edition 2024's
 # stricter macro hygiene. objc2's proc macros are edition-2024-safe.
-objc2 = "0.6"
+# `exception` feature enables `objc2::exception::catch`, which wraps
+# @try/@catch around every msg_send! and turns NSException into a Rust
+# Result — this is REQUIRED for the pasteboard read path, because
+# NSPasteboard / NSString can raise NSException on stale items, mixed-
+# type pasteboards, or after a long uptime, and an NSException that
+# unwinds across a Rust `catch_unwind` boundary triggers
+# `__rust_foreign_exception` → `abort()`.
+objc2 = { version = "0.6", features = ["exception"] }
 
 # Unix-specific: clock_gettime for sleep detection (macOS + Linux)
 [target.'cfg(unix)'.dependencies]

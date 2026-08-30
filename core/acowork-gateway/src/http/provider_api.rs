@@ -17,8 +17,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::http::models_api;
-use crate::http::routes::{ApiError, AppState};
+use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
+use acowork_core::operation::{OperationRecord, OperationState};
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,6 +109,12 @@ pub struct AddProviderRequest {
     /// into the offline models.dev data so the Runtime sees user preferences.
     #[serde(default)]
     pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
+    /// ADR-059 §7.3: the BootstrapState `version` the client read
+    /// before writing (optimistic concurrency — stale clients are
+    /// rejected with `resource_version_conflict`). Absent → no
+    /// precondition.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 /// Update provider request (supports partial updates — key and config are optional).
@@ -237,7 +244,10 @@ pub async fn list_providers(
 pub async fn add_provider(
     State(state): State<AppState>,
     Json(body): Json<AddProviderRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+    // ADR-059 §7.3: reject stale writers before touching the vault.
+    crate::http::routes::check_expected_version(&state, body.expected_version).await?;
+
     // Validate base_url format if provided
     if let Some(ref url) = body.base_url
         && !url.is_empty()
@@ -310,6 +320,7 @@ pub async fn add_provider(
     // 5. Persist to disk and bump version.
     let data_dir = get_data_dir_from_gw(&gw);
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
+    let resource_version = gw.resource_cache.provider_list.version;
     drop(gw);
 
     // 6. Hot-push to running agents — handled by MQTT publisher trigger below.
@@ -318,12 +329,20 @@ pub async fn add_provider(
         trigger.trigger();
     }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(MessageResponse {
-            message: format!("Key stored for provider: {}", body.provider),
-        }),
-    ))
+    // 7. ADR-059 §6: open a committed operation record so the client
+    // can correlate this mutation by `operation_id` and observe the
+    // resulting `resource_version`. The side effect (vault + disk)
+    // already completed synchronously, so the record starts terminal-
+    // ready in `Committed` and is swept after its deadline.
+    let mut record = OperationRecord::new(body.expected_version.unwrap_or(0));
+    record.state = OperationState::Committed;
+    record.resource_version = Some(resource_version);
+    let ack = OperationAck::from_record(&record);
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
+    Ok((StatusCode::CREATED, Json(ack)))
 }
 
 /// `DELETE /api/providers/:provider` — remove a provider (key + config).

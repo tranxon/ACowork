@@ -1,5 +1,5 @@
 #!/usr/bin/env pwsh
-# build_core.ps1 - Build Gateway + Runtime (debug or release mode)
+# build_core.ps1 - Build Gateway + Runtime + Node Agent (debug or release mode)
 # Usage:
 #   .\dev\build_core.ps1                  Build release (default)
 #   .\dev\build_core.ps1 -Debug           Build debug
@@ -51,10 +51,10 @@ if ($Profile -eq "debug") {
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
 # Step count:
-#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Copy resources, Start (7)
-#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Copy resources      (6)
-#   else   :            Gateway, Runtime, Embed, LSP Relay, Copy resources (5)
-$totalSteps = if ($Start) { 7 } elseif ($Stop) { 6 } else { 5 }
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources, Start (8)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources      (7)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, Copy resources (6)
+$totalSteps = if ($Start) { 8 } elseif ($Stop) { 7 } else { 6 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
@@ -70,7 +70,7 @@ $step = 0
 if ($Start -or $Stop) {
     # Step: Stop running processes
     $step++
-    Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, Embed, and LSP Relay processes..." -ForegroundColor Yellow
+    Write-Host "[$step/$totalSteps] Stopping running Gateway, Runtime, Embed, LSP Relay, and Node Agent processes..." -ForegroundColor Yellow
 
     $gatewayProcs = Get-Process -Name "acowork-gateway" -ErrorAction SilentlyContinue
     $runtimeProcs = Get-Process -Name "acowork-runtime" -ErrorAction SilentlyContinue
@@ -82,6 +82,11 @@ if ($Start -or $Stop) {
     # would otherwise be attached by the new gateway via
     # attach_existing_lsp_relay() but owned by a now-dead parent.
     $lspProcs    = Get-Process -Name "acowork-lsp-relay" -ErrorAction SilentlyContinue
+    # The Node Agent is spawned by the Gateway (ADR-055 §6.11). On Windows the
+    # Gateway's orphan cleanup is skipped (no `ps`), so a node left behind by a
+    # killed Gateway would keep running with the old broker connection — kill it
+    # explicitly to keep the stop step idempotent.
+    $nodeProcs   = Get-Process -Name "acowork-node"   -ErrorAction SilentlyContinue
 
     if ($gatewayProcs) {
         Write-Host "  Found Gateway processes: $($gatewayProcs.Id -join ', ')" -ForegroundColor Gray
@@ -113,6 +118,14 @@ if ($Start -or $Stop) {
         Write-Host "  LSP Relay stopped." -ForegroundColor Green
     } else {
         Write-Host "  No LSP Relay process running." -ForegroundColor Gray
+    }
+
+    if ($nodeProcs) {
+        Write-Host "  Found Node Agent processes: $($nodeProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-node" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Node Agent stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Node Agent process running." -ForegroundColor Gray
     }
 
     # Ensure embed port 18080 is released before starting a new gateway.
@@ -281,6 +294,36 @@ try {
     Write-Host "  LSP Relay build completed." -ForegroundColor Green
 } catch {
     Write-Host "  LSP Relay build failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
+# Step: Build Node Agent (standalone binary, sibling of acowork-gateway.exe)
+#
+# ADR-055 §6.11: the Gateway supervises a local Node Agent (`acowork-node`),
+# located via `current_exe().parent().join("acowork-node.exe")` — so the
+# binary MUST sit next to acowork-gateway.exe. Without it the Gateway
+# silently disables the node topology ("acowork-node binary not found — local
+# node agent disabled"), node 'local' never enrolls, and agent installs fail
+# with 503 "Node 'local' has never enrolled (offline)".
+$step++
+Write-Host "[$step/$totalSteps] Building Node Agent ($Profile mode)..." -ForegroundColor Yellow
+try {
+    $cargoArgs = @("build")
+    if ($Profile -eq "release") { $cargoArgs += "--release" }
+    $cargoArgs += @("-p", "acowork-node")
+    & cargo @cargoArgs 2>&1 | ForEach-Object {
+        if ($_ -match "error" -or $_ -match "Compiling") {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "  Node Agent build completed." -ForegroundColor Green
+} catch {
+    Write-Host "  Node Agent build failed: $_" -ForegroundColor Red
     exit 1
 }
 

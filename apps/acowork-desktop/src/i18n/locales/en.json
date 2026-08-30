@@ -73,6 +73,7 @@
     "startAgent": "Start Agent",
     "startingAgent": "Starting {{name}}…",
     "llmNotConfigured": "No LLM provider configured. Please add an API key in Harness → Providers.",
+    "llmSyncing": "Syncing LLM configuration…",
     "thinking": "Thinking...",
     "replying": "Replying...",
     "working": "working ...",
@@ -205,6 +206,13 @@
       "installSelectedInstalling": "Installing {{name}}...",
       "fromFileTitle": "Install from .agent file",
       "fromFileSubtitle": "Select a .agent package from your computer",
+      "preparing": "Preparing services: {{detail}}...",
+      "waitingReady": "Waiting for services to be ready...",
+      "opPending": "Pending",
+      "opSubmitted": "Submitted (op {{opId}})",
+      "opCompleted": "Installed",
+      "opFailed": "Failed",
+      "installProgress": "Install progress {{done}}/{{total}}",
       "complete": "Complete →",
       "back": "Back"
     }
@@ -228,6 +236,8 @@
     "contextUninstall": "Uninstall",
     "createAgent": "Create Agent",
     "installAgent": "Install Agent",
+    "selectNode": "Select node",
+    "back": "Back",
     "filterAgentPackage": "Agent Package",
     "agentStarted": "Agent started",
     "agentStartedDebug": "Agent started in debug mode",
@@ -350,7 +360,9 @@
     "labelLastAccessed": "Last Accessed",
     "statusStable": "Stable",
     "statusDecaying": "Decaying",
-    "statusCritical": "Critical"
+    "statusCritical": "Critical",
+    "contextMenuCopyNodeJson": "Copy Node (JSON)",
+    "contextMenuCopyFormatted": "Copy Formatted"
   },
   "skillsPanel": {
     "selectSkill": "Select skill",
@@ -373,6 +385,7 @@
     "tabGeneral": "General",
     "tabAppearance": "Appearance",
     "tabGateway": "Gateway",
+    "tabNodes": "Nodes",
     "profileTitle": "Your Profile",
     "displayName": "Display Name",
     "displayNamePlaceholder": "Your display name",
@@ -456,7 +469,19 @@
     "resetOnboarding": "Reset Onboarding",
     "resetOnboardingDesc": "Reset the onboarding wizard to reconfigure your Gateway connection and API keys. Gateway models cache will be reloaded from disk (no re-download needed).",
     "resetOnboardingBtn": "Reset Onboarding",
-    "resetOnboardingConfirm": "Reset onboarding? This will clear all progress and require reconfiguration of Gateway connection and API keys. Page will reload to restart."
+    "resetOnboardingConfirm": "Reset onboarding? This will clear all progress and require reconfiguration of Gateway connection and API keys. Page will reload to restart.",
+    "nodesTitle": "Node Management",
+    "nodesEmpty": "No nodes discovered. Start the local gateway or connect a remote node to see it here.",
+    "nodesRefresh": "Refresh",
+    "nodesOnline": "Online",
+    "nodesOffline": "Offline",
+    "nodesColNodeId": "Node",
+    "nodesColStatus": "Status",
+    "nodesColOs": "OS",
+    "nodesColArch": "Arch",
+    "nodesColVersion": "Version",
+    "nodesColHostname": "Hostname",
+    "nodesColAgents": "Agents"
   },
   "agentSetup": {
     "noApiKey": "No API key configured. Add in Harness → Search.",
@@ -733,7 +758,8 @@
     "stopped": "Stopped",
     "agent": "Agent",
     "version": "Version",
-    "sessions": "Sessions",
+    "activeSessions": "Active Sessions",
+    "totalSessions": "Total Sessions",
     "noAgentSelected": "No Agent selected",
     "buttonStep": "Step (F10)",
     "buttonStop": "Stop",
@@ -920,76 +946,76 @@
   },
   "tools": {
     "memory_recall": {
-      "running": "Recalling",
-      "done": "Recalled"
+      "running": "Recalling memory",
+      "done": "Recalled memory"
     },
     "context_recall": {
       "running": "Recalling context",
-      "done": "Context recalled"
+      "done": "Recalled context"
     },
     "memory_store": {
-      "running": "Storing",
-      "done": "Stored"
+      "running": "Storing memory",
+      "done": "Stored memory"
     },
     "http_request": {
-      "running": "Requesting",
-      "done": "Requested"
+      "running": "Http Requesting",
+      "done": "Http Requested"
     },
     "web_fetch": {
-      "running": "Fetching",
-      "done": "Fetched"
+      "running": "Web Fetching",
+      "done": "Web Fetched"
     },
     "web_search": {
-      "running": "Searching",
-      "done": "Searched"
+      "running": "Web Searching",
+      "done": "Web Searched"
     },
     "file_read": {
-      "running": "Reading",
-      "done": "Read"
+      "running": "Reading file",
+      "done": "Read file"
     },
     "file_write": {
-      "running": "Writing",
-      "done": "Written"
+      "running": "Writing file",
+      "done": "Written file"
     },
     "file_edit": {
-      "running": "Editing",
-      "done": "Edited"
+      "running": "Editing file",
+      "done": "Edited file"
     },
     "doc_reader": {
-      "running": "Reading document",
-      "done": "Read document"
+      "running": "Reading doc",
+      "done": "Read doc"
     },
     "glob_search": {
-      "running": "Globbing",
-      "done": "Globbed"
+      "running": "Glob searching",
+      "done": "Glob searched"
     },
     "content_search": {
-      "running": "Searching",
-      "done": "Searched"
+      "running": "Searching content",
+      "done": "Searched content"
     },
     "intent_send": {
       "running": "Sending intent",
       "done": "Sent intent"
     },
     "ask_user_question": {
-      "running": "Asking",
-      "done": "Asked"
+      "running": "Asking user",
+      "done": "Asked user"
     },
     "todo_write": {
       "running": "Updating todos",
       "done": "Updated todos"
     },
     "mcp_install": {
-      "running": "Installing",
-      "done": "Installed"
+      "running": "Installing MCP",
+      "done": "Installed MCP"
     },
     "mcp_uninstall": {
-      "running": "Uninstalling",
-      "done": "Uninstalled"
+      "running": "Uninstalling MCP",
+      "done": "Uninstalled MCP"
     },
     "rag_query": {
-      "running": "Querying",
-      "done": "Queried"
+      "running": "Querying RAG",
+      "done": "Queried RAG"
     },
     "codebase": {
       "running": "Searching code",

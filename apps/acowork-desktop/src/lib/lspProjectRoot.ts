@@ -28,14 +28,17 @@ import { log } from "./logger";
  * @param filePath    Absolute path of the file being opened
  * @param language    Language id (e.g. "typescript", "rust")
  * @param workspaceRoot  Monorepo root (upper bound for the search)
+ * @param agentId     Agent hosting the file — resolves which node's LSP
+ *                    relay to use (ADR-055 §6.7, Phase 4)
  * @returns Project root directory (absolute path)
  */
 export async function discoverProjectRoot(
     filePath: string,
     language: string,
     workspaceRoot: string,
+    agentId?: string,
 ): Promise<string> {
-    const relayUrl = await getLspRelayUrl();
+    const relayUrl = await getLspRelayUrl(agentId);
     if (!relayUrl) {
         log.warn("[LSP] project root discovery unavailable — relay not reachable, using workspace root");
         return workspaceRoot;

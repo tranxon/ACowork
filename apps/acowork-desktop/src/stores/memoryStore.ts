@@ -13,6 +13,7 @@ import {
 } from "../lib/gateway-api";
 import { useGatewayStore } from "./gatewayStore";
 import { log } from "../lib/logger";
+import { with503Retry } from "../lib/httpRetry";
 
 interface MemoryFilters {
   type: "All" | "Knowledge" | "Episodic" | "Procedural" | "Autobiographical";
@@ -109,7 +110,16 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       if (filters.keyword) params.set("keyword", filters.keyword);
       if (filters.timeRange !== "all") params.set("time_range", filters.timeRange);
 
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes?${params}`);
+      // Bug B v3 fix: memory endpoints proxy through the Runtime and
+      // 503 during the boot window between Gateway discovery and
+      // Runtime HTTP port registration. `with503Retry` rides out
+      // transient 503s transparently so the MemoryPanel does not
+      // have to gate on a UI-side `isAgentReady` flag (see
+      // MemoryPanel.tsx — `isAgentReady` was removed in v3).
+      const res = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes?${params}`),
+        { tag: `MemoryStore.fetchNodes(${agentId})`, logger: log },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: MemoryNodesListResponse = await res.json();
       set({ nodes: data.nodes, total: data.total, loading: false });
@@ -120,7 +130,11 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   fetchStats: async (agentId) => {
     try {
-      const res = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/stats`);
+      // Same 503 retry rationale as fetchNodes above.
+      const res = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/stats`),
+        { tag: `MemoryStore.fetchStats(${agentId})`, logger: log },
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: MemoryStatsResponse = await res.json();
       set({ stats: data });

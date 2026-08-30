@@ -9,8 +9,8 @@
 //! during compaction, so re-extracting on a background schedule would
 //! duplicate cost and create race conditions with the synchronous landing
 //! pipeline. The remaining steps (Pending upgrade/downgrade, generalization,
-//! history compression, relationship / limitation generation, episodic
-//! forgetting) continue to run as before.
+//! history compression, relationship generation, episodic forgetting)
+//! continue to run as before.
 
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ impl GrafeoStore {
     /// 4. Experience generalization to extract ProceduralNodes
     /// 5. Compress History nodes if too many
     /// 6. Auto-generate Relationship nodes for long-term users
-    /// 7. Auto-generate Limitation nodes from low success-rate skills
+    ///    (~~7. Limitation generation~~ DELETED — false positives, see review doc)
     ///
     /// Note: this method does not use `tracing` — the grafeo crate
     /// intentionally avoids that dependency. The caller (runtime)
@@ -101,11 +101,7 @@ impl GrafeoStore {
         // Per design §3.3: collaboration > 30 days → Relationship node.
         let _ = self.auto_generate_relationship_nodes()?;
 
-        // Step 7: Auto-generate Limitation nodes from low success-rate skills.
-        // Per design §3.3: skill success rate < 60% with >= 5 observations → Limitation node.
-        let _ = self.auto_generate_limitation_nodes()?;
-
-        // Step 8: Run episodic forgetting scan.
+        // Step 7: Run episodic forgetting scan.
         // Per design §2: consolidated episodes > 7 days old are candidates for
         // decay → Dormant. Unconsolidated > 14 days with importance < 0.3 → Dormant.
         // Unconsolidated > 14 days with importance >= 0.3 → keep and trigger offline consolidation.
@@ -362,66 +358,14 @@ impl GrafeoStore {
         Ok(1)
     }
 
-    /// Auto-generate Limitation autobiographical nodes.
+    /// Auto-generate Limitation autobiographical nodes — DELETED.
     ///
-    /// Per design §3.3: if a skill's ProceduralNodes indicate a success
-    /// rate below 60% with >= 5 total observations, create a Limitation node.
-    /// Idempotent — skips if one already exists for the skill.
-    fn auto_generate_limitation_nodes(&self) -> Result<usize> {
-        let procedures = self.get_all_procedural_nodes()?;
-
-        // Aggregate success/fail counts by source_skill.
-        let mut skill_stats: std::collections::HashMap<String, (u32, u32)> =
-            std::collections::HashMap::new();
-        for node in &procedures {
-            if let Some(ref skill) = node.source_skill {
-                let entry = skill_stats.entry(skill.clone()).or_insert((0, 0));
-                entry.0 += node.success_count;
-                entry.1 += node.fail_count;
-            }
-        }
-
-        let mut created = 0;
-        for (skill, (success, fail)) in skill_stats {
-            let total = success + fail;
-            if total < 5 {
-                continue; // Not enough observations.
-            }
-            let rate = success as f32 / total as f32;
-            if rate >= 0.60 {
-                continue; // Success rate is acceptable.
-            }
-
-            // Check idempotency — skip if Limitation node already exists.
-            let key = format!("skill_{}", skill);
-            if self.find_autobiographical_by_key(&key)?.is_some() {
-                continue;
-            }
-
-            let rate_pct = (rate * 100.0) as u32;
-            let value = format!(
-                "{} 成功率仅 {}%（{} 次成功 / {} 次失败）",
-                skill, rate_pct, success, fail
-            );
-            let node = AutobiographicalNode {
-                id: None,
-                category: AutobioCategory::Limitation,
-                key: key.clone(),
-                value,
-                confidence: 0.8,
-                source_episode_id: None,
-                embedding: None,
-                status: NodeStatus::Active,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                metadata: std::collections::HashMap::new(),
-            };
-            self.store_autobiographical(&node)?;
-            created += 1;
-        }
-
-        Ok(created)
-    }
+    /// This duplicated the runtime `MemoryManager::run_self_evaluation` logic
+    /// (same success-rate threshold, same key) but produced false-positive
+    /// Limitation nodes: `success_count` is never incremented anywhere in the
+    /// codebase, so any skill with >= 5 failures was flagged at 0% success.
+    /// Removed along with the runtime channel (memory write-entrypoint
+    /// decisions, see docs/memory-write-entrypoints.md).
 
     /// Run episodic memory cleanup based on design §2 forgetting rules.
     ///

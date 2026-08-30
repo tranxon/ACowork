@@ -41,6 +41,25 @@ export interface SystemStatusResponse {
   agents_installed: number;
   agents_running: number;
   uptime_secs: number;
+  /** ADR-055 D3: MQTT broker port for dynamic discovery (L3-6). */
+  mqtt_port: number;
+}
+
+/** Node Agent entry — matches Gateway HTTP API GET /api/nodes (ADR-055 §6.13.3). */
+export interface NodeInfo {
+  node_id: string;
+  online: boolean;
+  online_since?: string;
+  machine_uid?: string;
+  hostname?: string;
+  os?: string;
+  arch?: string;
+  node_version?: string;
+  protocol_version?: number;
+  capabilities: string[];
+  max_agents?: number;
+  agent_count?: number;
+  http_endpoint?: string;
 }
 
 /** Agent list entry — matches Gateway API */
@@ -230,14 +249,29 @@ export interface CloneResponse {
 
 // ── Publish types ─────────────────────────────────────────────────────
 
-/** A single check item from publish prepare */
+/**
+ * A single check item from `POST /api/agents/{id}/publish/prepare`.
+ *
+ * Wire shape mirrors `acowork_node::package::publish::CheckItem` (Node
+ * is the source of truth — Gateway forwards the Node's `PrepareResult`
+ * JSON verbatim). Field names MUST stay in sync with the Node side:
+ * `name` and `detail` — not `field` / `message`. The earlier `field` /
+ * `message` shape was stale from a pre-ADR-055 revision where the
+ * Gateway itself implemented the checks; PublishWizard then read
+ * `item.field` / `item.message` and silently got `undefined`, painting
+ * every check item with the "error" red `XCircle` regardless of real
+ * status.
+ */
 export interface CheckItem {
-  field: string;
+  name: string;
   status: string;
-  message?: string;
+  detail?: string;
 }
 
-/** Publish prepare response */
+/**
+ * Response from `POST /api/agents/{id}/publish/prepare`. Mirrors the
+ * Node's `PrepareResult` shape forwarded by the Gateway.
+ */
 export interface PreparePublishResponse {
   checks: CheckItem[];
   warnings: string[];
@@ -264,8 +298,24 @@ export interface SendMessageResponse {
   status: string;
 }
 
-/** Gateway connection status */
-export type GatewayStatus = "connected" | "disconnected" | "error";
+/**
+ * Gateway connection status.
+ *
+ * State machine:
+ *   `connecting` → `connected` (success)
+ *   `connecting` → `connected` → `error` (steady-state drop)
+ *   `connecting` → `connecting` (startup probe failure; transient)
+ *
+ * Note: `disconnected` is preserved for external callers that explicitly
+ * tear the gateway down (e.g. `stopLocalGateway`). During normal startup
+ * we never sit in `disconnected` — the desktop immediately starts probing
+ * `/health`, so the first observed state is `connecting`.
+ */
+export type GatewayStatus =
+  | "connected"
+  | "connecting"
+  | "disconnected"
+  | "error";
 
 /** Todo item status from backend */
 export type TodoStatus = "pending" | "in_progress" | "completed";
@@ -1276,6 +1326,18 @@ export interface UserProfileListResponse {
   users: BackendUserProfile[];
 }
 
+/** Response from POST/PUT /api/users — matches UserResponse in acowork-gateway */
+export interface UserProfileMutationResponse {
+  user: BackendUserProfile;
+  version: number;
+}
+
+/** Response from POST /api/users/{user_id}/activate — matches ActivateResponse */
+export interface ActivateUserResponse {
+  active_user_id: string;
+  version: number;
+}
+
 /** Request body for POST /api/users */
 export interface CreateUserRequest {
   display_name: string;
@@ -1415,18 +1477,24 @@ export interface AgentSearchConfig {
 // ── LSP types ────────────────────────────────────────────────────────────
 
 /**
- * Response from `GET /api/lsp/endpoint` (Gateway).
+ * Response from `GET /api/agents/{id}/lsp-endpoint` (Gateway).
+ *
+ * ADR-055 §6.7 (Phase 4): the LSP Relay is a node-local sidecar, so the
+ * endpoint is resolved per agent — the Gateway looks up the node hosting
+ * the agent and returns that node's advertised relay base URL.
  *
  * Desktop App queries this to discover the LSP Relay's address, then
  * connects directly to the relay's WebSocket and HTTP API.
  */
-export interface LspEndpointResponse {
-  /** Whether the LSP Relay process is running and ready */
-  available: boolean;
-  /** Relay host (always "127.0.0.1" for local mode) */
-  host: string;
-  /** Relay port (null when not available) */
-  port: number | null;
+export interface AgentLspEndpointResponse {
+  /** The agent id the lookup was performed for */
+  agent_id: string;
+  /** Node hosting the agent ("local" for Gateway-spawned agents) */
+  node_id: string;
+  /** Relay base URL (e.g. "http://127.0.0.1:19878"), null when not ready */
+  endpoint: string | null;
+  /** Whether the node's LSP relay is ready */
+  ready: boolean;
 }
 
 /** LSP server entry — matches acowork_lsp_relay::config::LspServerEntry */
@@ -1675,5 +1743,37 @@ export interface AvatarAssetEntry {
 export interface AvatarAssetsResponse {
   agent_id: string;
   assets: AvatarAssetEntry[];
+}
+
+/**
+ * ADR-059 §5.1 — Gateway bootstrap snapshot (`GET /api/bootstrap` and
+ * the retained `acowork/global/bootstrap` MQTT topic).
+ *
+ * `phase` is SCREAMING_SNAKE_CASE (`BOOTING` / `READY` / `DEGRADED` /
+ * `FAILED` / `SHUTTING_DOWN`). `version` is the resource version
+ * clients echo back via `expected_version` on mutation APIs.
+ */
+export interface BootstrapStateView {
+  protocol_version: number;
+  /** Fresh per Gateway process — changes on every restart. */
+  instance_id: string;
+  /** Resource version, increments on every readiness transition. */
+  version: number;
+  phase: string;
+  /** Human-readable subsystem-level diagnostic (e.g. "3/5 required ready"). */
+  phase_detail: string;
+  issued_at_ms: number;
+}
+
+/** ADR-059 §6 — install operation ack (`POST /api/agents/install`, HTTP 202). */
+export interface OperationAck {
+  operation_id: string;
+  /** snake_case: accepted / committed / running / completed / failed */
+  state: string;
+  resource_version?: number;
+  terminal_error?: {
+    code: string;
+    [key: string]: unknown;
+  };
 }
 

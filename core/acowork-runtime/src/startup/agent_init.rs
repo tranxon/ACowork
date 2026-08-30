@@ -18,6 +18,7 @@ use acowork_core::protocol::ProtocolType;
 use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::startup::context::AgentBootContext;
+use crate::startup::pull_global_resources_from_gateway;
 
 /// Phase A: initialize all per-agent (cross-session) resources.
 ///
@@ -60,6 +61,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     > = None;
     let mut search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
+    > = None;
+    // ADR-055 §6.7 (Phase 4): receiver for node LSP relay state changes,
+    // wired through `gateway_loop` to SessionManager.
+    let mut lsps_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::LspRelayUpdate>,
     > = None;
     let mut runtime_http_port: Option<u16> = None;
 
@@ -190,6 +196,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Arc::new(std::sync::RwLock::new(
             crate::tools::workspace_resolver::WorkspaceResolver::new(&config.work_dir),
         ));
+    // Fix-3 observability: log the on-disk path + allowed_dirs count at
+    // startup so users reporting "workspace disappeared on restart" can
+    // correlate the workspace_resolver state with the work_dir the
+    // runtime was actually using. The number should match the entries
+    // persisted on the previous run (see
+    // `workspace_mutation_impl::save_config`). See
+    // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+    {
+        let guard = workspace_resolver.read().expect("workspace_resolver lock poisoned");
+        tracing::info!(
+            work_dir = %config.work_dir,
+            allowed_dirs = guard.allowed_dirs().len(),
+            "WorkspaceResolver loaded from agent_workspaces.json"
+        );
+    }
 
     // ADR-058: workspace FS watcher set. When the HTTP server starts it
     // creates the set (shared with its state); otherwise a standalone
@@ -198,8 +219,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // `mqtt_client_slot` the HTTP server holds.
     let mut workspace_watcher_set: Option<crate::workspace::SharedWorkspaceWatcherSet> = None;
 
-    if let Some(_http_port) = config.http_port {
-        match crate::http::RuntimeHttpServer::start(
+    if let Some(bind_port) = config.http_port {
+        // ADR-055 §6.4: bind the Node-allocated loopback port so the
+        // Node reverse proxy has a stable `{agent_id} → port` mapping.
+        match crate::http::RuntimeHttpServer::start_with_bind_port(
+            bind_port,
             std::path::PathBuf::from(&config.work_dir),
             loaded.manifest.agent_id.clone(),
             session_snapshots.clone(),
@@ -257,11 +281,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::ProviderUpdate>();
         let (search_update_tx, search_update_chan_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::SearchUpdate>();
+        // ADR-055 §6.7 (Phase 4): sink for the node's LSP relay state.
+        // The MQTT event loop decodes `acowork/nodes/{id}/lsps` retained
+        // pushes; gateway_loop forwards to SessionManager so the
+        // codebase tool is registered / unregistered in all sessions.
+        let (lsps_update_tx, lsps_update_chan_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::mqtt::client::LspRelayUpdate>();
         let config_json = crate::agent_config::load_agent_config(std::path::Path::new(&config.work_dir))
             .ok().flatten().map(|c| serde_json::to_string(&c).unwrap_or_default()).unwrap_or_default();
         match crate::mqtt::RuntimeMqttClient::connect(
             crate::mqtt::client::MqttConnectConfig {
-                host: "127.0.0.1",
+                // ADR-055 D3: parameterise the broker host instead of
+                // hard-coding 127.0.0.1 so the Runtime can connect to a
+                // remote / distributed Gateway broker. Defaults to
+                // 127.0.0.1 for single-machine topology (L3-5).
+                host: config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
                 port: mqtt_port,
                 agent_id: &loaded.manifest.agent_id,
                 agent_name: &loaded.manifest.name,
@@ -274,7 +308,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_tx: Some(identity_update_tx),
                 provider_update_tx: Some(provider_update_tx),
                 search_update_tx: Some(search_update_tx),
+                node_id: config.node_id.as_deref(),
+                lsps_update_tx: Some(lsps_update_tx),
                 work_dir: std::path::PathBuf::from(&config.work_dir),
+                username: config.mqtt_username.as_deref(),
+                password: config.mqtt_password.as_deref(),
             },
         ).await {
             Ok(client) => {
@@ -285,23 +323,43 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 // (the Gateway subscribes to this retained topic on startup; if the publish
                 // never lands, the registry stays empty and every reverse-proxy request 503s).
                 if let Some(port) = runtime_http_port {
-                    let topic = format!("acowork/agents/{}/http_port", loaded.manifest.agent_id);
+                    // ADR-055 D3: publish the full endpoint (not just the
+                    // bare port) so the Gateway stores an opaque address it
+                    // can reverse-proxy to without knowing whether it is
+                    // loopback (Phase 1) or a Node reverse-proxy (Phase 2).
+                    // Runtime HTTP stays loopback-only (D2 decision).
+                    //
+                    // ADR-055 §6.4: when the Node injects
+                    // `--http-advertise-endpoint` (the Node reverse-proxy
+                    // base URL), publish `{base}/agents/{id}` so the
+                    // Gateway routes through the Node. The Runtime only
+                    // concatenates — node-internal topology stays private
+                    // to the Node.
+                    let endpoint = match &config.http_advertise_endpoint {
+                        Some(base) => format!(
+                            "{}/agents/{}",
+                            base.trim_end_matches('/'),
+                            loaded.manifest.agent_id
+                        ),
+                        None => format!("http://127.0.0.1:{}", port),
+                    };
+                    let topic = format!("acowork/agents/{}/http_endpoint", loaded.manifest.agent_id);
                     match client.publish_raw(
                         &topic,
-                        port.to_string().as_bytes(),
+                        endpoint.as_bytes(),
                         crate::mqtt::client::MqttQoS::AtLeastOnce,
                         true, // Retained — so Gateway can discover on restart
                     ).await {
                         Ok(()) => tracing::info!(
                             agent_id=%loaded.manifest.agent_id,
-                            port,
-                            "Published retained http_port for Gateway reverse-proxy discovery"
+                            %endpoint,
+                            "Published retained http_endpoint for Gateway reverse-proxy discovery"
                         ),
                         Err(e) => tracing::error!(
                             agent_id=%loaded.manifest.agent_id,
-                            port,
+                            %endpoint,
                             error=%e,
-                            "Failed to publish retained http_port — Gateway will return 503 until the Runtime restarts and re-publishes"
+                            "Failed to publish retained http_endpoint — Gateway will return 503 until the Runtime restarts and re-publishes"
                         ),
                     }
                 }
@@ -321,6 +379,49 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                 identity_update_rx = Some(identity_update_chan_rx);
                 provider_update_rx = Some(provider_update_chan_rx);
                 search_update_rx = Some(search_update_chan_rx);
+                lsps_update_rx = Some(lsps_update_chan_rx);
+
+                // Bug B fix (active pull, v3): after the MQTT client
+                // has connected and the AvailableResourceCache has been
+                // wired into the event loop, actively request the
+                // Gateway's current global-resource snapshot via
+                // `GET /api/global-resources`. This recovers from the
+                // retained-delivery race where the Gateway published an
+                // empty snapshot before vault unlock, and the corrected
+                // snapshot is therefore never re-delivered to an
+                // already-subscribed Runtime.
+                //
+                // The pull function BLOCKS until either (a) success,
+                // (b) the Gateway returns a SHUTTING_DOWN sentinel, or
+                // (c) the PULL_MAX_DURATION wall-clock deadline elapses.
+                // Phase A therefore cannot publish `ready=true` until
+                // the pull loop has finished — the session_task that
+                // runs in Phase B will then find a fully-populated
+                // `AvailableResourceCache` (or, on deadline, fall back
+                // to whatever MQTT retained has delivered). See
+                // `startup/global_resources_pull.rs` for the full
+                // retry semantics and the "never poisons the cache"
+                // guarantee on 503.
+                let pull_ok = pull_global_resources_from_gateway(
+                    config,
+                    available_cache
+                        .as_ref()
+                        .expect("available_cache initialised above"),
+                )
+                .await;
+                if pull_ok {
+                    tracing::info!(
+                        agent_id = %loaded.manifest.agent_id,
+                        "Active pull of /api/global-resources completed; \
+                         session_init will see a populated AvailableResourceCache"
+                    );
+                } else {
+                    tracing::warn!(
+                        agent_id = %loaded.manifest.agent_id,
+                        "Active pull of /api/global-resources did not complete before deadline; \
+                         session_init will fall back to whatever the MQTT retained path delivered"
+                    );
+                }
 
                 // Publish `ready=true` as soon as Phase A completes — HTTP server
                 // is listening and `http_port` is already announced, so the
@@ -646,8 +747,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // construct an `HttpRagProvider` from the manifest `RagToolConfig`
     // and register the `rag_query` tool. The LLM invokes this tool
     // on-demand when it decides external knowledge is needed (tool-based
-    // RAG, not automatic pre-retrieval merge - see ADR-051 §4.1.4 H
-    // design变更).
+    // RAG, not automatic pre-retrieval merge — see ADR-051 §4.1.4 H).
     //
     // Auth resolution: the manifest `auth_ref` (e.g., "vault:rag_key")
     // is resolved from the `provider_key_vault` populated by the MQTT
@@ -952,6 +1052,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         identity_update_rx,
         provider_update_rx,
         search_update_rx,
+        lsps_update_rx,
         runtime_http_port,
         provider,
         resolved_model,

@@ -352,8 +352,8 @@ impl GrafeoStore {
         // supply an embedding (e.g., the memory_store tool was invoked
         // without an EmbeddingProvider), fall back to a deterministic hash
         // embedding of the procedural text so the node is still immediately
-        // vector-searchable. Mirrors the fallback used by Path B in
-        // `acowork_memory::MemoryManager::record_procedural_from_failure`.
+        // vector-searchable. Mirrors the fallback in
+        // `acowork_memory::manager::procedural_embedding_for`.
         let embedding = input.embedding.clone().unwrap_or_else(|| {
             let text = format!("{} {}", trigger, action);
             acowork_memory::manager::procedural_embedding_fallback(&text)

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Circle, CircleDot, Copy, Check, Play, Loader2, AlertTriangle } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { cn } from "../../lib/utils";
-import { getGatewayUrl } from "../../lib/config";
+import { getLspRelayUrl, runLspInstall } from "../../lib/gateway-api";
 import { useTranslation } from "../../i18n/useTranslation";
 import { type LspStatus } from "../../lib/lspUtils";
 
@@ -59,10 +59,13 @@ export function LspIndicator({
     status,
     statusMessage,
     language,
+    agentId,
 }: {
     status: LspStatus;
     statusMessage: string;
     language: string;
+    /** Agent hosting the active file — resolves which node's LSP relay to use (ADR-055 §6.7) */
+    agentId?: string;
 }) {
     const { t } = useTranslation();
     const [showPopover, setShowPopover] = useState(false);
@@ -114,19 +117,26 @@ export function LspIndicator({
         setInstalling(true);
         setInstallResult(null);
         try {
-            const gatewayUrl = getGatewayUrl();
-            const resp = await fetch(`${gatewayUrl}/api/lsp/install/${encodeURIComponent(language)}`, {
-                method: "POST",
-            });
-            const data = await resp.json();
+            // ADR-055 §6.7 (Phase 4): the relay is a node-local sidecar, so
+            // installs go through the relay hosting the active file's agent
+            // (the Gateway no longer hosts `/api/lsp/install`).
+            const relayUrl = await getLspRelayUrl(agentId);
+            if (!relayUrl) {
+                setInstallResult({
+                    success: false,
+                    text: "LSP Relay not available",
+                });
+                return;
+            }
+            const data = await runLspInstall(language, relayUrl);
             if (data.success) {
                 setInstallResult({
                     success: true,
                     text: data.stdout || "Installation completed. Restart Gateway to apply.",
                 });
             } else {
-                // Show stderr first, then stdout, then error field, then fallback
-                const detail = data.stderr || data.stdout || data.error || `Install failed (exit code: ${data.exit_code})`;
+                // Show stderr first, then stdout, then fallback
+                const detail = data.stderr || data.stdout || `Install failed (exit code: ${data.exit_code})`;
                 setInstallResult({
                     success: false,
                     text: detail,

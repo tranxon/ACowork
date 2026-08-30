@@ -135,7 +135,7 @@ acowork/agents/{agent_id}/debug/events/{event_type}
 | `onStateChange` | `DebugStateChangeEvent { session_id, new_state, iteration }`（`new_state` 为 DebugState 名 `Running/Paused/Stepping/Stopped` 或 DebugPhase 名；Runtime 把 `ExecutionStateChanged` 与旧的 `StateChanged` 事件统一映射到本主题） | ~30B | 0 |
 | `onContextBuilt` | `DebugContextBuiltEvent { session_id, iteration, sections{...}, total_token_estimate }` | <500B | 0 |
 
-**对齐 `docs/zh/protocols/mqtt.md` §3.5 设计原则**：
+**对齐 `docs/protocols/zh/mqtt.md` §3.5 设计原则**：
 - ① **按数据源分类**：主题表达"agent {id} 的 debug 事件流"，不是"做什么动作"
 - ② **Owner 单一**：Runtime 是 events 唯一发布者，Desktop 只订阅
 - ③ **Retained = false**：事件是流，订阅断线重连后只从下一个事件开始
@@ -533,6 +533,6 @@ let service = Arc::new(RuntimeDebugService::new(sessions.clone())) as Arc<dyn De
 - ADR-034：[MQTT / HTTP 职责边界](./ADR-034-mqtt-http-boundary.md)
 - ADR-035：[流式传输重构](./ADR-035-mqtt-streaming-push-refactor.md)
 - **ADR-040：[Runtime adapter → UseCase service 模式](./ADR-040-runtime-adapter-use-case-layer.md)** —— 本 ADR 沿用其 trait + late-bind slot + Phase A/B 接线模式
-- 协议参考：[docs/zh/protocols/mqtt.md](../../zh/protocols/mqtt.md)
+- 协议参考：[docs/protocols/zh/mqtt.md](../../zh/protocols/mqtt.md)
 - Debug Protocol 设计：[docs/design/zh/10-debug-protocol.md](../../design/zh/10-debug-protocol.md)
 - UseCase 模板：[core/acowork-runtime/src/usecases/agent_tools.rs](../../../core/acowork-runtime/src/usecases/agent_tools.rs) 和 [workspace_mutation.rs](../../../core/acowork-runtime/src/usecases/workspace_mutation.rs)

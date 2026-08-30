@@ -53,7 +53,7 @@ Gateway 的核心职责是：Package Manager、Lifecycle Manager、Intent Router
 
 ### 问题 2：稳定性风险已有实证
 
-LSP install 脚本执行曾阻塞 Gateway 的 tokio runtime，导致 embed 看门狗饿死，误杀 embed 进程（参见 `docs/plan/embed-heartbeat-timeout-fix.md`）。根本原因是 LSP 安装脚本可能执行 `npm install`、`pip install`、`cargo install` 等重型操作，这些操作的不确定性与 Gateway 的高稳定性要求矛盾。
+LSP install 脚本执行曾阻塞 Gateway 的 tokio runtime，导致 embed 看门狗饿死，误杀 embed 进程（详细复盘归档于 `docs/_internal/archive/plan/embed-heartbeat-timeout-fix.md`，本地查阅）。根本原因是 LSP 安装脚本可能执行 `npm install`、`pip install`、`cargo install` 等重型操作，这些操作的不确定性与 Gateway 的高稳定性要求矛盾。
 
 ### 问题 3：未来 codebase 工具对 LSP 有强依赖
 

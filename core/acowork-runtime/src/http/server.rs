@@ -36,6 +36,7 @@
 //! POST   /workspaces/file                        // NEW: create file
 //! PUT    /workspaces/file                        // NEW: overwrite file
 //! DELETE /workspaces/file                        // NEW: delete file
+//! GET    /workspaces/raw/{path}                  // ADR-055 L2-7: raw bytes (preview iframe)
 //! POST   /workspaces/dir                         // NEW: create dir
 //! DELETE /workspaces/dir                         // NEW: delete dir
 //! POST   /workspaces/copy                        // NEW: copy file/dir tree
@@ -70,8 +71,9 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{DefaultBodyLimit, Path, Query, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
     routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +93,31 @@ pub enum RuntimeHttpServerError {
     #[error("Failed to bind: {0}")]
     Bind(String),
 }
+
+/// Global body-size cap for every Runtime HTTP route.
+///
+/// Axum's default `DefaultBodyLimit` is 2 MiB — which silently caps
+/// any extractor (`Json`, `Bytes`, `String`, `Multipart`, `Form`,
+/// etc.) before our handlers can read a single byte. The user-facing
+/// fallout is opaque ("Error parsing 'multipart/form-data' request"
+/// for a 9 MB PDF, generic JSON parse errors for a 3 MB request
+/// body, etc.) instead of a clean 413 + JSON error body from the
+/// service layer.
+///
+/// We raise the global cap to 64 MiB at the root router so every
+/// endpoint that legitimately needs a large body — multipart upload
+/// (`/sessions/{sid}/files`), workspace file write
+/// (`PUT /workspaces/file` with embedded content), memory node
+/// create/update payloads, etc. — can reach its handler. Per-route
+/// service-layer checks remain the source of truth for user-facing
+/// limits:
+///
+///   - attachments: [`crate::usecases::MAX_UPLOAD_BYTES`] (50 MiB)
+///   - workspace files: implicit 64 MiB ceiling via this limit;
+///
+/// anything larger is rejected at the handler with a clean error
+/// instead of at the extractor with an opaque one.
+const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Shared dispatch sender for Runtime HTTP → agent loop.
 ///
@@ -325,6 +352,65 @@ impl RuntimeHttpServer {
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
         session_manager_slot: SharedSessionManagerSlot,
     ) -> Result<Self, RuntimeHttpServerError> {
+        // Historical behaviour: random loopback port.
+        Self::start_with_bind_port(
+            0,
+            work_dir,
+            agent_id,
+            session_snapshots,
+            latest_session,
+            dispatch_tx,
+            embed_provider_dim,
+            degraded_reasons,
+            mqtt_client,
+            session_metadata,
+            memory_query,
+            workspace_query,
+            workspace_mutation,
+            agent_tools,
+            agent_config,
+            attachment,
+            session_config,
+            consolidation_timer,
+            rag_provider,
+            debug_service,
+            workspace_resolver,
+            session_manager_slot,
+        )
+        .await
+    }
+
+    /// ADR-055 §6.4: start the HTTP server on an explicit loopback port.
+    ///
+    /// The Node allocates a concrete port (from `NODE_HTTP_PORT_BASE`) and
+    /// passes it via `--http-port` so its reverse proxy has a stable
+    /// `{agent_id} → port` mapping. `bind_port = 0` keeps the historical
+    /// random-port behaviour (`127.0.0.1:0`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_bind_port(
+        bind_port: u16,
+        work_dir: PathBuf,
+        agent_id: String,
+        session_snapshots: SharedSessionSnapshots,
+        latest_session: SharedLatestSession,
+        dispatch_tx: SharedDispatchSender,
+        embed_provider_dim: SharedEmbedDimension,
+        degraded_reasons: SharedDegradation,
+        mqtt_client: SharedMqttClientSlot,
+        session_metadata: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
+        memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+        workspace_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
+        workspace_mutation: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceMutationService>>>>,
+        agent_tools: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentToolsService>>>>,
+        agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+        attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
+        session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
+        consolidation_timer: SharedConsolidationTimer,
+        rag_provider: SharedRagProvider,
+        debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
+        workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
+        session_manager_slot: SharedSessionManagerSlot,
+    ) -> Result<Self, RuntimeHttpServerError> {
         // ADR-058: the workspace FS watcher set is created here so the
         // HTTP state and the boot context share exactly one Arc. It is
         // exposed on the returned handle for `agent_init` to clone into
@@ -385,6 +471,14 @@ impl RuntimeHttpServer {
             // global-scoped (the desktop knows `document_id` from the
             // JSONL metadata it already loaded, no session_id needed).
             // Both route through `AttachmentService` (ADR-040).
+            //
+            // Per-route body-limit override is NOT needed here: the
+            // global `DefaultBodyLimit::max(GLOBAL_BODY_LIMIT)` layer
+            // (64 MiB) installed at the root of the router covers the
+            // `Multipart` extractor. The Runtime's own size check
+            // ([`crate::usecases::MAX_UPLOAD_BYTES`] = 50 MiB) then
+            // produces a clean 413 + JSON error body if the payload is
+            // over the user-facing limit.
             .route("/sessions/{sid}/files", post(upload_file))
             .route("/files/{document_id}", get(read_file))
             .route("/memory/graph", get(get_memory_graph))
@@ -439,6 +533,14 @@ impl RuntimeHttpServer {
                     .post(create_workspace_file)
                     .put(write_workspace_file)
                     .delete(delete_workspace_file),
+            )
+            // ADR-055 L2-7: raw-bytes read for the Gateway's HTML preview
+            // iframe (the Gateway reverse-proxies `/workspace-files/…`
+            // here). Serves verbatim bytes + Content-Type — unlike the
+            // JSON envelope above.
+            .route(
+                "/workspaces/raw/{*path}",
+                get(read_workspace_raw),
             )
             .route(
                 "/workspaces/dir",
@@ -524,10 +626,22 @@ impl RuntimeHttpServer {
             // starts the HTTP server before DebugService is wired up,
             // so handlers return 503 until Phase B populates the slot.
             .merge(crate::http::debug::debug_routes())
+            // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
+            // override axum's 2 MiB default at the root of the router.
+            // Each per-route service-layer check (e.g.
+            // `AttachmentService::PayloadTooLarge`) remains the source
+            // of truth for user-facing limits.
+            .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             .with_state(state);
 
-        // Bind to 127.0.0.1:0 for a random port
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        // Bind to the Node-allocated loopback port (ADR-055 §6.4);
+        // `127.0.0.1:0` = random port (pre-node-topology behaviour).
+        let bind_addr = if bind_port == 0 {
+            "127.0.0.1:0".to_string()
+        } else {
+            format!("127.0.0.1:{}", bind_port)
+        };
+        let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .map_err(|e| RuntimeHttpServerError::Bind(format!("Failed to bind: {}", e)))?;
 
@@ -1136,6 +1250,35 @@ async fn read_workspace_file(
         .map_err(workspace_error_to_response)
 }
 
+/// `GET /workspaces/raw/{path}?workspace_id=…` — serve a file's raw bytes
+/// (ADR-055 L2-7). The Gateway reverse-proxies its `/workspace-files/…`
+/// HTML-preview endpoints here instead of reading the workspace
+/// filesystem itself. Returns `Content-Type` + verbatim bytes so the
+/// preview iframe's `<img>` / `<link>` / `<script>` sub-resources resolve.
+async fn read_workspace_raw(
+    State(state): State<HttpState>,
+    Path(file_rel_path): Path<String>,
+    Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let svc = state.workspace_query.lock().await;
+    let svc = svc
+        .as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "workspace service not ready"}))))?;
+    let params = crate::usecases::workspace_query::ReadFileParams {
+        workspace_id: q.workspace_id,
+        path: file_rel_path,
+    };
+    let dto = svc
+        .read_file_raw(&params)
+        .await
+        .map_err(workspace_error_to_response)?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, dto.mime_type)],
+        dto.bytes,
+    ))
+}
+
 /// `GET /workspaces/find` — fuzzy filename search (Ctrl+P-style palette).
 async fn find_files(
     State(state): State<HttpState>,
@@ -1185,6 +1328,46 @@ async fn create_workspace(
             reload_workspace_resolver(&state);
             // ADR-058: reconcile watcher set with the reloaded resolver.
             sync_workspace_watchers(&state).await;
+            // Fix-3 sanity check: after reload, the newly-created
+            // workspace id MUST be visible via `find_by_id`. A `None`
+            // here indicates a write/read race (e.g. another thread
+            // clobbered `agent_workspaces.json` between `save_config`
+            // and the reload). The Desktop would experience this as
+            // "workspace disappeared" — surface it as 500 so the
+            // abnormal condition is loud rather than silently returning
+            // an entry that downstream `route_workspace_switch` calls
+            // cannot resolve. See `desktop-onboarding-bugfix_154b7ff7.md`
+            // §Fix 3.
+            if let Some(new_id) = r
+                .entry
+                .as_ref()
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                match state.workspace_resolver.read() {
+                    Ok(resolver) => {
+                        if resolver.find_by_id(new_id).is_none() {
+                            tracing::error!(
+                                ws_id = %new_id,
+                                "Workspace mutation: reload succeeded but new id not visible — possible write/read race"
+                            );
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": "Workspace persisted but not visible after reload — possible write/read race",
+                                    "ws_id": new_id,
+                                })),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "create_workspace: resolver lock poisoned during sanity check"
+                        );
+                    }
+                }
+            }
             Ok(Json(r.entry.unwrap_or(serde_json::json!({"created": r.ok}))))
         }
         Err(e) => Err(workspace_error_to_response(e)),
@@ -4407,6 +4590,12 @@ mod tests {
         let ws_dir = temp_dir.join("ws_alpha");
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(ws_dir.join("readme.txt"), b"hello workspace\n").unwrap();
+        // Hidden entries: `.cargo` / `.gitignore` must be visible in the
+        // tree (VSCode default), `.git` must stay hidden (VSCode default
+        // `files.exclude`).
+        std::fs::create_dir_all(ws_dir.join(".cargo")).unwrap();
+        std::fs::write(ws_dir.join(".gitignore"), b"target/\n").unwrap();
+        std::fs::create_dir_all(ws_dir.join(".git")).unwrap();
 
         // Persist agent_workspaces.json so resolve_workspace_root can
         // locate the `alpha` workspace by id.
@@ -4477,6 +4666,22 @@ mod tests {
         assert!(
             entries.iter().any(|e| e["name"] == "readme.txt"),
             "tree must include readme.txt, got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        // Hidden entries are visible unless VSCode-default-excluded.
+        assert!(
+            entries.iter().any(|e| e["name"] == ".cargo"),
+            "tree must include .cargo (hidden shown), got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        assert!(
+            entries.iter().any(|e| e["name"] == ".gitignore"),
+            "tree must include .gitignore (hidden shown), got: {}",
+            serde_json::to_string_pretty(&entries).unwrap()
+        );
+        assert!(
+            !entries.iter().any(|e| e["name"] == ".git"),
+            "tree must NOT include .git (VSCode default exclude), got: {}",
             serde_json::to_string_pretty(&entries).unwrap()
         );
 

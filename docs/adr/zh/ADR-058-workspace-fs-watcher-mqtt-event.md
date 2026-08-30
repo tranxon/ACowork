@@ -10,7 +10,7 @@
 - [ADR-048](./ADR-048-debug-protocol-mqtt-http.md)（Debug Protocol 走 MQTT + HTTP 模板 — **Runtime 直发 Desktop** 的同链路先例）
 - [ADR-054](./ADR-054-debug-context-snapshot-coverage.md)（同模式的"事件驱动 UI 同步"实践）
 - [docs/design/zh/08-security.md](../../design/zh/08-security.md) §11.4（`FsWatcher` 跨平台选型 — `notify::PollWatcher` 500ms）
-- [docs/zh/protocols/mqtt.md](../../zh/protocols/mqtt.md)（主题树规约 + Retained / Will 语义 + §3.2 Owner 单一原则）
+- [docs/protocols/zh/mqtt.md](../../zh/protocols/mqtt.md)（主题树规约 + Retained / Will 语义 + §3.2 Owner 单一原则）
 
 ---
 
@@ -104,7 +104,7 @@ graph LR
 
 ### 1.3 现状的根本问题：架构层面"workspace 是被动数据源"
 
-[docs/zh/protocols/mqtt.md §3.1](../../zh/protocols/mqtt.md) 已固化主题"按数据源 pub/sub"原则 — 每份数据由唯一的发布者权威发布，订阅者按需订阅。Workspace 当前**完全不走 MQTT**，所有 CRUD 都走 HTTP（`GET /api/agents/{id}/workspaces/tree`、`POST /workspaces/file`、`DELETE /workspaces/file` 等），Desktop 只能通过用户主动触发或本地初始化拉取看到变化。
+[docs/protocols/zh/mqtt.md §3.1](../../zh/protocols/mqtt.md) 已固化主题"按数据源 pub/sub"原则 — 每份数据由唯一的发布者权威发布，订阅者按需订阅。Workspace 当前**完全不走 MQTT**，所有 CRUD 都走 HTTP（`GET /api/agents/{id}/workspaces/tree`、`POST /workspaces/file`、`DELETE /workspaces/file` 等），Desktop 只能通过用户主动触发或本地初始化拉取看到变化。
 
 > **澄清**：这些 HTTP 端点由 Gateway **反向代理到 Runtime**（`core/acowork-gateway/src/http/proxy.rs`），真正读写 workspace 的是 Runtime。workspace 的权威所有者是 Runtime（ADR-009 v2），不是 Gateway。
 
@@ -149,7 +149,7 @@ Desktop 当前在 Remote 模式（Gateway 跑在 WSL / 远程主机 / SSH 主机
 
 - `core/acowork-gateway/src/http/proxy.rs:107-116`：*"the Runtime is the authoritative workspace API owner; the Gateway is now a thin reverse-proxy for these CPU-heavy filesystem walks."*
 - `core/acowork-gateway/src/http/workspaces.rs:1-6`：*"The Runtime is the authoritative owner of workspace config … All write-side workspace operations … are handled by the Agent Runtime HTTP server and proxied verbatim."*
-- `docs/zh/protocols/mqtt.md §3.2`：*"Runtime 拥有 `agents/{id}/*` 下所有主题"*；Gateway 只拥有 `acowork/global/*`。
+- `docs/protocols/zh/mqtt.md §3.2`：*"Runtime 拥有 `agents/{id}/*` 下所有主题"*；Gateway 只拥有 `acowork/global/*`。
 - `mqtt_payload.proto:66-75`：ADR-048 Debug 事件就是 **Runtime → Desktop** 直发（`acowork/agents/{id}/debug/events/*`）。
 
 **这四点共同决定：事件权威在 Runtime，而不是 Gateway。** 方案 C 表面上是"把事件权威放在拥有 FS 的一侧"，但它把"拥有 FS 的一侧"错误地等同成了 Gateway。
@@ -176,7 +176,7 @@ On expiry: publish "sleeping" → RuntimeMqttClient::disconnect → process::exi
 
 ### 3.1 协议契约：主题与 payload
 
-#### 主题（遵守 [docs/zh/protocols/mqtt.md](../../zh/protocols/mqtt.md) §3.2/§3.5）
+#### 主题（遵守 [docs/protocols/zh/mqtt.md](../../zh/protocols/mqtt.md) §3.2/§3.5）
 
 ```
 acowork/agents/{agent_id}/workspaces/{workspace_id}/fs-changed

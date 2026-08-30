@@ -183,6 +183,28 @@ pub struct WorkspaceFileDto {
     pub path: String,
 }
 
+/// Querystring for `read_file_raw` (ADR-055 L2-7): only `workspace_id`
+/// rides the querystring — the file path is the URL path segment
+/// (`GET /workspaces/raw/{path}?workspace_id=…`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct RawFileQuery {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+/// Response for `read_file_raw` — raw bytes + MIME type (ADR-055 L2-7).
+///
+/// Unlike [`WorkspaceFileDto`] (the JSON envelope of `read_file`), this
+/// is served **verbatim** so the HTML preview iframe's `<img>` / `<link>`
+/// / `<script>` sub-resources resolve correctly. The bytes are not
+/// base64-encoded and there is no JSON wrapper.
+#[derive(Debug, Clone)]
+pub struct RawFileDto {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+    pub size: u64,
+}
+
 /// Querystring for `find_files` (filename fuzzy search).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct FindFilesParams {
@@ -294,6 +316,14 @@ pub trait WorkspaceQueryService: Send + Sync {
         &self,
         params: &ReadFileParams,
     ) -> Result<WorkspaceFileDto, WorkspaceError>;
+
+    /// `GET /workspaces/raw/{path}` — read a file's raw bytes (ADR-055
+    /// L2-7). Served verbatim for the HTML preview iframe, with the same
+    /// `resolve_within` path-traversal guard as [`Self::read_file`].
+    async fn read_file_raw(
+        &self,
+        params: &ReadFileParams,
+    ) -> Result<RawFileDto, WorkspaceError>;
 
     /// `GET /workspaces/find` — fuzzy-search file/dir names.
     ///

@@ -141,7 +141,7 @@ Desktop App 也走 gRPC-web，Gateway 只暴露 gRPC。
 
 > 协议的完整设计细节（Topic 树、消息格式、Broker 选型、客户端库、Broker 生命周期、gRPC→MQTT Topic 映射、请求-响应模式、Control 指令映射、Gateway 架构收敛等）已抽取到独立的协议使用参考文档：
 >
-> 👉 **[`docs/zh/protocols/mqtt.md`](../../zh/protocols/mqtt.md)**
+> 👉 **[`docs/protocols/zh/mqtt.md`](../../zh/protocols/mqtt.md)**
 >
 > 本 ADR 仅保留决策动机、方案对比、影响范围、风险与缓解、实施计划。协议实现细节、Topic 树、消息格式、Broker 选型等以协议文档为准。
 
@@ -150,7 +150,7 @@ Desktop App 也走 gRPC-web，Gateway 只暴露 gRPC。
 
 > 迁移分阶段计划（双通道并存 → Desktop 迁移 → Runtime 切换 → 清理）已抽取到协议文档：
 >
-> 👉 **[`docs/zh/protocols/mqtt.md` §14 迁移路径](../../zh/protocols/mqtt.md#14-迁移路径参考-adr-033)**
+> 👉 **[`docs/protocols/zh/mqtt.md` §14 迁移路径](../../zh/protocols/mqtt.md#14-迁移路径参考-adr-033)**
 >
 > 本 ADR 仅保留决策影响（影响范围、风险与缓解、实施计划）。
 

@@ -9,15 +9,26 @@
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.12"/>
     </filter>
+    <!-- Theme-aware fill for the in-mark "A".
+         Default (#f8f8f8) matches light-mode renderers and acts as a safe
+         fallback if <style> is stripped. Dark mode inverts to #282828 so
+         the letter stays dark against the yellow chip on a dark page. -->
+    <style>
+      .letter-a { fill: #f8f8f8; }
+      @media (prefers-color-scheme: dark) {
+        .letter-a { fill: #282828; }
+      }
+    </style>
   </defs>
   <!-- warm yellow icon background -->
   <rect x="14" y="2" width="84" height="84" rx="20" ry="20" fill="url(#bg)" filter="url(#shadow)"/>
-  <!-- refined A, switched to dark text for better yellow contrast -->
+  <!-- refined A: light on light bg (#f8f8f8 default), dark on dark bg (#282828 via .letter-a) -->
   <text x="56" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-weight="700"
         font-size="76"
-        fill="#1F2937"
+        class="letter-a"
+        fill="#f8f8f8"
         text-anchor="middle"
         letter-spacing="-1">A</text>
   <!-- tighter, cleaner wordmark -->

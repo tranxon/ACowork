@@ -18,18 +18,19 @@
 
 use std::sync::Arc;
 
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 
 use acowork_core::mqtt_proto::{
-    self, AvailableEmbeddingModels, AvailableLsps, AvailableMcps, AvailableProviders,
-    AvailableSearches, AvailableUsers, DataEnvelope, EmbeddingModelRef, McpRef,
-    ProviderModelRef, ProviderRef, SearchRef, UserProfileRef,
+    self, AvailableEmbeddingModels, AvailableMcps, AvailableProviders, AvailableSearches,
+    AvailableUsers, DataEnvelope,
 };
-use acowork_core::protocol::{McpTransportDef, ProtocolType};
 
-use crate::gateway::state::GatewayState;
 use crate::http::routes::SharedHttpState;
 use crate::mqtt::client::{GatewayMqttClient, MqttQoS};
+use crate::mqtt::global_resources_builders::{
+    build_available_embedding_models, build_available_mcps, build_available_providers,
+    build_available_searches, build_available_users,
+};
 
 /// MQTT topic constants for global resources (§3.1.1).
 mod topics {
@@ -37,7 +38,6 @@ mod topics {
     pub const MCPS: &str = "acowork/global/mcps";
     pub const SEARCHES: &str = "acowork/global/searches";
     pub const EMBEDDING_MODELS: &str = "acowork/global/embedding_models";
-    pub const LSPS: &str = "acowork/global/lsps";
     /// ADR-042: active user profile snapshot. Runtime uses this to populate
     /// the identity_context for the compact model's language hint.
     pub const USER_PROFILE: &str = "acowork/global/user_profile";
@@ -45,10 +45,17 @@ mod topics {
 
 /// The Gateway's MQTT global resources publisher.
 ///
-/// Holds a `GatewayMqttClient` and a `Notify` trigger. When a resource
-/// changes, call `trigger_republish()` to wake the background loop,
-/// which reads the latest state and publishes all `acowork/global/*`
-/// Retained topics.
+/// Holds a `GatewayMqttClient`, a `Notify` trigger for republishes, and a
+/// `watch::Sender<bool>` for the "ready to publish" barrier.
+///
+/// The publish loop defers its first Retained publish until [`MqttPublisherHandle::set_ready`]
+/// is called with `true`. This guarantees that any Runtime subscribing
+/// to `acowork/global/providers` receives a snapshot whose `ProviderRef.api_key`
+/// fields are populated, never the all-empty snapshot emitted when the vault
+/// is still locked at boot.
+///
+/// After the first publish, the loop runs purely on Notify triggers (no
+/// polling). See `desktop-onboarding-bugfix_154b7ff7.md` §Fix 1.
 pub struct MqttGlobalResourcesPublisher {
     /// The MQTT client used to publish.
     client: GatewayMqttClient,
@@ -56,12 +63,54 @@ pub struct MqttGlobalResourcesPublisher {
     gateway_state: SharedHttpState,
     /// Notification trigger for republish.
     notify: Arc<Notify>,
+    /// Ready barrier sender. The publish loop defers its initial publish
+    /// until the sender transmits `true`.
+    ready_tx: watch::Sender<bool>,
 }
 
 /// Handle returned by `start()`. Dropping it stops the publisher loop.
 pub struct MqttPublisherHandle {
     _task: tokio::task::JoinHandle<()>,
     notify: Arc<Notify>,
+    ready_tx: watch::Sender<bool>,
+}
+
+impl MqttPublisherHandle {
+    /// Trigger an immediate republish of all global resource topics.
+    pub fn trigger_republish(&self) {
+        self.notify.notify_one();
+    }
+
+    /// Get a clonable trigger that HTTP handlers can store in AppState.
+    pub fn create_trigger(&self) -> MqttPublisherTrigger {
+        MqttPublisherTrigger {
+            notify: self.notify.clone(),
+        }
+    }
+
+    /// Ready-barrier control.
+    ///
+    /// The publish loop blocks on `set_ready(true)` before performing its
+    /// first Retained publish. Callers that need the first snapshot to be
+    /// coherent — specifically, the vault must be unlocked (so the
+    /// ProviderRef.api_key fields decrypt) AND the local node must be
+    /// enrolled (so other subscribers don't race against onboarding) —
+    /// use this as a coordination point.
+    ///
+    /// Setting `ready = true` additionally nudges the publish loop so a
+    /// fast-path (already past the barrier and parked on `notified()`) is
+    /// not skipped.
+    pub fn set_ready(&self, ready: bool) {
+        let _ = self.ready_tx.send(ready);
+        if ready {
+            self.notify.notify_one();
+        }
+    }
+
+    /// Convenience: `set_ready(true)`. See [`Self::set_ready`] for details.
+    pub fn mark_ready(&self) {
+        self.set_ready(true);
+    }
 }
 
 /// Clonable trigger for the MQTT publisher.
@@ -81,63 +130,113 @@ impl MqttPublisherTrigger {
     }
 }
 
-impl MqttPublisherHandle {
-    /// Trigger an immediate republish of all global resource topics.
-    pub fn trigger_republish(&self) {
-        self.notify.notify_one();
-    }
-
-    /// Get a clonable trigger that HTTP handlers can store in AppState.
-    pub fn create_trigger(&self) -> MqttPublisherTrigger {
-        MqttPublisherTrigger {
-            notify: self.notify.clone(),
-        }
-    }
-}
-
 impl MqttGlobalResourcesPublisher {
     /// Create a new publisher with the given MQTT client and Gateway state.
     pub fn new(client: GatewayMqttClient, gateway_state: SharedHttpState) -> Self {
+        let (ready_tx, _) = watch::channel(false);
         Self {
             client,
             gateway_state,
             notify: Arc::new(Notify::new()),
+            ready_tx,
         }
     }
 
     /// Start the publisher background loop.
     ///
     /// The loop:
-    /// 1. Publishes all `acowork/global/*` topics once at startup (initial Retained snapshot).
-    /// 2. Waits for `trigger_republish()` calls from HTTP handlers after resource changes.
-    /// 3. On each trigger, re-reads state and republishes all topics as Retained messages.
+    /// 1. **Ready barrier** — blocks on `set_ready(true)` before the first
+    ///    publish, so the first retained snapshot only fires once the vault
+    ///    is unlocked AND the local node has enrolled. See
+    ///    `desktop-onboarding-bugfix_154b7ff7.md` §Fix 1.
+    /// 2. Publishes all `acowork/global/*` topics once (initial Retained snapshot).
+    /// 3. Waits for `trigger_republish()` calls from HTTP handlers.
+    /// 4. On each trigger, re-reads state and republishes all topics as
+    ///    Retained messages.
     ///
-    /// No periodic polling — Retained messages ensure new subscribers get the latest
-    /// snapshot immediately, and every resource-mutating HTTP handler calls
-    /// `MqttPublisherTrigger::trigger()` to drive republish on change.
-    pub fn start(self) -> MqttPublisherHandle {
-        let notify = self.notify.clone();
+    /// No periodic polling — Retained messages ensure new subscribers get
+    /// the latest snapshot immediately, and every resource-mutating HTTP
+    /// handler calls `MqttPublisherTrigger::trigger()` to drive republish on
+    /// change.
+    pub fn start(&self) -> MqttPublisherHandle {
         let notify_for_loop = self.notify.clone();
+        let mut ready_rx = self.ready_tx.subscribe();
+        let handle_ready_tx = self.ready_tx.clone();
+        let handle_notify = self.notify.clone();
+
+        let helper = LoopHelper {
+            client: self.client.clone(),
+            gateway_state: self.gateway_state.clone(),
+        };
+
         let task = tokio::spawn(async move {
             tracing::info!("MQTT Global Resources Publisher loop started");
 
-            // Initial publish: send the current snapshot immediately.
-            self.publish_all().await;
+            // ── Ready barrier ───────────────────────────────────────
+            // The publisher MUST NOT emit its first retained snapshot
+            // before both (a) the vault is unlocked (so ProviderRef.api_key
+            // fields are decryptable) and (b) the local node has enrolled
+            // (so other subscribers don't race against onboarding).
+            // Otherwise a Runtime subscribing in the first few seconds
+            // caches `api_key_lengths=[0]` and ignores subsequent
+            // republishes (Retained messages are only delivered to
+            // subscribers that have not already seen the prior retained
+            // value).
+            if !*ready_rx.borrow() {
+                tracing::info!(
+                    "Publisher: deferring initial publish until vault unlocked AND node local online"
+                );
+            }
+            loop {
+                if *ready_rx.borrow() {
+                    break;
+                }
+                match ready_rx.changed().await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        tracing::warn!(
+                            "MQTT publisher: ready signal sender dropped; aborting publisher loop"
+                        );
+                        return;
+                    }
+                }
+            }
+            tracing::info!("Publisher: ready signal received, performing initial publish");
 
-            // Trigger-driven republish loop — no periodic polling needed.
+            helper.publish_all().await;
+
+            // ── Trigger-driven republish loop — no periodic polling ─────
             // Every resource-mutating HTTP handler (add/remove/update provider,
             // MCP catalog entry, embedding model, search key, global config)
             // calls `trigger()` which wakes this loop via `Notify`.
             loop {
                 notify_for_loop.notified().await;
                 tracing::debug!("MQTT publisher: triggered republish");
-                self.publish_all().await;
+                helper.publish_all().await;
             }
         });
 
-        MqttPublisherHandle { _task: task, notify }
+        MqttPublisherHandle {
+            _task: task,
+            notify: handle_notify,
+            ready_tx: handle_ready_tx,
+        }
     }
+}
 
+// ── Loop helper ───────────────────────────────────────────────────────
+//
+// `LoopHelper` is an internal struct that owns the publish-state needed by
+// the loop body. It is created from `MqttGlobalResourcesPublisher::start()`
+// and moved outright into the spawned task, so the loop has no borrow
+// conflicts with the `ready_rx` receiver parked on the ready barrier.
+
+struct LoopHelper {
+    client: GatewayMqttClient,
+    gateway_state: SharedHttpState,
+}
+
+impl LoopHelper {
     /// Publish all `acowork/global/*` Retained topics.
     ///
     /// Reads the current GatewayState snapshot and publishes:
@@ -145,7 +244,6 @@ impl MqttGlobalResourcesPublisher {
     /// - `acowork/global/mcps` — AvailableMcps
     /// - `acowork/global/searches` — AvailableSearches
     /// - `acowork/global/embedding_models` — AvailableEmbeddingModels
-    /// - `acowork/global/lsps` — AvailableLsps
     /// - `acowork/global/user_profile` — AvailableUsers (ADR-042)
     async fn publish_all(&self) {
         let gw = self.gateway_state.read().await;
@@ -155,7 +253,6 @@ impl MqttGlobalResourcesPublisher {
         let mcps_payload = build_available_mcps(&gw);
         let searches_payload = build_available_searches(&gw);
         let embedding_payload = build_available_embedding_models(&gw);
-        let lsp_payload = build_available_lsps(&gw);
         let user_profile_payload = build_available_users(&gw);
 
         tracing::debug!(
@@ -176,7 +273,6 @@ impl MqttGlobalResourcesPublisher {
         self.publish_mcps(mcps_payload).await;
         self.publish_searches(searches_payload).await;
         self.publish_embedding_models(embedding_payload).await;
-        self.publish_lsps(lsp_payload).await;
         self.publish_user_profiles(user_profile_payload).await;
     }
 
@@ -212,14 +308,6 @@ impl MqttGlobalResourcesPublisher {
         self.publish_envelope_raw(topics::EMBEDDING_MODELS, &envelope).await;
     }
 
-    async fn publish_lsps(&self, payload: AvailableLsps) {
-        let envelope = DataEnvelope {
-            version: 1,
-            payload: Some(mqtt_proto::data_envelope::Payload::AvailableLsps(payload)),
-        };
-        self.publish_envelope_raw(topics::LSPS, &envelope).await;
-    }
-
     /// ADR-042: publish the active user profile snapshot.
     ///
     /// Empty `active_user` (no user created yet) is still published as a
@@ -247,319 +335,19 @@ impl MqttGlobalResourcesPublisher {
     }
 }
 
-// ── Payload builders ───────────────────────────────────────────────────
-
-/// Build `AvailableProviders` from the GatewayState resource cache.
-///
-/// In Phase 1, "available" = all providers in the cache (the cache is
-/// rebuilt by HTTP handlers when providers change). In Phase 2+, the
-/// health-check loop will filter to only ready providers.
-fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
-    let cache = &gw.resource_cache.provider_list;
-    let providers: Vec<ProviderRef> = cache
-        .providers
-        .iter()
-        .map(|p| {
-            // Decrypt the provider's API key from the Gateway's Vault.
-            // Empty string when no key is configured (e.g. local Ollama).
-            // MQTT broker is localhost-only so it's safe to publish the
-            // decrypted key in the retained payload — see mqtt.md §3.1.1.
-            let api_key = gw
-                .vault
-                .get_provider(&p.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            ProviderRef {
-                id: p.id.clone(),
-                base_url: p.base_url.clone(),
-                protocol_type: map_protocol_type(&p.protocol_type).into(),
-                models: p
-                    .models
-                    .iter()
-                    .map(|m| {
-                        let (input_modalities, output_modalities) = m
-                            .capabilities
-                            .modalities
-                            .as_ref()
-                            .map(|moda| (moda.input.clone(), moda.output.clone()))
-                            .unwrap_or_default();
-                        ProviderModelRef {
-                            id: m.id.clone(),
-                            capabilities: Some(mqtt_proto::ModelCapabilities {
-                                context_window: m.capabilities.context_window,
-                                max_output_tokens: m.capabilities.max_output_tokens,
-                                input_modalities,
-                                output_modalities,
-                                supports_reasoning: m.capabilities.supports_reasoning,
-                                default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
-                            }),
-                            max_output_tokens_limit: m.max_output_tokens_limit,
-                        }
-                    })
-                    .collect(),
-                compact_model: p.compact_model.clone().unwrap_or_default(),
-                custom: p.custom,
-                api_key,
-            }
-        })
-        .collect();
-
-    AvailableProviders {
-        version: cache.version,
-        providers,
-        // ADR-056: forward the global default compact model so Runtime can
-        // resolve the distillation fallback chain without an extra round-trip.
-        // `None` (i.e. not set in `provider_list.json`) means "no global
-        // override" — Runtime falls back to provider.compact_model and chat.
-        default_compact_model: cache.default_compact_model.clone().map(|r| {
-            mqtt_proto::CompactModelRef {
-                provider_id: r.provider_id,
-                model_id: r.model_id,
-            }
-        }),
-    }
-}
-
-/// Build `AvailableMcps` from the GatewayState resource cache.
-///
-/// The `auth_token` is extracted from env vars and headers via
-/// `extract_api_key_from_mcp_config` — same logic that builds
-/// `mcp_key_vault` for gRPC AgentHello. Empty when no auth required.
-fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
-    let cache = &gw.resource_cache.mcp_list;
-    // MCP catalog is the source of truth for env/headers, not the
-    // resource_cache (which only stores server lists). Load it here.
-    let data_dir = gw
-        .config
-        .as_ref()
-        .map(|c| std::path::PathBuf::from(&c.data_dir))
-        .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-    let catalog: Vec<acowork_core::protocol::McpServerConfigDef> = crate::http::mcp_catalog_api::load_mcp_catalog(&data_dir)
-        .ok()
-        .unwrap_or_default();
-    let servers: Vec<McpRef> = cache
-        .servers
-        .iter()
-        .map(|s| {
-            // Look up the catalog entry to extract env/headers for the token.
-            let auth_token = catalog
-                .iter()
-                .find(|c| c.name == s.id)
-                .and_then(crate::resource_cache::extract_api_key_from_mcp_config)
-                .unwrap_or_default();
-            McpRef {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                transport: map_mcp_transport(&s.transport).into(),
-                url: s.url.clone().unwrap_or_default(),
-                command: s.command.clone(),
-                args: s.args.clone(),
-                env: s.env.clone(),
-                headers: s.headers.clone(),
-                tool_timeout_secs: s.tool_timeout_secs.unwrap_or(0),
-                auth_token,
-            }
-        })
-        .collect();
-
-    AvailableMcps {
-        version: cache.version,
-        servers,
-    }
-}
-
-/// Build `AvailableSearches` from the GatewayState resource cache.
-///
-/// `api_key` is decrypted from the Gateway's Vault at PUBLISH time,
-/// mirroring the logic in `build_search_key_vault` for gRPC AgentHello.
-/// Empty when the search provider has no key configured.
-fn build_available_searches(gw: &GatewayState) -> AvailableSearches {
-    let cache = &gw.resource_cache.search_list;
-    let providers: Vec<SearchRef> = cache
-        .providers
-        .iter()
-        .map(|s| {
-            let api_key = gw
-                .vault
-                .get_search_key(&s.id)
-                .map(|entry| entry.api_key)
-                .unwrap_or_default();
-            SearchRef {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                description: s.description.clone(),
-                requires_api_key: s.requires_api_key,
-                base_url: s.base_url.clone(),
-                api_key,
-            }
-        })
-        .collect();
-
-    AvailableSearches {
-        version: cache.version,
-        providers,
-    }
-}
-
-/// Build `AvailableEmbeddingModels` from the GatewayState resource cache
-/// + embed process state.
-fn build_available_embedding_models(gw: &GatewayState) -> AvailableEmbeddingModels {
-    let cache = &gw.resource_cache.embedding_models;
-    let models: Vec<EmbeddingModelRef> = cache
-        .models
-        .iter()
-        .map(|m| EmbeddingModelRef {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            description: m.description.clone().unwrap_or_default(),
-            dimension: m.dimension as u32,
-            max_tokens: m.max_tokens as u32,
-            size_mb: m.size_mb,
-            languages: m.languages.clone(),
-            hf_repo: m.hf_repo.clone(),
-            onnx_file: m.onnx_file.clone(),
-            tokenizer_file: m.tokenizer_file.clone(),
-            bundled: m.bundled,
-            recommended: m.recommended,
-        })
-        .collect();
-
-    // Active model info from embed process state.
-    let (active_model_id, active_dimension, endpoint) = match &gw.embed_process {
-        Some(eps) if eps.ready => (
-            eps.active_model_id.clone().unwrap_or_default(),
-            eps.active_dimension.unwrap_or(0) as u32,
-            format!("http://127.0.0.1:{}/v1", eps.port),
-        ),
-        _ => (String::new(), 0, String::new()),
-    };
-
-    AvailableEmbeddingModels {
-        version: cache.version,
-        models,
-        active_model_id,
-        active_dimension,
-        endpoint,
-    }
-}
-
-/// Build `AvailableLsps` from the GatewayState LSP relay process state.
-fn build_available_lsps(gw: &GatewayState) -> AvailableLsps {
-    match &gw.lsp_relay_process {
-        Some(lsp) if lsp.ready => AvailableLsps {
-            version: 1,
-            endpoint: format!("http://127.0.0.1:{}", lsp.port),
-            ready: true,
-        },
-        _ => AvailableLsps {
-            version: 1,
-            endpoint: String::new(),
-            ready: false,
-        },
-    }
-}
-
-/// ADR-042: Build `AvailableUsers` from the GatewayState user profile list.
-///
-/// Finds the user with `is_active == true` and serialises it into
-/// `UserProfileRef`. UI-only fields (avatar / builtin_avatar /
-/// created_at / updated_at / is_active) are omitted — Runtime never
-/// renders user profile UI. `custom` HashMap is serialised to JSON.
-fn build_available_users(gw: &GatewayState) -> AvailableUsers {
-    let list = &gw.resource_cache.user_profile_list;
-    let active = list.users.iter().find(|u| u.is_active).map(|u| {
-        let custom_json = serde_json::to_string(&u.custom).unwrap_or_else(|e| {
-            tracing::warn!(
-                user_id = %u.user_id,
-                error = %e,
-                "Failed to serialise UserProfile.custom to JSON; sending empty"
-            );
-            "{}".to_string()
-        });
-        UserProfileRef {
-            user_id: u.user_id.clone(),
-            display_name: u.display_name.clone(),
-            language: u.language.clone(),
-            timezone: u.timezone.clone(),
-            city: u.city.clone(),
-            country: u.country.clone(),
-            occupation: u.occupation.clone(),
-            communication_style: u.communication_style.clone(),
-            custom_json,
-        }
-    });
-
-    AvailableUsers {
-        version: list.version,
-        active_user: active,
-    }
-}
-
-// ── Enum mappers ───────────────────────────────────────────────────────
-
-fn map_protocol_type(pt: &ProtocolType) -> mqtt_proto::LlmProtocol {
-    match pt {
-        ProtocolType::OpenAI => mqtt_proto::LlmProtocol::Openai,
-        ProtocolType::Anthropic => mqtt_proto::LlmProtocol::Anthropic,
-        ProtocolType::Google => mqtt_proto::LlmProtocol::Google,
-        ProtocolType::Ollama => mqtt_proto::LlmProtocol::Ollama,
-    }
-}
-
-fn map_mcp_transport(t: &McpTransportDef) -> mqtt_proto::McpTransport {
-    match t {
-        McpTransportDef::Stdio => mqtt_proto::McpTransport::Stdio,
-        McpTransportDef::Http => mqtt_proto::McpTransport::Http,
-        McpTransportDef::Sse => mqtt_proto::McpTransport::Sse,
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────
+//
+// Payload builders (`build_available_*`) and enum mappers live in
+// `mqtt::global_resources_builders` and are tested there. Tests below
+// focus on the publisher's own wiring (broker, retained delivery, ready
+// barrier).
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_map_protocol_type() {
-        assert_eq!(
-            map_protocol_type(&ProtocolType::OpenAI),
-            mqtt_proto::LlmProtocol::Openai
-        );
-        assert_eq!(
-            map_protocol_type(&ProtocolType::Anthropic),
-            mqtt_proto::LlmProtocol::Anthropic
-        );
-    }
-
-    #[test]
-    fn test_map_mcp_transport() {
-        assert_eq!(
-            map_mcp_transport(&McpTransportDef::Stdio),
-            mqtt_proto::McpTransport::Stdio
-        );
-        assert_eq!(
-            map_mcp_transport(&McpTransportDef::Http),
-            mqtt_proto::McpTransport::Http
-        );
-    }
-
-    #[test]
-    fn test_build_available_providers_empty() {
-        let gw = GatewayState::new("/tmp/test-vault");
-        let payload = build_available_providers(&gw);
-        assert_eq!(payload.version, 0);
-        assert!(payload.providers.is_empty());
-    }
-
-    #[test]
-    fn test_build_available_lsps_no_process() {
-        let gw = GatewayState::new("/tmp/test-vault");
-        let payload = build_available_lsps(&gw);
-        assert!(!payload.ready);
-        assert!(payload.endpoint.is_empty());
-    }
-
     #[tokio::test]
     async fn test_publisher_publishes_retained_snapshot() {
+        use crate::gateway::state::GatewayState;
         use crate::http::routes::SharedHttpState;
         use std::sync::Arc;
         use tokio::sync::RwLock;
@@ -579,8 +367,13 @@ mod tests {
         let publisher = MqttGlobalResourcesPublisher::new(client, gw_state);
         let handle = publisher.start();
 
-        // Trigger a republish
-        handle.trigger_republish();
+        // Fix-1: the publisher loop blocks on `set_ready(true)` before
+        // its first retained publish. `mark_ready()` sends the ready
+        // signal AND nudges the loop, so the initial snapshot lands
+        // immediately. (Pre-Fix-1 this test used `trigger_republish()`,
+        // which only notifies and would hang the test forever after
+        // the ready barrier was added.)
+        handle.mark_ready();
 
         // Give the publisher a moment to publish
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -595,37 +388,56 @@ mod tests {
             .await
             .unwrap();
 
-        // Poll for retained messages
+        // Poll for retained messages. We use `tokio::time::timeout`
+        // around each poll so we never spin-busy when the eventloop
+        // keeps returning non-Publish events (e.g. ConnAck, SubAck);
+        // without the sleep the for-loop would burn CPU until the
+        // broker eventually delivers the retained publish.
         let mut received_topics = Vec::new();
-        for _ in 0..50 {
-            match eventloop.poll().await {
-                Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p))) => {
+        let poll_budget = std::time::Duration::from_secs(5);
+        let poll_start = std::time::Instant::now();
+        while poll_start.elapsed() < poll_budget && received_topics.len() < 6 {
+            let remaining = poll_budget.saturating_sub(poll_start.elapsed());
+            match tokio::time::timeout(
+                remaining.min(std::time::Duration::from_millis(100)),
+                eventloop.poll(),
+            )
+            .await
+            {
+                Ok(Ok(rumqttc::Event::Incoming(rumqttc::Incoming::Publish(p)))) => {
                     received_topics.push(p.topic.clone());
-                    if received_topics.len() >= 6 {
-                        break;
-                    }
                 }
-                Ok(_) => continue,
+                Ok(_) => {
+                    // Non-Publish event (ConnAck/SubAck/PingResp/etc) or
+                    // transient transport error. Yield so we don't pin a
+                    // CPU core while waiting for the broker's retained
+                    // delivery.
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
                 Err(_) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    // poll() deadline elapsed without an event. Loop
+                    // and try again until the outer budget is reached.
                 }
             }
         }
 
         assert!(
             received_topics.contains(&"acowork/global/providers".to_string()),
-            "should receive providers retained: {:?}",
+            "should receive providers retained within {:?}: {:?}",
+            poll_budget,
             received_topics
         );
         assert!(
             received_topics.contains(&"acowork/global/mcps".to_string()),
-            "should receive mcps retained: {:?}",
+            "should receive mcps retained within {:?}: {:?}",
+            poll_budget,
             received_topics
         );
         // ADR-042: verify the new user_profile retained topic is published.
         assert!(
             received_topics.contains(&"acowork/global/user_profile".to_string()),
-            "should receive user_profile retained (ADR-042): {:?}",
+            "should receive user_profile retained (ADR-042) within {:?}: {:?}",
+            poll_budget,
             received_topics
         );
 

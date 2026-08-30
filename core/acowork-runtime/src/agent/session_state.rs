@@ -303,10 +303,6 @@ pub struct SessionState {
     pub(crate) loop_detector: LoopDetector,
     /// Budget guard (per-session for independent token accounting)
     pub(crate) budget_guard: BudgetGuard,
-    /// Turn counter for Grafeo episodic storage (P1-2 fix).
-    /// Monotonically increasing per session; used as `turn_index` in
-    /// ConversationRecord to preserve chronological order.
-    pub(crate) turn_counter: u32,
     /// Messages deferred from `poll_interrupt()` during active execution.
     /// These are non-Interrupt messages that arrived in the AgentLoop's
     /// inbound channel while it was polling mid-iteration. They are
@@ -384,7 +380,6 @@ impl SessionState {
             conversation,
             loop_detector: LoopDetector::with_defaults(),
             budget_guard: BudgetGuard::new(budget),
-            turn_counter: 0,
             deferred_inbound: Vec::new(),
             status: SessionStatus::Idle,
             todos: Vec::new(),

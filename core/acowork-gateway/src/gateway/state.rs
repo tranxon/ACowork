@@ -8,7 +8,6 @@ use crate::cron::CronScheduler;
 use crate::cron::store::CronStore;
 use crate::interaction_store::InteractionStore;
 use crate::lifecycle::embed::EmbedProcessState;
-use crate::lifecycle::lsp_relay::LspRelayProcessState;
 use crate::rate::bucket::RateLimiter;
 use crate::resource_cache::ResourceCache;
 use crate::vault::VaultFacade;
@@ -23,6 +22,14 @@ use std::sync::Arc;
 ///
 /// **None** when MQTT is disabled in the Gateway config.
 pub type MqttBrokerControlHandle = tokio::sync::Mutex<Option<crate::mqtt::MqttBrokerHandle>>;
+
+/// System Agent ID — always auto-started with the Gateway.
+///
+/// ADR-055 Phase 2b.3: moved here from `lifecycle/manager.rs` (deleted).
+/// This is a Gateway policy constant (the System Agent is privileged and
+/// cannot be stopped by normal stop commands), not a node concern.
+pub const SYSTEM_AGENT_ID: &str = "com.acowork.system";
+
 /// Information about an installed agent
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
@@ -31,6 +38,11 @@ pub struct AgentInfo {
     pub name: String,
     pub install_path: String,
     pub manifest: acowork_core::AgentManifest,
+    /// Which node hosts this installed agent (ADR-055 §6.5).
+    /// `"local"` for the Gateway's own machine; a remote node_id once
+    /// the installed-package inventory is aggregated from node retained
+    /// info (Phase 2b.3 / Phase 3).
+    pub node_id: String,
 }
 
 /// Runtime DevMode activation state.
@@ -84,6 +96,10 @@ pub struct RunningAgentInfo {
     pub pid: u32,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub workspace: String,
+    /// Which node hosts this running Runtime (ADR-055 §6.5). `"local"`
+    /// while the Gateway spawns Runtimes directly; a remote node_id once
+    /// lifecycle is delegated to the Node control plane (Phase 2b.3).
+    pub node_id: String,
     /// Whether the Agent has completed the gRPC AgentHello handshake
     pub connected: bool,
     /// Whether the Agent has completed SessionTask initialization and is ready to receive messages
@@ -140,6 +156,42 @@ pub struct AgentMigrationState {
     pub error: Option<String>,
 }
 
+/// ADR-059: Gateway bootstrap runtime state.
+///
+/// Aggregates every bootstrap-specific concern that lives on the shared
+/// `GatewayState`:
+/// - the [`BootstrapOrchestrator`] that aggregates subsystem readiness
+///   into the bootstrap snapshot consumed by MQTT + HTTP,
+/// - per-subsystem readiness handles (e.g. `vault`) that HTTP handlers
+///   use to demote / restore readiness without touching the registry.
+///
+/// Kept separate from `GatewayState`'s stable fields so ADR-059 phases
+/// can extend bootstrap state without widening the general contract.
+///
+/// NOTE: distinct from the wire-level
+/// `acowork_core::mqtt_proto::BootstrapState` (the serialisable
+/// snapshot). This struct is pure in-process state.
+#[derive(Default)]
+pub struct BootstrapState {
+    /// The bootstrap orchestrator (Phase 1.2 wires this in).
+    ///
+    /// `None` during very early construction; set once during
+    /// `Gateway::run` after the subsystem registry is built. Read by
+    /// the MQTT BootstrapPublisher (Phase 1.1) and the HTTP
+    /// `/api/bootstrap` handler (Phase 1.3) to expose the aggregated
+    /// readiness snapshot.
+    pub orchestrator: Option<std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>>,
+    /// Readiness handle for the `vault` subsystem (Phase 5.4).
+    ///
+    /// Registered during `Gateway::run` alongside the other bootstrap
+    /// subsystems; stored here so the HTTP vault lock/unlock handlers
+    /// can demote (`mark_booting` on user lock) and restore
+    /// (`mark_ready` on unlock) the vault's readiness without holding
+    /// a reference to the bootstrap registry itself. `None` before
+    /// registration.
+    pub vault_readiness_handle: Option<crate::bootstrap::SubsystemHandle>,
+}
+
 /// Shared permission store type (same as gRPC server)
 /// Gateway state — shared mutable state for the entire Gateway process
 pub struct GatewayState {
@@ -166,9 +218,6 @@ pub struct GatewayState {
     pub resource_cache: ResourceCache,
     /// Embedding service process state (None if not started).
     pub embed_process: Option<EmbedProcessState>,
-    /// LSP Relay process state (None if not started).
-    /// Managed by the LSP Relay supervisor — spawn / monitor / restart.
-    pub lsp_relay_process: Option<LspRelayProcessState>,
     /// Last user-interaction timestamp per agent (`agent_id` -> UTC time).
     /// In-memory mirror of the on-disk interaction store; source of truth
     /// for the `GET /api/agents` sort order. Persists across agent
@@ -185,6 +234,44 @@ pub struct GatewayState {
     /// Always `Some` because initialised in `GatewayState::new`.
     /// The inner `Option` is `None` when MQTT is disabled in config.
     pub mqtt_broker_control: Arc<MqttBrokerControlHandle>,
+    /// ADR-055 Phase 5a: broker CONNECT auth inputs, kept so the debug
+    /// `/api/debug/mqtt/start` endpoint can restart the broker with the
+    /// same credential state. `None` when MQTT auth is disabled.
+    pub mqtt_broker_auth: Option<crate::mqtt::broker::BrokerAuth>,
+    /// ADR-055 D3: resolved advertise host for constructing endpoints
+    /// distributed to Runtime / Desktop (embed, LSP, broker).
+    ///
+    /// Config value > auto-detected non-loopback IP > "127.0.0.1".
+    /// Set once at startup from `Gateway::run` via
+    /// [`Self::set_advertise_host`]. Tests default to "127.0.0.1".
+    pub advertise_host: String,
+    /// MQTT publisher ready-barrier handle (Fix 1).
+    ///
+    /// The publisher defers its first retained publish until
+    /// [`crate::mqtt::MqttPublisherHandle::mark_ready`] is called via this
+    /// handle. Set once by `Gateway::run` after `start()` spawns the
+    /// publisher loop; read by the vault auto-unlock task and the
+    /// local-node ready task to coordinate the barrier. `None` when
+    /// MQTT is disabled.
+    pub mqtt_publisher_handle: Option<crate::mqtt::MqttPublisherHandle>,
+    /// ADR-059: stable identifier of this Gateway instance.
+    ///
+    /// UUID v4 lowercase hex, generated fresh on every Gateway process
+    /// start (NOT persisted across restarts — see ADR-059 §5.1:
+    /// "重启后换发"). Published as `BootstrapState.instance_id` (and
+    /// surfaced via `GET /api/bootstrap`) so clients can distinguish
+    /// a fresh Gateway from a retained re-delivery of a previous
+    /// instance.
+    ///
+    /// Initialised to `String::new()` by [`GatewayState::new`] and
+    /// overwritten by [`Self::set_instance_id`] during `Gateway::new`
+    /// before the state is wrapped in a `SharedState`.
+    pub instance_id: String,
+    /// ADR-059: Gateway bootstrap phase state — orchestrator + the
+    /// subsystem handles it coordinates. Grouped in one struct so
+    /// `GatewayState` stays a stable contract while this concern grows
+    /// with each ADR-059 phase.
+    pub bootstrap: BootstrapState,
 }
 
 impl GatewayState {
@@ -202,11 +289,48 @@ impl GatewayState {
             config: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,
-            lsp_relay_process: None,
             last_interactions: HashMap::new(),
             interaction_store: None,
             mqtt_broker_control: Arc::new(tokio::sync::Mutex::new(None)),
+            mqtt_broker_auth: None,
+            advertise_host: "127.0.0.1".to_string(),
+            mqtt_publisher_handle: None,
+            instance_id: String::new(),
+            bootstrap: BootstrapState::default(),
         }
+    }
+
+    /// ADR-059: assign the Gateway's stable instance id.
+    ///
+    /// Called once during `Gateway::new` after the instance id is
+    /// loaded (or freshly generated) from the data dir. The id is then
+    /// used by the bootstrap orchestrator and by the MQTT/HTTP
+    /// projections. Idempotent: a second call logs a warning and does
+    /// NOT overwrite the existing id (mutating it mid-run would
+    /// invalidate every already-published snapshot's `instance_id`).
+    pub fn set_instance_id(&mut self, id: String) {
+        if self.instance_id.is_empty() {
+            self.instance_id = id;
+        } else {
+            tracing::warn!(
+                current = %self.instance_id,
+                ignored = %id,
+                "GatewayState::set_instance_id called twice — keeping the first id"
+            );
+        }
+    }
+
+    /// ADR-059: attach the bootstrap orchestrator (Phase 1.2).
+    ///
+    /// Called once after the subsystem registry is built and the
+    /// orchestrator is constructed. Subsequent calls replace the
+    /// orchestrator; in normal Gateway operation this should only
+    /// happen at construction time.
+    pub fn set_bootstrap_orchestrator(
+        &mut self,
+        orchestrator: std::sync::Arc<crate::bootstrap::BootstrapOrchestrator>,
+    ) {
+        self.bootstrap.orchestrator = Some(orchestrator);
     }
 
     /// Check if an agent is installed
@@ -256,6 +380,48 @@ impl GatewayState {
         self.installed_agents.remove(agent_id)
     }
 
+    /// ADR-055 §6.5: aggregate an installed-agent inventory entry
+    /// reported by a node (retained `InstalledAgentInfo`). Rebuilds the
+    /// `AgentInfo` from the `manifest.toml` payload and registers it
+    /// (capabilities + install table). Idempotent: re-published retained
+    /// entries on node (re)connect simply overwrite the same key.
+    ///
+    /// Returns `None` (and logs) when the embedded `manifest.toml` is
+    /// invalid — the entry is skipped rather than poisoning the table.
+    pub fn upsert_installed_from_node(
+        &mut self,
+        node_id: &str,
+        entry: &acowork_core::mqtt_proto::InstalledAgentInfo,
+    ) -> Option<String> {
+        let manifest = match acowork_core::AgentManifest::from_toml(&entry.manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    node_id,
+                    agent_id = %entry.agent_id,
+                    error = %e,
+                    "Installed-agent info carries invalid manifest.toml — ignoring"
+                );
+                return None;
+            }
+        };
+        let agent_id = if entry.agent_id.is_empty() {
+            manifest.agent_id.clone()
+        } else {
+            entry.agent_id.clone()
+        };
+        let info = AgentInfo {
+            agent_id: agent_id.clone(),
+            version: entry.version.clone(),
+            name: entry.name.clone(),
+            install_path: entry.install_path.clone(),
+            manifest,
+            node_id: node_id.to_string(),
+        };
+        self.add_installed(info);
+        Some(agent_id)
+    }
+
     /// Add a running agent
     pub fn add_running(&mut self, info: RunningAgentInfo) {
         self.running_agents.insert(info.agent_id.clone(), info);
@@ -294,6 +460,13 @@ impl GatewayState {
     /// Set rate limiter
     pub fn set_rate_limiter(&mut self, limiter: RateLimiter) {
         self.rate_limiter = Some(limiter);
+    }
+
+    /// ADR-055 D3: set the resolved advertise host used to construct
+    /// embed / LSP / broker endpoints distributed to Runtime and
+    /// Desktop. Called once at startup from `Gateway::run`.
+    pub fn set_advertise_host(&mut self, host: String) {
+        self.advertise_host = host;
     }
 
     /// Record a user-driven interaction for `agent_id` and persist
@@ -371,6 +544,7 @@ mod tests {
             name: "Weather Agent".to_string(),
             install_path: "/tmp/weather".to_string(),
             manifest,
+            node_id: "local".to_string(),
         });
         assert!(state.is_installed("com.example.weather"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -385,6 +559,7 @@ mod tests {
             pid: 1234,
             started_at: chrono::Utc::now(),
             workspace: "/tmp/weather-workspace".to_string(),
+            node_id: "local".to_string(),
             connected: false,
             ready: false,
             dev_mode: false,
@@ -398,6 +573,36 @@ mod tests {
 
         state.remove_running("com.example.weather");
         assert!(!state.is_running("com.example.weather"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_instance_id_default_is_empty() {
+        let dir = temp_vault_dir("instance-id-default");
+        let state = GatewayState::new(&dir);
+        assert!(state.instance_id.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_instance_id_assigns() {
+        let dir = temp_vault_dir("instance-id-set");
+        let mut state = GatewayState::new(&dir);
+        state.set_instance_id("instance-A".to_string());
+        assert_eq!(state.instance_id, "instance-A");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_set_instance_id_is_idempotent() {
+        let dir = temp_vault_dir("instance-id-idempotent");
+        let mut state = GatewayState::new(&dir);
+        state.set_instance_id("instance-A".to_string());
+        // Second call must NOT overwrite — mutating the id mid-run
+        // would invalidate every already-published snapshot's
+        // instance_id.
+        state.set_instance_id("instance-B".to_string());
+        assert_eq!(state.instance_id, "instance-A");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

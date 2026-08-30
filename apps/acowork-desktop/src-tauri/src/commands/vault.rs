@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use tauri::State;
 
 use crate::gateway_client::{
-    GenericMessageResponse, ModelCapabilities, SearchVaultKeyEntry, VaultKeyEntry,
+    GenericMessageResponse, ModelCapabilities, OperationAck, SearchVaultKeyEntry, VaultKeyEntry,
 };
 use crate::state::AppState;
 
@@ -16,6 +16,13 @@ pub async fn list_keys(state: State<'_, AppState>) -> Result<Vec<VaultKeyEntry>,
 }
 
 /// Add a new API key (with optional base_url, models list, per-model capabilities, and custom flag)
+///
+/// ADR-059 §7.3: the Gateway now answers `POST /api/providers` with an
+/// [`OperationAck`] — not the legacy `GenericMessageResponse` — so the
+/// return type mirrors the new contract. The frontend doesn't destructure
+/// the body; it just resolves/rejects the invoke promise, so swapping the
+/// concrete type is enough to clear the "Failed to parse Gateway
+/// response" alert that used to surface on every successful add.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn add_key(
@@ -28,7 +35,7 @@ pub async fn add_key(
     model_capabilities: Option<HashMap<String, ModelCapabilities>>,
     compact_model: Option<String>,
     custom: Option<bool>,
-) -> Result<GenericMessageResponse, String> {
+) -> Result<OperationAck, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
     client

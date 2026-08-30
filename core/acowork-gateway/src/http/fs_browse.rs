@@ -28,10 +28,15 @@ pub struct FsBrowseQuery {
     /// Directory path to browse. Empty or "/" = root (returns home + common dirs).
     #[serde(default)]
     pub path: Option<String>,
+    /// Target node to browse (ADR-055 L7-1). Empty / "local" = the
+    /// Gateway machine's filesystem; any other value = a remote node's
+    /// filesystem (reverse-proxied to that node's `/fs/browse`).
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 /// A single entry in a directory listing
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsBrowseEntry {
     /// File or directory name
@@ -50,7 +55,7 @@ pub struct FsBrowseEntry {
 }
 
 /// Response for filesystem browsing
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsBrowseResponse {
     /// The path that was browsed (echoed back for UI breadcrumb)
@@ -174,10 +179,20 @@ fn validate_path(path: &str) -> Result<(), String> {
 /// When `path` is empty or "/", returns a list of common root directories
 /// (home, drive roots on Windows, / on Unix). For a specific path, returns
 /// the directory contents (directories first, then files, both alphabetical).
+///
+/// ADR-055 L7-1: `?target={node_id}` routes the browse to a remote node's
+/// filesystem (reverse-proxied to that node's `/fs/browse`); the default
+/// (empty / `local`) browses the Gateway machine.
 pub async fn browse_fs(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(query): Query<FsBrowseQuery>,
 ) -> Result<Json<FsBrowseResponse>, (StatusCode, Json<ApiError>)> {
+    // Remote target → reverse-proxy to the node's node-local fs browser.
+    let target = query.target.as_deref().unwrap_or("").trim();
+    if !target.is_empty() && target != "local" {
+        return proxy_fs_browse_to_node(&state, target, query.path.as_deref().unwrap_or("")).await;
+    }
+
     let requested_path = query.path.as_deref().unwrap_or("").trim();
 
     // Root browsing — return common starting points
@@ -282,6 +297,78 @@ pub async fn browse_fs(
         path: normalized_base,
         entries,
     }))
+}
+
+/// Reverse-proxy a filesystem browse to a remote node (ADR-055 L7-1).
+///
+/// Resolves the node's `http_endpoint` from the NodeRegistry's retained
+/// `NodeInfo` snapshot and forwards the `path` to `{endpoint}/fs/browse`,
+/// which the node executes against its own filesystem. The node's JSON
+/// response is parsed and re-serialized in the same [`FsBrowseResponse`]
+/// shape, so the Desktop frontend is agnostic to which machine served it.
+async fn proxy_fs_browse_to_node(
+    state: &AppState,
+    target: &str,
+    path: &str,
+) -> Result<Json<FsBrowseResponse>, (StatusCode, Json<ApiError>)> {
+    let registry = state
+        .node_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::service_unavailable("Node registry not initialized"))?;
+
+    let endpoint = {
+        let reg = registry.read().await;
+        let node = reg
+            .get(target)
+            .ok_or_else(|| ApiError::not_found(&format!("Node '{}' not found", target)))?;
+        if !node.online {
+            return Err(ApiError::service_unavailable(&format!(
+                "Node '{}' is offline",
+                target
+            )));
+        }
+        match node
+            .info
+            .as_ref()
+            .and_then(|i| if i.http_endpoint.is_empty() { None } else { Some(i.http_endpoint.clone()) })
+        {
+            Some(ep) => ep,
+            None => {
+                return Err(ApiError::service_unavailable(&format!(
+                    "Node '{}' has no HTTP endpoint",
+                    target
+                )));
+            }
+        }
+    };
+
+    let url = format!("{}/fs/browse?path={}", endpoint, urlencoding::encode(path));
+
+    let client = crate::http::proxy::runtime_http_client();
+    let resp = client.get(&url).send().await.map_err(|e| {
+        ApiError::service_unavailable(&format!(
+            "Failed to reach node '{}' at {}: {}",
+            target, endpoint, e
+        ))
+    })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(ApiError::internal(&format!(
+            "Node '{}' fs/browse returned {}: {}",
+            target, status, body
+        )));
+    }
+
+    let body: FsBrowseResponse = resp.json().await.map_err(|e| {
+        ApiError::internal(&format!(
+            "Failed to parse node '{}' fs/browse response: {}",
+            target, e
+        ))
+    })?;
+
+    Ok(Json(body))
 }
 
 /// Create filesystem browsing routes

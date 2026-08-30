@@ -103,11 +103,11 @@ fi
 TARGET_DIR="$WORKSPACE_ROOT/target/$PROFILE"
 
 # ── Total step count ──────────────────────────────────────────────────────────
-#   --start : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Copy, Start)
-#   else    : 6  (Stop, Gateway, Runtime, Embed, LSP Relay, Copy)
-TOTAL_STEPS=6
+#   --start : 8  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, Copy, Start)
+#   else    : 7  (Stop, Gateway, Runtime, Embed, LSP Relay, Node, Copy)
+TOTAL_STEPS=7
 if [ "$START_GATEWAY" = "true" ]; then
-    TOTAL_STEPS=7
+    TOTAL_STEPS=8
 fi
 
 # ── Header ──────────────────────────────────────────────────────────────────
@@ -202,8 +202,9 @@ echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # so a Gateway shutdown does NOT cascade termination to it — we must kill it
 # explicitly to avoid leaving an orphan binding port 19878, which would
 # otherwise be attached by the new gateway via attach_existing_lsp_relay()
-# but owned by a now-dead parent.
-for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay; do
+# but owned by a now-dead parent. Node Agent is included too (ADR-055 §6.11):
+# it is spawned by the Gateway, so a killed Gateway can orphan it.
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -328,6 +329,28 @@ if "${cargo_args[@]}" 2>&1 | tail -20; then
     echo -e "${GREEN}  ✓ LSP Relay compiled successfully${NC}"
 else
     echo -e "${RED}  ✗ LSP Relay compile failed${NC}"
+    exit 1
+fi
+echo ""
+
+# ── Step 4.6: Build Node Agent ───────────────────────────────────────────────
+#
+# ADR-055 §6.11: the Gateway supervises a local Node Agent (`acowork-node`),
+# located via `current_exe().parent().join("acowork-node")` — so the binary
+# MUST sit next to acowork-gateway. Without it the Gateway silently disables
+# the node topology ("acowork-node binary not found — local node agent
+# disabled"), node 'local' never enrolls, and agent installs fail with 503
+# "Node 'local' has never enrolled (offline)".
+echo -e "${YELLOW}[4.6/$TOTAL_STEPS] Building Node Agent ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-node)
+else
+    cargo_args=(cargo build -p acowork-node)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ Node Agent compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ Node Agent compile failed${NC}"
     exit 1
 fi
 echo ""

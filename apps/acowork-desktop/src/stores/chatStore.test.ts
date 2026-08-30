@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mergeMessageWindow, useChatStore, handleMessageEvent } from "./chatStore";
+import { mergeMessageWindow, useChatStore, handleMessageEvent, scheduleSendReconciliation } from "./chatStore";
 import {
   ingestStreamDelta,
   ingestRecordComplete,
@@ -19,7 +19,7 @@ import {
   useChatAdapterStore,
   type AdapterSessionState,
 } from "../components/chat/chatAdapterStore";
-import type { ChatMessage } from "../lib/types";
+import type { ChatMessage, ConversationEntry } from "../lib/types";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -336,6 +336,62 @@ describe("mergeMessageWindow: backend-authoritative ts ordering", () => {
     ]);
   });
 
+  it("server echo clears the _isOptimistic pending flag (file spinner regression)", () => {
+    // ADR-050 C5: sendMessage inserts optimistic entries into messages[]
+    // with `_isOptimistic: true`. The HTTP refresh is the ONLY mechanism
+    // that drops the flag — the server copy (same id) wins. This pins the
+    // contract that makes the attachment "waiting for server" spinner
+    // disappear once the send is persisted.
+    const optimisticUser: ChatMessage = {
+      id: "msg-user-1",
+      type: "user",
+      content: "check this file",
+      timestamp: 1000,
+      _isOptimistic: true,
+    };
+    const optimisticAtt: ChatMessage = {
+      id: "msg-att-1",
+      type: "system",
+      content: "",
+      timestamp: 1001,
+      metadata: { type: "attached_file", abs_path: "C:/ws/lib.rs", name: "lib.rs" },
+      _isOptimistic: true,
+    };
+    const server = [
+      { id: "msg-user-1", type: "user" as const, content: "check this file", timestamp: 1500 },
+      {
+        id: "msg-att-1",
+        type: "system" as const,
+        content: "",
+        timestamp: 1501,
+        metadata: { type: "attached_file", abs_path: "C:/ws/lib.rs", name: "lib.rs" },
+      },
+    ];
+    const result = mergeMessageWindow([optimisticUser, optimisticAtt], server);
+    expect(result.messages.some((m) => m._isOptimistic)).toBe(false);
+    // The pending flag is gone and the server copy (metadata intact) wins.
+    const att = result.messages.find((m) => m.id === "msg-att-1")!;
+    expect(att.metadata?.type).toBe("attached_file");
+    expect(att._isOptimistic).toBeUndefined();
+  });
+
+  it("keeps _isOptimistic when the server has NOT echoed the entry yet", () => {
+    // A refresh whose window does not contain the optimistic id must NOT
+    // clear the flag — the chip keeps its spinner until the backend really
+    // confirms the send (no false success state).
+    const optimisticAtt: ChatMessage = {
+      id: "msg-att-1",
+      type: "system",
+      content: "",
+      timestamp: 1001,
+      metadata: { type: "file_upload", filename: "report.pdf" },
+      _isOptimistic: true,
+    };
+    const result = mergeMessageWindow([optimisticAtt], []);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]._isOptimistic).toBe(true);
+  });
+
   it("preserves older cache entries not in the server window (loadPrevPage)", () => {
     // Cache holds older rows from a previous `loadPrevPage` request.
     // Server returns a newer page; the older rows must remain at the
@@ -598,6 +654,10 @@ function seedSessionState(
             messageOffset: offset,
             messageLimit: limit,
             messageTotal: total,
+            // loadSequence must be defined so loadSessionMessages' stale
+            // guard (`loadSequence !== seq`) never spuriously fires on a
+            // freshly-seeded session (undefined + 1 === NaN !== NaN).
+            loadSequence: 0,
             lastAccessed: Date.now(),
           },
         },
@@ -710,5 +770,108 @@ describe("thought timing: startTime/endTime", () => {
     expect(thought!.type).toBe("thought");
     expect(thought!.startTime).toBeUndefined();
     expect(thought!.endTime).toBeDefined();
+  });
+});
+
+// ── sendMessage reconciliation: attachment spinner regression ────────────
+//
+// After `sendMessage` inserts the user message + attachment system entries
+// into `messages[]` with `_isOptimistic: true`, `scheduleSendReconciliation`
+// runs a short bounded tail-refresh so the server-persisted copies (same
+// ids, no flag) replace the optimistic ones — clearing the chip spinner.
+// These tests pin that behaviour at the helper level (the helper is what
+// `sendMessage` schedules on a successful publish).
+describe("scheduleSendReconciliation: clears the attachment pending spinner", () => {
+  beforeEach(() => {
+    clearTestState();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    clearTestState();
+  });
+
+  it("replaces optimistic entries with the server echo (spinner cleared)", async () => {
+    // Exactly what sendMessage leaves behind: a user message + an
+    // attached_file system entry, both optimistic (pending).
+    const userMsg: ChatMessage = {
+      id: "msg-user-1",
+      type: "user",
+      content: "check this file",
+      timestamp: 1000,
+      _isOptimistic: true,
+    };
+    const attachment: ChatMessage = {
+      id: "msg-att-1",
+      type: "system",
+      content: "",
+      timestamp: 1001,
+      metadata: { type: "attached_file", abs_path: "C:/ws/lib.rs", name: "lib.rs" },
+      _isOptimistic: true,
+    };
+    seedSessionState([userMsg, attachment], { total: 2 });
+
+    // Backend persists the send with the SAME ids (ADR-046) — no flag.
+    const echoed: ConversationEntry[] = [
+      { id: "msg-user-1", ts: "2026-01-01T00:00:00.001Z", role: "user", content: "check this file" },
+      {
+        id: "msg-att-1",
+        ts: "2026-01-01T00:00:00.002Z",
+        role: "system",
+        content: "",
+        metadata: { type: "attached_file", abs_path: "C:/ws/lib.rs", name: "lib.rs" },
+      },
+    ];
+    const fetchMock = vi.fn((url: string) => {
+      if (url.includes("/messages")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ messages: echoed, offset: 0, limit: 2, total: 2 }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    scheduleSendReconciliation(AGENT, SESSION);
+    await vi.advanceTimersByTimeAsync(300);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages.some((m) => m._isOptimistic)).toBe(false);
+    // Server copy won: metadata intact, pending flag gone.
+    const att = ss.messages.find((m) => m.id === "msg-att-1");
+    expect(att).toBeDefined();
+    expect(att!.metadata?.type).toBe("attached_file");
+    expect(att!._isOptimistic).toBeUndefined();
+  });
+
+  it("keeps the spinner while the server has not echoed the send (bounded retries)", async () => {
+    const userMsg: ChatMessage = {
+      id: "msg-user-1",
+      type: "user",
+      content: "hi",
+      timestamp: 1000,
+      _isOptimistic: true,
+    };
+    seedSessionState([userMsg], { total: 1 });
+
+    // Server still hasn't flushed the entry — every refresh window is empty.
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ messages: [], offset: 0, limit: 0, total: 0 }),
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    scheduleSendReconciliation(AGENT, SESSION);
+    // Let all 3 bounded retries fire (300 + 800 + 1600 ms).
+    await vi.advanceTimersByTimeAsync(4000);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages.some((m) => m._isOptimistic)).toBe(true);
   });
 });

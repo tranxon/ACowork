@@ -5,7 +5,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     middleware::{self, Next},
     routing::get,
@@ -17,6 +17,17 @@ use tokio::sync::RwLock;
 
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
+use acowork_core::operation::{OperationId, OperationRecord, OperationState};
+use acowork_core::StructuredErrorBody;
+
+/// Global body-size cap applied at the root of the Gateway's
+/// merged router. See [`api_router`] for why we override axum's 2 MiB
+/// default — long story short: every extractor (`Json`, `Bytes`,
+/// `String`, `Multipart`, `Form`) shares this cap, so anything
+/// larger than 2 MiB was previously rejected by axum itself with an
+/// opaque error before our handlers could produce a clean JSON
+/// response.
+pub(crate) const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Shared state for HTTP handlers
 pub type SharedHttpState = Arc<RwLock<GatewayState>>;
@@ -30,8 +41,6 @@ pub struct AppState {
     pub auth: Arc<HttpAuth>,
     /// Tracing reload handle for dynamic log level changes
     pub log_reload_handle: Option<crate::LogReloadHandle>,
-    /// Whether CORS is enabled (allows any origin for remote Desktop connections)
-    pub cors_enabled: bool,
     /// ADR-033: MQTT Gateway client for publishing control commands to Runtime.
     pub mqtt_gateway_client: Option<Arc<crate::mqtt::GatewayMqttClient>>,
     /// ADR-033: MQTT global resources publisher trigger.
@@ -41,6 +50,21 @@ pub struct AppState {
     pub runtime_http_registry: Option<crate::http::proxy::SharedRuntimeHttpRegistry>,
     /// ADR-033: Agent registry tracking online/offline status from MQTT.
     pub agent_registry: Option<crate::mqtt::agent_registry::SharedAgentRegistry>,
+    /// ADR-055: Node control-plane client (issues agent lifecycle
+    /// commands to Node Agents and correlates the NodeEvent replies).
+    pub node_control: Option<crate::mqtt::node_control::NodeControlClient>,
+    /// ADR-055: Node registry (LWT-driven online state + retained info
+    /// snapshots). Used by handlers that route to node-local HTTP
+    /// services (e.g. `/api/fs/browse?target={node_id}`, L7-1).
+    pub node_registry: Option<crate::mqtt::SharedNodeRegistry>,
+    /// ADR-059 §7.2: subsystem readiness registry. Mutation handlers
+    /// that depend on a Node's control plane (e.g. `/api/agents/install`)
+    /// check `is_ready("node.{node_id}")` before dispatching.
+    pub bootstrap_registry: Option<crate::bootstrap::SharedSubsystemReadinessRegistry>,
+    /// ADR-059 §6.2: operation store — tracks every accepted mutation
+    /// (install / provider write / identity write) from `Accepted` to
+    /// a terminal state, keyed by `operation_id`.
+    pub operation_store: Option<crate::operation_store::SharedOperationStore>,
 }
 
 impl AppState {
@@ -53,11 +77,14 @@ impl AppState {
             gateway_state,
             auth,
             log_reload_handle: None,
-            cors_enabled: false,
             mqtt_gateway_client: None,
             mqtt_publisher_trigger: None,
             runtime_http_registry: None,
             agent_registry: None,
+            node_control: None,
+            node_registry: None,
+            bootstrap_registry: None,
+            operation_store: None,
         }
     }
 }
@@ -88,58 +115,42 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
 
 /// Build the HTTP router with all routes
 pub fn build_router(state: AppState) -> Router {
-    // When CORS is enabled (remote Desktop ↔ Gateway scenarios),
-    // allow any origin. Otherwise, restrict to localhost.
-    let cors = if state.cors_enabled {
-        tower_http::cors::CorsLayer::permissive().allow_credentials(true)
-    } else {
-        // Local-only CORS allowlist. Covers two deployment shapes:
-        //   1. Vite dev — page served from a Vite dev server on :3000 / :5173
-        //   2. Packaged Tauri v2 desktop app:
-        //      - Windows / Linux: `https://tauri.localhost`
-        //      - macOS:           `tauri://localhost`
-        //
-        //      Tauri v2 uses HTTPS (not HTTP) for the custom protocol on
-        //      Windows/Linux (v2 migration). Without the exact scheme the
-        //      browser's `Origin` header won't match and CORS silently
-        //      blocks every `fetch()` from the MSI-installed app.
-        tower_http::cors::CorsLayer::new()
-            .allow_origin({
-                let mut origins = vec![
-                    "http://localhost:3000".parse().unwrap(),
-                    "http://localhost:5173".parse().unwrap(),
-                    "http://127.0.0.1:3000".parse().unwrap(),
-                    // Tauri v2 production WebView on Windows / Linux
-                    // (confirmed via request logging: the WebView sends
-                    //  Origin: http://tauri.localhost, not https://)
-                    "http://tauri.localhost".parse().unwrap(),
-                    "https://tauri.localhost".parse().unwrap(),
-                ];
-                // macOS Tauri v2 sends `Origin: tauri://localhost`.
-                // The `http` crate (1.4.x) may reject non-HTTP URI
-                // schemes at runtime. Use a soft parse so the gateway
-                // does not panic on startup — macOS users see a CORS
-                // error instead of a gateway crash.
-                if let Ok(v) = "tauri://localhost".parse() {
-                    origins.push(v);
-                }
-                origins
-            })
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::DELETE,
-            ])
-            .allow_headers([
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::AUTHORIZATION,
-            ])
-    };
+    // CORS — permissive for all deployments.
+    //
+    // `CorsLayer::permissive()` alone — deliberately WITHOUT
+    // `allow_credentials(true)`: permissive() answers `*` for origin /
+    // method / header, and the CORS spec forbids combining `*` with
+    // `Access-Control-Allow-Credentials: true`. tower-http asserts at
+    // layer-build time and panics on that combination (this exact bug
+    // crashed the HTTP server once — see ensure_usable_cors_rules).
+    //
+    // Credentials are not needed: the Gateway never sends `Set-Cookie`
+    // and the desktop frontend fetches with the default
+    // `credentials: 'same-origin'`, so no cross-origin credentials are
+    // ever transmitted. The Gateway binds to loopback by default
+    // (`[http].host = 127.0.0.1`), so any origin that can reach it is
+    // already on the user's machine — 0 risk locally. For remote
+    // deployments (`[http].host = 0.0.0.0` or a LAN address), CSRF is
+    // prevented by the bearer-token middleware, not by CORS.
+    //
+    // Dev mode (Vite on :5173, Tauri custom protocol on macOS/Windows) is
+    // always cross-origin against the Gateway (:19876); a hardcoded
+    // allowlist breaks the moment the WebView resolves `localhost` to a
+    // different IP literal than the one hardcoded.
+    let cors = tower_http::cors::CorsLayer::permissive();
 
     Router::new()
         .route("/health", get(health_check))
         .route("/api/status", get(system_status))
+        // ADR-059 Phase 1.3: readiness projection (liveness lives at
+        // `/health`). `GET /api/bootstrap` exposes the same aggregated
+        // snapshot as the retained MQTT topic `acowork/global/bootstrap`.
+        .merge(crate::http::bootstrap_api::bootstrap_routes())
+        // ADR-059 Phase 5.4: vault lock/unlock — the relock path must
+        // demote the vault subsystem (phase drops below READY) and the
+        // unlock path must restore it, reusing the cold-start unlock
+        // sequence (see vault_api.rs).
+        .merge(crate::http::vault_api::vault_routes())
         .merge(crate::http::agents::agent_routes())
         .merge(crate::http::chat::chat_routes())
         .merge(crate::http::provider_api::provider_routes())
@@ -151,167 +162,59 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        .merge(crate::http::nodes_api::nodes_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
         .merge(crate::http::fs_browse::fs_routes())
+        .merge(crate::http::global_resources_api::global_resources_routes())
         .merge(crate::http::proxy::proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
-        .route("/api/lsp/endpoint", get(lsp_endpoint))
         .with_state(state)
+        // Global body-size cap. See `GLOBAL_BODY_LIMIT` for why we
+        // override axum's 2 MiB default at the root of the gateway
+        // router. Per-route service-layer limits (e.g. Runtime's
+        // `MAX_UPLOAD_BYTES` for attachments, gateway's
+        // `MAX_FILE_SIZE` for static file reads) remain the source of
+        // truth for user-facing caps — this layer only ensures those
+        // limits produce a clean error body instead of an opaque
+        // extractor parse failure.
+        .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
         .layer(middleware::from_fn(log_request_origin))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
 }
 
-// ── Health check ──────────────────────────────────────────────────────
+// ── Health check (liveness-only) ─────────────────────────────────────
 
-/// Overall health status
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HealthStatus {
-    /// All checks passed
-    Ok,
-    /// Some checks failed (system still functional)
-    Degraded,
-}
-
-/// Individual check result
+/// `GET /health` — liveness probe (no auth required).
+///
+/// ADR-059 Phase 1.3: this endpoint is STRICTLY liveness — it answers
+/// as soon as the HTTP server is up and says nothing about subsystem
+/// readiness (no checks, no ready flags). Consumers that need to know
+/// whether the Gateway is ready to accept dependent work must use
+/// `GET /api/bootstrap` and wait for `phase = READY`.
 #[derive(Debug, Serialize)]
-pub struct CheckResult {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-/// Health check response with dependency checks
-#[derive(Debug, Serialize)]
-pub struct HealthResponse {
+pub struct LivenessResponse {
     pub status: String,
     pub version: String,
-    pub checks: std::collections::HashMap<String, CheckResult>,
+    /// HTTP port this server listens on — the process identity half of
+    /// the liveness contract.
+    pub port: u16,
 }
 
-/// Minimum disk space for healthy operation (100 MB)
-const MIN_DISK_SPACE_BYTES: u64 = 100 * 1024 * 1024;
-
-/// `GET /health` — health check (no auth required)
-///
-/// Checks critical dependencies and returns an aggregated status:
-/// - `"ok"` — all checks passed
-/// - `"degraded"` — some checks failed (gRPC unavailable, disk low)
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    let mut checks = std::collections::HashMap::new();
-    let mut has_degraded = false;
-
-    // 1. IPC check — ADR-033: MQTT-based, always ok
-    checks.insert(
-        "ipc".to_string(),
-        CheckResult {
-            status: "ok".to_string(),
-            detail: Some("MQTT" .to_string()),
-        },
-    );
-
-    // 2. CronStore database check
-    {
-        let gw = state.gateway_state.read().await;
-        match &gw.cron_store {
-            Some(store) => {
-                match store.health_check() {
-                    Ok(()) => {
-                        checks.insert(
-                            "cron_store".to_string(),
-                            CheckResult {
-                                status: "ok".to_string(),
-                                detail: None,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        has_degraded = true; // Cron is non-critical
-                        checks.insert(
-                            "cron_store".to_string(),
-                            CheckResult {
-                                status: "unhealthy".to_string(),
-                                detail: Some(format!("Database error: {}", e)),
-                            },
-                        );
-                    }
-                }
-            }
-            None => {
-                has_degraded = true;
-                checks.insert(
-                    "cron_store".to_string(),
-                    CheckResult {
-                        status: "degraded".to_string(),
-                        detail: Some("CronStore not initialized".to_string()),
-                    },
-                );
-            }
-        }
-    }
-
-    // 4. Disk space check on data directory
-    {
-        let gw = state.gateway_state.read().await;
-        // Use the data directory for disk space check
-        let data_dir = gw
-            .config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.data_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./data"));
-        match fs2::available_space(&data_dir) {
-            Ok(available) => {
-                if available < MIN_DISK_SPACE_BYTES {
-                    has_degraded = true;
-                    checks.insert(
-                        "disk".to_string(),
-                        CheckResult {
-                            status: "degraded".to_string(),
-                            detail: Some(format!(
-                                "Low disk space: {} MB available",
-                                available / (1024 * 1024)
-                            )),
-                        },
-                    );
-                } else {
-                    checks.insert(
-                        "disk".to_string(),
-                        CheckResult {
-                            status: "ok".to_string(),
-                            detail: Some(format!("{} MB available", available / (1024 * 1024))),
-                        },
-                    );
-                }
-            }
-            Err(e) => {
-                has_degraded = true;
-                checks.insert(
-                    "disk".to_string(),
-                    CheckResult {
-                        status: "degraded".to_string(),
-                        detail: Some(format!("Cannot check disk space: {}", e)),
-                    },
-                );
-            }
-        }
-    }
-
-    let overall = if has_degraded {
-        HealthStatus::Degraded
-    } else {
-        HealthStatus::Ok
-    };
-
-    Json(HealthResponse {
-        status: match overall {
-            HealthStatus::Ok => "ok".to_string(),
-            HealthStatus::Degraded => "degraded".to_string(),
-        },
+/// `GET /health` — liveness check (no auth required)
+pub async fn health_check(State(state): State<AppState>) -> Json<LivenessResponse> {
+    let gw = state.gateway_state.read().await;
+    let port = gw
+        .config
+        .as_ref()
+        .map(|c| c.http.port)
+        .unwrap_or_else(crate::config::default_http_port);
+    Json(LivenessResponse {
+        status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        checks,
+        port,
     })
 }
 
@@ -324,6 +227,21 @@ pub struct SystemStatusResponse {
     pub agents_installed: usize,
     pub agents_running: usize,
     pub uptime_secs: u64,
+    /// ADR-055 D3 §6.3: MQTT broker port for Desktop discovery.
+    /// Lets the Desktop derive the broker port dynamically instead of
+    /// assuming the default 19875 (L3-6 residual gap — ADR-058 W4 fixed
+    /// the host derivation; this closes the port half).
+    pub mqtt_port: u16,
+    /// ADR-055 Phase 5a: MQTT username for the Desktop's broker
+    /// connection, present only when `mqtt.auth_enabled` is on.
+    /// Informational at this tier — CONNECT identity is keyed by
+    /// client_id (`user:{name}:desktop:{id}`), not username.
+    pub mqtt_username: Option<String>,
+    /// ADR-055 Phase 5a: MQTT password for the Desktop's broker
+    /// connection — the HttpAuth bearer token, the same value the
+    /// broker CONNECT check accepts for `user:*:desktop:*` clients.
+    /// Present only when `mqtt.auth_enabled` is on.
+    pub mqtt_password: Option<String>,
 }
 
 /// `GET /api/status` — system status
@@ -339,51 +257,118 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
         gw.running_agents.len()
     };
 
+    // ADR-055 Phase 5a: MQTT credentials for the Desktop
+    // (`connect_mqtt` consumes these when present). Exposed only when
+    // MQTT auth is on; the password is the HttpAuth bearer token — the
+    // same value the broker CONNECT handler accepts for `user:*:desktop:*`.
+    let mqtt_auth_enabled = gw
+        .mqtt_broker_auth
+        .as_ref()
+        .map(|a| a.auth_enabled)
+        .unwrap_or(false);
+    let (mqtt_username, mqtt_password) = if mqtt_auth_enabled {
+        (
+            Some("desktop".to_string()),
+            state.auth.token().map(str::to_string),
+        )
+    } else {
+        (None, None)
+    };
+
     Json(SystemStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents_installed: gw.installed_agents.len(),
         agents_running,
         uptime_secs: 0, // TODO: track actual uptime
+        mqtt_port: gw
+            .config
+            .as_ref()
+            .map(|c| c.mqtt.port)
+            .unwrap_or_else(crate::config::default_mqtt_port),
+        mqtt_username,
+        mqtt_password,
     })
 }
 
-// ── LSP Relay endpoint ────────────────────────────────────────────────
+// ── Error response helpers ────────────────────────────────────────────
 
-/// Response for `GET /api/lsp/endpoint` — returns the LSP Relay address.
+/// ADR-059 §7.3/§7.4 — unified mutation ack returned by every
+/// operation-bearing write API (`POST /api/providers`, `POST
+/// /api/users`, `POST /api/agents/install`, `POST /api/mcp-catalog`).
 ///
-/// Desktop App and Agent Runtime use this endpoint to discover the LSP Relay,
-/// then connect directly to its WebSocket and JSON-RPC API.
-#[derive(Debug, Serialize)]
-pub struct LspEndpointResponse {
-    pub available: bool,
-    pub host: String,
-    pub port: Option<u16>,
+/// The ack only carries protocol-level fields (OCP §5.4.4): the
+/// operation id, its current state, the post-commit resource version,
+/// and the structured terminal error when the operation failed. No
+/// capability names / subsystem generations / process ids.
+#[derive(Debug, Clone, Serialize)]
+pub struct OperationAck {
+    pub operation_id: OperationId,
+    pub state: OperationState,
+    pub resource_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_error: Option<StructuredErrorBody>,
 }
 
-/// `GET /api/lsp/endpoint` — return the LSP Relay's address.
-pub async fn lsp_endpoint(State(state): State<AppState>) -> Json<LspEndpointResponse> {
-    let gw = state.gateway_state.read().await;
-    match &gw.lsp_relay_process {
-        Some(eps) if eps.ready => Json(LspEndpointResponse {
-            available: true,
-            host: "127.0.0.1".to_string(),
-            port: Some(eps.port),
-        }),
-        _ => Json(LspEndpointResponse {
-            available: false,
-            host: "127.0.0.1".to_string(),
-            port: None,
-        }),
+impl OperationAck {
+    /// Build an ack from a tracked record (state + resource version
+    /// + terminal error mirrored from the record).
+    pub fn from_record(record: &OperationRecord) -> Self {
+        Self {
+            operation_id: record.operation_id.clone(),
+            state: record.state,
+            resource_version: record.resource_version,
+            terminal_error: record.terminal_error.clone(),
+        }
     }
 }
 
-// ── Error response helpers ────────────────────────────────────────────
+/// ADR-059 §7.3 — validate the mutation's `expected_version` against
+/// the Gateway's CURRENT bootstrap snapshot version.
+///
+/// The client reads `GET /api/bootstrap` before writing and echoes the
+/// snapshot's `version` back; a mismatch means the client's view is
+/// stale (typically a Gateway restart — the new instance's version
+/// counter restarts at 1, so any old-instance `expected_version` is
+/// rejected instead of being accepted against a fresh process).
+///
+/// Returns `Ok(())` on match, or a structured `409
+/// resource_version_conflict` carrying both version numbers.
+pub async fn check_expected_version(
+    state: &AppState,
+    expected_version: Option<u64>,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(expected) = expected_version else {
+        // No precondition — the mutation proceeds optimistically.
+        return Ok(());
+    };
+    let current = state
+        .gateway_state
+        .read()
+        .await
+        .bootstrap.orchestrator
+        .as_ref()
+        .map(|o| o.snapshot().version)
+        .unwrap_or(0);
+    if current != expected {
+        return Err(ApiError::conflict_structured(
+            StructuredErrorBody::resource_version_conflict(current, expected),
+        ));
+    }
+    Ok(())
+}
 
 /// Standard API error response
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
     pub code: u16,
+    /// ADR-059 §6.3: structured protocol error body for mutation
+    /// APIs. Absent for plain HTTP-layer errors (existing clients are
+    /// unaffected); present for `dependency_not_ready` /
+    /// `resource_version_conflict` etc. so clients can retry without
+    /// parsing human-readable text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured: Option<StructuredErrorBody>,
 }
 
 impl ApiError {
@@ -393,6 +378,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 404,
+                structured: None,
             }),
         )
     }
@@ -403,6 +389,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 400,
+                structured: None,
             }),
         )
     }
@@ -417,6 +404,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 422,
+                structured: None,
             }),
         )
     }
@@ -427,6 +415,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 500,
+                structured: None,
             }),
         )
     }
@@ -437,6 +426,7 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 401,
+                structured: None,
             }),
         )
     }
@@ -447,6 +437,36 @@ impl ApiError {
             Json(Self {
                 error: msg.to_string(),
                 code: 503,
+                structured: None,
+            }),
+        )
+    }
+
+    /// ADR-059 §2.3: conflict — the request depends on a resource that
+    /// is not ready yet (e.g. installing onto a Node whose control
+    /// plane has not announced `NodeReady`). The client should retry
+    /// once `GET /api/bootstrap` reports `phase = READY`.
+    pub fn conflict(msg: &str) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::CONFLICT,
+            Json(Self {
+                error: msg.to_string(),
+                code: 409,
+                structured: None,
+            }),
+        )
+    }
+
+    /// ADR-059 §6.3: structured conflict — HTTP 409 whose body carries
+    /// a protocol-level [`StructuredErrorBody`] (e.g.
+    /// `resource_version_conflict` with both version numbers).
+    pub fn conflict_structured(body: StructuredErrorBody) -> (StatusCode, Json<Self>) {
+        (
+            StatusCode::CONFLICT,
+            Json(Self {
+                error: format!("{:?}", body.code),
+                code: 409,
+                structured: Some(body),
             }),
         )
     }
@@ -478,9 +498,11 @@ mod tests {
     async fn test_health_check() {
         let state = test_app_state();
         let resp = health_check(State(state)).await;
-        assert_eq!(resp.status, "degraded"); // degraded because no session_mgr/stores
+        // Liveness-only contract (ADR-059 Phase 1.3): always "ok", no
+        // checks map, no readiness claims.
+        assert_eq!(resp.status, "ok");
         assert!(!resp.version.is_empty());
-        assert!(!resp.checks.is_empty());
+        assert!(resp.port > 0);
     }
 
     #[tokio::test]
@@ -489,6 +511,58 @@ mod tests {
         let resp = system_status(State(state)).await;
         assert_eq!(resp.agents_installed, 0);
         assert_eq!(resp.agents_running, 0);
+        // MQTT auth off by default → no credentials are exposed.
+        assert_eq!(resp.mqtt_username, None);
+        assert_eq!(resp.mqtt_password, None);
+    }
+
+    #[tokio::test]
+    async fn test_system_status_exposes_mqtt_credentials_when_auth_enabled() {
+        use std::sync::Mutex;
+
+        // MQTT auth enabled + HttpAuth enabled (the broker CONNECT
+        // check for `user:*:desktop:*` compares against the HttpAuth
+        // bearer token, so the Desktop gets it as its MQTT password).
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-http-status-auth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(true)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        let password = resp.mqtt_password.as_deref().expect("password exposed when auth on");
+        assert_eq!(password.len(), 64, "256-bit hex token");
+
+        // MQTT auth enabled but HttpAuth off → no password to hand out.
+        let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
+        {
+            let mut gw = gw_state.write().await;
+            gw.mqtt_broker_auth = Some(crate::mqtt::broker::BrokerAuth {
+                auth_enabled: true,
+                enrollment_tokens: Arc::new(Mutex::new(Default::default())),
+                node_tokens: Arc::new(Mutex::new(Default::default())),
+                publisher_token: "publisher-token".to_string(),
+                http_token: None,
+            });
+        }
+        let state = AppState::new(gw_state, Arc::new(HttpAuth::new(false)));
+        let resp = system_status(State(state)).await;
+        assert_eq!(resp.mqtt_username.as_deref(), Some("desktop"));
+        assert_eq!(resp.mqtt_password, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -497,48 +571,46 @@ mod tests {
         let _router = build_router(state);
     }
 
-    // ── LSP endpoint tests ──────────────────────────────────────────────
+    /// ADR-059 §6: the mutation ack carries exactly the protocol
+    /// fields (`operation_id` / `state` / `resource_version` /
+    /// `terminal_error`) — never internal capability names, subsystem
+    /// generations or process ids (OCP boundary, §5.4.4).
+    #[test]
+    fn operation_ack_carries_only_protocol_fields() {
+        let mut record = OperationRecord::new(3);
+        record.state = OperationState::Committed;
+        record.resource_version = Some(8);
 
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_no_relay() {
-        let state = test_app_state();
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert!(resp.port.is_none());
+        let json = serde_json::to_value(OperationAck::from_record(&record)).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.len(), 3, "terminal_error omitted when None: {obj:?}");
+        assert_eq!(obj["state"], "committed");
+        assert_eq!(obj["resource_version"], 8);
+        assert_eq!(obj["operation_id"], record.operation_id.as_str());
+
+        // A failed ack carries the structured terminal error instead.
+        let mut failed = OperationRecord::new(3);
+        failed.state = OperationState::Failed;
+        failed.terminal_error = Some(StructuredErrorBody::dependency_not_ready(
+            Some("BOOTING".to_string()),
+            None,
+            500,
+        ));
+        let json = serde_json::to_value(OperationAck::from_record(&failed)).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj["state"], "failed");
+        assert_eq!(obj["terminal_error"]["code"], "dependency_not_ready");
+        assert_eq!(obj["terminal_error"]["current_phase"], "BOOTING");
+        // OCP: no internal fields leak into the ack's terminal_error.
+        assert!(obj["terminal_error"].get("operation_id").is_none());
+        assert!(obj["terminal_error"].get("current_version").is_none());
     }
 
-    #[tokio::test]
-    async fn test_lsp_endpoint_available_when_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: true,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(resp.available);
-        assert_eq!(resp.host, "127.0.0.1");
-        assert_eq!(resp.port, Some(19878));
-    }
-
-    #[tokio::test]
-    async fn test_lsp_endpoint_unavailable_when_not_ready() {
-        let state = test_app_state();
-        {
-            let mut gw = state.gateway_state.write().await;
-            gw.lsp_relay_process = Some(crate::lifecycle::lsp_relay::LspRelayProcessState {
-                pid: 12345,
-                port: 19878,
-                ready: false,
-            });
-        }
-        let resp = lsp_endpoint(State(state)).await;
-        assert!(!resp.available);
-        assert!(resp.port.is_none());
+    #[test]
+    fn test_build_router_with_operation_store() {
+        let mut state = test_app_state();
+        state.operation_store = Some(crate::operation_store::OperationStore::new_shared());
+        let _router = build_router(state);
     }
 }
 

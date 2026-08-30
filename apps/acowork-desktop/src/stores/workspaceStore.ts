@@ -4,6 +4,9 @@ import { useSettingsStore } from "./settingsStore";
 import { useChatStore } from "./chatStore";
 import { DEFAULT_GATEWAY_URL, isGatewayLocal } from "../lib/config";
 import { log } from "../lib/logger";
+import { with503Retry } from "../lib/httpRetry";
+import { useFileTreeStore } from "./fileTree/fileTreeStore";
+import { treeKey, isReadyNode } from "./fileTree/types";
 
 /** Single workspace directory entry — matches Gateway API response */
 interface WorkspaceDir {
@@ -20,23 +23,6 @@ interface WorkspaceDir {
   last_selected_at: string | null;
   /** Prompt file to inject into system prompt (e.g. "CLAUDE.md", "AGENTS.md"). */
   prompt_file: string | null;
-}
-
-/** Single file/directory entry from the tree API — matches Gateway TreeResponse.entries */
-export interface TreeEntry {
-  name: string;
-  /** "file" or "directory" */
-  type: string;
-  size?: number;
-  modified?: string;
-  childrenCount?: number;
-}
-
-/** Tree API response — matches Gateway TreeResponse */
-export interface TreeResponse {
-  root: string;
-  path: string;
-  entries: TreeEntry[];
 }
 
 /** Single filename-search result — matches Gateway FindResponse.matches */
@@ -58,9 +44,6 @@ export interface FileFindResponse {
   matches: FileFindMatch[];
 }
 
-/** Cache key: `${agentId}:${workspaceId}:${relPath}` → TreeEntry[] */
-type TreeCacheKey = string;
-
 /**
  * One-shot "reveal this file in the workspace tree" request. Subscribers
  * (FileTree, AppLayout) compare `seq` against their last-consumed value to
@@ -81,12 +64,6 @@ interface WorkspaceState {
   /** Per-session current workspace selection. "__agent_home__" = agent home. */
   sessionWorkspaceMap: Record<string, string>;
   loading: boolean;
-  /** Tree cache: agentId:workspaceId:relativePath → TreeEntry[] */
-  treeCache: Record<TreeCacheKey, TreeEntry[]>;
-  /** Workspace root path per agent+workspace (from tree API response) */
-  treeRoots: Record<string, string>;
-  /** Paths currently being fetched (to avoid duplicate requests) */
-  treeLoadingPaths: Set<string>;
 
   // Fetch workspace list for a given agent
   fetchWorkspaces: (agentId: string) => Promise<void>;
@@ -108,9 +85,6 @@ interface WorkspaceState {
   // Get current workspace ID for a session (defaults to "__agent_home__")
   getSessionWorkspaceId: (sessionId: string) => string;
 
-  // Fetch directory tree for a given agent + workspace + relative path
-  fetchTree: (agentId: string, workspaceId: string, relPath?: string) => Promise<TreeEntry[] | null>;
-
   // Server-side filename search. The Gateway walks the workspace
   // (gitignore-aware) and returns ranked matches in one request.
   findFiles: (
@@ -120,12 +94,6 @@ interface WorkspaceState {
     limit?: number,
     signal?: AbortSignal,
   ) => Promise<FileFindResponse | null>;
-
-  // Get cached tree entries
-  getCachedTree: (agentId: string, workspaceId: string, relPath: string) => TreeEntry[] | undefined;
-
-  // Invalidate tree cache for an agent (e.g. when workspace changes)
-  invalidateTreeCache: (agentId: string) => void;
 
   /**
    * Latest "locate file in tree" request, or null. Each call to
@@ -196,36 +164,61 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
   sessionWorkspaceMap: {},
   loading: false,
-  treeCache: {},
-  treeRoots: {},
-  treeLoadingPaths: new Set<string>(),
   locateRequest: null,
 
-  fetchWorkspaces: async (agentId: string) => {
-    const seq = ++requestSeq;
-    set({ loading: true });
-    try {
-      const baseUrl = getGatewayUrl();
-      const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces`);
-      if (!resp.ok) {
-        log.error("[WorkspaceStore] fetchWorkspaces failed:", resp.status, resp.statusText);
-        set({ loading: false });
-        return;
-      }
-      const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
-      const workspaces = data.workspaces || [];
-      // Discard stale response if a newer request has been issued
-      if (seq !== requestSeq) return;
-      set({
-        workspaces,
-        loading: false,
-      });
-    } catch (e) {
-      log.error("[WorkspaceStore] fetchWorkspaces error:", e);
-      if (seq !== requestSeq) return;
+  /**
+ * Fetch the workspace list for an agent. 503 retries (honouring the
+ * Gateway's `Retry-After` header) are handled by `with503Retry` —
+ * see `lib/httpRetry.ts` for the policy and §4.13 of
+ * docs/zh/protocols/http.md for the wire contract.
+ *
+ * The store owns the retry loop so any UI element invoking
+ * `fetchWorkspaces(agentId)` benefits — see `WorkspaceSelector` and
+ * the empty-state render path.
+ *
+ * Why a background loop rather than a caller-level retry: the caller
+ * is a React effect with a finite mount lifetime; the store outlives
+ * any individual component, so a 503 during the first paint can be
+ * recovered even after the caller has unmounted (e.g. user closes the
+ * selector dropdown while the fetch is in flight).
+ */
+fetchWorkspaces: async (agentId: string) => {
+  const seq = ++requestSeq;
+  set({ loading: true });
+  try {
+    const baseUrl = getGatewayUrl();
+    const resp = await with503Retry(
+      () => fetch(`${baseUrl}/api/agents/${agentId}/workspaces`),
+      { tag: `WorkspaceStore.fetchWorkspaces(${agentId})`, logger: log },
+    );
+    // A newer request may have superseded us while we waited on the
+    // retry loop — drop the result so the winner's data wins.
+    if (seq !== requestSeq) return;
+    if (resp.status === 503) {
+      // All retries exhausted; with503Retry returned the last 503.
+      log.error(`[WorkspaceStore] fetchWorkspaces(${agentId}) still 503 after retries`);
       set({ loading: false });
+      return;
     }
-  },
+    if (!resp.ok) {
+      log.error(`[WorkspaceStore] fetchWorkspaces failed:`, resp.status, resp.statusText);
+      set({ loading: false });
+      return;
+    }
+    const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
+    const workspaces = data.workspaces || [];
+    // Discard stale response if a newer request has been issued
+    if (seq !== requestSeq) return;
+    set({
+      workspaces,
+      loading: false,
+    });
+  } catch (e) {
+    log.error(`[WorkspaceStore] fetchWorkspaces error:`, e);
+    if (seq !== requestSeq) return;
+    set({ loading: false });
+  }
+},
 
   setSessionWorkspace: async (agentId: string, sessionId: string, workspaceId: string) => {
     log.debug("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });
@@ -291,60 +284,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return get().sessionWorkspaceMap[sessionId] ?? "__agent_home__";
   },
 
-  fetchTree: async (agentId: string, workspaceId: string, relPath?: string) => {
-    const path = relPath ?? "";
-    const cacheKey = `${agentId}:${workspaceId}:${path}`;
-
-    // Deduplicate in-flight requests
-    if (get().treeLoadingPaths.has(cacheKey)) return null;
-
-    set((state) => ({
-      treeLoadingPaths: new Set(state.treeLoadingPaths).add(cacheKey),
-    }));
-
-    try {
-      const baseUrl = getGatewayUrl();
-      const params = new URLSearchParams();
-      if (workspaceId && workspaceId !== "__agent_home__") {
-        params.set("workspace_id", workspaceId);
-      }
-      if (path) {
-        params.set("path", path);
-      }
-      const qs = params.toString();
-      const url = `${baseUrl}/api/agents/${agentId}/workspaces/tree${qs ? `?${qs}` : ""}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        log.error("[WorkspaceStore] fetchTree failed:", resp.status, resp.statusText);
-        return null;
-      }
-      const data = (await resp.json()) as TreeResponse;
-      const rootKey = `${agentId}:${workspaceId}`;
-      set((state) => ({
-        treeCache: { ...state.treeCache, [cacheKey]: data.entries },
-        treeRoots: { ...state.treeRoots, [rootKey]: data.root },
-        treeLoadingPaths: (() => {
-          const next = new Set(state.treeLoadingPaths);
-          next.delete(cacheKey);
-          return next;
-        })(),
-      }));
-      return data.entries;
-    } catch (e) {
-      log.error("[WorkspaceStore] fetchTree error:", e);
-      set((state) => {
-        const next = new Set(state.treeLoadingPaths);
-        next.delete(cacheKey);
-        return { treeLoadingPaths: next };
-      });
-      return null;
-    }
-  },
-
-  getCachedTree: (agentId: string, workspaceId: string, relPath: string) => {
-    return get().treeCache[`${agentId}:${workspaceId}:${relPath}`];
-  },
-
   findFiles: async (
     agentId: string,
     workspaceId: string,
@@ -382,24 +321,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       log.error("[WorkspaceStore] findFiles error:", e);
       return null;
     }
-  },
-
-  invalidateTreeCache: (agentId: string) => {
-    set((state) => {
-      const nextCache: Record<string, TreeEntry[]> = {};
-      for (const [key, val] of Object.entries(state.treeCache)) {
-        if (!key.startsWith(`${agentId}:`)) {
-          nextCache[key] = val;
-        }
-      }
-      const nextRoots: Record<string, string> = {};
-      for (const [key, val] of Object.entries(state.treeRoots)) {
-        if (!key.startsWith(`${agentId}:`)) {
-          nextRoots[key] = val;
-        }
-      }
-      return { treeCache: nextCache, treeRoots: nextRoots };
-    });
   },
 
   requestLocate: (req) => {
@@ -583,10 +504,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         log.error("[WorkspaceStore] setPromptFile failed:", resp.status, resp.statusText, body);
         return false;
       }
-      // Update the local workspace state
-      const updated = await resp.json() as WorkspaceDir;
+      // The Runtime echoes { ok, ws_id } — NOT a full WorkspaceDir. Replacing
+      // the local entry with that response corrupted the workspaces list
+      // (id/path/access became undefined). Patch the field we already sent.
+      await resp.json().catch(() => ({}));
       set((state) => ({
-        workspaces: state.workspaces.map((ws) => (ws.id === workspaceId ? updated : ws)),
+        workspaces: state.workspaces.map((ws) =>
+          ws.id === workspaceId ? { ...ws, prompt_file: promptFile } : ws,
+        ),
       }));
       return true;
     } catch (e) {
@@ -611,14 +536,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
 
     const rootKey = `${agentId}:${workspaceId}`;
-    const root = get().treeRoots[rootKey];
-    if (!root) {
+    // Look up the cached workspace root from the fileTreeStore. The
+    // root path is returned by the tree API for the workspace root
+    // (relPath="") and is mirrored into the tree cache node.
+    const rootNode = useFileTreeStore.getState().getNode(treeKey(agentId, workspaceId, ""));
+    if (!isReadyNode(rootNode)) {
       log.warn(
         "[WorkspaceStore] revealItem failed: no cached workspace root for %s — fetch the tree first",
         rootKey,
       );
       return false;
     }
+    const root = rootNode.root;
 
     // TreeResponse.root is documented as forward-slash normalised,
     // even on Windows. `explorer.exe` accepts forward slashes, so we
@@ -646,9 +575,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       workspaces: [],
       sessionWorkspaceMap: {},
       loading: false,
-      treeCache: {},
-      treeRoots: {},
-      treeLoadingPaths: new Set(),
       copiedEntry: null,
       locateRequest: null,
     });

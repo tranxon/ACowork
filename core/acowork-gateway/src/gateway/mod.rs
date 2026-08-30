@@ -4,6 +4,7 @@
 //! gRPC server, lifecycle manager, package manager, and vault.
 
 pub mod state;
+pub mod node_manager;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,10 +15,7 @@ use crate::error::GatewayError;
 use crate::gateway::state::GatewayState;
 use crate::interaction_store::InteractionStore;
 use crate::handlers::server::SharedState;
-use crate::lifecycle::manager::LifecycleManager;
-use crate::package_manager::install;
-use crate::package_manager::uninstall;
-use crate::package_manager::upgrade;
+use crate::gateway::state::SYSTEM_AGENT_ID;
 
 /// Gateway — the top-level orchestrator
 ///
@@ -32,7 +30,6 @@ use crate::package_manager::upgrade;
 pub struct Gateway {
     config: GatewayConfig,
     state: SharedState,
-    lifecycle: LifecycleManager,
 }
 
 impl Gateway {
@@ -48,11 +45,8 @@ impl Gateway {
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         config.validate()?;
 
-        let log_file_size_mb = config.log_file_size_mb;
-        let log_file_count = config.log_file_count;
         let vault_dir = config.vault_dir.clone();
         let data_dir = config.data_dir.clone();
-        let packages_dir = config.packages_dir.clone();
 
         // Ensure data directory exists before opening the database
         std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -62,9 +56,6 @@ impl Gateway {
             ))
         })?;
 
-        // ADR-033: MQTT port for Runtime lifecycle (if MQTT is enabled).
-        let lifecycle_mqtt_port = if config.mqtt.enabled { Some(config.mqtt.port) } else { None };
-
         // Wire up the per-agent interaction store. Keys are agent_id, so the
         // timestamps survive agent stop/restart. Loaded eagerly so the
         // /api/agents sort order is correct from the first request.
@@ -73,28 +64,22 @@ impl Gateway {
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
-        // Restore installed agents from disk *before* wrapping into
-        // SharedState. This is the only time we can operate on the owned
-        // `GatewayState` directly; all later mutations go through the
-        // shared lock. See [`Self::restore_installed_agents_static`].
-        Self::restore_installed_agents_static(
-            &mut state,
-            std::path::Path::new(&packages_dir),
-            std::path::Path::new(&data_dir),
-        );
+        // ADR-059 §5.1: assign a fresh instance id at every Gateway
+        // process start. This is the single value consumers use to
+        // distinguish the current Gateway from a retained snapshot
+        // emitted by a previous one. NOT persisted across restarts:
+        // "重启后换发" is the entire point.
+        state.set_instance_id(uuid::Uuid::new_v4().to_string());
+
+        // ADR-055 §6.5: installed agents are no longer restored by an
+        // on-disk packages scan (L2-9). The local node publishes its
+        // installed-package inventory (retained InstalledAgentInfo) after
+        // it starts; the Gateway aggregates those into `installed_agents`
+        // via the MQTT dispatch path.
 
         let gateway = Self {
             config,
             state: Arc::new(RwLock::new(state)),
-            // idle_timeout removed: the decision is now owned by the Runtime
-            // (see `acowork-runtime::agent::idle_watcher`). The
-            // `Timeouts::idle_timeout_secs` TOML key is retained for backward
-            // compatibility but ignored at the Gateway.
-            lifecycle: LifecycleManager::new(
-                log_file_size_mb,
-                log_file_count,
-                lifecycle_mqtt_port,
-            ),
         };
 
         Ok(gateway)
@@ -115,12 +100,7 @@ impl Gateway {
         }
 
         // Check if System Agent is already installed
-        if self
-            .state
-            .read()
-            .await
-            .is_installed(crate::lifecycle::SYSTEM_AGENT_ID)
-        {
+        if self.state.read().await.is_installed(SYSTEM_AGENT_ID) {
             tracing::debug!("System Agent already installed, skipping bundled install");
             return;
         }
@@ -152,9 +132,10 @@ impl Gateway {
         );
         match self.install_agent_from_dir(&system_agent_src).await {
             Ok(agent_id) => {
+                // The local node re-discovers the copied package from its
+                // packages dir on startup and publishes the retained
+                // installed info; no in-memory refresh is needed here.
                 tracing::info!("Successfully auto-installed bundled agent: {}", agent_id);
-                // Refresh installed agents state
-                self.restore_installed_agents().await;
             }
             Err(e) => {
                 tracing::warn!("Failed to auto-install bundled System Agent: {}", e);
@@ -202,31 +183,21 @@ impl Gateway {
             .map_err(|e| GatewayError::Config(format!("Failed to parse manifest: {}", e)))?;
 
         let agent_id = manifest.agent_id.clone();
-        let version = manifest.version.clone();
 
-        // Copy agent files to packages directory
+        // Copy agent files to packages directory. The local node
+        // re-discovers the copied package from its packages dir on startup
+        // and publishes the retained installed info — the Gateway does NOT
+        // add it to installed_agents directly (ADR-055 §6.5 / L2-9).
         let packages_dir = std::path::Path::new(&self.config.packages_dir);
         let agent_pkg_dir = packages_dir.join(&agent_id);
 
-        // Remove existing directory if it exists
         let _ = std::fs::remove_dir_all(&agent_pkg_dir);
         std::fs::create_dir_all(&agent_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to create package dir: {}", e)))?;
 
-        // Copy all files from src_dir to package dir
         Self::copy_dir_recursive(src_dir, &agent_pkg_dir)
             .map_err(|e| GatewayError::Config(format!("Failed to copy agent files: {}", e)))?;
 
-        // Create AgentInfo and add to state
-        let info = crate::gateway::state::AgentInfo {
-            agent_id: agent_id.clone(),
-            version,
-            name: manifest.name.clone(),
-            install_path: agent_pkg_dir.to_string_lossy().to_string(),
-            manifest,
-        };
-
-        self.state.write().await.add_installed(info);
         Ok(agent_id)
     }
 
@@ -247,115 +218,6 @@ impl Gateway {
             }
         }
         Ok(())
-    }
-
-    /// Scan packages directory and restore installed agents from disk.
-    ///
-    /// On startup, the Gateway needs to rebuild its in-memory `installed_agents`
-    /// map by reading `manifest.toml` from each subdirectory under `packages_dir`.
-    /// Without this, agents installed in a previous session are invisible.
-    ///
-    /// **Async** wrapper that locks `self.state` and delegates to the
-    /// [`Self::restore_installed_agents_static`] helper. The split exists so
-    /// `Gateway::new` can run the same initialisation against an owned
-    /// `GatewayState` (no async runtime exists yet) before wrapping it in a
-    /// `SharedState`. After construction, all restore paths go through this
-    /// async method.
-    async fn restore_installed_agents(&mut self) {
-        let packages_dir = std::path::PathBuf::from(&self.config.packages_dir);
-        let data_dir = std::path::PathBuf::from(&self.config.data_dir);
-        let mut state = self.state.write().await;
-        Self::restore_installed_agents_static(&mut state, &packages_dir, &data_dir);
-    }
-
-    /// Synchronous restore helper that operates on an owned `&mut GatewayState`.
-    ///
-    /// Called from both [`Gateway::new`] (against a freshly constructed
-    /// owned state) and [`Gateway::restore_installed_agents`] (under the
-    /// `SharedState` write lock). Keeping the IO and field-mutation logic
-    /// here avoids duplicating it across two callers and prevents drift
-    /// between the construction-time and post-construction restore paths.
-    fn restore_installed_agents_static(
-        state: &mut GatewayState,
-        packages_dir: &std::path::Path,
-        data_dir: &std::path::Path,
-    ) {
-        if !packages_dir.exists() {
-            return;
-        }
-
-        let Ok(entries) = std::fs::read_dir(packages_dir) else {
-            return;
-        };
-
-        for entry in entries.flatten() {
-            let agent_dir = entry.path();
-            if !agent_dir.is_dir() {
-                continue;
-            }
-
-            let manifest_path = agent_dir.join("manifest.toml");
-            if !manifest_path.exists() {
-                continue;
-            }
-
-            match std::fs::read_to_string(&manifest_path) {
-                Ok(content) => match toml::from_str::<acowork_core::AgentManifest>(&content) {
-                    Ok(manifest) => {
-                        let info = crate::gateway::state::AgentInfo {
-                            agent_id: manifest.agent_id.clone(),
-                            version: manifest.version.clone(),
-                            name: manifest.name.clone(),
-                            install_path: agent_dir.to_string_lossy().to_string(),
-                            manifest,
-                        };
-                        let agent_id = info.agent_id.clone();
-                        state.add_installed(info);
-                        tracing::info!(
-                            "Restored installed agent: {} v{}",
-                            agent_id,
-                            state
-                                .installed_agents
-                                .get(&agent_id)
-                                .map(|i| i.version.as_str())
-                                .unwrap_or("?")
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse manifest at '{}': {}",
-                            manifest_path.display(),
-                            e
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read manifest at '{}': {}",
-                        manifest_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-
-        let count = state.installed_agents.len();
-        if count > 0 {
-            tracing::info!("Restored {} installed agent(s) from disk", count);
-        }
-
-        // ADR-017: Load avatar cache and apply to in-memory manifest so
-        // list_agents returns the correct avatar even for stopped agents.
-        let avatar_cache = crate::http::agent_config::load_avatar_cache(data_dir);
-        if !avatar_cache.is_empty() {
-            for (agent_id, entry) in &avatar_cache {
-                if let Some(info) = state.installed_agents.get_mut(agent_id) {
-                    info.manifest.avatar = entry.avatar.clone();
-                    info.manifest.builtin_avatar = entry.builtin_avatar.clone();
-                }
-            }
-            tracing::info!("Loaded avatar cache with {} entries", avatar_cache.len());
-        }
     }
 
     /// Kill orphaned acowork-runtime processes left over from a previous Gateway run.
@@ -379,31 +241,22 @@ impl Gateway {
             .enabled
             .then(|| format!("--mqtt-port {}", self.config.mqtt.port));
 
-        // Find all acowork-runtime processes
-        let output = match std::process::Command::new("pgrep")
-            .args(["-af", "acowork-runtime"])
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return 0, // pgrep not available, skip cleanup
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Find all acowork-runtime processes (full argv via `ps` — the
+        // `pgrep -af` variant prints bare PIDs on macOS and silently
+        // defeats every marker match).
+        let procs = crate::gateway::node_manager::find_procs_by_cmdline("acowork-runtime");
         let my_pid = std::process::id();
 
         // Filter PIDs whose command line matches our MQTT marker (if any).
-        let pids_to_kill: Vec<(u32, String)> = stdout
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
-                let pid: u32 = parts.first()?.trim().parse().ok()?;
+        let pids_to_kill: Vec<(u32, String)> = procs
+            .into_iter()
+            .filter_map(|(pid, cmdline)| {
                 if pid == my_pid {
                     return None; // don't kill self
                 }
-                let cmdline = parts.get(1).map(|s| s.trim()).unwrap_or("");
                 match &mqtt_marker {
                     Some(marker) if cmdline.contains(marker.as_str()) => {
-                        Some((pid, cmdline.to_string()))
+                        Some((pid, cmdline))
                     }
                     _ => None,
                 }
@@ -454,23 +307,12 @@ impl Gateway {
         // Ensure directories exist
         self.ensure_dirs()?;
 
-        // In dev_mode, auto-unlock vault with a default password
-        // so that API keys can be stored/retrieved without manual unlock.
-        // This is intentionally insecure — dev_mode is for local development only.
-        if self.config.dev_mode {
-            match self.state.write().await.vault.unlock("dev-mode-unlock") {
-                Ok(()) => tracing::info!("Vault auto-unlocked (dev_mode)"),
-                Err(e) => tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e),
-            }
-        }
-
-        // Scan packages directory and restore installed agents from disk.
-        self.restore_installed_agents().await;
+        // ADR-055 §6.5: installed agents are no longer restored by an
+        // on-disk packages scan (L2-9). The local node publishes its
+        // retained installed inventory after it starts; the Gateway
+        // aggregates those via the MQTT dispatch path.
 
         // Clean up orphaned runtime processes from a previous Gateway run.
-        // When Gateway restarts, previously running agents become orphaned
-        // (no gRPC connection). We kill them so the fresh Gateway can manage
-        // agents from a clean state.
         let orphan_count = self.cleanup_orphaned_runtimes();
         if orphan_count > 0 {
             tracing::info!(count = orphan_count, "Cleaned up orphan runtime processes");
@@ -485,17 +327,66 @@ impl Gateway {
         // available for the occasional self-state mutation.
         let shared_state: SharedState = self.state.clone();
 
-        // Auto-start the System Agent if installed.
-        // Pass the shared handle so the reaper can clean up the
-        // running-agent entry if the System Agent ever exits (e.g. a
-        // future idle-sleep policy that covers privileged agents).
-        if let Err(e) = self
-            .lifecycle
-            .auto_start_system_agent(&shared_state)
-            .await
-        {
-            tracing::warn!("Failed to auto-start System Agent: {}", e);
-        }
+        // ADR-059 Phase 1.2: build the bootstrap readiness picture
+        // before anything else can observe Gateway state. Subsystems
+        // register themselves against this registry as they come
+        // online; the orchestrator aggregates their state into a
+        // BootstrapState snapshot that the MQTT publisher (Phase 1.1)
+        // and the HTTP `/api/bootstrap` handler (Phase 1.3) expose.
+        //
+        // Subsystem IDs are intentionally stable strings (not enum
+        // variants) so the registry accepts arbitrary subsystems
+        // without changing its API — see ADR-059 §5.4 OCP boundary.
+        let bootstrap_registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        // Required: vault, mqtt broker + client, gateway publisher.
+        // Optional: embed (a remote fallback exists).
+        // `node.local` is marked ready by the NodeReady topic handler
+        // and `system_agent` by the local node's retained installed
+        // inventory (both in mqtt/dispatch.rs); the handles are local
+        // to this function, hence the `_` prefix.
+        let vault_handle = bootstrap_registry.register(
+            "vault",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let mqtt_handle = bootstrap_registry.register(
+            "mqtt",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let publisher_handle = bootstrap_registry.register(
+            "publisher",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let _local_node_handle = bootstrap_registry.register(
+            "node.local",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let _system_agent_handle = bootstrap_registry.register(
+            "system_agent",
+            crate::bootstrap::ReadinessKind::Required,
+        );
+        let embed_handle = bootstrap_registry.register(
+            "embedding",
+            crate::bootstrap::ReadinessKind::Optional,
+        );
+
+        // Construct the orchestrator with the same instance_id as the
+        // Gateway so the snapshot's `instance_id` field stays consistent
+        // across the Gateway's lifetime.
+        let instance_id = shared_state.read().await.instance_id.clone();
+        let bootstrap_orchestrator = crate::bootstrap::BootstrapOrchestrator::new(
+            instance_id,
+            bootstrap_registry.clone(),
+        );
+        shared_state.write().await.bootstrap.orchestrator =
+            Some(bootstrap_orchestrator.clone());
+        // ADR-059 Phase 5.4: stash the vault handle on the shared
+        // state so the HTTP vault lock/unlock handlers can demote
+        // (mark_booting) and restore (mark_ready) vault readiness
+        // without holding a registry reference.
+        shared_state.write().await.bootstrap.vault_readiness_handle = Some(vault_handle.clone());
+
+        // System Agent auto-start now happens AFTER the local node is up
+        // and its installed inventory has been aggregated (see below).
 
         // Try to spawn the local embedding service (acowork-embed).
         // This is optional — if the binary is not found, embedding will
@@ -525,6 +416,11 @@ impl Gateway {
                     "Reusing existing embedding service"
                 );
                 self.state.write().await.embed_process = Some(embed_state);
+                // ADR-059 Phase 1.2: a healthy pre-existing embed counts
+                // as ready for the bootstrap aggregation (optional
+                // subsystem — it never blocks READY, only demotes to
+                // DEGRADED if it later fails).
+                embed_handle.mark_ready(Some("existing embed process attached".to_string()));
                 embed_supervisor_cfg =
                     Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                         data_dir,
@@ -553,6 +449,12 @@ impl Gateway {
                         );
                         self.state.write().await.embed_process = Some(embed_state);
                         embed_child = Some(child);
+                        // ADR-059 Phase 1.2: the embed process is up
+                        // (process-level readiness; model loading is
+                        // tracked by the supervisor, not the bootstrap
+                        // registry).
+                        embed_handle
+                            .mark_ready(Some("embed process spawned".to_string()));
                         embed_supervisor_cfg =
                             Some(crate::lifecycle::embed_supervisor::EmbedSupervisorConfig {
                                 data_dir,
@@ -568,6 +470,14 @@ impl Gateway {
                             error = %e,
                             "Failed to spawn embedding service (local ONNX embedding unavailable, will use remote fallback)"
                         );
+                        // ADR-059 Phase 1.2: embed is optional and its
+                        // absence is a designed-in state (remote
+                        // fallback). Mark it skipped so the aggregated
+                        // phase can reach READY without treating the
+                        // missing binary as a failure.
+                        embed_handle.mark_skipped(Some(
+                            "local embed unavailable; remote fallback".to_string(),
+                        ));
                     }
                 }
             }
@@ -650,6 +560,13 @@ impl Gateway {
         {
             let mut gw = shared_state.write().await;
             gw.config = Some(self.config.clone());
+            // ADR-055 D3: resolve the advertise host once at startup
+            // (config > auto-detected non-loopback IP > 127.0.0.1) and
+            // cache it on GatewayState so every endpoint constructor
+            // (embed / LSP / AgentHello) reads a single source of truth.
+            let advertise = crate::config::resolve_advertise_host(&self.config);
+            tracing::info!(advertise_host = %advertise, "Resolved advertise host (ADR-055 D3)");
+            gw.advertise_host = advertise;
         }
 
         // Idle-timeout decision is owned by the Runtime now (see
@@ -711,123 +628,48 @@ impl Gateway {
             );
         }
 
-        // Spawn the LSP Relay process (acowork-lsp-relay).
-        // This is optional — if the binary is not found, LSP functionality
-        // is unavailable but the Gateway continues normally.
-        // The relay runs as an independent process with its own HTTP server,
-        // WebSocket LSP relay, and LSP process pool.
-        // See ADR-019 for the full architecture rationale.
-        let mut lsp_relay_child = None;
-        let mut lsp_relay_supervisor_cfg: Option<
-            crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig,
-        > = None;
-        {
-            let data_dir = std::path::PathBuf::from(&self.config.data_dir);
-            let lsp_relay_port = crate::lifecycle::lsp_relay::LSP_RELAY_DEFAULT_PORT;
-            let gateway_health_url = format!("http://127.0.0.1:{}/health", self.config.http.port);
-
-            // Check if an LSP Relay is already running on the expected port
-            let existing_health =
-                crate::lifecycle::lsp_relay::check_lsp_relay_health(lsp_relay_port).await;
-            if let Some(health) = existing_health {
-                let relay_state = crate::lifecycle::lsp_relay::attach_existing_lsp_relay(
-                    lsp_relay_port,
-                    Some(health),
-                );
-                tracing::info!(
-                    port = relay_state.port,
-                    ready = relay_state.ready,
-                    "Reusing existing LSP Relay process"
-                );
-                {
-                    let mut gw = shared_state.write().await;
-                    gw.lsp_relay_process = Some(relay_state);
-                }
-                lsp_relay_supervisor_cfg = Some(
-                    crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
-                        data_dir,
-                        port: lsp_relay_port,
-                        gateway_health_url,
-                    },
-                );
-            } else {
-                match crate::lifecycle::lsp_relay::spawn_lsp_relay(
-                    &data_dir,
-                    lsp_relay_port,
-                    &gateway_health_url,
-                )
-                .await
-                {
-                    Ok((relay_state, child)) => {
-                        tracing::info!(
-                            pid = relay_state.pid,
-                            port = relay_state.port,
-                            "LSP Relay process spawned"
-                        );
-                        {
-                            let mut gw = shared_state.write().await;
-                            gw.lsp_relay_process = Some(relay_state);
-                        }
-                        lsp_relay_child = Some(child);
-                        lsp_relay_supervisor_cfg = Some(
-                            crate::lifecycle::lsp_relay_supervisor::LspRelaySupervisorConfig {
-                                data_dir,
-                                port: lsp_relay_port,
-                                gateway_health_url,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to spawn LSP Relay (LSP functionality will be unavailable)"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Spawn LSP Relay process reaper — clears state when the child exits.
-        if let Some(mut child) = lsp_relay_child {
-            let child_pid = child.id();
-            let state_for_reaper = shared_state.clone();
-            tokio::spawn(async move {
-                let Some(target_pid) = child_pid else {
-                    return;
-                };
-                let exit_status = child.wait().await;
-                tracing::warn!(
-                    pid = target_pid,
-                    exit_status = ?exit_status,
-                    "LSP Relay process exited"
-                );
-                let mut gw = state_for_reaper.write().await;
-                let still_ours = gw
-                    .lsp_relay_process
-                    .as_ref()
-                    .map(|eps| eps.pid == target_pid)
-                    .unwrap_or(false);
-                if still_ours {
-                    gw.lsp_relay_process = None;
-                }
-            });
-        }
-
-        // Start the LSP Relay supervisor (SSE heartbeat monitoring + restart).
-        if let Some(sup_cfg) = lsp_relay_supervisor_cfg.take() {
-            crate::lifecycle::lsp_relay_supervisor::start_lsp_relay_supervisor(
-                sup_cfg,
-                shared_state.clone(),
-            );
-        }
+        // ADR-055 §6.7 (Phase 4): the LSP relay is NO LONGER hosted
+        // here — each Node hosts its own node-local relay and publishes
+        // the retained `acowork/nodes/{node_id}/lsps` topic. The Gateway
+        // subscribes to that topic (node_registry) and serves
+        // `GET /api/agents/{id}/lsp-endpoint` from it.
 
         // ADR-033: Start MQTT broker + Gateway client BEFORE HTTP server
         // so it's available for chat handlers to publish control commands.
         let mqtt_config = self.config.mqtt.clone();
+        // ADR-055 Phase 5a: prepare the credential stores + internal
+        // tokens BEFORE the broker starts so the CONNECT auth handler
+        // installs with the full state. The HTTP token doubles as the
+        // Desktop MQTT password, so it is generated whenever either
+        // channel enables auth (the HTTP handler layer itself stays
+        // permissive in this phase — the token is only consumed by the
+        // broker CONNECT handler and /api/status).
+        let http_auth = Arc::new(crate::http::auth::HttpAuth::new(
+            http_config.auth_enabled || mqtt_config.auth_enabled,
+        ));
+        if let Err(e) = http_auth.write_token_file(&data_dir_path) {
+            tracing::warn!(error = %e, "Failed to write http_token file");
+        }
+        let enrollment_tokens = crate::mqtt::new_shared_enrollment_store(&data_dir_path);
+        let node_tokens = crate::mqtt::new_shared_node_token_store(&data_dir_path);
+        let publisher_token = crate::mqtt::enrollment::generate_token();
+        let broker_auth = crate::mqtt::broker::BrokerAuth {
+            auth_enabled: mqtt_config.auth_enabled,
+            enrollment_tokens: enrollment_tokens.clone(),
+            node_tokens: node_tokens.clone(),
+            publisher_token: publisher_token.clone(),
+            http_token: http_auth.token().map(str::to_string),
+        };
+
         let mut mqtt_broker_handle: Option<crate::mqtt::MqttBrokerHandle> = if mqtt_config.enabled {
             // ADR-033: start_broker runs in a separate OS thread
             // because rumqttd creates its own tokio runtime internally.
-            match crate::mqtt::start_broker(&mqtt_config.host, mqtt_config.port) {
+            let auth = if mqtt_config.auth_enabled {
+                Some(broker_auth.clone())
+            } else {
+                None
+            };
+            match crate::mqtt::start_broker_with_auth(&mqtt_config.host, mqtt_config.port, auth) {
                 Ok(h) => { tracing::info!(addr = %h.listen_addr, "MQTT broker started"); Some(h) }
                 Err(e) => { tracing::error!(%e, "MQTT broker failed"); None }
             }
@@ -843,10 +685,19 @@ impl Gateway {
             }
             tracing::info!("MQTT broker handle registered with debug control");
         }
+        // ADR-055 Phase 5a: share the auth state so a debug-triggered
+        // broker restart keeps the same credential model.
+        {
+            let mut gw = shared_state.write().await;
+            gw.mqtt_broker_auth = Some(broker_auth);
+        }
 
         // ADR-033: Create runtime HTTP registry and agent registry.
         let runtime_http_registry = crate::http::proxy::new_shared_registry();
         let agent_registry = crate::mqtt::agent_registry::new_shared_registry();
+        // ADR-055: node registry — the Gateway's view of Node Agents
+        // (LWT-driven online state + retained info snapshots).
+        let node_registry = crate::mqtt::node_registry::new_shared_registry();
 
         // Track whether the broker actually started — used to gate the
         // Gateway-side publisher without needing to re-check the broker
@@ -857,9 +708,24 @@ impl Gateway {
             guard.is_some()
         };
 
+        // ADR-055 §6.2: node control client — created after the MQTT
+        // client exists; shared between dispatch (NodeEvent correlation)
+        // and the HTTP handlers (command issue) via this slot.
+        let node_control_slot: std::sync::Arc<
+            tokio::sync::Mutex<Option<crate::mqtt::node_control::NodeControlClient>>,
+        > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        // ADR-059 §6.2: the operation store is shared between the HTTP
+        // handlers (open records) and the MQTT dispatch layer (transition
+        // them on NodeEvent correlation). Created here so the MQTT
+        // callback registered below can capture it before the HTTP
+        // server starts.
+        let operation_store_shared = crate::operation_store::OperationStore::new_shared();
+
         let mqtt_gw_client: Option<Arc<crate::mqtt::GatewayMqttClient>> = if mqtt_broker_started {
             let reg_for_dispatch = runtime_http_registry.clone();
             let agent_reg_for_dispatch = agent_registry.clone();
+            let node_reg_for_dispatch = node_registry.clone();
             // Pass the client into dispatch so the status re-publish
             // path (plain text → protobuf DataEnvelope) has a way to
             // call `publish_envelope`. Note: the client is created
@@ -877,28 +743,82 @@ impl Gateway {
                 tokio::sync::Mutex<Option<Arc<crate::mqtt::GatewayMqttClient>>>,
             > = std::sync::Arc::new(tokio::sync::Mutex::new(dispatch_client));
             let slot_for_cb = dispatch_client_slot.clone();
+            let node_control_slot_for_cb = node_control_slot.clone();
             let state_for_dispatch = shared_state.clone();
+            // ADR-055 Phase 5a: enroll dispatch needs the credential
+            // stores + the auth flag. Cloned BEFORE the move-closure so
+            // the originals stay available (local-node token pre-issue
+            // below).
+            let enrollment_tokens_for_dispatch = enrollment_tokens.clone();
+            let node_tokens_for_dispatch = node_tokens.clone();
+            let auth_enabled_for_dispatch = mqtt_config.auth_enabled;
+            // ADR-059 §7.2: NodeReady dispatch drives `node.{id}`
+            // readiness on the bootstrap registry.
+            let bootstrap_registry_for_dispatch = bootstrap_registry.clone();
+            // Clone before the move-closure; the original stays
+            // available for the HTTP server below.
+            let operation_store_for_dispatch = operation_store_shared.clone();
             let callback: crate::mqtt::MqttMessageCallback = Arc::new(move |topic, payload| {
                 // Plain-text dispatch (http_port, status, ready, …)
                 let slot = slot_for_cb.clone();
+                let node_control_slot = node_control_slot_for_cb.clone();
                 let topic = topic.clone();
                 let payload = payload.clone();
                 let reg_for_dispatch = reg_for_dispatch.clone();
                 let agent_reg_for_dispatch = agent_reg_for_dispatch.clone();
+                let node_reg_for_dispatch = node_reg_for_dispatch.clone();
                 let state_for_dispatch = state_for_dispatch.clone();
-                tokio::spawn(async move {
+                let enrollment_tokens_for_cb = enrollment_tokens_for_dispatch.clone();
+                let node_tokens_for_cb = node_tokens_for_dispatch.clone();
+                let bootstrap_registry_for_cb = bootstrap_registry_for_dispatch.clone();
+                let operation_store_for_cb = operation_store_for_dispatch.clone();
+                 tokio::spawn(async move {
                     let client = slot.lock().await.clone();
-                    crate::mqtt::dispatch::handle_message(
-                        &topic, &payload,
-                        &reg_for_dispatch,
-                        &agent_reg_for_dispatch,
-                        client.as_ref(),
-                        &state_for_dispatch,
-                    );
+                    let node_control = node_control_slot.lock().await.clone();
+                    // ADR-059 follow-up: bundle every dispatch dependency
+                    // into one context instead of a growing argument list.
+                    // `client` / `node_control` / the token stores are moved
+                    // in (single-use inside this task); registry Arcs are
+                    // shallow-cloned.
+                    let dispatch_ctx = crate::mqtt::dispatch::DispatchContext {
+                        runtime_http_registry: reg_for_dispatch.clone(),
+                        agent_registry: agent_reg_for_dispatch.clone(),
+                        node_registry: node_reg_for_dispatch.clone(),
+                        mqtt_client: client,
+                        state: state_for_dispatch.clone(),
+                        node_control,
+                        enrollment_tokens: Some(enrollment_tokens_for_cb),
+                        node_tokens: Some(node_tokens_for_cb),
+                        auth_enabled: auth_enabled_for_dispatch,
+                        bootstrap_registry: Some(bootstrap_registry_for_cb),
+                        operation_store: Some(operation_store_for_cb),
+                    };
+                    crate::mqtt::dispatch::handle_message(&topic, &payload, &dispatch_ctx);
                 });
             });
 
-            match crate::mqtt::GatewayMqttClient::new_publisher_with_callback(&mqtt_config.host, mqtt_config.port, callback).await {
+            // ADR-055 Phase 5a: when MQTT auth is enabled the broker
+            // rejects credential-less connections — the publisher
+            // presents the internal startup token (client_id as the
+            // username; the CONNECT check keys on client_id + password).
+            let publisher_result = if mqtt_config.auth_enabled {
+                crate::mqtt::GatewayMqttClient::new_publisher_with_callback_and_credentials(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    callback,
+                    acowork_core::defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+                    &publisher_token,
+                )
+                .await
+            } else {
+                crate::mqtt::GatewayMqttClient::new_publisher_with_callback(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    callback,
+                )
+                .await
+            };
+            match publisher_result {
                 Ok(c) => {
                     tracing::info!("MQTT Gateway client connected (persistent subscriptions handled by ConnAck handler)");
                     let client = Arc::new(c.clone());
@@ -909,6 +829,16 @@ impl Gateway {
                     // AgentRegistry, which is what the Gateway itself
                     // needs).
                     *dispatch_client_slot.lock().await = Some(client.clone());
+                    // Backfill the node control client so dispatch can
+                    // correlate NodeEvent results (ADR-055 §6.2).
+                    *node_control_slot.lock().await = Some(
+                        crate::mqtt::node_control::NodeControlClient::new(client.clone()),
+                    );
+                    // ADR-059 Phase 1.2: the MQTT broker + Gateway client
+                    // are required subsystems; mark them ready as soon as
+                    // the client connected. Phase transitions are
+                    // idempotent, so re-entry is safe.
+                    mqtt_handle.mark_ready(Some("client connected".to_string()));
                     Some(client)
                 }
                 Err(e) => { tracing::warn!(%e, "MQTT Gateway client failed"); None }
@@ -918,6 +848,13 @@ impl Gateway {
         // ADR-033: Start MQTT Global Resources Publisher.
         // Publishes providers, models, MCP catalog, searches, embedding models
         // to acowork/global/* Retained topics so Runtime can discover them.
+        //
+        // The publisher defers its first Retained publish until a "ready"
+        // signal is raised — see `desktop-onboarding-bugfix_154b7ff7.md`
+        // §Fix 1. The handle is stored on `shared_state` so that (a) the
+        // dev_mode vault auto-unlock task and (b) the local-node
+        // supervisor completion can independently call `handle.mark_ready()`
+        // once their respective preconditions are satisfied.
         let mqtt_publisher_trigger: Option<crate::mqtt::MqttPublisherTrigger> = if let Some(ref client) = mqtt_gw_client {
             let publisher = crate::mqtt::MqttGlobalResourcesPublisher::new(
                 client.as_ref().clone(),
@@ -926,21 +863,78 @@ impl Gateway {
             let handle = publisher.start();
             let trigger = handle.create_trigger();
             tracing::info!("MQTT Global Resources Publisher started");
-            // Store the handle to keep the publisher loop alive.
-            // We don't hold it explicitly — it's kept alive by the tokio task.
+            // Store the handle so the ready barrier can be raised by the
+            // vault auto-unlock task and the local-node supervisor.
+            shared_state.write().await.mqtt_publisher_handle = Some(handle);
+            // ADR-059 Phase 1.2: the publisher is a required subsystem.
+            // Marking it ready here is intentionally conservative: the
+            // publisher's own deferred-publish loop only emits the FIRST
+            // retained snapshot once `mark_ready(true)` is raised, so
+            // the bootstrap snapshot can transition to READY before any
+            // provider payload has been released.
+            publisher_handle.mark_ready(Some("publisher started".to_string()));
             Some(trigger)
         } else { None };
+
+        // Keep a clonable trigger for the dev-mode vault auto-unlock
+        // task (below). The handle's `mark_ready()` is invoked via the
+        // shared state (see GatewayState::mqtt_publisher_handle); this
+        // `unlock_republish_trigger` is kept for backward-compatible
+        // explicit republish on first provider-key visibility.
+        let unlock_republish_trigger = mqtt_publisher_trigger.clone();
+
+        // ADR-059 Phase 1.2: start the bootstrap snapshot publisher
+        // once the MQTT client exists. It seeds the retained
+        // `acowork/global/bootstrap` topic immediately (BOOTING) and
+        // republishes on every orchestrator change (READY / DEGRADED /
+        // FAILED / SHUTTING_DOWN). The handle is bound for the rest of
+        // `run()`: dropping it would abort the publish loop.
+        let _bootstrap_publisher_handle: Option<
+            crate::mqtt::BootstrapPublisherHandle,
+        > = if let Some(ref client) = mqtt_gw_client {
+            let handle = crate::mqtt::BootstrapPublisher::start(
+                crate::mqtt::BootstrapPublisherOptions {
+                    client: client.as_ref(),
+                    orchestrator: bootstrap_orchestrator.clone(),
+                },
+            );
+            tracing::info!("MQTT Bootstrap publisher started (acowork/global/bootstrap)");
+            Some(handle)
+        } else {
+            None
+        };
 
         // ADR-033: Start cron scheduler (uses MQTT for Intent delivery).
         // Must be started AFTER MQTT client is available.
         {
             let cron_mqtt = mqtt_gw_client.clone();
             let cron_gw_state = shared_state.clone();
+            let cron_node_control = node_control_slot.lock().await.clone();
             let _cron_handle = tokio::spawn(async move {
-                crate::cron::run_cron_scheduler(cron_scheduler, cron_mqtt, cron_gw_state).await;
+                crate::cron::run_cron_scheduler(
+                    cron_scheduler,
+                    cron_mqtt,
+                    cron_gw_state,
+                    cron_node_control,
+                )
+                .await;
             });
         }
 
+        // Start the HTTP API as early as possible: the desktop app's
+        // readiness probe (10 s) must see :19876 listening before the
+        // node / System Agent startup dance completes. Every dependency
+        // (broker, Gateway client, registries, node-control slot) is
+        // ready at this point.
+        let node_control = node_control_slot.lock().await.clone();
+        let http_node_registry = node_registry.clone();
+        // ADR-059 §2.3: hand the readiness registry to the HTTP layer
+        // so mutation handlers gate on Node control-plane readiness.
+        let http_bootstrap_registry = bootstrap_registry.clone();
+        // ADR-059 §6.2: the operation store is shared between the HTTP
+        // handlers (open records) and the MQTT dispatch layer
+        // (transition them on NodeEvent correlation).
+        let http_operation_store = operation_store_shared.clone();
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http::server::start_http_server(
                 &http_config,
@@ -951,12 +945,226 @@ impl Gateway {
                 mqtt_publisher_trigger,
                 Some(runtime_http_registry),
                 Some(agent_registry),
+                node_control,
+                Some(http_node_registry),
+                Some(http_bootstrap_registry),
+                Some(http_operation_store),
+                http_auth,
             )
             .await
             {
                 tracing::error!("HTTP server failed: {}", e);
             }
         });
+
+        // ADR-055 §6.11: ensure a local Node Agent is running and
+        // supervise it (orphan cleanup → reuse window → spawn + reaper).
+        // Must run AFTER the MQTT broker + Gateway client are up so the
+        // retained `acowork/nodes/local/status` reuse window works.
+        // ADR-055 Phase 5a: when MQTT auth is enabled, pre-issue the
+        // local node's long-lived credential BEFORE the spawn so the
+        // child can connect + enroll on first boot (the record carries
+        // a placeholder machine_uid, claimed at enroll time).
+        let local_node_token = if mqtt_config.auth_enabled {
+            Some(
+                node_tokens
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .upsert(acowork_core::node::LOCAL_NODE_ID, ""),
+            )
+        } else {
+            None
+        };
+        let local_node_supervisor: Option<std::sync::Arc<crate::gateway::node_manager::LocalNodeSupervisor>> =
+            if mqtt_broker_started {
+                match crate::gateway::node_manager::ensure_local_node(
+                    &mqtt_config.host,
+                    mqtt_config.port,
+                    &self.config.packages_dir,
+                    node_registry.clone(),
+                    local_node_token,
+                    self.config.node_proxy_port,
+                    self.config.node_lsp_relay_port,
+                )
+                .await
+                {
+                    Ok(supervisor) => Some(supervisor),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Local node agent supervision failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // ADR-055 §6.11: Fix 1 follow-up — raise the publisher ready barrier
+        // once the local node has enrolled, regardless of whether the
+        // vault auto-unlock path fired. In non-dev_mode this is the only
+        // signal that releases the publisher loop; in dev_mode it covers
+        // the window between vault-unlock and node-enrollment so we
+        // don't emit a snapshot before the node is ready to talk.
+        if local_node_supervisor.is_some() {
+            let registry_for_ready = node_registry.clone();
+            let ready_state = shared_state.clone();
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+                while tokio::time::Instant::now() < deadline {
+                    if registry_for_ready
+                        .read()
+                        .await
+                        .is_online(acowork_core::node::LOCAL_NODE_ID)
+                    {
+                        let st = ready_state.read().await;
+                        if let Some(ref h) = st.mqtt_publisher_handle {
+                            h.mark_ready();
+                        }
+                        tracing::info!(
+                            "Publisher ready barrier raised by local node online event"
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                tracing::warn!(
+                    "Local node did not enroll within 20s; \
+                     publisher ready barrier is left for the vault \
+                     auto-unlock path (or, in non-dev_mode, will not fire \
+                     until the first resource change)"
+                );
+            });
+        }
+
+        // ADR-055 §6.2: auto-start the System Agent once the local node is
+        // up and its retained installed inventory has been aggregated.
+        // Runs in a background task — the inventory wait can take up to
+        // 10 s and must not delay the HTTP API / readiness probe. (When
+        // the broker is disabled the node-control slot is None, so this
+        // is a no-op.)
+        {
+            let sa_slot = node_control_slot.clone();
+            let sa_state = shared_state.clone();
+            tokio::spawn(async move {
+                // Take the node-control handle WITHOUT holding the slot
+                // lock across the wait loop below. A `MutexGuard` born in
+                // an `if let` condition lives until the end of the if
+                // block — holding it here would stall every dispatch
+                // task that locks the same slot for the full 10 s wait
+                // (observed as a ~10 s delay in installed-inventory
+                // aggregation and System Agent auto-start).
+                let nc_opt = sa_slot.lock().await.clone();
+                if let Some(nc) = nc_opt {
+                    // Bounded wait for the node's retained installed info.
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                    while !sa_state.read().await.is_installed(SYSTEM_AGENT_ID)
+                        && tokio::time::Instant::now() < deadline
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if !sa_state.read().await.is_installed(SYSTEM_AGENT_ID) {
+                        tracing::warn!("System Agent not installed — skipping auto-start");
+                    } else {
+                        match nc
+                            .start_agent(acowork_core::node::LOCAL_NODE_ID, SYSTEM_AGENT_ID, false)
+                            .await
+                        {
+                            Ok(event) => {
+                                if let Err(e) =
+                                    crate::mqtt::node_control::NodeControlClient::check_reply(
+                                        SYSTEM_AGENT_ID,
+                                        &event,
+                                    )
+                                {
+                                    tracing::warn!("Failed to auto-start System Agent: {}", e);
+                                } else {
+                                    let mut gw = sa_state.write().await;
+                                    let workspace = gw
+                                        .installed_agents
+                                        .get(SYSTEM_AGENT_ID)
+                                        .map(|i| {
+                                            std::path::PathBuf::from(&i.install_path)
+                                                .join("workspace")
+                                                .to_string_lossy()
+                                                .to_string()
+                                        })
+                                        .unwrap_or_default();
+                                    gw.add_running(crate::gateway::state::RunningAgentInfo {
+                                        agent_id: SYSTEM_AGENT_ID.to_string(),
+                                        pid: 0,
+                                        started_at: chrono::Utc::now(),
+                                        workspace,
+                                        node_id: acowork_core::node::LOCAL_NODE_ID.to_string(),
+                                        connected: false,
+                                        ready: false,
+                                        dev_mode: false,
+                                        debug_state: crate::gateway::state::DebugState::Disabled,
+                                        debug_port: None,
+                                        workspace_config_json: None,
+                                        current_embed_dim: None,
+                                        migration: None,
+                                    });
+                                    tracing::info!("Auto-started System Agent via local node");
+                                }
+                            }
+                            Err(e) => tracing::warn!("Failed to auto-start System Agent: {}", e),
+                        }
+                    }
+                }
+            });
+        }
+
+        // In dev_mode, auto-unlock the vault in the background. Unlock runs
+        // Argon2id (a deliberately slow KDF, ~1 s) under the GatewayState
+        // write lock, so it must start AFTER the HTTP server is up — a
+        // boot-time unlock would serialize all startup writes behind it
+        // (the broker / node / System Agent path does not touch the vault;
+        // only provider-credential HTTP handlers do, and they queue behind
+        // the 1 s unlock at most). This is intentionally insecure —
+        // dev_mode is for local development only.
+        if self.config.dev_mode {
+            let unlock_state = shared_state.clone();
+            let unlock_republish = unlock_republish_trigger;
+            tokio::spawn(async move {
+                let vault_boot_handle =
+                    match unlock_state.read().await.bootstrap.vault_readiness_handle.clone() {
+                        Some(h) => h,
+                        None => {
+                            tracing::error!(
+                                "Vault readiness handle not registered; dev-mode auto-unlock skipped"
+                            );
+                            return;
+                        }
+                    };
+                match crate::vault::unlock_vault_and_mark_ready(
+                    unlock_state,
+                    vault_boot_handle.clone(),
+                    unlock_republish,
+                    "dev-mode-unlock".to_string(),
+                    "vault unlocked (dev_mode)".to_string(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to auto-unlock vault in dev_mode: {}", e);
+                        // A failed unlock means the vault cannot serve
+                        // provider credentials — a required subsystem
+                        // in Failed drops the aggregated phase to
+                        // FAILED.
+                        vault_boot_handle.mark_failed(Some(format!(
+                            "vault auto-unlock failed: {e}"
+                        )));
+                    }
+                }
+            });
+        } else {
+            // No background unlock in non-dev mode. The ready barrier can
+            // still be raised by the local-node ready path below; if
+            // neither fires, the publisher loop will wait forever, which
+            // is correct — surfacing "global resources" without an
+            // enrolled node is exactly the onboarding bug we are fixing.
+            drop(unlock_republish_trigger);
+        }
 
         // S5.9: Wait for either SIGTERM/SIGINT or HTTP server exit.
         // On signal, all server tasks are aborted, triggering
@@ -969,36 +1177,17 @@ impl Gateway {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Received shutdown signal, cleaning up...");
 
-                // Kill all running Runtime (agent) processes before exiting.
-                // This prevents orphaned Runtime processes when Gateway shuts
-                // down normally. Collect PIDs under a short read-lock, then
-                // release the lock before issuing async kill calls.
-                {
-                    let gw = shared_state.read().await;
-                    let runtime_pids: Vec<(String, u32)> = gw
-                        .running_agents
-                        .iter()
-                        .map(|(id, info)| (id.clone(), info.pid))
-                        .collect();
-                    // Drop the read lock before calling async kill operations
-                    drop(gw);
-                    for (agent_id, pid) in &runtime_pids {
-                        tracing::info!(
-                            agent_id = %agent_id,
-                            pid = pid,
-                            "Shutting down Runtime process"
-                        );
-                        if let Err(e) =
-                            crate::lifecycle::process::kill_agent_process(*pid).await
-                        {
-                            tracing::warn!(
-                                agent_id = %agent_id,
-                                error = %e,
-                                "Failed to kill Runtime process"
-                            );
-                        }
-                    }
-                }
+                // ADR-059 Phase 1.2: publish the SHUTTING_DOWN snapshot
+                // BEFORE tearing down subsystems, so consumers observing
+                // the retained `acowork/global/bootstrap` topic see a
+                // graceful transition instead of a silent disappearance.
+                bootstrap_orchestrator.mark_shutting_down();
+
+                // ADR-055 §6.2: Runtime processes are hosted by the node —
+                // the Gateway no longer kills them directly. The local node
+                // is shut down below (its supervisor SIGTERMs the node
+                // process group); any surviving Runtime is reaped by the
+                // next Gateway startup's orphan cleanup.
 
                 // Kill the embedding service process before exiting.
                 // This prevents acowork-embed from becoming an orphan process.
@@ -1014,18 +1203,9 @@ impl Gateway {
                     }
                 }
 
-                // Kill the LSP Relay process before exiting.
-                // This prevents acowork-lsp-relay from becoming an orphan process.
-                {
-                    let gw = shared_state.read().await;
-                    if let Some(ref relay_state) = gw.lsp_relay_process
-                        && relay_state.pid != 0
-                    {
-                        tracing::info!(pid = relay_state.pid, "Shutting down LSP Relay");
-                        if let Err(e) = crate::lifecycle::lsp_relay::kill_lsp_relay(relay_state.pid).await {
-                            tracing::warn!(error = %e, "Failed to kill LSP Relay process");
-                        }
-                    }
+                // ADR-055 §6.11: shut down the local Node Agent.
+                if let Some(supervisor) = &local_node_supervisor {
+                    supervisor.shutdown().await;
                 }
 
                 Ok(())
@@ -1035,76 +1215,6 @@ impl Gateway {
         shutdown_result?;
 
         Ok(())
-    }
-
-    /// Install a .agent package.
-    ///
-    /// Async because `self.state` is a tokio [`SharedState`] — the write
-    /// lock is held only across the `install_package` call (which itself
-    /// does IO, but that's pre-existing behaviour and not made worse by
-    /// this change). The daemon-side HTTP install path uses
-    /// `state.blocking_write()` directly and is unaffected.
-    pub async fn install_package(&mut self, package_path: &str) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        install::install_package(
-            std::path::Path::new(package_path),
-            packages_dir,
-            &mut state,
-            self.config.dev_mode,
-        )?;
-        Ok(format!("Package installed: {}", package_path))
-    }
-
-    /// Uninstall an agent. See [`Self::install_package`] for the async rationale.
-    pub async fn uninstall_package(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        uninstall::uninstall_package(agent_id, packages_dir, &mut state)?;
-        Ok(format!("Agent uninstalled: {}", agent_id))
-    }
-
-    /// Upgrade an agent. See [`Self::install_package`] for the async rationale.
-    pub async fn upgrade_package(
-        &mut self,
-        agent_id: &str,
-        package_path: &str,
-    ) -> Result<String, GatewayError> {
-        let packages_dir = std::path::Path::new(&self.config.packages_dir);
-        let mut state = self.state.write().await;
-        upgrade::upgrade_package(
-            agent_id,
-            std::path::Path::new(package_path),
-            packages_dir,
-            &mut state,
-        )?;
-        Ok(format!("Agent upgraded: {}", agent_id))
-    }
-
-    /// Start an agent.
-    ///
-    /// `self.state` is already a [`SharedState`], so the CLI path is just
-    /// "clone the handle, hand it to `lifecycle`, done" — no
-    /// `take`/`swap` translation layer. The daemon (`run()`) and CLI
-    /// paths now share the same lifecycle signature.
-    ///
-    /// `wire_reaper = false` because in the CLI path the Gateway process
-    /// is about to exit; the reaper would outlive the call and have no
-    /// effect.
-    pub async fn start_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let state = self.state.clone();
-        self.lifecycle
-            .start_agent(agent_id, &state, false, false)
-            .await?;
-        Ok(format!("Agent started: {}", agent_id))
-    }
-
-    /// Stop a running agent. See [`Self::start_agent`] for the
-    /// SharedState rationale.
-    pub async fn stop_agent(&mut self, agent_id: &str) -> Result<String, GatewayError> {
-        let state = self.state.clone();
-        self.lifecycle.stop_agent(agent_id, &state).await?;
-        Ok(format!("Agent stopped: {}", agent_id))
     }
 
     /// List installed agents.
@@ -1129,33 +1239,16 @@ impl Gateway {
 
     /// Package an installed agent into .agent file (CLI command).
     ///
-    /// Async for SharedState symmetry with the rest of the CLI surface.
-    /// `build_package` only reads state, so we hold a `read().await` lock
-    /// for the duration.
+    /// Disabled until Phase 3 — publish build is delegated to the node.
     pub async fn package_agent(
         &self,
-        agent_id: &str,
-        output_dir: Option<&str>,
-        sign: bool,
-        key_dir: Option<&str>,
+        _agent_id: &str,
+        _output_dir: Option<&str>,
+        _sign: bool,
+        _key_dir: Option<&str>,
     ) -> Result<String, GatewayError> {
-        let output = output_dir
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("./build"));
-        let key = key_dir.map(std::path::PathBuf::from);
-
-        let state = self.state.read().await;
-        let result = crate::package_manager::publish::build_package(
-            agent_id,
-            &output,
-            sign,
-            key.as_deref(),
-            &state,
-        )?;
-
-        Ok(format!(
-            "Package built: {} ({} bytes, signed: {})",
-            result.output_path, result.file_size, result.signed
+        Err(GatewayError::Lifecycle(
+            "Publish build is not available in the node topology yet (ADR-055 Phase 3)".to_string(),
         ))
     }
 
@@ -1228,6 +1321,9 @@ mod tests {
             hf_mirrors: Vec::new(),
             data_flow: crate::config::DataFlowConfig::default(),
             mqtt: crate::config::MqttConfig::default(),
+            advertise_host: None,
+            node_proxy_port: None,
+            node_lsp_relay_port: None,
         }
     }
 

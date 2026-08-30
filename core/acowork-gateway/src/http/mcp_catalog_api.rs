@@ -20,8 +20,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::http::routes::{ApiError, AppState};
+use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
+use acowork_core::operation::{OperationRecord, OperationState};
 use acowork_core::protocol::{McpServerConfigDef, McpTransportDef};
 
 /// Build the MCP catalog router
@@ -137,6 +138,12 @@ pub struct McpCatalogResponse {
 pub struct AddCatalogEntryRequest {
     #[serde(flatten)]
     pub config: McpServerConfigDef,
+    /// ADR-059 §7.3: the BootstrapState `version` the client read
+    /// before writing (optimistic concurrency — stale clients are
+    /// rejected with `resource_version_conflict`). Absent → no
+    /// precondition.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 /// Request to update a single MCP server entry
@@ -250,7 +257,10 @@ pub async fn replace_catalog(
 pub async fn add_catalog_entry(
     State(state): State<AppState>,
     Json(body): Json<AddCatalogEntryRequest>,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+    // ADR-059 §7.3: reject stale writers before touching the catalog.
+    crate::http::routes::check_expected_version(&state, body.expected_version).await?;
+
     if body.config.name.is_empty() {
         return Err(ApiError::bad_request("MCP server name must not be empty"));
     }
@@ -266,7 +276,6 @@ pub async fn add_catalog_entry(
         )));
     }
 
-    let name = body.config.name.clone();
     catalog.push(body.config);
     save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
 
@@ -282,12 +291,23 @@ pub async fn add_catalog_entry(
         trigger.trigger();
     }
 
-    Ok((
-        StatusCode::CREATED,
-        Json(MessageResponse {
-            message: format!("MCP server '{}' added to catalog", name),
-        }),
-    ))
+    // ADR-059 §6: open a committed operation record so the client can
+    // correlate this mutation by `operation_id` and observe the
+    // resulting `resource_version`. The side effect (catalog + disk +
+    // mcp_list cache) already completed synchronously.
+    let resource_version = {
+        let gw = state.gateway_state.read().await;
+        gw.resource_cache.mcp_list.version
+    };
+    let mut record = OperationRecord::new(body.expected_version.unwrap_or(0));
+    record.state = OperationState::Committed;
+    record.resource_version = Some(resource_version);
+    let ack = OperationAck::from_record(&record);
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
+    Ok((StatusCode::CREATED, Json(ack)))
 }
 
 /// `PUT /api/mcp-catalog/{name}` — update a single server entry

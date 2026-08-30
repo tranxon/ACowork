@@ -82,7 +82,12 @@ fn error_descriptor_from_rumqttc_025(err: &ConnectionError) -> ErrorDescriptor {
 /// Without re-subscribing, the Gateway silently loses agent http_port,
 /// status, and ready updates after any MQTT reconnect.
 const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
-    ("acowork/agents/+/http_port", QoS::AtLeastOnce),
+    // ADR-055 D3 / Phase 1.4: the Runtime registers its full endpoint
+    // URL ("http://127.0.0.1:{port}") on this topic. NOTE: this was
+    // originally `http_port`; the Phase 1.4 topic rename updated
+    // dispatch.rs but missed this subscription list — fixed together
+    // with the ADR-055 Phase 2a node subscriptions.
+    ("acowork/agents/+/http_endpoint", QoS::AtLeastOnce),
     ("acowork/agents/+/status", QoS::AtLeastOnce),
     // Runtime publishes "true" only after Phase A–C have all populated
     // the HTTP server's late-bind slots; the Gateway pins
@@ -92,6 +97,35 @@ const PERSISTENT_SUBSCRIPTIONS: &[(&str, QoS)] = &[
     // `/sessions/{sid}/messages` HTTP call from the ChatPanel races with
     // Phase B and hits 503.
     ("acowork/agents/+/ready", QoS::AtLeastOnce),
+    // ADR-055 §6.2: node control plane — LWT-driven node online/offline
+    // (plain text) + node metadata (protobuf NodeInfo envelope), both
+    // retained so a fresh Gateway startup recovers the node view from
+    // the broker without polling.
+    ("acowork/nodes/+/status", QoS::AtLeastOnce),
+    ("acowork/nodes/+/info", QoS::AtLeastOnce),
+    // ADR-055 §6.7 (Phase 4): node-local LSP relay endpoint (retained
+    // AvailableLsps envelope, replaces the deprecated
+    // `acowork/global/lsps`). Feeds NodeRegistry::lsp_endpoint, served
+    // via `GET /api/agents/{id}/lsp-endpoint`.
+    ("acowork/nodes/+/lsps", QoS::AtLeastOnce),
+    // ADR-055 §6.2: per-agent NodeEvent results (protobuf envelope,
+    // QoS 1) — the Gateway correlates these against in-flight control
+    // commands by request_id (NodeControlClient).
+    ("acowork/nodes/+/agents/+/events", QoS::AtLeastOnce),
+    // ADR-055 §6.5: per-agent installed-package inventory (Retained).
+    // The Gateway aggregates these into its installed_agents view,
+    // replacing the pre-hard-cut on-disk packages scan (L2-9). An empty
+    // retained payload clears the entry on uninstall.
+    ("acowork/nodes/+/agents/+/installed", QoS::AtLeastOnce),
+    // ADR-055 Phase 5a: node enrollment handshake (QoS 1, non-retained
+    // — the Node publishes once on bootstrap).
+    ("acowork/nodes/+/enroll", QoS::AtLeastOnce),
+    // ADR-059 §7.2: Node control-plane readiness (DataEnvelope<NodeReady>,
+    // QoS 1 retained). The Node publishes after CONNECT + control
+    // subscriptions; the Gateway re-marks `node.{id}` ready in the
+    // SubsystemReadinessRegistry on receipt, and demotes it on an empty
+    // retained payload (Node shutdown / LWT / disconnect clear).
+    ("acowork/nodes/+/ready", QoS::AtLeastOnce),
 ];
 
 /// Callback type for receiving non-global MQTT messages (e.g. agent http_port).
@@ -160,9 +194,16 @@ impl GatewayMqttClient {
         host: &str,
         port: u16,
         client_id: &str,
+        credentials: Option<(&str, &str)>,
         message_callback: Option<MqttMessageCallback>,
     ) -> Result<Self, GatewayMqttClientError> {
         let mut options = MqttOptions::new(client_id, host, port);
+        // ADR-055 Phase 5a: when `mqtt.auth_enabled` is on, the broker
+        // rejects credential-less connections — the publisher presents
+        // the internal startup token.
+        if let Some((username, password)) = credentials {
+            options.set_credentials(username.to_string(), password.to_string());
+        }
         // Match the broker's `connection_timeout_ms` (5 s). This client
         // connects to the Gateway's own embedded broker on localhost,
         // but TCP half-dead connections can still occur after OS
@@ -314,7 +355,26 @@ impl GatewayMqttClient {
         host: &str,
         port: u16,
     ) -> Result<Self, GatewayMqttClientError> {
-        Self::connect(host, port, defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID, None).await
+        Self::connect(host, port, defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID, None, None)
+            .await
+    }
+
+    /// Create a publisher with the internal credentials (ADR-055 Phase
+    /// 5a: required when `mqtt.auth_enabled` is on).
+    pub async fn new_publisher_with_credentials(
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, GatewayMqttClientError> {
+        Self::connect(
+            host,
+            port,
+            defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+            Some((username, password)),
+            None,
+        )
+        .await
     }
 
     /// Create a publisher with a message callback for incoming subscriptions.
@@ -323,7 +383,33 @@ impl GatewayMqttClient {
         port: u16,
         callback: MqttMessageCallback,
     ) -> Result<Self, GatewayMqttClientError> {
-        Self::connect(host, port, defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID, Some(callback)).await
+        Self::connect(
+            host,
+            port,
+            defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+            None,
+            Some(callback),
+        )
+        .await
+    }
+
+    /// Create a publisher with a message callback + internal
+    /// credentials (ADR-055 Phase 5a).
+    pub async fn new_publisher_with_callback_and_credentials(
+        host: &str,
+        port: u16,
+        callback: MqttMessageCallback,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, GatewayMqttClientError> {
+        Self::connect(
+            host,
+            port,
+            defaults::GATEWAY_MQTT_PUBLISHER_CLIENT_ID,
+            Some((username, password)),
+            Some(callback),
+        )
+        .await
     }
 
     /// Create the Gateway publisher client with default localhost settings.

@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use acowork_core::mqtt_proto::{data_envelope, DataEnvelope};
 use chrono::{DateTime, Utc};
+use prost::Message as _;
 use tokio::sync::RwLock;
 
 /// Lifecycle state of an agent, derived from MQTT retained status messages.
@@ -78,14 +80,64 @@ impl AgentRegistry {
         let agent_id = parts[2].to_string();
         let payload_str = match std::str::from_utf8(payload) {
             Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    topic,
-                    agent_id = %parts[2],
-                    error = %e,
-                    "agent status payload is not valid UTF-8 — treating as offline"
-                );
-                ""
+            Err(_) => {
+                // The Gateway re-publishes plain-text status as a protobuf
+                // `DataEnvelope` on this SAME topic (`dispatch.rs`), and our
+                // own `acowork/agents/+/status` subscription receives that
+                // loopback. Decode it instead of treating a binary payload
+                // as offline — that used to flip a freshly-online agent
+                // (e.g. the auto-started System Agent) back to offline
+                // within the same second, hiding `ready=true` from
+                // `/api/agents` and timing the Desktop out (Phase 5a
+                // startup report).
+                match DataEnvelope::decode(payload) {
+                    Ok(envelope) => {
+                        let Some(data_envelope::Payload::AgentStatus(status)) = envelope.payload
+                        else {
+                            tracing::warn!(
+                                topic,
+                                agent_id = %parts[2],
+                                "agent status loopback envelope carries no AgentStatus payload"
+                            );
+                            return;
+                        };
+                        let now = Instant::now();
+                        let sleeping_at = if status.sleeping {
+                            self.agents
+                                .get(&status.agent_id)
+                                .and_then(|s| s.sleeping_at)
+                                .or(Some(Utc::now()))
+                        } else {
+                            None
+                        };
+                        self.agents.insert(
+                            status.agent_id.clone(),
+                            AgentOnlineState {
+                                online: status.online,
+                                sleeping: status.sleeping,
+                                last_updated: now,
+                                sleeping_at,
+                                agent_id: status.agent_id,
+                            },
+                        );
+                        tracing::debug!(
+                            agent_id = %parts[2],
+                            online = status.online,
+                            sleeping = status.sleeping,
+                            "Agent registry updated from MQTT (protobuf loopback)"
+                        );
+                        return;
+                    }
+                    Err(decode_err) => {
+                        tracing::warn!(
+                            topic,
+                            agent_id = %parts[2],
+                            error = %decode_err,
+                            "agent status payload is neither UTF-8 nor a DataEnvelope — ignoring"
+                        );
+                        return;
+                    }
+                }
             }
         };
         let state = payload_str.trim();
@@ -205,6 +257,29 @@ mod tests {
         let mut registry = AgentRegistry::new();
         registry.update_from_mqtt("invalid/topic", b"online");
         assert_eq!(registry.total_tracked(), 0);
+    }
+
+    #[test]
+    fn test_update_from_mqtt_protobuf_loopback_is_online() {
+        // The Gateway re-publishes plain-text status as a protobuf
+        // DataEnvelope on the same topic; our own subscription receives
+        // the loopback. It must be decoded (online=true), NOT treated
+        // as offline (the pre-fix behaviour that hid `ready=true`).
+        use acowork_core::mqtt_proto::{data_envelope, AgentStatus as AgentStatusProto, DataEnvelope};
+        use prost::Message as _;
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::AgentStatus(AgentStatusProto {
+                agent_id: "com.example".to_string(),
+                online: true,
+                sleeping: false,
+            })),
+        };
+        let bytes = envelope.encode_to_vec();
+        let mut registry = AgentRegistry::new();
+        registry.update_from_mqtt("acowork/agents/com.example/status", &bytes);
+        assert!(registry.is_online("com.example"));
+        assert_eq!(registry.online_count(), 1);
     }
 
     #[test]

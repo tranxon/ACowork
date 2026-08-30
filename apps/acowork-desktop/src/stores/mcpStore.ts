@@ -12,6 +12,7 @@ import type {
   McpServerConfigDef,
   McpProbeResponse,
   McpHealthStatus,
+  OperationAck,
 } from "../lib/types";
 
 /**
@@ -130,9 +131,17 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         body: JSON.stringify({ ...config }),
       });
       if (!resp.ok) {
+        // On error Gateway answers with the standard `ApiError` envelope.
         const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
         throw new Error(err.error || `HTTP ${resp.status}`);
       }
+      // On success Gateway answers with `OperationAck` (ADR-059 §7.3).
+      // We don't surface the ack — the catalog is reloaded below and
+      // the per-agent tool wiring is re-applied via the refresh event,
+      // both of which pick up the just-added server. The typed
+      // `OperationAck` parse is here purely so the wire-shape contract
+      // is enforced at compile time (the value is discarded).
+      await resp.json().catch(() => undefined) as OperationAck | undefined;
       // Reload catalog after adding
       await get().loadCatalog();
       emitAgentConfigRefresh();

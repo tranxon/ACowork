@@ -1,0 +1,12 @@
+//! acowork-node CLI entry point.
+
+use acowork_node::cli::Cli;
+use clap::Parser;
+
+fn main() {
+    let cli = Cli::parse();
+    if let Err(e) = cli.run() {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}

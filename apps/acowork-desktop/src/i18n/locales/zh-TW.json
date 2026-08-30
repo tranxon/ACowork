@@ -85,6 +85,13 @@
       "installSelectedInstalling": "正在安裝 {{name}}...",
       "fromFileTitle": "從 .agent 檔案安裝",
       "fromFileSubtitle": "從你的電腦上選擇一個 .agent 安裝包",
+      "preparing": "正在準備系統服務：{{detail}}...",
+      "waitingReady": "正在等待系統服務就緒...",
+      "opPending": "等待中",
+      "opSubmitted": "已提交 (op {{opId}})",
+      "opCompleted": "已完成",
+      "opFailed": "失敗",
+      "installProgress": "安裝進度 {{done}}/{{total}}",
       "complete": "完成 →",
       "back": "返回"
     }
@@ -159,6 +166,7 @@
     "startAgent": "啟動 Agent",
     "startingAgent": "正在啟動 {{name}}…",
     "llmNotConfigured": "未設定 LLM 服務商。請在 Harness → 模型服務商 中新增 API 金鑰。",
+    "llmSyncing": "正在同步 LLM 設定…",
     "thinking": "正在思考...",
     "replying": "正在回覆...",
     "working": "正在處理...",
@@ -226,6 +234,8 @@
     "contextUninstall": "解除安裝",
     "createAgent": "建立 Agent",
     "installAgent": "安裝 Agent",
+    "selectNode": "選擇安裝節點",
+    "back": "返回",
     "filterAgentPackage": "Agent 套件",
     "agentStarted": "Agent 已啟動",
     "agentStartedDebug": "Agent 已以偵錯模式啟動",
@@ -266,6 +276,7 @@
     "tabGeneral": "一般",
     "tabAppearance": "外觀",
     "tabGateway": "閘道",
+    "tabNodes": "節點",
     "profileTitle": "個人資料",
     "displayName": "顯示名稱",
     "displayNamePlaceholder": "輸入您的顯示名稱",
@@ -349,7 +360,19 @@
     "resetOnboarding": "重設引導流程",
     "resetOnboardingDesc": "重設引導精靈以重新設定閘道連線和 API 金鑰。閘道模型快取將從磁碟重新載入（無需重新下載）。",
     "resetOnboardingBtn": "重設引導流程",
-    "resetOnboardingConfirm": "確定要重設引導流程嗎？這將會清除所有引導進度，需要重新設定閘道連線和 API 金鑰。頁面將自動重新整理以重新開始。"
+    "resetOnboardingConfirm": "確定要重設引導流程嗎？這將會清除所有引導進度，需要重新設定閘道連線和 API 金鑰。頁面將自動重新整理以重新開始。",
+    "nodesTitle": "節點管理",
+    "nodesEmpty": "未發現任何節點。啟動本機閘道或接入遠端節點後在此查看。",
+    "nodesRefresh": "重新整理",
+    "nodesOnline": "線上",
+    "nodesOffline": "離線",
+    "nodesColNodeId": "節點",
+    "nodesColStatus": "狀態",
+    "nodesColOs": "系統",
+    "nodesColArch": "架構",
+    "nodesColVersion": "版本",
+    "nodesColHostname": "主機名稱",
+    "nodesColAgents": "Agent 數"
   },
   "agentSetup": {
     "noApiKey": "No API key configured. Add in Harness → Search.",
@@ -865,8 +888,8 @@
       "done": "已記憶"
     },
     "http_request": {
-      "running": "請求中",
-      "done": "已請求"
+      "running": "請求http中",
+      "done": "已請求http"
     },
     "web_fetch": {
       "running": "取得網頁",
@@ -897,8 +920,8 @@
       "done": "已匹配檔案"
     },
     "content_search": {
-      "running": "搜尋內容",
-      "done": "已搜尋內容"
+      "running": "搜尋檔案內容",
+      "done": "已搜尋檔案內容"
     },
     "intent_send": {
       "running": "發送意圖",
@@ -929,16 +952,16 @@
       "done": "已搜尋程式碼"
     },
     "bash": {
-      "running": "在 Git Bash 中執行",
-      "done": "已在 Git Bash 中執行"
+      "running": "在GitBash中執行",
+      "done": "已在GitBash中執行"
     },
     "powershell": {
-      "running": "在 PowerShell 中執行",
-      "done": "已在 PowerShell 中執行"
+      "running": "在PowerShell中執行",
+      "done": "已在PowerShell中執行"
     },
     "shell": {
-      "running": "執行命令",
-      "done": "已執行命令"
+      "running": "執行Shell命令",
+      "done": "已執行Shell命令"
     }
   },
   "askQuestionCard": {
@@ -1013,7 +1036,9 @@
     "labelLastAccessed": "最後存取",
     "statusStable": "穩定",
     "statusDecaying": "衰退中",
-    "statusCritical": "關鍵"
+    "statusCritical": "關鍵",
+    "contextMenuCopyNodeJson": "複製節點 (JSON)",
+    "contextMenuCopyFormatted": "複製格式化文字"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "關閉",

@@ -884,11 +884,43 @@ body {
   color: hsl(240 5% 75%);
 }
 
-/* Tables — clear borders, rounded corners, cell dividers */
+/* Tables — clear borders, rounded corners, cell dividers.
+   Layout strategy:
+     - Outer frame (1px border + border-radius) lives on the
+       <table> itself, not on the scroll wrapper. Reasoning:
+       1. The .prose-table-scroll wrapper is a pure scroll
+          viewport (overflow-x: auto); putting visual chrome on
+          it makes the chrome stay fixed at the viewport while
+          the cell grid scrolls underneath — which looks broken
+          when the table is wider than the container.
+       2. <table>'s own `border + border-radius` together act as
+          the frame.
+     - `border-collapse: separate` + `border-spacing: 0` is
+       required for `border-radius` to actually render on a
+       <table>. In `collapse` mode every current engine ignores
+       the radius (well-known browser behavior). The existing
+       per-cell border scheme (right + bottom on every cell, last
+       col / last row drops its edge) reproduces the same 1px
+       internal grid in `separate` mode — adjacent cells no longer
+       share borders, but each only paints one side, so there's
+       no doubling.
+     - `overflow: hidden` clips cell backgrounds (e.g. `.prose th`
+       title shade) to the rounded shape. Cells themselves have
+       square corners in `separate` mode; without the clip, a th's
+       colored bg would peek out past the table's rounded border
+       at the four corners.
+     - `border-radius: var(--radius-md)` matches `.prose pre` so
+       code blocks and tables share the same visual language.
+     - Last row / last column drop their bottom / right border
+       so the table's outer border is the single visible edge
+       at the bottom and right. */
 .prose table {
   border-collapse: separate;
   border-spacing: 0;
   min-width: 100%;
+  border: 1px solid var(--tw-prose-td-borders);
+  border-radius: var(--radius-md);
+  overflow: hidden;
 }
 
 .prose th,
@@ -912,17 +944,15 @@ body {
   border-bottom: none;
 }
 
-/* Horizontal-scroll wrapper for markdown tables. Owns the outer
-   border, rounded corners and overflow so the inner <table> can
-   grow beyond the container without clipping or breaking titles.
-   The .prose table itself only sets min-width: 100% (see above);
-   everything visual (border / radius / scroll) lives here. */
+/* Horizontal-scroll wrapper for markdown tables. Pure scroll
+   viewport — no border / radius of its own. The <table> inside
+   owns the outer frame (see .prose table rule above) so the
+   frame stays aligned with the cell grid when the table is
+   horizontally scrolled within the wrapper. */
 .prose-table-scroll {
   margin-top: 0.6em;
   margin-bottom: 0.6em;
   overflow-x: auto;
-  border-radius: 0.375rem;
-  border: 1px solid var(--tw-prose-td-borders);
 }
 
 /* Table body — subtle zebra striping for readability.
@@ -931,14 +961,30 @@ body {
    Title/body colors come from @theme's --color-chat-* tokens,
    which auto-flip in .dark — no per-rule override needed.
    white-space:nowrap keeps header titles on a single line so a
-   sibling column with a long token can't squeeze them mid-word. */
+   sibling column with a long token can't squeeze them mid-word.
+   border-color (set on the th shorthand) recolours the right &
+   bottom borders (the only ones with width + style from the
+   .prose th, td rule above) from td-borders to th-borders, so
+   the header divider reads slightly stronger than inter-body
+   dividers. */
 .prose th {
   background-color: var(--color-chat-title);
   border-color: var(--tw-prose-th-borders);
-  border-bottom: 1px solid var(--tw-prose-th-borders);
   font-weight: 600;
   color: hsl(240 5% 12%);
   white-space: nowrap;
+}
+
+/* Empty <th> (e.g. `|     |     |` in markdown) collapses to
+   padding+border only because the line-box has no content to size
+   against — combined with `white-space: nowrap` above, the title row
+   renders at ~half the height of a populated one. Inject a zero-width
+   space so the line box always exists, matching populated <th>s.
+   The character is invisible, unselectable in practice (zero width),
+   and ignored by screen readers, so the visual fix is free of side
+   effects on copy / a11y. */
+.prose th:empty::before {
+  content: "\200b";
 }
 
 .dark .prose th {

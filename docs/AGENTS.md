@@ -1,90 +1,63 @@
 # AGENTS.md — docs/
 
-Architecture design documents for ACowork.AI platform (v3.x).
+Public architecture & design docs for ACowork.AI (v3.x).
+
+> **本地归档（不进 git）**：[`docs/_internal/`](./_internal/README.md) — 实施计划 / 评审报告 / 上游项目调研 / 内部诊断报告。由 `.gitignore` 拦截，仅供团队本地查阅。
 
 ## OVERVIEW
 
-Design documents organized by language (zh/en). All original docs are in **Chinese (zh)**; English (en) translations to be added incrementally.
+All public docs are organized by **topic** (architecture, design, module spec, ADR, PRD, protocol, MCP research). Each topic has a `{zh,en}/` subdirectory — Chinese is the source language; English is added incrementally as translations become available.
 
 ## STRUCTURE
 
 ```
 docs/
-├── AGENTS.md                # This file
-├── zh/                      # 中文设计文档（源语言）
-│   ├── prd.md               # 平台需求定义
-│   ├── prd-ui-ux.md         # Desktop App UI/UX 需求
-│   ├── RAG-protocol-guide.md# 标准查询协议指南
-│   ├── session-diagnostic.md# Session 管理诊断报告
-│   └── protocols/           # API 协议参考文档（面向集成方）
-│       ├── README.md        # 协议总览 / 纲要
-│       ├── http.md          # Gateway HTTP REST API
-│       └── mqtt.md          # 实时事件总线（替代已下架的 gRPC + WebSocket）
-├── en/                      # English docs
-│   └── mcp-server-research.md
-├── design/
-│   ├── zh/                  # 架构设计文档（16篇）
-│   │   ├── 01-overview.md
-│   │   ├── 02-agent-package.md
-│   │   ├── 03-agent-runtime.md
-│   │   ├── 04-gateway.md
-│   │   ├── 05-memory.md
-│   │   ├── 06-communication.md
-│   │   ├── 08-security.md
-│   │   ├── 10-debug-protocol.md
-│   │   ├── 11-module-design.md   # 模块设计索引
-│   │   ├── 12-tool-system.md
-│   │   ├── 13-skill-system.md
-│   │   ├── 14-desktop-app.md
-│   │   ├── 15-conversation-persistence.md
-│   │   ├── 16-ipc-grpc-migration.md
-│   │   ├── 17-web-search-provider.md
-│   │   └── 18-user-identity-simplified.md
-│   └── en/                  # (待翻译)
-├── module-design/
-│   ├── zh/                  # Rust crate 规格文档（8篇）
-│   │   ├── 00-overview.md
-│   │   ├── 01-core.md
-│   │   ├── 02-runtime.md
-│   │   ├── 03-gateway.md
-│   │   ├── 04-grafeo.md
-│   │   ├── 05-vault-sign.md
-│   │   ├── 06-architecture.md
-│   │   └── 06-ask-user-question-tool.md
-│   └── en/
-│       └── AGENTS.md
-├── plan/
-│   ├── zh/                  # 实施计划（7篇）
-│   └── en/                  # (待翻译)
-├── adr/
-│   ├── zh/                  # 架构决策记录（3篇中文）
-│   └── en/                  # 架构决策记录（1篇英文）
-├── review/
-│   ├── zh/                  # 设计/代码评审报告（35篇）
-│   └── en/                  # (待翻译)
-└── reference/
-    ├── zh/                  # 参考调研文档（6篇）
-    └── en/
-        └── AGENTS.md
+├── AGENTS.md                # This file (index)
+├── design/{zh,en}/          # 架构设计（zh: 19 篇；en: 待翻译占位）
+├── module-design/{zh,en}/   # Rust crate 规格（zh: 8 篇；en: AGENTS.md 占位）
+├── adr/{zh,en}/             # 架构决策记录（zh: 49；en: 1）
+├── prd/{zh,en}/             # 平台 PRD + Desktop UI/UX（zh: 2；en: 占位）
+├── protocols/{zh,en}/       # API 协议参考（zh: HTTP / MQTT / RAG 集成；en: 占位）
+└── mcp-server-research/{zh,en}/   # MCP Server 集成调研（en: 1；zh: 占位）
 ```
+
+每个主题目录均带 `zh/` + `en/` 子目录，使目录结构对称、新主题可零成本复制。
 
 ## WHERE TO LOOK
 
-| Need                   | File                              |
-| ---------------------- | --------------------------------- |
-| Platform overview      | `design/zh/01-overview.md`        |
-| .agent package format  | `design/zh/02-agent-package.md`   |
-| Rust crate structure   | `module-design/zh/00-overview.md` |
-| Security/isolation     | `design/zh/08-security.md`        |
-| Gateway components     | `module-design/zh/03-gateway.md`  |
-| Memory (Grafeo)        | `module-design/zh/04-grafeo.md`   |
-| Implementation roadmap | `plan/zh/plan-overview.md`        |
-| API 协议参考（HTTP / gRPC / WebSocket） | `zh/protocols/README.md` |
+| Need | File |
+| --- | --- |
+| 平台总览 | [`design/zh/01-overview.md`](./design/zh/01-overview.md) |
+| .agent 包格式 | [`design/zh/02-agent-package.md`](./design/zh/02-agent-package.md) |
+| Rust crate 结构 | [`module-design/zh/00-overview.md`](./module-design/zh/00-overview.md) |
+| Security / 隔离 | [`design/zh/08-security.md`](./design/zh/08-security.md) |
+| Gateway 组件 | [`module-design/zh/03-gateway.md`](./module-design/zh/03-gateway.md) |
+| 记忆（Grafeo） | [`module-design/zh/04-grafeo.md`](./module-design/zh/04-grafeo.md) |
+| 平台 PRD | [`prd/zh/prd.md`](./prd/zh/prd.md) |
+| Desktop UI/UX | [`prd/zh/prd-ui-ux.md`](./prd/zh/prd-ui-ux.md) |
+| HTTP API 协议 | [`protocols/zh/http.md`](./protocols/zh/http.md) |
+| MQTT 事件总线 | [`protocols/zh/mqtt.md`](./protocols/zh/mqtt.md) |
+| RAG 集成协议 | [`protocols/zh/RAG-protocol-guide.md`](./protocols/zh/RAG-protocol-guide.md) |
+| MCP Server 集成 | [`mcp-server-research/en/mcp-server-research.md`](./mcp-server-research/en/mcp-server-research.md) |
+| 架构决策记录 | [`adr/zh/`](./adr/zh/) |
 
 ## CONVENTIONS (THIS DIR)
 
-- **Primary language**: All design docs written in **Chinese (中文)**
-- **English docs**: Created for reference materials and ADRs originally in English; new English translations follow at project completion
-- **File naming**: Same filename across zh/en for correspondence
+- **Primary language**: 所有设计文档以 **中文** 为源语言；English 翻译随项目完成度增量补充
+- **Topic + language layout**: 每个主题目录（`design/`、`module-design/`、`adr/`、`prd/`、`protocols/`、`mcp-server-research/`）下统一带 `zh/` 与 `en/` 子目录；尚未翻译的空子目录放 `.gitkeep` 占位
+- **File naming**: 同名文件跨 zh/en 对应；ADR 命名 `ADR-NNN-slug.md`
 - Version v3.x only — no v2.x terminology
-- Rust workspace: 7 crates under `core/acowork-*`
+- Rust workspace: 12 crates under `core/acowork-*`，以 [`core/Cargo.toml`](../core/Cargo.toml) `[workspace] members` 为准
+- `docs/_internal/` 由 `.gitignore` 拦截，不进入开源仓库
+
+## ADDING A NEW TOPIC
+
+新建一个主题时，按以下结构创建（保持与现有主题一致）：
+
+```bash
+mkdir -p docs/<topic>/zh docs/<topic>/en
+touch docs/<topic>/en/.gitkeep      # 占位到翻译完成
+# 写 docs/<topic>/zh/<file>.md
+```
+
+如果主题某语言暂无内容，**保留空目录 + .gitkeep**，不要删除 — 让结构始终对称。

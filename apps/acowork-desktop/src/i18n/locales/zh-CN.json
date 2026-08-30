@@ -85,6 +85,13 @@
       "installSelectedInstalling": "正在安装 {{name}}...",
       "fromFileTitle": "从 .agent 文件安装",
       "fromFileSubtitle": "从你的电脑上选择一个 .agent 安装包",
+      "preparing": "正在准备系统服务：{{detail}}...",
+      "waitingReady": "正在等待系统服务就绪...",
+      "opPending": "等待中",
+      "opSubmitted": "已提交 (op {{opId}})",
+      "opCompleted": "已完成",
+      "opFailed": "失败",
+      "installProgress": "安装进度 {{done}}/{{total}}",
       "complete": "完成 →",
       "back": "返回"
     }
@@ -160,6 +167,7 @@
     "startAgent": "启动 Agent",
     "startingAgent": "正在启动 {{name}}…",
     "llmNotConfigured": "未配置 LLM 服务商。请在 Harness → 模型服务商 中添加 API 密钥。",
+    "llmSyncing": "正在同步 LLM 配置…",
     "thinking": "正在思考...",
     "replying": "正在回复...",
     "working": "正在处理...",
@@ -228,6 +236,8 @@
     "contextUninstall": "卸载",
     "createAgent": "创建 Agent",
     "installAgent": "安装 Agent",
+    "selectNode": "选择安装节点",
+    "back": "返回",
     "filterAgentPackage": "Agent 包",
     "agentStarted": "Agent 已启动",
     "agentStartedDebug": "Agent 已以调试模式启动",
@@ -268,6 +278,7 @@
     "tabGeneral": "通用",
     "tabAppearance": "外观",
     "tabGateway": "网关",
+    "tabNodes": "节点",
     "profileTitle": "个人资料",
     "displayName": "显示名称",
     "displayNamePlaceholder": "输入您的显示名称",
@@ -351,7 +362,19 @@
     "resetOnboarding": "重置引导流程",
     "resetOnboardingDesc": "重置引导向导以重新配置 Gateway 连接和 API 密钥。Gateway 模型缓存将从磁盘重新加载（无需重新下载）。",
     "resetOnboardingBtn": "重置引导流程",
-    "resetOnboardingConfirm": "确定要重置引导流程吗？这将会清除所有引导进度，需要重新配置 Gateway 连接和 API Key。页面将自动刷新以重新开始。"
+    "resetOnboardingConfirm": "确定要重置引导流程吗？这将会清除所有引导进度，需要重新配置 Gateway 连接和 API Key。页面将自动刷新以重新开始。",
+    "nodesTitle": "节点管理",
+    "nodesEmpty": "未发现任何节点。启动本地网关或接入远程节点后在此查看。",
+    "nodesRefresh": "刷新",
+    "nodesOnline": "在线",
+    "nodesOffline": "离线",
+    "nodesColNodeId": "节点",
+    "nodesColStatus": "状态",
+    "nodesColOs": "系统",
+    "nodesColArch": "架构",
+    "nodesColVersion": "版本",
+    "nodesColHostname": "主机名",
+    "nodesColAgents": "Agent 数"
   },
   "agentSetup": {
     "noApiKey": "未配置 API 密钥。请在 Harness → 搜索中添加。",
@@ -612,7 +635,8 @@
     "stopped": "已停止",
     "agent": "Agent",
     "version": "版本",
-    "sessions": "会话数",
+    "activeSessions": "活跃会话数",
+    "totalSessions": "历史会话数",
     "noAgentSelected": "未选择 Agent",
     "buttonStep": "单步 (F10)",
     "buttonStop": "停止",
@@ -882,8 +906,8 @@
       "done": "已记忆"
     },
     "http_request": {
-      "running": "正在请求",
-      "done": "已请求"
+      "running": "正在请求http",
+      "done": "已请求http"
     },
     "web_fetch": {
       "running": "获取网页",
@@ -891,31 +915,31 @@
     },
     "web_search": {
       "running": "搜索网页",
-      "done": "已搜索"
+      "done": "已搜索网页"
     },
     "file_read": {
       "running": "读取文件",
-      "done": "已读取"
+      "done": "已读取文件"
     },
     "file_write": {
       "running": "写入文件",
-      "done": "已写入"
+      "done": "已写入文件"
     },
     "file_edit": {
       "running": "修改文件",
-      "done": "已修改"
+      "done": "已修改文件"
     },
     "doc_reader": {
       "running": "读取文档",
-      "done": "已读取"
+      "done": "已读取文档"
     },
     "glob_search": {
       "running": "匹配文件",
-      "done": "已匹配"
+      "done": "已匹配文件"
     },
     "content_search": {
-      "running": "搜索内容",
-      "done": "已搜索"
+      "running": "搜索文件内容",
+      "done": "已搜索文件内容"
     },
     "intent_send": {
       "running": "发送意图",
@@ -923,7 +947,7 @@
     },
     "ask_user_question": {
       "running": "询问用户",
-      "done": "已询问"
+      "done": "已询问用户"
     },
     "todo_write": {
       "running": "更新待办",
@@ -946,16 +970,16 @@
       "done": "已搜索代码"
     },
     "bash": {
-      "running": "执行命令",
-      "done": "已执行命令"
+      "running": "执行bash命令",
+      "done": "已执行bash命令"
     },
     "powershell": {
-      "running": "执行命令",
-      "done": "已执行命令"
+      "running": "执行powershell命令",
+      "done": "已执行powershell命令"
     },
     "shell": {
-      "running": "执行命令",
-      "done": "已执行命令"
+      "running": "执行shell命令",
+      "done": "已执行shell命令"
     }
   },
   "askQuestionCard": {
@@ -1034,7 +1058,9 @@
     "labelLastAccessed": "最后访问",
     "statusStable": "稳定",
     "statusDecaying": "衰退中",
-    "statusCritical": "关键"
+    "statusCritical": "关键",
+    "contextMenuCopyNodeJson": "复制节点 (JSON)",
+    "contextMenuCopyFormatted": "复制格式化文本"
   },
   "agentDetailDialog": {
     "ariaLabelClose": "关闭",

@@ -852,10 +852,8 @@ impl AgentLoop {
             }
         }
 
-        // Retrieve relevant long-term memories and inject into context
-        // P2-4 fix: capture memory node IDs for later traceability in record_turn_to_memory
-        let retrieved_memory_ids = self
-            .retrieve_and_inject_memories(user_message, context_builder)
+        // Retrieve relevant long-term memories and inject into context.
+        self.retrieve_and_inject_memories(user_message, context_builder)
             .await;
 
         // P3: Notify consolidation scheduler that agent is active —
@@ -998,7 +996,6 @@ impl AgentLoop {
                         iteration,
                         context_builder,
                         user_message,
-                        &retrieved_memory_ids,
                         &current_model,
                     )
                     .await
@@ -1409,7 +1406,6 @@ impl AgentLoop {
         iteration: u32,
         context_builder: &mut ContextBuilder,
         _user_message: &str,
-        _retrieved_memory_ids: &[String],
         current_model: &str,
     ) -> Result<IterationResult> {
         // ── ① Debug observer hooks + resume ──
@@ -1611,11 +1607,6 @@ impl AgentLoop {
                 "Tool results were truncated to fit context budget"
             );
         }
-
-        // ── ⑧.5 Path B: Record tool failures as ProceduralNodes ──
-        // After persisting results, scan for errors and create
-        // low-confidence ProceduralNodes (execution_failure path).
-        self.record_tool_failures_to_memory(&deduped_calls, &tool_contents);
 
         // ── ⑧.75 Append tool results to history ──
         //

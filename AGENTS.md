@@ -68,17 +68,16 @@ When debugging, consult the latest log file to rapidly identify the root cause
 ├── apps/                    # Application layer (executables)
 │   ├── cli/                 # Gateway CLI (planned)
 │   └── acowork-desktop/     # Tauri v2 Desktop App (frontend + thin Rust backend with system tray / MQTT client)
-├── docs/                    # Architecture design docs (Chinese, v3.x)
-│   ├── design/              # architecture design docs (Chinese under design/zh/, English under design/en/ — pending)
-│   ├── module-design/       # Detailed module specs (crate structure)
-│   ├── plan/                # Planning docs
-│   ├── review/              # Design & code review reports (numbered, under review/zh/)
-│   ├── adr/                 # Architecture decision records (35+, under adr/zh/)
-│   ├── zh/                  # PRD, RAG protocol guide, session diagnostic, protocols/
-│   │   └── protocols/       # API protocol reference (HTTP + MQTT, see §Architecture below)
-│   └── reference/           # Reference materials (ZeroClaw, Grafeo, memory research)
+├── docs/                    # Public architecture docs (open-source friendly)
+│   ├── AGENTS.md            # guide of design docs (this sibling index)
+│   ├── design/{zh,en}/      # 19 architecture design docs (Chinese, v3.x; en: TBD)
+│   ├── module-design/{zh,en}/   # Rust crate specifications (8 zh + en placeholder)
+│   ├── adr/{zh,en}/         # Architecture decision records (50+)
+│   ├── prd/{zh,en}/         # Platform PRD + Desktop UI/UX PRD
+│   ├── protocols/{zh,en}/   # API protocol reference (HTTP + MQTT + RAG)
+│   ├── mcp-server-research/{zh,en}/   # MCP server integration research
+│   └── _internal/           # ⚠️ gitignored — local-only archive (plans, reviews, references, diagnostics)
 ├── examples/                # Example .agent packages
-├── ref-repo/                # Reference implementation ONLY (not source of truth)
 └── dev/                     # Build/Package/CI/CD scripts
 ```
 
@@ -123,7 +122,7 @@ Agent Runtime (universal binary — Rust)
 - **HTTP REST**（`http://127.0.0.1:19876`）— Desktop / CLI 触发 + 配置写回 + 大数据查询；Gateway 内部转为对 Runtime localhost HTTP 的反向代理
 - **MQTT**（`localhost:19875`）— 实时事件（chat chunk / tool_call / done）、状态同步（Will + Retained）、设备生命周期
 - **Debug Protocol**（DevMode 专用，复用生产 IPC 通道，ADR-048）— HTTP RPC `/api/agents/{id}/debug/{*rest}`（Gateway 反代 → Runtime）+ MQTT 调试事件 `acowork/agents/{id}/debug/events/{type}`：步进调试、Skill 热加载、录制回放
-- 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/zh/protocols/README.md`
+- 历史 gRPC 双向流 + WebSocket 流式推送均已下线，参见 `docs/design/zh/16-ipc-grpc-migration.md` 与 `docs/protocols/zh/README.md`
 
 ## Conventions
 
@@ -134,7 +133,6 @@ Agent Runtime (universal binary — Rust)
 
 ## Rules (Do NOT)
 
-- Do NOT edit `ref-repo/` — it is a separate reference project, not source of truth
 - Do NOT commit in Chinese
 - Do NOT act before the user confirms your plan
 - Do NOT kill gateway or runtime process when testing, you are running in it

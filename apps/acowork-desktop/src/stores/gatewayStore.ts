@@ -21,19 +21,54 @@ interface GatewayStore {
 }
 
 export const useGatewayStore = create<GatewayStore>((set, get) => ({
+  // ADR-051 + ADR-052 (lifecycle ownership):
+  //   `SplashScreen` is the SOLE owner of startup-time health probing.
+  //   It calls `checkHealth()` in a poll loop until the Gateway responds,
+  //   then calls `onReady()` which mounts `AppLayout`. By the time
+  //   `AppLayout` reads `status`, SplashScreen has already pushed it
+  //   to `connected`. We start at `disconnected` so that any banner /
+  //   indicator keyed on `status === "disconnected"` shows the right
+  //   thing before SplashScreen takes over — but AppLayout is gated
+  //   by `gatewayReady` in App.tsx, so no banner is visible during the
+  //   startup window regardless of this initial value.
   status: "disconnected",
   health: null,
   localState: "idle",
   migrationProgress: {},
 
   checkHealth: async () => {
+    const t0 = performance.now();
+    const prev = get().status;
     try {
       const resp = await fetch(`${getGatewayUrl()}/health`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const health = await resp.json() as HealthResponse;
       set({ status: "connected", health });
-    } catch {
-      set({ status: "error", health: null });
+      log.debug(
+        `[checkHealth] OK prev=${prev} → connected (${(performance.now() - t0).toFixed(1)}ms)`,
+      );
+    } catch (err) {
+      const dur = (performance.now() - t0).toFixed(1);
+      log.error(
+        `[checkHealth] FAIL prev=${prev} → `,
+        err instanceof Error ? `${err.message} (${dur}ms)` : `${err} (${dur}ms)`,
+      );
+      // ADR-051: distinguish startup probe failure (transient, gateway
+      // is still booting) from steady-state drop (gateway was reachable
+      // and just went away).
+      //
+      //   - Never connected yet  → keep `connecting` (or downgrade from
+      //                            `error` if we transiently hit it).
+      //   - Currently `connected`→ upgrade to `error` (genuine outage).
+      //
+      // We never set `error` for a fresh probe failure because the only
+      // visible effect is a red status bar that disappears seconds later
+      // once the gateway comes up — pure UX noise.
+      if (prev === "connected") {
+        set({ status: "error", health: null });
+      } else {
+        set({ status: "connecting", health: null });
+      }
     }
   },
 

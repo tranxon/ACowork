@@ -189,6 +189,17 @@ impl RuntimeWorkspaceMutationService {
             .map_err(|e| WorkspaceError::Persist(format!("write tmp: {}", e)))?;
         std::fs::rename(&tmp, &path)
             .map_err(|e| WorkspaceError::Persist(format!("rename tmp: {}", e)))?;
+        // Fix-3 observability: log the on-disk path + entries count after
+        // every workspace mutation so users reporting "workspace
+        // disappeared on restart" can correlate the persisted file path
+        // with the work_dir the runtime was actually using. See
+        // `desktop-onboarding-bugfix_154b7ff7.md` §Fix 3.
+        tracing::info!(
+            work_dir = %self.work_dir.display(),
+            config_path = %path.display(),
+            additional_dirs = cfg.additional_dirs.len(),
+            "persisted agent_workspaces.json after workspace mutation"
+        );
         Ok(())
     }
 }

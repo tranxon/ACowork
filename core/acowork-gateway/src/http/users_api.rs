@@ -16,8 +16,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::http::routes::{ApiError, AppState};
+use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
+use acowork_core::operation::{OperationRecord, OperationState};
 use acowork_core::protocol::UserProfile;
 
 /// Build the users router
@@ -52,6 +53,12 @@ pub struct CreateUserRequest {
     pub communication_style: Option<String>,
     #[serde(default)]
     pub custom: std::collections::HashMap<String, String>,
+    /// ADR-059 §7.3: the BootstrapState `version` the client read
+    /// before writing (optimistic concurrency — stale clients are
+    /// rejected with `resource_version_conflict`). Absent → no
+    /// precondition.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 /// Request body for updating a user profile (all fields optional — merge)
@@ -133,7 +140,10 @@ pub async fn list_users(
 pub async fn create_user(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
-) -> Result<(StatusCode, Json<UserResponse>), (StatusCode, Json<ApiError>)> {
+) -> Result<(StatusCode, Json<OperationAck>), (StatusCode, Json<ApiError>)> {
+    // ADR-059 §7.3: reject stale writers before touching the profile list.
+    crate::http::routes::check_expected_version(&state, req.expected_version).await?;
+
     let now = now_iso();
     let user_id = Uuid::new_v4().to_string();
 
@@ -197,13 +207,19 @@ pub async fn create_user(
         "User profile created"
     );
 
-    Ok((
-        StatusCode::CREATED,
-        Json(UserResponse {
-            user: profile,
-            version,
-        }),
-    ))
+    // ADR-059 §6: open a committed operation record so the client can
+    // correlate this mutation by `operation_id` and observe the
+    // resulting `resource_version`. The side effect (profile list +
+    // disk) already completed synchronously.
+    let mut record = OperationRecord::new(req.expected_version.unwrap_or(0));
+    record.state = OperationState::Committed;
+    record.resource_version = Some(version);
+    let ack = OperationAck::from_record(&record);
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+
+    Ok((StatusCode::CREATED, Json(ack)))
 }
 
 /// `PUT /api/users/{user_id}` — update a user profile

@@ -71,6 +71,13 @@ impl HttpAuth {
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
+
+    /// The generated bearer token (None when auth is disabled).
+    /// Exposed for the MQTT broker auth handler and `/api/status`
+    /// (ADR-055 Phase 5a: Desktop uses it as its MQTT password).
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_ref().map(|t| t.expose_secret())
+    }
 }
 
 #[cfg(test)]

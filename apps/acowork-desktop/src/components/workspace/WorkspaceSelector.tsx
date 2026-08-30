@@ -21,13 +21,15 @@ function workspaceDisplayName(dir: WorkspaceDir) {
 export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDirection?: "up" | "down"; textHidden?: boolean }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
-  // Subscribe to ready flag so we re-fetch workspaces when the agent finishes
-  // startup (ready transitions false→true). Without this, a fetch that races
-  // with Gateway workspace-cache population yields an empty list that sticks.
-  const agentReady = useAgentStore((s) => {
-    if (!selectedAgentId) return false;
-    return s.agents[selectedAgentId]?.meta?.ready ?? false;
-  });
+  // Note: we intentionally do NOT gate `fetchWorkspaces` on
+  // `s.agents[selectedAgentId]?.meta?.ready` here. Bug B v3 fix —
+  // the meta.ready flag is pushed by MQTT retained messages whose
+  // arrival is asynchronous to Runtime HTTP readiness. Gating on
+  // ready caused the workspace dropdown to flash "Loading…" forever
+  // when the user opened the workspace panel during the first second
+  // after agent start. Instead, the store's `fetchWorkspaces` now
+  // owns the 503 retry loop (see `lib/httpRetry.ts`) so transient
+  // 503s during Runtime port registration recover transparently.
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
   const { workspaces, sessionWorkspaceMap, loading, fetchWorkspaces, setSessionWorkspace } =
@@ -48,20 +50,19 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden }: { dropDi
     ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
     : "__agent_home__";
 
-  // Load workspaces when agent changes or becomes ready.
-  // agentReady guards against a race: the initial fetch may hit Gateway
-  // before the Runtime's Phase-A UpdateWorkspaceConfig reaches the cache.
+  // Fetch workspaces whenever the selected agent changes. The store
+  // owns the 503 retry loop — see `lib/httpRetry.ts` and the comment
+  // at the top of this component — so we do not need to gate on
+  // agentReady (the MQTT-retained ready flag is asynchronous to
+  // Runtime HTTP readiness and gating on it caused the workspace
+  // dropdown to hang at "Loading…" forever).
   useEffect(() => {
     if (!selectedAgentId) {
       useWorkspaceStore.getState().reset();
       return;
     }
-    // Only fetch when agent is ready to avoid 503 errors during startup
-    // (Runtime HTTP port not yet registered in Gateway's reverse proxy registry).
-    if (agentReady) {
-      void fetchWorkspaces(selectedAgentId);
-    }
-  }, [selectedAgentId, agentReady, fetchWorkspaces]);
+    void fetchWorkspaces(selectedAgentId);
+  }, [selectedAgentId, fetchWorkspaces]);
 
   // Close on outside click
   useEffect(() => {

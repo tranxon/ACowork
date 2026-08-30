@@ -103,6 +103,13 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
     const agent = s.agentStates[selectedAgentId];
     return agent?.openSessionIds?.length ?? 0;
   });
+  // Historical session total for the agent — from the backend session list
+  // scan (`total_count` in GET /api/agents/{id}/sessions), refreshed by
+  // `agentStore.fetchSessions`. Distinct from `openSessionCount` (active tabs).
+  const totalSessionCount = useAgentStore((s) => {
+    if (!selectedAgentId) return 0;
+    return s.agents[selectedAgentId]?.pagination.totalCount ?? 0;
+  });
   const isCompacting = useChatStore((s) => {
     if (!selectedAgentId) return false;
     const agent = s.agentStates[selectedAgentId];
@@ -640,8 +647,12 @@ export function ResultsPanel({ width, isDebugMode = false, onResizeStart, active
                     <span className="text-zinc-700 dark:text-zinc-300">{selectedAgent.version}</span>
                   </div>
                   <div className="flex justify-between py-1">
-                    <span className="text-zinc-500">{t("resultsPanel.sessions")}</span>
+                    <span className="text-zinc-500">{t("resultsPanel.activeSessions")}</span>
                     <span className="text-zinc-700 dark:text-zinc-300">{openSessionCount}</span>
+                  </div>
+                  <div className="flex justify-between py-1">
+                    <span className="text-zinc-500">{t("resultsPanel.totalSessions")}</span>
+                    <span className="text-zinc-700 dark:text-zinc-300">{totalSessionCount}</span>
                   </div>
                   {/* ADR-028: agent-scoped cumulative totals across every LLM
                       call made by this Runtime process for this agent. These

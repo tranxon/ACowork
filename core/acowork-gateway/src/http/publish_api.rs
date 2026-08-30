@@ -1,9 +1,12 @@
-//! Publish API HTTP handlers
+//! Publish API HTTP handlers.
 //!
-//! S4.1: Clone — POST /api/agents/:id/clone
-//! S4.2: Prepare — POST /api/agents/:id/publish/prepare
-//! S4.3: Build — POST /api/agents/:id/publish/build
-//! S4.3a: CLI Package command wired through Gateway
+//! ADR-055 Phase 3b: publish prepare/build are delegated to the node via
+//! `NodePublishPrepare` / `NodePublishBuild` control commands. The node
+//! reports the structured result in `NodeEvent.result_json` (JSON), which
+//! the handlers re-parse into the HTTP response shapes. `install-locally`
+//! delegates to the local node; `export` remains read-only (it only
+//! locates an already-built package on the Gateway's machine — for remote
+//! nodes file retrieval is a Phase 3 follow-up).
 
 use axum::{
     Json, Router,
@@ -12,6 +15,8 @@ use axum::{
     routing::post,
 };
 use serde::{Deserialize, Serialize};
+
+use acowork_core::mqtt_proto::NodeEvent;
 
 use crate::http::routes::{ApiError, AppState};
 
@@ -32,42 +37,38 @@ pub fn publish_routes() -> Router<AppState> {
 /// Publish prepare request
 #[derive(Debug, Deserialize)]
 pub struct PrepareRequest {
-    /// Whether to perform cleanup operations (remove dev, clear recordings, reset config)
     #[serde(default)]
     pub clean: bool,
 }
 
-/// Publish prepare response
-#[derive(Debug, Serialize)]
+/// Publish prepare response (mirrors the node's `PrepareResult` JSON).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PrepareResponse {
-    pub checks: Vec<crate::package_manager::publish::CheckItem>,
+    pub checks: Vec<serde_json::Value>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
     pub cleaned: bool,
 }
 
-/// `POST /api/agents/:id/publish/prepare` — check and clean agent for publishing
+/// `POST /api/agents/:id/publish/prepare` — delegated to the node.
 pub async fn prepare_publish(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<PrepareRequest>,
 ) -> Result<Json<PrepareResponse>, (StatusCode, Json<ApiError>)> {
-    let result = tokio::task::spawn_blocking(move || {
-        let mut gw = state.gateway_state.blocking_write();
-        crate::package_manager::publish::prepare_publish(&agent_id, req.clean, &mut gw)
-    })
-    .await;
+    let node_id = node_id_of(&state, &agent_id).await?;
+    let node_control = state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
+    let event = node_control
+        .publish_prepare(&node_id, &agent_id, req.clean)
+        .await
+        .map_err(|e| ApiError::internal(&format!("Publish prepare failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Publish prepare failed: {}", e)))?;
 
-    match result {
-        Ok(Ok(prep)) => Ok(Json(PrepareResponse {
-            checks: prep.checks,
-            warnings: prep.warnings,
-            errors: prep.errors,
-            cleaned: prep.cleaned,
-        })),
-        Ok(Err(e)) => Err(ApiError::bad_request(&format!("Prepare failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Prepare task failed: {}", e))),
-    }
+    Ok(Json(parse_result::<PrepareResponse>(&event)?))
 }
 
 // ── S4.3 Build ────────────────────────────────────────────────────────
@@ -75,62 +76,65 @@ pub async fn prepare_publish(
 /// Build request
 #[derive(Debug, Deserialize)]
 pub struct BuildRequest {
-    /// Whether to sign the package
     #[serde(default)]
     pub sign: bool,
-    /// Path to signing keys directory (defaults to examples/.signing-keys)
     #[serde(default)]
     pub key_dir: Option<String>,
 }
 
-/// Build response
-#[derive(Debug, Serialize)]
+/// Build response (mirrors the node's `BuildResult` JSON).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BuildResponse {
     pub output_path: String,
     pub signed: bool,
     pub file_size: u64,
 }
 
-/// `POST /api/agents/:id/publish/build` — build .agent package
+/// `POST /api/agents/:id/publish/build` — delegated to the node.
 pub async fn build_publish(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
     Json(req): Json<BuildRequest>,
 ) -> Result<Json<BuildResponse>, (StatusCode, Json<ApiError>)> {
-    // Determine output directory from Gateway config
-    let output_dir = {
-        let gw = state.gateway_state.read().await;
-        gw.config
-            .as_ref()
-            .map(|c| std::path::PathBuf::from(&c.packages_dir))
-            .unwrap_or_else(|| std::path::PathBuf::from("./build"))
-    };
+    let node_id = node_id_of(&state, &agent_id).await?;
+    let node_control = state
+        .node_control
+        .clone()
+        .ok_or_else(|| ApiError::internal("Node control plane unavailable (MQTT disabled)"))?;
+    // Empty output_dir → the node builds into its own packages_dir.
+    let event = node_control
+        .publish_build(&node_id, &agent_id, "", req.sign, req.key_dir.as_deref().unwrap_or(""))
+        .await
+        .map_err(|e| ApiError::internal(&format!("Publish build failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Publish build failed: {}", e)))?;
 
-    let key_dir = req.key_dir.map(std::path::PathBuf::from);
-    let sign = req.sign;
+    Ok(Json(parse_result::<BuildResponse>(&event)?))
+}
 
-    // Perform build in spawn_blocking (build_package does file I/O)
-    let result = tokio::task::spawn_blocking(move || {
-        let gw = state.gateway_state.blocking_read();
-        crate::package_manager::publish::build_package(
-            &agent_id,
-            &output_dir,
-            sign,
-            key_dir.as_deref(),
-            &gw,
-        )
-    })
-    .await;
+/// Resolve the node hosting an installed agent (publish operates on the
+/// node that owns the package).
+async fn node_id_of(
+    state: &AppState,
+    agent_id: &str,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    let gw = state.gateway_state.read().await;
+    gw.installed_agents
+        .get(agent_id)
+        .map(|i| i.node_id.clone())
+        .ok_or_else(|| ApiError::not_found(&format!("Agent not found: {}", agent_id)))
+}
 
-    match result {
-        Ok(Ok(build)) => Ok(Json(BuildResponse {
-            output_path: build.output_path,
-            signed: build.signed,
-            file_size: build.file_size,
-        })),
-        Ok(Err(e)) => Err(ApiError::bad_request(&format!("Build failed: {}", e))),
-        Err(e) => Err(ApiError::internal(&format!("Build task failed: {}", e))),
-    }
+/// Parse the structured result a node reported in `NodeEvent.result_json`.
+fn parse_result<T: serde::de::DeserializeOwned>(
+    event: &NodeEvent,
+) -> Result<T, (StatusCode, Json<ApiError>)> {
+    let json = event
+        .result_json
+        .as_deref()
+        .ok_or_else(|| ApiError::internal("Node reply missing result_json"))?;
+    serde_json::from_str::<T>(json)
+        .map_err(|e| ApiError::internal(&format!("Failed to parse node result: {}", e)))
 }
 
 /// Install-locally request
@@ -140,44 +144,47 @@ pub struct InstallLocallyRequest {
     pub package_path: String,
 }
 
-/// `POST /api/agents/:id/publish/install-locally` — install built package locally
+/// `POST /api/agents/:id/publish/install-locally` — install built package
+/// locally via the local node.
 pub async fn install_locally(
     State(state): State<AppState>,
     Path(_agent_id): Path<String>,
     Json(req): Json<InstallLocallyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ApiError>)> {
-    let packages_dir = get_packages_dir(&state).await;
-    let dev_mode = get_dev_mode(&state).await;
+    // Extract the manifest to route the install command and register cron.
+    let manifest = crate::http::agents::extract_manifest_from_package(
+        std::path::Path::new(&req.package_path),
+    )
+    .map_err(|e| ApiError::bad_request(&format!("{}", e)))?;
+    let agent_id = manifest.agent_id.clone();
 
-    let result = tokio::task::spawn_blocking(move || {
-        let pkg_path = std::path::PathBuf::from(&req.package_path);
-        let mut gw = state.gateway_state.blocking_write();
-        crate::package_manager::install::install_package(
-            &pkg_path,
-            &packages_dir,
-            &mut gw,
-            dev_mode,
+    let node_control = state.node_control.clone().ok_or_else(|| {
+        ApiError::internal("Node control plane unavailable (MQTT disabled)")
+    })?;
+    let event = node_control
+        .install_agent(
+            acowork_core::node::LOCAL_NODE_ID,
+            &agent_id,
+            &req.package_path,
+            crate::http::agents::gateway_dev_mode(&state).await,
         )
-    })
-    .await;
+        .await
+        .map_err(|e| ApiError::internal(&format!("Install-locally failed: {}", e)))?;
+    crate::mqtt::node_control::NodeControlClient::check_reply(&agent_id, &event)
+        .map_err(|e| ApiError::internal(&format!("Install-locally failed: {}", e)))?;
 
-    match result {
-        Ok(Ok(info)) => Ok((
-            StatusCode::CREATED,
-            Json(serde_json::json!({
-                "message": format!("Package installed locally: {}", info.agent_id),
-                "agent_id": info.agent_id,
-            })),
-        )),
-        Ok(Err(e)) => Err(ApiError::bad_request(&format!(
-            "Install-locally failed: {}",
-            e
-        ))),
-        Err(e) => Err(ApiError::internal(&format!(
-            "Install-locally task failed: {}",
-            e
-        ))),
+    {
+        let mut gw = state.gateway_state.write().await;
+        crate::cron::register_agent_cron_triggers(&mut gw, &agent_id, &manifest);
     }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "message": format!("Package installed locally: {}", agent_id),
+            "agent_id": agent_id,
+        })),
+    ))
 }
 
 /// Export response
@@ -222,19 +229,4 @@ pub async fn export_package(
         status: "ready".to_string(),
         output_path: output_path.to_string_lossy().to_string(),
     }))
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────
-
-async fn get_packages_dir(state: &AppState) -> std::path::PathBuf {
-    let gw = state.gateway_state.read().await;
-    gw.config
-        .as_ref()
-        .map(|c| std::path::PathBuf::from(&c.packages_dir))
-        .unwrap_or_else(|| std::path::PathBuf::from("./packages"))
-}
-
-async fn get_dev_mode(state: &AppState) -> bool {
-    let gw = state.gateway_state.read().await;
-    gw.config.as_ref().map(|c| c.dev_mode).unwrap_or(false)
 }

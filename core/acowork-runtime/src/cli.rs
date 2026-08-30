@@ -79,6 +79,48 @@ pub struct Cli {
     /// When set, Runtime starts a local HTTP endpoint for Desktop discovery.
     #[arg(long, env = "ACOWORK_HTTP_PORT")]
     pub http_port: Option<u16>,
+
+    /// ADR-055 D3: Gateway MQTT broker host (for remote / distributed
+    /// deployments where the Gateway broker is not on 127.0.0.1).
+    /// Defaults to 127.0.0.1 (single-machine topology).
+    /// Injected by the Node Agent at spawn time (`--gateway-host`), or
+    /// set directly in standalone mode.
+    #[arg(long, env = "ACOWORK_GATEWAY_HOST")]
+    pub gateway_host: Option<String>,
+
+    /// ADR-055 D3/§6.4: base URL of the Node reverse proxy that fronts
+    /// this Runtime's loopback HTTP server (e.g.
+    /// `http://{node_advertise}:19900`). When set, the Runtime publishes
+    /// its retained `http_endpoint` as `{base}/agents/{id}` so the
+    /// Gateway reverse-proxies through the Node instead of directly to
+    /// the loopback address. Injected by the Node Agent at spawn time
+    /// (`--http-advertise-endpoint`); standalone mode omits it and falls
+    /// back to the direct loopback endpoint. The Runtime only
+    /// concatenates — it never learns the node-internal topology (§6.4).
+    #[arg(long, env = "ACOWORK_HTTP_ADVERTISE_ENDPOINT")]
+    pub http_advertise_endpoint: Option<String>,
+
+    /// ADR-055 §6.7 (Phase 4): the node hosting this Runtime. When set,
+    /// the Runtime subscribes to the node's retained LSP relay topic
+    /// (`acowork/nodes/{node_id}/lsps`) and registers the `codebase`
+    /// tool when the relay becomes ready (and unregisters it when the
+    /// relay goes away). Injected by the Node Agent at spawn time
+    /// (`--node-id`); standalone mode omits it and the codebase tool
+    /// stays unregistered — matching the pre-Phase-4 behavior.
+    #[arg(long, env = "ACOWORK_NODE_ID")]
+    pub node_id: Option<String>,
+
+    /// ADR-055 Phase 5a: MQTT broker CONNECT username. Injected by the
+    /// Node Agent at spawn time (`agent:{id}`); standalone mode can set
+    /// it manually to authenticate against an auth-enabled broker.
+    #[arg(long, env = "ACOWORK_MQTT_USERNAME")]
+    pub mqtt_username: Option<String>,
+
+    /// ADR-055 Phase 5a: MQTT broker CONNECT password (node_token /
+    /// enrollment token). Injected by the Node Agent at spawn time;
+    /// standalone mode can set it manually.
+    #[arg(long, env = "ACOWORK_MQTT_PASSWORD")]
+    pub mqtt_password: Option<String>,
 }
 
 impl Cli {
