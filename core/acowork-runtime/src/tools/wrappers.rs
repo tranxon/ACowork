@@ -173,7 +173,11 @@ impl PathGuardedTool {
             let allowed_str =
                 path_utils::normalize_separators(&allowed_normalized.to_string_lossy());
 
-            tracing::debug!(
+            // LOG-001: fires once per candidate allowed-dir in the loop
+            // (N lines per file-tool call) — raw iteration noise. Demoted
+            // to TRACE; the final allow/reject decision is logged once
+            // after the loop (see below).
+            tracing::trace!(
                 target_path = %target_str,
                 allowed_path = %allowed_str,
                 "PathGuardedTool: validating path"
@@ -196,6 +200,16 @@ impl PathGuardedTool {
                 }
             }
         }
+
+        // LOG-001: single per-call decision log replacing the N per-candidate
+        // lines — carries the resolved access level for debugging path guards.
+        let decision = best_match.as_ref().map(|(len, access)| (len, access));
+        tracing::debug!(
+            target_path = %path,
+            matched = decision.is_some(),
+            allowed_len = decision.map(|(l, _)| *l).unwrap_or(0),
+            "PathGuardedTool: path access resolved"
+        );
 
         // Return the access level of the best match, or error if no match
         best_match.map(|(_, access)| access).ok_or_else(|| {

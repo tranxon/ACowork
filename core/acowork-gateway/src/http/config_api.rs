@@ -247,7 +247,7 @@ pub async fn update_config(
     if let Some(level) = &body.log_level {
         // 1. Apply to Gateway itself
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!("Failed to reload Gateway tracing filter: {}", e);
             } else {

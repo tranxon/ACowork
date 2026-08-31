@@ -459,13 +459,12 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CrlfStderr {
 /// Returns the reload handle so the Gateway can dynamically change
 /// the log level at runtime via the HTTP config API.
 fn init_tracing(level: &str, log_file_size_mb: u64, log_file_count: u64) -> Option<crate::LogReloadHandle> {
-    use tracing_subscriber::{reload, EnvFilter, layer::SubscriberExt};
+    use tracing_subscriber::{reload, layer::SubscriberExt};
     use tracing_subscriber::util::SubscriberInitExt;
     use acowork_core::logging::ChronoLocalTimer;
     use crate::config::GatewayConfig;
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let env_filter = acowork_core::logging::build_env_filter(level);
 
     // Log directory: <root>/data/logs/  (sibling of embed.log)
     let log_dir = GatewayConfig::project_data_dir().join("logs");

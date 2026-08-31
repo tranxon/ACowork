@@ -280,7 +280,10 @@ impl AgentLoop {
                     self.session_core.notify_new_data_available();
                 }
                 StreamEvent::ToolCallChunk { index, arguments } => {
-                    tracing::debug!(index, chunk_len = arguments.len(), "ToolCallChunk received");
+                    // LOG-001: fires once per streamed argument chunk (tens
+                    // per tool call) — raw accumulation noise, enable TRACE
+                    // only when debugging tool-arg assembly.
+                    tracing::trace!(index, chunk_len = arguments.len(), "ToolCallChunk received");
                     // Discard stale delta chunks for tool calls that already have complete JSON
                     if !finished_tool_indices.contains(&index) {
                         let buffer = tool_call_args_buffer.entry(index).or_default();

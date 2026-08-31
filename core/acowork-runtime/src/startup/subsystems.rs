@@ -643,10 +643,14 @@ pub(crate) fn spawn_config_change_relay(
 
 /// Spawn the per-session state-change relay (ADR-043).
 ///
-/// Every state change is published immediately — no cooldown. The retained
-/// SessionState topic (`sessions/{sid}/state`) ensures the broker overwrites
-/// the previous value, so even if a Desktop client is momentarily
-/// disconnected, it receives the latest snapshot on reconnect.
+/// Coalescing behaviour (LOG-001 / PERF-001): a single LLM turn emits ~9
+/// `StateChange` snapshots (status flip + one `message_count` increment per
+/// appended message + context_usage + token updates). Publishing every one
+/// floods the chunk channel and forces the Desktop to re-render 9x per turn.
+/// We hold the newest snapshot and publish **at most once per coalescing
+/// window** (500 ms). The retained SessionState topic
+/// (`sessions/{sid}/state`) overwrites the previous value on the broker, so
+/// even a disconnected Desktop receives the latest snapshot on reconnect.
 pub(crate) fn spawn_state_change_relay(
     mut state_rx: tokio::sync::mpsc::UnboundedReceiver<StateChange>,
     chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
@@ -655,26 +659,18 @@ pub(crate) fn spawn_state_change_relay(
 ) {
     tokio::spawn(async move {
         use crate::agent::loop_::{ChunkEvent, SessionChunkEvent};
+        use std::time::{Duration, Instant};
 
-        while let Some(change) = state_rx.recv().await {
-            // Drop sentinel: empty session_id means the ConversationSession
-            // is being dropped. Skip publishing — the last real state has
-            // already been sent before the drop.
-            if change.snapshot.session_id.is_empty()
-                && change.snapshot.agent_id.is_empty()
-            {
-                continue;
-            }
+        const COALESCE_WINDOW: Duration = Duration::from_millis(500);
 
-            let state = change.snapshot;
-            tracing::info!(
-                session_id = %session_id,
-                message_count = state.message_count,
-                "state relay: sending SessionStateChanged to chunk channel"
-            );
-
+        /// Publish a single snapshot to the chunk channel (best-effort).
+        fn publish(
+            chunk_tx: &tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
+            session_id: &str,
+            state: acowork_core::mqtt_proto::SessionState,
+        ) {
             let event = SessionChunkEvent {
-                session_id: session_id.clone(),
+                session_id: session_id.to_string(),
                 event: ChunkEvent::SessionStateChanged { state },
             };
             if chunk_tx.try_send(event).is_err() {
@@ -682,6 +678,71 @@ pub(crate) fn spawn_state_change_relay(
                     session_id = %session_id,
                     "state relay: chunk channel full/closed, dropping notification"
                 );
+            }
+        }
+
+        /// Drop sentinel: empty session_id means the ConversationSession is
+        /// being destroyed — flush any pending snapshot, then exit.
+        fn is_drop_sentinel(change: &StateChange) -> bool {
+            change.snapshot.session_id.is_empty() && change.snapshot.agent_id.is_empty()
+        }
+
+        let mut pending: Option<acowork_core::mqtt_proto::SessionState> = None;
+        loop {
+            // 1) Wait for the first change of a burst.
+            match state_rx.recv().await {
+                Some(change) => {
+                    if is_drop_sentinel(&change) {
+                        if let Some(s) = pending.take() {
+                            publish(&chunk_tx, &session_id, s);
+                        }
+                        break;
+                    }
+                    pending = Some(change.snapshot);
+                }
+                None => {
+                    if let Some(s) = pending.take() {
+                        publish(&chunk_tx, &session_id, s);
+                    }
+                    break;
+                }
+            }
+
+            // 2) Coalesce the rest of the window — keep only the newest.
+            let deadline = Instant::now() + COALESCE_WINDOW;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                match tokio::time::timeout(remaining, state_rx.recv()).await {
+                    Ok(Some(change)) => {
+                        if is_drop_sentinel(&change) {
+                            if let Some(s) = pending.take() {
+                                publish(&chunk_tx, &session_id, s);
+                            }
+                            break;
+                        }
+                        pending = Some(change.snapshot);
+                    }
+                    Ok(None) => {
+                        if let Some(s) = pending.take() {
+                            publish(&chunk_tx, &session_id, s);
+                        }
+                        break;
+                    }
+                    Err(_) => break, // window elapsed
+                }
+            }
+
+            // 3) Publish the freshest snapshot of this burst.
+            if let Some(s) = pending.take() {
+                tracing::debug!(
+                    session_id = %session_id,
+                    message_count = s.message_count,
+                    "state relay: publishing coalesced SessionStateChanged"
+                );
+                publish(&chunk_tx, &session_id, s);
             }
         }
         tracing::debug!(

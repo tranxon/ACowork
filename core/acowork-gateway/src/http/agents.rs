@@ -1970,7 +1970,7 @@ pub async fn start_agent(
         }
         // 2. Apply to Gateway's own tracing subscriber
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!(
                     "Failed to reload Gateway tracing filter for debug mode: {}",
@@ -2112,7 +2112,7 @@ pub async fn restart_agent_in_debug(
             }
         }
         if let Some(handle) = &state.log_reload_handle {
-            let new_filter = tracing_subscriber::EnvFilter::new(level);
+            let new_filter = acowork_core::logging::build_env_filter(level);
             if let Err(e) = handle.reload(new_filter) {
                 tracing::warn!(
                     "Failed to reload Gateway tracing filter for debug mode: {}",
