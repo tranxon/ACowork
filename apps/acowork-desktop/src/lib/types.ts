@@ -1670,6 +1670,115 @@ export interface EmbeddingTestResponse {
   error?: string | null;
 }
 
+/** Response from POST /api/embedding-providers/{id}/test (cloud providers).
+ *
+ *  Distinct from `EmbeddingTestResponse` because the cloud endpoint uses
+ *  `{ ok, message }` rather than `{ success, error }` — kept the cloud
+ *  field names verbatim so the gateway response and the frontend
+ *  interface never drift out of sync via type aliasing.
+ *
+ *  Callers that need the unified `EmbeddingTestResponse` shape (e.g. the
+ *  per-card UI) should map `ok → success`, `message → error` explicitly. */
+export interface CloudEmbeddingTestResponse {
+  provider_id: string;
+  model_id: string;
+  ok: boolean;
+  dimension?: number | null;
+  /** Human-readable status — "OK — returned N dims as expected." on success,
+   *  or the upstream error message on failure (e.g. "HTTP 401: …"). */
+  message?: string | null;
+}
+
+// ── Cloud Embedding Providers (S1-7) ────────────────────────────────────
+
+/** A single cloud embedding model within a provider (e.g. volcengine.doubao-embedding). */
+export interface CloudEmbeddingModel {
+  id: string;
+  name: string;
+  dimensions: number;
+  context_length?: number | null;
+  embedding_modalities?: string[];
+}
+
+/** A cloud embedding provider (volcengine / dashscope / siliconflow / …). */
+export interface CloudEmbeddingProvider {
+  id: string;
+  name: string;
+  api: string;
+  protocol: string;
+  env: string[];
+  doc?: string | null;
+  models: Record<string, CloudEmbeddingModel>;
+  /** Whether an API key is currently stored in Vault (mirrors backend
+   * `EmbeddingProviderView.has_api_key`). Use this — not the active
+   * selection's `has_api_key` — to drive per-card UI, because the
+   * active selection only tracks the *currently selected* provider's
+   * key state, while every card needs to know its own. */
+  has_api_key?: boolean;
+  /** Masked preview of the stored API key, when one is configured.
+   * Backend returns this only when `has_api_key === true`. */
+  key_preview?: string | null;
+  /** True for user-added providers (persisted in
+   * `user_embedding_providers.json`). Bundled providers omit this or
+   * send `false`. */
+  custom?: boolean;
+}
+
+/** Active cloud embedding selection — mirrors data_dir/active_embedding_provider.json. */
+export interface ActiveCloudEmbeddingProvider {
+  provider_id: string;
+  model_id: string;
+  dimension: number;
+  base_url: string;
+  has_api_key: boolean;
+  selected_at: string;
+}
+
+/** Response for GET /api/embedding-providers */
+export interface CloudEmbeddingProvidersResponse {
+  providers: CloudEmbeddingProvider[];
+  active: ActiveCloudEmbeddingProvider | null;
+}
+
+/** Response for POST /api/embedding-providers/{id}/select */
+export interface SelectCloudEmbeddingResponse {
+  provider_id: string;
+  model_id: string;
+  dimension: number;
+  base_url: string;
+  has_api_key: boolean;
+  status: string;
+  message: string;
+}
+
+/** Request body for POST /api/embedding-providers — add a user-defined provider. */
+export interface AddCloudEmbeddingProviderRequest {
+  id: string;
+  name: string;
+  api: string;
+  models: Record<string, CloudEmbeddingModel>;
+  /** Optional API key stored in Vault alongside the provider entry. */
+  api_key?: string;
+}
+
+/** Request body for PUT /api/embedding-providers/{id} — update a user-defined provider. */
+export interface UpdateCloudEmbeddingProviderRequest {
+  name?: string;
+  api?: string;
+  /** When provided, REPLACES the entire model set. */
+  models?: Record<string, CloudEmbeddingModel>;
+}
+
+/** Response for add / update / delete embedding provider. */
+export interface CloudEmbeddingProviderResponse {
+  id: string;
+  name: string;
+  api: string;
+  custom: boolean;
+  models: string[];
+  message: string;
+}
+
 // ── Migration types ───────────────────────────────────────────────────────
 
 /** Migration progress for a single agent — matches GET /api/embedding-models/migration-progress */
