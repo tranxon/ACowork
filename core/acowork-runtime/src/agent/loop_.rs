@@ -1439,6 +1439,23 @@ impl AgentLoop {
         current_model: &str,
     ) -> Result<IterationResult> {
         // ── ① Debug observer hooks + resume ──
+        // ADR-048: drain any bypass-injected debug handles written by
+        // SessionManager while this loop was running (the mid-loop
+        // `EnableDebugMode` path — see `push_debug_mode_to_existing_sessions`).
+        // The channel is held at the AgentCore level because the observer
+        // slot's `set_pending_injection` is a no-op while the observer is
+        // `Production`; draining here and injecting a DevMode observer lets
+        // a debug panel opened mid-iteration take effect on the very next
+        // iteration instead of waiting for the SessionTask message loop
+        // (which is blocked inside `run()`).
+        if let Some(handles) = self.core.take_pending_debug_handles() {
+            tracing::info!(
+                session_id = ?self.session_core.session_id.as_deref(),
+                "AgentLoop: mid-loop bypass-injected debug handles → enabling DevMode observer"
+            );
+            let observer = crate::debug::DebugObserverImpl::new(handles);
+            self.core.set_debug_mode(observer);
+        }
         self.core.debug_observer.check_pending_injection();
         let debug_iter = self
             .core

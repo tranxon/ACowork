@@ -145,6 +145,11 @@ pub struct AgentCore {
     /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
     /// Layer 1 in the resolution chain. 0 means "no limit".
     pub(crate) context_window_override: Option<u64>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (from
+    /// agent_config.json, set via Agent Setup panel). `None` = use
+    /// [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`] (0.90
+    /// default = "compress until at most 10% remains").
+    pub(crate) compression_ratio_threshold: Option<f64>,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -177,6 +182,20 @@ pub struct AgentCore {
     pub(crate) rag_provider: Option<Arc<dyn RagProvider>>,
     /// Debug observer slot — Production (no-op) or Dev (real observer).
     pub(crate) debug_observer: DebugObserverSlot,
+    /// ADR-048: shared bypass-injection channel for debug handles.
+    ///
+    /// SessionManager writes `DebugHandles` here while the agent loop is
+    /// running (its message channel is blocked inside `run()`), and the
+    /// agent loop drains it at the start of each iteration via
+    /// [`Self::take_pending_debug_handles`].
+    ///
+    /// Held here — not on the observer slot — because the observer's
+    /// `set_pending_injection` is a no-op while the slot is `Production`,
+    /// which is exactly the state during a mid-loop `EnableDebugMode`.
+    /// `disable_debug_mode` clears the shared slot (session_manager.rs),
+    /// so a stale handles pointer cannot be applied after teardown.
+    pub(crate) pending_debug_handles:
+        Option<Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>>,
     /// ADR-046: blob store for `file_upload` / `image_upload` items
     /// (uploaded PDFs, images, …). Populated in Phase B of `session_init`
     /// via [`AgentCore::set_attachment_service`]; the agent loop reads
@@ -272,6 +291,7 @@ impl AgentCore {
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
+            compression_ratio_threshold: None,
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
@@ -283,6 +303,7 @@ impl AgentCore {
             rag_provider: None,
             memory_session: None,
             debug_observer: observer,
+            pending_debug_handles: None,
             approval_gate: None,
             shell_approval_threshold,
             shell_risk_rules: crate::security::shell_risk::ShellRiskRules::load(
@@ -637,6 +658,14 @@ impl AgentCore {
             );
             self.approval_timeout_secs = Some(timeout);
         }
+        if let Some(threshold) = overrides.compression_ratio_threshold {
+            tracing::info!(
+                old = ?self.compression_ratio_threshold,
+                new = threshold,
+                "runtime config: compression_ratio_threshold updated"
+            );
+            self.compression_ratio_threshold = Some(threshold);
+        }
 
         // ADR-061 §10.2: the `tool_compression_enabled` toggle and its
         // platform-tools hot-reload are deleted; `context_retrieve` is
@@ -921,7 +950,42 @@ impl AgentCore {
         &mut self,
         ch: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>>,
     ) {
-        self.debug_observer.set_pending_injection(ch);
+        // ADR-048: hold the bypass-injection channel at the AgentCore level.
+        // The observer slot's `set_pending_injection` is a NO-OP while the
+        // observer is `Production` (which is almost always the case here —
+        // `session_task.rs` calls this in `SessionTask::new` before any
+        // DevMode is active). Relying on the observer slot alone silently
+        // dropped the channel, so a mid-loop `EnableDebugMode` written into
+        // `session_handle.pending_debug_handles` was never visible to the
+        // running agent loop. The agent loop drains this channel at the
+        // start of each iteration via [`Self::take_pending_debug_handles`].
+        //
+        // We still forward to the observer slot as well: for a session that
+        // is ALREADY Dev, `DebugObserverImpl::check_pending_injection` can
+        // observe a late bypass write (rewind/patch injection), and the
+        // observer's own pending slot remains the mirror for the Dev case.
+        self.debug_observer.set_pending_injection(ch.clone());
+        self.pending_debug_handles = Some(ch);
+    }
+
+    /// Take any bypass-injected debug handles, clearing the slot.
+    ///
+    /// Called at the start of every agent-loop iteration. Returns the
+    /// handles written by SessionManager's `push_debug_mode_to_existing_sessions`
+    /// (the mid-loop `EnableDebugMode` path) if any, so the caller can
+    /// build a DevMode observer and inject it via [`Self::set_debug_mode`].
+    ///
+    /// Returns `None` when the lock is contended (the writer holds it); in
+    /// that case the caller should retry next iteration rather than block
+    /// the agent loop.
+    pub(crate) fn take_pending_debug_handles(
+        &self,
+    ) -> Option<crate::debug::DebugHandles> {
+        let ch = self.pending_debug_handles.as_ref()?;
+        match ch.try_lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        }
     }
 
     pub fn debug_observer(&self) -> &DebugObserverSlot { &self.debug_observer }
@@ -1024,6 +1088,7 @@ impl Clone for AgentCore {
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
+            compression_ratio_threshold: self.compression_ratio_threshold,
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
@@ -1033,6 +1098,12 @@ impl Clone for AgentCore {
             rag_provider: self.rag_provider.clone(),
             memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),
+            // ADR-048: the pending-debug channel is intentionally NOT
+            // carried across clones — it is per-session state bound by
+            // `SessionTask::new` via `set_debug_pending_injection`. A
+            // template (or another session's clone) must not inherit a
+            // sibling's bypass channel.
+            pending_debug_handles: None,
             approval_gate: self.approval_gate.clone(),
             shell_approval_threshold: self.shell_approval_threshold,
             shell_risk_rules: self.shell_risk_rules.clone(),
@@ -1751,5 +1822,80 @@ mod tests {
             session_core.rag_provider.as_ref().unwrap().name(),
             "dummy_rag"
         );
+    }
+
+    /// Build a minimal per-session `DebugHandles` bundle, mirroring
+    /// `SessionManager::create_session` / `push_debug_mode_to_existing_sessions`.
+    async fn make_debug_handles(session_id: &str) -> crate::debug::DebugHandles {
+        let ctrl = Arc::new(tokio::sync::Mutex::new(
+            crate::debug::controller::DebugController::new(),
+        ));
+        let bus = crate::debug::events::DebugEventBus::new();
+        let (rw, rs, rc) = {
+            let guard = ctrl.lock().await;
+            (
+                guard.rewind_notify_handle(),
+                guard.resume_notify_handle(),
+                guard.control_notify_handle(),
+            )
+        };
+        crate::debug::DebugHandles {
+            debug_ctrl: ctrl,
+            debug_event_tx: bus.sender_template().for_session(session_id.to_string()),
+            rewind_notify: rw,
+            resume_notify: rs,
+            control_notify: rc,
+        }
+    }
+
+    /// Regression for the mid-loop `EnableDebugMode` bypass bug (ADR-048):
+    ///
+    /// `AgentCore::set_debug_pending_injection` must hold the bypass
+    /// channel at the AgentCore level EVEN when the observer slot is
+    /// `Production` (the observer's own `set_pending_injection` is a no-op
+    /// in that state). Before this fix, `session_task.rs` bound the channel
+    /// in `SessionTask::new` — which runs while the observer is Production
+    /// — so a debug panel opened mid-loop could never be picked up, and
+    /// iteration counters stayed frozen until the SessionTask message loop
+    /// processed the queued `EnableDebugMode`.
+    #[tokio::test]
+    async fn test_pending_debug_handles_held_at_core_level_and_clone_isolated() {
+        let mut core = make_core(Some(8192), None, None, 0);
+
+        // Sanity: a fresh core has no pending channel.
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Simulate SessionTask::new binding the shared bypass channel while
+        // the observer is still Production.
+        let channel: Arc<tokio::sync::Mutex<Option<crate::debug::DebugHandles>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        core.set_debug_pending_injection(channel.clone());
+
+        // The channel must be retained at the AgentCore level (the fix).
+        assert!(core.pending_debug_handles.is_some());
+
+        // Simulate SessionManager::push_debug_mode_to_existing_sessions
+        // writing per-session handles into the shared channel while the
+        // agent loop is running.
+        {
+            let mut pending = channel.lock().await;
+            *pending = Some(make_debug_handles("sess-1").await);
+        }
+
+        // The agent loop drains it at the next iteration boundary.
+        let taken = core
+            .take_pending_debug_handles()
+            .expect("bypass-injected handles must be drainable");
+        assert_eq!(taken.debug_event_tx.session_id(), "sess-1");
+
+        // A second drain yields nothing (slot cleared).
+        assert!(core.take_pending_debug_handles().is_none());
+
+        // Clones do NOT carry the pending channel: it is per-session state,
+        // rebound by each SessionTask::new. A template clone must not
+        // inherit a sibling session's bypass channel.
+        let clone = core.clone();
+        assert!(clone.pending_debug_handles.is_none());
+        assert!(clone.take_pending_debug_handles().is_none());
     }
 }
