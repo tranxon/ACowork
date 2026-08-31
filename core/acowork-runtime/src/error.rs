@@ -48,6 +48,14 @@ pub enum RuntimeError {
     #[error("Memory error: {0}")]
     Memory(String),
 
+    /// LLM summary quality/format gate failure (distillation & compaction).
+    ///
+    /// See [`crate::episode_distill::SummaryError`] — retryable variants
+    /// (`Empty`, `MissingBlock`) step down the distillation target chain,
+    /// while `LowQuality` discards the output (quality-over-nothing).
+    #[error("Summary error: {0}")]
+    Summary(#[from] crate::episode_distill::SummaryError),
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 

@@ -2010,7 +2010,8 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_without_identity_keeps_system_prompt_unchanged() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("<summary>hello</summary>");
+        // Stub output must pass the compact_with_llm quality gate (≥20 chars).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -2041,7 +2042,8 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_with_identity_embeds_language_directive_into_system() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("<summary>summary text</summary>");
+        // Stub output must pass the compact_with_llm quality gate (≥20 chars).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary output here</summary>");
 
         let identity =
             "- Display Name: 大鱼\n- Language: zh-CN\n- Timezone: Asia/Shanghai\n- City: 上海";
@@ -2078,7 +2080,9 @@ mod tests {
     #[tokio::test]
     async fn compact_via_llm_with_empty_identity_keeps_system_prompt_unchanged() {
         let hm = build_history_with_messages();
-        let provider = CaptureProvider::new("ok");
+        // Stub output must carry a valid <summary> block — the quality gate in
+        // compact_with_llm rejects marker-less output (no raw-text fallback).
+        let provider = CaptureProvider::new("<summary>a valid compact model summary here</summary>");
 
         let result = hm
             .compact_via_llm(
@@ -2095,6 +2099,83 @@ mod tests {
             req.messages[0].content,
             crate::prompt::COMPACTION_SYSTEM_PROMPT,
             "whitespace-only identity must not append the directive"
+        );
+    }
+
+    // ── Quality gate rejection paths (P1: quality-over-nothing) ───────────
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_too_short_summary() {
+        let hm = build_history_with_messages();
+        // A placeholder summary (< MIN_SUMMARY_CHARS) must fail the quality
+        // gate — the output is discarded, never stored.
+        let provider = CaptureProvider::new("<summary>ok</summary>");
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::LowQuality(_))
+            ),
+            "placeholder summary must fail the quality gate, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_markerless_reasoning_dump() {
+        let hm = build_history_with_messages();
+        // Reasoning-model dump without the <summary> marker — the exact
+        // pollution shape from the pasted-text incident. Must error, never
+        // fall back to the raw text as a summary.
+        let provider = CaptureProvider::new(
+            "确认 disable 路径已清理 pending 槽位。\n开始实施。改两处：\n1. 删除 resolve_distill_model 调用\n2. 验证 fallback 链",
+        );
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::MissingBlock)
+            ),
+            "marker-less dump must fail the quality gate, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_via_llm_rejects_empty_content() {
+        let hm = build_history_with_messages();
+        // Empty content (model ignored thinking_mode=disabled and put its
+        // output in reasoning_content) must surface as SummaryError::Empty.
+        let provider = CaptureProvider::new("");
+        let err = hm
+            .compact_via_llm(
+                &provider,
+                "compact-model",
+                crate::prompt::COMPACTION_SYSTEM_PROMPT,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RuntimeError::Summary(crate::episode_distill::SummaryError::Empty(_))
+            ),
+            "empty content must surface as SummaryError::Empty, got: {err}"
         );
     }
 

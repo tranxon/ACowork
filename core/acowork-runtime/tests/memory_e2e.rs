@@ -11,7 +11,8 @@
 //! The write path is NOT a test stub: it exercises the real production
 //! compaction landing chain —
 //!   `EpisodeDistiller::write_summary_to_provider`
-//!     → `parse_compact_output` (5-field triples per ADR-057 D7/D8)
+//!     → `parse_compact_output_strict` (quality gate + 5-field triples,
+//!       ADR-057 D7/D8)
 //!     → `MemoryManager::record_distilled`
 //!     → `GrafeoStore::ingest_distilled_triples`
 //!     → instant pipeline (`process_memory_store`) + `SOURCED_FROM` edges
@@ -207,7 +208,8 @@ async fn desktop_memory_panel_flow_after_distillation_landing() {
         &Some(provider),
         Some(&DeterministicEmbedding),
     )
-    .await;
+    .await
+    .expect("fixture must pass the summary quality gate and land");
 
     // ── 3. Panel list: 1 Episodic + 2 Knowledge nodes ───────────────────
     let list = get_json(&e2e, "/memory/nodes?page=1&size=50").await;
@@ -314,7 +316,8 @@ async fn desktop_memory_panel_sourced_from_edges_survive_landing() {
         &Some(provider),
         Some(&DeterministicEmbedding),
     )
-    .await;
+    .await
+    .expect("fixture must pass the summary quality gate and land");
 
     // Resolve the episode node id through the same HTTP list the panel uses.
     let episodes = get_json(&e2e, "/memory/nodes?type=Episodic").await;
@@ -357,7 +360,8 @@ async fn desktop_memory_panel_duplicate_distillation_is_idempotent() {
             &Some(provider.clone()),
             Some(&DeterministicEmbedding),
         )
-        .await;
+        .await
+        .expect("fixture must pass the summary quality gate and land");
     }
 
     // Two episodes (one per write) but still only 2 knowledge nodes —
@@ -370,6 +374,40 @@ async fn desktop_memory_panel_duplicate_distillation_is_idempotent() {
         Some(2),
         "duplicate compaction output must not duplicate knowledge nodes"
     );
+
+    std::fs::remove_dir_all(&e2e._temp_dir).ok();
+}
+
+/// The quality gate must reject polluted LLM output BEFORE it reaches the
+/// store: verbatim role-label echoes (the model copied the raw dialog into
+/// the summary) must not land any node (P1: quality-over-nothing).
+#[tokio::test]
+async fn desktop_memory_panel_rejects_polluted_summary() {
+    let e2e = spawn_memory_e2e_server("reject").await;
+
+    let provider: Arc<dyn MemoryProvider> = e2e.store.clone();
+    let polluted = "<summary>用户：你好\n[User]: 你好\n[Assistant]: 我来看一下\n[Tool(bash)]: ls\n对话结束</summary>";
+    let err = EpisodeDistiller::write_summary_to_provider(
+        polluted,
+        "sess-e2e-reject",
+        &Some(provider),
+        Some(&DeterministicEmbedding),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            acowork_runtime::error::RuntimeError::Summary(
+                acowork_runtime::episode_distill::SummaryError::LowQuality(_)
+            )
+        ),
+        "verbatim role labels must fail the quality gate, got: {err:?}"
+    );
+
+    // Nothing landed — the panel shows an empty memory.
+    let stats = get_json(&e2e, "/memory/stats").await;
+    assert_eq!(stats["total_nodes"].as_u64(), Some(0));
 
     std::fs::remove_dir_all(&e2e._temp_dir).ok();
 }

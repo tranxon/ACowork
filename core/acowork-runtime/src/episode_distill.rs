@@ -87,14 +87,188 @@ pub fn parse_compact_output(raw: &str) -> CompactOutput {
     CompactOutput { summary, triples }
 }
 
+/// Quality/format gate error for LLM summary output (distillation & compaction).
+///
+/// Per the "LLM summaries must guarantee quality" principle, summary output
+/// that fails this gate is **discarded** — it never lands in episodic memory
+/// and never becomes the in-memory compaction marker:
+///
+/// - [`SummaryError::Empty`] / [`SummaryError::MissingBlock`] are
+///   **retryable**: the model didn't follow the `<summary>` format, so a
+///   different distillation target tier may do better.
+/// - [`SummaryError::LowQuality`] is **not retryable**: the model produced a
+///   structurally valid but unusable summary, and stepping down the fallback
+///   chain only gets cheaper/weaker — the output is dropped
+///   (quality-over-nothing).
+#[derive(Debug, Clone)]
+pub enum SummaryError {
+    /// Model returned an empty response (or only thinking blocks).
+    Empty(String),
+    /// Output is missing the required `<summary>...</summary>` block.
+    MissingBlock,
+    /// Summary block exists but failed the heuristic quality gate.
+    LowQuality(String),
+}
+
+impl std::fmt::Display for SummaryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SummaryError::Empty(hint) => {
+                write!(f, "compact model returned empty response{hint}")
+            }
+            SummaryError::MissingBlock => {
+                write!(f, "compact model output is missing the <summary> block")
+            }
+            SummaryError::LowQuality(preview) => {
+                write!(f, "compact model summary failed the quality gate: {preview:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SummaryError {}
+
+impl SummaryError {
+    /// Whether retrying with the next distillation target tier may help.
+    ///
+    /// `LowQuality` is a model-capability problem — the fallback chain only
+    /// gets cheaper/weaker, so the output is discarded instead of retried.
+    pub fn is_retryable(&self) -> bool {
+        !matches!(self, SummaryError::LowQuality(_))
+    }
+}
+
+/// Minimum character count for an LLM summary to be considered substantive.
+///
+/// Shorter output is treated as the model stalling / refusing rather than a
+/// real summary. Kept small so legitimate terse summaries are not misjudged.
+const MIN_SUMMARY_CHARS: usize = 20;
+
+/// Lazily-compiled regex matching `path/to/file.ext:NNN` leaks.
+///
+/// Reasoning models that ignore `thinking_mode=disabled` dump their chain of
+/// thought into the content; a summary that still carries tool-output shapes
+/// (file:line references) after sanitization is not clean prose.
+fn file_line_leak_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"[A-Za-z0-9_\-./\\]+\.(?:rs|ts|tsx|js|jsx|py|go|java|kt|toml|json|ya?ml|sh|md|c|h|cpp|hpp):\s*\d+",
+        )
+        .expect("file-line leak regex is valid")
+    })
+}
+
+/// Lazily-compiled regex matching raw tool-call/result echo tokens that
+/// survived [`sanitize_summary_text`] (mid-line echoes, bracket variants).
+fn tool_echo_leak_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)(?:^|\s)\[(?:tool(?:\([^)]*\))?|tool_call|tool_result|thought)\]")
+            .expect("tool echo leak regex is valid")
+    })
+}
+
+/// Heuristic quality gate for a `<summary>` block (valid format, bad content).
+///
+/// Returns `true` when the summary shows clear signs of being unusable:
+/// - too short to be a real summary (model stalling / refusing), or
+/// - **two or more conversation-role label lines** (`[User]:`, `[Assistant]:`,
+///   `[Tool(bash)]:`, ...) echoed verbatim — the model copied the raw dialog
+///   into the summary instead of summarizing it (strong copy signal), or
+/// - at least **two** contamination features: table-artifact lines,
+///   `file:line` references, tool-call/result echoes, or a single role-label
+///   line that survived sanitization.
+///
+/// A single contamination feature is tolerated (a summary may legitimately
+/// mention one file path); two or more strongly indicate raw tool output or
+/// reasoning dumps leaked into the summary.
+fn is_low_quality(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    if trimmed.chars().count() < MIN_SUMMARY_CHARS {
+        return true;
+    }
+    let mut contamination_flags = 0u8;
+    if trimmed.lines().any(|l| l.trim_start().starts_with(['|', '│'])) {
+        contamination_flags += 1;
+    }
+    if file_line_leak_regex().is_match(trimmed) {
+        contamination_flags += 1;
+    }
+    if tool_echo_leak_regex().is_match(trimmed) {
+        contamination_flags += 1;
+    }
+    // Conversation-role label lines copied verbatim into the summary mean the
+    // model echoed the raw dialog instead of summarizing it. Two or more
+    // labelled lines are a strong copy signal → discard outright; a single
+    // line is tolerated and only counts as one contamination feature.
+    let role_label_echoes = trimmed
+        .lines()
+        .filter(|l| {
+            role_marker_prefix_regex().is_match(l) || tool_marker_line_regex().is_match(l)
+        })
+        .count();
+    if role_label_echoes >= 2 {
+        return true;
+    }
+    if role_label_echoes == 1 {
+        contamination_flags += 1;
+    }
+    contamination_flags >= 2
+}
+
+/// Validate raw compact-model output against the quality gate.
+///
+/// The gate is **strict**: a missing `<summary>` block is an error, not a
+/// reason to fall back to the raw text — that fallback is exactly how
+/// reasoning dumps landed in episodic memory. Callers either step down the
+/// distillation target chain (retryable errors) or discard the output.
+fn validate_summary_output(raw: &str) -> std::result::Result<(), SummaryError> {
+    let Some(block) = extract_block(raw, "summary") else {
+        return Err(SummaryError::MissingBlock);
+    };
+    if block.trim().is_empty() {
+        return Err(SummaryError::Empty(
+            " (response contained a <summary> block with no content)".to_string(),
+        ));
+    }
+    if is_low_quality(&block) {
+        let preview: String = block.trim().chars().take(200).collect();
+        return Err(SummaryError::LowQuality(preview));
+    }
+    Ok(())
+}
+
+/// Strict variant of [`parse_compact_output`] for production write paths.
+///
+/// Unlike the backwards-compatible [`parse_compact_output`] (which treats a
+/// missing `<summary>` block as "the whole output is the summary"), this
+/// applies the quality gate first and **fails** when the block is missing or
+/// unusable — the summary is discarded (quality-over-nothing), never
+/// substituted with raw text.
+pub fn parse_compact_output_strict(
+    raw: &str,
+) -> std::result::Result<CompactOutput, SummaryError> {
+    validate_summary_output(raw)?;
+    let summary =
+        sanitize_summary_text(&extract_block(raw, "summary").expect("validated above"));
+    let triples_str = extract_block(raw, "triples").unwrap_or_default();
+    let triples: Vec<Triple> = triples_str
+        .lines()
+        .filter_map(parse_triple_line)
+        .collect();
+    Ok(CompactOutput { summary, triples })
+}
+
 /// ADR-061 §8.2/§8.3/§13.3: validated compaction summary output.
 ///
-/// `summary` is the `<summary>` block content (or the whole output when
-/// the tag is missing — backwards compatible with pre-block format);
-/// `user_intent` is the `<user_intent>` block content, falling back to
-/// the caller-supplied raw user messages when the LLM omits the block.
-/// Both are sanitized so role labels / tool echoes do not land in the
-/// marker text (see [`sanitize_summary_text`]).
+/// `summary` is the `<summary>` block content (empty when the tag is
+/// missing — production paths gate the output through [`compact_with_llm`]
+/// first, so the raw text is never substituted); `user_intent` is the
+/// `<user_intent>` block content, falling back to the caller-supplied raw
+/// user messages when the LLM omits the block. Both are sanitized so role
+/// labels / tool echoes do not land in the marker text (see
+/// [`sanitize_summary_text`]).
 #[derive(Debug, Clone)]
 pub struct ValidatedSummary {
     pub summary: String,
@@ -103,7 +277,10 @@ pub struct ValidatedSummary {
 
 /// Parse and validate the compact model's raw output (ADR-061 §8).
 ///
-/// - `<summary>` missing → the entire output is treated as the summary.
+/// - `<summary>` missing → degrades to empty (production callers run the
+///   output through the quality gate in [`compact_with_llm`] first, so a
+///   missing block here means the caller is on a defensive path; the raw
+///   text is NEVER substituted as the summary).
 /// - `<user_intent>` missing → `fallback_user_intent` (the raw user
 ///   messages joined by the caller, compaction markers excluded) is used;
 ///   when that is also absent the block degrades to empty rather than
@@ -112,8 +289,7 @@ pub fn parse_and_validate_summary(
     raw: &str,
     fallback_user_intent: Option<&str>,
 ) -> ValidatedSummary {
-    let summary =
-        sanitize_summary_text(&extract_block(raw, "summary").unwrap_or_else(|| raw.trim().to_string()));
+    let summary = sanitize_summary_text(&extract_block(raw, "summary").unwrap_or_default());
     let user_intent = extract_block(raw, "user_intent")
         .map(|s| sanitize_summary_text(&s))
         .or_else(|| fallback_user_intent.map(str::to_string))
@@ -343,14 +519,16 @@ impl EpisodeDistiller {
     /// Distill an entire conversation session upon close.
     ///
     /// Reads the JSONL file and produces a session-level natural-language summary.
-    /// If the session content is shorter than `min_distill_chars`, the raw text is
-    /// used directly as summary — no LLM call is made (and `usage` in the
-    /// returned tuple is `UsageInfo::default()`).
+    /// If the session content is shorter than `min_distill_chars`, the session
+    /// is **skipped** (an episode with an empty summary is returned) — the raw
+    /// conversation text is NEVER used as the summary (no raw-text fallback:
+    /// role labels and tool echoes must not land in episodic memory). Callers
+    /// must not write the episode when the returned summary is empty.
     ///
     /// `identity_context` is threaded into the system prompt when an LLM call
     /// is made so the summary lands in the user's preferred language. When the
-    /// raw-text fallback path is taken, no LLM is invoked and identity is not
-    /// consulted (the raw conversation text is used as-is).
+    /// session is skipped, no LLM is invoked and `usage` in the returned tuple
+    /// is `UsageInfo::default()`.
     ///
     /// `compaction_prompt` is the agent-specific summarization directive from
     /// `prompts/summary.md`; `None` falls back to the built-in
@@ -382,27 +560,38 @@ impl EpisodeDistiller {
             ));
         }
 
-        let (summary, usage) = if messages_text.len() < min_distill_chars {
+        // Short sessions are SKIPPED, not summarized with raw text: falling
+        // back to the raw conversation would land role labels and tool
+        // echoes in episodic memory. Skipping is not a failure — the session
+        // is simply not worth remembering.
+        if messages_text.len() < min_distill_chars {
             tracing::debug!(
                 len = messages_text.len(),
                 threshold = min_distill_chars,
-                "Session content is short — using raw text as summary, skipping LLM"
+                "Session content is short — skipping distillation (no raw-text fallback)"
             );
-            // Raw JSONL fallback: still sanitize so tool-call/result echoes and
-            // role labels don't become "knowledge" in the episodic memory.
-            (sanitize_summary_text(&messages_text), UsageInfo::default())
-        } else {
-            let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
-            compact_with_llm(
-                &prompt,
-                provider,
-                model_name,
-                distill_max_tokens,
-                identity_context,
-                compaction_prompt.unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT),
-            )
-            .await?
-        };
+            return Ok((
+                DistilledEpisode {
+                    session_id: session_id.to_string(),
+                    summary: String::new(),
+                    source_session_id: session_id.to_string(),
+                    consolidated: false,
+                    triples: Vec::new(),
+                },
+                UsageInfo::default(),
+            ));
+        }
+
+        let prompt = crate::prompt::COMPACT_PROMPT.replace("{messages_text}", &messages_text);
+        let (summary, usage) = compact_with_llm(
+            &prompt,
+            provider,
+            model_name,
+            distill_max_tokens,
+            identity_context,
+            compaction_prompt.unwrap_or(crate::prompt::COMPACTION_SYSTEM_PROMPT),
+        )
+        .await?;
 
         Ok((
             DistilledEpisode {
@@ -425,18 +614,24 @@ impl EpisodeDistiller {
     /// If `embedding_provider` is `Some`, generates an embedding vector
     /// from the summary text (200ms timeout) and stores it on the node
     /// for future vector-based retrieval.
+    ///
+    /// Returns `Err` when the summary fails the strict quality gate (the
+    /// output is discarded, never stored) or when Grafeo rejects the write.
+    /// Callers decide how to surface the failure (log vs. user notification).
     pub async fn write_summary_to_provider(
         summary_text: &str,
         session_id: &str,
         memory_provider: &Option<Arc<dyn acowork_memory::MemoryProvider>>,
         embedding_provider: Option<&dyn EmbeddingProvider>,
-    ) {
+    ) -> Result<()> {
         let Some(provider) = memory_provider else {
-            return;
+            return Ok(());
         };
         let manager =
             crate::memory::MemoryManager::new(crate::memory::MemoryManagerConfig::default());
-        let parsed = parse_compact_output(summary_text);
+        // Strict parse: a summary that fails the quality gate is discarded —
+        // parse_compact_output's raw-text fallback is intentionally NOT used.
+        let parsed = parse_compact_output_strict(summary_text)?;
         let episode = DistilledEpisode {
             session_id: session_id.to_string(),
             summary: parsed.summary,
@@ -444,16 +639,10 @@ impl EpisodeDistiller {
             consolidated: false,
             triples: parsed.triples,
         };
-        if let Err(e) = manager
+        manager
             .record_distilled(provider.as_ref(), &episode, embedding_provider)
-            .await
-        {
-            tracing::warn!(
-                error = %e,
-                session_id = %session_id,
-                "Failed to write summary to provider (non-fatal)"
-            );
-        }
+            .await?;
+        Ok(())
     }
 
     /// Select the cheapest model from a list of `ModelCapabilitiesInfo`.
@@ -678,10 +867,14 @@ pub(crate) async fn compact_with_llm(
         } else {
             " (content was empty — model may have ignored thinking_mode=disabled)"
         };
-        return Err(RuntimeError::Tool(format!(
-            "Compact model returned empty response{hint}"
-        )));
+        return Err(RuntimeError::Summary(SummaryError::Empty(hint.to_string())));
     }
+    // Quality gate: the output MUST carry a non-trivial <summary> block.
+    // A missing block or low-quality content is an error — never fall back
+    // to the raw text (that fallback is how reasoning dumps polluted
+    // episodic memory). Retryable errors let the caller step down the
+    // distillation target chain; LowQuality discards the output.
+    validate_summary_output(&summary).map_err(RuntimeError::Summary)?;
     Ok((summary, usage))
 }
 
@@ -817,7 +1010,7 @@ mod tests {
     async fn test_compact_with_llm_returns_usage_tuple_when_provider_supplies_it() {
         // ADR-027: Provider returning usage must thread through (String, UsageInfo).
         let provider = StubProvider::with_usage(
-            "summary text",
+            "<summary>a concise summary of the conversation here</summary>",
             UsageInfo {
                 prompt_tokens: 4_000,
                 completion_tokens: 800,
@@ -835,7 +1028,10 @@ mod tests {
         )
         .await;
         let (summary, usage) = result.expect("compact_with_llm should succeed");
-        assert_eq!(summary, "summary text");
+        assert!(
+            summary.contains("a concise summary of the conversation"),
+            "summary must be the raw marker-carrying output, got: {summary}"
+        );
         assert_eq!(usage.prompt_tokens, 4_000);
         assert_eq!(usage.completion_tokens, 800);
         assert_eq!(usage.total_tokens, 4_800);
@@ -845,7 +1041,7 @@ mod tests {
     async fn test_compact_with_llm_returns_zero_usage_when_provider_omits_it() {
         // ADR-027 "宁可 miss 也不估计": when Provider returns no usage,
         // the second tuple element is UsageInfo::default() (all zeros).
-        let provider = StubProvider::new("summary text");
+        let provider = StubProvider::new("<summary>a concise summary of the conversation here</summary>");
         let result = compact_with_llm(
             "ignored",
             &provider,
@@ -858,6 +1054,80 @@ mod tests {
         let (_summary, usage) = result.expect("compact_with_llm should succeed");
         assert_eq!(usage.prompt_tokens, 0);
         assert_eq!(usage.completion_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn compact_messages_rejects_markerless_reasoning_dump() {
+        // Tail-distillation entry point (used by close_session_inner) must
+        // hit the same quality gate: a marker-less reasoning dump is an
+        // error, never a summary (P1 — quality-over-nothing).
+        let provider = StubProvider::new(
+            "确认 disable 路径已清理 pending 槽位。\n开始实施。改两处：\n1. 删除 resolve_distill_model 调用\n2. 验证 fallback 链",
+        );
+        let messages = vec![ChatMessage {
+            role: MessageRole::User,
+            content: "你好，请帮我分析这个问题".to_string(),
+            ..Default::default()
+        }];
+        let err = EpisodeDistiller::compact_messages(
+            &messages,
+            &provider,
+            "model",
+            1024,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, RuntimeError::Summary(SummaryError::MissingBlock)),
+            "marker-less dump must fail the quality gate, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn distill_on_session_end_skips_short_sessions_without_llm() {
+        // Short sessions are SKIPPED (empty summary + zero usage) — the raw
+        // conversation text must never be used as the summary (no raw-text
+        // fallback: role labels and tool echoes must not land in memory).
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-distill-short-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{}\n{\"role\":\"user\",\"content\":\"你好，帮我看看这个问题\"}\n",
+        )
+        .unwrap();
+
+        // If the skip logic regressed and the LLM were called, the stub
+        // would return a gate-passing summary and the empty-summary assert
+        // below would fail.
+        let provider = StubProvider::new(
+            "<summary>should never be called for a short session</summary>",
+        );
+        let (episode, usage) = EpisodeDistiller::distill_on_session_end(
+            &path,
+            "sess-short",
+            &provider,
+            "model",
+            10_000, // min_distill_chars — far above the file length
+            1024,
+            None,
+            None,
+        )
+        .await
+        .expect("short session must skip, not fail");
+        assert!(
+            episode.summary.is_empty(),
+            "short session must yield an empty summary, got: {:?}",
+            episode.summary
+        );
+        assert_eq!(usage.prompt_tokens, 0, "no LLM call → zero usage");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
@@ -1147,10 +1417,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_validate_summary_missing_summary_uses_whole_output() {
+    fn parse_and_validate_summary_missing_summary_degrades_to_empty() {
+        // No raw-text fallback: a missing <summary> block yields an empty
+        // summary (production paths gate the output through
+        // compact_with_llm before parsing, so this is a defensive path).
         let raw = "plain prose without tags";
         let parsed = parse_and_validate_summary(raw, None);
-        assert_eq!(parsed.summary, "plain prose without tags");
+        assert!(parsed.summary.is_empty());
         assert!(parsed.user_intent.is_empty());
     }
 
@@ -1171,6 +1444,99 @@ mod tests {
         assert!(!parsed.user_intent.contains("[Tool(bash)]:"));
         assert!(parsed.summary.contains("prose"));
         assert!(parsed.user_intent.contains("intent"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Summary quality gate (P1: quality-over-nothing) — validate_summary_output
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_summary_output_rejects_missing_block() {
+        // Reasoning-model dump without the <summary> marker — the exact
+        // pollution shape from the pasted-text incident.
+        let raw = "确认 disable 路径已清理 pending 槽位。\n开始实施。改两处：\n1. 删除 resolve_distill_model 调用\n2. 验证 fallback 链";
+        let err = validate_summary_output(raw).unwrap_err();
+        assert!(matches!(err, SummaryError::MissingBlock));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn validate_summary_output_rejects_empty_block() {
+        let err = validate_summary_output("<summary>  </summary>").unwrap_err();
+        assert!(matches!(err, SummaryError::Empty(_)));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn validate_summary_output_rejects_too_short_block() {
+        // Format is right but the content is a placeholder — not a summary.
+        let err = validate_summary_output("<summary>ok</summary>").unwrap_err();
+        assert!(matches!(err, SummaryError::LowQuality(_)));
+        assert!(!err.is_retryable(), "low quality must not be retried");
+    }
+
+    #[test]
+    fn validate_summary_output_rejects_verbatim_role_label_echoes() {
+        // The model copied the raw dialog (role labels intact) into the
+        // summary instead of summarizing it — strong copy signal.
+        let raw = "<summary>用户：你好\n[User]: 你好\n[Assistant]: 我来看一下\n[Tool(bash)]: ls\n对话结束</summary>";
+        let err = validate_summary_output(raw).unwrap_err();
+        assert!(
+            matches!(err, SummaryError::LowQuality(_)),
+            "verbatim role labels must fail the quality gate, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_summary_output_tolerates_single_role_label_line() {
+        // A single labelled line is tolerated — it counts as one
+        // contamination feature, not enough to discard.
+        let raw = "<summary>用户要求重构 Settings 页面，并希望保留现有交互习惯。\n[User]: 请重构 Settings 页面\n这是本次会话的核心诉求。</summary>";
+        assert!(
+            validate_summary_output(raw).is_ok(),
+            "a single role label must be tolerated"
+        );
+    }
+
+    #[test]
+    fn validate_summary_output_rejects_mixed_contamination() {
+        // Two contamination features: a file:line reference plus a
+        // table-artifact line — raw tool output leaked into the summary.
+        let raw = "<summary>定位到 ChatPanel 的问题。\nsrc/components/chat/ChatPanel.tsx:420: const sessionState = ...\n| 文件 | 行号 |\n| ChatPanel | 420 |\n最终修复了滚动位置。</summary>";
+        let err = validate_summary_output(raw).unwrap_err();
+        assert!(
+            matches!(err, SummaryError::LowQuality(_)),
+            "two contamination features must fail the gate, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_summary_output_accepts_clean_block() {
+        let raw = "<summary>用户要求查找 running 和 retry 相关的 UI 元素，最终定位到 RetryWaitBanner 组件并确认了开关逻辑。</summary>";
+        assert!(validate_summary_output(raw).is_ok());
+    }
+
+    #[test]
+    fn parse_compact_output_strict_ok() {
+        let raw = "<summary>用户修复了上下文压缩的摘要质量问题，并验证了三层 fallback 链。</summary>\n\
+                   <triples>\nUser | fixed | summary quality gate | 0.9 | Fact\n</triples>";
+        let parsed =
+            parse_compact_output_strict(raw).expect("valid output must parse in strict mode");
+        assert!(parsed.summary.contains("摘要质量"));
+        assert_eq!(parsed.triples.len(), 1);
+    }
+
+    #[test]
+    fn parse_compact_output_strict_rejects_missing_block() {
+        let err = parse_compact_output_strict("plain prose without tags").unwrap_err();
+        assert!(matches!(err, SummaryError::MissingBlock));
+    }
+
+    #[test]
+    fn summary_error_retryability() {
+        assert!(SummaryError::MissingBlock.is_retryable());
+        assert!(SummaryError::Empty("hint".to_string()).is_retryable());
+        assert!(!SummaryError::LowQuality("x".to_string()).is_retryable());
     }
 
     #[test]
