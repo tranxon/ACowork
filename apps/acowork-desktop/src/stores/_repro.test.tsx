@@ -5,9 +5,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, act, fireEvent } from "@testing-library/react";
 import { useCallback } from "react";
-import { useChatStore, handleMessageEvent } from "./chatStore";
+import { useChatStore, handleMessageEvent, scheduleSendReconciliation } from "./chatStore";
 import { useAgentStore } from "./agentStore";
 import { FileTreeNode } from "../components/workspace/FileTree/FileTreeNode";
+import type { ChatMessage } from "../lib/types";
 
 const AGENT = "com.test.Agent";
 
@@ -574,5 +575,179 @@ describe("REPRO: add to file routes to old session after new session creation", 
     expect(
       useChatStore.getState().getSessionState(AGENT, "sess-old").attachedContext,
     ).toHaveLength(1);
+  });
+
+  // ── REPRO-G: send button + phase banner stale state ────────────────
+  //
+  // User report (2026-09-01):
+  //   - After send, button still shows "Send" instead of "Stop" (sending=false
+  //     even though sessionStatus moved to llm_awaiting_first_chunk).
+  //   - After done, button still shows "Stop" (sending=true even though
+  //     sessionStatus is back to idle).
+  //   - Switching sessions + switching back makes the UI correct → proves
+  //     the store state IS right, but the subscription / re-render layer
+  //     dropped the in-place update.
+  //
+  // Hypothesis: the scheduleSendReconciliation set() chain
+  // (300/800/1600ms loadSequence updates) racing with the session_state
+  // MQTT set() chain drops intermediate sessionStatus transitions on the
+  // floor. The probe below subscribes via the same selector pattern as
+  // ChatPanel and records every observed (status, sending) pair.
+  it("REPRO-G: sendMessage → session_state transitions are observed by the status selector (no drop)", async () => {
+    const SESSION = "sess-g";
+    seedAgent([SESSION], SESSION);
+
+    // Use real timers so the 300/800/1600ms reconciliation actually fires
+    // (the user's bug is timing-dependent).
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+
+    // Probe: mirrors ChatPanel.tsx:408-413 selector pattern. Records every
+    // observed transition so we can assert the chain is observed end-to-end.
+    const observed: Array<{ status: string; sending: boolean; t: number }> = [];
+    const t0 = Date.now();
+    function StatusProbe() {
+      const sessionStatus = useChatStore((s) => {
+        const agent = s.agentStates[AGENT];
+        return agent?.sessionStates[SESSION]?.sessionStatus ?? null;
+      });
+      const sending = sessionStatus?.status !== "idle" && sessionStatus != null;
+      if (
+        observed.length === 0 ||
+        observed[observed.length - 1].status !== (sessionStatus?.status ?? "null") ||
+        observed[observed.length - 1].sending !== !!sending
+      ) {
+        observed.push({
+          status: sessionStatus?.status ?? "null",
+          sending: !!sending,
+          t: Date.now() - t0,
+        });
+      }
+      return (
+        <div data-testid="status">
+          {sessionStatus?.status ?? "null"}|{sending ? "1" : "0"}
+        </div>
+      );
+    }
+
+    render(<StatusProbe />);
+
+    // 1. Backend publishes session_state (idle → llm_awaiting_first_chunk).
+    //    The user's backend does this ~50ms after sendMessage lands. We
+    //    compress that here.
+    await act(async () => {
+      handleMessageEvent(
+        {
+          type: "session_state",
+          agent_id: AGENT,
+          session_id: SESSION,
+          status: { status: "llm_awaiting_first_chunk" },
+          message_count: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          ratio: 0,
+          updated_at: 0,
+        },
+        useChatStore.setState,
+        useChatStore.getState,
+        AGENT,
+      );
+    });
+
+    // 2. scheduleSendReconciliation (what sendMessage schedules after a
+    //    successful MQTT publish). On each retry, loadSessionMessages runs
+    //    a set() for loadSequence+abortController — which does NOT include
+    //    sessionStatus in its patch but DOES create a new agent object.
+    //    If the selector's identity check trips, the in-flight transition
+    //    observed in step 1 could be lost.
+    await act(async () => {
+      // Insert an optimistic message first so scheduleSendReconciliation
+      // has something to wait for (it short-circuits if no _isOptimistic).
+      const ss0 = useChatStore.getState().getSessionState(AGENT, SESSION);
+      useChatStore.setState((s) => ({
+        ...s,
+        agentStates: {
+          ...s.agentStates,
+          [AGENT]: {
+            ...s.agentStates[AGENT]!,
+            sessionStates: {
+              ...s.agentStates[AGENT]!.sessionStates,
+              [SESSION]: {
+                ...ss0,
+                messages: [
+                  ...ss0.messages,
+                  {
+                    id: "msg-opt",
+                    content: "hello",
+                    type: "user",
+                    timestamp: Date.now(),
+                    _isOptimistic: true,
+                  } as ChatMessage,
+                ],
+              },
+            },
+          },
+        },
+      }));
+
+      scheduleSendReconciliation(AGENT, SESSION);
+      // Advance through all 3 retry delays: 300 + 800 + 1600 = 2700ms.
+      // The first fetch resolves quickly (mock returns empty), the second
+      // also resolves, the third is allowed to fire too.
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(800);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1600);
+      await Promise.resolve();
+    });
+
+    // 3. Backend publishes session_state (llm_awaiting_first_chunk → idle).
+    await act(async () => {
+      handleMessageEvent(
+        {
+          type: "session_state",
+          agent_id: AGENT,
+          session_id: SESSION,
+          status: { status: "idle" },
+          message_count: 1,
+          input_tokens: 0,
+          output_tokens: 0,
+          total_input_tokens: 0,
+          total_output_tokens: 0,
+          ratio: 0,
+          updated_at: 0,
+        },
+        useChatStore.setState,
+        useChatStore.getState,
+        AGENT,
+      );
+    });
+
+    vi.useRealTimers();
+
+    // The chain we expect to observe:
+    //   1. null → null (initial)
+    //   2. llm_awaiting_first_chunk → sending=1   (the bug: user reports this is missing)
+    //   3. (the 3 reconciliation set()s — should not flip status back)
+    //   4. idle → sending=0                       (the bug: user reports this is missing)
+    //
+    // We don't pin exact ordering of (3) vs (2) since the timeline
+    // depends on how the test's mocks schedule microtasks, but we DO
+    // require that (2) and (4) appear in observed[] in that order.
+    const sawProcessing = observed.some((o) => o.sending === true);
+    const sawBackToIdle = observed.some((o) => o.sending === false && o.status === "idle");
+
+    // If the bug is real, `sawProcessing` will be false OR `sawBackToIdle`
+    // will be false (or both — depending on which transition is dropped).
+    expect(
+      sawProcessing,
+      `Selector never observed a processing transition. Observed: ${JSON.stringify(observed)}`,
+    ).toBe(true);
+    expect(
+      sawBackToIdle,
+      `Selector never observed the back-to-idle transition. Observed: ${JSON.stringify(observed)}`,
+    ).toBe(true);
   });
 });

@@ -654,7 +654,7 @@ pub(crate) fn spawn_config_change_relay(
 pub(crate) fn spawn_state_change_relay(
     mut state_rx: tokio::sync::mpsc::UnboundedReceiver<StateChange>,
     chunk_tx: tokio::sync::mpsc::Sender<crate::agent::loop_::SessionChunkEvent>,
-    _conv: ConversationSession,
+    conv: ConversationSession,
     session_id: String,
 ) {
     tokio::spawn(async move {
@@ -662,6 +662,16 @@ pub(crate) fn spawn_state_change_relay(
         use std::time::{Duration, Instant};
 
         const COALESCE_WINDOW: Duration = Duration::from_millis(500);
+
+        // Hold the ConversationSession alive for as long as the relay runs.
+        // The caller hands us a clone; if we never bind it, the clone is
+        // dropped as soon as this function returns, which triggers
+        // `ConversationSession::drop` → sends a Drop sentinel on
+        // `state_change_tx` → this relay interprets it as "session destroyed"
+        // and exits immediately (ADR-043 sentinel semantics). Binding it here
+        // keeps the channel sender alive so the sentinel only arrives when the
+        // SessionManager truly destroys the session.
+        let _alive = conv;
 
         /// Publish a single snapshot to the chunk channel (best-effort).
         fn publish(
