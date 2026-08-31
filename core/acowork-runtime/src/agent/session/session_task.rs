@@ -311,6 +311,46 @@ pub(crate) struct SessionTask {
 // the JSONL metadata. The Runtime no longer reads uploaded file bytes
 // or assembles complex prompt prefixes — see ADR-046 §2.4.
 
+/// ADR-047: apply deferred LLM-side effects when the session config
+/// version has advanced since the last poll.
+///
+/// Called (a) at the top of the SessionTask main loop — the original
+/// turn-boundary site — and (b) immediately before processing any
+/// inbound message that can drive an agent-loop run (ChatMessage,
+/// ContinueExecution, debug replay). Without (b), a config change
+/// (model_switch / reasoning_effort / workspace_switch) landing while
+/// the task is blocked in `select!` was only applied AFTER the next
+/// run finished — every LLM call of that run still used the stale
+/// provider ("switched model but usage still hits the old provider").
+fn apply_pending_config_effects(
+    agent_loop: &mut AgentLoop,
+    context_builder: &mut ContextBuilder,
+    session_id: &str,
+    last_config_version: &mut u64,
+    last_config_snapshot: &mut crate::agent::session_config::SessionConfigSnapshot,
+) {
+    if let Some(conv) = agent_loop.session.conversation.as_ref() {
+        let current_version = conv.config_version();
+        if current_version != *last_config_version {
+            let snapshot = conv.config_snapshot();
+            tracing::info!(
+                session_id = %session_id,
+                old_version = *last_config_version,
+                new_version = current_version,
+                "SessionTask: config version changed, applying LLM-side effects"
+            );
+            crate::agent::session_config::llm_effects::apply_llm_effects(
+                agent_loop,
+                context_builder,
+                &snapshot,
+                last_config_snapshot,
+            );
+            *last_config_snapshot = snapshot;
+            *last_config_version = current_version;
+        }
+    }
+}
+
 impl SessionTask {
     /// Create a new SessionTask with the given shared core, session state,
     /// message receiver, system prompt, and optional chunk channel.
@@ -631,26 +671,18 @@ impl SessionTask {
 
         loop {
             // ── ADR-047: Check if config was mutated during previous turn ──
-            if let Some(conv) = agent_loop.session.conversation.as_ref() {
-                let current_version = conv.config_version();
-                if current_version != last_config_version {
-                    let snapshot = conv.config_snapshot();
-                    tracing::info!(
-                        session_id = %session_id,
-                        old_version = last_config_version,
-                        new_version = current_version,
-                        "SessionTask: config version changed, applying LLM-side effects"
-                    );
-                    crate::agent::session_config::llm_effects::apply_llm_effects(
-                        &mut agent_loop,
-                        &mut context_builder,
-                        &snapshot,
-                        &last_config_snapshot,
-                    );
-                    last_config_snapshot = snapshot;
-                    last_config_version = current_version;
-                }
-            }
+            // Applied both here (turn boundary after a run) and before every
+            // inbound message (see the `apply_pending_config_effects` call
+            // before `match msg`), so a config change landing while the task
+            // waits in `select!` is picked up BEFORE the next run starts —
+            // not after it finishes.
+            apply_pending_config_effects(
+                &mut agent_loop,
+                &mut context_builder,
+                &session_id,
+                &mut last_config_version,
+                &mut last_config_snapshot,
+            );
 
             // Use tokio::select! to await inbound messages, rewind
             // notifications, and resume notifications — all sourced
@@ -691,6 +723,17 @@ impl SessionTask {
                                 tracing::info!(
                                     session_id = %session_id,
                                     "Debug: resume/step notify — restarting agent loop"
+                                );
+                                // ADR-047: apply any config changes that
+                                // landed while the run was paused before
+                                // replaying (same rationale as the
+                                // ChatMessage path).
+                                apply_pending_config_effects(
+                                    &mut agent_loop,
+                                    &mut context_builder,
+                                    &session_id,
+                                    &mut last_config_version,
+                                    &mut last_config_snapshot,
                                 );
                                 // Apply rewind/patches before run
                                 agent_loop.core.debug_observer.apply_rewind_and_patches(
@@ -756,6 +799,20 @@ impl SessionTask {
             } else {
                 inbound_rx.recv().await
             };
+
+            // ADR-047: Re-check the config version before handling ANY
+            // inbound message. A model_switch / reasoning_effort /
+            // workspace_switch that landed while this task was blocked in
+            // `select!` must be applied before the next run (ChatMessage /
+            // ContinueExecution / debug replay) — otherwise the run still
+            // executes against the stale LLM provider.
+            apply_pending_config_effects(
+                &mut agent_loop,
+                &mut context_builder,
+                &session_id,
+                &mut last_config_version,
+                &mut last_config_snapshot,
+            );
 
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
