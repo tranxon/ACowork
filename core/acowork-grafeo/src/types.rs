@@ -96,13 +96,6 @@ pub mod edge_types {
     pub const EVOLUTION_FROM: &str = "EVOLUTION_FROM";
     /// New knowledge node corrects an older incorrect version.
     pub const CORRECTS: &str = "CORRECTS";
-    /// Episodic node sourced a knowledge node (ADR-057 D9 cross-layer link).
-    ///
-    /// P0 ships the `Episodic -[SOURCED_FROM]-> Knowledge` edge so that
-    /// `graph_expand` reaches knowledge from episode seeds. The reverse
-    /// direction is implicit (episode IDs are stamped onto knowledge nodes
-    /// via the `source_episode_id` property).
-    pub const SOURCED_FROM: &str = "SOURCED_FROM";
 
     /// All edge types in a static slice (for iteration).
     pub const ALL: &[&str] = &[
@@ -113,7 +106,6 @@ pub mod edge_types {
         DERIVED_FROM,
         EVOLUTION_FROM,
         CORRECTS,
-        SOURCED_FROM,
     ];
 }
 
@@ -963,9 +955,10 @@ mod tests {
         assert!(edge_types::ALL.contains(&edge_types::SELF_REFERENCES));
         assert!(edge_types::ALL.contains(&edge_types::PRODUCED));
         assert!(edge_types::ALL.contains(&edge_types::DERIVED_FROM));
-        // ADR-057 D9: SOURCED_FROM is the cross-layer Episodic→Knowledge edge.
-        assert!(edge_types::ALL.contains(&edge_types::SOURCED_FROM));
-        assert_eq!(edge_types::ALL.len(), 8);
+        // Triples-removed (ADR-057): the `Episodic -[SOURCED_FROM]-> Knowledge`
+        // edge type was retired because the distillation landing pipeline no
+        // longer creates `Knowledge` nodes from compacted episodes.
+        assert_eq!(edge_types::ALL.len(), 7);
     }
 
     // =====================================================================

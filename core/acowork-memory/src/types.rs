@@ -255,12 +255,6 @@ pub mod edge_types {
     pub const SELF_REFERENCES: &str = "SELF_REFERENCES";
     /// Knowledge node derived from an episodic node.
     pub const DERIVED_FROM: &str = "DERIVED_FROM";
-    /// Episodic node sourced a knowledge node (ADR-057 D9 cross-layer link).
-    ///
-    /// The `Episodic -[SOURCED_FROM]-> Knowledge` edge lets `graph_expand`
-    /// reach knowledge from episode seeds. The reverse direction is implicit
-    /// via the `source_episode_id` property on knowledge nodes.
-    pub const SOURCED_FROM: &str = "SOURCED_FROM";
 }
 
 // ============================================================================
@@ -677,44 +671,16 @@ pub struct StoreStats {
 // DistilledEpisode without depending on acowork-runtime.
 // ============================================================================
 
-/// A simple subject-predicate-object triple extracted during compaction.
-///
-/// ADR-057 D7/D8: `confidence` and `sub_type` are **required** fields at
-/// construction time (the compact model must emit both). `#[serde(default)]`
-/// is used so that legacy JSON missing these fields still deserializes — this
-/// is *not* a defensive Option, it is purely a serde-level accommodation for
-/// round-tripping during the development phase. New code MUST always supply
-/// both fields when constructing a `Triple` (see `episode_distill::parse_compact_output`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Triple {
-    pub subject: String,
-    pub predicate: String,
-    pub object: String,
-    /// LLM-assigned confidence in [0.0, 1.0]. Drives Active/Pending dispatch.
-    #[serde(default = "default_triple_confidence")]
-    pub confidence: f32,
-    /// Knowledge sub-type. Drives routing / labelling of the KnowledgeNode.
-    #[serde(default = "default_triple_sub_type")]
-    pub sub_type: KnowledgeSubType,
-}
-
-fn default_triple_confidence() -> f32 {
-    0.7
-}
-
-fn default_triple_sub_type() -> KnowledgeSubType {
-    KnowledgeSubType::Fact
-}
-
 /// A compacted/distilled episode - natural-language summary of a conversation segment.
 ///
 /// Per [ADR-011], the summary is plain natural language text. No structured JSON
 /// fields (intent_type, decision, keywords, etc.) - the summary text IS the
 /// distillation result and is directly suitable for semantic retrieval.
 ///
-/// ADR-057: Triples are extracted during compaction by the compact model and
-/// landed synchronously into the semantic layer (`MemoryProvider::ingest_distilled_triples`).
-/// Entities are intentionally NOT modelled as graph nodes in P0 (D5).
+/// ADR-057 (方案 C 撤销): Compaction no longer extracts structured triples.
+/// The natural-language summary is the only persistent output of compaction;
+/// structured knowledge comes from the `memory_store` tool or future batch
+/// refinement (see ADR-057 §12 retraction record).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistilledEpisode {
     /// Session that produced this episode.
@@ -726,9 +692,4 @@ pub struct DistilledEpisode {
     /// Whether this episode has been consolidated to the semantic layer.
     /// Initial value is always `false`.
     pub consolidated: bool,
-    /// Knowledge triples (subject|predicate|object|confidence|sub_type) extracted
-    /// during compaction. Each triple is grounded into a `KnowledgeNode` (Active
-    /// when `confidence >= 0.85`, Pending otherwise) by
-    /// [`crate::provider::MemoryProvider::ingest_distilled_triples`].
-    pub triples: Vec<Triple>,
 }

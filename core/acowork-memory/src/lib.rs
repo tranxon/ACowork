@@ -20,7 +20,7 @@ pub mod store;
 pub mod types;
 
 // Re-exports: MemoryProvider trait (new, for ADR-051 migration)
-pub use provider::{IngestResult, MemoryProvider};
+pub use provider::MemoryProvider;
 
 // Re-exports: MemoryAdminService trait (ADR-051 P4, admin/management operations)
 pub use admin::{
@@ -57,7 +57,7 @@ pub use types::{
     DEFAULT_EMBEDDING_DIM, DecayConfig, DecayScanResult, DistilledEpisode, Episode, KnowledgeNode,
     KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery, NodeStatus, PrivacyLevel,
     ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics, SearchResult, StoreHealth,
-    StoreStats, Triple,
+    StoreStats,
 };
 
 // Label and edge type constants

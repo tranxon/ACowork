@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::{
-    labels, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
+    labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
 };
 use crate::consolidation::{EmbeddingFn, GeneralizationConfig};
 
@@ -650,37 +650,51 @@ impl MemoryManager {
         injected
     }
 
-    /// Record a distilled/compacted episode into Grafeo.
+    /// Record a distilled/compacted episode into the episodic layer.
     ///
-    /// ADR-057 P0: This is now a thin wrapper around
-    /// [`MemoryProvider::ingest_distilled_triples`], which:
-    ///   - Stores the episode synchronously.
-    ///   - Lands each triple as a `KnowledgeNode` (Active ≥ 0.85, Pending
-    ///     otherwise).
-    ///   - Creates the cross-layer `Episodic -[SOURCED_FROM]-> Knowledge` edge
-    ///     so `graph_expand` reaches knowledge from episode seeds (D9).
+    /// ADR-057 → triples removal (this PR): only the natural-language
+    /// summary is persisted. Triple-based knowledge extraction was removed
+    /// because compact-model output quality was too low (see
+    /// [`parse_compact_output_strict`]’s gate rationale). Knowledge-layer
+    /// updates flow through the `memory_store` tool / procedural creation
+    /// paths instead (see `docs/memory-write-entrypoints.md`).
     ///
-    /// `metadata.triples` and `metadata.entities` are intentionally **not**
-    /// persisted (D3/D5 — no readers in the greenfield codebase).
+    /// Embedding of the summary is best-effort (D1 — failure degrades to
+    /// `None`, episode still stored, vector recall drops for that node).
     pub async fn record_distilled(
         &self,
         provider: &dyn MemoryProvider,
         episode: &DistilledEpisode,
         embedding_provider: Option<&dyn EmbeddingProvider>,
     ) -> Result<()> {
-        let result = provider
-            .ingest_distilled_triples(episode, embedding_provider)
-            .await
-            .map_err(|e| AcoworkError::Memory(format!("Failed to record distilled episode: {e}")))?;
+        let summary_embedding = match embedding_provider {
+            Some(prov) => prov.embed(&episode.summary).await.ok(),
+            None => None,
+        };
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "source_session_id".to_string(),
+            serde_json::Value::String(episode.source_session_id.clone()),
+        );
+
+        let ep = Episode {
+            session_id: episode.session_id.clone(),
+            turn_index: 0,
+            role: "distilled".to_string(),
+            content: episode.summary.clone(),
+            embedding: summary_embedding,
+            timestamp: chrono::Utc::now(),
+            consolidated: false,
+            metadata,
+            importance: 0.7,
+        };
+        provider.store_episode(&ep)?;
 
         tracing::debug!(
             session_id = %episode.session_id,
             summary_len = episode.summary.len(),
-            triple_count = episode.triples.len(),
-            episode_id = result.episode_id,
-            knowledge_landed = result.knowledge_ids.len(),
-            conflicts_detected = result.conflicts_detected,
-            "Recorded distilled episode via ingest_distilled_triples"
+            "Recorded distilled episode (summary-only, no triple landing)"
         );
 
         Ok(())
