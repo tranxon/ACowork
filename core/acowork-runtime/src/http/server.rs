@@ -1946,6 +1946,7 @@ async fn put_agent_config(
         req.shell_approval_threshold,
         req.approval_timeout_secs,
         req.idle_timeout_secs,
+        req.compression_ratio_threshold,
     );
     let svc = state
         .agent_config
@@ -2098,6 +2099,11 @@ struct UpdateAgentConfigRequest {
     /// on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     idle_timeout_secs: Option<serde_json::Value>,
+    /// ADR-061: minimum compression ratio for levels 1-7 (0.05–0.95;
+    /// 0.90 default = "compress until at most 10% remains"). Absent =
+    /// leave the on-disk value alone (partial PUT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compression_ratio_threshold: Option<serde_json::Value>,
 }
 
 impl UpdateAgentConfigRequest {

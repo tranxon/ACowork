@@ -22,7 +22,7 @@ use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
 #[cfg(test)]
 use acowork_core::providers::traits::ChatRequest;
 
-use crate::agent::compression_constants::{MIN_COMPRESSION_RATIO, SUMMARY_TOKEN_BUDGET};
+use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
 use crate::token::counter::TokenCounter;
 
@@ -973,17 +973,22 @@ impl HistoryManager {
     ///
     /// Selection rule (§19.2):
     /// - Levels 1-7: the **first** level satisfying
-    ///   `ratio >= MIN_COMPRESSION_RATIO && projected <= budget` wins
+    ///   `ratio >= min_ratio && projected <= budget` wins
     ///   (stop at the first sufficient one — more aggressive levels are
     ///   never tried).
-    /// - Level 8: sole fallback, **exempt** from the 10% bar; only requires
+    /// - Level 8: sole fallback, **exempt** from the ratio bar; only requires
     ///   `projected <= budget` (T > budget overflow lands here in one shot).
+    ///
+    /// `min_ratio` is the per-agent compression ratio threshold (default
+    /// [`MIN_COMPRESSION_RATIO`] = 0.90, i.e. "compress until at most 10%
+    /// remains", e.g. 200K → 20K).
     ///
     /// Errors with [`CompressError::UnrecoverableOverflow`] when level 8
     /// still cannot fit — the caller must not touch history (§19.5).
     pub(crate) fn plan_compression(
         &self,
         summary: &str,
+        min_ratio: f64,
     ) -> std::result::Result<CompressionPlan, CompressError> {
         if self.current_tokens == 0 || self.max_tokens == 0 {
             return Err(CompressError::UnrecoverableOverflow {
@@ -999,7 +1004,7 @@ impl HistoryManager {
             let projected = plan.projected_tokens;
             if level < 8 {
                 let ratio = 1.0 - (projected as f64 / self.current_tokens as f64);
-                if ratio >= MIN_COMPRESSION_RATIO && projected <= self.max_tokens {
+                if ratio >= min_ratio && projected <= self.max_tokens {
                     return Ok(plan);
                 }
             } else {
@@ -1165,6 +1170,7 @@ impl HistoryManager {
         &mut self,
         plan: CompressionPlan,
         summary: &str,
+        min_ratio: f64,
     ) -> std::result::Result<CompressionOutcome, CompressError> {
         let original_tokens = plan.original_tokens;
         let ratio = 1.0 - (plan.projected_tokens as f64 / original_tokens as f64);
@@ -1173,7 +1179,7 @@ impl HistoryManager {
         // against callers bypassing `plan_compression`). Level 8 is exempt
         // from the ratio bar (§19.2).
         if plan.projected_tokens > self.max_tokens
-            || (plan.level < 8 && ratio < MIN_COMPRESSION_RATIO)
+            || (plan.level < 8 && ratio < min_ratio)
         {
             return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
         }
@@ -1247,6 +1253,7 @@ impl HistoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 
     fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         ChatMessage {
@@ -2095,7 +2102,8 @@ mod tests {
 
     /// Build 7 full rounds: System + (User → Assistant{tool_calls} → Tool →
     /// Assistant) × 7. Tool results carry extra text so level 1's tool drops
-    /// clear the 10% ratio bar.
+    /// clear a 10% ratio bar (tests that want a weak level selected pass
+    /// `0.10` explicitly — the default bar is 0.90).
     fn build_7_round_history() -> HistoryManager {
         let mut hm = HistoryManager::new(1_000_000);
         hm.append(make_message(MessageRole::System, "System prompt"));
@@ -2138,7 +2146,10 @@ mod tests {
     #[test]
     fn test_plan_level1_keeps_users_all_and_tools_of_last_5_assistants() {
         let hm = build_7_round_history();
-        let plan = hm.plan_compression("Summary").expect("level 1 must fit");
+        // Explicit 10% bar: this fixture's total is small (~1K tokens), so
+        // level 1 only clears a weak bar — under the default 0.90 bar it
+        // would be skipped (see test_plan_default_ratio_skips_weak_levels).
+        let plan = hm.plan_compression("Summary", 0.10).expect("level 1 must fit");
         assert_eq!(plan.level, 1, "with a huge budget level 1 is selected first");
 
         // Level 1: every User and Assistant survives; tool window = the last
@@ -2180,16 +2191,16 @@ mod tests {
         }
         assert!(projections[0] > projections[7], "level 8 must be strictly smaller");
 
-        // Budget = level-5 projection: levels 1-4 fail the budget check,
-        // level 5 is the first fit → selected (§19.1: stop, never try 6-8).
+        // Budget = level-5 projection, 10% bar: levels 1-4 fail the budget
+        // check, level 5 is the first fit → selected (§19.1: stop, never try 6-8).
         let mut hm = hm;
         hm.set_max_tokens(projections[4]);
-        let plan = hm.plan_compression("Summary").expect("level 5 must fit");
+        let plan = hm.plan_compression("Summary", 0.10).expect("level 5 must fit");
         assert_eq!(plan.level, 5, "first sufficient level wins");
         // §19.2/D5: after apply the real count stays within budget (S known
         // at plan time + level 8 backstop).
         let outcome = hm
-            .apply_compression(plan, "Summary")
+            .apply_compression(plan, "Summary", 0.10)
             .expect("apply must succeed");
         assert_eq!(outcome.level, 5);
         assert!(
@@ -2219,7 +2230,9 @@ mod tests {
             .build_level_plan(8, hm.messages(), "Summary")
             .projected_tokens;
         hm.set_max_tokens(p8);
-        let plan = hm.plan_compression("Summary").expect("level 8 must fit");
+        let plan = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .expect("level 8 must fit");
         assert_eq!(plan.level, 8, "only level 8 fits; ratio exemption required");
 
         // Level 8 retains system + the LAST non-marker User (the earlier
@@ -2239,7 +2252,9 @@ mod tests {
         let mut hm = build_7_round_history();
         let p8 = hm.build_level_plan(8, hm.messages(), "Summary").projected_tokens;
         hm.set_max_tokens(p8 - 1);
-        let err = hm.plan_compression("Summary").unwrap_err();
+        let err = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .unwrap_err();
         assert!(
             matches!(err, CompressError::UnrecoverableOverflow { .. }),
             "level 8 cannot fit => explicit failure, history untouched: {err}"
@@ -2251,16 +2266,16 @@ mod tests {
     fn test_apply_compression_marker_contract_and_user_preservation() {
         let mut hm = build_7_round_history();
         let plan = hm
-            .plan_compression("A solid summary of everything so far")
+            .plan_compression("A solid summary of everything so far", 0.10)
             .expect("plan");
         assert_eq!(plan.level, 1);
         let outcome = hm
-            .apply_compression(plan, "A solid summary of everything so far")
+            .apply_compression(plan, "A solid summary of everything so far", 0.10)
             .expect("apply");
 
         assert!(outcome.removed_messages > 0);
         assert!(outcome.new_tokens < outcome.original_tokens);
-        assert!(outcome.compression_ratio >= MIN_COMPRESSION_RATIO);
+        assert!(outcome.compression_ratio >= 0.10);
 
         let msgs = hm.messages();
         let system_count = msgs
@@ -2290,12 +2305,30 @@ mod tests {
         let plan = hm.build_level_plan(1, hm.messages(), "Summary");
         let before = format!("{:?}", hm.messages());
         hm.set_max_tokens(1); // projected >> budget → defensive re-check fails
-        let err = hm.apply_compression(plan, "Summary").unwrap_err();
+        let err = hm
+            .apply_compression(plan, "Summary", MIN_COMPRESSION_RATIO)
+            .unwrap_err();
         assert!(matches!(err, CompressError::InsufficientCompression { .. }));
         assert_eq!(
             format!("{:?}", hm.messages()),
             before,
             "history must be untouched on reject"
+        );
+    }
+
+    #[test]
+    fn test_plan_default_ratio_skips_weak_levels() {
+        // ADR-061 §19.3: the default bar is 0.90 ("compress until at most
+        // 10% remains"). The small 7-round fixture never removes 90% at
+        // levels 1-7, so plan must fall through to level 8's ratio
+        // exemption instead of stopping at a weak level.
+        let hm = build_7_round_history();
+        let plan = hm
+            .plan_compression("Summary", MIN_COMPRESSION_RATIO)
+            .expect("level 8 must still fit");
+        assert_eq!(
+            plan.level, 8,
+            "under the default 0.90 bar every level 1-7 is skipped"
         );
     }
 

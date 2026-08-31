@@ -19,7 +19,7 @@ ADR-060 的 Block A/B/C/D 重排解决了"动态块污染稳定前缀"的问题�
 
 本 ADR 决定：
 
-1. **8 级递减压缩策略**替代"保留最近 N 轮"：从最宽松的保留级别开始逐级收紧，直到压缩比 ≥ 10% 为止；优化指标从"轮数"改为"压缩比"。
+1. **8 级递减压缩策略**替代"保留最近 N 轮"：从最宽松的保留级别开始逐级收紧，直到压缩比 ≥ 阈值（默认 90% = 节省 ≥ 90%、剩余 ≤ 10%，如 200K → 20K）为止；优化指标从"轮数"改为"压缩比"。常规场景 Lv4-8 是工作级别（Lv5 是默认阈值的稳定命中点），Lv1-3 是"单用户输入 + agent 长工具任务"场景保留实现。阈值是 per-agent 可调参数（`compression_ratio_threshold`，AgentSetup 面板，默认 90%，见 §3.3/§19.3）。
 2. **FIFO 路径物理删除**：`trim_fifo` / `emergency_trim` 在 8 级策略下不可达，删除后极端场景改为**显式失败**（`ChunkEvent::Error` 提示用户），绝不静默牺牲 cache。
 3. **工具自动压缩关闭**：`context_abandon` 工具不再注册（LLM 自主压缩破坏 cache 连续性），`context_retrieve` 保留作为压缩后的显式取回通道。
 4. **summary 保持既有 marker 契约**：压缩产物仍是 `User` 角色 + `name="compaction_summary"` 的消息（ADR-011/restorer 既有约定），level 元数据以纯文本写在 summary 内容最前面，**不改变消息角色**——避免与 ADR-060 Block B 的 System 过滤及 Anthropic system 提升语义冲突。
@@ -95,11 +95,20 @@ ADR-011 的压缩机制（`compact_via_llm` + `replace_middle_with_summary`）�
 
 工程上按"全量失效"预算（保守），实际收益以 Anthropic 场景更好。
 
-### 3.3 "10% 最低压缩比"是工程启发式
+### 3.3 压缩比达标线：默认 90%，per-agent 可调
 
-按同一 1.25× 写/读成本模型，压缩比 \(r\) 的盈亏平衡轮数 ≈ \(1.25(1-r)/r\)：\(r=10\%\) 时约 **11 轮**，\(r=50\%\) 时约 1.25 轮。严格地说"低于 10% 不划算"只在预期剩余轮数 < 11 时成立。
+按同一 1.25× 写/读成本模型，压缩比 \(r\) 的盈亏平衡轮数 ≈ \(1.25(1-r)/r\)：\(r=10%\) 时约 **11 轮**，\(r=50%\) 时约 1.25 轮。但低阈值是"够本就行"的成本视角，**未解决长会话反复触发压缩的可用性问题**——例如 200K → 180K（节省 10%）只够"擦过 budget"，下一会话又涨上来又触发，"压了个寂寞"。
 
-**决策**：10% 门槛作为**工程启发式**保留（实现简单、行为可预测），不追求与成本模型严格联动；若后续需要，可升级为"门槛 = f(预期剩余轮数)"的动态模型，本 ADR 不展开。
+**决策**：本 ADR 的达标线默认 **90%**（节省 ≥ 90%、剩余 ≤ 10%，如 200K → 20K）——确保压缩后 history 留出充足缓冲空间，避免短期内反复触发压缩再次付出 cache miss 成本。该阈值是**产品可用性决策**（不是成本模型的盈亏平衡推演），实现简单、行为可预测。
+
+**可调参数**：90% 是**默认值**，不是硬编码——通过 per-agent `compression_ratio_threshold`（agent_config.json / AgentSetup 面板，范围 0.05–0.95）可调：调低（如 50%）让更温和的压缩级别（Lv1-3）在轻量场景下也能生效，调高（如 95%）更激进。`None` = 使用内置默认 0.90（§19.3）。若后续需要，可升级为"门槛 = f(预期剩余轮数 / 工具调用分布)"的动态模型，本 ADR 不展开。
+
+**典型场景下的命中级别**（默认 90% 阈值；user+asst≈20K、tools≈180K）：
+- 工具均匀分布：Lv3-4 可能命中（约 80-85%）；Lv5 稳定命中（≈91%）
+- 工具集中在尾部：Lv1-4 全部跳过（远期工具占比大，Lv1-3 保留最近 5/3/1 窗口仍省不到 90%），Lv5 命中
+- 极端：Lv8 兜底
+
+调低阈值后 Lv1-3 也会在轻量场景命中（见 §6.1 场景定位）。
 
 ### 3.4 真正决定成败的是 summary 质量
 
@@ -134,9 +143,11 @@ ADR-010 的核心结论是"**程序能做的是什么时候叫 LLM 来做摘要�
 
 ### 6.1 设计思路
 
-**核心洞察**：以"保留 N 轮"为指标是脆弱的——N 轮的 token 数随工具调用体量变化巨大（N=1 在 long-running task 场景下就可能撑满 budget）。**真正应该优化的指标是"压缩比"**——只要压缩比 ≥ 10%，cache 牺牲就值得；否则降一级再压。
+**核心洞察**：以"保留 N 轮"为指标是脆弱的——N 轮的 token 数随工具调用体量变化巨大（N=1 在 long-running task 场景下就可能撑满 budget）。**真正应该优化的指标是"压缩比"**——只要压缩比 ≥ 阈值（默认 90% = 节省 ≥ 90%、剩余 ≤ 10%），cache 牺牲就值得且后续会话有充足缓冲；否则降一级再压。阈值见 §3.3（per-agent 可调）。
 
-**逐级递减的语义**：从最宽松的保留（级 1）开始尝试，如果压缩比不达标（< 10%），进入更激进的级（级 2），以此类推，直到级 8 仍不达标则放弃压缩（`NoCompressionNeeded`）。
+**逐级递减的语义**：从最宽松的保留（级 1）开始尝试，如果压缩比不达标（< 阈值），进入更激进的级（级 2），以此类推，直到级 8 仍不达标则放弃压缩（`NoCompressionNeeded`）。
+
+**Lv1-3 的设计意图（场景定位）**：Lv1-3 只压工具（保留所有 user/assistant），是为"单用户输入一句话 + agent 执行很长工具任务"场景保留——此时工具调用集中分布在尾部几个 assistant 窗口，Lv1-3 能保留尾部工具上下文而压掉远期。**常规多轮对话场景（user+assistant 占小头 + 工具是大头且均匀分布）下 Lv1-3 几乎不可能满足默认 90% 阈值，会跳过至 Lv4-7 直至 Lv8**——这是预期行为，不视为退化（实现保留给低阈值调整或特定数据分布场景）。
 
 **为什么不用单一策略**：long-running task 场景下，用户消息稀疏但每个 assistant 后都有大量工具调用。固定"保留最近 K 轮"要么 K=3 就撑满 budget，要么 K=1 丢光信息。逐级递减自动适配不同场景的"信息密度"。
 
@@ -165,11 +176,10 @@ ADR-010 的核心结论是"**程序能做的是什么时候叫 LLM 来做摘要�
 
 ```rust
 /// 8 级递减压缩策略
-/// 从级 1 开始尝试，直到压缩比达到 ≥ MIN_COMPRESSION_RATIO (10%)
+/// 从级 1 开始尝试，直到压缩比达到 ≥ min_ratio（默认 MIN_COMPRESSION_RATIO = 0.90，
+/// 即压缩后剩余 ≤ 10%；per-agent 可调，见 §3.3）
 /// 返回 CompressionPlan，执行 plan.apply(history) 完成压缩
-pub fn plan_compression(history: &HistoryState) -> Result<CompressionPlan> {
-    const MIN_COMPRESSION_RATIO: f64 = 0.10;  // 至少压掉 10% 才算"值得"
-
+pub fn plan_compression(history: &HistoryState, min_ratio: f64) -> Result<CompressionPlan> {
     let original_tokens = history.current_tokens;
     let target_tokens = history.effective_input_budget;
     let needed_ratio = 1.0 - (target_tokens as f64 / original_tokens as f64);
@@ -184,7 +194,7 @@ pub fn plan_compression(history: &HistoryState) -> Result<CompressionPlan> {
 
         tracing::debug!(level, projected_tokens, compression_ratio, "Trying compression level");
 
-        if compression_ratio >= MIN_COMPRESSION_RATIO {
+        if compression_ratio >= min_ratio {
             tracing::info!(level, compression_ratio, "Compression plan selected");
             return Ok(plan);
         }
@@ -221,12 +231,12 @@ impl CompressionPlan {
 
 ```rust
 impl CompressionPlan {
-    pub fn apply(self, history: &mut HistoryState) -> Result<CompressionOutcome> {
+    pub fn apply(self, history: &mut HistoryState, min_ratio: f64) -> Result<CompressionOutcome> {
         let original_tokens = history.current_tokens;
         let projected = self.projected_tokens();
         let ratio = 1.0 - (projected as f64 / original_tokens as f64);
 
-        if ratio < MIN_COMPRESSION_RATIO {
+        if ratio < min_ratio {
             return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
         }
 
@@ -431,9 +441,11 @@ match compact_via_llm(...).await {
 
 ## 13. 验收准则与异常边界
 
-### 13.1 压缩比 ≥ 10%
+### 13.1 压缩比 ≥ 阈值（默认 90%）
 
-任何一次成功压缩必须满足 `compression_ratio >= 10%`（启发式依据见 §3.3）。不达标 → 降级重试；8 级全不达标 → `NoCompressionNeeded`。
+任何一次成功压缩必须满足 `compression_ratio >= min_ratio`（默认 90% = 节省 ≥ 90%、剩余 ≤ 10%，决策依据见 §3.3；per-agent 可通过 `compression_ratio_threshold` 调整，范围 0.05–0.95）。不达标 → 降级重试；8 级全不达标 → `NoCompressionNeeded`。
+
+**Lv1-3 的场景定位**：Lv1-3 设计为"单用户输入 + agent 长工具任务"场景保留（保留所有 user/assistant + 尾部工具调用）；常规多轮对话场景下 Lv1-3 因工具占比大、均匀分布而无法满足默认 90% 阈值，会跳过至 Lv4+（Lv5 稳定命中）——这是预期行为，不视为退化（实现保留给低阈值调整或特定数据分布场景）。
 
 ### 13.2 级 1-7 必须保留所有 user 消息
 
@@ -451,7 +463,7 @@ LLM 输出缺少 `<user_intent>` 时，fallback 用原始 user 消息拼接（§
 
 | 边界 | 类型 | 行为 | 用户感知 |
 |---|---|---|---|
-| **压缩比 < 10%** | 验收不通过 | 降一级重试；8 级都不达标 → NoCompressionNeeded | 无感（自动降级） |
+| **压缩比 < 阈值（默认 90%）** | 验收不通过 | 降一级重试；8 级都不达标 → NoCompressionNeeded | 无感（自动降级） |
 | **级 1-7 丢失 user** | 验收不通过 | 返回 BugInPlan（plan 自身 bug） | 无感（plan 不会出错） |
 | **summary 缺 user_intent** | 验收不通过 | fallback 到原始 user 消息拼接 | 无感 |
 | **LLM 不可用** | 异常 | 不修改 history，emit `ChunkEvent::Error` | 前端提示"压缩失败" |
@@ -519,9 +531,9 @@ pub enum CompressionOutcome {
 
 | 编号 | 内容 | 涉及文件 | 优先级 |
 |------|------|----------|--------|
-| 1 | 常量 `MIN_COMPRESSION_RATIO=0.10` / `MIN_BUDGET_FOR_AGENT=8192` / summary token 上限常量 | 新 `compression_constants.rs` | **P0** |
+| 1 | 常量 `MIN_COMPRESSION_RATIO=0.90`（默认值；per-agent 可被 `compression_ratio_threshold` 覆盖，见 §19.3/19-6）/ `MIN_BUDGET_FOR_AGENT=65536` / summary token 上限常量 | 新 `compression_constants.rs` | **P0** |
 | 2 | `CompressionPlan::for_level` + `plan_compression` 8 级策略 | `core/acowork-runtime/src/agent/history.rs` | **P0** |
-| 3 | `CompressionPlan::apply` 强制压缩比 ≥ 10% + summary marker 构建（保持 User role + `name=compaction_summary`） | `core/acowork-runtime/src/agent/history.rs` | **P0** |
+| 3 | `CompressionPlan::apply` 强制压缩比 ≥ 阈值（默认 90%）+ summary marker 构建（保持 User role + `name=compaction_summary`） | `core/acowork-runtime/src/agent/history.rs` | **P0** |
 | 4 | `assert_user_messages_preserved` 验收（级 1-7 全保留 user） | `core/acowork-runtime/src/agent/history.rs` | **P0** |
 | 5 | `parse_and_validate_summary` + `<user_intent>` fallback 原始 user 消息 | `core/acowork-runtime/src/agent/history.rs` + `prompt.rs` | **P0** |
 | 6 | `COMPACTION_SYSTEM_PROMPT` 更新为三章节强制结构 | `core/acowork-runtime/src/agent/prompt.rs` | **P0** |
@@ -546,7 +558,7 @@ pub enum CompressionOutcome {
 
 | 维度 | 改动前 | 改动后 |
 |---|---|---|
-| 压缩策略 | 保留固定 3 轮 + FIFO 删头 | **8 级递减 + 10% 最低压缩比门槛**（§6） |
+| 压缩策略 | 保留固定 3 轮 + FIFO 删头 | **8 级递减 + 压缩比门槛（默认 90%，per-agent 可调）**（§6） |
 | FIFO 触发频率 | 偶发（压缩后仍超限时） | **永远不触发**（代码删除） |
 | Block B cache 失效原因 | todo / memory / FIFO 删头 / LLM 自主压缩 | **只剩 todo**（ADR-060 解决） |
 | summary LLM 调用次数 | 每超限 1 次 | 每超限 1 次（级 1 达标则只调 1 次） |
@@ -576,7 +588,7 @@ pub enum CompressionOutcome {
 
 本 ADR 用**单一原则**——"压缩比是优化指标，LLM 是唯一信息重建通道，FIFO 是必须消除的 cache 杀手"——重构上下文压缩机制：
 
-- **8 级递减策略**：从"全部 user/assistant + 最近 5 个 assistant 之间的工具"逐级收紧，到级 8"仅骨架 + summary"；每级只保留到"压缩比 ≥ 10%"就停，不达标降级重试。
+- **8 级递减策略**：从"全部 user/assistant + 最近 5 个 assistant 之间的工具"逐级收紧，到级 8"仅骨架 + summary"；每级只保留到"压缩比 ≥ 阈值（默认 90%）"就停，不达标降级重试（阈值 per-agent 可调，见 §3.3）。Lv1-3 为"单用户输入+长工具任务"场景保留实现，常规场景下会跳过至 Lv4-8（Lv5 是默认阈值的稳定命中点）。
 - **对话骨架优先**：级 1-7 保留所有 user 消息，assistant 次之，工具调用最后丢（§13.2）。
 - **summary marker 契约不变**：保持 `User` 角色 + `name="compaction_summary"`，level 元数据以纯文本内嵌（§9），与 restorer / episode_distill / ADR-060 Block B 过滤全部兼容。
 - **FIFO 物理删除**：§11.2 完整盘点 7 类调用点全部改道；LLM 不可用 → 显式失败 + 用户决策。
@@ -608,22 +620,21 @@ compact_history_if_needed（80% 触发 / force）
 伪代码（替代 §7.1）：
 
 ```rust
-pub fn plan_compression(history: &HistoryState, summary_tokens: u64) -> Result<CompressionPlan> {
-    const MIN_COMPRESSION_RATIO: f64 = 0.10;
+pub fn plan_compression(history: &HistoryState, summary_tokens: u64, min_ratio: f64) -> Result<CompressionPlan> {
     let original_tokens = history.current_tokens;
     let budget = history.effective_input_budget;
 
-    // 级 1-7：第一个满足 "压缩比 ≥ 10% 且 压缩后 ≤ budget" 的级（够用即停）
+    // 级 1-7：第一个满足 "压缩比 ≥ 阈值（默认 0.90）且 压缩后 ≤ budget" 的级（够用即停）
     for level in 1..=7 {
         let plan = CompressionPlan::for_level(level, history);
         let projected = plan.retained_tokens() + summary_tokens;
         let ratio = 1.0 - (projected as f64 / original_tokens as f64);
-        if ratio >= MIN_COMPRESSION_RATIO && projected <= budget {
+        if ratio >= min_ratio && projected <= budget {
             return Ok(plan);
         }
     }
 
-    // 级 8 兜底：唯一允许 ratio > 10% 的级，只校验压缩后 ≤ budget
+    // 级 8 兜底：唯一允许 ratio < 阈值 的级（实际 ratio 通常 ≥ 90%），只校验压缩后 ≤ budget
     let plan8 = CompressionPlan::for_level(8, history);
     if plan8.retained_tokens() + summary_tokens <= budget {
         return Ok(plan8);
@@ -636,10 +647,11 @@ pub fn plan_compression(history: &HistoryState, summary_tokens: u64) -> Result<C
 
 **注意**：级 8 的"当前 user message"定义为 history 中最后一条 `MessageRole::User` 消息；Block D（ADR-060 的 `pending_user_message`）由调用方显式传入，不参与 history 内判定。
 
-### 19.2 选择规则与 10% 语义（修订 §6.1/§13.1）
+### 19.2 选择规则与阈值语义（修订 §6.1/§13.1）
 
-- **10% 是目标达标线**：压缩比 < 10% 说明压得太少（§3.3 盈亏平衡点以下，不值得动 cache），不选中；级 1-7 从最宽松开始，**第一个满足 "r ≥ 10% 且 projected ≤ budget" 的级被选中即停**——更激进的级不会被尝试，故压缩比远超 10% 的级（除级 8 外）不会被选中。
-- **级 8 豁免**：作为唯一兜底，允许压缩比超过 10%（压到最小形态），其验收标准是 `projected ≤ budget` 而非 `r ≥ 10%`。
+- **阈值（默认 90%）是目标达标线**：压缩比 < 90%（即剩余 > 10%，如 200K → 180K 只省 10%，"压了个寂寞"）说明压得太少，未留出后续会话的缓冲空间，不选中；级 1-7 从最宽松开始，**第一个满足 "r ≥ 阈值 且 projected ≤ budget" 的级被选中即停**——更激进的级不会被尝试。阈值通过 per-agent `compression_ratio_threshold`（agent_config.json / AgentSetup 面板，范围 0.05–0.95）可调；调低后轻量场景会落在更温和的级。
+- **级 8 豁免**：作为唯一兜底，允许压缩比 < 阈值（实际 ratio 通常远超），其验收标准是 `projected ≤ budget` 而非 `r ≥ 阈值`。
+- **Lv1-3 场景定位**：Lv1-3 为"单用户输入+长工具任务"场景保留（保留所有 user/assistant + 尾部工具调用）；常规多轮对话场景下 Lv1-3 因工具占比大、均匀分布而无法满足默认 90% 阈值，会跳过至 Lv4-7 甚至 Lv8——这是预期行为，不视为退化（实现保留给低阈值调整或特定数据分布场景）。
 - **T > budget 极端场景**：级 1-7 全部"压缩后 > budget"时落级 8 一次到位，**不需要多轮收敛**。
 
 修订 §7.2 `apply` 校验：
@@ -652,7 +664,7 @@ impl CompressionPlan {
         if self.level < 8 {
             // 级 1-7：双条件校验（达标线 + budget）
             let ratio = 1.0 - (projected as f64 / original_tokens as f64);
-            if ratio < MIN_COMPRESSION_RATIO || projected > history.effective_input_budget {
+            if ratio < min_ratio || projected > history.effective_input_budget {
                 return Err(CompressError::InsufficientCompression { projected_ratio: ratio });
             }
         } else {
@@ -672,8 +684,8 @@ impl CompressionPlan {
 | 常量 | 值 | 说明 |
 |---|---|---|
 | `SUMMARY_TOKEN_BUDGET` | `4_096` | 摘要输出上限；替代现状 `compact_via_llm` 硬编码 2048（[history.rs:776](core/acowork-runtime/src/agent/history.rs#L776)）。**代码中不存在 8K 摘要定义**（`8_192` 仅出现在 `max_output_tokens_limit` 默认值与测试中），以本值定稿 |
-| `MIN_BUDGET_FOR_AGENT` | `65_536` | 模型拒绝线（替代原 8K）。`effective_input_budget < 64K` 的模型拒绝运行：128K/200K/1M 主流全过（128K − 32K output = 96K ≥ 64K），64K context 以下拒绝。64K 下机制自洽：触发 51.2K → 压掉 ≥10% = 5K+ > 4K summary（summary 不主导）→ 压缩后 ~46K（≈72%）→ 撑约 10 轮再触发 |
-| `MIN_COMPRESSION_RATIO` | `0.10` | 级 1-7 达标线（不变，级 8 豁免） |
+| `MIN_BUDGET_FOR_AGENT` | `65_536` | 模型拒绝线（替代原 8K）。`effective_input_budget < 64K` 的模型拒绝运行：128K/200K/1M 主流全过（128K − 32K output = 96K ≥ 64K），64K context 以下拒绝。64K 下机制自洽：触发 51.2K → 压缩后 ~46K（≈72%）→ 撑约 10 轮再触发（summary 4K 不主导） |
+| `MIN_COMPRESSION_RATIO` | `0.90`（默认值） | 级 1-7 达标线（节省 ≥ 90%、剩余 ≤ 10%；级 8 豁免）。**per-agent 可覆盖**：`AgentConfig::compression_ratio_threshold`（agent_config.json / AgentSetup 面板，范围 0.05–0.95），`None` = 本默认值。运行时链路：`put_agent_config` → `RuntimeConfigOverrides` → `AgentCore.compression_ratio_threshold` → `plan_compression(&marker_text, min_ratio)`（见 19-6） |
 
 ### 19.4 marker 语义（修订 §6.2/§9/§13.2）
 
@@ -705,7 +717,8 @@ impl CompressionPlan {
 | 19-2 | `CompactionEventMeta.keep_last_rounds` → `level: u8` 字段迁移，restorer 回放窗口校验同步适配 | conversation.rs + restorer.rs | **P0** |
 | 19-3 | `plan_compression(history, summary_tokens)` 签名与 19.1 先摘要后 plan 时序改造 | loop_context.rs + history.rs | **P0** |
 | 19-4 | 前端 `ContextOverflow` 错误提示文案（§11.3 压缩失败提示；chatStore 已有 error_type 处理基础） | apps/acowork-desktop i18n + chatStore | **P1** |
-| 19-5 | 测试补充：级 8 豁免校验、超限量 >10% 落级 8 的 plan 边界、marker 按 user 级保留的 `assert_user_messages_preserved` 适配 | runtime tests | **P0** |
+| 19-5 | 测试补充：级 8 豁免校验、超限落级 8 的 plan 边界、marker 按 user 级保留的 `assert_user_messages_preserved` 适配 | runtime tests | **P0** |
+| 19-6 | 达标线参数化：`MIN_COMPRESSION_RATIO` 默认 0.90，per-agent `compression_ratio_threshold`（agent_config.json / AgentSetup 面板，范围 0.05–0.95）全链路：`AgentConfig` → `RuntimeConfigOverrides` → `AgentCore` → `plan_compression/apply_compression(min_ratio)` | agent_config.rs + session_manager.rs + agent_core.rs + loop_context.rs + history.rs + usecases + http/server.rs + 前端 agentStore/AgentSetupTab/i18n | **P0** |
 
 ### 19.8 §7.3 布局图修正
 
@@ -725,7 +738,7 @@ P0 清单已全部落地并随 `cargo test -p acowork-runtime --lib`（1111 pass
 
 | 编号 | 状态 | 备注 |
 |---|---|---|
-| §15-1 | ✅ | `compression_constants.rs`：`SUMMARY_TOKEN_BUDGET = 4_096` / `MIN_BUDGET_FOR_AGENT = 65_536` / `MIN_COMPRESSION_RATIO = 0.10`（§19.3 定稿值） |
+| §15-1 | ✅ | `compression_constants.rs`：`SUMMARY_TOKEN_BUDGET = 4_096` / `MIN_BUDGET_FOR_AGENT = 65_536` / `MIN_COMPRESSION_RATIO = 0.90`（§19.3 默认值；per-agent 可被 `compression_ratio_threshold` 覆盖，见 19-6；Lv1-3 为"单用户输入+长工具任务"场景保留实现，常规场景 Lv4-8 工作，Lv5 稳定命中） |
 | §15-2 | ✅ | `plan_compression(history, summary_tokens)` 8 级策略，级 1-7 达标即停、级 8 豁免 ratio（§19.1） |
 | §15-3 | ✅ | `CompressionPlan::apply` 双条件/单条件校验 + marker 构建（User role + `name=compaction_summary`） |
 | §15-4 | ✅ | `assert_user_messages_preserved` 验收适配（marker 按 user 级处理） |
@@ -748,4 +761,5 @@ P0 清单已全部落地并随 `cargo test -p acowork-runtime --lib`（1111 pass
 | 19-3 | ✅ | 先摘要后 plan 时序（`compact_via_llm` 全量输入 → S 已知 → 8 级） |
 | 19-4 | ✅ | 前端 `ContextOverflow` 文案（ChatPanel + 5 语言 i18n） |
 | 19-5 | ✅ | 级 8 豁免 / 超限落级 8 / marker 按 user 级保留测试 |
+| 19-6 | ✅ | 达标线参数化全链路（见 §19.3 表项）：默认 0.90，AgentSetup 面板设置项（50%–95% slider，i18n ×5），`plan_compression/apply_compression` 接收 `min_ratio` 参数，测试新增 `test_plan_default_ratio_skips_weak_levels` |
 

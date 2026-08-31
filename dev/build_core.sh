@@ -406,6 +406,20 @@ else
     echo -e "${RED}  WARNING: embedding_models.json not found at $EMBED_MODELS_SRC${NC}"
 fi
 
+# Step 4.6: Copy offline_embedding_providers.json next to the gateway binary
+#
+# The gateway reads this from `{exe_dir}/offline_embedding_providers.json`
+# (cloud embedding provider catalog). Missing file = empty catalog = the UI's
+# cloud-provider section shows an empty list.
+echo -e "${YELLOW}[4.6/6] Copying offline_embedding_providers.json to target/$PROFILE...${NC}"
+EMBEDDING_PROVIDERS_SRC="$WORKSPACE_ROOT/assets/offline_embedding_providers.json"
+if [ -f "$EMBEDDING_PROVIDERS_SRC" ]; then
+    cp "$EMBEDDING_PROVIDERS_SRC" "$TARGET_DIR/offline_embedding_providers.json"
+    echo -e "${GREEN}  Copied to $TARGET_DIR${NC}"
+else
+    echo -e "${RED}  WARNING: offline_embedding_providers.json not found at $EMBEDDING_PROVIDERS_SRC${NC}"
+fi
+
 echo ""
 
 # Step 5: Start Gateway (only when not --no-start)

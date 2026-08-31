@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
 
+use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
 use crate::agent::context::count_chat_request_chars;
 use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
@@ -712,14 +713,25 @@ impl AgentLoop {
                         "<summary>{}</summary>\n<user_intent>{}</user_intent>",
                         validated.summary, validated.user_intent
                     );
+                    // ADR-061 §19.3: the per-agent compression ratio threshold
+                    // (Agent Setup panel, agent_config.json) replaces the
+                    // built-in default; None → MIN_COMPRESSION_RATIO (0.90).
+                    let min_ratio = self
+                        .core
+                        .compression_ratio_threshold
+                        .unwrap_or(MIN_COMPRESSION_RATIO);
                     let (level, removed) = match self
                         .session
                         .history
-                        .plan_compression(&marker_text)
+                        .plan_compression(&marker_text, min_ratio)
                     {
                         Ok(plan) => {
                             let level = plan.level;
-                            match self.session.history.apply_compression(plan, &marker_text) {
+                            match self
+                                .session
+                                .history
+                                .apply_compression(plan, &marker_text, min_ratio)
+                            {
                                 Ok(outcome) => {
                                     tracing::info!(
                                         level = outcome.level,

@@ -10,10 +10,16 @@ use crate::error::RuntimeError;
 
 /// Minimum compression ratio for levels 1-7 (the target bar).
 ///
-/// A level is only selected when it removes >= 10% of the history tokens —
-/// below that the cache invalidation is not worth the summary cost
-/// (ADR-061 §3.3 break-even analysis). Level 8 is exempt (see below).
-pub(crate) const MIN_COMPRESSION_RATIO: f64 = 0.10;
+/// A level is only selected when it removes >= `MIN_COMPRESSION_RATIO` of
+/// the history tokens — below that the cache invalidation is not worth the
+/// summary cost (ADR-061 §3.3 break-even analysis). Level 8 is exempt
+/// (see below).
+///
+/// Default is 0.90 = "compress until at most 10% remains" (e.g. 200K →
+/// 20K). This is the **default** for the per-agent
+/// `AgentConfig::compression_ratio_threshold` (agent_config.json / Agent
+/// Setup panel); a user override replaces it at plan time.
+pub(crate) const MIN_COMPRESSION_RATIO: f64 = 0.90;
 
 /// Maximum output budget for the LLM compaction summary.
 ///

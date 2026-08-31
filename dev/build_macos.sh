@@ -375,6 +375,15 @@ if [ -f "$EMBEDDING_MODELS_SRC" ]; then
     cp "$EMBEDDING_MODELS_SRC" "$TARGET_DIR/"
     echo -e "${GREEN}  ✓ embedding_models.json${NC}"
 fi
+
+# Copy offline_embedding_providers.json (cloud embedding provider catalog)
+# The gateway reads this from `{exe_dir}/offline_embedding_providers.json`.
+# Missing file = empty catalog = the UI's cloud-provider section shows no list.
+EMBEDDING_PROVIDERS_SRC="$WORKSPACE_ROOT/assets/offline_embedding_providers.json"
+if [ -f "$EMBEDDING_PROVIDERS_SRC" ]; then
+    cp "$EMBEDDING_PROVIDERS_SRC" "$TARGET_DIR/"
+    echo -e "${GREEN}  ✓ offline_embedding_providers.json${NC}"
+fi
 echo ""
 
 # ── Step 6: Start Gateway (only with --start) ──────────────────────────────
