@@ -236,6 +236,13 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces/{ws_id}/prompt-file",
             put(proxy_set_prompt_file),
         )
+        // ADR-058 (demand-driven revision): frontend pushes the visible
+        // watch set (open tabs + expanded dirs) to the Runtime. Full
+        // replace semantics; empty set → no scanning.
+        .route(
+            "/api/agents/{id}/workspaces/{ws_id}/fs-watch",
+            put(proxy_set_workspace_fs_watch),
+        )
         // Routes 14-15: Workspace file & dir REST resources (Gateway is
         // transparent — forwards verbatim to the Runtime's filesystem-aware
         // HTTP server). The path-traversal guard lives on the Runtime
@@ -715,6 +722,23 @@ async fn proxy_set_prompt_file(
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}/prompt-file", ws_id);
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/fs-watch`
+/// to Runtime's `PUT /workspaces/{ws_id}/fs-watch`.
+///
+/// Transparent pass-through (same rationale as the workspace file/dir
+/// proxies): path-traversal / workspace resolution live on the Runtime
+/// side; the Gateway only forwards the body and surfaces status codes.
+async fn proxy_set_workspace_fs_watch(
+    State(state): State<AppState>,
+    Path((id, ws_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/workspaces/{}/fs-watch", ws_id);
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
 }

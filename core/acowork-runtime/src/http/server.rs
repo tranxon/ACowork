@@ -513,6 +513,15 @@ impl RuntimeHttpServer {
                 "/workspaces/{ws_id}/prompt-file",
                 put(set_workspace_prompt_file),
             )
+            // ADR-058 (demand-driven revision): frontend pushes the watch
+            // set (open editor tabs + expanded tree dirs) here. Full
+            // replace semantics — the Runtime diffs against its current
+            // set and watches each target NonRecursive. Empty set → no
+            // scanning at all.
+            .route(
+                "/workspaces/{ws_id}/fs-watch",
+                put(set_workspace_fs_watch),
+            )
             .route("/workspaces/tree", get(list_tree))
             .route("/workspaces/find", get(find_files))
             .route("/workspaces/search", get(search_files))
@@ -1458,6 +1467,82 @@ async fn set_workspace_prompt_file(
         .await
         .map(|_| Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
         .map_err(workspace_error_to_response)
+}
+
+/// Request body for `PUT /workspaces/{ws_id}/fs-watch`.
+///
+/// `paths` are workspace-relative watch targets: `""` is the workspace
+/// root, every other entry is a file or directory to watch one level
+/// deep (`NonRecursive`). Full replace semantics — the Runtime diffs
+/// against the current set.
+#[derive(Debug, Deserialize)]
+struct SetWorkspaceFsWatchBody {
+    paths: Vec<String>,
+}
+
+/// `PUT /workspaces/{ws_id}/fs-watch` — demand-driven watch set update.
+///
+/// The frontend pushes exactly what it is showing: open editor tabs
+/// (file-level) plus the expanded directories of the visible file tree
+/// (one-level dir watch). An empty `paths` clears all watches → no
+/// scanning at all. This replaces the old "watch the whole workspace
+/// recursively on startup" model whose cost was unbounded (a large
+/// repo with a `target/` of 130k+ files pegged CPU at 47-100%).
+async fn set_workspace_fs_watch(
+    State(state): State<HttpState>,
+    Path(ws_id): Path<String>,
+    Json(body): Json<SetWorkspaceFsWatchBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    // Validate the workspace id against the resolver so unknown ids
+    // fail loudly instead of silently updating nothing.
+    {
+        let resolver = state
+            .workspace_resolver
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        if resolver.find_by_id(&ws_id).is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "workspace not found", "ws_id": ws_id})),
+            ));
+        }
+    }
+
+    // Path-traversal guard: reject absolute paths and `..` escapes.
+    // Targets must stay within the workspace; the watcher joins them
+    // under the workspace root.
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(body.paths.len());
+    for raw in body.paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            // Empty string = workspace root itself.
+            paths.push(PathBuf::from(""));
+            continue;
+        }
+        let p = PathBuf::from(trimmed);
+        if p.is_absolute()
+            || p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "watch path must be workspace-relative and not escape the workspace",
+                    "path": trimmed,
+                })),
+            ));
+        }
+        paths.push(p);
+    }
+
+    // Deduplicate while preserving a deterministic order (frontend may
+    // send overlapping sets from tab + tree state).
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+
+    let watchers = state.workspace_watchers.lock().await;
+    watchers.set_watch_targets(&ws_id, paths);
+    Ok(Json(serde_json::json!({"ok": true, "ws_id": ws_id})))
 }
 
 /// `DELETE /workspaces/{ws_id}` — remove a workspace entry.
