@@ -15,7 +15,6 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
     routing::get,
 };
 use serde::{Deserialize, Serialize};
@@ -186,7 +185,7 @@ fn validate_path(path: &str) -> Result<(), String> {
 pub async fn browse_fs(
     State(state): State<AppState>,
     Query(query): Query<FsBrowseQuery>,
-) -> Result<Json<FsBrowseResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<FsBrowseResponse>, ApiError> {
     // Remote target → reverse-proxy to the node's node-local fs browser.
     let target = query.target.as_deref().unwrap_or("").trim();
     if !target.is_empty() && target != "local" {
@@ -310,7 +309,7 @@ async fn proxy_fs_browse_to_node(
     state: &AppState,
     target: &str,
     path: &str,
-) -> Result<Json<FsBrowseResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<FsBrowseResponse>, ApiError> {
     let registry = state
         .node_registry
         .as_ref()

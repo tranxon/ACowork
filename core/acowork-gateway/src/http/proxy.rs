@@ -1528,7 +1528,7 @@ pub(crate) async fn fetch_runtime_json(
     state: &AppState,
     id: &str,
     path: &str,
-) -> Result<serde_json::Value, (StatusCode, axum::Json<crate::http::routes::ApiError>)> {
+) -> Result<serde_json::Value, crate::http::routes::ApiError> {
     send_runtime_json(state, id, path, reqwest::Method::GET, None).await
 }
 
@@ -1542,7 +1542,7 @@ pub(crate) async fn send_runtime_json(
     path: &str,
     method: reqwest::Method,
     body: Option<&serde_json::Value>,
-) -> Result<serde_json::Value, (StatusCode, axum::Json<crate::http::routes::ApiError>)> {
+) -> Result<serde_json::Value, crate::http::routes::ApiError> {
     use crate::http::routes::ApiError;
 
     let registry = state.runtime_http_registry.as_ref().ok_or_else(|| {

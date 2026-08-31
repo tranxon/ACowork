@@ -66,7 +66,7 @@ pub fn bootstrap_routes() -> Router<AppState> {
 /// attached in `Gateway::run`, so in practice this never fires).
 pub async fn get_bootstrap(
     State(state): State<AppState>,
-) -> Result<Json<BootstrapStateView>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<BootstrapStateView>, ApiError> {
     let gw = state.gateway_state.read().await;
     let Some(orchestrator) = gw.bootstrap.orchestrator.clone() else {
         return Err(ApiError::service_unavailable(
@@ -177,7 +177,7 @@ mod tests {
         let gw_state = Arc::new(RwLock::new(GatewayState::new(&dir.to_string_lossy())));
         let state = AppState::new(gw_state, Arc::new(HttpAuth::new(false)));
         let err = get_bootstrap(State(state)).await.unwrap_err();
-        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
     }
 
     /// The JSON shape is stable: exactly the 6 protocol fields, phase
