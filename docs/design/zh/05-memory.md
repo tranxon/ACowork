@@ -114,30 +114,29 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照，以 Grafe
 └──────────────────────────────────────────┘
 ```
 
-**实体与三元组提取（v3.10 简化）：**
+**Compact Model 输出格式（v3.10 简化 + 2026-XX-XX 进一步收敛）：**
 
-不再每轮通过 memory_hint 提取实体——改为在 Compaction 触发时由 Compact Model 一次性完成。Compact Model 输出格式：
+Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下生成的三元组质量不稳定（subject/predicate/object 简化为压缩信息），落地为 KnowledgeNode 反而污染沉淀层；entities 提取与即时提取路径重叠且缺少 sub_type/confidence 等元数据，价值低于 `memory_store` 工具路径。Compaction 的职责收敛为「生成可检索的摘要 + 可回放的意图」，沉淀层落地由专用管道承担（职责分离）。
 
 ```
 <summary>
 自然语言摘要文本...
 </summary>
-<entities>
-Entity1, Entity2, Entity3
-</entities>
-<triples>
-subject | predicate | object
-subject | predicate | object
-</triples>
+<user_intent>
+当前对话用户的核心意图（可选）
+</user_intent>
 ```
 
-- **entities**：跨轮持续出现的核心实体（人、地点、技术、项目、概念），最多 10 个，逗号分隔
-- **triples**：显式事实知识，subject|predicate|object 格式，一行一个
+- **summary**：自然语言摘要文本，存入 `Episode.content`，同时用于向量检索（HNSW）与 BM25 全文匹配
+- **user_intent**：当前对话用户的核心意图（可选块），存入 `Episode.metadata.user_intent`，便于历史回放时还原用户目标
+
+沉淀层落地完全依赖两条独立管道：
+1. **即时提取**：LLM 主动调用 `memory_store` 工具——有完整上下文、LLM 自评 confidence、可指定 sub_type，质量由 LLM 自我保证
+2. **离线巩固**（Phase 3）：`run_offline_consolidation_with_generalization` 复用 Episode 摘要重新提取并仲裁冲突（与 triples 块完全独立）
 
 设计理由：
 - 每轮提取的成本（~65 tokens/轮）在 ADR-011 之后不再合理——经历层不再逐轮写入，存储目的已消失
-- Compact Model 有完整对话上下文，实体和三元组的提取质量高于逐轮快照
-- Compaction 是低频操作（每 80% 触发），边际成本可忽略
+- 沉淀层落地质量优先于压缩阶段的一次性抽取：摘要用于检索回放，沉淀由专用管道分阶段精炼
 - 检索策略始终使用默认权重，不做类型驱动的动态调整——经评估 f/r 类型的微调收益未被验证
 
 **检索策略（v3.10 简化）：**

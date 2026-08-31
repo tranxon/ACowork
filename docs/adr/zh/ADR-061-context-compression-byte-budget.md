@@ -282,11 +282,9 @@ You are compressing a conversation history. Output MUST be:
 <user_intent>
 [MUST 列出所有用户的原始意图与显式约束,即使已被满足或不再相关]
 </user_intent>
-
-<triples>
-[结构化知识:实体、关系、关键事实]
-</triples>
 "#;
+
+> **2026-XX-XX 修订**：`<triples>` 章节已在 M3 改造中撤销（详见 ADR-057 §0.2 triples-removed 决策说明）。当前 `COMPACTION_SYSTEM_PROMPT` 仅保留 `<summary>` + `<user_intent>` 双章节。
 ```
 
 （per-agent 定制由 ADR-053 的 `prompts/summary.md` 覆盖，本结构为最低强制要求。）
@@ -743,7 +741,7 @@ P0 清单已全部落地并随 `cargo test -p acowork-runtime --lib`（1111 pass
 | §15-3 | ✅ | `CompressionPlan::apply` 双条件/单条件校验 + marker 构建（User role + `name=compaction_summary`） |
 | §15-4 | ✅ | `assert_user_messages_preserved` 验收适配（marker 按 user 级处理） |
 | §15-5 | ✅ | `parse_and_validate_summary` + `<user_intent>` fallback（排除 marker） |
-| §15-6 | ✅ | `COMPACTION_SYSTEM_PROMPT` 三章节强制结构（`<summary>` → `<user_intent>` → `<triples>`） |
+| §15-6 | ✅ | `COMPACTION_SYSTEM_PROMPT` 双章节强制结构（`<summary>` → `<user_intent>`） |
 | §15-7 | ✅ | LLM 全失败 → `ChunkEvent::Error { error_type: "ContextOverflow", message_id: "compaction-failed" }`，history 不改 |
 | §15-8 | ✅ | budget 校验：session_init.rs:313（boot 拒绝）+ session_manager.rs:1958（model_switch 拒绝） |
 | §15-9 | ✅ | 8 级全不达标 → `NoCompressionNeeded` |

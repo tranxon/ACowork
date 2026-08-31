@@ -25,7 +25,7 @@
 | # | 入口 | 写入目标 | 触发方式 |
 |---|------|---------|---------|
 | A | `memory_store` 工具 | Knowledge / Procedural / Autobiographical | LLM 主动调用 |
-| C | 会话蒸馏 `write_summary_to_provider` | Episodic + Knowledge triples | 自动 / compaction |
+| C | 会话蒸馏 `write_summary_to_provider` | Episodic | 自动 / compaction |
 | D | manifest 引导 | Autobiographical Identity/Capability | 启动时 |
 | E | HTTP 管理 API | 任意节点 | 外部客户端 |
 | F | consolidation 后台流水线 | Generalized / Resolved Conflict 节点 | 自动 / idle 或累计阈值 |
