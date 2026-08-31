@@ -1743,7 +1743,31 @@ export function ChatPanel() {
         {/* ADR-015: Session tab bar */}
         {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
         {/* Messages area with drawer overlay */}
-        <div className="relative flex-1 overflow-hidden">
+        <div
+          className="relative flex-1 overflow-hidden"
+          onWheel={(e) => {
+            // The jump-to-top / jump-to-bottom buttons live as siblings of
+            // the scroll container inside this `overflow-hidden` wrapper
+            // (see JSX below), so the browser's scrollable-ancestor lookup
+            // for a wheel event hitting a button walks up the chain,
+            // finds no `overflow-y-auto` ancestor (overflow:hidden doesn't
+            // count), and falls through to the body — the messages
+            // container never receives the wheel.  This is invisible most
+            // of the time because the buttons are tiny, but right after
+            // clicking jump-to-top the cursor is still over the button
+            // (and the button stays mounted for one rAF while isNearTop
+            // catches up) so the user immediately wheels to scroll back
+            // down and the wheel appears dead.  Forward wheel events that
+            // hit a button to the scroll container; leave all other wheel
+            // events alone so native scrolling inside the container works
+            // exactly as before.
+            if (!(e.target as HTMLElement).closest("button")) return;
+            const container = messagesContainerRef.current;
+            if (!container) return;
+            container.scrollTop += e.deltaY;
+            e.preventDefault();
+          }}
+        >
           <div
             ref={messagesContainerRef}
             onScroll={() => {
