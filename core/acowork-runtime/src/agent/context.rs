@@ -557,7 +557,7 @@ impl ContextBuilder {
             messages.push(ChatMessage {
                 role: MessageRole::User,
                 content: format!(
-                    "## Active Task List\nUse the `todo_write` tool to manage this list. Current tasks:\n{todos}"
+                    "## Todo Task List\nThis is your todo task list. If any task status needs updating, use the `todo_write` tool to update it. If nothing needs updating, do nothing.\n\n{todos}"
                 ),
                 cache_control: Some(CacheControl::Ephemeral),
                 ..Default::default()
@@ -999,7 +999,7 @@ mod tests {
         let history = HistoryManager::new(10000);
         let request = builder.build(&manifest, &history, None, None, 32_768);
         let system = &request.messages[0].content;
-        assert!(!system.contains("Active Task List"), "todo omitted");
+        assert!(!system.contains("Todo Task List"), "todo omitted");
         assert!(
             !system.contains("Memory Conflicts Needing Confirmation"),
             "ambiguous hint omitted"
@@ -1010,7 +1010,7 @@ mod tests {
             !request
                 .messages
                 .iter()
-                .any(|m| m.content.contains("Active Task List")),
+                .any(|m| m.content.contains("Todo Task List")),
             "todo omitted from Block C after clear"
         );
     }
@@ -1039,7 +1039,7 @@ mod tests {
             Some(acowork_core::providers::traits::CacheControl::Ephemeral)
         );
         // Block A must NOT contain dynamic todo content.
-        assert!(!request.messages[0].content.contains("Active Task List"));
+        assert!(!request.messages[0].content.contains("Todo Task List"));
         // Block A must NOT contain the ambiguous hint section.
         assert!(!request.messages[0].content.contains("Memory Conflicts"));
 
@@ -1056,7 +1056,7 @@ mod tests {
             block_c.role, MessageRole::User,
             "Block C must use User role (ADR-060 §5.4)"
         );
-        assert!(block_c.content.contains("Active Task List"));
+        assert!(block_c.content.contains("Todo Task List"));
         assert!(block_c.content.contains("task1"));
         assert_eq!(
             block_c.cache_control,
@@ -1101,7 +1101,7 @@ mod tests {
         // [0] A, [1..3] B, [4] C — no D.
         assert_eq!(request.messages.len(), 5);
         assert_eq!(request.messages[4].role, MessageRole::User);
-        assert!(request.messages[4].content.contains("Active Task List"));
+        assert!(request.messages[4].content.contains("Todo Task List"));
     }
 
     #[test]
@@ -1116,8 +1116,8 @@ mod tests {
 
         let r1 = builder.build(&manifest, &history, None, None, 32_768);
         let r2 = builder.build(&manifest, &history, None, None, 32_768);
-        let c1 = r1.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
-        let c2 = r2.messages.iter().find(|m| m.content.contains("Active Task List")).unwrap();
+        let c1 = r1.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
+        let c2 = r2.messages.iter().find(|m| m.content.contains("Todo Task List")).unwrap();
         assert_eq!(c1.content, c2.content, "Block C bytes must be deterministic");
         assert_eq!(r1.messages[0].content, r2.messages[0].content, "Block A bytes must be deterministic");
     }

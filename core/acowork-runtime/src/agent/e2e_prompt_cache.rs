@@ -421,7 +421,7 @@ fn assert_block_c_layout(msgs: &[ChatMessage], current: &str, expected_todo: &st
     // Block C — the todo snapshot as an independent User-role message.
     assert_eq!(msgs[n - 2].role, MessageRole::User, "Block C is user role");
     assert!(
-        msgs[n - 2].content.contains("## Active Task List"),
+        msgs[n - 2].content.contains("## Todo Task List"),
         "Block C must contain the todo-list header"
     );
     assert!(
@@ -466,7 +466,7 @@ async fn todo_write_roundtrip_block_c_layout_and_restart_recovery() {
         "Block A carries the system prompt"
     );
     assert!(
-        !msgs[0].content.contains("## Active Task List"),
+        !msgs[0].content.contains("## Todo Task List"),
         "Block A must NOT contain the todo snapshot"
     );
     assert_eq!(msgs[1].content, "First turn", "Block B holds the original turn");
@@ -490,7 +490,7 @@ async fn todo_write_roundtrip_block_c_layout_and_restart_recovery() {
         "tool iteration: last message is Block C (todo snapshot), no Block D"
     );
     assert!(
-        msgs.last().unwrap().content.contains("## Active Task List"),
+        msgs.last().unwrap().content.contains("## Todo Task List"),
         "Block C is the request tail after the todo change"
     );
     assert!(
@@ -501,7 +501,7 @@ async fn todo_write_roundtrip_block_c_layout_and_restart_recovery() {
     );
     assert!(
         msgs.iter().any(|m| {
-            m.role == MessageRole::User && m.content.contains("## Active Task List")
+            m.role == MessageRole::User && m.content.contains("## Todo Task List")
         }),
         "Block C appears immediately after todos change (tool iteration)"
     );

@@ -1707,7 +1707,7 @@ mod tests {
         // [0] Block A: system kernel.
         assert_eq!(request.messages[0].role, MessageRole::System);
         assert!(
-            !request.messages[0].content.contains("Active Task List"),
+            !request.messages[0].content.contains("Todo Task List"),
             "Block A must not contain the dynamic todo snapshot"
         );
 
@@ -1724,7 +1724,7 @@ mod tests {
         let block_c = request
             .messages
             .iter()
-            .find(|m| m.content.contains("Active Task List"))
+            .find(|m| m.content.contains("Todo Task List"))
             .unwrap();
         assert_eq!(
             block_c.role, MessageRole::User,
