@@ -24,9 +24,10 @@ pub(crate) const MIN_COMPRESSION_RATIO: f64 = 0.90;
 /// Maximum output budget for the LLM compaction summary.
 ///
 /// Replaces the former hardcoded `2048` in `compact_via_llm`. With the
-/// mandatory three-section summary (`<summary>` / `<user_intent>` /
-/// `<triples>`, ADR-061 §8.1) 2K is too tight; 4K leaves room for the
-/// full user-intent list without truncating `</triples>`.
+/// mandatory two-section summary (`<summary>` / `<user_intent>`,
+/// ADR-061 §8.1; `<triples>` was removed in ADR-057) 2K is too tight;
+/// 4K leaves room for the full user-intent list without truncating
+/// `</user_intent>`.
 pub(crate) const SUMMARY_TOKEN_BUDGET: u64 = 4_096;
 
 /// Model rejection line: agents require an effective input budget of at

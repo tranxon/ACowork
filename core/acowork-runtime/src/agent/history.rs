@@ -967,7 +967,7 @@ impl HistoryManager {
 
     /// ADR-061 §19.1: select the 8-level degradation plan.
     ///
-    /// `summary` is the LLM output (post `strip_metadata_blocks`); its token
+    /// `summary` is the LLM output (already parsed by `parse_compact_output`); its token
     /// size is known here, so the projection is exact — the 8-level walk
     /// happens **after** the summary (§19.1 先摘要后 plan).
     ///
