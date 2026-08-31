@@ -387,39 +387,59 @@ fn integration_lwt_offline_on_disconnect() {
     let port = fresh_broker_port();
     let broker = start_broker("127.0.0.1", port).unwrap();
 
+    // Phase 1: connect inside a throwaway runtime, then drop the WHOLE
+    // runtime. Dropping just `RuntimeMqttClient` does NOT tear down the
+    // connection: the event-loop poll task owns the socket independently
+    // (EventLoopGuard's JoinHandle is detached, not aborted), so the TCP
+    // link stays alive and the broker never publishes the Will. Dropping
+    // the runtime aborts the poll task and the OS closes the socket — the
+    // exact equivalent of a Runtime process crash, which is the real LWT
+    // trigger.
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let cache = new_shared_cache();
+            let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+            let runtime = RuntimeMqttClient::connect(
+                MqttConnectConfig {
+                    host: "127.0.0.1",
+                    port,
+                    agent_id: "com.test.lwt",
+                    agent_name: "LWT Agent",
+                    agent_version: "1.0.0",
+                    avatar: None,
+                    builtin_avatar: None,
+                    config_json: "{}",
+                    available_cache: cache,
+                    control_tx,
+                    identity_update_tx: None,
+                    provider_update_tx: None,
+                    search_update_tx: None,
+                    node_id: None,
+                    lsps_update_tx: None,
+                    work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
+                    username: None,
+                    password: None,
+                },
+            ).await.unwrap();
+
+            // connect() returns only after bootstrap published the retained
+            // "online" status — the checker in Phase 2 sees a pre-existing
+            // "online" unless the Will lands on top of it.
+            drop(control_rx);
+            drop(runtime);
+
+            // Let the retained "online" fully propagate before teardown.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+    } // rt dropped → poll task aborted → TCP FIN → broker publishes the Will
+
+    // Phase 2: fresh runtime to observe the retained status.
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let cache = new_shared_cache();
-        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
-        let runtime = RuntimeMqttClient::connect(
-            MqttConnectConfig {
-                host: "127.0.0.1",
-                port,
-                agent_id: "com.test.lwt",
-                agent_name: "LWT Agent",
-                agent_version: "1.0.0",
-                avatar: None,
-                builtin_avatar: None,
-                config_json: "{}",
-                available_cache: cache,
-                control_tx,
-                identity_update_tx: None,
-                provider_update_tx: None,
-                search_update_tx: None,
-                node_id: None,
-                lsps_update_tx: None,
-                work_dir: std::env::temp_dir().join(format!("acowork-test-{}", uuid::Uuid::new_v4())),
-                username: None,
-                password: None,
-            },
-        ).await.unwrap();
-
-        // Drop Runtime — LWT should publish "offline" retained to status topic
-        drop(control_rx);
-        drop(runtime);
-
-        // Wait for LWT to propagate
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Give the broker a moment to detect the closed socket and publish
+        // the Will (retained "offline").
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Connect a fresh client to check the retained message
         let mut opts = rumqttc::MqttOptions::new("e2e:lwt:checker", "127.0.0.1", port);
