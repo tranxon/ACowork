@@ -165,6 +165,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::nodes_api::nodes_routes())
         .merge(crate::http::users_api::users_routes())
         .merge(crate::http::embedding_api::embedding_routes())
+        .merge(crate::embedding_providers::embedding_providers_routes())
         .merge(crate::http::fs_browse::fs_routes())
         .merge(crate::http::global_resources_api::global_resources_routes())
         .merge(crate::http::proxy::proxy_routes())

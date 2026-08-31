@@ -1389,6 +1389,14 @@ export function ChatPanel() {
     const cd = e.clipboardData;
     if (!cd) return;
 
+    // ALWAYS preventDefault — every branch below handles insertion itself,
+    // so the browser's default paste must NOT run. Leaving it enabled
+    // (as the original "let default paste happen" comment suggested) is
+    // exactly how the double-paste bug surfaces: in some Tauri WebView
+    // paths the browser's native paste fires alongside our manual
+    // `insertTextAtCaret`, producing the clipboard text twice.
+    e.preventDefault();
+
     // Read plain text up front — needed for the "no files" branch.
     // `text/uri-list` (X11/Wayland file URIs) and `text` are also probed
     // for completeness, but in Tauri WebViews the dominant case is
@@ -1417,7 +1425,6 @@ export function ChatPanel() {
       // NOT also insert the `text/plain` here: when Explorer copies N
       // files, the text payload is exactly the N paths joined by
       // newlines, and inserting them would duplicate the upload UX.
-      e.preventDefault();
       for (const p of paths) void uploadFileAtPath(p);
       return;
     }
@@ -1426,7 +1433,6 @@ export function ChatPanel() {
     // it at the caret — this is the dominant case when the user copies
     // agent output (mermaid / tables / code) and pastes it back.
     if (text) {
-      e.preventDefault();
       insertTextAtCaret(text);
       return;
     }
@@ -1436,13 +1442,15 @@ export function ChatPanel() {
     // `name` (no path), so we can't upload — but inserting the
     // filename gives the user visual feedback.
     if (cd.files && cd.files.length > 0) {
-      e.preventDefault();
       const names = Array.from(cd.files).map((f) => f.name).join("\n");
       insertTextAtCaret(names);
       return;
     }
-    // else: clipboard held neither paths nor files nor text — let the
-    // browser default paste happen so the user sees *some* response.
+    // else: clipboard held neither paths nor files nor text — we
+    // already called preventDefault above, so nothing pastes. The
+    // silent no-op is intentional (and matches the original comment
+    // about "user sees *some* response" — the previous default-paste
+    // fallback was the source of the double-paste bug).
   }, [insertTextAtCaret, uploadFileAtPath]);
 
   /**

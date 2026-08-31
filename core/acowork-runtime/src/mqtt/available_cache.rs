@@ -554,6 +554,9 @@ mod tests {
             active_model_id: "bge-small".to_string(),
             active_dimension: 512,
             endpoint: "http://127.0.0.1:18080/v1".to_string(),
+            active_provider_id: String::new(),
+            active_api_key: String::new(),
+            active_base_url: String::new(),
         });
         assert_eq!(
             cache.embed_endpoint().as_deref(),

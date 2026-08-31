@@ -45,7 +45,7 @@ export const SECTION_LABELS: Record<string, string> = {
   // ADR-060: Block C — an independent User-role message (Ephemeral cache
   // breakpoint) emitted AFTER the history block, not a system-prompt
   // sub-item anymore. Content/key unchanged; only grouping/label moved.
-  todo_context: "Active Task List (Block C)",
+  todo_context: "Active Task List",
   ambiguous_confirmation_hint: "Memory Conflicts Hint",
   // ADR-054 step 4: lazy-loaded; refreshed at iteration end so it includes
   // the current iteration's assistant reply (not just the pre-LLM history).

@@ -166,7 +166,30 @@ message AvailableEmbeddingModels {
   /// Active embedding vector dimension, if a model is loaded.
   uint32 active_dimension = 4;
   /// Local embedding HTTP endpoint (e.g. "http://127.0.0.1:18080/v1").
+  /// Always populated as long as the ONNX sidecar is running — used as
+  /// Tier-1 fallback when the active cloud provider is unavailable or
+  /// rate-limited.
   string endpoint = 5;
+
+  // ── Cloud Embedding Provider (ADR-s1: 云端 provider 与本地 ONNX 并存) ──
+  /// Active cloud embedding provider ID (e.g. "volcengine",
+  /// "dashscope", "siliconflow"), or empty string when the user has
+  /// not selected a cloud provider. When set, Runtime should prefer
+  /// the cloud provider over the local ONNX endpoint above.
+  string active_provider_id = 6;
+  /// Decrypted API key for `active_provider_id`. NEVER persisted to
+  /// workspace disk by Runtime — same security contract as the
+  /// provider / search keys on the other global topics.
+  ///
+  /// Empty when no key is configured or no cloud provider is selected.
+  string active_api_key = 7;
+  /// Base URL of the active cloud provider (e.g.
+  /// "https://ark.cn-beijing.volces.com/api/v3"). Copied from the
+  /// provider catalog at selection time so the Runtime can construct
+  /// a RemoteEmbeddingProvider without re-fetching the catalog.
+  ///
+  /// Empty when no cloud provider is selected.
+  string active_base_url = 8;
 }
 
 /// Available LSP relays — single sidecar process.
