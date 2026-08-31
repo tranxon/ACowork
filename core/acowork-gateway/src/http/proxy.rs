@@ -169,6 +169,10 @@ pub fn proxy_routes() -> Router<AppState> {
             post(proxy_memory_consolidate),
         )
         .route(
+            "/api/agents/{id}/memory/rebuild-embeddings",
+            post(proxy_memory_rebuild_embeddings),
+        )
+        .route(
             "/api/agents/{id}/memory/graph",
             get(proxy_get_memory_graph),
         )
@@ -607,6 +611,33 @@ async fn proxy_memory_consolidate(
 ) -> Response {
     let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
     proxy_to_runtime_with_method(&state, &id, "/memory/consolidate", "", reqwest::Method::POST, payload, &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/memory/rebuild-embeddings` to
+/// Runtime's `POST /memory/rebuild-embeddings`.
+///
+/// Forwards the inbound body verbatim: the Gateway (embedding_api
+/// `start_migration`) sends `{"endpoint", "model_id", "dimension"}` so the
+/// Runtime can build a temporary provider and re-embed every stored node
+/// (Bug3 — restores the dimension-migration feature lost in the gRPC→MQTT
+/// refactor).
+async fn proxy_memory_rebuild_embeddings(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/memory/rebuild-embeddings",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 // ── New Phase 4 proxy handlers ─────────────────────────────────────────

@@ -497,6 +497,8 @@ impl RuntimeHttpServer {
             )
             .route("/memory/stats", get(get_memory_stats))
             .route("/memory/consolidate", post(trigger_consolidate))
+            .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
+            .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
             // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
             // file reads now flow exclusively through
@@ -642,6 +644,14 @@ impl RuntimeHttpServer {
             // of truth for user-facing limits.
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             .with_state(state);
+        // Diagnostic: confirms the migration route was wired into the Router
+        // during this build. Runs once at server boot. If this log never
+        // appears, the .route() call above was lost in a refactor and
+        // Gateway start-migration requests will silently 404.
+        tracing::info!(
+            target: "migration_diag",
+            "runtime HTTP server: registered POST /memory/rebuild-embeddings"
+        );
 
         // Bind to the Node-allocated loopback port (ADR-055 §6.4);
         // `127.0.0.1:0` = random port (pre-node-topology behaviour).
@@ -1148,6 +1158,75 @@ async fn trigger_consolidate(
         .consolidate(body.force, body.retention_days)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ))
+}
+
+/// Request body for `POST /memory/rebuild-embeddings`.
+///
+/// Carries the new embedding model the Gateway has switched to. The
+/// Runtime builds a temporary provider and re-embeds every stored node,
+/// rebuilding the HNSW indexes (Bug3 — restores the dimension-migration
+/// feature lost in the gRPC→MQTT refactor).
+#[derive(Debug, Deserialize)]
+struct RebuildEmbeddingsBody {
+    /// Embedding endpoint, e.g. `http://127.0.0.1:18080/v1`.
+    #[serde(default)]
+    endpoint: String,
+    /// Embedding model ID.
+    #[serde(default)]
+    model_id: String,
+    /// Target embedding dimension.
+    dimension: usize,
+}
+
+/// `POST /memory/rebuild-embeddings` — re-embed all nodes with a new model.
+async fn rebuild_embeddings(
+    State(state): State<HttpState>,
+    Json(body): Json<RebuildEmbeddingsBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    tracing::info!(
+        target: "migration_diag",
+        endpoint = %body.endpoint,
+        model_id = %body.model_id,
+        dimension = body.dimension,
+        "rebuild_embeddings: received request"
+    );
+
+    // ADR-040: usecase trait is the sole implementation path.
+    let svc = state.memory_query.lock().await;
+    if svc.is_none() {
+        tracing::warn!(
+            target: "migration_diag",
+            "rebuild_embeddings: memory_query service not ready, returning 503"
+        );
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let svc = svc.as_ref().unwrap();
+    tracing::info!(
+        target: "migration_diag",
+        "rebuild_embeddings: invoking memory_query.rebuild_embeddings"
+    );
+    let report = svc
+        .rebuild_embeddings(&body.endpoint, &body.model_id, body.dimension)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                target: "migration_diag",
+                error = %e,
+                "rebuild_embeddings: memory_query.rebuild_embeddings failed"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    tracing::info!(
+        target: "migration_diag",
+        total_scanned = report.total_scanned,
+        rebuilt = report.rebuilt,
+        skipped_no_embedding = report.skipped_no_embedding,
+        errors = report.errors,
+        "rebuild_embeddings: completed"
+    );
     Ok(Json(
         serde_json::to_value(report).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     ))

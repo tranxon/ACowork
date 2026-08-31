@@ -329,6 +329,22 @@ impl AvailableResourceCache {
             .map(|e| e.endpoint.clone())
     }
 
+    /// Get the full active embedding config (endpoint, model id, dimension)
+    /// if an embedding model is loaded. Used by agent boot to recover the
+    /// config that the Gateway forgot to inject as env vars (Bug1).
+    pub fn embedding_config(&self) -> Option<(String, String, usize)> {
+        self.embedding_models
+            .as_ref()
+            .filter(|e| !e.endpoint.is_empty() && !e.active_model_id.is_empty())
+            .map(|e| {
+                (
+                    e.endpoint.clone(),
+                    e.active_model_id.clone(),
+                    e.active_dimension as usize,
+                )
+            })
+    }
+
     /// Get the LSP relay endpoint if it's ready.
     pub fn lsp_endpoint(&self) -> Option<String> {
         self.lsps

@@ -137,6 +137,23 @@ pub struct SearchUpdate {
     pub search_key_vault: Vec<acowork_core::protocol::SearchKeyEntry>,
 }
 
+/// Embedding model update pushed from the MQTT poll loop to SessionManager.
+///
+/// Carried by `acowork/global/embedding_models` (AvailableEmbeddingModels).
+/// This is the MQTT-era replacement for the old gRPC `SidecarEndpointUpdate`
+/// (ADR-033): it lets the Runtime rebuild its embedding provider in-place
+/// when the Gateway (re)starts the embed sidecar or switches the active
+/// model — including the boot-time case where the Runtime started before
+/// the embed service was ready.
+#[derive(Debug, Clone)]
+pub struct EmbeddingUpdate {
+    pub endpoint: String,
+    pub model_id: String,
+    pub dimension: usize,
+    pub provider_id: Option<String>,
+    pub api_key: Option<String>,
+}
+
 /// Node-local LSP relay state pushed from the MQTT poll loop to
 /// SessionManager (ADR-055 §6.7, Phase 4).
 ///
@@ -349,6 +366,21 @@ pub struct MqttConnectConfig<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub search_update_tx: Option<
         tokio::sync::mpsc::UnboundedSender<SearchUpdate>,
+    >,
+    /// Sink for embedding-model updates. The MQTT event loop sends
+    /// [`EmbeddingUpdate`] here whenever `acowork/global/embedding_models`
+    /// retained is received (initial snapshot or hot-push after the embed
+    /// sidecar becomes ready / the active model switches). The receiver
+    /// (held by `agent_init.rs` → `gateway_loop`) forwards to
+    /// `SessionManager::handle_embedding_config_update` so all sessions
+    /// rebuild their embedding provider in-place (ADR-033 MQTT replacement
+    /// for the removed gRPC `SidecarEndpointUpdate`).
+    ///
+    /// Optional: when None, the MQTT event loop still updates
+    /// `available_cache` but does not notify SessionManager.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub embedding_update_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<EmbeddingUpdate>,
     >,
     /// Node id this Runtime belongs to (ADR-055 §6.7, Phase 4). When
     /// set, bootstrap subscribes to `acowork/nodes/{node_id}/lsps` and
@@ -574,6 +606,7 @@ impl RuntimeMqttClient {
         let poll_identity_tx = cfg.identity_update_tx.clone();
         let poll_provider_tx = cfg.provider_update_tx.clone();
         let poll_search_tx = cfg.search_update_tx.clone();
+        let poll_embedding_tx = cfg.embedding_update_tx.clone();
         let poll_lsps_tx = cfg.lsps_update_tx.clone();
         let poll_node_lsps_topic = bootstrap_data.node_lsps_topic.clone();
         let poll_bootstrap = bootstrap_data.clone();
@@ -843,6 +876,53 @@ impl RuntimeMqttClient {
                                                         "Failed to send search update to SessionManager"
                                                     );
                                                 }
+                                            }
+                                        } else if topic == "acowork/global/embedding_models" {
+                                            // ADR-033 MQTT replacement for the
+                                            // removed gRPC SidecarEndpointUpdate:
+                                            // forward the active embedding
+                                            // endpoint/model/dim to SessionManager
+                                            // so every session rebuilds its
+                                            // embedding provider in-place. This
+                                            // covers both the boot-time race (the
+                                            // Runtime starts before the embed
+                                            // sidecar is ready) and hot model
+                                            // switches.
+                                            let update = {
+                                                let models = cache_write.embedding_models.as_ref();
+                                                match models {
+                                                    Some(m) if !m.endpoint.is_empty()
+                                                        && !m.active_model_id.is_empty() =>
+                                                    {
+                                                        Some(EmbeddingUpdate {
+                                                            endpoint: m.endpoint.clone(),
+                                                            model_id: m.active_model_id.clone(),
+                                                            dimension: m.active_dimension as usize,
+                                                            provider_id: if m.active_provider_id.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(m.active_provider_id.clone())
+                                                            },
+                                                            api_key: if m.active_api_key.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(m.active_api_key.clone())
+                                                            },
+                                                        })
+                                                    }
+                                                    _ => None,
+                                                }
+                                            };
+                                            drop(cache_write);
+                                            if let Some(ref tx) = poll_embedding_tx
+                                                && let Some(update) = update
+                                                && let Err(e) = tx.send(update)
+                                            {
+                                                tracing::warn!(
+                                                    agent_id = %poll_agent_id,
+                                                    error = %e,
+                                                    "Failed to send embedding update to SessionManager"
+                                                );
                                             }
                                         }
                                     }
@@ -2155,6 +2235,7 @@ mod tests {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
                 work_dir,
@@ -2250,6 +2331,7 @@ mod tests {
                 identity_update_tx: None,
                 provider_update_tx: None,
                 search_update_tx: None,
+                embedding_update_tx: None,
                 node_id: None,
                 lsps_update_tx: None,
                 work_dir,

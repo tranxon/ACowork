@@ -138,6 +138,7 @@ fn fs_watcher_full_chain_e2e() {
             identity_update_tx: None,
             provider_update_tx: None,
             search_update_tx: None,
+            embedding_update_tx: None,
             node_id: None,
             lsps_update_tx: None,
             work_dir: std::env::temp_dir().join(format!("acowork-fs-e2e-{}", uuid::Uuid::new_v4())),

@@ -22,20 +22,11 @@ edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.95"
 
-# Dev profile optimization (PERF-001): default `cargo build` is opt-level 0,
-# which made every hot path (SSE parsing, JSON serialization, tiktoken counting,
-# MQTT codec, state broadcast) run 5-10x slower than release — observed as
-# ~70% CPU in the senior-engineer runtime during active work while the system
-# agent (idle) sat at ~0.1%. The team does not single-step debug; we read logs,
-# so opt-level 2 + `debug` (debuginfo) OFF keeps near-release performance with
-# far less compile time. If a future member needs stepping, flip to
-# `opt-level = 1` + `debug = true`.
+# Dev profile uses Cargo defaults (`opt-level = 0` + full debuginfo).
+# An earlier optimization (PERF-001, `opt-level = 2` in dev) was reverted after
+# the runtime CPU issue was confirmed to be unrelated to compilation flags —
+# so there is no longer a reason to deviate from the standard dev profile.
 [profile.dev]
-opt-level = 2
-debug = false
-# Dependencies compile as fast as our own code — no per-package override needed.
-[profile.dev.package."*"]
-opt-level = 2
 
 [workspace.dependencies]
 # Async runtime

@@ -12,7 +12,9 @@
 //!   phase transitions BOOTING → READY / DEGRADED / FAILED and the
 //!   client waits for READY before submitting dependent work.
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{extract::State, routing::get, Json, Router};
+#[cfg(test)]
+use axum::http::StatusCode;
 use serde::Serialize;
 
 use crate::bootstrap::orchestrator::BootstrapPhase;

@@ -35,7 +35,7 @@ use std::path::Path;
 /// Kept aligned with `MAX_OUTPUT_BYTES` on purpose: one number, one rule.
 /// If we ever need a different read-vs-output cap, split them again — but
 /// make the divergence intentional and documented.
-
+///
 /// True if the bytes contain a NUL byte — a strong signal the file is
 /// binary (or UTF-16/UTF-32 text) rather than UTF-8 text.
 fn looks_binary(bytes: &[u8]) -> bool {

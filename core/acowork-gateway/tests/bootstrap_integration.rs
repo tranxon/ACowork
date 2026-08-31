@@ -160,10 +160,9 @@ async fn collect_first_publish_payload(
             remaining.min(Duration::from_millis(100)),
         )
         .await
+            && p.topic == target_topic
         {
-            if p.topic == target_topic {
-                return Some(p.payload.to_vec());
-            }
+            return Some(p.payload.to_vec());
         }
     }
     None
@@ -303,9 +302,11 @@ async fn build_surface(port: u16, instance_id: &str) -> TestSurface {
     let mut gw_state = GatewayState::new(&vault_dir.to_string_lossy());
     let data_dir = vault_dir.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let mut config = acowork_gateway::config::GatewayConfig::default();
-    config.data_dir = data_dir.to_string_lossy().to_string();
-    config.vault_dir = vault_dir.to_string_lossy().to_string();
+    let config = acowork_gateway::config::GatewayConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
+        vault_dir: vault_dir.to_string_lossy().to_string(),
+        ..acowork_gateway::config::GatewayConfig::default()
+    };
     gw_state.config = Some(config);
     let gw_state: SharedHttpState = Arc::new(RwLock::new(gw_state));
     gw_state.write().await.bootstrap.orchestrator = Some(orchestrator.clone());
@@ -425,9 +426,11 @@ fn build_shared_state(vault_dir: &std::path::Path, password: &str) -> SharedHttp
 
     let data_dir = vault_dir.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let mut config = acowork_gateway::config::GatewayConfig::default();
-    config.data_dir = data_dir.to_string_lossy().to_string();
-    config.vault_dir = vault_dir.to_string_lossy().to_string();
+    let config = acowork_gateway::config::GatewayConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
+        vault_dir: vault_dir.to_string_lossy().to_string(),
+        ..acowork_gateway::config::GatewayConfig::default()
+    };
     gw_state.config = Some(config);
 
     gw_state.resource_cache.provider_list.providers = vec![acowork_core::protocol::ProviderListItem {

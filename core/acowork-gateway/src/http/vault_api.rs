@@ -16,9 +16,10 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
     routing::post,
 };
+#[cfg(test)]
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};

@@ -47,6 +47,14 @@ pub(crate) struct AgentBootContext {
     pub search_update_rx: Option<
         tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::SearchUpdate>,
     >,
+    /// Receiver for `acowork/global/embedding_models` updates (ADR-033).
+    /// Consumed by `gateway_loop::mqtt_only_loop` and forwarded to
+    /// `SessionManager::handle_embedding_config_update` so sessions rebuild
+    /// their embedding provider when the embed sidecar becomes ready or
+    /// the active model switches.
+    pub embedding_update_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::mqtt::client::EmbeddingUpdate>,
+    >,
     /// Receiver for node LSP relay state changes (ADR-055 §6.7,
     /// Phase 4). Consumed by `gateway_loop::mqtt_only_loop` and
     /// forwarded to `SessionManager::handle_lsp_relay_update`.

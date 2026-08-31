@@ -891,10 +891,7 @@ pub async fn test_embedding_provider(
             return ApiError::internal("Gateway config not initialized").into_response();
         }
     };
-    let api_key = match gw.vault.get_embedding_key(&id) {
-        Ok(k) => Some(k),
-        Err(_) => None,
-    };
+    let api_key = gw.vault.get_embedding_key(&id).ok();
     drop(gw);
 
     let catalog = merged_embedding_catalog(&data_dir);
@@ -1285,14 +1282,13 @@ pub async fn delete_embedding_provider(
     }
     if let Some(active) = load_active_embedding_provider(Path::new(&data_dir))
         && active.provider_id == id
+        && let Err(e) = clear_active_embedding_provider(Path::new(&data_dir))
     {
-        if let Err(e) = clear_active_embedding_provider(Path::new(&data_dir)) {
-            tracing::warn!(
-                error = %e,
-                provider_id = %id,
-                "Failed to clear active embedding selection after deleting provider"
-            );
-        }
+        tracing::warn!(
+            error = %e,
+            provider_id = %id,
+            "Failed to clear active embedding selection after deleting provider"
+        );
     }
 
     // Trigger MQTT republish.

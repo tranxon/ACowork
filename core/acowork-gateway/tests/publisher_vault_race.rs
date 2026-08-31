@@ -185,10 +185,9 @@ async fn collect_first_publish_payload(
             remaining.min(Duration::from_millis(100)),
         )
         .await
+            && p.topic == target_topic
         {
-            if p.topic == target_topic {
-                return Some(p.payload.to_vec());
-            }
+            return Some(p.payload.to_vec());
         }
     }
     None

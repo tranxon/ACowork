@@ -297,6 +297,27 @@ impl Tool for MemoryStoreTool {
                         .map(|a| format!("autobiographical/{}", a.aspect.as_str()))
                         .unwrap_or_else(|| "autobiographical".to_string()),
                 };
+                // Bugfix (MEM): the handle already holds the embedding
+                // provider (set once at construction) but it was never
+                // wired into the write path, so every Knowledge node was
+                // stored without a vector (text-only). Generate the
+                // content embedding here so embedding-based dedup and
+                // vector indexing actually work. Degrade gracefully to
+                // text-only when no provider is available or embedding fails.
+                let content_embedding: Option<Vec<f32>> =
+                    match self.handle.as_ref().and_then(|h| h.embedding()) {
+                        Some(ep) => match ep.embed(&content).await {
+                            Ok(vec) => Some(vec),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "memory_store: failed to embed content, storing text-only"
+                                );
+                                None
+                            }
+                        },
+                        None => None,
+                    };
                 let input = MemoryStoreInput {
                     content: content.clone(),
                     sub_type: sub_type_for_knowledge,
@@ -305,7 +326,7 @@ impl Tool for MemoryStoreTool {
                     object: None,
                     confidence: Some(confidence),
                     source_episode_id: None,
-                    embedding: None,
+                    embedding: content_embedding,
                     autobiographical: autobio_input,
                 };
 

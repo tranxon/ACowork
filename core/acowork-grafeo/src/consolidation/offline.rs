@@ -358,14 +358,14 @@ impl GrafeoStore {
         Ok(1)
     }
 
-    /// Auto-generate Limitation autobiographical nodes — DELETED.
-    ///
-    /// This duplicated the runtime `MemoryManager::run_self_evaluation` logic
-    /// (same success-rate threshold, same key) but produced false-positive
-    /// Limitation nodes: `success_count` is never incremented anywhere in the
-    /// codebase, so any skill with >= 5 failures was flagged at 0% success.
-    /// Removed along with the runtime channel (memory write-entrypoint
-    /// decisions, see docs/memory-write-entrypoints.md).
+    // Auto-generate Limitation autobiographical nodes — DELETED.
+    //
+    // This duplicated the runtime `MemoryManager::run_self_evaluation` logic
+    // (same success-rate threshold, same key) but produced false-positive
+    // Limitation nodes: `success_count` is never incremented anywhere in the
+    // codebase, so any skill with >= 5 failures was flagged at 0% success.
+    // Removed along with the runtime channel (memory write-entrypoint
+    // decisions, see docs/memory-write-entrypoints.md).
 
     /// Run episodic memory cleanup based on design §2 forgetting rules.
     ///
