@@ -10,10 +10,11 @@
 //! ## Safety gates
 //!
 //! Reading is strict rather than lossy:
-//! - **Size cap** — [`MAX_TEXT_BYTES`] limits how much text can be
-//!   inlined into one tool result. Bigger files must be read
-//!   incrementally (shell `head` / `grep`, workspace `read_file`) —
-//!   dumping a 50 MB log into the model context would blow the window.
+//! - **Size cap** — Reuses `crate::tools::output::MAX_OUTPUT_BYTES`
+//!   (128 KB) as a fail-fast gate *before* reading, so we don't pull
+//!   megabytes off disk just to truncate them at the tool-output
+//!   boundary moments later. Bigger files must be read incrementally
+//!   (shell `head` / `grep`, workspace `read_file`).
 //! - **NUL-byte sniff** — binary files (PNG, ZIP, EXE, ...) frequently
 //!   happen to be valid UTF-8; a NUL byte is a reliable cheap signal
 //!   that the file is not human-readable text.
@@ -25,11 +26,15 @@ use std::path::Path;
 
 /// Maximum plain-text size the doc_reader will inline as a tool result.
 ///
-/// Tool output is further capped by `crate::tools::output::MAX_OUTPUT_BYTES`
-/// (256 KB), so this ceiling only guards the *read* itself — we fail
-/// fast with actionable guidance instead of reading 50 MB just to
-/// truncate it moments later.
-pub const MAX_TEXT_BYTES: u64 = 1024 * 1024; // 1 MiB
+/// Reuses `crate::tools::output::MAX_OUTPUT_BYTES` (128 KB) as a fail-fast
+/// gate *before* reading, so we don't pull megabytes off disk just to
+/// truncate them at the tool-output boundary moments later. Files larger
+/// than this must be read incrementally (`head` / `grep` / workspace
+/// `read_file`).
+///
+/// Kept aligned with `MAX_OUTPUT_BYTES` on purpose: one number, one rule.
+/// If we ever need a different read-vs-output cap, split them again — but
+/// make the divergence intentional and documented.
 
 /// True if the bytes contain a NUL byte — a strong signal the file is
 /// binary (or UTF-16/UTF-32 text) rather than UTF-8 text.
@@ -45,12 +50,12 @@ pub fn extract_text(path: &Path) -> Result<String, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("Failed to read text file: {e}"))?;
 
-    if bytes.len() as u64 > MAX_TEXT_BYTES {
+    if bytes.len() > crate::tools::output::MAX_OUTPUT_BYTES {
         return Err(format!(
             "Text file too large: {} bytes (limit: {} bytes). \
              Read it incrementally instead (e.g. `head`, `grep`, or workspace `read_file`).",
             bytes.len(),
-            MAX_TEXT_BYTES
+            crate::tools::output::MAX_OUTPUT_BYTES
         ));
     }
 
@@ -114,7 +119,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_text() {
-        let big = vec![b'a'; (MAX_TEXT_BYTES + 1) as usize];
+        let big = vec![b'a'; crate::tools::output::MAX_OUTPUT_BYTES + 1];
         let (_dir, p) = with_temp_file(&big, "big.log");
         let err = extract_text(&p).expect_err("oversized text must be rejected");
         assert!(err.contains("too large"), "got: {err}");

@@ -10,14 +10,15 @@
 //! logic is the project-wide [`crate::util::text::truncate_utf8`] helper;
 //! the markers and append-policies specific to *tool output* stay here.
 
-/// Default maximum bytes for a single tool output (256 KB).
+/// Default maximum bytes for a single tool output (128 KB).
 ///
-/// Reduced from 512 KB to 256 KB: two concurrent 512 KB results (e.g.
-/// two bash commands) could consume ~1 MB / ~250K tokens, exceeding the
-/// usable context budget of most models (typically 128-172K). At 256 KB
-/// per result (~64K tokens each), two results stay within budget while
-/// still providing ample meaningful content.
-pub const MAX_OUTPUT_BYTES: usize = 256 * 1024; // 256 KB
+/// Reduced from 512 KB → 256 KB → 128 KB. Two concurrent near-cap results
+/// (e.g. two bash commands) must stay within the usable context budget of
+/// most models (typically 128-172K tokens): 128 KB ≈ 32K tokens each leaves
+/// ~50% of the window for system prompt, tool definitions, history and
+/// follow-up turns. Larger payloads would push the session task over the
+/// compression threshold on a single tool call.
+pub const MAX_OUTPUT_BYTES: usize = 128 * 1024; // 128 KB
 
 /// Maximum bytes per *single matched line* when a tool emits line-level
 /// output (e.g. content_search content mode).
