@@ -113,6 +113,15 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"], "default": "normal" },
           "parent_task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
+          "assignee": {
+            "type": "string",
+            "description": "agent_id to assign. Must exist in the Gateway agent directory (design §9.1). Agent-created tasks enter review_status=pending regardless."
+          },
+          "due_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 due timestamp, e.g. 2026-09-05T00:00:00Z"
+          },
           "depends_on": {
             "type": "array",
             "items": {
@@ -124,6 +133,17 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
               }
             }
           }
+        }
+      }
+    },
+    {
+      "name": "pm_check_task",
+      "description": "Check whether a task created by the calling agent has been approved by a human. Returns status + review_status. Only the task creator may call this.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["task_id"],
+        "properties": {
+          "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" }
         }
       }
     },
@@ -205,16 +225,33 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
   ]
 }"#;
 
+/// 解析 manifest 中的工具数组（`tools/list` 响应的 `tools` 字段）。
+///
+/// 每次调用解析一次（manifest 是编译时常量，解析成本可忽略）。
+/// 与 `PM_TOOL_MANIFEST` 保持单一事实来源。
+pub fn manifest_tools() -> Vec<serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_str(PM_TOOL_MANIFEST).expect("PM_TOOL_MANIFEST must be valid JSON");
+    v["tools"].as_array().cloned().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn manifest_is_valid_json() {
         let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         for t in tools {
             assert!(t["name"].is_string());
             assert!(t["inputSchema"].is_object());
         }
+    }
+
+    #[test]
+    fn manifest_tools_matches_raw_manifest() {
+        let parsed: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
+        let raw = parsed["tools"].as_array().unwrap();
+        assert_eq!(super::manifest_tools().len(), raw.len());
     }
 }

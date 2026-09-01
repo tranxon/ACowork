@@ -694,6 +694,19 @@ impl RuntimeMqttClient {
                                                 .map(|m| m.servers.clone())
                                                 .unwrap_or_default();
                                             drop(cache_write);
+                                            // T3-4: 替换 `{agent_id}` 模板占位符。
+                                            //
+                                            // Gateway 注入的 pm MCP 通过
+                                            // `X-MCP-Actor: {agent_id}` 识别调用者
+                                            // （设计 §9.2）。这里是 Runtime 收到
+                                            // `acowork/global/mcps` 的唯一持久化点，
+                                            // `poll_agent_id` 即本 agent 的真实身份；
+                                            // 在此替换后，连接路径（startup / config
+                                            // change）读到的是已解析的 header，无需
+                                            // 感知模板。env 同样替换以支持未来扩展。
+                                            let resolve_agent_id = |value: &str| {
+                                                value.replace("{agent_id}", &poll_agent_id)
+                                            };
                                             let defs: Vec<
                                                 acowork_core::protocol::McpServerConfigDef,
                                             > = servers
@@ -704,8 +717,16 @@ impl RuntimeMqttClient {
                                                     url: if s.url.is_empty() { None } else { Some(s.url.clone()) },
                                                     command: s.command.clone(),
                                                     args: s.args.clone(),
-                                                    env: s.env.clone(),
-                                                    headers: s.headers.clone(),
+                                                    env: s
+                                                        .env
+                                                        .into_iter()
+                                                        .map(|(k, v)| (k, resolve_agent_id(&v)))
+                                                        .collect(),
+                                                    headers: s
+                                                        .headers
+                                                        .into_iter()
+                                                        .map(|(k, v)| (k, resolve_agent_id(&v)))
+                                                        .collect(),
                                                     tool_timeout_secs: if s.tool_timeout_secs == 0 {
                                                         None
                                                     } else {

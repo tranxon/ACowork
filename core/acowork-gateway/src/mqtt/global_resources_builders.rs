@@ -150,6 +150,33 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
         })
         .collect();
 
+    // T3-4: 自动注入 pm MCP（设计 §6.1 / §21）。
+    //
+    // `pm_mcp_url` 在 `Gateway::run` 启动时设置（`Some` ⇔ PM 服务已启动且
+    // `pm.auto_inject_mcp = true`）。注入后，每个 Agent 的 catalog 都会出现
+    // `name = "pm"` 的 HTTP MCP server，Agent 启动即可调用 `pm_*` 工具。
+    //
+    // 身份：pm MCP 通过 `X-MCP-Actor` header 识别调用者（= agent_id，设计
+    // §9.2）。这里下发 `{agent_id}` 模板占位符，Runtime 连接时替换为实际
+    // agent_id（见 Runtime `template_mcp_identity`）。
+    let mut servers = servers;
+    if let Some(pm_url) = &gw.pm_mcp_url {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-MCP-Actor".to_string(), "{agent_id}".to_string());
+        servers.push(McpRef {
+            id: "pm".to_string(),
+            name: "pm".to_string(),
+            transport: map_mcp_transport(&McpTransportDef::Http).into(),
+            url: pm_url.clone(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            headers,
+            tool_timeout_secs: 60,
+            auth_token: String::new(),
+        });
+    }
+
     AvailableMcps {
         version: cache.version,
         servers,

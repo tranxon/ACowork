@@ -73,6 +73,15 @@ pub enum PmError {
         to: String,
     },
 
+    // ── MCP 鉴权（设计 §9.2 / §9.3）──────────────────────────────────
+    /// 调用者不是任务 assignee，或匿名调用被禁止的工具。
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
+    /// MCP 匿名连接调用需要身份的工具（无 `X-MCP-Actor`）。
+    #[error("authentication required: {0}")]
+    Unauthenticated(String),
+
     // ── 基础设施（自动 From 转换）───────────────────────────────────
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -119,6 +128,10 @@ impl PmError {
 
             PmError::DependencyNotSatisfied { .. } => 409,
 
+            PmError::Unauthenticated(_) => 401,
+
+            PmError::Forbidden(_) => 403,
+
             PmError::Io(_) | PmError::Json(_) | PmError::Multipart(_) | PmError::Image(_) => 500,
 
             PmError::Internal(_) => 500,
@@ -144,6 +157,8 @@ impl PmError {
             PmError::AttachmentMimeRejected(_) => "attachment_mime_rejected",
             PmError::TooManyAttachments(_) => "too_many_attachments",
             PmError::InvalidStateTransition { .. } => "invalid_state_transition",
+            PmError::Unauthenticated(_) => "unauthenticated",
+            PmError::Forbidden(_) => "forbidden",
             PmError::Io(_) => "io_error",
             PmError::Json(_) => "json_error",
             PmError::Multipart(_) => "multipart_error",
@@ -240,6 +255,9 @@ mod tests {
             ),
             (PmError::Multipart("boundary missing".into()), 500, "multipart_error"),
             (PmError::Image("decode failed".into()),        500, "image_error"),
+            // ── MCP auth（P3）────────────────────────────────────────
+            (PmError::Unauthenticated("anonymous write".into()), 401, "unauthenticated"),
+            (PmError::Forbidden("not assignee".into()),     403, "forbidden"),
             (PmError::Internal("x-actor missing".into()),   500, "internal_error"),
         ];
 
@@ -259,8 +277,9 @@ mod tests {
                 expected_code
             );
         }
-        // 21 个错误码,与 README §3 表 21 行对齐
-        assert_eq!(seen_codes.len(), 21);
+        // 23 个错误码,与 README §3 表 23 行对齐
+        // （P3 新增 unauthenticated / forbidden 两个 MCP 鉴权错误码）
+        assert_eq!(seen_codes.len(), 23);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。

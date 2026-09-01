@@ -352,6 +352,16 @@ impl TreePmStore {
         self.index.read().len()
     }
 
+    /// 某项目下的任务总数（二级索引，O(1)）。供项目概览（看板头 / MCP 摘要）。
+    pub fn project_task_count(&self, project_id: &ProjectId) -> usize {
+        self.index
+            .read()
+            .by_project
+            .get(project_id)
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
     /// 内部辅助：从索引读取任务条目。
     pub fn index_entry(&self, task_id: &TaskId) -> Option<TaskEntry> {
         self.index.read().by_id.get(task_id).cloned()
@@ -634,8 +644,8 @@ impl PmStore for TreePmStore {
             status: TaskStatus::Pending,
             review_status,
             priority: input.priority,
-            assignee: None,
-            due_at: None,
+            assignee: input.assignee,
+            due_at: input.due_at,
             depends_on: input.depends_on,
             attachments: vec![],
             result: None,
@@ -940,7 +950,7 @@ impl PmStore for TreePmStore {
 
     // ── Lifecycle ──────────────────────────────────────────────────
 
-    async fn claim_task(&self, id: &TaskId, _agent_id: &str) -> Result<Task> {
+    async fn claim_task(&self, id: &TaskId, agent_id: &str) -> Result<Task> {
         let entry = self
             .index
             .read()
@@ -964,6 +974,9 @@ impl PmStore for TreePmStore {
 
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
+        // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
+        // MCP 层已校验调用者 == assignee（设计 §9.2），这里落盘兜底一致。
+        task.assignee = Some(agent_id.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
         self.refresh_entry(&entry, id, task.status, task.assignee.clone());
@@ -1281,6 +1294,8 @@ mod tests {
             parent_task_id: None,
             depends_on: vec![],
             attachment_ids: vec![],
+            assignee: None,
+            due_at: None,
         }
     }
 

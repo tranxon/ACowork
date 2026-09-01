@@ -586,12 +586,32 @@ impl Gateway {
         // 失败**非致命**：Gateway 继续运行，`/api/pm/*` 路由仅在 Some 时挂载
         // （server.rs 通过 `gateway_state.pm_service` 读取）。PM 数据默认位于
         // `{data_dir}/acowork-pm`（`prepare_pm_data_dir` 已在 config 解析时处理）。
-        match acowork_pm::PmService::new(self.config.pm.clone()).await {
+        //
+        // 注入 Gateway 侧 Agent 目录（§9.1）：`pm_create_task` 指派 assignee
+        // 时校验其存在于 `installed_agents`。共享 state 的 read 锁只在校验瞬间
+        // 持有，不跨 await 点，无死锁风险。
+        let agent_dir: Arc<dyn acowork_pm::AgentDirectory> = Arc::new(
+            crate::http::pm_api::GatewayAgentDirectory::new(shared_state.clone()),
+        );
+        match acowork_pm::PmService::with_agent_directory(self.config.pm.clone(), agent_dir).await {
             Ok(svc) => {
                 let arc = Arc::new(svc);
-                shared_state.write().await.pm_service = Some(arc);
+                let pm_mcp_url = if self.config.pm.auto_inject_mcp {
+                    Some(format!(
+                        "http://{}:{}{}",
+                        shared_state.read().await.advertise_host.clone(),
+                        http_config.port,
+                        self.config.pm.mcp_http_path
+                    ))
+                } else {
+                    None
+                };
+                let mut gw = shared_state.write().await;
+                gw.pm_service = Some(arc);
+                gw.pm_mcp_url = pm_mcp_url.clone();
                 tracing::info!(
                     data_dir = %self.config.pm.data_dir.display(),
+                    pm_mcp_url = pm_mcp_url.as_deref().unwrap_or("<disabled>"),
                     "PM service started (ADR-061)"
                 );
             }

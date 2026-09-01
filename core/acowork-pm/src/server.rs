@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::config::PmConfig;
 use crate::error::Result;
+use crate::mcp::{AgentDirectory, NoopAgentDirectory};
 use crate::store::tree::TreePmStore;
 
 /// PM 服务运行实例。
@@ -25,11 +26,25 @@ use crate::store::tree::TreePmStore;
 pub struct PmService {
     pub config: PmConfig,
     pub store: Arc<TreePmStore>,
+    /// Agent 目录契约（设计 §9.1）：`pm_create_task` 校验 assignee 存在。
+    /// 默认 `Noop`（不校验）；Gateway 注入真实实现（基于 installed_agents）。
+    pub agent_dir: Arc<dyn AgentDirectory>,
 }
 
 impl PmService {
     /// 构造服务实例（**不**启动 server，仅初始化 store + 重建索引）。
+    ///
+    /// 使用宽松 Agent 目录（不做 assignee 存在性校验）。生产环境建议用
+    /// [`PmService::with_agent_directory`] 注入真实目录。
     pub async fn new(config: PmConfig) -> Result<Self> {
+        Self::with_agent_directory(config, Arc::new(NoopAgentDirectory)).await
+    }
+
+    /// 构造服务实例，并注入 Agent 目录（Gateway 基于其 `installed_agents` 提供）。
+    pub async fn with_agent_directory(
+        config: PmConfig,
+        agent_dir: Arc<dyn AgentDirectory>,
+    ) -> Result<Self> {
         config.validate()?;
 
         let store = Arc::new(TreePmStore::new(config.clone()).await?);
@@ -39,12 +54,19 @@ impl PmService {
             store.rebuild_index().await?;
         }
 
-        Ok(Self { config, store })
+        Ok(Self {
+            config,
+            store,
+            agent_dir,
+        })
     }
 
     /// 构建 axum router（供 Gateway 挂载）。
     ///
     /// 返回的 router 已包含全部 PM API 路由，**不**启动 listen socket。
+    ///
+    /// **P3**：REST `pm_router`（`/api/pm/*`）与 MCP JSON-RPC `mcp_router`
+    /// （`/mcp`，公开 `/api/pm/mcp`）在此合并。两者均为 `Router<()>`。
     ///
     /// State 类型：`Router`（`Router<()>`）—— PM 内部已 `.with_state(ApiState)`
     /// 注入 state，对外呈现为可 serve 的 router。Gateway 端用
@@ -52,6 +74,7 @@ impl PmService {
     /// 类型一致，PM 的 `()` 与 Gateway 的 `AppState` 不同）。
     pub fn router(&self) -> axum::Router {
         crate::api::routes::pm_router(self.store.clone(), self.config.clone())
+            .merge(crate::mcp::mcp_router(self.store.clone(), self.agent_dir.clone()))
     }
 
     /// 启动独立的 HTTP server（**仅供开发模式**，生产由 Gateway 托管）。

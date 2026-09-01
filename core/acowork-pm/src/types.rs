@@ -138,9 +138,10 @@ impl TaskStatus {
 /// - `chore`：杂项
 /// - `checkpoint`：人类检查点（完成时强制 review）
 /// - `milestone`：里程碑标记
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskType {
+    #[default]
     Task,
     Bug,
     Feature,
@@ -293,10 +294,11 @@ fn default_priority() -> Priority {
 }
 
 /// 任务优先级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Low,
+    #[default]
     Normal,
     High,
     Urgent,
@@ -338,6 +340,16 @@ pub struct CreateTask {
     /// 可选：在创建时上传的附件 ID 列表（附件需先调用 multipart 上传获取 ID）。
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 指派 Agent / human（设计 PM-04 / §6 `pm_create_task` 的 `assignee` 参数）。
+    ///
+    /// **P3 新增**：`CreateTask` 补齐 `assignee` + `due_at`（P1 遗留缺口——
+    /// 创建时无法指派/设定截止时间，只能事后 PATCH）。不存在的 agent 由上层
+    /// （MCP `AgentDirectory` / Gateway）校验，本结构仅承载字段。
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。
+    #[serde(default)]
+    pub due_at: Option<DateTime<Utc>>,
 }
 
 fn default_task_type() -> TaskType {

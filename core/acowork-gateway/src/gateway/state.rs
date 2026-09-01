@@ -278,6 +278,12 @@ pub struct GatewayState {
     /// `None` 表示 PM 服务尚未启动（或启动失败）。HTTP 层通过
     /// `build_router_with_pm` 把 PM router 挂到 `/api/pm/*` 路径下。
     pub pm_service: Option<Arc<acowork_pm::PmService>>,
+    /// P3 T3-4: pm MCP HTTP 端点 URL（`http://{advertise_host}:{http.port}{pm.mcp_http_path}`）。
+    ///
+    /// 启动时在 PM 服务成功启动且 `pm.auto_inject_mcp` 时设置；`Some` 表示
+    /// `build_available_mcps` 应把 pm MCP 注入到 `acowork/global/mcps` 资源
+    /// （每个 Agent 的 catalog），使 Agent 自动获得 `pm_*` 工具。
+    pub pm_mcp_url: Option<String>,
 }
 
 impl GatewayState {
@@ -304,6 +310,7 @@ impl GatewayState {
             instance_id: String::new(),
             bootstrap: BootstrapState::default(),
             pm_service: None,
+            pm_mcp_url: None,
         }
     }
 

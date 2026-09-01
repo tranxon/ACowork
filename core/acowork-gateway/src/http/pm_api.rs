@@ -38,8 +38,9 @@
 use std::sync::Arc;
 
 use axum::Router;
+use tokio::sync::RwLock;
 
-use acowork_pm::PmService;
+use acowork_pm::{AgentDirectory, PmService};
 
 /// 返回 PM service 的 axum `Router`（`Router<()>`，已注入 ApiState），
 /// 由 Gateway `nest_service("/api/pm", ...)` 挂载。
@@ -47,4 +48,30 @@ use acowork_pm::PmService;
 /// Path 内部不带 `/api` 前缀（`nest_service` 时自动加上 `/api/pm`）。
 pub fn pm_routes(pm_service: Arc<PmService>) -> Router {
     pm_service.router()
+}
+
+/// Gateway 提供的 [`AgentDirectory`] 实现（设计 §9.1）：基于
+/// `GatewayState.installed_agents` 判断某 `agent_id` 是否已安装。
+///
+/// 用于 `pm_create_task` 指派 `assignee` 时的存在性校验——只有存在于
+/// Gateway Agent 目录中的 agent 才能被指派任务（防止幽灵 assignee）。
+///
+/// **为什么基于 `installed_agents` 而不是 `running_agents`**：目录语义是
+/// "已安装即可指派"，与 agent 当前是否在线无关；指派给离线 agent 是合法的
+/// （其上线后通过 `pm_list_my_tasks` 可自查）。
+pub struct GatewayAgentDirectory {
+    state: Arc<RwLock<crate::gateway::state::GatewayState>>,
+}
+
+impl GatewayAgentDirectory {
+    pub fn new(state: Arc<RwLock<crate::gateway::state::GatewayState>>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentDirectory for GatewayAgentDirectory {
+    async fn agent_exists(&self, agent_id: &str) -> bool {
+        self.state.read().await.is_installed(agent_id)
+    }
 }

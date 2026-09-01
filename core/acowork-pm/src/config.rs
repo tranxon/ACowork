@@ -69,10 +69,27 @@ pub struct PmConfig {
     /// 默认 `256`。
     #[serde(default = "default_thumbnail_max_edge")]
     pub thumbnail_max_edge: u32,
+
+    /// 是否自动把 pm MCP HTTP 端点注入每个 Agent 的 MCP catalog（设计 §6.1 / T3-4）。
+    ///
+    /// 默认 `true`：Gateway 在 `acowork/global/mcps` 资源下发中附带一个
+    /// `name = "pm"`、transport = http 的 MCP server，Agent 启动后自动获得
+    /// `pm_*` 工具。关闭后 Agent 需在 Tools 面板手动添加（通常无需关闭）。
+    #[serde(default = "default_true")]
+    pub auto_inject_mcp: bool,
+
+    /// pm MCP HTTP 端点的公开路径（含 `/api/pm` 前缀，由 Gateway `nest_service`
+    /// 挂载）。默认 `/api/pm/mcp`（设计 §21）。
+    #[serde(default = "default_mcp_http_path")]
+    pub mcp_http_path: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_mcp_http_path() -> String {
+    "/api/pm/mcp".to_string()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -121,6 +138,8 @@ impl Default for PmConfig {
             index_rebuild_on_start: default_index_rebuild_on_start(),
             generate_thumbnails: default_true(),
             thumbnail_max_edge: default_thumbnail_max_edge(),
+            auto_inject_mcp: default_true(),
+            mcp_http_path: default_mcp_http_path(),
         }
     }
 }

@@ -85,3 +85,5 @@ pub use server::PmService;
 
 // MCP
 pub use mcp::manifest::PM_TOOL_MANIFEST;
+pub use mcp::mcp_router;
+pub use mcp::{AgentDirectory, McpState, NoopAgentDirectory};
