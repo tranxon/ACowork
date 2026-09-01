@@ -23,6 +23,7 @@ import {
 } from "../../lib/accentPresets";
 import { SettingsPage } from "../settings/SettingsPage";
 import { HarnessPage } from "../harness/HarnessPage";
+import { ProjectsView } from "../../views/ProjectsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
@@ -894,7 +895,13 @@ export function AppLayout() {
           </div>
         )}
 
-        {(currentView === "projects" || currentView === "docs") && (
+        {currentView === "projects" && (
+          <div className="flex flex-1 overflow-hidden rounded-xl bg-chat-area">
+            <ProjectsView />
+          </div>
+        )}
+
+        {currentView === "docs" && (
           <div className="flex flex-1 items-center justify-center overflow-hidden rounded-xl bg-chat-area">
             <div className="rounded-md border border-zinc-200 bg-modal-surface p-8 dark:border-zinc-700">
               <p className="text-sm text-zinc-400 dark:text-zinc-500">TODO</p>
