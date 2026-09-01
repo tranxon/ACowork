@@ -156,19 +156,6 @@ impl GrafeoStore {
             .clone()
     }
 
-    /// Replace the currently-applied memory quality configuration.
-    ///
-    /// Primarily intended for runtime config switching (per-agent manifest
-    /// overrides, benchmark harnesses that need before/after gates). The
-    /// write-time Plan-Y fold in `process_memory_store` reads `self.quality()`
-    /// on every store, so subsequent writes honour the new configuration.
-    pub fn set_quality(&self, new_quality: MemoryQualityConfig) {
-        *self
-            .quality
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = new_quality;
-    }
-
     /// Initialize schema: create HNSW vector indexes and BM25 text indexes.
     ///
     /// Vector indexes are created for all four memory labels **only if they

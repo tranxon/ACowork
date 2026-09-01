@@ -136,24 +136,25 @@ pub struct MemoryManagerConfig {
     pub enable_graph_expand: bool,
     /// Record episodes asynchronously (default: true).
     pub record_async: bool,
-    /// Per-turn auto-injection of retrieved memories (default: **true**).
+    /// Per-turn auto-injection of retrieved memories (default: **false**).
     ///
-    /// When enabled, `MemoryManager::retrieve_and_inject` is called from the
-    /// agent loop on at most the first user turn per session (ADR-060 §6.3 /
-    /// ADR-062 §6.1 — Plan A). Subsequent turns skip via
-    /// `AgentLoop.memory_retrieved_for_session`. The LLM can still trigger
-    /// explicit deep recall via the `memory_recall` tool
-    /// (`MemoryQuery::deep_recall`) at any time.
+    /// When disabled, `MemoryManager::retrieve_and_inject` is NOT called
+    /// from the agent loop — the LLM can still trigger explicit deep recall
+    /// via the `memory_recall` tool (`MemoryQuery::deep_recall`).
     ///
-    /// **M5 (2026-09)**: flipped default from `false` → `true` per
-    /// ADR-062 §6.1. Re-opening was gated on benchmark evidence
-    /// (D1 Dormant exclusion + D2 min_score fix); M4 report shows §5.2
-    /// thresholds cleared (Precision@5 +41%, Dormant garbage =0, auto_inject
-    /// hit 100%).
+    /// **Why off by default (2026-09-12 decision)**:
+    /// 1. Different agent types need different recall profiles (coding
+    ///    agents value project context; chat agents value user preference).
+    /// 2. The Grafeo memory layer (triples / preference nodes) is not yet
+    ///    mature enough for unsupervised per-turn injection.
+    /// 3. Retrieving with the raw user message as the query yields
+    ///    low-precision results that can mislead the LLM.
     ///
-    /// Per-agent override: a `.agent` manifest can set
-    /// `[memory.quality].auto_inject_enabled = false` to opt out without
-    /// code changes.
+    /// Re-enable per agent once the memory layer matures, or once an
+    /// agent-specific query strategy exists.
+    ///
+    /// ADR-062 D3: re-opening this switch is gated on benchmark evidence
+    /// (retrieval quality must clear §5.2 thresholds first).
     pub auto_inject_enabled: bool,
 }
 
@@ -168,9 +169,7 @@ impl Default for MemoryManagerConfig {
             abstention_prompt: None,
             enable_graph_expand: true,
             record_async: true,
-            // M5 (ADR-062 §6.1 — Plan A): first-turn trigger via
-            // `memory_retrieved_for_session` flag in loop_memory.rs:93.
-            auto_inject_enabled: true,
+            auto_inject_enabled: false,
         }
     }
 }
@@ -1130,9 +1129,9 @@ mod tests {
         assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
         assert!(config.enable_graph_expand);
         assert!(config.record_async);
-        // M5 (ADR-062 §6.1 — Plan A): per-turn auto-injection is ON by default
-        // (first-turn trigger). Per-agent opt-out via `.agent` manifest.
-        assert!(config.auto_inject_enabled);
+        // 2026-09-12: per-turn auto-injection is OFF by default (see the
+        // field doc for rationale). Re-enable deliberately per agent.
+        assert!(!config.auto_inject_enabled);
     }
 
     #[test]

@@ -221,20 +221,15 @@ impl GrafeoStore {
         // Step 4: Create the new knowledge node.
         let subject = input.subject.clone().unwrap_or_else(|| "user".to_string());
         let predicate = input.predicate.clone().unwrap_or_default();
-        let mut object = input
+        let object = input
             .object
             .clone()
             .unwrap_or_else(|| input.content.clone());
 
         let mut new_metadata = std::collections::HashMap::new();
         // Persist LLM-provided keywords to aid retrieval (design §4.1, Gap G8).
-        // Stored under metadata["keywords"] as a JSON array.
-        //
-        // M5 (ADR-062 §6.2 — Plan Y): when `quality.keyword_index` is enabled,
-        // also fold the keywords into the BM25-indexed `object` field so text
-        // search naturally matches keyword tokens without adding a new
-        // grafeo-engine hybrid source. Default `keyword_index=false` keeps the
-        // metadata-only behaviour, preserving M4 baselines.
+        // Stored under metadata["keywords"] as a JSON array so BM25/keyword
+        // matching can consume them during recall.
         if let Some(keywords) = &input.keywords
             && !keywords.is_empty()
         {
@@ -247,9 +242,6 @@ impl GrafeoStore {
                         .collect(),
                 ),
             );
-            if self.quality().keyword_index {
-                object.push_str(&format!(" Keywords: {}", keywords.join(" ")));
-            }
         }
 
         let mut new_node = KnowledgeNode {
