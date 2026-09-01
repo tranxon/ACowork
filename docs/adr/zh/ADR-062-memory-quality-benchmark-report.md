@@ -184,12 +184,41 @@ auto_inject min_score=None    → 1 result, score 0.6437
 - benchmark 复测：新增 keyword 专项查询集（基于"仅靠 keywords 命中"的查询），P@5 / Recall@5 验证打开 vs 关闭的差值。
 - Manifest `[memory.quality].keyword_index = true/false` 双向生效。
 
+### 6.2.1 Keyword 质量门（M5 必做前置）
+
+**问题**：当前 keyword 唯一来源是 LLM（`memory_store` 工具调用参数，[memory_store.rs:271-276](core/acowork-runtime/src/tools/builtin/memory_store.rs#L271-L276)），零清洗/限长/去重/停用词过滤。[05-memory.md §3.3](../design/zh/05-memory.md) 原本设计 Runtime 从 `memory_hint.e` 提取作为**确定性主源** + LLM 可选补充（"LLM 甚至可以不填"），但 v3.10 简化（[05-memory.md:144,1151](../design/zh/05-memory.md#L1151)）把 Runtime 链路删了，**未同步更新设计文档**——这是 §6.2 直接折入 `object` 的潜在放大风险（garbage keywords → 放大进 BM25 → 检索污染；与 ADR-062 §1 已对 `confidence`/`importance` 警告的同类 LLM 锚定问题）。
+
+**决策（轻量写时门，Option A）**：在写入路径增加确定性清洗，**无论 `keyword_index` 是否打开都生效**（保证 `metadata["keywords"]` 自身也干净，不分裂）。
+
+- **位置**：纯函数 `acowork_memory::keyword::sanitize(input: Vec<String>) -> Vec<String>`；在 `memory_store.rs`（LLM 边界）与 `instant.rs`（防御兜底、幂等）双向调用。
+- **规则**（按序）：
+  1. `trim()` + 长度过滤：`0 < len ≤ 30`（防整句污染）
+  2. 小写化（与 BM25 分词器 token 大小写一致）
+  3. 字符过滤：必须含至少一个 ASCII alpha 或 CJK 字符（过滤纯数字 / 纯标点）
+  4. 去重（case-insensitive，按小写后字符串）
+  5. 停用词过滤：内置 ~30 个常见无意义 token（`the, a, user, fact, memory, note, info, data, thing, item, stuff, kind, type, way, something, anything, everything, one, two, three, yes, no, ok, okay, um, uh, hmm, oh, ah, wow`，中文标点空串等）
+  6. 数量上限：单节点 ≤ 8 keywords（超出截断，保留前 8）
+- **可观测性**：清洗掉的 keyword 数量 + 各规则触发分布埋点（`memory_write_keyword_gate` structured event），用于 M3.6 阈值校准后续分析。
+- **工具描述同步更新**：`memory_store` 工具描述加入 "Provide short lowercase tokens (≤30 chars), avoid duplicates and common stopwords"——降低 LLM 锚定到默认 bad case 的概率。
+
+**不做的**（避免范围蔓延）：
+- 词频/全局常见 token 黑名单（依赖跨节点统计，需另设 P3）
+- 词干提取 / 同义词归并（依赖 NLP 库，超出 M5 范围）
+- 恢复 `memory_hint.e` Runtime 提取（Option B，见 §6.7 P3）
+
+**M5 验收条件扩展**：
+- 单元测试覆盖每条规则的边界（空串、超长、纯数字、停用词、重复、超 8 个）
+- BM25 命中测试：清洗后的 keyword 在 `object` 索引中可被搜到
+- 回归测试：现有 e2e 用例 `test_memory_store_metadata_params_inmemory` 在清洗后仍通过
+- manifest `[memory.quality]` 不新增 keyword 相关开关（清洗是 always-on 的写入约束，非可配参数）
+
 ### 6.5 M5 总体步骤
 
 | 步骤 | 改动文件 | 验证手段 |
 |---|---|---|
 | 1. `auto_inject_enabled` 默认值改 true | [manager.rs](core/acowork-memory/src/manager.rs) | 单元测试（默认值断言）+ benchmark harness 验证命中率 |
-| 2. keyword_index 写时拼入 `object` | [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) | 单元测试（写/读 BM25 命中）+ benchmark |
+| 2a. **keyword 写时质量门**（§6.2.1 前置） | `acowork-memory/src/keyword.rs`（新模块）+ [memory_store.rs](core/acowork-runtime/src/tools/builtin/memory_store.rs) + [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) 双向调用 | 单元测试覆盖 6 条规则边界 + 工具描述更新 + 现有 e2e 回归 |
+| 2b. keyword_index 写时拼入 `object`（依赖 2a） | [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) | 单元测试（清洗后 BM25 命中）+ benchmark |
 | 3. manifest `[memory.quality].keyword_index` / `auto_inject_enabled` 反序列化已就位（无需改动） | — | harness 显式设值覆盖验证 |
 | 4. 扩展 benchmark：keyword 专项查询集 + auto_inject 状态扫描 | [memory_m4_bench.rs](core/acowork-runtime/tests/memory_m4_bench.rs) | 重命名为 `memory_m5_bench` 或追加 keyword 配置开关 |
 | 5. 跑 before/after 对比 | — | 输出表格（Precision@5 / Recall@5 / MRR / Dormant / auto_inject hit / keyword hit） |
@@ -217,6 +246,7 @@ auto_inject min_score=None    → 1 result, score 0.6437
 | **P3** | consolidation_bg → AgentLoop 通知通道（解锁方案 C） | ADR-060 §11 #4 | 中（事件通道 + 通知机制） |
 | **P3** | M3.6 阈值校准（confidence/importance 分布方差 + 阈值合理性） | ADR-062 §6.6 | 中（需先有埋点数据） |
 | **P3** | M4 score-domain 探针发现的根本解决：补 `create_node_with_props` 写 vector index | M4 §4.3 | 小（grafeo-engine wrapper 1 处） |
+| **P3** | 恢复 `memory_hint.e` Runtime 提取（实现 [05-memory.md §3.3](../design/zh/05-memory.md) 当年设计：规则化实体提取 + 与 LLM 合并去重） | M5 §6.2.1 | 中（独立 ADR / 规则引擎） |
 
 **原则**：每项都有明确入口（来源列）与工作量估算，避免"待办黑洞"。
 
