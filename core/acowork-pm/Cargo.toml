@@ -65,6 +65,10 @@ toml.workspace = true
 # MIME type detection (attachment uploads)
 mime_guess = "2"
 
+# Integrity checksum for attachment uploads (sha256)
+sha2.workspace = true
+hex.workspace = true
+
 # Image thumbnail generation (feature-gated)
 image = { version = "0.25", optional = true }
 

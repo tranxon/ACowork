@@ -21,9 +21,9 @@
 //! | POST   /tasks/:tid/review             |   ✓   |                     |
 //! | GET    /tasks/:tid/children           |   ✓   |                     |
 //! | GET    /tasks/:tid/attachments        |   ✓   |                     |
-//! | POST   /tasks/:tid/attachments        |       | 500 unimplemented   |
-//! | GET    /attachments/:aid              |       | 500 unimplemented   |
-//! | DELETE /attachments/:aid              |   ✓   | 404 unknown         |
+//! | POST   /tasks/:tid/attachments        |   ✓   | 404 unknown task   |
+//! | GET    /attachments/:aid              |   ✓   | 404 unknown        |
+//! | DELETE /attachments/:aid              |   ✓   | 404 unknown        |
 
 use std::sync::Arc;
 
@@ -519,9 +519,8 @@ async fn list_attachments_empty_returns_200() {
 }
 
 #[tokio::test]
-async fn upload_attachment_returns_500_unimplemented() {
-    // P1 阶段 attachment upload 是 TODO，handler 直接返回 500。
-    // 这个测试是为了在 P2 实现 upload 时立刻报警 —— 状态码变化就是契约变化。
+async fn upload_download_delete_attachment_roundtrip() {
+    // 真实 multipart 上传 → 元数据返回 → 下载字节 → 删除 204。
     let app = TestApp::new().await;
     let router = app.router();
     let pid = create_project(&app, "P").await;
@@ -533,23 +532,131 @@ async fn upload_attachment_returns_500_unimplemented() {
     let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
     let tid = body["id"].as_str().unwrap().to_string();
 
-    let req = Request::builder()
+    // 构造 multipart body（text/plain 文件）
+    let boundary = "----testboundary";
+    let file_name = "hello.txt";
+    let file_content = b"hello attachment bytes";
+    let mut mp_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: text/plain\r\n\r\n"
+    )
+    .into_bytes();
+    mp_body.extend_from_slice(file_content);
+    mp_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let upload = Request::builder()
         .method(Method::POST)
         .uri(format!("/tasks/{tid}/attachments"))
-        .header(header::CONTENT_TYPE, "multipart/form-data; boundary=---xxx")
-        .body(Body::from("---\r\n"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("x-actor", "human-alice")
+        .body(Body::from(mp_body))
         .unwrap();
-    let (status, body) = body_json(router.oneshot(req).await.unwrap()).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body["error"]["code"], "internal_error");
+    let (status, meta) = body_json(router.clone().oneshot(upload).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(meta["filename"], "hello.txt");
+    assert_eq!(meta["kind"], "file");
+    assert_eq!(meta["content_type"], "text/plain");
+    assert_eq!(meta["size"].as_u64().unwrap(), file_content.len() as u64);
+    assert!(meta["sha256"].as_str().unwrap().len() == 64);
+    let aid = meta["id"].as_str().unwrap().to_string();
+
+    // 下载 → 返回原始字节
+    let download = TestApp::request_no_body(Method::GET, &format!("/attachments/{aid}"));
+    let resp = router.clone().oneshot(download).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/plain"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    assert_eq!(&bytes[..], file_content);
+
+    // 列表 → 1 条
+    let list = TestApp::request_no_body(Method::GET, &format!("/tasks/{tid}/attachments"));
+    let (status, arr) = body_json(router.clone().oneshot(list).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(arr.as_array().unwrap().len(), 1);
+
+    // 删除 → 204，再下载 → 404
+    let del = TestApp::request_no_body(Method::DELETE, &format!("/attachments/{aid}"));
+    let resp = router.clone().oneshot(del).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let again = TestApp::request_no_body(Method::GET, &format!("/attachments/{aid}"));
+    let (status, _) = body_json(router.oneshot(again).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn download_attachment_returns_500_unimplemented() {
+async fn upload_attachment_missing_file_field_returns_400() {
+    // multipart body 缺 `file` 字段 → 400（而不是旧的 500 unimplemented）。
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await;
+    let create = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({"title": "T"}),
+    );
+    let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
+    let tid = body["id"].as_str().unwrap().to_string();
+
+    let boundary = "----testboundary";
+    let mut mp_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nvalue\r\n--{boundary}--\r\n"
+    )
+    .into_bytes();
+    let _ = &mut mp_body; // keep body non-empty
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/attachments"))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("x-actor", "human-alice")
+        .body(Body::from(mp_body))
+        .unwrap();
+    let (status, body) = body_json(router.oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn upload_attachment_unknown_task_returns_404() {
+    let app = TestApp::new().await;
+    let boundary = "----testboundary";
+    let mut mp_body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\n"
+    )
+    .into_bytes();
+    mp_body.extend_from_slice(b"x");
+    mp_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/tasks/t-unknown/attachments")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .header("x-actor", "human-alice")
+        .body(Body::from(mp_body))
+        .unwrap();
+    let (status, body) = body_json(app.router().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "task_not_found");
+}
+
+#[tokio::test]
+async fn download_unknown_attachment_returns_404() {
     let app = TestApp::new().await;
     let req = TestApp::request_no_body(Method::GET, "/attachments/att-anything");
-    let (status, _body) = body_json(app.router().oneshot(req).await.unwrap()).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, body) = body_json(app.router().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "attachment_not_found");
 }
 
 #[tokio::test]

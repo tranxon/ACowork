@@ -21,12 +21,26 @@ pub async fn list(
     State(state): State<ApiState>,
     Path(pid): Path<String>,
     query: axum::extract::Query<TaskFilter>,
-) -> Result<Json<Vec<Task>>, crate::error::PmError> {
+) -> Result<Json<Vec<crate::types::TaskResponse>>, crate::error::PmError> {
     let pid = pid.parse::<ProjectId>()?;
     let mut filter = query.0;
     filter.project_id = Some(pid);
     let tasks = state.store.find_tasks(&filter).await?;
-    Ok(Json(tasks))
+    let mut out = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let tid = task.id.clone();
+        let depth = state.store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
+        let parent_id = state.store.parent_of(&tid);
+        let blocked_by = state.store.compute_blocked_by(&tid).await?;
+        out.push(crate::types::TaskResponse {
+            task,
+            is_blocked: !blocked_by.is_empty(),
+            blocked_by,
+            depth,
+            parent_id,
+        });
+    }
+    Ok(Json(out))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -66,6 +80,7 @@ pub async fn get(
         .await?
         .ok_or(crate::error::PmError::TaskNotFound(tid.to_string()))?;
     let depth = state.store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
+    let parent_id = state.store.parent_of(&tid);
     let blocked_by = state.store.compute_blocked_by(&tid).await?;
 
     Ok(Json(crate::types::TaskResponse {
@@ -73,6 +88,7 @@ pub async fn get(
         is_blocked: !blocked_by.is_empty(),
         blocked_by,
         depth,
+        parent_id,
     }))
 }
 

@@ -109,6 +109,25 @@ pub trait PmStore: Send + Sync {
     async fn get_attachment(&self, att_id: &AttachmentId) -> Result<Option<AttachmentMeta>>;
     async fn register_attachment(&self, task_id: &TaskId, meta: AttachmentMeta) -> Result<()>;
     async fn delete_attachment(&self, att_id: &AttachmentId) -> Result<()>;
+    /// 写附件物理文件（original + optional thumb）并注册元数据。
+    ///
+    /// `meta.storage_path` / `meta.thumb_path` 为相对任务目录的路径（handler
+    /// 按 `attachments/{att_id}/original.{ext}` / `thumb.jpg` 约定构造）。
+    /// 返回持久化后的完整 `meta`。
+    async fn write_attachment(
+        &self,
+        task_id: &TaskId,
+        meta: AttachmentMeta,
+        bytes: Vec<u8>,
+        thumb_bytes: Option<Vec<u8>>,
+    ) -> Result<AttachmentMeta>;
+    /// 读附件物理文件内容（`thumb=true` 读缩略图，仅图片有）。
+    /// 返回 `(meta, bytes)`；附件不存在返回 `None`。
+    async fn read_attachment_bytes(
+        &self,
+        att_id: &AttachmentId,
+        thumb: bool,
+    ) -> Result<Option<(AttachmentMeta, Vec<u8>)>>;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -336,6 +355,28 @@ impl TreePmStore {
     /// 内部辅助：从索引读取任务条目。
     pub fn index_entry(&self, task_id: &TaskId) -> Option<TaskEntry> {
         self.index.read().by_id.get(task_id).cloned()
+    }
+
+    /// 推导任务的父任务 ID（由物理目录位置推断，根任务返回 `None`）。
+    ///
+    /// `dir_path` 结构：
+    /// - 根任务：`.../projects/{pid}/tasks/{tid}`
+    /// - 子任务：`.../projects/{pid}/tasks/{parent}/children/{tid}`
+    ///
+    /// **P2 新增**：供列表接口返回 `parent_id` 派生字段，前端一次拉取
+    /// 即可重建看板树（无需逐任务调用 `/tasks/:tid/children`）。
+    pub fn parent_of(&self, task_id: &TaskId) -> Option<TaskId> {
+        let entry = self.index.read().by_id.get(task_id)?.clone();
+        let parent = entry.dir_path.parent()?;
+        // 子任务父目录名为 "children"，其上一级目录名即父任务 id
+        if parent.file_name()?.to_string_lossy() == "children" {
+            let grand = parent.parent()?;
+            let name = grand.file_name()?.to_string_lossy().into_owned();
+            TaskId::parse(&name).ok()
+        } else {
+            // 根任务：父目录名是 "tasks"
+            None
+        }
     }
 }
 
@@ -1106,6 +1147,83 @@ impl PmStore for TreePmStore {
 
         self.index.write().unregister_attachment(att_id);
         Ok(())
+    }
+
+    async fn write_attachment(
+        &self,
+        task_id: &TaskId,
+        meta: AttachmentMeta,
+        bytes: Vec<u8>,
+        thumb_bytes: Option<Vec<u8>>,
+    ) -> Result<AttachmentMeta> {
+        let entry = self
+            .index
+            .read()
+            .by_id
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
+        let task_dir = entry.dir_path;
+
+        // 物理目录：{task_dir}/attachments/{att_id}/
+        let att_dir = task_dir
+            .join("attachments")
+            .join(meta.id.as_str());
+        fs::create_dir_all(&att_dir).await?;
+
+        // original.{ext} —— storage_path 形如 "attachments/{att_id}/original.{ext}"
+        let original_name = Path::new(&meta.storage_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("original.bin");
+        fs::write(att_dir.join(original_name), &bytes).await?;
+
+        // thumb.jpg —— 仅图片（thumb_path 形如 "attachments/{att_id}/thumb.jpg"）
+        if let (Some(thumb_bytes), Some(thumb_path)) = (thumb_bytes, &meta.thumb_path) {
+            let thumb_name = Path::new(thumb_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("thumb.jpg");
+            fs::write(att_dir.join(thumb_name), thumb_bytes).await?;
+        }
+
+        // 注册元数据（数量上限校验在 register_attachment 内）
+        self.register_attachment(task_id, meta.clone()).await?;
+        Ok(meta)
+    }
+
+    async fn read_attachment_bytes(
+        &self,
+        att_id: &AttachmentId,
+        thumb: bool,
+    ) -> Result<Option<(AttachmentMeta, Vec<u8>)>> {
+        let task_id = match self.index.read().by_attachment.get(att_id) {
+            Some(t) => t.clone(),
+            None => return Ok(None),
+        };
+        let meta = self
+            .get_attachment(att_id)
+            .await?
+            .ok_or_else(|| PmError::AttachmentNotFound(att_id.to_string()))?;
+
+        let rel_path = if thumb {
+            meta.thumb_path.clone().ok_or_else(|| {
+                PmError::AttachmentNotFound(format!("thumb for {}", att_id))
+            })?
+        } else {
+            meta.storage_path.clone()
+        };
+
+        let entry = self
+            .index
+            .read()
+            .by_id
+            .get(&task_id)
+            .cloned()
+            .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
+        let file_path = entry.dir_path.join(&rel_path);
+        let bytes = fs::read(&file_path).await?;
+        Ok(Some((meta, bytes)))
     }
 }
 

@@ -436,7 +436,8 @@ impl Default for TaskSort {
 
 /// 任务完整响应（包含派生字段）。
 ///
-/// 序列化时附带 `is_blocked` / `blocked_by`，便于前端展示，但不写入 `task.json`。
+/// 序列化时附带 `is_blocked` / `blocked_by` / `depth` / `parent_id`，
+/// 便于前端展示与重建看板树，但不写入 `task.json`。
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskResponse {
     #[serde(flatten)]
@@ -449,6 +450,12 @@ pub struct TaskResponse {
     pub blocked_by: Vec<TaskId>,
     /// 物理深度（根=0）。
     pub depth: u8,
+    /// 父任务 ID（由物理目录位置推导，根任务为 `null`）。
+    ///
+    /// **P2 新增**：列表接口返回此字段，前端可一次拉取重建看板树，
+    /// 无需逐个调用 `/tasks/:tid/children`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<TaskId>,
 }
 
 fn is_false(b: &bool) -> bool {

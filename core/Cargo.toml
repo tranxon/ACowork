@@ -99,6 +99,7 @@ zip = { version = "8.1", default-features = true, features = ["deflate-flate2"] 
 
 # Encoding
 base64 = "0.22"
+hex = "0.4"
 urlencoding = "2.1"
 
 # Document parsing

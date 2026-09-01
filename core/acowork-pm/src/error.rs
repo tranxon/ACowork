@@ -29,6 +29,9 @@ pub enum PmError {
     #[error("invalid id: {0}")]
     InvalidId(String),
 
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
     #[error("path traversal detected for id: {0}")]
     PathTraversal(String),
 
@@ -101,6 +104,7 @@ impl PmError {
             | PmError::AttachmentNotFound(_) => 404,
 
             PmError::InvalidId(_)
+            | PmError::BadRequest(_)
             | PmError::PathTraversal(_)
             | PmError::ReservedId(_)
             | PmError::MaxDepthExceeded { .. }
@@ -128,6 +132,7 @@ impl PmError {
             PmError::TaskNotFound(_) => "task_not_found",
             PmError::AttachmentNotFound(_) => "attachment_not_found",
             PmError::InvalidId(_) => "invalid_id",
+            PmError::BadRequest(_) => "bad_request",
             PmError::PathTraversal(_) => "path_traversal",
             PmError::ReservedId(_) => "reserved_id",
             PmError::CycleDetected { .. } => "cycle_detected",
@@ -187,6 +192,7 @@ mod tests {
             (PmError::AttachmentNotFound("att-x".into()),   404, "attachment_not_found"),
             // ── 400 input validation ─────────────────────────────────
             (PmError::InvalidId("foo".into()),              400, "invalid_id"),
+            (PmError::BadRequest("missing field".into()),   400, "bad_request"),
             (PmError::PathTraversal("../etc".into()),       400, "path_traversal"),
             (PmError::ReservedId("task.json".into()),       400, "reserved_id"),
             (PmError::MaxDepthExceeded { depth: 5, max: 4 },400, "max_depth_exceeded"),
@@ -253,8 +259,8 @@ mod tests {
                 expected_code
             );
         }
-        // 20 个错误码,与 README §3 表 20 行对齐
-        assert_eq!(seen_codes.len(), 20);
+        // 21 个错误码,与 README §3 表 21 行对齐
+        assert_eq!(seen_codes.len(), 21);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
@@ -286,6 +292,7 @@ mod tests {
             PmError::TaskNotFound("x".into()),
             PmError::AttachmentNotFound("x".into()),
             PmError::InvalidId("x".into()),
+            PmError::BadRequest("x".into()),
             PmError::PathTraversal("x".into()),
             PmError::ReservedId("x".into()),
             PmError::CycleDetected {
