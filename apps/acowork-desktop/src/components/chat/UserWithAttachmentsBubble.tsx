@@ -16,6 +16,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
+import { formatBubbleTime } from "../../lib/formatTime";
 
 export interface UserWithAttachmentsBubbleProps {
   /** The user text message (items[0] of the block). */
@@ -157,13 +158,24 @@ export function UserWithAttachmentsBubble({
           </div>
         )}
 
-        {/* User text bubble */}
+        {/* User text bubble. Hover-revealed timestamp anchored to the
+            bubble's own LEFT edge. The bubble is split into two layers
+            (outer = relative group + chrome, inner = content + scroll)
+            so the timestamp's `-top-5` is not clipped by the inner
+            layer's `overflow-y-auto` scroll container. */}
         {userMessage.content && (
           <div
-            className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+            className="relative group mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
             style={fontSizeStyle}
           >
-            {userMessage.content}
+            {userMessage.timestamp && (
+              <span className="pointer-events-none absolute left-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
+                {formatBubbleTime(userMessage.timestamp)}
+              </span>
+            )}
+            <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+              {userMessage.content}
+            </div>
           </div>
         )}
       </div>
