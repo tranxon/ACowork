@@ -272,6 +272,12 @@ pub struct GatewayState {
     /// `GatewayState` stays a stable contract while this concern grows
     /// with each ADR-059 phase.
     pub bootstrap: BootstrapState,
+    /// ADR-061: PM 项目管理服务句柄。
+    ///
+    /// 由 `Gateway::run` 启动时构造（`PmService::new(config.pm)`）并写入；
+    /// `None` 表示 PM 服务尚未启动（或启动失败）。HTTP 层通过
+    /// `build_router_with_pm` 把 PM router 挂到 `/api/pm/*` 路径下。
+    pub pm_service: Option<Arc<acowork_pm::PmService>>,
 }
 
 impl GatewayState {
@@ -297,6 +303,7 @@ impl GatewayState {
             mqtt_publisher_handle: None,
             instance_id: String::new(),
             bootstrap: BootstrapState::default(),
+            pm_service: None,
         }
     }
 

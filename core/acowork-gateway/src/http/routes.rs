@@ -185,6 +185,26 @@ pub fn build_router(state: AppState) -> Router {
         .layer(cors)
 }
 
+/// Build the HTTP router with all routes, merging the PM service router
+/// (ADR-061) under the public `/api/pm/*` prefix.
+///
+/// `pm_service` is the shared PM service handle constructed by
+/// `Gateway::run`; it is `None` until PM has started (or when it failed
+/// to start — PM is non-fatal, the Gateway keeps running).
+pub fn build_router_with_pm(
+    state: AppState,
+    pm_service: Option<Arc<acowork_pm::PmService>>,
+) -> Router {
+    let router = build_router(state);
+    match pm_service {
+        Some(pm) => router.nest_service("/api/pm", crate::http::pm_api::pm_routes(pm)),
+        None => {
+            tracing::warn!("PM service handle is None — /api/pm/* routes not mounted");
+            router
+        }
+    }
+}
+
 // ── Health check (liveness-only) ─────────────────────────────────────
 
 /// `GET /health` — liveness probe (no auth required).

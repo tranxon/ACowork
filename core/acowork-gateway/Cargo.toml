@@ -23,6 +23,7 @@ acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
 acowork-sign.workspace = true
 acowork-vault.workspace = true
 acowork-memory.workspace = true
+acowork-pm.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
 async-trait.workspace = true

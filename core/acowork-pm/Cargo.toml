@@ -1,0 +1,73 @@
+[package]
+name = "acowork-pm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+description = "Project & Task management service — directory-tree storage, dependency graph, parent-child task tree, attachments, REST API + MCP tools"
+
+[lib]
+name = "acowork_pm"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Generate thumbnails for image attachments on upload
+image-thumb = ["dep:image"]
+# Promote dependencies to blocking before claim (default: soft warn only)
+strict-deps = []
+
+[dependencies]
+acowork-core.workspace = true
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+tokio-stream.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+# HTTP server
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+reqwest.workspace = true
+
+# Date/time + UUID
+chrono.workspace = true
+uuid.workspace = true
+
+# Concurrency
+parking_lot.workspace = true
+
+# File watching + traversal
+notify.workspace = true
+ignore.workspace = true
+regex.workspace = true
+
+# Configuration
+directories.workspace = true
+toml.workspace = true
+
+# MIME type detection (attachment uploads)
+mime_guess = "2"
+
+# Image thumbnail generation (feature-gated)
+image = { version = "0.25", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

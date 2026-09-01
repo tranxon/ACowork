@@ -165,8 +165,11 @@ pub(crate) async fn start_http_server(
     // Write pidfile for Desktop App discovery
     let _pidfile_guard = write_pidfile(data_dir, actual_port)?;
 
-    // Build router
-    let app = routes::build_router(app_state);
+    // Build router — merge PM service routes under `/api/pm/*` if the
+    // PM service started successfully (ADR-061). Reading the handle from
+    // GatewayState keeps the server decoupled from PM construction.
+    let pm_service = app_state.gateway_state.read().await.pm_service.clone();
+    let app = routes::build_router_with_pm(app_state, pm_service);
 
     // Convert std::net::TcpListener to tokio::net::TcpListener
     // This reuses the already-bound listener — no second bind() call.

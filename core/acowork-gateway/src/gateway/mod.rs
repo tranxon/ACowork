@@ -581,6 +581,25 @@ impl Gateway {
         let http_config = self.config.http.clone();
         let data_dir_path = std::path::PathBuf::from(&self.config.data_dir);
 
+        // ADR-061: 构造 PM 项目管理服务（目录树存储 + 索引重建）。
+        //
+        // 失败**非致命**：Gateway 继续运行，`/api/pm/*` 路由仅在 Some 时挂载
+        // （server.rs 通过 `gateway_state.pm_service` 读取）。PM 数据默认位于
+        // `{data_dir}/acowork-pm`（`prepare_pm_data_dir` 已在 config 解析时处理）。
+        match acowork_pm::PmService::new(self.config.pm.clone()).await {
+            Ok(svc) => {
+                let arc = Arc::new(svc);
+                shared_state.write().await.pm_service = Some(arc);
+                tracing::info!(
+                    data_dir = %self.config.pm.data_dir.display(),
+                    "PM service started (ADR-061)"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "PM service failed to start — /api/pm/* not mounted");
+            }
+        }
+
         // Rebuild resource cache from MCP catalog at startup.
         // provider_list.json is loaded by load_resource_cache() above;
         // it is the source of truth for provider config. No rebuild needed.
@@ -1324,6 +1343,7 @@ mod tests {
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,
+            pm: acowork_pm::PmConfig::default(),
         }
     }
 
