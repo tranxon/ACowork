@@ -204,7 +204,6 @@ auto_inject min_score=None    → 1 result, score 0.6437
 **不做的**（避免范围蔓延）：
 - 词频/全局常见 token 黑名单（依赖跨节点统计，需另设 P3）
 - 词干提取 / 同义词归并（依赖 NLP 库，超出 M5 范围）
-- 恢复 `memory_hint.e` Runtime 提取（Option B，见 §6.7 P3）
 
 **M5 验收条件扩展**：
 - 单元测试覆盖每条规则的边界（空串、超长、纯数字、停用词、重复、超 8 个）
@@ -246,7 +245,6 @@ auto_inject min_score=None    → 1 result, score 0.6437
 | **P3** | consolidation_bg → AgentLoop 通知通道（解锁方案 C） | ADR-060 §11 #4 | 中（事件通道 + 通知机制） |
 | **P3** | M3.6 阈值校准（confidence/importance 分布方差 + 阈值合理性） | ADR-062 §6.6 | 中（需先有埋点数据） |
 | **P3** | M4 score-domain 探针发现的根本解决：补 `create_node_with_props` 写 vector index | M4 §4.3 | 小（grafeo-engine wrapper 1 处） |
-| **P3** | 恢复 `memory_hint.e` Runtime 提取（实现 [05-memory.md §3.3](../design/zh/05-memory.md) 当年设计：规则化实体提取 + 与 LLM 合并去重） | M5 §6.2.1 | 中（独立 ADR / 规则引擎） |
 
 **原则**：每项都有明确入口（来源列）与工作量估算，避免"待办黑洞"。
 
