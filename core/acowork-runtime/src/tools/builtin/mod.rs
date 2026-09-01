@@ -47,6 +47,23 @@ pub mod todo_write;
 pub mod web_fetch;
 pub mod web_search;
 
+// ── Shared limits ──────────────────────────────────────────────────────
+
+/// Maximum number of lines any single fragment-reader call may return.
+///
+/// Shared by [`file_read`] (mandatory `start_line` / `end_line`) and
+/// [`doc_reader`] plain-text fallback (optional `start_line` /
+/// `end_line`).  The cap prevents one tool call from dumping megabytes of
+/// source text into the LLM context — when more is needed, paginate
+/// across multiple calls (the file_read error message gives the LLM an
+/// explicit paginate template).
+///
+/// Set high enough (400 lines ≈ 8-16 KB of typical source) to keep most
+/// real-world reads in one round-trip, low enough that two concurrent
+/// near-cap results still fit well under [`crate::tools::output::MAX_OUTPUT_BYTES`]
+/// (32 KB).
+pub const MAX_LINES_PER_CALL: usize = 400;
+
 use acowork_core::tools::traits::Tool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,7 +168,10 @@ pub fn all_builtin_tools(
             agent_id,
             memory_session,
         )),
-        Arc::new(memory_store::MemoryStoreTool::new(agent_id, memory_session_for_store)),
+        Arc::new(memory_store::MemoryStoreTool::new(
+            agent_id,
+            memory_session_for_store,
+        )),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::with_timeout(
             Duration::from_millis(tool_http_timeout_ms),
@@ -162,7 +182,10 @@ pub fn all_builtin_tools(
         Arc::new(doc_reader::DocReaderTool::new()),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
-        Arc::new(intent_send::IntentSendTool::new(agent_id.to_string(), mqtt_slot.clone())),
+        Arc::new(intent_send::IntentSendTool::new(
+            agent_id.to_string(),
+            mqtt_slot.clone(),
+        )),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
         Arc::new(mcp_install::McpInstallTool::new(
@@ -231,14 +254,14 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn make_test_deps() -> (
         SharedResolver,
-        String,                                          // agent_id
-        u64,                                             // tool_http_timeout_ms
+        String, // agent_id
+        u64,    // tool_http_timeout_ms
         search_backends::SharedSearchKeyVault,
         search_backends::SharedSearchProviderList,
         Option<Arc<MemorySessionHandle>>,
         McpNotifyRef,
-        String,                                          // agent_home
-        Option<String>,                                  // lsp_relay_endpoint
+        String,         // agent_home
+        Option<String>, // lsp_relay_endpoint
         crate::http::server::SharedMqttClientSlot,
         RetrieveQueue,
     ) {
@@ -300,16 +323,7 @@ mod tests {
         ) = make_test_deps();
 
         let tools = all_builtin_tools(
-            &resolver,
-            &agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
+            &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
             retrieve_q,
         );
 
@@ -345,16 +359,7 @@ mod tests {
         ) = make_test_deps();
 
         let tools = all_builtin_tools(
-            &resolver,
-            &agent_id,
-            timeout,
-            search_kv,
-            search_pl,
-            mem,
-            mcp,
-            agent_home,
-            lsp,
-            mqtt,
+            &resolver, &agent_id, timeout, search_kv, search_pl, mem, mcp, agent_home, lsp, mqtt,
             retrieve_q,
         );
 
@@ -383,5 +388,71 @@ mod tests {
                 names
             );
         }
+    }
+
+    // ── Cross-constraint invariants ────────────────────────────────
+    //
+    // These constants are referenced from multiple tools. Drift between
+    // them would silently break contracts. The static checks below catch
+    // obvious misconfigurations at compile time / test time rather than
+    // at runtime when an LLM session mysteriously fails.
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn max_lines_per_call_leaves_headroom_for_other_context() {
+        // 400 lines × ~80 bytes (typical source) ≈ 32 KB. Two concurrent
+        // fragment-reader results at the upper bound would saturate
+        // the per-tool cap, leaving no room for history / system prompt.
+        // The realistic guarantee is enforced by `output::truncate_output`
+        // as a final safety net in both `file_read` and `doc_reader`,
+        // but we still want the *nominal* case to fit comfortably.
+        //
+        // Bound: MAX_LINES_PER_CALL × 100 bytes (pathological source) <
+        // 2 × MAX_OUTPUT_BYTES. Anything tighter would force truncation
+        // on every call.
+        let nominal = MAX_LINES_PER_CALL * 100;
+        assert!(
+            nominal <= crate::tools::output::MAX_OUTPUT_BYTES * 2,
+            "MAX_LINES_PER_CALL ({}) × 100 bytes = {} must fit under 2 × MAX_OUTPUT_BYTES ({} bytes); \
+             otherwise every paged fragment-read needs truncation",
+            MAX_LINES_PER_CALL,
+            nominal,
+            crate::tools::output::MAX_OUTPUT_BYTES * 2
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn max_lines_per_call_is_a_positive_value() {
+        // These are constant comparisons today, but kept as runtime
+        // asserts so future constant changes produce a clear test
+        // failure with the actual values, rather than a confusing
+        // compile-time panic.
+        assert!(MAX_LINES_PER_CALL > 0);
+        // And not absurdly large either — if it's > MAX_OUTPUT_BYTES
+        // then file_read's per-line summary format alone blows the cap.
+        assert!(
+            MAX_LINES_PER_CALL * 20 < crate::tools::output::MAX_OUTPUT_BYTES,
+            "MAX_LINES_PER_CALL ({}) must be small enough that 20-char lines \
+             fit under MAX_OUTPUT_BYTES ({} bytes)",
+            MAX_LINES_PER_CALL,
+            crate::tools::output::MAX_OUTPUT_BYTES
+        );
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn shell_budget_is_a_strict_subset_of_global_cap() {
+        // Cross-file invariant: the shell tool's head+tail budget must
+        // stay well under the global cap so a single shell call never
+        // single-handedly blows context.
+        let shell_budget =
+            crate::tools::output::MAX_SHELL_HEAD_BYTES + crate::tools::output::MAX_SHELL_TAIL_BYTES;
+        assert!(
+            shell_budget < crate::tools::output::MAX_OUTPUT_BYTES,
+            "shell head+tail budget ({} bytes) must be < MAX_OUTPUT_BYTES ({} bytes)",
+            shell_budget,
+            crate::tools::output::MAX_OUTPUT_BYTES
+        );
     }
 }
