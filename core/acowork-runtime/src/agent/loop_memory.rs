@@ -206,6 +206,17 @@ impl super::loop_::AgentLoop {
                     context_builder.set_ambiguous_confirmation_hint(hint);
                 }
 
+                // G9: Inject abstention guidance into context when retrieval
+                // returned nothing and abstention was enabled. Unlike the
+                // ambiguous hint (deferred per ADR-060 §5.2), this prompt is
+                // injected into the system prompt by `build()` — the empty
+                // result case is rare, so Block A stays byte-stable on the
+                // normal path (see context.rs `## Memory Abstention Guidance`).
+                if let Some(prompt) = result.abstention_prompt {
+                    tracing::info!("Injecting abstention guidance into context");
+                    context_builder.set_abstention_prompt(prompt);
+                }
+
                 // P3-3: Sample and evaluate retrieval quality via LLM Judge.
                 {
                     let judge_config = JudgeConfig::default();

@@ -24,9 +24,10 @@ use crate::consolidation::{
     EmbeddingFn, GeneralizationConfig, GeneralizationResult, MemoryStoreInput, MemoryStoreResult,
     OfflineConsolidationConfig, OfflineConsolidationResult, SchedulerConfig, TripleExtractorLlm,
 };
+use crate::quality::MemoryQualityConfig;
 use crate::types::{
-    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode,
-    KnowledgeNode, MemoryQuery, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
+    MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
 };
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
@@ -254,6 +255,30 @@ pub trait MemoryProvider: Send + Sync {
     /// Returns `None` if the node has no `session_id` property or does
     /// not exist.
     fn get_node_session_id(&self, node_id: u64) -> Result<Option<String>>;
+
+    /// Get the lifecycle status of a node.
+    ///
+    /// Used by the retrieval pipeline to exclude Dormant nodes from final
+    /// results (ADR-062 D1) while allowing them to remain as graph-expansion
+    /// seeds — Dormant nodes can still bridge to Active nodes via edges.
+    ///
+    /// Returns `None` if the node does not exist or has no status property.
+    fn get_node_status(&self, node_id: u64) -> Result<Option<NodeStatus>>;
+
+    /// Push the agent's memory quality configuration to the provider
+    /// (ADR-062 D2).
+    ///
+    /// The provider uses this to parameterize quality thresholds that were
+    /// previously hardcoded in the storage engine: dedup thresholds,
+    /// consolidation confidence gates, graph-expansion decay, and the
+    /// edge-weight formula. Implementations MUST behave identically to the
+    /// pre-configuration defaults when this is never called ("zero-config =
+    /// current behaviour", ADR-062 §4.2).
+    ///
+    /// Typically invoked once at provider initialization with the agent's
+    /// `MemoryQualityConfig`; the same config is embedded in
+    /// `MemoryManagerConfig.quality` for the retrieval side.
+    fn apply_quality_config(&self, config: &MemoryQualityConfig) -> Result<()>;
 
     /// Apply PageRank topology boost to re-rank retrieval scores.
     ///

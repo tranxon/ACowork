@@ -462,6 +462,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result = provider.process_memory_store(&input).unwrap();

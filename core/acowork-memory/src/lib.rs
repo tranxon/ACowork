@@ -16,6 +16,7 @@ pub mod consolidation;
 pub mod judge;
 pub mod manager;
 pub mod provider;
+pub mod quality;
 pub mod store;
 pub mod types;
 
@@ -50,6 +51,12 @@ pub use consolidation::MemoryStoreResult as ProcessResult;
 
 // Re-exports: judge types (ADR-051 P4, moved from acowork_grafeo)
 pub use judge::{JudgeConfig, JudgeResult, should_sample};
+
+// Re-exports: memory quality config (ADR-062 D2)
+pub use quality::{
+    ConsolidationQuality, DedupQuality, EdgeWeightQuality, GraphExpandQuality,
+    MemoryQualityConfig,
+};
 
 // Re-exports: core memory types
 pub use types::{

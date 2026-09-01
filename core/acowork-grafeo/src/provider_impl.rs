@@ -15,7 +15,8 @@ use acowork_memory::consolidation::{
 use acowork_memory::provider::MemoryProvider;
 use acowork_memory::{
     AutobioCategory, AutobiographicalNode, DecayConfig, DecayScanResult, Episode, KnowledgeNode,
-    MemoryQuery, ProceduralNode, PurgeResult, SearchResult, StoreHealth, StoreStats,
+    MemoryQualityConfig, MemoryQuery, NodeStatus, ProceduralNode, PurgeResult, SearchResult,
+    StoreHealth, StoreStats,
 };
 
 use grafeo_common::types::NodeId;
@@ -89,6 +90,7 @@ fn grafeo_to_memory_autobiographical(node: GrafeoAutobiographicalNode) -> Autobi
         status: node.status,
         created_at: node.created_at,
         updated_at: node.updated_at,
+        source: node.source,
         metadata: node.metadata,
     }
 }
@@ -105,6 +107,7 @@ fn memory_to_grafeo_autobiographical(node: &AutobiographicalNode) -> GrafeoAutob
         status: node.status.clone(),
         created_at: node.created_at,
         updated_at: node.updated_at,
+        source: node.source.clone(),
         metadata: node.metadata.clone(),
     }
 }
@@ -152,6 +155,8 @@ fn memory_to_grafeo_knowledge(node: &KnowledgeNode) -> GrafeoKnowledgeNode {
         created_at: node.created_at,
         updated_at: node.updated_at,
         metadata: node.metadata.clone(),
+        privacy: node.privacy.clone(),
+        importance: node.importance,
     }
 }
 
@@ -345,14 +350,7 @@ impl MemoryProvider for GrafeoStore {
     // ── Forgetting ───────────────────────────────────────────────────────
 
     fn run_decay_scan(&self, config: &DecayConfig) -> AcoworkResult<DecayScanResult> {
-        let native_config = crate::forgetting::decay::DecayConfig {
-            lambda: config.lambda as f64,
-            access_boost: config.access_per_hit as f64,
-            dormant_threshold: config.dormant_threshold,
-        };
-        let transitioned = self
-            .run_decay_scan(&native_config)
-            .map_err(err_to_acowork)?;
+        let transitioned = self.run_decay_scan(config).map_err(err_to_acowork)?;
         Ok(DecayScanResult {
             to_dormant: transitioned as u64,
             reactivated: 0,
@@ -677,6 +675,20 @@ impl MemoryProvider for GrafeoStore {
         }
     }
 
+    fn get_node_status(&self, node_id: u64) -> AcoworkResult<Option<NodeStatus>> {
+        let nid = NodeId(node_id);
+        match self.db().get_node(nid) {
+            Some(node) => Ok(node
+                .get_property("status")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse().ok())
+                // Legacy nodes without an explicit status default to Active
+                // (consistent with `stats.rs` / `admin_impl.rs`).
+                .or(Some(NodeStatus::Active))),
+            None => Ok(None),
+        }
+    }
+
     fn apply_pagerank_boost(
         &self,
         scores: &mut [(u64, f64)],
@@ -741,4 +753,12 @@ impl MemoryProvider for GrafeoStore {
         Ok(result)
     }
 
+    fn apply_quality_config(&self, config: &MemoryQualityConfig) -> AcoworkResult<()> {
+        *self
+            .quality
+            .write()
+            .map_err(|_| AcoworkError::Memory("grafeo quality config lock poisoned".to_string()))? =
+            config.clone();
+        Ok(())
+    }
 }

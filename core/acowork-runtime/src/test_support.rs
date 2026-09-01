@@ -31,6 +31,7 @@ use acowork_memory::types::{
     SearchResult, StoreHealth, StoreStats,
 };
 use acowork_memory::MemoryProvider;
+use acowork_memory::quality::MemoryQualityConfig;
 use async_trait::async_trait;
 use chrono::Utc;
 
@@ -498,8 +499,23 @@ impl MemoryProvider for InMemoryProvider {
             .and_then(|n| n.session_id.clone()))
     }
 
+    fn get_node_status(&self, node_id: u64) -> Result<Option<NodeStatus>> {
+        Ok(self
+            .nodes
+            .read()
+            .unwrap()
+            .get(&node_id)
+            .map(|n| n.status.clone()))
+    }
+
     fn apply_pagerank_boost(&self, _scores: &mut [(u64, f64)], _weight: f64) -> Result<()> {
         // No graph topology in InMemoryProvider - no-op.
+        Ok(())
+    }
+
+    fn apply_quality_config(&self, _config: &MemoryQualityConfig) -> Result<()> {
+        // InMemoryProvider is a test stub without dedup/consolidation
+        // thresholds - no-op (zero-config behaviour is identical either way).
         Ok(())
     }
 
@@ -625,6 +641,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result = provider.process_memory_store(&input).unwrap();

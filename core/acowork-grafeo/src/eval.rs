@@ -166,6 +166,9 @@ fn eval_information_extraction() -> f32 {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb.clone()),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         if store.process_memory_store(&input).is_err() {
@@ -233,6 +236,9 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.8),
         source_episode_id: None,
         embedding: Some(emb_a),
+        privacy: None,
+        importance: None,
+        keywords: None,
         autobiographical: None,
         };
     let input_b = MemoryStoreInput {
@@ -244,6 +250,9 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.85),
         source_episode_id: None,
         embedding: Some(emb_b),
+        privacy: None,
+        importance: None,
+        keywords: None,
         autobiographical: None,
         };
 
@@ -267,6 +276,9 @@ fn eval_abstraction() -> f32 {
         confidence: Some(0.8),
         source_episode_id: None,
         embedding: Some(proc_emb),
+        privacy: None,
+        importance: None,
+        keywords: None,
         autobiographical: None,
         };
 
@@ -292,6 +304,7 @@ fn eval_abstraction() -> f32 {
         status: NodeStatus::Active,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        source: "user_statement".to_string(),
         metadata: HashMap::new(),
     };
 

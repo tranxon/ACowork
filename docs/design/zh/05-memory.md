@@ -214,6 +214,8 @@ GrafeoStore 仅负责存储和索引，不持有 `EmbeddingProvider`。
   - 未巩固 + 超过 14 天 + importance < 0.3 → 清理（低价值且未被提取的碎片）
   - 未巩固 + 超过 14 天 + importance >= 0.3 → 保留并尝试离线巩固
 
+> **实现状态（v3.12，P2 G13）**：差异化清理策略已落地于 `acowork-grafeo/src/consolidation/offline.rs` 的 `run_episodic_cleanup()`，由生产路径 `run_offline_consolidation` 调度。单阈值删除接口 `cleanup_episodes` / `cleanup_old_episodes` 无生产调用方（仅 trait 定义 + 测试 stub），按 Rule of three 不再重复实现。
+
 ## 3. 沉淀层：长期记忆
 
 沉淀层是 Agent 的"知识根基"，包含三种记忆类型，全部存储在 Grafeo 的语义记忆图谱中。
@@ -348,6 +350,8 @@ struct AutobiographicalNode {
     source: String,                  // "manifest" / "self_evaluation" / "user_statement" / "important_event"
                                         // v3.11: 由 memory_store(category=autobiographical) 即时写入时
                                         //        LLM 通过 `source` 参数标注, 取值集合扩展为 4 项
+                                        // v3.12 (P2 G7): source 已升级为 typed 字段（非仅 metadata），
+                                        //        持久化到 grafeo property，读取缺省回退 "user_statement"（向后兼容旧库）
     updated_at: DateTime,
 
     // 自传体记忆不参与遗忘衰减——这是 Agent 的核心身份
@@ -1088,6 +1092,11 @@ PendingKnowledgeNode 写入时：
 | Phase 2 | 0.6              | 保守值，精度优先。预期会过滤掉较多低质量结果       |
 | Phase 3 | 基于实际数据校准 | 根据在线评估的 NRR 指标和 LongMemEval 成绩动态调整 |
 
+> **实现澄清（v3.12，P2 G9）**：代码中存在**两个同名但语义不同的 `min_score`**，勿混淆：
+> - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。
+> - `MemoryManagerConfig.default_min_score = 0.0`（`manager.rs`）：作用于 **hybrid RRF 融合分数**。RRF 分数典型范围仅 0.01-0.05（`1/(k + rank)` 量级），设非零默认值会过滤掉几乎全部结果，故有意为 0.0（不过滤）。
+> - 两者所在分数域不同，默认值不可互相移植。manager 侧仅做注释区分，不改默认值（改 0.6 会误过滤全部，属于 §6.5 Phase 2 目标而非当前缺陷）。
+
 **与检索降级策略的关系**：
 
 Abstention 在 Level 0-3 降级策略之后生效，是最终的质量门控：
@@ -1125,7 +1134,9 @@ pub struct MemoryQuery {
     pub filters: MemoryFilters,
     pub limit: usize,
     pub expand_hops: u8,
-    pub min_score: Option<f32>,   // Abstention threshold, None = use default (0.6)
+    // 检索过滤阈值（RRF 融合分数域）。None = MemoryManagerConfig.default_min_score = 0.0（不过滤）。
+    // ⚠️ 与 AbstentionConfig.default_min_score = 0.6（raw scores，拒答判定）语义不同，勿混淆。
+    pub min_score: Option<f32>,
 }
 ```
 
@@ -1137,12 +1148,14 @@ pub struct MemoryQuery {
 
 **原设计（v3.7）**：通过 memory_hint.type 动态调整 RRF 权重和 graph_expand 参数。四种模式（s/f/r/i）各有不同权重配置。
 
-**v3.10 简化**：移除 per-round memory_hint 提取和规则引擎类型检测。所有检索统一使用默认权重（vector: 0.7, text: 0.3, graph: 0.0），graph_expand 使用保守阈值 [0.15, 0.2, 0.25]。
+**v3.10 简化**：移除 per-round memory_hint 提取和规则引擎类型检测。所有检索统一使用默认权重（vector: 0.7, text: 0.3, graph: 0.0），graph_expand 使用默认早停阈值 `[0.1, 0.15, 0.2]`（1跳/2跳/3跳）。
 
 **简化理由**：
 - f/r 类型的权重微调收益未被 benchmark 验证，不值得引入规则复杂度
 - i（Identity）类型虽然理论上有意义（仅搜 Autobiographical），但需要在检索质量损失（漏掉其他层相关知识）和性能优化之间权衡——当前默认搜全部 4 个 Label 是更安全的选择
 - graph_expand 的激进阈值依赖图质量，当前图结构尚未经过充分验证
+
+> **实现对齐（v3.12，P2 G11/G12）**：早停阈值默认值已由 `[0.15, 0.2, 0.25]` 调整为 `[0.1, 0.15, 0.2]`（与设计 §6.3 "1跳: 0.1, 2跳: 0.15, 3跳: 0.2" 一致，`GraphExpandConfig::default()` 与 `get_expand_thresholds()` 的 `"s"`/`"_"` 分支同步更新；`"r"` 分支保持 `[0.1, 0.12, 0.15]` 不变）。边权重自动计算规则（§3.1 `edge_strength = min(0.8, confidence_avg × exp(-0.01 × days_since))`）已在 `semantic/graph.rs` 落地：`create_memory_edge` 在调用方未显式传 weight 时自动读取两端节点 confidence 计算并写入 weight property；读取端优先读 property，缺省回退 `DEFAULT_EDGE_WEIGHT=1.0`（向后兼容旧库）。
 
 HintType 枚举和相关权重查找函数（`get_hint_weights`, `config_from_hint`）保留在代码中，供将来需要时使用。
 
@@ -1309,7 +1322,7 @@ ProceduralNode 的来源有三条路径：
 
 路径 A — 用户反馈即时提取（Phase 1 已有，Tool Call）：用户明确纠正（"太长了" / "不要用表格"）→ ProceduralNode.trigger_condition = "用户要求简洁输出"，action_pattern = "优先给结论，控制长度"。
 
-路径 B — 执行失败自动总结：SkillExecution 的 failure_case 触发。当 Skill 返回执行失败时，Runtime 自动将 failure_case 摘要写入 ProceduralNode，learned_from = "执行失败"，source_skill 指向对应 Skill。
+~~路径 B — 执行失败自动总结~~ **（已移除，v3.12）**：原设计 SkillExecution 的 failure_case 触发，将 failure_case 摘要写入 ProceduralNode。实际代码中 `failure_case → ProceduralNode` 自动写入路径从未落地，且 SkillExecution 的 `success_count` 从未被递增，据此派生任何"成功率"类节点都会产生 false-positive（见 offline.rs DELETED 注释）。当前程序记忆来源收敛为：路径 A（用户反馈即时提取）+ 路径 C（离线巩固提炼），失败学习暂缓。
 
 路径 C — 离线巩固提炼（Phase 3 的离线巩固负责，Phase 2 先做单 Skill 内模式识别）。
 
@@ -1331,15 +1344,16 @@ Phase 2 需要补上"困境三"（记忆泛化与抽象）的设计缺口。Proc
 
 具体实现：在 grafeo crate 新增 `procedural_abstract` 模块，提供 `detect_merge_candidates()` 方法，扫描同类 trigger_condition 下的多个 action_pattern，由 LLM 判断是否应合并。
 
-**核心组件三：自我评估驱动的 AutobiographicalNode 更新**
+**~~核心组件三：自我评估驱动的 AutobiographicalNode 更新~~** **（已移除，v3.12）**
 
-自我评估的目标是让 Agent 认知自身的能力边界，主要体现在 Limitation 节点的自动更新。
+原设计目标是让 Agent 认知自身的能力边界，主要通过 Limitation 节点的自动更新实现：
 
-触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息，更新 SkillExperience.model_compatibility。当某模型上某类任务成功率低于 60% 时，生成或更新 AutobiographicalNode Limitation 节点："在 [模型] 上，[任务类型] 成功率约 [X]%，建议切换模型或简化任务"。
+- 触发时机：每次 SkillExecution 完成后，根据 success/failure 和模型信息更新 `SkillExperience.model_compatibility`；某模型某类任务成功率低于 60% 时生成/更新 Limitation 节点。
+- 注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级）。
 
-注入时机：Limitation 节点在每次对话的 System Prompt 注入时必须包含（与 Identity / Capability 同级），确保 Agent 始终知道自己的边界。
+> **移除原因**：该自动路径（含 runtime `MemoryManager::run_self_evaluation` 与 grafeo `offline.rs` 内的重复实现）已删除——`success_count` 从未在任何代码路径被递增，据此派生的"成功率"必然把 ≥5 次失败的 Skill 误判为 0% 成功率，产生 false-positive Limitation 节点。自传体记忆的来源收敛为 §3.3 的四条路径（Manifest 派生 / 即时 Tool Call 用户陈述 / 重要事件 / 离线自我评估），Limitation 节点的产生依赖用户或 LLM 显式陈述，不再自动生成。
 
-同时新增 Relationship 节点的自动维护：当用户与 Agent 合作超过一定时长（如 30 天），自动生成 Relationship 节点记录合作模式。
+同时原设计新增 Relationship 节点的自动维护（用户与 Agent 合作超过 30 天自动生成）——该自动触发逻辑同样未落地；当前 Relationship 节点由 `memory_store(category="autobiographical", aspect="Relationship")` 即时写入（manager.rs 含自动维护辅助逻辑，source 标记 `self_evaluation`）。
 
 **Phase 2 验收标准：**
 

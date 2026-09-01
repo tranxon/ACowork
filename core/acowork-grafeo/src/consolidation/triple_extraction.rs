@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{GrafeoError, Result};
 use crate::grafeo::GrafeoStore;
-use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus};
+use crate::types::{KnowledgeNode, KnowledgeSubType, NodeStatus, PrivacyLevel};
 
 // ---------------------------------------------------------------------------
 // LLM abstraction (re-exported from acowork-memory)
@@ -255,6 +255,8 @@ impl GrafeoStore {
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
                 metadata: HashMap::new(),
+                privacy: PrivacyLevel::Personal,
+                importance: 0.5,
             };
 
             self.store_knowledge(&node)?;
@@ -471,6 +473,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(has_potential_conflict(&triple, &existing));
@@ -503,6 +507,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(!has_potential_conflict(&triple, &existing));
@@ -535,6 +541,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         }];
 
         assert!(has_potential_conflict(&triple, &existing));
@@ -638,6 +646,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&existing).unwrap();
 

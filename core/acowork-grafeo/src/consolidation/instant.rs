@@ -47,15 +47,12 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Cosine-similarity threshold above which two knowledge nodes are
-/// considered duplicates (identical meaning).
-const DEDUP_THRESHOLD: f32 = 0.95;
-
-/// Cosine-similarity threshold above which two procedural nodes are
-/// considered duplicates (same trigger+action). Lower than knowledge
-/// dedup because procedures are more specific and slight wording
-/// variations still indicate the same behavior pattern.
-const PROCEDURE_DEDUP_THRESHOLD: f32 = 0.90;
+// NOTE (ADR-062 D2): Dedup similarity thresholds (knowledge 0.95, procedure
+// 0.90) and the direct-Active confidence gate (0.85) are now centralized in
+// `acowork_memory::quality::MemoryQualityConfig` (dedup.knowledge_threshold,
+// dedup.procedure_threshold, consolidation.direct_active_threshold) and read
+// via `self.quality()`. "Zero-config = current behaviour" is preserved by the
+// matching Default values.
 
 /// Confidence boost applied when a duplicate procedure reinforces an
 /// existing node (instead of creating a new one).
@@ -63,9 +60,6 @@ const PROCEDURE_CONFIDENCE_BOOST: f32 = 0.05;
 
 /// Maximum confidence for a ProceduralNode (cap after boosting).
 const PROCEDURE_MAX_CONFIDENCE: f32 = 0.98;
-
-/// Confidence threshold above which a node is created directly as Active.
-const DIRECT_ACTIVE_THRESHOLD: f32 = 0.85;
 
 /// Default confidence assigned when the LLM does not provide one.
 const DEFAULT_CONFIDENCE: f32 = 0.7;
@@ -203,7 +197,7 @@ impl GrafeoStore {
             && self
                 .is_duplicate_knowledge(
                     embedding,
-                    DEDUP_THRESHOLD,
+                    self.quality().dedup.knowledge_threshold,
                     input.subject.as_deref(),
                     input.predicate.as_deref(),
                     input.object.as_deref(),
@@ -217,7 +211,8 @@ impl GrafeoStore {
         let conflicts = self.detect_knowledge_conflicts(input)?;
 
         // Step 3: Determine initial status based on confidence.
-        let status = if confidence >= DIRECT_ACTIVE_THRESHOLD {
+        // Threshold from ADR-062 ConsolidationQuality.direct_active_threshold.
+        let status = if confidence >= self.quality().consolidation.direct_active_threshold {
             NodeStatus::Active
         } else {
             NodeStatus::Pending
@@ -226,10 +221,36 @@ impl GrafeoStore {
         // Step 4: Create the new knowledge node.
         let subject = input.subject.clone().unwrap_or_else(|| "user".to_string());
         let predicate = input.predicate.clone().unwrap_or_default();
-        let object = input
+        let mut object = input
             .object
             .clone()
             .unwrap_or_else(|| input.content.clone());
+
+        let mut new_metadata = std::collections::HashMap::new();
+        // Persist LLM-provided keywords to aid retrieval (design §4.1, Gap G8).
+        // Stored under metadata["keywords"] as a JSON array.
+        //
+        // M5 (ADR-062 §6.2 — Plan Y): when `quality.keyword_index` is enabled,
+        // also fold the keywords into the BM25-indexed `object` field so text
+        // search naturally matches keyword tokens without adding a new
+        // grafeo-engine hybrid source. Default `keyword_index=false` keeps the
+        // metadata-only behaviour, preserving M4 baselines.
+        if let Some(keywords) = &input.keywords
+            && !keywords.is_empty()
+        {
+            new_metadata.insert(
+                "keywords".to_string(),
+                serde_json::Value::Array(
+                    keywords
+                        .iter()
+                        .map(|k| serde_json::Value::String(k.clone()))
+                        .collect(),
+                ),
+            );
+            if self.quality().keyword_index {
+                object.push_str(&format!(" Keywords: {}", keywords.join(" ")));
+            }
+        }
 
         let mut new_node = KnowledgeNode {
             id: None,
@@ -243,7 +264,9 @@ impl GrafeoStore {
             status: status.clone(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            metadata: std::collections::HashMap::new(),
+            metadata: new_metadata,
+            privacy: input.privacy.clone().unwrap_or_default(),
+            importance: input.importance.unwrap_or(0.5),
         };
 
         // All heuristic conflicts are Ambiguous — new node keeps its
@@ -311,8 +334,10 @@ impl GrafeoStore {
     ) -> Result<Option<ProcessResult>> {
         // Step 1: Dedup check (only if embedding is available).
         if let Some(ref embedding) = input.embedding
-            && let Some(existing_id) =
-                self.find_duplicate_procedure(embedding, PROCEDURE_DEDUP_THRESHOLD)?
+            && let Some(existing_id) = self.find_duplicate_procedure(
+                embedding,
+                self.quality().dedup.procedure_threshold,
+            )?
             {
                 // Reinforce the existing node: boost confidence.
                 if let Some(mut existing) = self.get_procedural(existing_id)? {
@@ -334,7 +359,8 @@ impl GrafeoStore {
         let (trigger, action) = parse_procedure_content(&input.content);
 
         // Step 3: Determine initial status based on confidence.
-        let status = if confidence >= DIRECT_ACTIVE_THRESHOLD {
+        // Threshold from ADR-062 ConsolidationQuality.direct_active_threshold.
+        let status = if confidence >= self.quality().consolidation.direct_active_threshold {
             NodeStatus::Active
         } else {
             NodeStatus::Pending
@@ -425,6 +451,7 @@ impl GrafeoStore {
             // Refresh in place. Confidence is bumped slightly (capped) since
             // re-confirmation reinforces the existing self-knowledge.
             existing.value = input.content.clone();
+            existing.source = source.clone();
             existing
                 .metadata
                 .insert("source".to_string(), serde_json::Value::String(source.clone()));
@@ -460,11 +487,14 @@ impl GrafeoStore {
             status: NodeStatus::Active,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            // metadata first so `source` can be used here before the typed
+            // field moves it below.
             metadata: {
                 let mut m = std::collections::HashMap::new();
-                m.insert("source".to_string(), serde_json::Value::String(source));
+                m.insert("source".to_string(), serde_json::Value::String(source.clone()));
                 m
             },
+            source,
         };
 
         let new_id = self.store_autobiographical(&node)?;
@@ -736,7 +766,7 @@ fn parse_procedure_content(content: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DEFAULT_EMBEDDING_DIM;
+    use crate::types::{DEFAULT_EMBEDDING_DIM, PrivacyLevel};
 
     fn test_store() -> GrafeoStore {
         GrafeoStore::new_in_memory().unwrap()
@@ -841,6 +871,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -870,6 +903,9 @@ mod tests {
             confidence: Some(0.6),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -896,6 +932,9 @@ mod tests {
             confidence: None, // defaults to 0.7
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -925,6 +964,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let id1 = store.process_memory_store(&input1).unwrap();
@@ -941,10 +983,85 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)), // identical direction
+            privacy: None,
+            importance: None,
+            keywords: None,
                 autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
         assert!(id2.is_none(), "duplicate should return None");
+    }
+
+    #[test]
+    fn test_process_memory_store_keywords_persisted() {
+        let store = test_store();
+
+        // With keywords → metadata["keywords"] array is written.
+        let input = MemoryStoreInput {
+            content: "User lives in Shanghai".to_string(),
+            sub_type: KnowledgeSubType::Fact,
+            subject: Some("user".to_string()),
+            predicate: Some("lives_in".to_string()),
+            object: Some("Shanghai".to_string()),
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: Some(vec![
+                "shanghai".to_string(),
+                "location".to_string(),
+                "home".to_string(),
+            ]),
+            autobiographical: None,
+        };
+        let result = store.process_memory_store(&input).unwrap().unwrap();
+        let node = store
+            .get_knowledge(NodeId::new(result.node_id))
+            .unwrap()
+            .unwrap();
+        let keywords = node
+            .metadata
+            .get("keywords")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|k| k.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(
+            keywords,
+            Some(vec![
+                "shanghai".to_string(),
+                "location".to_string(),
+                "home".to_string(),
+            ])
+        );
+
+        // Without keywords → no "keywords" metadata key is written.
+        let input_no_kw = MemoryStoreInput {
+            content: "User prefers tea over coffee".to_string(),
+            sub_type: KnowledgeSubType::Preference,
+            subject: Some("user".to_string()),
+            predicate: Some("prefers".to_string()),
+            object: Some("tea".to_string()),
+            confidence: Some(0.9),
+            source_episode_id: None,
+            embedding: Some(flipped_emb(1)),
+            privacy: None,
+            importance: None,
+            keywords: None,
+            autobiographical: None,
+        };
+        let result2 = store.process_memory_store(&input_no_kw).unwrap().unwrap();
+        let node2 = store
+            .get_knowledge(NodeId::new(result2.node_id))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !node2.metadata.contains_key("keywords"),
+            "no keywords should not write the metadata key"
+        );
     }
 
     // =====================================================================
@@ -967,6 +1084,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
@@ -983,6 +1103,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(flipped_emb(9)), // cos ≈ 0.953 > 0.95
+            privacy: None,
+            importance: None,
+            keywords: None,
                 autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
@@ -1009,6 +1132,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
@@ -1023,6 +1149,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let id2 = store.process_memory_store(&input2).unwrap();
@@ -1048,6 +1177,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1083,6 +1215,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -1096,6 +1230,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1141,6 +1278,8 @@ mod tests {
             created_at: two_days_ago,
             updated_at: two_days_ago,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -1156,6 +1295,9 @@ mod tests {
             confidence: Some(0.88),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)), // cos ≈ 0.922 with const_emb(1.0)
+            privacy: None,
+            importance: None,
+            keywords: None,
                 autobiographical: None,
         };
 
@@ -1200,6 +1342,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&node).unwrap();
 
@@ -1256,6 +1400,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&node).unwrap();
 
@@ -1296,6 +1442,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         store.store_knowledge(&existing).unwrap();
 
@@ -1309,6 +1457,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1335,6 +1486,9 @@ mod tests {
             confidence: None,
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1358,6 +1512,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1392,6 +1549,8 @@ mod tests {
             created_at: old_time,
             updated_at: old_time,
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -1404,6 +1563,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1443,6 +1605,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             metadata: std::collections::HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
         let existing_id = store.store_knowledge(&existing).unwrap();
 
@@ -1455,6 +1619,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: Some(flipped_emb(15)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1493,6 +1660,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1524,6 +1694,9 @@ mod tests {
             confidence: Some(0.6),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
 
@@ -1596,6 +1769,9 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result1 = store.process_memory_store(&input1).unwrap();
@@ -1612,6 +1788,9 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)), // identical
+            privacy: None,
+            importance: None,
+            keywords: None,
                 autobiographical: None,
         };
         let result2 = store.process_memory_store(&input2).unwrap();
@@ -1652,6 +1831,9 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(const_emb(1.0)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         store.process_memory_store(&input1).unwrap();
@@ -1666,6 +1848,9 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: Some(flipped_emb(40)),
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: None,
         };
         let result2 = store.process_memory_store(&input2).unwrap();
@@ -1700,6 +1885,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Preference,
                 key: Some("style".to_string()),
@@ -1749,6 +1937,9 @@ mod tests {
             confidence: Some(0.85),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Preference,
                 key: Some("style".to_string()),
@@ -1766,6 +1957,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Preference,
                 key: Some("style".to_string()),
@@ -1805,6 +1999,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::History,
                 key: None, // derived per-event
@@ -1840,6 +2037,9 @@ mod tests {
             confidence: Some(0.9),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Limitation,
                 key: Some("bash_caution".to_string()),
@@ -1879,6 +2079,9 @@ mod tests {
             confidence: Some(0.7),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Capability,
                 key: Some("model".to_string()),
@@ -1910,6 +2113,9 @@ mod tests {
             confidence: Some(0.5),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Limitation,
                 key: Some("bash".to_string()),
@@ -1927,6 +2133,9 @@ mod tests {
             confidence: Some(0.95),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Limitation,
                 key: Some("bash".to_string()),
@@ -1964,6 +2173,9 @@ mod tests {
             confidence: Some(0.5),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Identity,
                 key: Some("role".to_string()),
@@ -1981,6 +2193,9 @@ mod tests {
             confidence: Some(1.0),
             source_episode_id: None,
             embedding: None,
+            privacy: None,
+            importance: None,
+            keywords: None,
             autobiographical: Some(AutobiographicalStoreInput {
                 aspect: AutobioCategory::Identity,
                 key: Some("role".to_string()),

@@ -115,7 +115,7 @@ pub mod edge_types {
 // KnowledgeSubType, NodeStatus, and AutobioCategory are defined in
 // acowork_memory and re-exported here for grafeo-internal use.
 
-pub use acowork_memory::{AutobioCategory, KnowledgeSubType, NodeStatus};
+pub use acowork_memory::{AutobioCategory, KnowledgeSubType, NodeStatus, PrivacyLevel};
 
 // ---------------------------------------------------------------------------
 // Structs
@@ -147,6 +147,11 @@ pub struct Episode {
     pub importance: f32,
 }
 
+/// Default importance score for nodes without an explicit value.
+fn default_importance() -> f32 {
+    0.5
+}
+
 /// Semantic memory node — fact, preference, or relation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeNode {
@@ -174,6 +179,14 @@ pub struct KnowledgeNode {
     pub updated_at: DateTime<Utc>,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Privacy level — drives package-share stripping (design §7.1/§8.1).
+    /// Defaults to `Personal` (conservative: stripped when sharing).
+    #[serde(default)]
+    pub privacy: PrivacyLevel,
+    /// Importance scored by LLM at write time [0.0, 1.0] (design §3.1/§5.1).
+    /// Defaults to 0.5 when unset.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
 }
 
 /// Procedural memory node — behavior pattern.
@@ -235,6 +248,11 @@ pub struct AutobiographicalNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Provenance of this self-knowledge.
+    ///
+    /// Conventional values: `"user_statement"`, `"important_event"`,
+    /// `"self_evaluation"`, `"manifest"`. Defaults to `"user_statement"`.
+    pub source: String,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -292,6 +310,25 @@ fn value_to_metadata(value: Option<&Value>) -> Result<HashMap<String, serde_json
 /// Build a property map from a slice of (key, value) pairs for lookup.
 fn prop_map(props: &[(String, Value)]) -> HashMap<&str, &Value> {
     props.iter().map(|(k, v)| (k.as_str(), v)).collect()
+}
+
+/// Serialize `PrivacyLevel` to its string representation for node properties.
+fn privacy_to_str(p: &PrivacyLevel) -> &'static str {
+    match p {
+        PrivacyLevel::Public => "Public",
+        PrivacyLevel::Personal => "Personal",
+        PrivacyLevel::Sensitive => "Sensitive",
+    }
+}
+
+/// Parse a `PrivacyLevel` from its string representation.
+fn str_to_privacy(s: &str) -> Option<PrivacyLevel> {
+    match s {
+        "Public" => Some(PrivacyLevel::Public),
+        "Personal" => Some(PrivacyLevel::Personal),
+        "Sensitive" => Some(PrivacyLevel::Sensitive),
+        _ => None,
+    }
 }
 
 /// Get a required string property.
@@ -422,6 +459,14 @@ impl KnowledgeNode {
                 Value::from(dt_to_timestamp(self.updated_at)),
             ),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
+            (
+                "privacy".to_string(),
+                Value::from(privacy_to_str(&self.privacy)),
+            ),
+            (
+                "importance".to_string(),
+                Value::from(f64::from(self.importance)),
+            ),
         ];
         if let Some(id) = self.source_episode_id {
             props.push((
@@ -459,6 +504,18 @@ impl KnowledgeNode {
                     .ok_or_else(|| GrafeoError::Memory("missing updated_at".to_string()))?,
             )?,
             metadata: value_to_metadata(map.get("metadata").copied())?,
+            // Backward-compatible defaults: missing privacy -> Personal
+            // (conservative: stripped on share), missing importance -> 0.5.
+            privacy: map
+                .get("privacy")
+                .and_then(|v| v.as_str())
+                .and_then(str_to_privacy)
+                .unwrap_or_default(),
+            importance: map
+                .get("importance")
+                .and_then(|v| v.as_float64())
+                .map(|f| f as f32)
+                .unwrap_or(0.5),
         })
     }
 }
@@ -595,6 +652,7 @@ impl AutobiographicalNode {
                 "updated_at".to_string(),
                 Value::from(dt_to_timestamp(self.updated_at)),
             ),
+            ("source".to_string(), Value::from(self.source.as_str())),
             ("metadata".to_string(), metadata_to_value(&self.metadata)),
         ];
         if let Some(id) = self.source_episode_id {
@@ -631,6 +689,13 @@ impl AutobiographicalNode {
                     .and_then(|v| v.as_timestamp())
                     .ok_or_else(|| GrafeoError::Memory("missing updated_at".to_string()))?,
             )?,
+            // Old stores may lack the `source` property — default to
+            // "user_statement" for backward compatibility (G7).
+            source: map
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "user_statement".to_string()),
             metadata: value_to_metadata(map.get("metadata").copied())?,
         })
     }
@@ -731,6 +796,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
 
         let props = original.to_properties();
@@ -760,6 +827,8 @@ mod tests {
             created_at: test_dt(),
             updated_at: test_dt(),
             metadata: HashMap::new(),
+            privacy: PrivacyLevel::Personal,
+            importance: 0.5,
         };
 
         let props = original.to_properties();
@@ -851,6 +920,7 @@ mod tests {
             status: NodeStatus::Active,
             created_at: test_dt(),
             updated_at: test_dt(),
+            source: "manifest".to_string(),
             metadata: HashMap::new(),
         };
 
@@ -862,6 +932,7 @@ mod tests {
         assert_eq!(restored.value, "WeatherBot");
         assert_eq!(restored.confidence, 1.0);
         assert_eq!(restored.status, NodeStatus::Active);
+        assert_eq!(restored.source, "manifest");
         assert!(restored.embedding.is_some());
     }
 
@@ -878,6 +949,7 @@ mod tests {
             status: NodeStatus::Active,
             created_at: test_dt(),
             updated_at: test_dt(),
+            source: "important_event".to_string(),
             metadata: HashMap::new(),
         };
 
@@ -886,7 +958,34 @@ mod tests {
 
         assert_eq!(restored.category, AutobioCategory::History);
         assert_eq!(restored.source_episode_id, Some(NodeId::new(20)));
+        assert_eq!(restored.source, "important_event");
         assert!(restored.embedding.is_none());
+    }
+
+    /// Old stores may lack the `source` property (G7) — reading must fall
+    /// back to the default `"user_statement"` instead of failing.
+    #[test]
+    fn test_autobiographical_node_roundtrip_missing_source_defaults() {
+        let original = AutobiographicalNode {
+            id: None,
+            category: AutobioCategory::Preference,
+            key: "style".to_string(),
+            value: "concise".to_string(),
+            confidence: 0.9,
+            source_episode_id: None,
+            embedding: None,
+            status: NodeStatus::Active,
+            created_at: test_dt(),
+            updated_at: test_dt(),
+            source: "user_statement".to_string(),
+            metadata: HashMap::new(),
+        };
+
+        let mut props = original.to_properties();
+        // Simulate a legacy record without the `source` property.
+        props.retain(|(k, _)| k != "source");
+        let restored = AutobiographicalNode::from_properties(NodeId::new(9), &props).unwrap();
+        assert_eq!(restored.source, "user_statement");
     }
 
     // =====================================================================

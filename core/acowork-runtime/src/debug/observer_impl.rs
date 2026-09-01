@@ -383,6 +383,15 @@ impl super::observer::DebugObserver for DebugObserverImpl {
             ));
         }
 
+        // 2.5c Abstention guidance (G9) — same slot as the ambiguous hint.
+        if let Some(prompt) = req.context_builder.abstention_prompt() {
+            named.push(NamedSection::new(
+                "abstention_prompt",
+                prompt.to_string(),
+                req.model,
+            ));
+        }
+
         // 2.6 Skill instructions
         if let Some(skills) = req.context_builder.skill_instructions() {
             named.push(NamedSection::new("skill_instructions", skills.to_string(), req.model));

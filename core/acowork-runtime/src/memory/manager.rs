@@ -52,10 +52,17 @@ mod tests {
         object: &str,
         embedding: &[f32],
     ) -> u64 {
+        // Mirror `KnowledgeNode::to_properties` (types.rs): the text index
+        // searches the `content` property, which is derived from the triple.
+        // Without it, a Knowledge node is only reachable via vector search,
+        // whose score is negative (distance), so `min_score=0.0` would filter
+        // it out — same failure mode as the real path without content.
+        let content = format!("{} {} {}", subject, predicate, object);
         let id = store
             .store_node(
                 labels::KNOWLEDGE,
                 [
+                    ("content", Value::from(content.as_str())),
                     ("subject", Value::from(subject)),
                     ("predicate", Value::from(predicate)),
                     ("object", Value::from(object)),
@@ -123,6 +130,8 @@ mod tests {
         let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty(), "expected at least one result");
         assert!(!result.metrics.abstention_triggered);
+        // G9: non-empty result must NOT attach the abstention prompt.
+        assert!(result.abstention_prompt.is_none());
     }
 
     #[tokio::test]
@@ -146,6 +155,8 @@ mod tests {
         assert!(result.memories.is_empty());
         assert!(result.metrics.abstention_triggered);
         assert_eq!(result.metrics.result_count, 0);
+        // G9: empty result + abstention enabled must attach the guidance prompt.
+        assert!(result.abstention_prompt.is_some());
     }
 
     #[tokio::test]
@@ -168,6 +179,8 @@ mod tests {
 
         let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(result.metrics.abstention_triggered);
+        // G9: abstention triggered → prompt must be present.
+        assert!(result.abstention_prompt.is_some());
     }
 
     #[tokio::test]
@@ -272,7 +285,7 @@ mod tests {
         // Retrieve with PageRank enabled (default config, strong boost).
         let mut config = MemoryManagerConfig::default();
         config.enable_graph_expand = true;
-        config.pagerank_weight = 0.3; // Strong boost to make topology effect visible.
+        config.quality.pagerank_weight = 0.3; // Strong boost to make topology effect visible.
         let manager = MemoryManager::new(config);
 
         let mut query = MemoryQuery {
@@ -307,7 +320,7 @@ mod tests {
 
         // PageRank disabled.
         let mut config = MemoryManagerConfig::default();
-        config.pagerank_weight = 0.0;
+        config.quality.pagerank_weight = 0.0;
         let manager = MemoryManager::new(config);
 
         let mut query = MemoryQuery {
@@ -323,6 +336,45 @@ mod tests {
 
         let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
         assert!(!result.memories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_identity_searches_all_labels() {
+        let store = test_store();
+        let emb = test_embedding();
+        // G10 (§6.6): Identity hint must search ALL 4 labels, so a Knowledge
+        // layer node must be reachable even when hint_type == Identity.
+        store_knowledge(&store, "user", "lives_in", "Shanghai", &emb);
+
+        let manager = MemoryManager::new(MemoryManagerConfig::default());
+        let mut query = MemoryQuery {
+            query_text: "user lives in Shanghai".to_string(),
+            embedding: Some(emb),
+            filters: Default::default(),
+            limit: 5,
+            expand_hops: 0,
+            min_score: None,
+            abstention_enabled: false,
+            hint_type: HintType::Identity,
+        };
+
+        let result = manager.retrieve(&store as &dyn MemoryProvider, &mut query, None).await.unwrap();
+        assert!(
+            !result.memories.is_empty(),
+            "Identity hint should search all labels and hit Knowledge nodes"
+        );
+        assert!(
+            result
+                .memories
+                .iter()
+                .any(|m| m.label == labels::KNOWLEDGE),
+            "expected at least one Knowledge node, got: {:?}",
+            result
+                .memories
+                .iter()
+                .map(|m| m.label.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -435,6 +487,7 @@ mod tests {
             value,
             confidence: 0.9,
             source_episode_id: None,
+            source: "user_statement".to_string(),
             embedding: None,
             status: NodeStatus::Active,
             created_at: chrono::Utc::now(),

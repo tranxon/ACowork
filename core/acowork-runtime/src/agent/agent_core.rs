@@ -724,6 +724,10 @@ impl AgentCore {
                 let existing: usize = ["Episodic", "Knowledge", "Procedural", "Autobiographical"]
                     .iter().map(|l| graph.nodes_by_label(l).len()).sum();
                 tracing::info!(path = %db_path.display(), existing_nodes = existing, "Grafeo memory store opened");
+                let quality = self.memory_quality_config();
+                if let Err(e) = store.apply_quality_config(&quality) {
+                    tracing::warn!(error = %e, "Failed to apply memory quality config to GrafeoStore, using defaults");
+                }
                 let store_arc = Arc::new(store);
                 self.bootstrap_autobiographical_from_manifest(&*store_arc);
                 if let Some(ref session) = self.memory_session {
@@ -783,7 +787,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Identity, key: key.to_string(),
                 value: value.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(key = %key, error = %e, "Failed to bootstrap Autobiographical/Identity node");
@@ -794,7 +800,9 @@ impl AgentCore {
                 id: None, category: AutobioCategory::Capability, key: cap_key.clone(),
                 value: cap_def.description.clone(), confidence: 1.0, source_episode_id: None,
                 embedding: None, status: NodeStatus::Active,
-                created_at: now, updated_at: now, metadata: HashMap::new(),
+                created_at: now, updated_at: now,
+                // Bootstrapped from the agent manifest — not a user statement.
+                source: "manifest".to_string(), metadata: HashMap::new(),
             };
             if let Err(e) = provider.store_autobiographical(&node) {
                 tracing::warn!(capability = %cap_key, error = %e, "Failed to bootstrap Autobiographical/Capability node");
@@ -804,7 +812,24 @@ impl AgentCore {
     }
 
     pub fn init_memory_manager(&self) -> MemoryManager {
-        MemoryManager::new(MemoryManagerConfig::default())
+        MemoryManager::new(MemoryManagerConfig {
+            quality: self.memory_quality_config(),
+            ..MemoryManagerConfig::default()
+        })
+    }
+
+    /// Resolve the agent's memory quality config (ADR-062 D2).
+    ///
+    /// Source: the `.agent` manifest `[memory.quality]` section (package
+    /// author default). An absent section yields `MemoryQualityConfig::default()`
+    /// ("zero configuration = current behaviour").
+    pub(crate) fn memory_quality_config(&self) -> acowork_memory::quality::MemoryQualityConfig {
+        self.manifest
+            .memory
+            .quality
+            .clone()
+            .map(Into::into)
+            .unwrap_or_default()
     }
 
     pub fn start_consolidation_pipeline(&mut self) {

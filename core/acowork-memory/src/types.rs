@@ -115,8 +115,10 @@ impl MemoryQuery {
 
     /// Build a query for per-turn auto-injection.
     ///
-    /// Lightweight background context: searches Autobiographical + Episodic
-    /// labels, excludes current-session nodes, no graph expansion, low limit.
+    /// Lightweight background context: searches all 4 labels (Episodic /
+    /// Knowledge / Procedural / Autobiographical) per design §6.6 — even
+    /// Identity queries default to all labels, excluding current-session
+    /// nodes, no graph expansion, low limit.
     pub fn auto_inject(query_text: String, exclude_session_id: Option<String>) -> Self {
         Self {
             query_text,
@@ -127,7 +129,11 @@ impl MemoryQuery {
             },
             limit: 5,
             expand_hops: 0,
-            min_score: Some(0.3),
+            // NOTE (ADR-062 D1): `min_score` left as `None` so it resolves via
+            // MemoryManagerConfig.quality.min_score (default 0.0). The old
+            // hardcoded `Some(0.3)` was on the RRF score scale (~0.01-0.05)
+            // and silently filtered out every auto-inject hit.
+            min_score: None,
             abstention_enabled: false,
             hint_type: HintType::Identity,
         }
@@ -433,6 +439,14 @@ pub struct KnowledgeNode {
     pub updated_at: DateTime<Utc>,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Privacy level — drives package-share stripping (design §7.1/§8.1).
+    /// Defaults to `Personal` (conservative: stripped when sharing).
+    #[serde(default)]
+    pub privacy: PrivacyLevel,
+    /// Importance scored by LLM at write time [0.0, 1.0] (design §3.1/§5.1).
+    /// Defaults to 0.5 when unset.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
 }
 
 /// Procedural memory node — behavior pattern.
@@ -508,8 +522,19 @@ pub struct AutobiographicalNode {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Provenance of this self-knowledge.
+    ///
+    /// Conventional values: `"user_statement"`, `"important_event"`,
+    /// `"self_evaluation"`, `"manifest"`. Defaults to `"user_statement"`.
+    #[serde(default = "default_source")]
+    pub source: String,
     /// Optional metadata.
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Default provenance for autobiographical knowledge (design §9).
+fn default_source() -> String {
+    "user_statement".to_string()
 }
 
 // ============================================================================

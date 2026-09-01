@@ -8,7 +8,7 @@
 
 use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
 use acowork_memory::consolidation::{AutobiographicalStoreInput, MemoryStoreInput};
-use acowork_memory::types::{AutobioCategory, KnowledgeSubType};
+use acowork_memory::types::{AutobioCategory, KnowledgeSubType, PrivacyLevel};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -101,7 +101,16 @@ impl MemoryStoreTool {
                     },
                     "confidence": {
                         "type": "number",
-                        "description": "Your confidence in this knowledge (0.0-1.0). High confidence (>=0.85) creates an Active node; lower creates Pending for later verification. Default 0.7 for knowledge/procedure, 0.85 for autobiographical."
+                        "description": "Your confidence in this knowledge (0.0-1.0), reflecting how certain you actually are. Anchor on evidence, not on a target value: base it on whether the statement is direct, explicit, recent, and from the user personally (higher), versus inferred, stale, or speculative (lower). Most routine observations are moderately certain — score them accordingly. Reserve very high scores for facts you would bet on; use very low scores for uncertain or contradicting signals. Do not inflate scores to make a memory seem more certain than it is."
+                    },
+                    "privacy": {
+                        "type": "string",
+                        "enum": ["public", "personal", "sensitive"],
+                        "description": "Optional privacy level: 'public' (shareable in agent packages), 'personal' (default, stripped on share), 'sensitive' (stripped on share). Ignored for autobiographical writes."
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "How critical is this memory to long-term value (0.0-1.0)? Higher importance resists forgetting. Distinguish core identity facts (near 1.0) from transient preferences (~0.3-0.5) from trivia (~0.1)."
                     },
                     "keywords": {
                         "type": "array",
@@ -268,6 +277,23 @@ impl Tool for MemoryStoreTool {
             })
         });
 
+        // --- Extract optional privacy (public | personal | sensitive) ---
+        // Only meaningful for knowledge/procedure writes; autobiographical
+        // nodes carry their own classification.
+        let privacy = params.get("privacy").and_then(|v| v.as_str()).map(|s| {
+            match s.to_lowercase().as_str() {
+                "public" => PrivacyLevel::Public,
+                "sensitive" => PrivacyLevel::Sensitive,
+                _ => PrivacyLevel::Personal,
+            }
+        });
+
+        // --- Extract optional importance (clamp 0.0-1.0) ---
+        let importance = params
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .map(|c| c.clamp(0.0, 1.0) as f32);
+
         // --- Resolve MemoryProvider via late-binding handle ---
         // The provider may be None if AgentCore::init_memory_provider hasn't
         // completed yet (Phase B of startup). We fall back to a fake
@@ -318,6 +344,15 @@ impl Tool for MemoryStoreTool {
                         },
                         None => None,
                     };
+                // Show provenance in the tool result so the LLM/audit trail can
+                // see the source (G7). Only autobiographical writes carry one.
+                // Extracted before `autobio_input` is moved into the input.
+                let source_display = autobio_input
+                    .as_ref()
+                    .and_then(|a| a.source.clone())
+                    .map(|s| format!(", source: {s}"))
+                    .unwrap_or_default();
+
                 let input = MemoryStoreInput {
                     content: content.clone(),
                     sub_type: sub_type_for_knowledge,
@@ -327,22 +362,46 @@ impl Tool for MemoryStoreTool {
                     confidence: Some(confidence),
                     source_episode_id: None,
                     embedding: content_embedding,
+                    privacy,
+                    importance,
+                    keywords: _keywords,
                     autobiographical: autobio_input,
                 };
 
                 match provider.process_memory_store(&input) {
-                    Ok(Some(result)) => Ok(ToolResult {
-                        ok: true,
-                        content: format!(
-                            "Stored {cat}: \"{content}\" (confidence: {conf:.2}, id: {id})",
-                            cat = category_display,
-                            content = content,
-                            conf = confidence,
-                            id = result.node_id
-                        ),
-                        error: None,
-                        token_usage: None,
-                    }),
+                    Ok(Some(result)) => {
+                        // ADR-062 M3.6: lightweight write-path distribution
+                        // telemetry. One structured debug event per successful
+                        // write carries the resolved confidence/importance and
+                        // whether the LLM provided them explicitly (vs the
+                        // fallback defaults). Log aggregation builds the
+                        // confidence/importance distributions used to
+                        // re-calibrate consolidation thresholds (ADR-062 §6.6).
+                        tracing::debug!(
+                            target: "memory_write_scores",
+                            agent_id = %self.agent_id,
+                            category = %category_display,
+                            confidence,
+                            confidence_explicit = params.get("confidence").is_some(),
+                            importance = importance.unwrap_or(f32::NAN),
+                            importance_explicit = params.get("importance").is_some(),
+                            node_id = result.node_id,
+                            "memory write score distribution"
+                        );
+                        Ok(ToolResult {
+                            ok: true,
+                            content: format!(
+                                "Stored {cat}: \"{content}\" (confidence: {conf:.2}, id: {id}{source})",
+                                cat = category_display,
+                                content = content,
+                                conf = confidence,
+                                id = result.node_id,
+                                source = source_display
+                            ),
+                            error: None,
+                            token_usage: None,
+                        })
+                    }
                     Ok(None) => {
                         // Duplicate skipped
                         Ok(ToolResult {
@@ -729,7 +788,50 @@ mod tests {
         assert_eq!(stats.node_count, 1);
     }
 
-    // ── Autobiographical category tests ─────────────────────────────────
+    /// End-to-end: keywords/privacy/importance params are accepted and
+    /// forwarded into MemoryStoreInput (Gap G8 + M2). The InMemoryProvider
+    /// does not persist these fields, so persistence is verified at the
+    /// Grafeo layer (instant.rs test_process_memory_store_keywords_persisted);
+    /// this test proves the tool wiring does not drop or reject them.
+    #[tokio::test]
+    async fn test_memory_store_metadata_params_inmemory() {
+        let (tool, provider) = test_tool_with_provider();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User lives in Shanghai",
+                    "category": "fact",
+                    "confidence": 0.9,
+                    "privacy": "public",
+                    "importance": 0.8,
+                    "keywords": ["shanghai", "location", "home"]
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.ok, "expected success, got: {:?}", result.error);
+        assert!(result.content.contains("Shanghai"));
+
+        // Invalid privacy value falls back to Personal (no hard error).
+        let result2 = tool
+            .execute(
+                serde_json::json!({
+                    "content": "User prefers tea",
+                    "category": "preference",
+                    "privacy": "bogus",
+                    "importance": 99.0
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result2.ok, "expected success, got: {:?}", result2.error);
+
+        // Both nodes stored.
+        let stats = provider.stats().unwrap();
+        assert_eq!(stats.node_count, 2);
+    }
     //
     // The autobiographical category is the new entry point for "user about
     // the agent" knowledge (e.g. "you're too verbose", "good job"). It
@@ -959,10 +1061,13 @@ mod tests {
     }
 
     /// Extract the node_id from a successful memory_store result's content.
-    /// Format: "Stored ... (confidence: ..., id: <id>)".
+    /// Format: "Stored ... (confidence: ..., id: <id>[, source: <src>])".
+    /// The optional `, source:` suffix is stripped before parsing.
     #[cfg(feature = "grafeo-backend")]
     fn extract_node_id(content: &str) -> u64 {
         let after = content.rsplit("id: ").next().unwrap();
+        // Drop any trailing ", source: ..." segment.
+        let after = after.split(',').next().unwrap();
         let after = after.trim_end_matches(')').trim();
         after
             .parse::<u64>()
