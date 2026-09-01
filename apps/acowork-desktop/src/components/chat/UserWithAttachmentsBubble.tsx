@@ -16,7 +16,6 @@ import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
-import { formatBubbleTime } from "../../lib/formatTime";
 
 export interface UserWithAttachmentsBubbleProps {
   /** The user text message (items[0] of the block). */
@@ -158,23 +157,13 @@ export function UserWithAttachmentsBubble({
           </div>
         )}
 
-        {/* User text bubble. Same anchor rule as the plain user bubble
-            in MessageBubble.tsx: the timestamp anchors to the bubble's
-            top-LEFT edge (left edge faces screen center for a right-aligned
-            bubble) so it never overflows the right edge of the viewport. */}
+        {/* User text bubble */}
         {userMessage.content && (
-          <div className="relative group mt-[6px]">
-            {userMessage.timestamp && (
-              <span className="pointer-events-none absolute left-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBubbleTime(userMessage.timestamp)}
-              </span>
-            )}
-            <div
-              className="max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
-              style={fontSizeStyle}
-            >
-              {userMessage.content}
-            </div>
+          <div
+            className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+            style={fontSizeStyle}
+          >
+            {userMessage.content}
           </div>
         )}
       </div>

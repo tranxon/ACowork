@@ -23,7 +23,6 @@ import {
   type ContextMenuItem,
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, snapshotSelection } from "../../lib/clipboard";
-import { formatBubbleTime } from "../../lib/formatTime";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -356,19 +355,8 @@ const MessageBubble = React.memo(function MessageBubble({
               <span className="mt-[2px] text-xs text-zinc-400 dark:text-zinc-500">{liveUserName}</span>
             )}
             {message.content && (
-              // Hover tooltip shows the message timestamp. Anchored to the
-              // bubble's top-LEFT corner (align=start) — the bubble is
-              // right-aligned, so this keeps the tooltip toward the screen
-              // center instead of overflowing the right edge.
-              <div className="relative group mt-[6px]">
-                {message.timestamp && (
-                  <span className="pointer-events-none absolute left-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
-                    {formatBubbleTime(message.timestamp)}
-                  </span>
-                )}
-                <div className="max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
-                  {message.content}
-                </div>
+              <div className="mt-[6px] max-w-[85%] rounded-md rounded-br-sm bg-chat-user px-4 py-2.5 text-chat-user-text select-text whitespace-pre-wrap break-words max-h-48 overflow-y-auto" style={fontSizeStyle}>
+                {message.content}
               </div>
             )}
           </div>
@@ -398,20 +386,9 @@ const MessageBubble = React.memo(function MessageBubble({
     return (
       <>
         <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
-          {/* Hover tooltip shows the message timestamp. Anchored to the
-             bubble's top-RIGHT corner (align=end) — the bubble is
-             left-aligned (ml-12), so this keeps the tooltip toward the
-             screen center instead of overflowing the left edge. */}
-          <div className="relative group">
-            {message.timestamp && (
-              <span className="pointer-events-none absolute right-0 -top-5 whitespace-nowrap text-[10px] text-zinc-500 dark:text-zinc-400 opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBubbleTime(message.timestamp)}
-              </span>
-            )}
-            <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
-              <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
-                <StreamMarkdown content={displayContent} />
-              </div>
+          <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 dark:text-zinc-200 select-text break-words" style={fontSizeStyle}>
+            <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
+              <StreamMarkdown content={displayContent} />
             </div>
           </div>
         </div>

@@ -17,21 +17,6 @@ import { cn } from "../../lib/utils";
  */
 
 type TooltipPosition = "top" | "bottom" | "left" | "right";
-/**
- * Alignment perpendicular to `position`.
- *
- * For `top` / `bottom`: horizontal — `start` = tooltip's left edge aligns
- * with trigger's left edge, `end` = tooltip's right edge aligns with
- * trigger's right edge.
- * For `left` / `right`: vertical — `start` = tooltip's top edge aligns
- * with trigger's top edge, `end` = tooltip's bottom edge aligns with
- * trigger's bottom edge.
- *
- * Used by chat bubbles to keep the timestamp tooltip anchored to the
- * inner edge of an off-center bubble (user bubble → `start`, assistant
- * bubble → `end`) so the tooltip never overflows the screen edge.
- */
-type TooltipAlign = "start" | "center" | "end";
 type TooltipVariant = "inverted" | "plain";
 
 interface TooltipProps {
@@ -41,11 +26,6 @@ interface TooltipProps {
   children: ReactElement;
   /** Tooltip position relative to trigger. Default: 'top' */
   position?: TooltipPosition;
-  /**
-   * Perpendicular alignment relative to trigger. Default: 'center'.
-   * See `TooltipAlign` for the per-position semantics.
-   */
-  align?: TooltipAlign;
   /** Visual variant. Default: 'inverted' */
   variant?: TooltipVariant;
   /** Max width for long content. Default: '200px' */
@@ -70,93 +50,20 @@ const variantClasses: Record<TooltipVariant, string> = {
 const GAP = 6; // px gap between trigger and tooltip
 
 // ── CSS-based positioning classes for inline (non-portal) mode ─────────
-// Layout: position (top/bottom/left/right) × align (start/center/end).
-// "start"/"end" drop the centered translate and pin the corresponding edge
-// to the matching edge of the trigger — the tooltip then naturally grows
-// away from that edge in the direction of the trigger's body.
-const inlinePositionClasses: Record<TooltipPosition, Record<TooltipAlign, string>> = {
-  top: {
-    start: "bottom-full left-0 mb-1.5",
-    center: "bottom-full left-1/2 -translate-x-1/2 mb-1.5",
-    end: "bottom-full right-0 mb-1.5",
-  },
-  bottom: {
-    start: "top-full left-0 mt-1.5",
-    center: "top-full left-1/2 -translate-x-1/2 mt-1.5",
-    end: "top-full right-0 mt-1.5",
-  },
-  left: {
-    start: "right-full top-0 mr-1.5",
-    center: "right-full top-1/2 -translate-y-1/2 mr-1.5",
-    end: "right-full bottom-0 mr-1.5",
-  },
-  right: {
-    start: "left-full top-0 ml-1.5",
-    center: "left-full top-1/2 -translate-y-1/2 ml-1.5",
-    end: "left-full bottom-0 ml-1.5",
-  },
+const inlinePositionClasses: Record<TooltipPosition, string> = {
+  top: "bottom-full left-1/2 -translate-x-1/2 mb-1.5",
+  bottom: "top-full left-1/2 -translate-x-1/2 mt-1.5",
+  left: "right-full top-1/2 -translate-y-1/2 mr-1.5",
+  right: "left-full top-1/2 -translate-y-1/2 ml-1.5",
 };
 
-// ── Portal-mode anchor + transform lookup ──────────────────────────────
-// Each entry says: from the chosen anchor point on the trigger's rect,
-// apply this CSS transform to position the tooltip's matching corner.
-//   position=top,  align=start  → anchor at (left, top), translate(0,-100%)
-//     = tooltip's bottom-LEFT sits at trigger's top-LEFT
-//   position=top,  align=end    → anchor at (right, top), translate(-100%,-100%)
-//     = tooltip's bottom-RIGHT sits at trigger's top-RIGHT
-//   position=top,  align=center → anchor at center-top, translate(-50%,-100%)
-//     = tooltip centered above the trigger
-type AnchorEdge = "left" | "center" | "right" | "top" | "bottom";
-interface PortalAnchor {
-  /** Which edge of the trigger's bounding rect to anchor against. */
-  anchorH: AnchorEdge;
-  /** Which edge of the trigger's bounding rect to anchor against. */
-  anchorV: AnchorEdge;
-  /** Translate applied after anchoring to align the tooltip's matching edge. */
-  translateX: "0" | "-50%" | "-100%";
-  translateY: "0" | "-50%" | "-100%";
-}
-const portalAnchorMap: Record<TooltipPosition, Record<TooltipAlign, PortalAnchor>> = {
-  top: {
-    start:  { anchorH: "left",   anchorV: "top",    translateX: "0",      translateY: "-100%" },
-    center: { anchorH: "center", anchorV: "top",    translateX: "-50%",   translateY: "-100%" },
-    end:    { anchorH: "right",  anchorV: "top",    translateX: "-100%",  translateY: "-100%" },
-  },
-  bottom: {
-    start:  { anchorH: "left",   anchorV: "bottom", translateX: "0",      translateY: "0" },
-    center: { anchorH: "center", anchorV: "bottom", translateX: "-50%",   translateY: "0" },
-    end:    { anchorH: "right",  anchorV: "bottom", translateX: "-100%",  translateY: "0" },
-  },
-  left: {
-    start:  { anchorH: "left",   anchorV: "top",    translateX: "-100%",  translateY: "0" },
-    center: { anchorH: "left",   anchorV: "center", translateX: "-100%",  translateY: "-50%" },
-    end:    { anchorH: "left",   anchorV: "bottom", translateX: "-100%",  translateY: "-100%" },
-  },
-  right: {
-    start:  { anchorH: "right",  anchorV: "top",    translateX: "0",      translateY: "0" },
-    center: { anchorH: "right",  anchorV: "center", translateX: "0",      translateY: "-50%" },
-    end:    { anchorH: "right",  anchorV: "bottom", translateX: "0",      translateY: "-100%" },
-  },
+// ── Transform strings for portal mode ──────────────────────────────────
+const portalTransformMap: Record<TooltipPosition, string> = {
+  top: "translate(-50%, -100%)",
+  bottom: "translate(-50%, 0)",
+  left: "translate(-100%, -50%)",
+  right: "translate(0, -50%)",
 };
-
-/** Resolve a trigger-relative coordinate for the given anchor edge. */
-function resolveAnchor(edge: AnchorEdge, rect: DOMRect, axis: "h" | "v"): number {
-  if (axis === "h") {
-    switch (edge) {
-      case "left":   return rect.left;
-      case "center": return rect.left + rect.width / 2;
-      case "right":  return rect.right;
-    }
-  } else {
-    switch (edge) {
-      case "top":    return rect.top;
-      case "center": return rect.top + rect.height / 2;
-      case "bottom": return rect.bottom;
-    }
-  }
-  // Exhaustiveness fallback — never reached if all AnchorEdge cases handled.
-  return 0;
-}
 
 // ── Inline tooltip (CSS-positioned, supports @container queries) ───────
 
@@ -164,7 +71,6 @@ function InlineTooltip({
   content,
   children,
   position,
-  align,
   variant,
   maxWidth,
   tipClass,
@@ -233,7 +139,7 @@ function InlineTooltip({
       */}
       <div
         className={cn(
-          inlinePositionClasses[position][align],
+          inlinePositionClasses[position],
           "pointer-events-none absolute z-50 w-max",
           tipClass,
           visible ? "block" : "hidden",
@@ -263,7 +169,6 @@ function PortalTooltip({
   content,
   children,
   position,
-  align,
   variant,
   maxWidth,
   delayMs,
@@ -273,41 +178,34 @@ function PortalTooltip({
   const [coords, setCoords] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const timerRef = useRef<ReturnType<typeof setTimeout>>(null);
 
-  // Resolve the current anchor once per render — `coords` only stores the
-  // anchor point on the trigger's rect (with GAP applied), and the
-  // translate values come straight from the anchor entry. This keeps the
-  // portal element's transform reactive to both `position` AND `align`.
-  const anchor = portalAnchorMap[position][align];
-
   const calcPosition = useCallback(() => {
     if (!triggerRef.current) return;
     const rect = triggerRef.current.getBoundingClientRect();
-    const a = portalAnchorMap[position][align];
 
-    // Offset the anchor point by GAP depending on which side of the trigger
-    // the tooltip lives on. For "top" / "left" the tooltip is BEFORE the
-    // trigger along that axis, so the anchor moves by -GAP; for "bottom" /
-    // "right" it moves by +GAP. The perpendicular coordinate stays at the
-    // matching edge of the trigger (start/center/end).
-    let top = resolveAnchor(a.anchorV, rect, "v");
-    let left = resolveAnchor(a.anchorH, rect, "h");
+    let top = 0;
+    let left = 0;
+
     switch (position) {
       case "top":
-        top -= GAP;
+        top = rect.top - GAP;
+        left = rect.left + rect.width / 2;
         break;
       case "bottom":
-        top += GAP;
+        top = rect.bottom + GAP;
+        left = rect.left + rect.width / 2;
         break;
       case "left":
-        left -= GAP;
+        top = rect.top + rect.height / 2;
+        left = rect.left - GAP;
         break;
       case "right":
-        left += GAP;
+        top = rect.top + rect.height / 2;
+        left = rect.right + GAP;
         break;
     }
 
     setCoords({ top, left });
-  }, [position, align]);
+  }, [position]);
 
   const handleEnter = useCallback(() => {
     // Defense 1: clear any pending timer from a previous enter that hasn't
@@ -374,7 +272,7 @@ function PortalTooltip({
             style={{
               top: coords.top,
               left: coords.left,
-              transform: `translate(${anchor.translateX}, ${anchor.translateY})`,
+              transform: portalTransformMap[position],
             }}
           >
             <div
@@ -401,7 +299,6 @@ export function Tooltip({
   content,
   children,
   position = "top",
-  align = "center",
   variant = "inverted",
   maxWidth = "200px",
   tipClass,
@@ -412,7 +309,7 @@ export function Tooltip({
     return children;
   }
 
-  const props = { content, children, position, align, variant, maxWidth, delayMs };
+  const props = { content, children, position, variant, maxWidth, delayMs };
 
   // tipClass → inline mode (preserves @container query support)
   if (tipClass) {
