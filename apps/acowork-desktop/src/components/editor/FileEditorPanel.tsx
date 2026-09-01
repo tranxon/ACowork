@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
+import { useFileEditorStore, registerFileDisposer, type OpenFile } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, getCachedWorkspaceRoot, treeKey, isReadyNode } from "../../stores/fileTree";
@@ -162,6 +162,25 @@ export function FileEditorPanel({ width }: { width: number }) {
         return null;
     })();
     const locateDisabled = locateDisabledReason !== null;
+
+    // ── "Add to Chat" disabled reason ─────────────────────────────────
+    // Mirrors locateDisabledReason so the UX hint is identical. A file
+    // that belongs to a different agent or workspace must NOT be
+    // attached to the current session's chat context — that would smuggle
+    // cross-agent paths into another agent's prompt AND would 401/403 at
+    // the gateway when the LLM tries to read it (workspace-scoped auth).
+    //
+    // Note: "loading" is intentionally NOT a reason here. A user can still
+    // attach a file mid-load; the attached-context payload only needs the
+    // relPath/absPath, not the loaded content.
+    type AddToChatDisabledReason = "no-file" | "url-preview" | "wrong-agent" | "wrong-workspace" | null;
+    const addToChatDisabledReason: AddToChatDisabledReason = (() => {
+        if (!activeFile) return "no-file";
+        if (activeFile.kind === "url") return "url-preview";
+        if (activeFile.agentId !== selectedAgentId) return "wrong-agent";
+        if (currentWorkspaceId !== null && activeFile.workspaceId !== currentWorkspaceId) return "wrong-workspace";
+        return null;
+    })();
 
     const handleLocateInTree = useCallback(() => {
         if (!activeFile || locateDisabled || !selectedAgentId || !activeSessionId) return;
@@ -794,6 +813,40 @@ export function FileEditorPanel({ width }: { width: number }) {
         }
     }, [openFiles]);
 
+    // ── Register file disposer with fileEditorStore ──────────────────────
+    //
+    // The store calls this disposer once per removed file BEFORE mutating
+    // openFiles[]. It handles Monaco TextModel release (which the store
+    // itself cannot do -- it has no Monaco reference) plus LSP didClose.
+    //
+    // Pre-registration, every caller of closeFile / closeOthers /
+    // closeAllFiles had to remember to do its own cleanup, and at least
+    // one caller (workspaceFsEvents reacting to a disk-delete) forgot --
+    // leaking TextModels in monaco.editor.getModels().
+    useEffect(() => {
+        const unregister = registerFileDisposer((file) => {
+            const monacoInst = monacoRef.current;
+            // 1. LSP didClose -- only if the document is actually tracked
+            //    AND the LSP client is still alive for the right workspace.
+            if (lspClient && monacoInst && documentTrackerRef.current && file.kind === "file") {
+                const uri = monacoInst.Uri.parse(file.relPath);
+                const model = monacoInst.editor.getModel(uri);
+                if (model) {
+                    documentTrackerRef.current.trackClose(lspClient, model);
+                }
+            }
+            // 2. Monaco TextModel disposal -- no-op if already disposed
+            //    by another path.
+            if (monacoInst && file.kind === "file") {
+                disposeModelForFile(monacoInst, file.relPath);
+            }
+            // 3. Per-file view-state cleanup -- cursor/scroll position
+            //    for a closed file is meaningless after this point.
+            viewStatesRef.current.delete(file.relPath);
+        });
+        return unregister;
+    }, [lspClient]);
+
     // ── LSP providers registration ──────────────────────────────────────
 
     useEffect(() => {
@@ -833,6 +886,18 @@ export function FileEditorPanel({ width }: { width: number }) {
     const handleAddSelectionToChat = useCallback(() => {
         const agentId = selectedAgentId;
         if (!agentId || !activeFile || !selectionRange) return;
+        // Defensive: refuse to attach a file owned by a different agent or
+        // workspace. The button is hidden by `addToChatDisabledReason` in
+        // the UI, but a programmatic invocation (or a stale closure) could
+        // still land here. Returning silently is correct — the UI already
+        // surfaced the reason via `locateDisabled.<reason>` tooltip text.
+        if (activeFile.agentId !== agentId) {
+            log.warn(
+                "[FileEditor] Add to Chat refused: file belongs to a different agent",
+                { fileAgent: activeFile.agentId, selectedAgent: agentId },
+            );
+            return;
+        }
         const sessionId = getActiveSessionId(agentId);
         if (!sessionId) return;
 
@@ -863,88 +928,24 @@ export function FileEditorPanel({ width }: { width: number }) {
             setClosingFileId(file.id);
             return;
         }
-        // Send didClose before removing from store
-        if (lspClient && monacoRef.current && documentTrackerRef.current) {
-            const monacoUri = monacoRef.current.Uri.parse(file.relPath);
-            const model = monacoRef.current.editor.getModel(monacoUri);
-            if (model) {
-                documentTrackerRef.current.trackClose(lspClient, model);
-            }
-        }
+        // The registered file disposer handles LSP didClose + Monaco
+        // TextModel disposal automatically when closeFile runs.
         closeFile(file.id);
-        // Dispose Monaco model if no other tab still references the same file
-        if (monacoRef.current) {
-            const remaining = useFileEditorStore.getState().openFiles;
-            const stillReferenced = remaining.some(
-                (f) => f.id !== file.id && f.relPath === file.relPath
-            );
-            if (!stillReferenced) {
-                disposeModelForFile(monacoRef.current, file.relPath);
-            }
-        }
-    }, [closeFile, lspClient]);
+    }, [closeFile]);
 
     const confirmClose = useCallback(() => {
         if (!closingFileId) return;
-        const closingFile = openFiles.find((f) => f.id === closingFileId);
-        // Send didClose before discarding
-        if (lspClient && monacoRef.current && documentTrackerRef.current && closingFile) {
-            const monacoUri = monacoRef.current.Uri.parse(closingFile.relPath);
-            const model = monacoRef.current.editor.getModel(monacoUri);
-            if (model) {
-                documentTrackerRef.current.trackClose(lspClient, model);
-            }
-        }
+        // The registered file disposer handles LSP didClose + Monaco TextModel
+        // disposal automatically when closeFile runs (with force=true).
         closeFile(closingFileId, true);
         setClosingFileId(null);
-        // Dispose Monaco model if no other tab still references the same file
-        if (monacoRef.current && closingFile) {
-            const remaining = useFileEditorStore.getState().openFiles;
-            const stillReferenced = remaining.some(
-                (f) => f.id !== closingFile.id && f.relPath === closingFile.relPath
-            );
-            if (!stillReferenced) {
-                disposeModelForFile(monacoRef.current, closingFile.relPath);
-            }
-        }
-    }, [closingFileId, closeFile, lspClient, openFiles]);
+    }, [closingFileId, closeFile]);
 
     // ── Tab right-click menu (VSCode-style: Close / Close Others / Close All) ──
 
     const handleTabContextMenu = useCallback((e: React.MouseEvent, file: OpenFile) => {
         tabMenu.openAt(e, { fileId: file.id });
     }, [tabMenu]);
-
-    /**
-     * Send didClose to LSP and dispose Monaco models for a set of files.
-     * Store mutations are the caller's responsibility (single- or batch-close).
-     * This is the shared cleanup path for "Close", "Close Others", and "Close All".
-     */
-    const cleanupClosedFiles = useCallback((files: OpenFile[]) => {
-        if (files.length === 0) return;
-        // 1. Notify LSP server via didClose for every tracked model
-        if (lspClient && monacoRef.current && documentTrackerRef.current) {
-            for (const file of files) {
-                const monacoUri = monacoRef.current.Uri.parse(file.relPath);
-                const model = monacoRef.current.editor.getModel(monacoUri);
-                if (model) {
-                    documentTrackerRef.current.trackClose(lspClient, model);
-                }
-            }
-        }
-        // 2. Dispose Monaco models that are no longer referenced by any surviving tab
-        if (monacoRef.current) {
-            const remaining = useFileEditorStore.getState().openFiles;
-            for (const file of files) {
-                const stillReferenced = remaining.some(
-                    (f) => f.id !== file.id && f.relPath === file.relPath,
-                );
-                if (!stillReferenced) {
-                    disposeModelForFile(monacoRef.current, file.relPath);
-                }
-            }
-        }
-    }, [lspClient]);
 
     // ── Tab right-click menu actions ──────────────────────────────────
 
@@ -960,6 +961,17 @@ export function FileEditorPanel({ width }: { width: number }) {
         if (file.kind !== "file") return;
         const agentId = selectedAgentId;
         if (!agentId) return;
+        // Defensive: refuse to attach a file owned by a different agent.
+        // Right-click menu disables the item via `canAddToChat`, but we
+        // double-check here in case of a stale closure or a direct call
+        // path that bypasses the menu.
+        if (file.agentId !== agentId) {
+            log.warn(
+                "[FileEditor] Tab Add to Chat refused: file belongs to a different agent",
+                { fileAgent: file.agentId, selectedAgent: agentId },
+            );
+            return;
+        }
         const sessionId = activeSessionId;
         if (!sessionId) return;
         // Resolve absolute path the same way as the floating selection addToChat.
@@ -997,9 +1009,9 @@ export function FileEditorPanel({ width }: { width: number }) {
             setClosingFileId(file.id);
             return;
         }
-        cleanupClosedFiles([file]);
+        // The registered file disposer handles disposal automatically.
         closeFile(file.id);
-    }, [cleanupClosedFiles, closeFile]);
+    }, [closeFile]);
 
     const handleCloseOthers = useCallback((file: OpenFile) => {
         const others = openFiles.filter((f) => f.id !== file.id);
@@ -1018,9 +1030,10 @@ export function FileEditorPanel({ width }: { width: number }) {
             });
             return;
         }
-        cleanupClosedFiles(others);
+        // closeOthers triggers the registered file disposer for each
+        // non-kept tab -- no manual cleanup needed.
         closeOthers(file.id);
-    }, [openFiles, cleanupClosedFiles, closeOthers, setActiveFile]);
+    }, [openFiles, closeOthers, setActiveFile]);
 
     const handleCloseAll = useCallback(() => {
         if (openFiles.length === 0) return;
@@ -1033,9 +1046,10 @@ export function FileEditorPanel({ width }: { width: number }) {
             });
             return;
         }
-        cleanupClosedFiles(openFiles);
+        // closeAllFiles triggers the registered file disposer for every
+        // tab -- no manual cleanup needed.
         closeAllFiles();
-    }, [openFiles, cleanupClosedFiles, closeAllFiles]);
+    }, [openFiles, closeAllFiles]);
 
     const handleTabPreview = useCallback((file: OpenFile) => {
         if (file.kind !== "file") return;
@@ -1085,7 +1099,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         // tabs have no relPath/absPath to attach and no Gateway endpoint
         // to refetch.
         const showFileActions = target.kind === "file";
-        const canAddToChat = showFileActions && !!selectedAgentId && !!activeSessionId;
+        const canAddToChat = showFileActions && addToChatDisabledReason === null && !!activeSessionId;
         const canRefresh = showFileActions && !target.loading;
         // Preview is only useful for files that have a preview view
         // (Markdown / HTML / SVG), and only when the tab is currently in source
@@ -1168,22 +1182,16 @@ export function FileEditorPanel({ width }: { width: number }) {
 
     const confirmBatchClose = useCallback(() => {
         if (!batchCloseRequest) return;
-        // Re-resolve the actual OpenFile objects from the latest store state
-        // (in case files were closed by some other path while the dialog was open).
-        const live = useFileEditorStore.getState().openFiles;
-        const filesToClean = batchCloseRequest.fileIds
-            .map((id) => live.find((f) => f.id === id))
-            .filter((f): f is OpenFile => f !== undefined);
-        if (filesToClean.length > 0) {
-            cleanupClosedFiles(filesToClean);
-        }
+        // Both closeAllFiles(true) and closeOthers(..., true) trigger the
+        // registered file disposer for every removed file -- no pre-clean
+        // pass needed.
         if (batchCloseRequest.kind === "all") {
             closeAllFiles(true);
         } else if (batchCloseRequest.kind === "others" && batchCloseRequest.keepFileId) {
             closeOthers(batchCloseRequest.keepFileId, true);
         }
         setBatchCloseRequest(null);
-    }, [batchCloseRequest, cleanupClosedFiles, closeAllFiles, closeOthers]);
+    }, [batchCloseRequest, closeAllFiles, closeOthers]);
 
     return (
         <div
@@ -1456,7 +1464,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             }}
                         />
                         {/* Floating "Add to Chat" button near selection end */}
-                        {selectionRange && addToChatPos && selectedAgentId && (
+                        {selectionRange && addToChatPos && addToChatDisabledReason === null && (
                             <button
                                 onClick={handleAddSelectionToChat}
                                 className="absolute z-30 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-white shadow-md transition-colors"

@@ -875,3 +875,99 @@ describe("scheduleSendReconciliation: clears the attachment pending spinner", ()
     expect(ss.messages.some((m) => m._isOptimistic)).toBe(true);
   });
 });
+
+// ── messagesStale: cache-integrity flag ──────────────────────────────────
+//
+// Regression for the "switch away → switch back hides the first user message"
+// bug.  Root cause: switching sessions calls `clearSessionMessages()`, which
+// wipes `messages[]` and resets the pagination cursor.  If the agent was still
+// streaming for that session, background `record_complete` writes then
+// re-populate `messages[]` with ONLY the tail records.  On switch-back the old
+// `hasMessages = messages.length > 0` check was true, so ChatPanel skipped the
+// backend reload and the older history (incl. the first user message) stayed
+// missing until a second clear+reload cycle.
+//
+// The `messagesStale` flag distinguishes a partially-repopulated post-clear
+// cache from an authoritative one, so ChatPanel's "skip reload" branches gate
+// on `!messagesStale`.  These tests pin the flag's store-level contract.
+describe("messagesStale: cache-integrity flag", () => {
+  beforeEach(() => {
+    clearTestState();
+  });
+
+  afterEach(() => {
+    clearTestState();
+  });
+
+  it("clearSessionMessages marks the cache stale", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+
+    useChatStore.getState().clearSessionMessages(AGENT, SESSION);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages).toEqual([]);
+    expect(ss.messageTotal).toBe(0);
+    expect(ss.messagesStale).toBe(true);
+  });
+
+  it("background record_complete into a cleared session keeps the cache stale (partial tail must not look authoritative)", () => {
+    seedSessionState([{ id: "u1", type: "user", content: "hi", timestamp: 1000 }], { total: 1 });
+    useChatStore.getState().clearSessionMessages(AGENT, SESSION);
+    expect(useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.messagesStale).toBe(true);
+
+    // Agent finishes streaming while the user is in another session: only the
+    // completed tail record lands (the cleared user message does NOT come back
+    // — it would only be restored by an HTTP window load).
+    handleMessageEvent(
+      {
+        type: "record_complete",
+        session_id: SESSION,
+        message_id: "assistant-1",
+        role: "assistant",
+        content: "hello back",
+      },
+      useChatStore.setState,
+      useChatStore.getState,
+      AGENT,
+    );
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    // The tail record IS present — this is exactly what made the old
+    // `hasMessages` guard skip the reload and hide the user message...
+    expect(ss.messages.map((m) => m.id)).toContain("assistant-1");
+    // ...but the flag still reports stale, so ChatPanel forces a full reload
+    // on the next switch-back and restores the missing history.
+    expect(ss.messagesStale).toBe(true);
+  });
+
+  it("a successful loadSessionMessages clears the stale flag", async () => {
+    seedSessionState([], { total: 0 });
+    useChatStore.getState().clearSessionMessages(AGENT, SESSION);
+
+    // Server has the full conversation; the HTTP window restores it.
+    vi.stubGlobal("fetch", vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({
+          messages: [
+            { id: "u1", role: "user", content: "hi", ts: "2026-01-01T00:00:00.000Z" },
+            { id: "assistant-1", role: "assistant", content: "hello back", ts: "2026-01-01T00:00:01.000Z" },
+          ],
+          offset: 0,
+          limit: 2,
+          total: 2,
+        }),
+      }),
+    ));
+
+    await useChatStore.getState().loadSessionMessages(AGENT, SESSION, 0, 50);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages.map((m) => m.id)).toEqual(["u1", "assistant-1"]);
+    expect(ss.messageTotal).toBe(2);
+    expect(ss.messagesStale).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+});

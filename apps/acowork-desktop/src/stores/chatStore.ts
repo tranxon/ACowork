@@ -186,6 +186,25 @@ interface SessionChatState {
   messageOffset: number;
   messageLimit: number;
   messageTotal: number;
+  /**
+   * Cache-integrity flag: true when `messages[]` is known to be a
+   * PARTIAL, non-authoritative slice of the conversation.
+   *
+   * Set by `clearSessionMessages` (which wipes `messages[]` and resets
+   * the pagination cursor).  After a clear, the array can only be
+   * partially repopulated by background events (e.g. `record_complete`
+   * writes for a session the user switched away from mid-stream) — the
+   * older history (including the first user message) never comes back
+   * until a real HTTP window load.  Cleared back to false by any
+   * successful `loadSessionMessages` (the merge makes the cache
+   * authoritative for the fetched window again).
+   *
+   * Consumers must gate their "cache already has data → skip reload"
+   * shortcuts on `!messagesStale`; otherwise a partial cache is
+   * mistaken for a complete one and the conversation renders with
+   * missing messages until the next clear+reload cycle.
+   */
+  messagesStale: boolean;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
@@ -266,6 +285,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messageOffset: 0,
   messageLimit: 0,
   messageTotal: 0,
+  messagesStale: false,
   pendingApproval: {},
   pendingQuestions: [],
   isLoadingSession: false,
@@ -1217,6 +1237,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        messagesStale: true,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1237,6 +1258,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        messagesStale: true,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -1483,6 +1505,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageOffset: 0,
         messageLimit: 0,
         messageTotal: 0,
+        // Local truncation makes the cache non-authoritative (tail lost) —
+        // force a reload on the next re-entry so the conversation renders whole.
+        messagesStale: true,
       });
     });
   },
@@ -1784,6 +1809,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messageOffset: finalOffset,
           messageLimit: finalLimit,
           messageTotal: returnedTotal,
+          // A real HTTP window landed — the cache is authoritative for the
+          // fetched window again (see the messagesStale doc).  hasOlder /
+          // hasNewer drive any further pagination.
+          messagesStale: false,
           isLoadingSession: false,
           loadError: null,
         });
@@ -1900,6 +1929,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       messageOffset: 0,
       messageLimit: 0,
       messageTotal: 0,
+      // The cache is now a non-authoritative empty slice.  It can only be
+      // partially repopulated by background record_complete writes (e.g. a
+      // session the user switched away from mid-stream), so consumers must
+      // NOT treat "has data" as "has complete data" until a full HTTP load
+      // lands (loadSessionMessages clears this back to false).
+      messagesStale: true,
     }));
   },
 

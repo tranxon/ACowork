@@ -20,7 +20,7 @@ import { ContextUsageIcon } from "./ContextUsageIcon";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
-import { useLiveStream, getChatAdapterSession } from "./chatAdapterStore";
+import { useLiveStream, getChatAdapterSession, releaseAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
 import { ContextMenu, useContextMenu } from "../common/ContextMenu";
@@ -851,7 +851,12 @@ export function ChatPanel() {
     });
 
     // ADR-033: connectStream removed — MQTT connection is managed by Rust backend.
-    if (!hasMessages) {
+    // Gate the "skip reload" branch on cache integrity too: after a
+    // clearSessionMessages the cache may be PARTIALLY repopulated by
+    // background record_complete writes (messagesStale=true) — those
+    // tail records must not mask the missing older history, so force a
+    // full load until a real HTTP window has landed.
+    if (!hasMessages || ss0?.messagesStale) {
       // 2a. No messages in store — load from backend (first mount or new session).
       // The scroll controller handles positioning after blocks arrive:
       // scrollToBottom() for atBottom/no-snapshot, scrollToBlockId() for browsing.
@@ -896,12 +901,26 @@ export function ChatPanel() {
   useEffect(() => {
     if (!selectedAgentId || !currentSessionId) return;
 
-    // Release the previous session's messages (memory cleanup).
+    // Release the previous session's resources (memory cleanup).
     // We do this BEFORE loading the new session so the memory is freed
     // before the new data arrives.
+    //
+    // Two pieces:
+    //   1. `messages[]` - released unconditionally via clearSessionMessages.
+    //   2. `chatAdapterStore.sessions[prevKey]` - released ONLY when the
+    //      previous session is not actively streaming. If the user switched
+    //      away mid-stream, the rolling `assistantStream` / `thinkingStream`
+    //      ChatMessage objects are still in flight; dropping them would lose
+    //      the live preview when the user switches back. Once stream ends,
+    //      `record_complete` lands in `messages[]` and the next switch-away
+    //      will release the (now-stale) adapter entry.
     const prevId = prevSessionIdRef.current;
     if (prevId && prevId !== currentSessionId) {
       useChatStore.getState().clearSessionMessages(selectedAgentId, prevId);
+      const prevAdapter = getChatAdapterSession(selectedAgentId, prevId);
+      if (!prevAdapter.isAssistantReplying && !prevAdapter.isThinking) {
+        releaseAdapterSession(selectedAgentId, prevId);
+      }
     }
     prevSessionIdRef.current = currentSessionId;
 
@@ -928,9 +947,10 @@ export function ChatPanel() {
       (existingMessages && existingMessages.length > 0) ||
       (existingOptimistic && existingOptimistic.length > 0)
     );
-    if (hasMessages) {
-      // Messages (and/or optimistic overlay) already cached — just
-      // refresh session state.
+    if (hasMessages && !ss1?.messagesStale) {
+      // Messages (and/or optimistic overlay) already cached AND the cache
+      // is authoritative (not a partially-repopulated post-clear slice) —
+      // just refresh session state.
       chatStore.loadSession(selectedAgentId, currentSessionId);
       return;
     }
