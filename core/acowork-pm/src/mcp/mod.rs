@@ -306,6 +306,8 @@ fn rpc_error(id: Option<Value>, code: i32, message: String) -> Response {
 mod tests {
     use super::*;
     use crate::config::PmConfig;
+    use crate::store::tree::PmStore;
+    use crate::types::{ProjectStatus, TaskId, UpdateProject};
     use tower::ServiceExt;
 
     /// 将响应体 `Bytes` 解析为 `Value`。
@@ -320,18 +322,19 @@ mod tests {
 
     /// 测试用最小状态：tempdir store + Noop AgentDirectory。
     pub(crate) async fn test_mcp_state() -> (McpState, tempfile::TempDir) {
+        test_mcp_state_with_dir(Arc::new(NoopAgentDirectory)).await
+    }
+
+    /// 测试用最小状态（可注入自定义 Agent 目录）。
+    pub(crate) async fn test_mcp_state_with_dir(
+        agent_dir: Arc<dyn AgentDirectory>,
+    ) -> (McpState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = PmConfig::default();
         cfg.data_dir = tmp.path().to_path_buf();
         cfg.index_rebuild_on_start = false;
         let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
-        (
-            McpState {
-                store,
-                agent_dir: Arc::new(NoopAgentDirectory),
-            },
-            tmp,
-        )
+        (McpState { store, agent_dir }, tmp)
     }
 
     #[tokio::test]
@@ -465,6 +468,61 @@ mod tests {
         Router::new()
             .route("/mcp", post(jsonrpc_endpoint))
             .with_state(state)
+    }
+
+    /// 建 router（可注入自定义 Agent 目录）。
+    async fn test_router_with_dir(agent_dir: Arc<dyn AgentDirectory>) -> Router {
+        let (state, _tmp) = test_mcp_state_with_dir(agent_dir).await;
+        Router::new()
+            .route("/mcp", post(jsonrpc_endpoint))
+            .with_state(state)
+    }
+
+    /// 建 router + 暴露 store（供 human review / archive 等 MCP 之外的
+    /// 前置状态构造，模拟人类审批侧）。
+    async fn test_router_and_store() -> (Router, Arc<TreePmStore>) {
+        let (state, _tmp) = test_mcp_state().await;
+        let router = Router::new()
+            .route("/mcp", post(jsonrpc_endpoint))
+            .with_state(state.clone());
+        (router, state.store)
+    }
+
+    /// 白名单 Agent 目录（测试桩）：仅当 agent_id 在白名单内才返回 true。
+    /// 用于验证 `pm_create_task` 的 assignee 存在性校验（设计 §9.1）。
+    struct WhitelistAgentDirectory {
+        allowed: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    }
+
+    impl WhitelistAgentDirectory {
+        fn new(ids: &[&str]) -> Self {
+            Self {
+                allowed: std::sync::Arc::new(std::sync::Mutex::new(
+                    ids.iter().map(|s| s.to_string()).collect(),
+                )),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDirectory for WhitelistAgentDirectory {
+        async fn agent_exists(&self, agent_id: &str) -> bool {
+            self.allowed.lock().unwrap().contains(agent_id)
+        }
+    }
+
+    /// 断言 JSON-RPC 错误：返回 (code, message 前缀, 完整 message)。
+    fn assert_rpc_error(v: &Value) -> (i32, String, String) {
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        let prefix = msg
+            .split_once(':')
+            .map(|(p, _)| p.trim().to_string())
+            .unwrap_or_else(|| msg.clone());
+        (
+            v["error"]["code"].as_i64().unwrap_or(0) as i32,
+            prefix,
+            msg,
+        )
     }
 
     /// e2e：Agent 完整生命周期 —— create_project → create_task(assignee+due_at)
@@ -662,5 +720,559 @@ mod tests {
         assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED);
         let v = call_tool(&router, None, 35, "pm_check_task", json!({ "task_id": tid })).await;
         assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED);
+    }
+
+    // ── P3 e2e 补齐：剩余工具 happy path + 边界场景 ───────────────────
+
+    /// e2e：pm_update_task happy path —— 改 title/status/priority/assignee。
+    #[tokio::test]
+    async fn e2e_update_task_happy_path() {
+        let router = test_router().await;
+        let agent = "agent-updater";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            40,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            41,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": agent }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // 改 title + priority + status（pending → in_progress 合法）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            42,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "renamed", "priority": "high", "status": "in_progress" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "update failed: {v}");
+        let up = tool_text(&v);
+        assert_eq!(up["title"], "renamed");
+        assert_eq!(up["priority"], "high");
+        assert_eq!(up["status"], "in_progress");
+
+        // 清空 assignee（assignee=null）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            43,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": null }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "clear assignee failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], Value::Null);
+    }
+
+    /// e2e：pm_update_task 非法状态流转（done → in_progress 虽合法，但
+    /// pending → submitted 非法）返回 400 invalid_state_transition。
+    #[tokio::test]
+    async fn e2e_update_task_invalid_transition() {
+        let router = test_router().await;
+        let agent = "agent-bad";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            44,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            45,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": agent }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // pending → submitted 非法（必须先 claim）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            46,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "submitted" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "transition error msg: {msg}");
+        assert_eq!(prefix, "invalid_state_transition", "unexpected: {msg}");
+    }
+
+    /// e2e：pm_reparent_task —— 移动到新父 + 提升根 + 防环 409。
+    #[tokio::test]
+    async fn e2e_reparent_task_happy_and_cycle() {
+        let router = test_router().await;
+        let agent = "agent-reparent";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            47,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // A 根任务，B 为 A 的子任务
+        let v = call_tool(
+            &router,
+            Some(agent),
+            48,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "A", "assignee": agent }),
+        )
+        .await;
+        let tid_a = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            49,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "B", "assignee": agent, "parent_task_id": tid_a }),
+        )
+        .await;
+        let tid_b = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // B 深度 = 1，parent = A
+        let v = call_tool(&router, Some(agent), 50, "pm_get_task", json!({ "task_id": tid_b }))
+            .await;
+        assert_eq!(tool_text(&v)["depth"], 1);
+        assert_eq!(tool_text(&v)["parent_id"], tid_a);
+
+        // 防环：把 A 移到自己的子任务 B 下 → cycle_detected 409（B 仍是 A 子树成员）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            51,
+            "pm_reparent_task",
+            json!({ "task_id": tid_a, "new_parent": tid_b }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "cycle error msg: {msg}");
+        assert_eq!(prefix, "cycle_detected", "unexpected: {msg}");
+        // A 层级不变
+        let v = call_tool(&router, Some(agent), 52, "pm_get_task", json!({ "task_id": tid_a }))
+            .await;
+        assert_eq!(tool_text(&v)["depth"], 0);
+
+        // 提升 B 为根（new_parent=null）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            53,
+            "pm_reparent_task",
+            json!({ "task_id": tid_b, "new_parent": null }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "reparent to root failed: {v}");
+        let v = call_tool(&router, Some(agent), 54, "pm_get_task", json!({ "task_id": tid_b }))
+            .await;
+        assert_eq!(tool_text(&v)["depth"], 0);
+        assert_eq!(tool_text(&v)["parent_id"], Value::Null);
+    }
+
+    /// e2e：pm_list_my_tasks —— Agent 自查指派给自己的任务 + status 过滤。
+    #[tokio::test]
+    async fn e2e_list_my_tasks_happy_path() {
+        let router = test_router().await;
+        let agent = "agent-self";
+        let other = "agent-other";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            54,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // 两个给自己的任务 + 一个给别人的任务
+        for i in 0..3 {
+            let (title, assignee) = if i < 2 { ("mine", agent) } else { ("others", other) };
+            let v = call_tool(
+                &router,
+                Some(agent),
+                55,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": title, "assignee": assignee }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "create task {i} failed: {v}");
+        }
+
+        // 自查：只返回自己的 2 个任务
+        let v = call_tool(&router, Some(agent), 56, "pm_list_my_tasks", json!({})).await;
+        let mine = tool_text(&v);
+        assert_eq!(mine.as_array().unwrap().len(), 2, "my_tasks: {mine}");
+
+        // status 过滤：把第一个 claim 后，pending 只剩 1 个
+        let my_tid = mine[0]["id"].as_str().unwrap().to_string();
+        let v = call_tool(&router, Some(agent), 57, "pm_claim_task", json!({ "task_id": my_tid }))
+            .await;
+        assert!(v["error"].is_null(), "claim failed: {v}");
+        let v = call_tool(
+            &router,
+            Some(agent),
+            58,
+            "pm_list_my_tasks",
+            json!({ "status": "pending" }),
+        )
+        .await;
+        let pending = tool_text(&v);
+        assert_eq!(pending.as_array().unwrap().len(), 1, "pending my_tasks: {pending}");
+    }
+
+    /// e2e：pm_check_task 非创建者 403（设计 §6：仅创建者可查审核状态）。
+    #[tokio::test]
+    async fn e2e_check_task_non_creator_forbidden() {
+        let router = test_router().await;
+        let creator = "agent-creator";
+        let other = "agent-other";
+
+        let v = call_tool(
+            &router,
+            Some(creator),
+            59,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(creator),
+            60,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": creator }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // 非创建者 check → 403 forbidden
+        let v = call_tool(&router, Some(other), 61, "pm_check_task", json!({ "task_id": tid }))
+            .await;
+        let (code, prefix, _msg) = assert_rpc_error(&v);
+        assert_eq!(code, CODE_FORBIDDEN, "non-creator check should be forbidden");
+        assert_eq!(prefix, "forbidden");
+
+        // 创建者本人可查
+        let v = call_tool(&router, Some(creator), 62, "pm_check_task", json!({ "task_id": tid }))
+            .await;
+        assert!(v["error"].is_null());
+        assert_eq!(tool_text(&v)["id"], tid);
+    }
+
+    /// e2e：pm_create_task assignee 不在 Agent 目录 → 400 bad_request
+    /// （设计 §9.1；用白名单目录验证存在性校验）。
+    #[tokio::test]
+    async fn e2e_create_task_assignee_not_in_directory() {
+        let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[
+            "agent-known",
+        ])))
+        .await;
+        let agent = "agent-known";
+        let ghost = "agent-ghost";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            63,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // assignee 不存在 → 400 bad_request（错误 message 提及 assignee）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            64,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": ghost }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR);
+        assert_eq!(prefix, "bad_request", "unexpected: {msg}");
+        assert!(msg.contains("assignee agent not found"), "msg: {msg}");
+
+        // assignee 存在于目录 → 成功
+        let v = call_tool(
+            &router,
+            Some(agent),
+            65,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T2", "assignee": agent }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "known assignee failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], agent);
+    }
+
+    /// e2e：依赖阻塞 —— depends_on(Blocks) 未完成时 claim 409，依赖完成
+    /// 后（人类 review → Done）可 claim。
+    #[tokio::test]
+    async fn e2e_dependency_blocks_claim() {
+        let (router, store) = test_router_and_store().await;
+        let agent = "agent-dep";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            66,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // A：前置依赖；B：依赖 A（Blocks）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            67,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "A", "assignee": agent }),
+        )
+        .await;
+        let tid_a = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            68,
+            "pm_create_task",
+            json!({
+                "project_id": pid, "title": "B", "assignee": agent,
+                "depends_on": [{ "task_id": tid_a, "kind": "blocks" }],
+            }),
+        )
+        .await;
+        let tid_b = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // B 被 A 阻塞 → is_blocked=true
+        let v = call_tool(&router, Some(agent), 69, "pm_get_task", json!({ "task_id": tid_b }))
+            .await;
+        let b = tool_text(&v);
+        assert_eq!(b["is_blocked"], true, "B should be blocked: {b}");
+        assert_eq!(b["blocked_by"][0], tid_a);
+
+        // claim B → 409 dependency_not_satisfied
+        let v = call_tool(&router, Some(agent), 70, "pm_claim_task", json!({ "task_id": tid_b }))
+            .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "dep error msg: {msg}");
+        assert_eq!(prefix, "dependency_not_satisfied", "unexpected: {msg}");
+
+        // 完成 A：claim → submit → 人类 review approve → Done
+        let store = store.clone();
+        let tid_a_typed = TaskId(tid_a.clone());
+        store.claim_task(&tid_a_typed, agent).await.unwrap();
+        store
+            .submit_task(&tid_a_typed, "done by agent", vec![], agent)
+            .await
+            .unwrap();
+        store.review_task(&tid_a_typed, true, "human").await.unwrap();
+        let v = call_tool(&router, Some(agent), 71, "pm_get_task", json!({ "task_id": tid_a }))
+            .await;
+        assert_eq!(tool_text(&v)["status"], "done", "A should be done: {v}");
+
+        // B 不再被阻塞 → 可 claim
+        let v = call_tool(&router, Some(agent), 72, "pm_claim_task", json!({ "task_id": tid_b }))
+            .await;
+        assert!(v["error"].is_null(), "claim B after dep done failed: {v}");
+        assert_eq!(tool_text(&v)["status"], "in_progress");
+    }
+
+    /// e2e：404 —— project / task 不存在返回对应错误。
+    #[tokio::test]
+    async fn e2e_not_found() {
+        let router = test_router().await;
+        let agent = "agent-404";
+
+        // project 不存在
+        let v = call_tool(
+            &router,
+            Some(agent),
+            72,
+            "pm_get_project",
+            json!({ "project_id": "p-missing123" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "404 project msg: {msg}");
+        assert_eq!(prefix, "project_not_found", "unexpected: {msg}");
+
+        // task 不存在
+        let v = call_tool(
+            &router,
+            Some(agent),
+            73,
+            "pm_get_task",
+            json!({ "task_id": "t-missing123" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "404 task msg: {msg}");
+        assert_eq!(prefix, "task_not_found", "unexpected: {msg}");
+    }
+
+    /// e2e：pm_list_tasks 过滤（status / assignee / limit）+ include_archived。
+    #[tokio::test]
+    async fn e2e_list_filters() {
+        let (router, store) = test_router_and_store().await;
+        let agent = "agent-filter";
+        let other = "agent-other";
+
+        // 项目 1：归档（通过 store 直接归档，模拟人类操作）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            74,
+            "pm_create_project",
+            json!({ "title": "archived-proj" }),
+        )
+        .await;
+        let pid_arch = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .update_project(
+                &crate::types::ProjectId(pid_arch.clone()),
+                UpdateProject {
+                    title: None,
+                    description: None,
+                    status: Some(ProjectStatus::Archived),
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // 项目 2：正常，2 个任务（1 个 assignee=agent）
+        let v = call_tool(
+            &router,
+            Some(agent),
+            75,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        for (i, (title, a)) in [("T1", agent), ("T2", other)].into_iter().enumerate() {
+            let v = call_tool(
+                &router,
+                Some(agent),
+                76,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": title, "assignee": a }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "create task {i} failed: {v}");
+        }
+
+        // include_archived=false（默认）：归档项目不出现
+        let v = call_tool(&router, None, 77, "pm_list_projects", json!({})).await;
+        let projs = tool_text(&v);
+        let titles: Vec<&str> = projs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["title"].as_str().unwrap())
+            .collect();
+        assert!(!titles.contains(&"archived-proj"), "archived shown by default: {projs}");
+
+        // include_archived=true：归档项目出现
+        let v = call_tool(
+            &router,
+            None,
+            78,
+            "pm_list_projects",
+            json!({ "include_archived": true }),
+        )
+        .await;
+        let projs = tool_text(&v);
+        assert!(
+            projs.as_array().unwrap().iter().any(|p| p["title"] == "archived-proj"),
+            "archived missing with include_archived: {projs}"
+        );
+
+        // list_tasks 过滤：assignee=agent 只有 1 个
+        let v = call_tool(
+            &router,
+            None,
+            79,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "assignee": agent }),
+        )
+        .await;
+        assert_eq!(tool_text(&v).as_array().unwrap().len(), 1);
+
+        // limit=1
+        let v = call_tool(
+            &router,
+            None,
+            80,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "limit": 1 }),
+        )
+        .await;
+        assert_eq!(tool_text(&v).as_array().unwrap().len(), 1);
+    }
+
+    /// e2e：pm_reparent_task 匿名拒绝（§9.3 匿名仅只读）。
+    #[tokio::test]
+    async fn e2e_reparent_anonymous_rejected() {
+        let router = test_router().await;
+        let agent = "agent-rp";
+
+        let v = call_tool(
+            &router,
+            Some(agent),
+            81,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            82,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": agent }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        let v = call_tool(
+            &router,
+            None,
+            83,
+            "pm_reparent_task",
+            json!({ "task_id": tid, "new_parent": null }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED, "anonymous reparent: {v}");
     }
 }

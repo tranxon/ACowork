@@ -356,6 +356,55 @@ fn default_task_type() -> TaskType {
     TaskType::Task
 }
 
+/// 反序列化"可清空"的三态可选字段（`Option<Option<T>>`）：
+///
+/// | JSON | 反序列化结果 | 语义 |
+/// |------|------------|------|
+/// | 字段缺失 | `None` | 不修改 |
+/// | `null` | `Some(None)` | 清空为 null |
+/// | 值 `v` | `Some(Some(v))` | 设为 v |
+///
+/// **为什么需要自定义反序列化器**：serde 默认把 JSON `null` 解析为 `Option<T>`
+/// 的外层 `None`，与字段缺失无法区分，导致 `UpdateTask.assignee` / `due_at`
+/// 的"清空"分支永远无法通过 wire 触发（P1 遗留缺陷）。此 helper 通过
+/// `deserialize_option` 的 `visit_none` 分支显式返回 `Some(None)` 修复之。
+///
+/// 用于 `#[serde(default, deserialize_with = "deserialize_clearable")]`。
+pub fn deserialize_clearable<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    struct ClearableVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: serde::de::DeserializeOwned> serde::de::Visitor<'de>
+        for ClearableVisitor<T>
+    {
+        type Value = Option<Option<T>>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a nullable value (null clears the field)")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(None))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(None))
+        }
+
+        fn visit_some<D2>(self, d: D2) -> Result<Self::Value, D2::Error>
+        where
+            D2: serde::Deserializer<'de>,
+        {
+            T::deserialize(d).map(|t| Some(Some(t)))
+        }
+    }
+
+    d.deserialize_option(ClearableVisitor(std::marker::PhantomData))
+}
+
 /// `PATCH /api/pm/tasks/:tid` 请求体（**所有字段皆可选**，未提供则不修改）。
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -366,7 +415,9 @@ pub struct UpdateTask {
     pub task_type: Option<TaskType>,
     pub status: Option<TaskStatus>,
     pub priority: Option<Priority>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
     pub assignee: Option<Option<String>>, // `null` 表示清空
+    #[serde(default, deserialize_with = "deserialize_clearable")]
     pub due_at: Option<Option<DateTime<Utc>>>,
     pub depends_on: Option<Vec<Dependency>>,
 }

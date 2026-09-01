@@ -27,7 +27,7 @@ use crate::store::tree::{PmStore, TreePmStore};
 use crate::types::{
     CreateProject, CreateTask, Dependency, Priority, ProjectId, ProjectStatus, ReparentTask,
     ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus, TaskType,
-    UpdateTask,
+    UpdateTask, deserialize_clearable,
 };
 
 /// 工具分发入口（由 `POST /mcp` 的 `tools/call` 调用）。
@@ -388,9 +388,9 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         status: Option<TaskStatus>,
         #[serde(default)]
         priority: Option<Priority>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_clearable")]
         assignee: Option<Option<String>>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_clearable")]
         due_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
         #[serde(default)]
         depends_on: Option<Vec<Dependency>>,
